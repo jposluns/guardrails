@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "4d66331911a3b2fd4e8b9515dc3aec7a45bf7f466e1d6a9a38b2175e4d860114"
+tree-sha256 = "bd5d5a08423a9c959acadb6c9838dba969831598b4c4b4fdde426bb6902101bf"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -91,8 +91,8 @@ sha256 = "5abcd3d73c58dad02c8bc2bdf6bfd297c01ee14dd6fc3aa672b9f372d146f084"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 2161195
-sha256 = "46adfb778cb7caff3354e389c64b1515f8026a9b8a91e184d3cbeb8bd7c88a4f"
+bytes = 2161187
+sha256 = "a33a770d32582a994e9fd05ab7d8b8b5b20c2c9f28cf19ee8947eb71f87333c3"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -2741,8 +2741,8 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 
 [[sources]]
 path = "opf/tools/_journal.py"
-bytes = 203954
-sha256 = "9590ef6040de25ffc3f42e7bc6a3bad07fff65cfeba0f82130698f0bbbcbc59f"
+bytes = 203951
+sha256 = "96aec84315c6bd3090fe1e6cdb558e9dd73b61e0b7e4ebdeb06e4740702218a2"
 
 [[sources]]
 path = "opf/tools/_opf_absorb.py"
@@ -2866,8 +2866,8 @@ sha256 = "2fd57e0be2ebb7f191424dbc2704ad74c72b9c8f20d2cc22ecb4fd33a04f24b1"
 
 [[sources]]
 path = "opf/tools/_opf_oplock.py"
-bytes = 558260
-sha256 = "0a0c7275e155d72000247aaabb055db5dda29bff08acc8172c8f995b9e0789d4"
+bytes = 558304
+sha256 = "8389b83c451ab273fd993f9afb1030f6c644fcc1e6e2297a3c229da88f258ee5"
 
 [[sources]]
 path = "opf/tools/_opf_pack_manifest.py"
@@ -3121,8 +3121,8 @@ sha256 = "e074940f4dfa8faf47f45d894db6af8ed5a9d54c1ac089e6aac53e6c2a56c5f7"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1306613
-sha256 = "56ee0f11068487716aee3363ae6d7cfb67e6196ec8763234b1cca9c6658e1a1a"
+bytes = 1306603
+sha256 = "4f22f908a74397308160258ff6626605502a8aa4035cdd1a67650b4e2e954966"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3151,8 +3151,8 @@ sha256 = "4b43a109b5981f5afebf458dc84465f86a2a7afda8007baa283fa5efe22710be"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 2161195
-sha256 = "46adfb778cb7caff3354e389c64b1515f8026a9b8a91e184d3cbeb8bd7c88a4f"
+bytes = 2161187
+sha256 = "a33a770d32582a994e9fd05ab7d8b8b5b20c2c9f28cf19ee8947eb71f87333c3"
 
 [[sources]]
 path = "roadmap.toml"
@@ -3721,8 +3721,8 @@ sha256 = "86d55d3f474a61803df772ded86a9f9d1ffe74bc9f83b2f36fb1a643bf706ab5"
 
 [[sources]]
 path = "tools/gen_enforcement_register.py"
-bytes = 94823
-sha256 = "88bb3a5c402a3bf138839f2eac2eb60cc6ef5761837d64106871b6a59953a847"
+bytes = 94799
+sha256 = "3316a3abc01801f7e7b3ac59ae2e30f653b537014b220b08a889b6df2d6663fc"
 
 [[sources]]
 path = "tools/gen_first_pin_demo.py"

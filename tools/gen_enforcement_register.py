@@ -1261,7 +1261,7 @@ def self_test_main():
             failures.append("fidelity test setup: expected the alpha residue tail to append")
         try:
             _assert_display_fidelity(appended, md_text, controls, enforced_union)
-            failures.append("display fidelity: appended content in a block must fail exact-equality (fix 3)")
+            failures.append("display fidelity: appended content in a block must fail exact-equality")
         except ValueError:
             pass
         # (a4) FENCE-SCOPING: a residue removed from its OWN Markdown fence but present elsewhere in the
@@ -1269,7 +1269,7 @@ def self_test_main():
         md_moved = md_text.replace(_ALPHA_RESIDUE, "gone", 1) + "\n\nprose: " + _ALPHA_RESIDUE + "\n"
         try:
             _assert_display_fidelity(html_page, md_moved, controls, enforced_union)
-            failures.append("display fidelity: a residue outside its own fence must fail (fix 3)")
+            failures.append("display fidelity: a residue outside its own fence must fail")
         except ValueError:
             pass
 
@@ -1294,7 +1294,7 @@ def self_test_main():
         ])
         if _md_mechanism_fence(fenced_md, "gate:beta") != "Beta real residue.":
             failures.append("fence-unaware heading: the heading lookup must skip fenced blocks so a prior "
-                            "residue containing a heading-like line does not misdirect extraction (fix 3)")
+                            "residue containing a heading-like line does not misdirect extraction")
 
         # (a5) F2: a rule linked only through class c gates reads as such on both views, and the summary
         # counts it under the same label. Flip the alpha gate to class c and rebuild the ledger to match;

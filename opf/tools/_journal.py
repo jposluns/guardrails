@@ -169,7 +169,7 @@ def _close_fd_quietly(fd):
     ensure_journal_dirs), each of which closes SEVERAL opened fds in a `finally`: a raw `os.close` there,
     when one close raised, abandoned the rest (the sibling of _opf_check._close_fd_quietly).
 
-    Single close (P1, #378): the descriptor is closed with exactly ONE os.close. If it raises, the number
+    Single close (#378): the descriptor is closed with exactly ONE os.close. If it raises, the number
     counts as released and is never touched again: no fstat, no second close. close(2) on Linux "always
     releases the file descriptor early in the close operation, freeing it for reuse", and retrying "is the
     wrong thing to do, since this may cause a reused file descriptor from another thread to be closed"
@@ -186,7 +186,7 @@ def _close_fd_quietly(fd):
 
 def _close_fd_propagating(fd):
     """Close a descriptor on a FAIL-CLOSED path where the close error must PROPAGATE to the caller (unlike
-    _close_fd_quietly's teardown swallow). Single close (P1, #378): exactly ONE os.close; if it raises, the
+    _close_fd_quietly's teardown swallow). Single close (#378): exactly ONE os.close; if it raises, the
     number counts as released (close(2) on Linux releases it early, even when the close then reports EINTR
     or EIO, and a retry can close another thread's reused descriptor: man 2 close), so it is never probed
     or closed again, and the ORIGINAL close error propagates unchanged, preserving every existing
@@ -303,7 +303,7 @@ def _close_fd_yielding(fd):
     """Close a descriptor from an `except` handler or a `finally` block without letting a close error
     REPLACE the exception already in flight there (#378): the close error _close_fd_propagating raises would
     otherwise mask the body's error whenever the body raised. When an exception is unwinding through, or
-    being handled in, the CALLING frame, the same single close still runs (P1: one os.close, the number
+    being handled in, the CALLING frame, the same single close still runs (one os.close, the number
     released either way and never touched again) but its close error is dropped, so the ORIGINAL exception
     keeps propagating; when none is (the normal path through a `finally`), this is exactly
     _close_fd_propagating and a close error still fails closed. "In flight in the calling frame" means the
@@ -512,7 +512,7 @@ def _read_contained(root_fd, relpath, require_single_link=False, cap=None):
         return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
         # Each close in its own try/finally: a FILE close that reports an error must
-        # not skip the parent close and leak pfd. Each close is a single os.close (P1: a raising close has
+        # not skip the parent close and leak pfd. Each close is a single os.close (a raising close has
         # released its number, close(2), and it is never touched again), so both descriptors are released
         # either way, and the file-close error keeps propagating fail-closed to the caller.
         try:
@@ -2604,7 +2604,7 @@ def _st_close_run(call, masking, expect, watch=True):
     # A deliberately leaked number is reported and left open: the harness records no opens, so it cannot
     # prove the number is still the tested call's own. Another thread may have reused it (a released
     # number included) through os.open, builtin open() or any other route, so closing it could close
-    # someone else's descriptor (#378 P1).
+    # someone else's descriptor (#378, single close).
     leaked = sorted(fd for fd, ident in after.items() if before.get(fd) != ident)
     if leaked:
         problems.append("LEAK: descriptor(s) {} survived the failing close".format(leaked))
@@ -2628,7 +2628,7 @@ def _st_close_check(ns, vectors):
     assertion alone. `ns` is the namespace whose close helpers the sites resolve at call time. A vector is
     (label, masking, flips, call, expect). The flips: A, _close_fd_yielding replaced by
     _close_fd_propagating, so every site is back to propagating (red: MASKED); B, the helper always quiet
-    (red: SILENT); C, the caller-frame check removed (red: SILENT); R (RECLOSE), the pre-P1 bodies of
+    (red: SILENT); C, the caller-frame check removed (red: SILENT); R (RECLOSE), the pre-single-close bodies of
     _close_fd_propagating and _close_fd_quietly put back, which fstat the number after a failed close and
     close it again when it looks open (red: REUSE alone, so this leg runs with the PROBE watch off); P, an
     fstat probe after the failed close with no second close (red: PROBE); F, the same probe made with
@@ -3200,7 +3200,7 @@ def _st_fd_table_fails_closed():
 
 def _st_n2d():
     """N2d: the helper's one os.close raises EIO while a stderr write would raise OSError too (a broken
-    stderr): the helper must RETURN, having made exactly one close (P1, #378: no probe, no second close).
+    stderr): the helper must RETURN, having made exactly one close (#378: no probe, no second close).
     The close is a stub, so no open number is touched. Returns (returned, single_close)."""
     import errno
     saved_close, saved_stderr = os.close, sys.stderr
@@ -3364,7 +3364,7 @@ def _st_descriptor_helper_checks():
                  an exact fit returns its bytes, one byte over and a non-empty file under a zero cap refuse,
                  and an empty file under a zero cap returns empty with no read (_st_stop_at_cap).
       N2a        _close_fd_quietly swallows a close-time EBADF rather than propagating it.
-      N2d        _close_fd_quietly never raises and closes exactly once (P1, #378): its one close fails while
+      N2d        _close_fd_quietly never raises and closes exactly once (#378): its one close fails while
                  stderr itself is broken, and the helper still returns without a second close.
       FD-table   _st_fd_table, the close vectors' leak table, fails closed: an fstat error other than EBADF
                  raises naming the descriptor, never reads as closed.

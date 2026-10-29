@@ -2353,8 +2353,8 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publ
 
 
 def _verify_staged(fd, payload, label):
-    """Read the staged bytes back before publication, the same fork guard
-    applied to the read-back: the staging file must hold exactly `payload`, its size and its bytes read at
+    """Read the staged bytes back before publication (a second fork defence, not pid-gated:
+    it detects a forked continuation's duplicate write): the staging file must hold exactly `payload`, its size and its bytes read at
     explicit offsets from 0 (os.pread, so the shared file offset is neither used nor moved). A
     forked continuation that completed the write loop it was forked inside (a Python-level step no
     pid gate can split) writes through the SAME open file description, whose offset it shares, so
@@ -4762,7 +4762,7 @@ def _t_c6_diffinode(d, env):
 
 
 def _t_toml_class_read_control(d, env):
-    """T-toml-class (a parse RecursionError is a ValueError-class refusal): a control record whose parse overflows (tomllib
+    """T-toml-class (a parse RecursionError is refused like a ValueError): a control record whose parse overflows (tomllib
     raises RecursionError, a RuntimeError, not a ValueError), and one carrying an over-long integer
     literal (a bare ValueError); _read_control_record must refuse both with OpLockError, never let
     either escape. The overflow is INJECTED (tomllib.loads raises RecursionError on a marked, otherwise

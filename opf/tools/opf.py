@@ -2276,8 +2276,7 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
     paths; the caller carries that ledger through every later step
     (the deadline tick, the wrapper suppression depth), so the
     stack is never re-read after a charge and neither an exemption
-    nor a suppression can migrate to a ledger that was not charged
-   ."""
+    nor a suppression can migrate to a ledger that was not charged."""
     import threading
     while True:
         # Bind ONCE, before any user code: the conversion below may suspend
@@ -2683,8 +2682,8 @@ def _watchdog_ledger_case(mode, budget):
     hung suite and never a pass. Returns the vector leg's own verdict
     int for the launching fixture to compare (3 marks a fixture that never
     exercised its path); the two bool-return control modes
-    deliberately return a bool the launching fixture must REJECT
-   . The held-landing vectors suspend one thread INSIDE
+    deliberately return a bool the launching fixture must REJECT.
+    The held-landing vectors suspend one thread INSIDE
     the landing step (the leg's `landed` list swapped for one whose append
     blocks on that thread's first landing, before the record is appended),
     so they catch a reintroduced ledger lock held ACROSS the landing
@@ -9869,8 +9868,8 @@ def _watchdog_completion_case(mode, tree=None):
         # the handler's own bound exception or an alias of it), or
         # capturing its exception for a
         # deferred re-raise while doing nothing else but boundary-routed
-        # work -- and the capture is held to its promise STRUCTURALLY
-        #: after a capturing handler,
+        # work -- and the capture is held to its promise STRUCTURALLY:
+        # after a capturing handler,
         # every statement that can run while the captured object may be
         # pending calls nothing but the boundary and isinstance, never
         # rebinds the captured name, and every path re-raises exactly
@@ -9963,11 +9962,9 @@ def _watchdog_completion_case(mode, tree=None):
         #     mutation through the escaped reference never poisons
         #     the imported name;
         #   - a module self-import: a plain import of the emit module
-        #     itself makes module-owned code clear as "external"
-        #    ;
+        #     itself makes module-owned code clear as "external";
         #   - module-level shadowing of a BUILTIN name: resolve_call's
-        #     builtin clearance checks function-local bindings only
-        #    ;
+        #     builtin clearance checks function-local bindings only;
         #   - deferred evaluation AT LARGE: annotation_reads
         #     recognizes only the spelled __annotations__/
         #     __annotate__ attribute access, so any OTHER
@@ -10389,8 +10386,8 @@ def _watchdog_completion_case(mode, tree=None):
             # when the callee is DISCLOSED external code; anything it
             # cannot resolve is a cannot-evaluate FAILURE, never a
             # silent pass. A method call on a
-            # local value resolves through the receiver-origin proof
-            #: disclosed names count only on proven-external
+            # local value resolves through the receiver-origin proof:
+            # disclosed names count only on proven-external
             # receivers, a proven module class instance resolves into
             # the closure, and an unproven receiver is a FAILURE.
             if isinstance(func, ast.Name):
@@ -10780,8 +10777,7 @@ def _watchdog_completion_case(mode, tree=None):
             # "execute now" was pre-3.14 semantics). The deferral
             # moves the execution point to the READ:
             # annotation_reads below recognizes that access, and
-            # every scan that restricts calls rejects it too
-            #.
+            # every scan that restricts calls rejects it too.
             stack = list(body)
             while stack:
                 node = stack.pop()
@@ -10847,8 +10843,7 @@ def _watchdog_completion_case(mode, tree=None):
             # and every OTHER read-triggered lazy construct (PEP 695
             # type parameters and aliases among them) is not
             # recognized at all -- both are DISCLOSED residual
-            # classes at the head of this leg, held by leg 19
-            #.
+            # classes at the head of this leg, held by leg 19.
             stack = list(body)
             while stack:
                 node = stack.pop()
@@ -10999,8 +10994,7 @@ def _watchdog_completion_case(mode, tree=None):
             # returning normally. A nonlocal/global of the captured
             # name ANYWHERE in the function -- a pre-capture nested
             # def used as a boundary step can rebind the capture with
-            # zero post-capture binding leaves -- is a FAILURE too
-            #.
+            # zero post-capture binding leaves -- is a FAILURE too.
             for leaf in ast.walk(function):
                 assert not (isinstance(leaf, (ast.Global, ast.Nonlocal))
                             and captured in leaf.names), (
@@ -13297,8 +13291,7 @@ def _watchdog_completion_case(mode, tree=None):
             # receipt read raises the cancellation as the
             # collection's first step; cancellation=None drives a
             # normally-completing collection, for the cases whose
-            # cancellation is BORN in the owned-handle cleanup
-            #.
+            # cancellation is BORN in the owned-handle cleanup.
             def raising_recv():
                 if cancellation is not None:
                     raise cancellation
@@ -18270,8 +18263,8 @@ def _init_main(rest):
             if val == "" or val.startswith("-"):
                 # The rejected value is rendered inert, never {!r}: repr of a value
                 # holding a single quote and no double quote is a DOUBLE-quoted literal
-                # in which $(...) stays live when the printed line reaches a POSIX shell
-                #. An empty value renders as nothing; the sentence
+                # in which $(...) stays live when the printed line reaches a POSIX shell.
+                # An empty value renders as nothing; the sentence
                 # names that case.
                 _init_echo("opf init: --root requires a non-empty directory argument, "
                            "not the inert-escaped value {} (an empty value shows as "
@@ -19075,7 +19068,7 @@ def _adopt_read_bounded(path, label, cap):
                 _opf_store._close_fd_exc_safe(pfd)
             except OSError:
                 # A failing parent close must not leak the just-opened input fd
-                # or the parent fd itself (P1, #378): the parent close is _close_fd_exc_safe's single
+                # or the parent fd itself (single-close rule, #378): the parent close is _close_fd_exc_safe's single
                 # os.close (#377) and the input close the journal engine's, and close(2) has released
                 # the number when it reports the error, so it is never touched again; the propagating
                 # error still fails the read closed below.
@@ -21861,7 +21854,7 @@ def _st_census_eio_raises(scan, fd, seam="fstat", code=None):
 
 
 def _retained_close_offpath_self_test():
-    """The retained-close off-path sweep (part B), under P1: swept over every descriptor-closing helper family OFF
+    """The retained-close off-path sweep (part B), under the single-close rule: swept over every descriptor-closing helper family OFF
     the hardened adopt status/plan paths. Each family's fixture call runs clean to count the os.close
     calls made from opf/tools code (an ExitStack callback is attributed to the code that registered it;
     _journal's own bare closes are part A's), then once per position N with the N-th such close releasing
@@ -22239,7 +22232,7 @@ def _retained_close_offpath_self_test():
 
 
 def _close_exc_safe_vectors_self_test():
-    """Under P1 (one close): the in-flight-exception close vectors. Each vector drives one call
+    """Under the single-close rule (one os.close): the in-flight-exception close vectors. Each vector drives one call
     site with the close it names releasing its descriptor and then raising (EINTR, and separately EIO, as
     close(2) does on Linux), and grades one property on its own assertion:
       body    the body's exception is in flight at the close: that SAME exception object must propagate;
@@ -22256,7 +22249,7 @@ def _close_exc_safe_vectors_self_test():
     propagating, the adoption transaction's record-and-report close-out included) the body vectors;
     SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
     (the any-exception test in place of the calling-frame test, in both helpers, the ExitStack
-    callback and the descriptor stack's close) the caller vectors; RECLOSE (the pre-P1 fstat-then-reclose
+    callback and the descriptor stack's close) the caller vectors; RECLOSE (the pre-single-close fstat-then-reclose
     recovery put back in #377's helpers, in _journal's _close_fd_quietly and _close_fd_propagating, and in
     _opf_check._close_fd_quietly) every V1 vector, by REUSE (PROBE may fail with it; nothing else may);
     and PROBE (#378's P flip: the same helpers making one close, then an fstat of the number when it
@@ -22289,16 +22282,16 @@ def _close_exc_safe_vectors_self_test():
                                   break_reuse=False, census=real_fstat)
 
     def propagating(fd):
-        """A P1 propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
+        """A single-close propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
         os.close(fd)
 
     def quietly(fd):
-        """A P1 quiet close (the SWALLOW and CALLER-FRAME stand-in): one os.close, its error swallowed."""
+        """A single-close quiet close (the SWALLOW and CALLER-FRAME stand-in): one os.close, its error swallowed."""
         with contextlib.suppress(OSError):
             os.close(fd)
 
     def reclose(fd, quiet):
-        """RECLOSE: the pre-P1 confirm-then-reclose recovery, inlined so the flip outlives #378's _journal."""
+        """RECLOSE: the pre-single-close confirm-then-reclose recovery, inlined so the flip outlives #378's _journal."""
         try:
             os.close(fd)
             return
@@ -22955,7 +22948,7 @@ def _close_exc_safe_vectors_self_test():
     reds = {None: {}, "MASK": {"body": "body"}, "SWALLOW": {"normal": "normal", "caller": "caller"},
             "CALLER-FRAME": {"caller": "caller"}}
     # RECLOSE breaks REUSE (PROBE may break with it) on every V1 vector, the journal-routed sites' included
-    # (the flip puts the pre-P1 body back in _journal's helpers too); PROBE breaks PROBE alone on every one.
+    # (the flip puts the pre-single-close body back in _journal's helpers too); PROBE breaks PROBE alone on every one.
     reds["RECLOSE"] = dict(body="reuse", normal="reuse", caller="reuse", quiet="reuse")
     reds["PROBE"] = dict(body="probe", normal="probe", caller="probe", quiet="probe")
     failures = []
@@ -23193,7 +23186,7 @@ def run_self_tests_isolated(tests=None):
     by _self_tests() at call time (after _bootstrap() has bound the _opf_* helpers), never a module-level
     default that would need those helpers imported at module top.
 
-    Int-limit hermeticity guard (finding 8-4): each helper in _INT_LIMIT_SELF_TESTS pins the int-string
+    Int-limit hermeticity guard: each helper in _INT_LIMIT_SELF_TESTS pins the int-string
     conversion limit to 4300 inside its fixtures and must RESTORE the ambient value afterward. That restore
     had no fails-if-reverted check: under the DEFAULT ambient (already 4300) a dropped restore leaves 4300
     and is invisible. So around each such helper we set a distinct SENTINEL limit (!= 4300 and != the real
@@ -23218,7 +23211,7 @@ def run_self_tests_isolated(tests=None):
                 sys.set_int_max_str_digits(_idlimit_orig)   # restore the real ambient regardless of outcome
             if _idlimit_after != _idlimit_sentinel:
                 print("opf self-test: {} left sys.get_int_max_str_digits at {} (expected the sentinel {}); a "
-                      "dropped int-limit restore is a hermeticity leak, failing closed (finding 8-4)".format(
+                      "dropped int-limit restore is a hermeticity leak, failing closed".format(
                           label, _idlimit_after, _idlimit_sentinel), file=sys.stderr)
                 worst = EXIT_MALFORMED
         else:

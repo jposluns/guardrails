@@ -437,8 +437,8 @@ def _deny_missing_tool_name(rule):
 # redirection ANYWHERE in a command (leading, interspersed, or trailing: 'git >/dev/null commit', '>out
 # pytest') is recorded as redirect metadata and REMOVED from the argv the handlers judge, closing the
 # post-tokenize redirect-pollution class shared across the hooks. A naive post-tokenize strip was proven
-# unsafe (a quoted '>' or a numeric option value was over-stripped into a silent allow, an earlier prtbrn strip that was reverted
-# revert), so the strip happens HERE, from raw positions, where quote provenance and fd adjacency are still
+# unsafe (a quoted '>' or a numeric option value was over-stripped into a silent allow, an earlier prtbrn strip that was
+# reverted), so the strip happens HERE, from raw positions, where quote provenance and fd adjacency are still
 # visible - never reconstructed from already-tokenized words.
 #
 # It is a LEXER, not a shell parser: it models the recognized redirection and separator grammar and, for
@@ -5539,7 +5539,7 @@ def bash_absolute_paths(data):
     shifts the working directory through a relative cd/pushd operand, or names a relative/opaque
     NON-destructive redirection target (an append '>>', a read '<'/'<>', or a relative cd - each resolves
     against a working directory that can silently differ between calls), it ALLOWS with an informational
-    note: those are a convention, not a hazard, so the floor never asks on them. The ONE exception
+    note: those are a convention, not a hazard, so the floor never asks on them. The ONE exception:
     a DESTRUCTIVE TRUNCATING redirect ('>', '>|', '&>', or a '>&' to a file) to a
     RELATIVE or OPAQUE target DENIES-and-educates - truncation ZEROES its target, so aiming it at a
     cwd-dependent relative/unverified path can destroy the WRONG file, the exact data-loss the absolute-paths
@@ -8326,7 +8326,7 @@ def _pristine_single_bare_git(command, segments):
 # regardless of the allow/ask/deny verdict. It is skipped when the tree is PROVABLY CLEAN (nothing the probe
 # can see to lose), when the command is not in scope, and for stash/branch (a worktree snapshot cannot
 # capture stash entries or branch commits; ref-pinning for those is a separate, deferred mechanism).
-# F-D EXPANSION: a NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is now
+# WIDER SCOPE: a NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is now
 # also snapshot-backed BEST-EFFORT against the SESSION CWD repo, so an asked-then-approved wrapped discard is
 # recoverable too. It is best-effort because a non-pristine command's redirected dir is NOT parsed: a command
 # that changes into a DIFFERENT repository may be snapshotted at the session repo rather than the target (a
