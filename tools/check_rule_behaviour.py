@@ -166,7 +166,16 @@ RETIRED_WAIVER_KINDS = {
 CATEGORIES = ("frontmatter", "heading", "whitespace")
 # An ATX heading line as CommonMark reads one from the first byte of a line: one to six '#', then a space, a
 # tab or the line end. A line such as '#word', or one opening with seven '#', is paragraph text, never heading.
+# Such a line inside a fenced code block or an HTML comment is code or comment text, never heading either.
 ATX_HEADING_RE = re.compile(rb"#{1,6}(?:[ \t]|\n|\Z)")
+# A code fence opens on a line indented at most three spaces with three or more '`' or '~'; a '`' fence whose
+# info string holds a '`' is inline code, not a fence. It closes on a line of the same character, at least as
+# many of them, and only spaces or tabs after; a fence never closed runs to the end of the file.
+FENCE_OPEN_RE = re.compile(rb" {0,3}(`{3,}|~{3,})")
+FENCE_CLOSE_RE = re.compile(rb" {0,3}(`{3,}|~{3,})[ \t]*\Z")
+# An HTML comment block opens on a line indented at most three spaces with '<!--' and closes at the end of the
+# first line, the opening one included, that holds '-->'.
+COMMENT_OPEN_RE = re.compile(rb" {0,3}<!--")
 BUDGET_KEYS = {"wording-only": "wording-only-per-change", "unencoded": "unencoded-per-change",
                "anchor-only": "anchor-only-per-change", "non-clause-text": "non-clause-text-per-change"}
 ABSENT = "absent"
@@ -996,10 +1005,36 @@ def parse_exclusions(data, label):
     return out
 
 
+def _outside_blocks(data, line_start):
+    """Whether the line at line_start lies outside every fenced code block and HTML comment block, reading
+    the file from its first byte."""
+    fence, comment, at = None, False, 0
+    while at < line_start:
+        nxt = data.find(b"\n", at)
+        line = data[at:len(data) if nxt < 0 else nxt]
+        if fence is not None:
+            closer = FENCE_CLOSE_RE.match(line)
+            if closer and closer.group(1)[:1] == fence[:1] and len(closer.group(1)) >= len(fence):
+                fence = None
+        elif comment:
+            if b"-->" in line:
+                comment = False
+        else:
+            opener = FENCE_OPEN_RE.match(line)
+            if opener and not (opener.group(1)[:1] == b"`" and b"`" in line[opener.end():]):
+                fence = opener.group(1)
+            elif COMMENT_OPEN_RE.match(line):
+                comment = b"-->" not in line
+        if nxt < 0:
+            break
+        at = nxt + 1
+    return fence is None and not comment
+
+
 def _category_holds(data, start, end, category):
     """Whether bytes [start, end) of one rule file fall in a non-clause-text category: spaces and newlines
-    (whitespace), the leading ----fenced block (frontmatter), or one ATX heading line, its line end included
-    (heading)."""
+    (whitespace), the leading ----fenced block (frontmatter), or one ATX heading line outside every fenced
+    code block and HTML comment, its line end included (heading)."""
     piece = data[start:end]
     if category == "whitespace":
         return all(byte in (0x20, 0x0A) for byte in piece)
@@ -1021,7 +1056,8 @@ def _category_holds(data, start, end, category):
         line_start = data.rfind(b"\n", 0, start) + 1
         nxt = data.find(b"\n", line_start)
         line_end = len(data) if nxt < 0 else nxt + 1
-        return ATX_HEADING_RE.match(data, line_start) is not None and end <= line_end
+        return (ATX_HEADING_RE.match(data, line_start) is not None and end <= line_end
+                and _outside_blocks(data, line_start))
     return False
 
 
@@ -3649,6 +3685,66 @@ def _v(gate):
     return _not_heading(gate, "# Omega", "\n\n")
 
 
+def _block_insert(block, line):
+    """A base whose rule file ends with the given block lines after the last clause, and a head that adds one
+    line after them, tiled as heading."""
+    base = _alpha()
+    base.budget["non-clause-text-per-change"] = 1
+    base.edit(ALPHA, "Gamma must hold.\n", "Gamma must hold.\n\n" + "".join(text + "\n" for text in block))
+    head = base.copy()
+    head.rules[ALPHA] += line + "\n"
+    (side, start, end), = _pieces(base, head, ALPHA)
+    data = head.rules[ALPHA].encode("utf-8")
+    assert side == "head" and data[start:end] == (line + "\n").encode("utf-8"), (side, start, end)
+    head.waivers = [_rw("t1", ALPHA, side, start, end, base, head, "heading")]
+    return base, head, start, end
+
+
+def _block_heading(gate, block, line, code):
+    base, head, start, end = _block_insert(block, line)
+    if code == 0:
+        return _expect(gate, head, base, code=0, needles=["by non-clause-text t1 (heading)"])
+    return _expect(gate, head, base, code=1, needles=["waiver t1: {} [{},{}) is not heading text".format(
+        ALPHA, start, end)])
+
+
+# A '#' line inside a fenced code block or an HTML comment is code or comment text: a heading tile refuses it,
+# and a fence or comment that has closed leaves the next '#' line a heading again.
+@_vector("waiver/heading-tile-in-backtick-fence-refused")
+def _v(gate):
+    return _block_heading(gate, ["```sh", "exit 0"], "# x", 1)
+
+
+@_vector("waiver/heading-tile-in-tilde-fence-refused")
+def _v(gate):
+    return _block_heading(gate, ["~~~", "exit 0"], "## y", 1)
+
+
+@_vector("waiver/heading-tile-in-unclosed-fence-refused")
+def _v(gate):
+    return _block_heading(gate, ["````", "```"], "# x", 1)
+
+
+@_vector("waiver/heading-tile-in-html-comment-refused")
+def _v(gate):
+    return _block_heading(gate, ["<!--", "a note"], "# hidden", 1)
+
+
+@_vector("waiver/heading-tile-after-closed-fence-passes")
+def _v(gate):
+    return _block_heading(gate, ["```sh", "exit 0", "```", "~~~~", "exit 0", "~~~~~"], "# x", 0)
+
+
+@_vector("waiver/heading-tile-after-closed-comment-passes")
+def _v(gate):
+    return _block_heading(gate, ["<!--", "a note", "-->", "<!-- a note -->"], "# x", 0)
+
+
+@_vector("waiver/heading-tile-after-backtick-info-line-passes")
+def _v(gate):
+    return _block_heading(gate, ["```a`b", "Delta"], "# x", 0)
+
+
 @_vector("waiver/non-clause-text-whitespace-range-passes")
 def _v(gate):
     base = _alpha()
@@ -4515,11 +4611,31 @@ MUTANTS = (
      "waiver/frontmatter-tile-ends-at-block-end-passes"),
     ("frontmatter-fence", '        if not data.startswith(b"---\\n"):', '        if not data.startswith(b"---\\n\\n"):',
      "waiver/frontmatter-tile-ends-one-before-block-end-passes"),
-    ("heading-category", "        return ATX_HEADING_RE.match(data, line_start) is not None and end <= line_end",
-     "        return False", "waiver/non-clause-text-heading-range-passes"),
-    ("heading-any-hash", "        return ATX_HEADING_RE.match(data, line_start) is not None and end <= line_end",
-     '        return data[line_start:line_start + 1] == b"#" and end <= line_end',
+    ("heading-category", "        return (ATX_HEADING_RE.match(data, line_start) is not None and end <= line_end",
+     "        return (False", "waiver/non-clause-text-heading-range-passes"),
+    ("heading-any-hash", "        return (ATX_HEADING_RE.match(data, line_start) is not None and end <= line_end",
+     '        return (data[line_start:line_start + 1] == b"#" and end <= line_end',
      "waiver/heading-tile-hash-without-space-refused"),
+    ("heading-in-block", "                and _outside_blocks(data, line_start))", "                and True)",
+     "waiver/heading-tile-in-backtick-fence-refused"),
+    ("heading-fence-opens", "                fence = opener.group(1)", "                pass",
+     "waiver/heading-tile-in-backtick-fence-refused"),
+    ("heading-tilde-fence", 'FENCE_OPEN_RE = re.compile(rb" {0,3}(`{3,}|~{3,})")',
+     'FENCE_OPEN_RE = re.compile(rb" {0,3}(`{3,})")', "waiver/heading-tile-in-tilde-fence-refused"),
+    ("heading-fence-close-length", " and len(closer.group(1)) >= len(fence):", ":",
+     "waiver/heading-tile-in-unclosed-fence-refused"),
+    ("heading-fence-close-longer", " and len(closer.group(1)) >= len(fence):",
+     " and len(closer.group(1)) == len(fence):", "waiver/heading-tile-after-closed-fence-passes"),
+    ("heading-fence-closes", "                fence = None", "                pass",
+     "waiver/heading-tile-after-closed-fence-passes"),
+    ("heading-comment-opens", '                comment = b"-->" not in line', "                comment = False",
+     "waiver/heading-tile-in-html-comment-refused"),
+    ("heading-comment-one-line", '                comment = b"-->" not in line', "                comment = True",
+     "waiver/heading-tile-after-closed-comment-passes"),
+    ("heading-comment-closes", '            if b"-->" in line:', "            if False:",
+     "waiver/heading-tile-after-closed-comment-passes"),
+    ("heading-backtick-info", ' and not (opener.group(1)[:1] == b"`" and b"`" in line[opener.end():]):', ":",
+     "waiver/heading-tile-after-backtick-info-line-passes"),
     ("heading-hash-count", 'ATX_HEADING_RE = re.compile(rb"#{1,6}(?:[ \\t]|\\n|\\Z)")',
      'ATX_HEADING_RE = re.compile(rb"#+(?:[ \\t]|\\n|\\Z)")', "waiver/heading-tile-seven-hashes-refused"),
     ("heading-five-hashes", 'ATX_HEADING_RE = re.compile(rb"#{1,6}(?:[ \\t]|\\n|\\Z)")',
@@ -4883,6 +4999,13 @@ def self_test(report_path=None):
                 ("waiver/heading-tile-bare-hash-line-passes",),
                 ("waiver/heading-tile-ends-at-line-end-passes",),
                 ("waiver/heading-tile-ends-one-past-line-end-refused",),
+                ("waiver/heading-tile-in-backtick-fence-refused",),
+                ("waiver/heading-tile-in-tilde-fence-refused",),
+                ("waiver/heading-tile-in-unclosed-fence-refused",),
+                ("waiver/heading-tile-in-html-comment-refused",),
+                ("waiver/heading-tile-after-closed-fence-passes",),
+                ("waiver/heading-tile-after-closed-comment-passes",),
+                ("waiver/heading-tile-after-backtick-info-line-passes",),
                 ("waiver/non-clause-text-whitespace-range-passes",),
                 ("waiver/non-clause-text-tiles-exactly",),
                 ("waiver/non-clause-text-gap-fails",),
