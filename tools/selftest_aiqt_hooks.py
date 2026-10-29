@@ -23614,6 +23614,32 @@ def _main_isolated(monitor):
             ("(gb-m4) an unfinished lex naming GEN.md denies", "deny", "cat <<< x > GEN.md", gr),
             ("(gb-m5) a mention bounded by a path character is no mention, so it notes", "allow-note",
              "F=GEN.md.bak; echo x > \"$F\"", gr),
+            # an uncertain '#' (the comment rule above _nest_track): every reading is judged, each from the session
+            # cwd; past the readings bound (a fifth such '#') the lexer reads nothing after the first one, and the
+            # shared fallback decides (_gensrc_doubt_unread): text spelling no redirect, sink program or wrapper,
+            # in quoting the fallback decodes, holds no judged write, and any other is an incomplete lex
+            ("(gb-h1) five uncertain '#' in a command spelling no sink allows", "allow",
+             "(true #a #b #c #d #e\n)", gr),
+            ("(gb-h2) five uncertain '#' and a read naming GEN.md allows (nothing there can write)", "allow",
+             "(true #a #b #c #d #e\n) ; cat GEN.md", gr),
+            ("(gb-h3) five uncertain '#' and a redirect naming GEN.md denies (an incomplete lex)", "deny",
+             "(true #a #b #c #d #e\n) > GEN.md", gr),
+            ("(gb-h4) five uncertain '#' and a redirect naming no registered target notes", "allow-note",
+             "(true #a #b #c #d #e\n) > out.txt", gr),
+            ("(gb-h5) five uncertain '#' and a sink program, spelled in capitals, past them notes", "allow-note",
+             "(true #a #b #c #d #e\nTEE b)", gr),
+            ("(gb-h6) five uncertain '#' and a wrapper past them notes", "allow-note",
+             "(true #a #b #c #d #e\nenv -X b)", gr),
+            ("(gb-h7) five uncertain '#' in quoting the fallback does not decode notes", "allow-note",
+             "(echo $'x' #a #b #c #d #e\n)", gr),
+            ("(gb-h8) a redirect only the word reading of an uncertain '#' sees denies", "deny",
+             "(true #a > GEN.md\n)", gr),
+            ("(gb-h9) a reading's directory never reaches another reading, so the restore notes", "allow-note",
+             "(cd /tmp #a ) ; git restore GEN.md", gr),
+            ("(gb-h10) a subshell with no cd restores the directory at its ), so a relative sink after it is "
+             "judged from cwd", "allow", "(true) ; echo x > out.txt", gr),
+            ("(gb-h11) the walk reads the empty segment a newline ends after a cd's && (the directory becomes "
+             "unknown), so naming GEN.md denies", "deny", "cd /tmp &&\necho x > GEN.md", gr),
             # the target resolution budget: a sink over 4,096 normalized bytes is never resolved (uncleared)
             ("(gb-n1) a sink of exactly 4096 bytes is judged at the budget (a tree member, so it denies)", "deny",
              "echo x > " + _gb_deep_at, gr),
@@ -23659,6 +23685,31 @@ def _main_isolated(monitor):
             failures.append("(gb-labels) two gb cases share a label")
         for _gb_label, _gb_want, _gb_cmd, _gb_cwd in _gb_cases:
             bexpect(_gb_label, _gb_want, _gb_cmd, _gb_cwd)
+        # (gb-reach-*) the skip_empty pre-pass of _gensrc_bash against the full lex, on every gb command: both
+        # lexes give the same flags (gb-reach-flags); a command any reading of whose full lex has an effect holds a
+        # segment that can add one (_gensrc_reach, gb-reach-writes); and where its text holds no ) and no segment
+        # is a cd, pushd or popd, the segments skip_empty leaves out change no effect (gb-reach-skip).
+        # Falsifiable: an effect source _gensrc_reach does not read, or a walk state those segments move without
+        # a ) or a directory change, fails a gb command here.
+        for _gb_label, _gb_want, _gb_cmd, _gb_cwd in _gb_cases:
+            _gb_text = _gb_cmd.replace("{gr}", gr)
+            for _gb_n, _gb_root in enumerate(gb_extra, 1):
+                _gb_text = _gb_text.replace("{b%d}" % _gb_n, _gb_root)
+            _gb_full = aiqt_hooks._gensrc_lex(_gb_text)
+            _gb_skip = aiqt_hooks._gensrc_lex(_gb_text, skip_empty=True)
+            _gb_reach = [aiqt_hooks._gensrc_reach(seg) for segs in _gb_skip[0] for seg in segs]
+            _gb_fx = [eff for segs in _gb_full[0] for eff in aiqt_hooks._bash_write_effects(segs, _gb_cwd)]
+            if _gb_full[1:] != _gb_skip[1:]:
+                failures.append("(gb-reach-flags) {}: the full and skip_empty lexes give flags {!r} and {!r}".format(
+                    _gb_label, _gb_full[1:], _gb_skip[1:]))
+            if _gb_fx and not any(writes for writes, _moves in _gb_reach):
+                failures.append("(gb-reach-writes) {}: the full lex has effects {!r}, but no skip_empty segment "
+                                "can add one".format(_gb_label, _gb_fx))
+            if ")" not in _gb_text and not any(moves for _writes, moves in _gb_reach):
+                _gb_sfx = [eff for segs in _gb_skip[0] for eff in aiqt_hooks._bash_write_effects(segs, _gb_cwd)]
+                if _gb_sfx != _gb_fx:
+                    failures.append("(gb-reach-skip) {}: with no ) and no directory change, the skip_empty "
+                                    "segments give effects {!r}, the full lex {!r}".format(_gb_label, _gb_sfx, _gb_fx))
         # (gb-s3) the structural regeneration allowance: a sink-free command is allowed BEFORE any registry
         # read (the recorder fails the case if the loader runs at all), even where the registry is malformed.
         _gb_reg_reads = []

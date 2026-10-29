@@ -2346,12 +2346,21 @@ def _lex_resume_partial(command, exc, locale=False, skip_empty=False):
     in full (_gate_recovered_sink); exc must come from a lex of this same command with this locale and
     skip_empty, whose state the fork carries. Inside _CommandReading the command reading of the recovered
     segments follows them (_with_command_readings)."""
-    lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
-    readings = _with_command_readings(
-        _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed], True, locale,
-        skip_empty, "`" in command)
+    readings = _lex_resume_readings(command, exc, locale, skip_empty)
     return ([seg for segs, _complete, _open in readings for seg in segs],
             all(done for _segs, done, _open in readings), readings[-1][2])
+
+
+def _lex_resume_readings(command, exc, locale=False, skip_empty=False):
+    """The readings _lex_resume_partial returns in one list, each a (segments, complete, in_progress) entry as
+    _lex_readings gives one: the lex under no reading that resumes where exc stopped, then main's reading where
+    that lex read a body main's skip reads otherwise, then, inside _CommandReading, the command readings. A
+    caller whose answer depends on the order of the segments it reads, not only on each one, reads each entry on
+    its own (gensrc_guard's working-directory walk, _gensrc_lex)."""
+    lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
+    return _with_command_readings(
+        _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed], True, locale,
+        skip_empty, "`" in command)
 
 
 def _lex_readings(command, partial=False, locale=False, skip_empty=False):
@@ -18146,6 +18155,18 @@ _GENSRC_REDIRECT_SINKS = frozenset((">", ">>", ">|", "&>", "&>>", "<>", ">&"))
 _GENSRC_BARE_WRAPPERS = frozenset(("command", "exec", "builtin", "sudo"))
 _GENSRC_LEADING_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "do", "while", "until"))
 _GENSRC_PYTHON_RE = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
+# The programs _gensrc_program_effects reads a sink from, beside python (_GENSRC_PYTHON_RE); it reads nothing
+# from any other program, so a segment whose program is none of these adds an effect only through a redirect
+# or a wrapper (_gensrc_reach).
+_GENSRC_WRITERS = frozenset(("tee", "truncate", "sed", "gsed", "perl", "cp", "mv", "ln", "install", "rsync", "dd",
+                             "git"))
+# The fallback probe for a command whose '#' readings the lexer cannot judge (_gensrc_doubt_unread), read on the
+# lowercased _hash_doubt_scan text: a '>' (every output redirect spells one) or a word, on boundaries no command
+# word continues past, that lowercases to a sink program (_GENSRC_WRITERS, or one starting python) or a wrapper
+# _gensrc_peel reads (_GENSRC_BARE_WRAPPERS and _GATE_WRAPPER_GRAMMAR, whose options can fault or name a time
+# -o file). It over-matches (any such word in an argument or a comment matches too), the fallback's safe side.
+_GENSRC_DOUBT_RE = re.compile(r">|(?<![a-z0-9_])(?:python|(?:{})(?![a-z0-9_]))".format("|".join(
+    sorted(re.escape(word) for word in _GENSRC_WRITERS | _GENSRC_BARE_WRAPPERS | set(_GATE_WRAPPER_GRAMMAR)))))
 _GENSRC_OPAQUE_RE = re.compile(r"[$`*?\[{]")
 _GENSRC_GLOB_CHARS = frozenset("*?[")
 _GENSRC_HEREDOC_WORD_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
@@ -18226,15 +18247,22 @@ def _gensrc_writer_spec(name):
     return None
 
 
-def _gensrc_lex(command):
-    """Lex command with the shared _lex_command in partial mode: (segments, complete). When that lex stops,
-    it is retried ONCE with every unquoted heredoc delimiter (<<WORD or <<-WORD, WORD made of letters, digits,
-    _, . and -) rewritten to its quoted form, so the body is skipped as literal data and a redirect on the
-    opening line after the delimiter (cat <<EOF >> X) is still judged; the retry is used only when it
-    completes. A command or process substitution inside such a body is then not seen (a disclosed residual)."""
-    segments, complete, _in_progress = _lex_command(command, partial=True)
+def _gensrc_lex(command, skip_empty=False):
+    """Lex command as the shared _lex_command does in partial mode, but keep its readings apart: (readings,
+    complete, doubt), readings a list of segment lists, one per reading of the command's uncertain '#'
+    characters (_lex_readings), since the working-directory walk (_bash_write_effects) depends on the order of
+    the segments it reads and so reads each reading on its own. Where those readings cannot be judged (more
+    than _HASH_READING_LIMIT uncertain '#', or one in or right after a backquote substitution), doubt is True
+    and readings holds what _lex_command recovers there (_lex_resume_readings), complete being False. When the
+    lex stops, it is retried ONCE with every unquoted heredoc delimiter (<<WORD or <<-WORD, WORD made of
+    letters, digits, _, . and -) rewritten to its quoted form, so the body is skipped as literal data and a
+    redirect on the opening line after the delimiter (cat <<EOF >> X) is still judged; the retry is used only
+    when it completes. A command or process substitution inside such a body is then not seen (a disclosed
+    residual). skip_empty is passed to every lex (_lex_command): it leaves out each segment with no word and
+    no redirect, and changes no other segment, their order or complete."""
+    readings, complete, doubt = _gensrc_readings(command, skip_empty)
     if complete:
-        return segments, True
+        return readings, True, False
     n = len(command)
     out = []
     i = 0
@@ -18257,12 +18285,56 @@ def _gensrc_lex(command):
         i = next_i
         changed = True
     if not changed:
-        return segments, False
+        return readings, False, doubt
     out.append(command[i:])
-    again, done, _in_progress = _lex_command("".join(out), partial=True)
+    again, done, _doubt = _gensrc_readings("".join(out), skip_empty)
     if done:
-        return again, True
-    return segments, False
+        return again, True, False
+    return readings, False, doubt
+
+
+def _gensrc_readings(command, skip_empty):
+    """One partial lex of command under every reading of its uncertain '#' characters, as _lex_command makes
+    it, its readings kept apart: (readings, complete, doubt), as _gensrc_lex returns them."""
+    try:
+        lexed = _lex_readings(command, True, False, skip_empty)
+        doubt = False
+    except _UncertainHashError as exc:
+        if isinstance(exc, _ReadingLimitError):
+            raise
+        lexed = _lex_resume_readings(command, exc, False, skip_empty)
+        doubt = True
+    return [segs for segs, _done, _open in lexed], all(done for _segs, done, _open in lexed) and not doubt, doubt
+
+
+def _gensrc_reach(seg):
+    """What one lexed segment can do in _bash_write_effects, as (writes, moves). writes is True when it can add a
+    write effect under some working directory: an output redirect (_GENSRC_REDIRECT_SINKS), a wrapper option
+    outside its grammar or a time -o file (_gensrc_peel), or a literal program word that is a sink program
+    (_GENSRC_WRITERS or python); a segment with writes False adds no effect whatever directory reaches it.
+    moves is True for a literal cd, pushd or popd, the only segment that changes that directory itself; the
+    other change is the restore at a ) separator."""
+    writes = any(red.op in _GENSRC_REDIRECT_SINKS for red in seg.redirects)
+    argv = seg.argv
+    pi, _chdir, outputs, fault = _gensrc_peel(argv)
+    if fault is not None or outputs:
+        return True, False
+    if pi >= len(argv) or seg.argv_opaque[pi]:
+        return writes, False
+    prog = _gate_word(argv[pi])
+    return (writes or prog in _GENSRC_WRITERS or bool(_GENSRC_PYTHON_RE.match(prog)),
+            prog in ("cd", "pushd", "popd"))
+
+
+def _gensrc_doubt_unread(command):
+    """The fallback for a command whose '#' readings the shared lexer cannot judge (_UncertainHashError, the
+    FALLBACK paragraph of the comment above _nest_track): True when what the lexer did not read may hold a
+    write this guard judges, so the command stays an uncleared write: its quoting is one the fallback does not
+    decode (_hash_doubt_opaque), or its text as written or de-quoted (_hash_doubt_scan), lowercased as
+    _gate_word reads a program word, holds a '>' or a sink program or wrapper word (_GENSRC_DOUBT_RE). False
+    when neither holds: then no segment of any reading of the command can add an effect (_gensrc_reach),
+    so the command is judged on the segments the lexer recovered, as a complete lex is."""
+    return _hash_doubt_opaque(command) or bool(_GENSRC_DOUBT_RE.search(_hash_doubt_scan(command).lower()))
 
 
 def _gensrc_resolve(word, opaque, tilde, base):
@@ -18794,7 +18866,10 @@ def _gensrc_program_effects(prog, argv, pi, aop, atl, base, effects):
     backup option of cp, mv, ln or install (-b, --backup, -S or --suffix write a side file beside the
     destination under a caller-chosen name), an in-place sed or perl SUFFIX (the backup lands beside each
     file under a name the operands do not spell), and a remote rsync source (the local file a transfer
-    writes is not the operand's spelling); every other program spells no sink here."""
+    writes is not the operand's spelling); every other program spells no sink here (_GENSRC_WRITERS, which
+    _gensrc_reach reads, names the programs above but python)."""
+    if prog not in _GENSRC_WRITERS and not _GENSRC_PYTHON_RE.match(prog):
+        return
     args, oa, ta = argv[pi + 1:], aop[pi + 1:], atl[pi + 1:]
     index = _gensrc_flag_index(args, oa, ta)
 
@@ -18934,7 +19009,9 @@ def _gensrc_program_effects(prog, argv, pi, aop, atl, base, effects):
 
 
 def _bash_write_effects(segments, cwd):
-    """The write effects (_GensrcEffect) of lexed Bash segments in command order. The working directory starts
+    """The write effects (_GensrcEffect) of the lexed Bash segments of ONE reading of a command (_gensrc_lex), in
+    command order; the segment with no word and no redirect that a separator ends is read too, for its ( or ).
+    The working directory starts
     at cwd (None when the session cwd is unknown) and follows a literal cd or pushd segment (_gensrc_cd) only
     while its effect is CERTAIN for the segments that can see it: a cd in a pipeline element or a background
     job changes nothing (a subshell); one reached through || may not run at all (the directory is then
@@ -19084,9 +19161,14 @@ def _gensrc_mentions(entries, command, root_c):
 def _gensrc_bash(data):
     """The Bash channel verdict of gensrc_guard: ("allow",), ("note", message) or ("deny", reason, banner);
     gensrc_guard turns it into the decision. A payload with no object tool_input or no readable command
-    string DENIES fail-closed (the detector cannot read it). The command is lexed (_gensrc_lex) and its write
-    effects collected (_bash_write_effects); a complete lex with no effect ALLOWS before any registry read or
-    git call (reads are never judged). Each sink and restore path is canonicalized and judged against the
+    string DENIES fail-closed (the detector cannot read it). The command is lexed under every reading of its
+    uncertain '#' characters (_gensrc_lex) and the write effects of each reading collected on its own
+    (_bash_write_effects), only where a segment can add one (_gensrc_reach); a complete lex with no effect
+    ALLOWS before any registry read or git call (reads are never judged). Where the lexer cannot judge those
+    readings, the shared uncertain-'#' fallback (the FALLBACK paragraph above _nest_track) decides
+    (_gensrc_doubt_unread): a command whose text spells no redirect, sink program or wrapper, in quoting the
+    fallback decodes, holds no write this guard judges past the '#', and is judged as a complete lex is; any
+    other is an incomplete lex. Each sink and restore path is canonicalized and judged against the
     registry of EVERY repository on its root chain (_gensrc_root_chain: its own innermost toplevel and each
     enclosing repository up to the session repository, so a repository nested inside a registered tree never
     shadows the enclosing registry), the first _GENSRC_MAX_ROOTS distinct roots in command order, under at
@@ -19114,12 +19196,35 @@ def _gensrc_bash(data):
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or any(ord(ch) < 0x20 for ch in cwd):
         cwd = None
     try:
-        segments, complete = _gensrc_lex(command)
-        effects = _bash_write_effects(segments, cwd)
-        if complete and not effects:
+        # A lex with no record for a segment that has no word and no redirect (skip_empty) holds every segment
+        # that can add an effect (_gensrc_reach), and builds no record for a run of separators however many
+        # readings repeat it; skip_empty changes no other segment, their order or the flags. With no segment
+        # that can add one, no reading has an effect. Otherwise each reading is walked on its own from cwd. The
+        # walk reads a left-out segment only for its separator, which moves the directory only at a ) (a
+        # restore, or an unmatched one that makes it unknown) or after a cd, pushd or popd (the separators it
+        # is certain across); so the command is lexed again with those records only where its text holds a )
+        # or a segment is such a directory change, and the decision is the one the full lex alone gives.
+        readings, complete, doubt = _gensrc_lex(command, skip_empty=True)
+        reach = [_gensrc_reach(seg) for segs in readings for seg in segs]
+        effects = []
+        if any(writes for writes, _moves in reach):
+            if ")" in command or any(moves for _writes, moves in reach):
+                readings, complete, doubt = _gensrc_lex(command)
+            for segs in readings:
+                effects.extend(_bash_write_effects(segs, cwd))
+        # Text the lexer did not read: where it stopped at a '#' whose readings it cannot judge, the fallback
+        # decides whether that text may hold a judged write (_gensrc_doubt_unread); where it stopped at any
+        # other construct, it may.
+        unread = not complete and (not doubt or _gensrc_doubt_unread(command))
+        if not unread and not effects:
             return ("allow",)
         why = [eff.word for eff in effects if eff.kind == "uncleared"]
-        if not complete:
+        if unread and doubt:
+            why.append("a '#' whose comment reading depends on context that the shared lexer could not judge "
+                       "under both readings (more than four such '#', or one in or right after a backquote "
+                       "substitution), so it read nothing past that '#', in a command whose text spells a "
+                       "redirect, a sink program or a wrapper, or holds quoting the fallback does not decode")
+        elif unread:
             why.append("a command the lexer cannot finish (a here-string, process substitution, fd-variable "
                        "redirect or unbalanced quote stops it)")
         session_c = None
