@@ -32962,7 +32962,7 @@ def _push_step_quoted_masked(command):
     quotes, a '${', arithmetic or a comment, and the bodies of the operators read start after the next newline
     read in such a place, each up to its delimiter line (after its leading tabs for '<<-'). An unquoted body,
     which bash expands, is passed over unmasked. When the walk cannot follow command (a ')' it did not open,
-    as a case pattern writes, a quote, substitution or body still open at the end, a newline inside quotes
+    as a case pattern writes, a quote, substitution or body still open at the end, a newline inside double quotes
     while a body is pending), command is returned unchanged, which can only keep a deny. Linear in the length
     of command."""
     n = len(command)
