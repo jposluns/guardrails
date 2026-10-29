@@ -11222,15 +11222,19 @@ def _main_isolated(monitor):
         finally:
             aiqt_hooks._commit_git = _orig_commit_git
 
-        # === F-R2-1: the no-remote exemption is restricted to a LONE, directly-bound `git commit`. A COMPOUND
-        # command's pre-command remote-absence probe is STALE (a `cd remote-repo && commit` lands in a repo the
-        # probe never saw; a `git remote add && commit` adds the remote AFTER the probe ran), so a compound /
-        # multi-segment / cd-bearing / redirected commit is handled EXACTLY as before the exemption: DENY when
-        # it lands on a protected branch. Each DENY below runs from a no-remote main-HEAD session cwd (nr_none),
-        # so it is fail-to-pass under a revert - reverting the lone_direct restriction makes the exemption
-        # (nr_none has no remote) ALLOW these compound/redirected commits (the over-fire the finding reported).
-        # nr_all1/nr_all2 exercise the remote-spelling coverage: a remote-backed repo in ANY spelling still
-        # DENIES a lone protected commit (the exemption must not weaken it). Judged by the structured verdict. ==
+        # === The no-remote exemption is restricted to a LONE `git commit` (admitted cd/pushd aside, whose
+        # target the probe reads). A COMPOUND command's pre-command remote-absence probe is otherwise STALE (a
+        # `git remote add && commit` adds the remote AFTER the probe ran), so a compound /
+        # multi-segment / redirected commit is handled EXACTLY as before the exemption: DENY when
+        # it lands on a protected branch. The compound rows run from a no-remote main-HEAD session cwd
+        # (nr_none). Each row's comment names the revert that turns it red, as measured by running these rows
+        # against patched copies of aiqt_hooks. Several rows are held by more than one independent check
+        # (the _commit_command_syntax grammar, the _commit_literal_segment checks, and the _commit_issue
+        # condition on certificate D: one commit, no switch, only admitted cd/pushd steps beside it), so no
+        # single revert turns them red; their comments name the set of reverts that does.
+        # nr_upstream/nr_fileurl/nr_backup exercise the remote-spelling coverage: a remote-backed repo in ANY
+        # spelling still DENIES a lone protected commit (the exemption must not weaken it). Judged by the
+        # structured verdict. ==
         nr_upstream = _init_repo(tmp / "pl-nr-upstream")   # main HEAD, a remote named 'upstream'
         _git(nr_upstream, "remote", "add", "upstream", str(tmp / "pl-nr-upstream.git"))
         nr_fileurl = _init_repo(tmp / "pl-nr-fileurl")     # main HEAD, a file:// URL remote
@@ -11239,23 +11243,38 @@ def _main_isolated(monitor):
         _git(nr_backup, "remote", "add", "backup", str(tmp / "pl-nr-backup.git"))
         # Positive control (the exemption still works for the lone form): a lone bare commit on main in a
         # no-remote repo ALLOWS. This contrasts the compound denials below (the denial is the compound-ness,
-        # not the repo), and reds if the lone-form exemption is broken.
+        # not the repo). It turns red when _commit_issue never issues certificate D (its `remote is False`
+        # branch removed).
         pexpect("(pl-fr1-0) lone 'git commit' on main in a no-remote repo ALLOWS (the exemption, lone form)",
                 "git commit -m x", "allow", cwd=str(nr_none))
-        # cd into a (remote-backed) repo then commit: compound -> exemption withheld -> DENY. Reverting reds it.
-        pexpect("(pl-fr1-1) 'cd <remote-repo> && git commit' DENIES (compound; pre-command state is stale)",
+        # cd into a (remote-backed) repo then commit: the exemption is judged for the cd target -> DENY.
+        # Reverting the lone-commit restriction does not turn this red (the cd target has a remote, so D is
+        # withheld either way). It turns red when the cd step no longer sets the commit's directory in
+        # _commit_evaluate (the commit is then judged in nr_none), or when _repo_has_remote reports no remote.
+        pexpect("(pl-fr1-1) 'cd <remote-repo> && git commit' DENIES (the cd target has a remote)",
                 "cd {} && git commit --allow-empty -m qa".format(nr_remote), "deny", cwd=str(nr_none))
-        # add a remote then commit: the pre-add no-remote state is stale -> DENY. Reverting reds it.
+        # add a remote then commit: the pre-add no-remote state is stale -> DENY. No single revert turns this
+        # red: `git remote add` is outside the grammar (_commit_syntax_step returns None, so
+        # _commit_command_syntax reports unverifiable), and an admitted extra step would still withhold D
+        # (_commit_issue admits only cd/pushd beside the commit). It turns red when both are reverted: the
+        # unrecognized segment admitted as an inert step AND the cd/pushd-only condition on D dropped.
         pexpect("(pl-fr1-2) 'git remote add X <url> && git commit' DENIES (preceding remote mutation)",
                 "git remote add upstream {} && git commit -m x".format(tmp / "x.git"), "deny",
                 cwd=str(nr_none))
-        # any other compound spelling (';'-sequenced) -> DENY (cover as before).
+        # any other compound spelling (';'-sequenced) -> DENY (cover as before). No single revert turns this
+        # red, nor does any pair of the three checks that hold it: `echo done` is outside the grammar, the ';'
+        # fails the uninterrupted && chain check of _commit_command_syntax, and the cd/pushd-only condition on
+        # D withholds the certificate. It turns red only when all three are reverted together.
         pexpect("(pl-fr1-3) 'git commit ; echo done' DENIES (';'-compound, multi-segment)",
                 "git commit -m x ; echo done", "deny", cwd=str(nr_none))
-        # a redirected commit -> DENY (cover as before; the exemption is only for a lone bare commit).
+        # a redirected commit -> DENY (cover as before; the exemption is only for a lone bare commit). No single
+        # revert turns this red: _commit_literal_segment rejects it both for its redirect record
+        # (not seg.redirects) and for the raw '>' (_commit_raw_literal). It turns red when both are dropped.
         pexpect("(pl-fr1-4) 'git commit > out' DENIES (redirected commit)",
                 "git commit -m x > out.txt", "deny", cwd=str(nr_none))
         # remote-backed repo in ANY spelling still DENIES a lone direct protected commit (regression guards).
+        # Reverting the lone-commit restriction does not turn these red (they are lone commits); each turns
+        # red when _repo_has_remote reports no remote for its repo.
         pexpect("(pl-fr1-5) lone commit on main with an 'upstream' remote DENIES (remote-backed)",
                 "git commit -m x", "deny", cwd=str(nr_upstream))
         pexpect("(pl-fr1-6) lone commit on main with a file:// URL remote DENIES (remote-backed)",
@@ -11263,28 +11282,33 @@ def _main_isolated(monitor):
         pexpect("(pl-fr1-7) lone commit on main with a 'backup' path remote DENIES (remote-backed)",
                 "git commit -m x", "deny", cwd=str(nr_backup))
 
-        # === F-R2-4: a LONE single segment with no redirects is NOT sufficient to prove the commit's
+        # === A LONE single segment with no redirects is NOT sufficient to prove the commit's
         # repo/remote context is stable - an executable command/process substitution INSIDE the commit
         # (a double-quoted `$(...)`, an unquoted backtick) can mutate that context (add a remote, run a
         # nested git) before git runs, so the pre-command no-remote probe is stale. The exemption must
-        # require the commit segment be FREE of such substitution (opaque_shell False). Each DENY below
-        # runs from a no-remote main-HEAD cwd (nr_none) and is fail-to-pass under a revert: dropping the
-        # opaque_shell qualifier from lone_direct_commit re-ALLOWS these substitution-bearing commits
-        # (the bypass the finding reported). The positive control (pl-fr1-0 above) proves the exemption
+        # require the commit segment be FREE of such substitution. _commit_literal_segment rejects it by
+        # three independent checks: not seg.opaque_shell, not any(seg.argv_opaque), and _commit_raw_literal
+        # (which rejects '$' and backtick outside single quotes). Each DENY below runs from a no-remote
+        # main-HEAD cwd (nr_none). Dropping any one or any two of those checks leaves every row denied;
+        # pl-fr4-1, pl-fr4-2b and pl-fr4-3 turn red only when all three are dropped together, and pl-fr4-2
+        # needs more (see its comment). The positive control (pl-fr1-0 above) proves the exemption
         # still ALLOWS the genuine lone bare commit, so these denials are the substitution, not the repo.
         pexpect("(pl-fr4-1) 'git commit -m \"$(git remote add ...)\"' DENIES (command substitution in "
                 "the commit segment; no-remote probe is stale)",
                 'git commit --allow-empty -m "$(git remote add origin /some/path; echo qa)"',
                 "deny", cwd=str(nr_none))
+        # The '&&' inside these backticks splits the payload into two segments, so dropping the three
+        # substitution checks is not enough: this row turns red only when, in addition, the unrecognized
+        # second segment is admitted as an inert step AND the cd/pushd-only condition on D is dropped.
         pexpect("(pl-fr4-2) 'git commit -m `git remote add ...`' DENIES (backtick command substitution)",
                 "git commit --allow-empty -m `git remote add origin /some/path && echo qa`",
                 "deny", cwd=str(nr_none))
-        # A LONE single-segment backtick (no internal metachar to split on) is the strict fail-to-pass
-        # for the backtick vector on the opaque_shell qualifier: pl-fr4-2's payload denies via multi-
-        # segment (its internal '&&' splits it) even without the qualifier, whereas this one is a single
-        # segment whose ONLY disqualifier is opaque_shell, so reverting the qualifier re-ALLOWS it.
-        pexpect("(pl-fr4-2b) lone single-segment backtick commit DENIES (opaque_shell command "
-                "substitution; strict fail-to-pass for the qualifier)",
+        # A LONE single-segment backtick (no internal metachar to split on) isolates the backtick vector to
+        # _commit_literal_segment: unlike pl-fr4-2 it needs no grammar or D revert. Its segment fails all three
+        # substitution checks (opaque_shell, argv_opaque and _commit_raw_literal), so no single revert turns
+        # it red; it turns red when all three are dropped together.
+        pexpect("(pl-fr4-2b) lone single-segment backtick commit DENIES (backtick command substitution; "
+                "red only when all three substitution checks are dropped)",
                 "git commit --allow-empty -m `whoami`", "deny", cwd=str(nr_none))
         pexpect("(pl-fr4-3) 'git commit -m \"$(git -C <repo> commit ...)\"' DENIES (nested-git command "
                 "substitution)",
@@ -11333,6 +11357,35 @@ def _main_isolated(monitor):
         nr_ctl = _init_repo(tmp / "pl-nr-genuine")   # main HEAD, genuinely NO remote by any mechanism
         pexpect("(pl-fr7c-0) lone commit on main in a genuinely no-remote repo ALLOWS (exemption intact)",
                 "git commit --allow-empty -m x", "allow", cwd=str(nr_ctl))
+
+        # The exemption is judged for the repository the commit targets (its -C operand, else the
+        # latest preceding cd/pushd operand, else cwd), never for an unrelated session cwd. Each allow
+        # runs from a remote-backed main cwd and each deny from a no-remote main cwd, so judging the
+        # cwd instead of the target flips every row. An unreadable target fails closed.
+        nr_q, nr_remote_q = shlex.quote(str(nr_ctl)), shlex.quote(str(nr_remote))
+        for _case, _command in (("C", "git -C {} commit -m x"), ("cd", "cd {} && git commit -m x"),
+                                ("pushd", "pushd {} && git commit -m x")):
+            pexpect("(pl-nrt-{}-allow) {} naming a no-remote repo on main from a remote-backed cwd ALLOWS"
+                    .format(_case, _case), _command.format(nr_q), "allow", cwd=str(nr_remote),
+                    certificate=("D", "refs/heads/main"))
+            pexpect("(pl-nrt-{}-deny) {} naming a remote-backed repo on main from a no-remote cwd DENIES"
+                    .format(_case, _case), _command.format(nr_remote_q), "deny", cwd=str(nr_ctl),
+                    detail="would commit on protected branch")
+        nr_badcfg = _init_repo(tmp / "pl-nr-badcfg")   # main HEAD, no remote, config git cannot parse
+        with open(nr_badcfg / ".git" / "config", "a", encoding="utf-8") as _badcfg:
+            _badcfg.write("[broken\n")
+        nr_plain = tmp / "pl-nr-plain-dir"             # an existing directory that is not a repository
+        nr_plain.mkdir()
+        for _case, _path in (("unparseable-config", nr_badcfg), ("not-a-repo", nr_plain),
+                             ("missing", tmp / "pl-nr-missing")):
+            for _form in ("git -C {} commit -m x", "cd {} && git commit -m x"):
+                pexpect("(pl-nrt-unreadable-{}) {!r} DENIES (target cannot be read)".format(_case, _form),
+                        _form.format(shlex.quote(str(_path))), "deny", cwd=str(nr_ctl))
+        pexpect("(pl-nrt-semicolon) 'cd <no-remote repo>; git commit' DENIES (outside the && grammar)",
+                "cd {} ; git commit -m x".format(nr_q), "deny", cwd=str(nr_remote))
+        pexpect("(pl-nrt-companion) a non-cd companion still withholds D from an explicit target",
+                "true && git -C {} commit -m x".format(nr_q), "deny", cwd=str(nr_remote),
+                detail="would commit on protected branch")
 
         # A-D positive registry. The consumer spy in pexpect observes the certificate the
         # public handler actually uses; an informational allow-note cannot satisfy these cases.
@@ -11388,9 +11441,9 @@ def _main_isolated(monitor):
                     "git commit -m x", "allow", cwd=str(_unborn),
                     certificate=(_shape, "refs/heads/" + _branch))
             if _shape == "D":
-                pexpect("(pl239-unborn-{}-C) explicit target cannot obtain D".format(_branch),
+                pexpect("(pl239-unborn-{}-C) explicit no-remote target obtains D".format(_branch),
                         "git -C {} commit -m x".format(shlex.quote(str(_unborn))),
-                        "deny", cwd=plf, detail="would commit on protected branch")
+                        "allow", cwd=plf, certificate=("D", "refs/heads/" + _branch))
                 _git(_unborn, "remote", "add", "upstream", str(tmp / "pl239-unborn-remote.git"))
                 pexpect("(pl239-unborn-{}-remote) remote presence withholds D".format(_branch),
                         "git commit -m x", "deny", cwd=str(_unborn),
@@ -11634,8 +11687,13 @@ def _main_isolated(monitor):
             pexpect("(pl239-cwd-{})".format(_case), "git commit", "deny", cwd=_cwd)
         pexpect("(pl239-target-absent)", "git -C {} commit"
                 .format(shlex.quote(str(tmp / "pl239-missing"))), "deny", cwd=plf)
-        pexpect("(pl239-cd-loses-session)", "cd {} && git commit".format(_pl239_f),
-                "deny", cwd=plf, detail="session directory binding is unavailable after cd")
+        # A preceding cd names the directory of a later plain commit, never the session cwd.
+        pexpect("(pl239-cd-protected)", "cd {} && git commit".format(_pl239_m),
+                "deny", cwd=plf, detail="would commit on protected branch")
+        pexpect("(pl239-cd-feature)", "cd {} && git commit".format(_pl239_f),
+                "allow", cwd=plr, certificate=("A", "refs/heads/other"))
+        pexpect("(pl239-cd-dotted)", "cd {}/. && git commit".format(_pl239_f),
+                "deny", cwd=plf, detail="command directory is unavailable")
 
         # Unknown ambient GIT_* denies even with a resolvable explicit feature target.
         _pl239_envkey = "GIT_PL239_UNKNOWN_OVERRIDE"
