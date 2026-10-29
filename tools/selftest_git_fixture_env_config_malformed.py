@@ -121,7 +121,6 @@ def _malformed_lane(base):
             ("config/check_gensrc_failclose/malformed", "tools/check_gensrc_failclose.py"),
             ("config/selftest_ci_status/malformed", "tools/selftest_ci_status.py"),
             ("config/check_opf_init/malformed", "opf/tools/check_opf_init.py"),
-            ("config/check_opf_upgrade/malformed", "opf/tools/check_opf_upgrade.py"),
             ("config/check_opf_doctor/malformed", "opf/tools/check_opf_doctor.py"),
             ("config/_opf_init_operation/malformed", "opf/tools/_opf_init_operation.py"),
             ("config/_opf_oplock/malformed", "opf/tools/_opf_oplock.py"),

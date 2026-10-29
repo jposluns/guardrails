@@ -80,13 +80,14 @@
     <div class="wrap">
       <h3>Template</h3>
       <p>Closed keysets throughout: an unknown key in any base section is a validation finding. The base
-        <code>[opf]</code> table carries the exact discovery token <code>standard = "opf"</code> and the
-        spec version the store conforms to. The reference scaffold's base:</p>
+        <code>[opf]</code> table carries the exact discovery token <code>standard = "opf"</code>, the
+        spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:</p>
       <div class="codecard src">
         <div class="codecard-bar">.working/toml/manifest.toml</div>
         <div class="codebody"><span class="tok-tbl">[opf]</span>
   <span class="tok-key">standard</span> = <span class="tok-str">"opf"</span>
-  <span class="tok-key">spec_version</span> = <span class="tok-str">"1.2.0"</span>
+  <span class="tok-key">spec_version</span> = <span class="tok-str">"2.0.0"</span>
+  <span class="tok-key">homes</span> = <span class="tok-num">2</span>
   <span class="tok-key">layout</span> = <span class="tok-str">"inline"</span>
   <span class="tok-key">posture</span> = <span class="tok-str">"required"</span>
   <span class="tok-key">import_status</span> = <span class="tok-str">"none"</span>
@@ -94,9 +95,11 @@
   <span class="tok-tbl">[modules]</span>
   <span class="tok-key">governance</span> = <span class="tok-num">false</span></div>
       </div>
+      <p>The reference tooling does not yet implement spec 2.0.0: its scaffold still writes
+        <code>spec_version = "1.2.0"</code> with no <code>homes</code> key.</p>
       <p>The top-level tables:</p>
       <div class="tree"><pre>
-  [opf]           standard, spec_version, layout (inline | per-record),
+  [opf]           standard, spec_version, homes (2), layout (inline | per-record),
                   posture (off | warn | required), import_status (none | partial | complete)
   [store]         sync_target (empty under the in-repo default)
   [modules]       governance, delivery_assurance, operational_policy, concurrent_operation
@@ -126,8 +129,7 @@
       <p>The manifest is control data, not a record source, so it has no paired Markdown view; it is,
         however, what declares every other pair, because the <code>[views.*]</code> map is the registry
         the renderer and the drift gate read. It is created by <code>opf init</code>, validated before a
-        byte is written; updated by <code>opf upgrade</code> (a canonical model regeneration for the
-        1.0.0 or 1.1.0 to 1.2.0 schema migration, never a textual edit), by the adopter's own reviewed edit to
+        byte is written; updated by the adopter's own reviewed edit to
         enable a module, register a vendor, or record an unmanaged path, and, in the standard's planned
         <code>opf migrate</code> operation, re-pointing the recorded sync target. Migration is not yet
         implemented in the reference CLI. <code>opf render</code> reads the view map, and
@@ -159,11 +161,11 @@
         </div>
         <div>
           <dt>Read by</dt>
-          <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <code>opf upgrade</code> <code>opf absorb</code> <code>opf record</code> <span>implemented readers of an existing store</span></dd>
+          <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <code>opf absorb</code> <code>opf record</code> <span>implemented readers of an existing store</span></dd>
         </div>
         <div>
           <dt>Written by</dt>
-          <dd class="refchips"><code>opf init</code> <code>opf upgrade</code> <span>a reviewed adopter edit</span> <code>opf migrate</code> <span>(planned; not yet implemented in the reference CLI)</span></dd>
+          <dd class="refchips"><code>opf init</code> <span>a reviewed adopter edit</span> <code>opf migrate</code> <span>(planned; not yet implemented in the reference CLI)</span></dd>
         </div>
       </dl>
     </div>
@@ -220,13 +222,11 @@
       <p>Allocation increments the counter under the store's lock as one atomic claim, so no gap between
         choosing an ID and reserving it can double-allocate. Counters are never reset and IDs are never
         reused, even when a record is superseded, refuted, or its work reverted. Rotation, index
-        rewrites, and store relocation never touch this file. When <code>opf upgrade</code> migrates a 1.0.0
-        store to 1.2.0, the earlier schema delta adds any missing CN, MD, and PP namespaces and preserves every
-        existing high-water; a 1.1.0 store's counters are unchanged. Counters are a control
+        rewrites, and store relocation never touch this file. Counters are a control
         ledger, not a record type, so no view renders from them.</p>
       <p>It is created by <code>opf init</code> with all namespaces at zero, updated by ID allocation
-        (atomically under the store lock, whenever any process creates a record in any type) and by
-        <code>opf upgrade</code> extending the namespace roster, and read by <code>opf doctor</code> (for
+        (atomically under the store lock, whenever any process creates a record in any type), and read
+        by <code>opf doctor</code> (for
         counter completeness, monotonicity against a prior committed snapshot, and every live or archived
         ID within its high-water) and by record creation, to allocate the next ID.</p>
     </div>
@@ -252,7 +252,7 @@
         </div>
         <div>
           <dt>Written by</dt>
-          <dd class="refchips"><code>opf init</code> <span>ID allocation, atomic</span> <code>opf record</code> <code>opf upgrade</code></dd>
+          <dd class="refchips"><code>opf init</code> <span>ID allocation, atomic</span> <code>opf record</code></dd>
         </div>
         <div>
           <dt>Read by</dt>
@@ -500,7 +500,7 @@
         <div class="codecard-bar">.working/toml/lease.toml</div>
         <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
   <span class="tok-key">holder</span> = <span class="tok-str">"opf@host-a/pid-8412"</span>
-  <span class="tok-key">operation</span> = <span class="tok-str">"upgrade"</span>
+  <span class="tok-key">operation</span> = <span class="tok-str">"record"</span>
   <span class="tok-key">acquired_at</span> = <span class="tok-str">"2026-08-29T16:22:41Z"</span></div>
       </div>
       <p>A lease is never seized from a live holder. It is reconciled against recorded state on resume or
@@ -511,11 +511,12 @@
         alone, are the guard. The lease is transient operational state, not a record source, so no view
         renders from it.</p>
       <p>The standard describes acquisition before mutation and release at clean close or after
-        reconciliation of a dead run. Implemented coverage is narrower: <code>opf upgrade</code> claims
+        reconciliation of a dead run. Implemented coverage is narrower: <code>opf record</code> claims
         a lease, and <code>opf doctor</code> validates its shape when present.
         The retired <code>opf import</code> modes refuse before any write and take no lock.
-        <code>opf init</code>
-        supplies no lock or lease and does not serialize concurrent writers. <code>opf sync</code>
+        <code>opf init</code> holds the lease, under the shared operation lock, only while it writes
+        the store, removes the lease and releases the lock before it reports success, and clears a
+        dead run's leftover lock record only with <code>--recover</code>. <code>opf sync</code>
         and <code>opf migrate</code> are planned, not implemented cross-system enforcement.</p>
     </div>
   </section>
@@ -537,7 +538,7 @@
       <dl class="refstrip">
         <div>
           <dt>Held during</dt>
-          <dd class="refchips"><span>standard: store mutations</span> <span>CLI lease: upgrade; init has no lease</span></dd>
+          <dd class="refchips"><span>standard: store mutations</span> <span>CLI lease: record and init</span></dd>
         </div>
         <div>
           <dt>Contains</dt>
@@ -545,7 +546,7 @@
         </div>
         <div>
           <dt>Enforced by</dt>
-          <dd class="refchips"><span>upgrade acquisition</span> <code>opf doctor</code> <span>shape validation; cross-system reconciliation planned</span></dd>
+          <dd class="refchips"><span>record acquisition</span> <code>opf doctor</code> <span>shape validation; cross-system reconciliation planned</span></dd>
         </div>
       </dl>
     </div>

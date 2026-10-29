@@ -10,8 +10,8 @@ variables for good.
 entry_restore_failures(tool, entry, inner, args, helpers) runs the entry point in a child
 interpreter that first sets a caller environment (HOME at a fresh scratch directory;
 XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM and every other inherited
-GIT_* variable unset; a caller variable GIT_AIQT_CALLER_PROBE=kept), loads the tool from its path,
-replaces the isolated main the entry point delegates to with a stand-in, calls the entry point
+GIT_* variable unset; a caller variable GIT_AIQT_CALLER_PROBE=kept), imports the tool under its own
+module name through the ordinary import system (_import_tool), replaces the isolated main the entry point delegates to with a stand-in, calls the entry point
 in-process with the positional arguments args, and requires os.environ to equal its snapshot from
 before the call exactly and every global binding of the tool's module to be the same object it was
 before the call (so a cached git executable rebound to the lifecycle's wrapper must be put back).
@@ -94,26 +94,41 @@ _WRAPPER_MUTANTS names, not a wrapper written to defeat it.
 Residual: the probe installs its own scratch home (_git_fixture_env._SCRATCH_HOME), so the branch of
 _scratch_home() that creates that directory and registers its removal is not exercised here.
 
-The child is this module's _child_main, reached through a fixed -c bootstrap that puts this
-directory on the module path; the module has no __main__ block of its own.
+The child is this file run as a script by the interpreter (python3 -I -B with this file's path):
+its __main__ block puts this directory on the module path and hands the arguments to _child_main.
+The probe's inputs reach the child in argv and its result comes back as one tagged line on the
+child's stdout. The tool under test is never loaded by a loader call on a file path: it is
+imported by name, and the name is validated first (_import_tool).
 
 Imported only by a self-test; nothing here runs on a production path."""
+import sys
 
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: _entry_restore_selftest.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+import importlib
 import json
+import keyword
 import os
 import secrets
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 PROBE_KEY = "GIT_AIQT_CALLER_PROBE"
 PROBE_VALUE = "kept"
 _RESULT_TAG = "ENTRY-RESTORE "
-_CHILD_BOOTSTRAP = ("import sys; sys.path.insert(0, sys.argv[1]); import _entry_restore_selftest; "
-                    "sys.exit(_entry_restore_selftest._child_main(sys.argv[2:]))")
 _MUTANT_MODE = "--wrapper-mutants"
 # The scrub values the lifecycle must apply, written out independently of _git_fixture_env so a
 # wrong value there fails the probe instead of being expected by it. HOME and XDG_CONFIG_HOME are
@@ -192,8 +207,7 @@ def entry_restore_failures(tool, entry, inner, args=(), helpers=(), timeout=300)
     launched, times out, or reports no result is a failure, never a silent pass."""
     label = "{} {}()".format(os.path.basename(str(tool)), entry)
     spec = json.dumps({"args": list(args), "helpers": [list(helper) for helper in helpers]})
-    argv = [sys.executable, "-I", "-B", "-c", _CHILD_BOOTSTRAP,
-            os.path.dirname(os.path.abspath(__file__)), str(tool), entry, inner, spec]
+    argv = [sys.executable, "-I", "-B", os.path.abspath(__file__), str(tool), entry, inner, spec]
     try:
         child = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -227,8 +241,7 @@ def wrapper_mutant_failures(timeout=120):
     that cannot be launched, times out, or reports no well-formed result gives every name that
     failure, never a silent pass."""
     names = _mutant_result_names()
-    argv = [sys.executable, "-I", "-B", "-c", _CHILD_BOOTSTRAP,
-            os.path.dirname(os.path.abspath(__file__)), _MUTANT_MODE]
+    argv = [sys.executable, "-I", "-B", os.path.abspath(__file__), _MUTANT_MODE]
     try:
         child = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -483,12 +496,35 @@ def _call_problems(caller, bound, module, recorded, seen, home, fixture_home, ar
     return problems + _seen_problems(seen, caller, home, fixture_home, args)
 
 
+def _import_tool(tool):
+    """Import the tool at path tool (NAME.py) in this child by its module name NAME through the
+    ordinary import system, as an import statement naming it would, with no loader call on the
+    path. The name is validated first: tool must be an existing regular file whose name is NAME.py,
+    NAME an identifier that is not a keyword, and no module NAME already loaded here. tool's
+    directory is appended to the module path, and the imported module must come from tool itself,
+    so a module of that name found earlier on the path is refused, never probed in its place.
+    Returns (module, None), or (None, why)."""
+    path = os.path.abspath(str(tool))
+    stem, suffix = os.path.splitext(os.path.basename(path))
+    if suffix != ".py" or not stem.isidentifier() or keyword.iskeyword(stem):
+        return None, "{} is not a NAME.py file with an importable module name".format(tool)
+    if not os.path.isfile(path):
+        return None, "{} is not a regular file".format(tool)
+    if stem in sys.modules:
+        return None, "a module named {} is already loaded in the probe child".format(stem)
+    sys.path.append(os.path.dirname(path))
+    module = importlib.import_module(stem)
+    found = getattr(module, "__file__", None)
+    if not found or os.path.realpath(found) != os.path.realpath(path):
+        return None, "importing {} loaded {!r}, not {}".format(stem, found, tool)
+    return module, None
+
+
 def _child(tool, entry, inner, args=(), helpers=()):
-    """Child side: set the caller environment, call the entry point in-process with args, with inner
-    replaced by a stand-in that records the arguments it receives and each helper by a recorder,
-    first around a stand-in returning 0 and then around one raising, and return the list of
-    problems found."""
-    import importlib.util
+    """Child side: set the caller environment, import the tool (_import_tool), call the entry point
+    in this child with args, with inner replaced by a stand-in that records the arguments it
+    receives and each helper by a recorder, first around a stand-in returning 0 and then around one
+    raising, and return the list of problems found."""
     problems = []
     home = tempfile.mkdtemp(prefix="aiqt-entry-restore-home-")
     fixture_home = tempfile.mkdtemp(prefix="aiqt-entry-restore-fixture-home-")
@@ -496,10 +532,9 @@ def _child(tool, entry, inner, args=(), helpers=()):
     channel = tempfile.mkdtemp(prefix="aiqt-entry-restore-channel-")
     try:
         _set_caller_environment(home)
-        sys.path.append(os.path.dirname(os.path.abspath(tool)))
-        spec = importlib.util.spec_from_file_location("_entry_restore_target", tool)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module, refused = _import_tool(tool)
+        if module is None:
+            return [refused]
         import _git_fixture_env
         if not callable(getattr(module, inner, None)):
             return ["{} has no function {}".format(tool, inner)]
@@ -672,7 +707,7 @@ def _well_formed_spec(spec):
 
 
 def _child_main(argv):
-    """The child's entry, reached only through _CHILD_BOOTSTRAP: print the one result record and
+    """The child's entry, reached only through this file's __main__ block: print the one result record and
     return the exit status (0 when every list in the result is empty, 1 when one is not, which a
     working wrapper mutant check always gives through its two refusals, 2 a usage error). argv is
     [_MUTANT_MODE] for wrapper_mutant_failures, else [TOOL, ENTRY, INNER, SPEC] with SPEC the JSON
@@ -695,3 +730,10 @@ def _child_main(argv):
                    [tuple(helper) for helper in spec["helpers"]])
     print(_RESULT_TAG + json.dumps(found))
     return 1 if found else 0
+
+
+if __name__ == "__main__":
+    # -I leaves the script's own directory off the module path; _git_fixture_env and the tools
+    # under test are imported from it.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.exit(_child_main(sys.argv[1:]))
