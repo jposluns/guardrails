@@ -3319,6 +3319,132 @@ def _gate_read_fast_failures(count=4000, seed=20261026):
     return out
 
 
+# Texts for the unread-text and spelled-alias fast paths (_gate_unread_may_hit, _git_alias_text_may_build): a hook
+# skip spelled plainly, behind a quote-assembled git or verb, through a backslash, or coded in an ANSI-C escape (its
+# '-' too); text missing the git, the roster verb or the '-'; and git commands whose region holds a '$', backquote,
+# brace or -c definition, or none of them, before a construct the lexer refuses.
+_GATE_UNREAD_FAST_TEXTS = (
+    "git push '", "git push -n '", "g'i't commit -nv <<<x", "git co'mmit' -n <<<x", "git commit -$'n' '",
+    "git commit $'" + chr(92) + "x2dn' <<<x", "x '; g" + chr(92) + "it commit -n", "echo x; git push --no-verify <<<x",
+    "git log -n 3 '", "git status <<<x", "push -n '", "git -C $D log <<<x", "git `x` log '", "git {a,b} log '",
+    "git -c alias.l=log l <<<x", "git -C \"$D\" log '", "git push origin main <(x)")
+_GATE_UNREAD_FAST_ALPHABET = ("g", "i", "t", "G", "git", " git ", "push", "commit", "am", " ", "-", "-n", "--no-v",
+                              "n", "'", '"', "$", chr(92), "\n", "x2d", "x67", "{", "}", ",", "`", "-c", "alias.",
+                              "GIT_CONFIG_", ";", "<<<x", "<(", "|")
+
+
+def _gate_unread_full(text):
+    """_gate_unread_bypass(text) with every slice read: its fast-path test is replaced by one that is always True for
+    the call and restored after it."""
+    may = aiqt_hooks._gate_unread_may_hit
+    aiqt_hooks._gate_unread_may_hit = lambda _text: True
+    try:
+        return aiqt_hooks._gate_unread_bypass(text)
+    finally:
+        aiqt_hooks._gate_unread_may_hit = may
+
+
+def _gate_alias_with(text, may_build):
+    """_git_alias_spelled_kind(text) with may_build in place of _git_alias_text_may_build for the call, restored
+    after it."""
+    real = aiqt_hooks._git_alias_text_may_build
+    aiqt_hooks._git_alias_text_may_build = may_build
+    try:
+        return aiqt_hooks._git_alias_spelled_kind(text)
+    finally:
+        aiqt_hooks._git_alias_text_may_build = real
+
+
+def _gate_calls(name, call):
+    """How many times call() called aiqt_hooks.<name>, counted by a wrapper installed for the call and restored."""
+    real = getattr(aiqt_hooks, name)
+    calls = [0]
+
+    def counted(*args):
+        calls[0] += 1
+        return real(*args)
+
+    setattr(aiqt_hooks, name, counted)
+    try:
+        call()
+    finally:
+        setattr(aiqt_hooks, name, real)
+    return calls[0]
+
+
+def _gate_unread_fast_failures(count=4000, seed=20261031):
+    """(gw-unread-fast) _gate_unread_bypass, which passes over text that _gate_unread_may_hit says no reading of it or
+    of a slice of it can give the any-word walk a hit, gives the full reading's result (every slice read,
+    _gate_unread_full), and (gw-alias-fast) _git_alias_spelled_kind, which builds no spelled command where
+    _git_alias_text_may_build says none can define an alias, gives the result of building them all, on
+    _GATE_UNREAD_FAST_TEXTS, _GATE_READ_FAST_TEXTS and `count` seeded random texts over _GATE_UNREAD_FAST_ALPHABET.
+    The corpus must hold texts each test passes over and texts each full reading gives a hit for. Two wrong unread
+    tests (one without the escape case, one reading the raw text) and a wrong alias test (one that reads no mark)
+    must each be caught by the same comparison, so it discriminates. (gw-unread-fast-taken) the fast paths are
+    taken: neither reading splits or builds anything for a run of git push words before a lone quote, where a test
+    that is always True does (gw-unread-fast-taken-red)."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_GATE_UNREAD_FAST_TEXTS) + list(_GATE_READ_FAST_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_GATE_UNREAD_FAST_ALPHABET) for _ in range(rng.randint(0, 12))))
+    unread_full = [_gate_unread_full(text) for text in texts]
+    alias_full = [_gate_alias_with(text, lambda _command, _text: True) for text in texts]
+    passed = [text for text in texts if not aiqt_hooks._gate_unread_may_hit(text)]
+    unbuilt = [text for text in texts if aiqt_hooks._GIT_WORD_RE.search(text)
+               and not aiqt_hooks._git_alias_text_may_build(text, aiqt_hooks._dequoted_text(text))]
+    if (not passed or not unbuilt or not any(hit is not None for hit in unread_full)
+            or "built" not in alias_full):
+        out.append("(gw-unread-fast-corpus) the corpus must hold texts each test passes over ({} unread, {} alias) "
+                   "and texts each full reading gives a hit for".format(len(passed), len(unbuilt)))
+    for text, want in zip(texts, unread_full):
+        got = aiqt_hooks._gate_unread_bypass(text)
+        if got != want and len(out) < 3:
+            out.append("(gw-unread-fast) _gate_unread_bypass({!r}) gave {!r}, the full reading {!r}".format(
+                text, got, want))
+    for text, want in zip(texts, alias_full):
+        got = aiqt_hooks._git_alias_spelled_kind(text)
+        if got != want and len(out) < 6:
+            out.append("(gw-alias-fast) _git_alias_spelled_kind({!r}) gave {!r}, building every spelled command "
+                       "{!r}".format(text, got, want))
+    drops = aiqt_hooks._GATE_READING_DROPS
+    verbs = aiqt_hooks._NOVERIFY_VERBS
+    wrong = (
+        ("no-escape", lambda text: ("-" in text.translate(drops) and "git" in text.translate(drops).lower()
+                                    and any(verb in text.translate(drops) for verb in verbs))),
+        ("raw", lambda text: (("$" in text and chr(92) in text)
+                              or ("-" in text and "git" in text.lower() and any(verb in text for verb in verbs)))),
+    )
+    may = aiqt_hooks._gate_unread_may_hit
+    for name, test in wrong:
+        aiqt_hooks._gate_unread_may_hit = test
+        try:
+            caught = any(aiqt_hooks._gate_unread_bypass(text) != want for text, want in zip(texts, unread_full))
+        finally:
+            aiqt_hooks._gate_unread_may_hit = may
+        if not caught:
+            out.append("(gw-unread-fast-red-{}) a wrong fast-path test passes the comparison".format(name))
+    if all(_gate_alias_with(text, lambda _command, dq: aiqt_hooks._git_alias_text_may_define(dq)) == want
+           for text, want in zip(texts, alias_full)):
+        out.append("(gw-alias-fast-red) a test that reads no mark passes the comparison")
+    command = "git push " * 64 + "'"
+    taken = (_gate_calls("_gate_split_spans", lambda: aiqt_hooks._gate_unread_bypass(command)),
+             _gate_calls("_git_alias_spelled_segments", lambda: aiqt_hooks._git_alias_spelled_kind(command)))
+    if taken != (0, 0):
+        out.append("(gw-unread-fast-taken) on {!r} the unread reading split {} time(s) and the alias reading built "
+                   "{} time(s), want none".format(command[:18] + "...", *taken))
+    aiqt_hooks._gate_unread_may_hit = lambda _text: True
+    try:
+        always = (_gate_calls("_gate_split_spans", lambda: aiqt_hooks._gate_unread_bypass(command)),
+                  _gate_calls("_git_alias_spelled_segments",
+                              lambda: _gate_alias_with(command, lambda _command, _text: True)))
+    finally:
+        aiqt_hooks._gate_unread_may_hit = may
+    if 0 in always:
+        out.append("(gw-unread-fast-taken-red) a test that is always True passes the count ({})".format(always))
+    return out
+
+
 # The budget of the de-quoted reading's cost row (gw-read-cost): the CPU time of _gate_behind_bypass over every
 # segment of a command must stay under this share of the CPU time of one lex of the same command.
 _GATE_READ_COST_SHARE = 0.25
@@ -4032,6 +4158,106 @@ def _lex_repeats_failures(count=4000, seed=20261029):
         out.append("(dl-lex-repeats-taken-red) the default lex of {!r} built {} records, not more than 200, so "
                    "the count cannot see a caller that builds one per separator".format(lines[:12] + "...",
                                                                                       default_built))
+    return out
+
+
+# Commands whose full lex fails where a partial lex recovers what it read: a lone or glued quote after words,
+# separators or a redirect, a here-string, a process substitution and a NUL, and a quoted here-document body in a
+# double-quoted command substitution that main's skip reads otherwise, before an unbalanced quote or a
+# here-string, where main's reading follows the recovered segments.
+_LEX_STOPPED_TEXTS = (
+    "git push '", "git push git push '", "a; b 'c", ";;; 'x", "a |; > o 'y", "cat <<<x", "a <(b)", "a\x00b",
+    "x 2>'y", "(a; 'b", "git commit -m \"$(cat <<'EOF'\nDon't\nEOF\n)\" 'y", "echo \"$(cat <<'E'\n'\nE\n)\" <<<x",
+    "git commit -m \"$(cat <<'EOF'\nfix ' it\nEOF\n)\"; echo 'y")
+
+
+def _lex_stopped_view(result, seen):
+    """A partial lex's (segments, complete, in_progress) with each segment's word spellings, and the stops seen
+    recorded for it (_LexStops), for _lex_stopped_mismatches."""
+    segments, complete, in_progress = result
+    return ([(tuple(seg), getattr(seg.argv, "spelling", None)) for seg in segments], complete, in_progress,
+            [(start, None if words is None else (list(words), getattr(words, "spelling", None)))
+             for start, words in seen])
+
+
+def _lex_stopped_mismatches(stopped, texts):
+    """[(text, skip_empty, got, want)] for each of texts and each skip_empty (False, _SKIP_EMPTY_REPEATS) whose full
+    lex inside _WordSpellings raises a ValueError other than _UncertainHashError, where stopped(text, exc,
+    skip_empty), the partial lex taken from that error inside _LexStops, differs from a partial lex of text with that
+    skip_empty inside the same contexts (got None where the error records nothing)."""
+    out = []
+    for text in texts:
+        for skip in (False, aiqt_hooks._SKIP_EMPTY_REPEATS):
+            with aiqt_hooks._WordSpellings():
+                try:
+                    aiqt_hooks._lex_readings(text, skip_empty=skip)
+                    continue
+                except aiqt_hooks._UncertainHashError:
+                    continue
+                except ValueError as exc:
+                    got = None
+                    if getattr(exc, "recovered", None) is not None:
+                        with aiqt_hooks._LexStops() as stops:
+                            got = _lex_stopped_view(stopped(text, exc, skip), stops.seen)
+                with aiqt_hooks._LexStops() as stops:
+                    want = _lex_stopped_view(aiqt_hooks._lex_command(text, partial=True, skip_empty=skip),
+                                             stops.seen)
+            if got != want:
+                out.append((text, skip, got, want))
+    return out
+
+
+def _lex_stopped_failures(count=4000, seed=20261031):
+    """(dl-lex-stopped) A full lex that fails with a ValueError other than _UncertainHashError records where its first
+    reading stopped, and the partial lex taken from it (_lex_stopped_partial) is a partial lex of the same command
+    with the same skip_empty: the same segments with their word spellings, the same flags and the same _LexStops
+    stops, on _LEX_STOPPED_TEXTS, _LEX_SKIP_TEXTS, _LEX_FORK_TEXTS and `count` seeded random texts over
+    _LEX_SKIP_ALPHABET. Three wrong readings (the open segment dropped, main's reading left out, and no stop
+    recorded) must each be caught by the same comparison, so it discriminates. (dl-lex-stopped-taken)
+    gate_weakening, whose parse-error path takes its partial lex so, starts one _lex_pass from the start of a run of
+    git push words before a lone quote (_lex_pass_starts), where a fresh partial lex after its failed lex starts
+    two (dl-lex-stopped-taken-red)."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_LEX_STOPPED_TEXTS) + list(_LEX_SKIP_TEXTS) + list(_LEX_FORK_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_SKIP_ALPHABET) for _ in range(rng.randint(0, 10))))
+    stopped = aiqt_hooks._lex_stopped_partial
+    for text, skip, got, want in _lex_stopped_mismatches(
+            lambda text, exc, skip: stopped(text, exc, skip_empty=skip), texts)[:3]:
+        out.append("(dl-lex-stopped) the partial lex a failed lex of {!r} recorded (skip_empty={!r}) gave {!r}, a "
+                   "partial lex {!r}".format(text, skip, got, want))
+
+    def open_dropped(text, exc, skip):
+        segments, complete, in_progress = stopped(text, exc, skip_empty=skip)
+        return (segments[:-1] if in_progress else segments), complete, False
+
+    def no_main(text, exc, skip):
+        return stopped(text, types.SimpleNamespace(recovered=exc.recovered[:3] + (False,)), skip_empty=skip)
+
+    def no_stop(text, exc, skip):
+        with aiqt_hooks._LexStops():
+            return stopped(text, exc, skip_empty=skip)
+
+    for name, wrong in (("open-dropped", open_dropped), ("no-main", no_main), ("no-stop", no_stop)):
+        if not _lex_stopped_mismatches(wrong, texts):
+            out.append("(dl-lex-stopped-red-{}) a wrong reading passes the comparison".format(name))
+    command = "git push " * 64 + "'"
+    data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+            "session_id": "lex-stopped-session", "tool_use_id": "lex-stopped-call"}
+    starts = _lex_pass_starts(lambda: aiqt_hooks.HANDLERS["gate_weakening"](data))
+    if starts != 1:
+        out.append("(dl-lex-stopped-taken) gate_weakening started {} lexes of {!r} from its start; the partial lex "
+                   "its failed lex recorded must be taken, so one".format(starts, command[:18] + "..."))
+    aiqt_hooks._lex_stopped_partial = (lambda text, exc, locale=False, skip_empty=False:
+                                       aiqt_hooks._lex_command(text, True, locale, skip_empty))
+    try:
+        fresh = _lex_pass_starts(lambda: aiqt_hooks.HANDLERS["gate_weakening"](data))
+    finally:
+        aiqt_hooks._lex_stopped_partial = stopped
+    if fresh < 2:
+        out.append("(dl-lex-stopped-taken-red) with a fresh partial lex gate_weakening started {} lexes, so the count "
+                   "cannot see a second lex".format(fresh))
     return out
 
 
@@ -6831,6 +7057,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_lex_skip_failures())
     failures.extend(_lex_skip_floor_failures())
     failures.extend(_lex_repeats_failures())
+    failures.extend(_lex_stopped_failures())
     failures.extend(_lex_fork_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
@@ -18297,6 +18524,9 @@ def _main_isolated(monitor):
         dqwexpect("(gw-dqw-long-dotgit) a value ending in .git adds none", "--git-dir=r.git", ["--git-dir=r.git"])
         # The de-quoted reading passes over text no reading can make name git and keeps every decision there.
         failures.extend(_gate_read_fast_failures())
+        # The unread-text and spelled-alias readings pass over text none of their walks can hit, and keep every
+        # decision there.
+        failures.extend(_gate_unread_fast_failures())
         # The run-out over-deny reaches a quoted URL or path ending in '.git' on ANY git line, roster verb or
         # not (the 'git' after the dot is a word-boundary match whose walk runs off the span end); the
         # gate-weakening residue discloses it. Pinned so a change to it updates that disclosure; the
