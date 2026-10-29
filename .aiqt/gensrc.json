@@ -131,6 +131,15 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
+      "sources": [
+        ".aiqt/core/hooks/manifest.toml"
+      ],
+      "target": ".claude/settings.json"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_worker_pack.py",
       "sources": [
         ".aiqt/core/profiles/worker-pack.md"
@@ -232,6 +241,18 @@
       "target": "NOTICE"
     },
     {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_reference_facts.py",
+      "sources": [
+        ".aiqt/core/rules/",
+        ".aiqt/core/gates/manifest.toml",
+        ".aiqt/core/hooks/manifest.toml",
+        ".aiqt/standards/",
+        "ENFORCEMENT.md"
+      ],
+      "target": "README.md"
+    },
+    {
       "kind": "file",
       "regenerate": "python3 tools/gen_roadmap.py",
       "sources": [
@@ -246,6 +267,15 @@
         "changelog.toml"
       ],
       "target": "VERSION"
+    },
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_secret_patterns.py",
+      "sources": [
+        "opf/enforcement/ci/github-actions.yml",
+        "opf/enforcement/ci/opf-ci.sh"
+      ],
+      "target": "opf/tools/_opf_adopt_complete.py"
     },
     {
       "kind": "file",

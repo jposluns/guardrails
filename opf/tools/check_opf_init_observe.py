@@ -272,6 +272,179 @@ def absent_evidence(module):
         raise AssertionError(identity)
 
 
+PINNED, NEWEST, PARENT = "a" * 40, "b" * 40, "c" * 40
+POINTER_BLOB = b"100644 blob " + b"d" * 40 + b"\t.opf.toml\0"
+POINTER_TREE = b"040000 tree " + b"d" * 40 + b"\t.opf.toml\0"
+WORKING_TREE = b"040000 tree " + b"e" * 40 + b"\t.working\0"
+
+
+def scripted(rev_list, prefix="", pinned=PINNED, **extra):
+    """git answers keyed by the exact argv prior_store_holder must send; extra maps a
+    commit's probe (tree, parent or listing) to its answer. An answer that is an int is
+    that nonzero exit with empty output."""
+    base = prefix + "/" if prefix else ""
+    escaped = "".join("\\" + ch if ch in "*?[]\\" else ch for ch in base)
+    answers = {("rev-parse", "--is-shallow-repository"): b"false\n",
+               ("rev-list", "--first-parent", "--max-count=1", pinned, "--",
+                ":(literal)" + base + ".opf.toml",
+                ":(glob)" + escaped + ".working/*/manifest.toml"): rev_list}
+    for commit, tree in extra.get("trees", {}).items():
+        answers[("--literal-pathspecs", "ls-tree", "-z", commit, "--",
+                 base + ".opf.toml", base + ".working")] = tree
+    for commit, parent in extra.get("parents", {}).items():
+        answers[("rev-parse", "--verify", "--quiet", commit + "^1")] = parent
+    for commit, listing in extra.get("listings", {}).items():
+        answers[("ls-tree", "-r", "-z", "--name-only", commit + ":" + base + ".working")] = listing
+    return answers
+
+
+def holder(module, answers, prefix="", grafts=None, pinned=PINNED):
+    """prior_store_holder over scripted answers: (holder, or ("refused", code, detail), calls).
+    An unscripted argv answers rc 128, so a changed command refuses rather than passing."""
+    import _opf_observe
+    calls = []
+    snapshots = list(grafts or [("fixture", "absent")] * 2)
+
+    class Adapter:
+        def __init__(self, git, root):
+            pass
+
+        def graft_snapshot(self, budget):
+            return snapshots.pop(0)
+
+    def run_git(git, root, args, *rest, **kwargs):
+        calls.append((root, list(args)))
+        out = answers.get(tuple(args))
+        if out is None:
+            return _opf_observe._GitOutcome(True, 128, b"", "unscripted fixture command")
+        if type(out) is int:
+            return _opf_observe._GitOutcome(True, out, b"", "scripted fixture failure")
+        return _opf_observe._GitOutcome(True, 0, out, "")
+
+    module.GitObjects = Adapter
+    real = _opf_observe._run_git
+    _opf_observe._run_git = run_git
+    try:
+        result = module.prior_store_holder("/fixture/git", "/fixture/repo", pinned_head=pinned,
+                                           prefix=prefix, object_format="sha1")
+    except module.ObservationError as exc:
+        result = ("refused", exc.code, exc.detail)
+    finally:
+        _opf_observe._run_git = real
+    return result, calls
+
+
+def refused_as(module, result):
+    return type(result) is tuple and result[:2] == ("refused", module.CANNOT_EVALUATE)
+
+
+def holder_first_parent(module):
+    result, calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                            trees={NEWEST: POINTER_BLOB}))
+    check(result == NEWEST and all(root == "/fixture/repo" for root, _args in calls),
+          "prior-holder-first-parent-walk")
+
+
+def holder_deletion_parent(module):
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: b"", PARENT: POINTER_BLOB},
+                                             parents={NEWEST: PARENT.encode() + b"\n"}))
+    check(result == PARENT, "prior-holder-deletion-parent")
+
+
+def holder_manifest(module):
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: WORKING_TREE},
+                                             listings={NEWEST: b"toml/manifest.toml\0"}))
+    check(result == NEWEST, "prior-holder-manifest-one-level-down")
+
+
+def holder_pointer_blob(module):
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: POINTER_TREE, PARENT: b""},
+                                             parents={NEWEST: PARENT.encode() + b"\n"}))
+    check(refused_as(module, result)
+          and "rather than guessing" in result[2], "prior-holder-pointer-must-be-blob")
+
+
+def holder_no_hit(module):
+    result, _calls = holder(module, scripted(b""))
+    check(result is None, "prior-holder-no-hit-none")
+
+
+def holder_escaped(module):
+    result, _calls = holder(module, scripted(b"", prefix="we[X]"), prefix="we[X]")
+    check(result is None, "prior-holder-prefix-glob-escaped")
+
+
+def holder_shallow(module):
+    answers = scripted(NEWEST.encode() + b"\n", trees={NEWEST: POINTER_BLOB})
+    answers[("rev-parse", "--is-shallow-repository")] = b"true\n"
+    result, _calls = holder(module, answers)
+    check(refused_as(module, result) and "SHALLOW" in result[2],
+          "prior-holder-shallow-refused")
+
+
+def holder_graft_recheck(module):
+    result, _calls = holder(module, scripted(b""),
+                            grafts=[("fixture", "absent"), ("fixture", "changed")])
+    check(refused_as(module, result) and "metadata changed" in result[2],
+          "prior-holder-grafts-rechecked")
+
+
+def holder_git_failure(module):
+    # rev-list exits 128 (a pinned head git cannot resolve) with empty output: read as an
+    # empty walk that would be "no prior store", so the exit status alone must refuse.
+    result, _calls = holder(module, scripted(128))
+    check(refused_as(module, result) and result[2].startswith("rc 128:"),
+          "prior-holder-git-failure-refused")
+
+
+def holder_bad_pinned(module):
+    # An uppercase OID is malformed; git would resolve it, and the scripted walk answers
+    # empty, so only the shape check refuses, before any git read.
+    bad = PINNED.upper()
+    result, calls = holder(module, scripted(b"", pinned=bad), pinned=bad)
+    check(refused_as(module, result) and result[2] == "invalid commit OID" and calls == [],
+          "prior-holder-malformed-pinned-head")
+
+
+def holder_bad_object_id(module):
+    # The walk answers a name that is not an OID, and that name's tree would hold a pointer.
+    result, _calls = holder(module, scripted(b"not-a-commit\n",
+                                             trees={"not-a-commit": POINTER_BLOB}))
+    check(refused_as(module, result) and result[2] == "unexpected object id",
+          "prior-holder-unexpected-object-id")
+
+
+def holder_shallow_unexpected(module):
+    # A git too old for --is-shallow-repository echoes the flag back: neither true nor false.
+    answers = scripted(b"")
+    answers[("rev-parse", "--is-shallow-repository")] = b"--is-shallow-repository\n"
+    result, _calls = holder(module, answers)
+    check(refused_as(module, result) and "unexpected --is-shallow-repository" in result[2],
+          "prior-holder-shallow-answer-unexpected")
+
+
+def holder_listing_no_tab(module):
+    # Three fields but no tab: without the tab test the entry names nothing, the hit reads
+    # as a deletion, and the parent's pointer would be reported.
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: b"100644 blob " + b"d" * 40 + b"\0",
+                                                    PARENT: POINTER_BLOB},
+                                             parents={NEWEST: PARENT.encode() + b"\n"}))
+    check(refused_as(module, result) and "unparseable ls-tree entry" in result[2],
+          "prior-holder-listing-tab-required")
+
+
+def holder_listing_two_fields(module):
+    # A tab but only two fields: without the field count the pointer would match as a blob.
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: b"100644 blob\t.opf.toml\0"}))
+    check(refused_as(module, result) and "unparseable ls-tree entry" in result[2],
+          "prior-holder-listing-three-fields")
+
+
 def scope_omission(module):
     db = Objects(module)
     h = db.commit({".working/entry": b"present"})
@@ -503,6 +676,36 @@ CASES = [
      "if evidence_commit not in chain:", "if False:"),
     ("seed-absent-evidence", absent_evidence,
      'source.run(["cat-file", "-e", evidence_commit], budget)', "pass"),
+    ("prior-holder-first-parent-walk", holder_first_parent,
+     '"rev-list", "--first-parent", "--max-count=1", pinned_head',
+     '"rev-list", "--max-count=1", pinned_head'),
+    ("prior-holder-deletion-parent", holder_deletion_parent,
+     'holder = commit_id(read(["rev-parse", "--verify", "--quiet", newest + "^1"]))',
+     "holder = newest"),
+    ("prior-holder-manifest-one-level-down", holder_manifest,
+     "return any(len(parts) == 2 and parts[0] and parts[1] == manifest",
+     "return any(False"),
+    ("prior-holder-pointer-must-be-blob", holder_pointer_blob,
+     'and fields[1] == b"blob"', "and True"),
+    ("prior-holder-no-hit-none", holder_no_hit, "if newest.strip():", "if True:"),
+    ("prior-holder-prefix-glob-escaped", holder_escaped,
+     'return "".join("\\\\" + ch if ch in "*?[]\\\\" else ch for ch in text)', "return text"),
+    ("prior-holder-shallow-refused", holder_shallow, 'if shallow == b"true\\n":', "if False:"),
+    ("prior-holder-grafts-rechecked", holder_graft_recheck,
+     'rather than guessing")\n    if source.graft_snapshot(budget) != grafts:',
+     'rather than guessing")\n    if False:'),
+    ("prior-holder-git-failure-refused", holder_git_failure,
+     "if not outcome.completed or outcome.rc != 0:", "if not outcome.completed:"),
+    ("prior-holder-malformed-pinned-head", holder_bad_pinned,
+     "if not oid_ok(pinned_head, object_format):", "if False:"),
+    ("prior-holder-unexpected-object-id", holder_bad_object_id,
+     "if not oid_ok(text, object_format):", "if False:"),
+    ("prior-holder-shallow-answer-unexpected", holder_shallow_unexpected,
+     'if shallow != b"false\\n":', "if False:"),
+    ("prior-holder-listing-tab-required", holder_listing_no_tab,
+     'if tab != b"\\t" or len(fields) != 3:', "if len(fields) != 3:"),
+    ("prior-holder-listing-three-fields", holder_listing_two_fields,
+     'if tab != b"\\t" or len(fields) != 3:', 'if tab != b"\\t":'),
     ("graft-search-only-ancestor", graft_search_only,
      "next_fd = os.open(component, _opf_store._WALK_O_TRAVERSE | os.O_DIRECTORY\n"
      "                                      | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)",

@@ -2838,8 +2838,6 @@ def _v(gate):
 
 DUP = RULES_PREFIX + "fixdupl.md"
 DUP_TEXT = "---\ncorpus-id: fixdupl\n---\n\nKeep the log.\n\n# Notes\n\nKeep the log.\n"
-DUP2 = RULES_PREFIX + "fixdupm.md"
-DUP2_TEXT = "---\ncorpus-id: fixdupm\n---\n\nKeep the log.\n"
 XD = "fixdupl.1"
 
 
@@ -2884,31 +2882,72 @@ def _clause_gate(fx, prev=None):
         return code, out.getvalue() + err.getvalue()
 
 
+# Two clauses that swap places, so every sentence lies inside a clause row on both sides (the clause gate's
+# text-coverage leg) while each clause's own register row moves.
+SWAP = RULES_PREFIX + "fixswap.md"
+SWAP_TEXT = "---\ncorpus-id: fixswap\n---\n\nKeep the log.\n\nKeep the log.\n"
+XS, XT = "fixswap.1", "fixswap.2"
+PATH_A, PATH_B = RULES_PREFIX + "fixpatha.md", RULES_PREFIX + "fixpathb.md"
+XA, XB = "fixpatha.1", "fixpathb.1"
+
+
+def _encode_two(fx, first, second):
+    fx.rows = [_req(first, ["claim:completion"], ["count:reconciled"]),
+               _req(second, ["claim:partial"], ["set:enumerated"])]
+    fx.cases = {"k-1": _case("k-1", [first], {"claim": "completion"}, "REJECT count:reconciled"),
+                "k-2": _case("k-2", [second], {"claim": "partial"}, "REJECT set:enumerated")}
+
+
+def _swap_windows(budget=None):
+    """Two clauses on the two occurrences of one text in an unchanged file; HEAD swaps their windows."""
+    base = _Fx()
+    base.rules[SWAP] = SWAP_TEXT
+    base.clauses = {XS: [SWAP, "Keep the log.", 5, 5], XT: [SWAP, "Keep the log.", 7, 7]}
+    _encode_two(base, XS, XT)
+    base.budget.update(budget or {})
+    base.born, base.gone = ["fixswap", XS, XT], []
+    head = base.copy()
+    head.clauses[XS], head.clauses[XT] = [SWAP, "Keep the log.", 7, 7], [SWAP, "Keep the log.", 5, 5]
+    return base, head
+
+
+def _swap_paths():
+    """Two unchanged files holding one text at the same lines, one clause on each; HEAD swaps their paths."""
+    base = _Fx()
+    for rel, cid in ((PATH_A, XA), (PATH_B, XB)):
+        base.rules[rel] = "---\ncorpus-id: {}\n---\n\nKeep the log.\n".format(cid.split(".")[0])
+    base.clauses = {XA: [PATH_A, "Keep the log.", 5, 5], XB: [PATH_B, "Keep the log.", 5, 5]}
+    _encode_two(base, XA, XB)
+    base.born, base.gone = ["fixpatha", XA, "fixpathb", XB], []
+    head = base.copy()
+    head.clauses[XA], head.clauses[XB] = [PATH_B, "Keep the log.", 5, 5], [PATH_A, "Keep the log.", 5, 5]
+    return base, head
+
+
 @_vector("change/register-only-window-to-other-occurrence-marks-clause")
 def _v(gate):
-    base, head = _dup_moved()
-    for fx in (base, head):
-        fx.born, fx.gone = ["fixdupl", XD], []
+    base, head = _swap_windows()
     pre = (_clause_gate(base), _clause_gate(head))
-    refused = _expect(gate, head, base, code=1, needles=["ANCHOR MOVED: fixdupl.1: {} 5-5 -> {} 9-9".format(DUP, DUP)])
-    base2, head2 = _dup_moved({"anchor-only-per-change": 1})
-    head2.waivers = [_cw("w-a", "anchor-only", XD, base2, head2)]
-    waived = _expect(gate, head2, base2, code=0, needles=["WAIVED: fixdupl.1 by anchor-only w-a"])
+    refused = _expect(gate, head, base, code=1, needles=[
+        "ANCHOR MOVED: {}: {} 5-5 -> {} 7-7".format(XS, SWAP, SWAP),
+        "ANCHOR MOVED: {}: {} 7-7 -> {} 5-5".format(XT, SWAP, SWAP)])
+    base2, head2 = _swap_windows({"anchor-only-per-change": 2})
+    head2.waivers = [_cw("w-s", "anchor-only", XS, base2, head2), _cw("w-t", "anchor-only", XT, base2, head2)]
+    waived = _expect(gate, head2, base2, code=0, needles=["WAIVED: {} by anchor-only w-s".format(XS),
+                                                          "WAIVED: {} by anchor-only w-t".format(XT)])
     return pre[0][0] == 0 and pre[1][0] == 0 and refused[0] and waived[0], (pre, refused, waived)
 
 
 @_vector("change/register-only-source-path-change-marks-clause")
 def _v(gate):
-    base = _dup()
-    base.rules[DUP2] = DUP2_TEXT
-    base.clauses["fixdupm.1"] = [DUP2, "Keep the log.", 5, 5]
-    head = base.copy()
-    head.clauses[XD] = [DUP2, "Keep the log.", 5, 5]
-    head.born, head.gone = ["fixdupl", XD, "fixdupm", "fixdupm.1"], []
-    pre = _clause_gate(head)
-    ok, detail = _expect(gate, head, base, code=1, needles=["ANCHOR MOVED: fixdupl.1: {} 5-5 -> {} 5-5".format(
-        DUP, DUP2)])
-    return ok and pre[0] == 1 and "is not the scanned rule source" in pre[1], (pre, detail)
+    base, head = _swap_paths()
+    pre = (_clause_gate(base), _clause_gate(head))
+    ok, detail = _expect(gate, head, base, code=1, needles=[
+        "ANCHOR MOVED: {}: {} 5-5 -> {} 5-5".format(XA, PATH_A, PATH_B),
+        "ANCHOR MOVED: {}: {} 5-5 -> {} 5-5".format(XB, PATH_B, PATH_A)])
+    # the HEAD register is one the clause gate refuses for its paths alone: every sentence is still covered
+    return ok and pre[0][0] == 0 and pre[1][0] == 1 and "is not the scanned rule source" in pre[1][1] and \
+        "lies inside no clause row" not in pre[1][1], (pre, detail)
 
 
 @_vector("change/rule-file-rename-marks-every-clause")
@@ -4941,6 +4980,12 @@ def self_test(report_path=None):
 
 
 def main(argv=None):
+    """Run the selected mode and leave through _selftest_exit_report.exit_with, which the execution report
+    requires; the entry line calls this only after the child-status guard."""
+    _selftest_exit_report.exit_with(_dispatch(argv))
+
+
+def _dispatch(argv):
     args = sys.argv[1:] if argv is None else argv
     if (len(args) in (2, 3) and args[-2] == "--execution-report" and os.path.isabs(args[-1])
             and args[:-2] in ([], ["--self-test"])):
@@ -4958,5 +5003,60 @@ def main(argv=None):
     return 2
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. The self-test reads child exit statuses
+# (git, its own direct launch and check_clauses.py), so under an ignored SIGCHLD a failing child would read
+# as a pass; the guard runs at the entry line, before main() dispatches any mode.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    _selftest_exit_report.exit_with(main())
+    sys.exit(_child_status_refusal_exit("check_rule_behaviour.py") or main())

@@ -3111,5 +3111,69 @@ id = "evgcmp.15"
 born-release = "1.1.0"
 
 [[born]]
+id = "setcmp.9"
+born-release = "1.1.0"
+
+[[born]]
+id = "setcmp.10"
+born-release = "1.1.0"
+
+[[born]]
+id = "citint.4"
+born-release = "1.1.0"
+
+[[born]]
+id = "rdbchr.2"
+born-release = "1.1.0"
+
+[[born]]
+id = "secsup.7"
+born-release = "1.1.0"
+
+[[born]]
+id = "gatdis.21"
+born-release = "1.1.0"
+
+[[born]]
+id = "prtbrn.4"
+born-release = "1.1.0"
+
+[[born]]
+id = "exauth.2"
+born-release = "1.1.0"
+
+[[born]]
+id = "obsbeh.10"
+born-release = "1.1.0"
+
+[[born]]
+id = "prjint1.4"
+born-release = "1.1.0"
+
+[[born]]
+id = "prjint1.5"
+born-release = "1.1.0"
+
+[[born]]
+id = "prjint1.6"
+born-release = "1.1.0"
+
+[[born]]
+id = "wowo01.21"
+born-release = "1.1.0"
+
+[[born]]
+id = "sectok.8"
+born-release = "1.1.0"
+
+[[born]]
+id = "gensrc.5"
+born-release = "1.1.0"
+
+[[born]]
+id = "vrfdlv.13"
+born-release = "1.1.0"
+
+[[born]]
 id = "setcmp.11"
 born-release = "1.1.0"

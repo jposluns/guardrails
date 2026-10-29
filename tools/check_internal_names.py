@@ -15,8 +15,8 @@ are reused, so the two gates agree and no plaintext internal name is re-typed he
   2. A HASHED codename denylist (tools/internal-name-hashes.txt): SHA-256 only, for names a generic shape
      cannot catch, above all a sibling-repo name. Shipped EMPTY by default; the private generator fills it.
 
-SCOPE, deliberately narrow and explicit (all but the role-name rule, whose whole-tree scope is described
-below). This gate scans ONLY the QA-suite shipped surfaces plus the shipped
+SCOPE, deliberately narrow and explicit (all but the role-name rule and the decision-id layer, whose
+whole-tree scopes are described below). Layers 1 and 2 scan ONLY the QA-suite shipped surfaces plus the shipped
 gate-runner and CI-workflow files this PR modifies (tools/run_all_checks.sh and .github/workflows/quality.yml,
 both verified clean of provenance shapes), plus the public .preview/ channel, NOT the whole tree: the existing pack legitimately carries
 guardrail-decision ids in its hooks and a dogfood-adopter name in its site and docs, so a whole-tree
@@ -28,6 +28,18 @@ whose target is missing) is a present-but-unreadable input, not an absent one: i
 an OSError, exit 2) at both the hashes-file load and the scoped-file scan, never read as absent. A line
 carrying an `internal-allow`
 marker is exempt from the STRUCTURAL layer (the same escape hatch the leak gate offers).
+
+DECISION-ID LAYER, tree-wide (scan_tree_decision_ids). The internal maintainer-decision id shape (DECISION_ID)
+is checked over the WHOLE working tree, walked fail-closed with the skips and text suffixes above, not only
+over SCOPE_RELPATHS: no file in the tree carries one, so this layer has no legitimate occurrence to exempt.
+A line carrying an internal-allow marker is exempt here as well. In this layer a file that is not valid
+UTF-8 is skipped, where the whole-tree leak gate decodes it losslessly and scans it; a scoped surface that
+is not valid UTF-8 still fails closed. The walk reads untracked and git-ignored files too (everything on
+disk outside the skipped directories), does not follow a symlinked directory, and reads a file only when
+its suffix is one of the leak gate's TEXT_SUFFIXES or it has no suffix, so a file under any other suffix
+(a .csv, say) is not read. A bare ordinal with no further segment (D-3) is not matched. An unlistable
+directory, an unreadable file and a non-regular file (a FIFO) each fail closed with exit 2; a file that
+vanishes between the walk and the read is a fail-closed finding, as in the scoped layer.
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -43,32 +55,62 @@ under the repository root (code, Markdown, site HTML, generated outputs that are
 own source alike), decoded as UTF-8, and also runs inside the scoped scan above (so an untracked scoped
 surface is still covered). The only exemption is the internal-allow marker, which exempts the ONE line that
 carries it; this gate's own self-test vectors carry that marker on each line that holds the word, and no
-file is exempt by name. A tracked file that is not valid UTF-8 is skipped only under the rule this gate
-already applies to walked directories (a file whose suffix is present and not in TEXT_SUFFIXES, such as the
-committed .zip archives, is not text and is not read as text); any other non-UTF-8 tracked file, a tracked
-path absent from the working tree, or a tracked path that is not a readable regular file CANNOT BE
-EVALUATED and fails closed at exit 2, the way an unreadable input does. A .gitattributes `binary` attribute
-is NOT a skip: a binary-attributed file that decodes as UTF-8 is scanned. When git cannot list the tracked
-set (no git, not a repository, a failed or empty listing) the rule cannot run and the gate exits 2.
+file is exempt by name. Every tracked file whose suffix is TRACKED_ARCHIVE_SUFFIX (.zip, the format of the
+committed skill archives) first goes through the leak gate's archive rule, whether or not its bytes decode
+as UTF-8: check_leaks.verify_archive, the predicate built from the same functions the leak gate's scan
+applies (the archive-size bound on a read that stops one byte past it, the parsed records covering the
+file exactly, and every member read in full under zipfile's CRC and header checks; nothing is extracted to
+disk). A .zip that fails it CANNOT BE EVALUATED and fails closed at exit 2, named with the leak gate's
+reason. A .zip that passes is scanned when it decodes as UTF-8 and is otherwise skipped as binary, the only
+non-UTF-8 tracked file the role rule skips. Any other non-UTF-8 tracked file whatever its suffix (a
+malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
+tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
+the way an unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed
+file that decodes as UTF-8 is scanned. When git cannot list the tracked set (no git, not a repository, a
+failed or empty listing) the rule cannot run and the gate exits 2.
 WHAT THE ROLE RULE CANNOT SEE: an untracked or git-ignored file (outside the scoped scan), a generated
 output that is not committed and is not handed to it as a tracked file (a built release archive, a rendered
-site that is not checked in), the contents of an archive or other non-UTF-8 file skipped by suffix, a staged
-change that differs from the working-tree copy (it reads the working tree), and the word split or encoded
-(an HTML entity, a zero-width character) so the plain pattern does not match.
+site that is not checked in), the content of a tracked .zip's members, which the archive rule reads in
+memory to verify the archive but this rule never scans (the leak gate scans them), a staged change that
+differs from the working-tree copy (it reads the working tree), and the word split or encoded (an HTML
+entity, a zero-width character) so the plain pattern does not match.
+
+REVIEW-ROUND LABEL RULE, WHOLE TRACKED TREE. The review-round label patterns (_REVIEW_LABELS: a reviewer
+family name followed by a QA round number, and a QA round number followed by a severity grade or a finding
+id, in each case with at most one space between the parts, both case-insensitive) run inside the role rule
+above, over the same tracked set with the same internal-allow exemption, skips and fail-closed exits, and
+inside the scoped scan. "QA" alone, "quality", a bare grade word, a family name alone and a round number
+with neither a family name before it nor a grade or finding id after it are not matched. The grade or
+finding id must end at a word boundary, so a round number before an ordinary word that starts with a grade
+("minority", "majority") or before an F, digits and then letters is not matched. A review label written in
+another shape (a family name after the round number, a tab, two spaces or punctuation between the parts, or
+a grade or finding id run straight into a letter, digit or underscore, say) is outside this rule.
 
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or a tracked file the role
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
-provenance id, a host path, a hashed codename, and the role name in a tracked file outside SCOPE_RELPATHS)
-and passes clean generic content, so removing a layer makes a case fail. The self-test exits 0 only when
+provenance id, a host path, a hashed codename, the role name and a review-round label of each shape in a
+tracked file outside SCOPE_RELPATHS, and a maintainer-decision id of each shape anywhere in the tree) and
+passes clean generic content, so removing a
+layer makes a case fail. It also runs the real scan over a planted fixture repository to prove the tree-wide
+decision-id layer is wired in and fails closed on an unreadable file, an unlistable directory, a FIFO and a
+vanished file, and over fixture repositories to prove the role rule skips a non-UTF-8 tracked file only when
+it is a .zip the leak gate's archive rule accepts (a real ZIP archive passes, with the archive-size bound at
+its exact size and one byte above too, and an accepted archive that decodes as UTF-8 is scanned; a malformed
+.csv and a .csv carrying the ZIP signature each exit 2 as not valid UTF-8; a .zip without the signature, a
+signature-prefixed .zip that is not an archive, valid UTF-8 or not, a .zip with one member failing its CRC, a
+.zip of bytes ahead of an empty archive's end record, the archive with the bound one byte under its size,
+and the archive followed by bytes past the bound each exit 2 named with the leak gate's reason, and the
+archive deleted from the working tree exits 2 as absent). The self-test exits 0 only when
 every case ran and passed; 1 when any case failed (it also prints the cases it did not run); otherwise, when
 it skipped a case, 3. It never exits 0 after a skip. Skip reasons it prints include, as examples rather than
 a complete set:
   "case 11 (a dangling symlink could not be created)"
   "case 12 (a dangling symlink could not be created)"
-  "case 19 at the {} path (a FIFO could not be created)" ({} is hash-file or scoped-file)
+  "case 19 at the {} path (a FIFO could not be created)" ({} is hash-file, scoped-file or tracked-zip)
   "case 19 (os.mkfifo is unavailable)"
-  "cases 19 to 23 (the child sentinel matched the parent pid)"
+  "cases 19 to 23 and 25 (the child sentinel matched the parent pid)"
   "case 23 (the inherited-probe sentinel matched the parent pid)"
+  "case 25 (an unreadable file could not be planted: permissions do not bind here)"
 """
 import sys
 
@@ -88,6 +130,7 @@ import os
 import re
 import stat
 import subprocess
+import zipfile
 from pathlib import Path
 
 # Import the sibling modules WITHOUT placing this script's own directory AHEAD of the stdlib on sys.path.
@@ -103,6 +146,12 @@ import check_leaks  # noqa: E402  reuse the leak gate's normalization + structur
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 SKIP_NAMES = {"internal-name-hashes.txt", "check_internal_names.py", "check_leaks.py", "leak-hashes.txt"}
 TEXT_SUFFIXES = check_leaks.TEXT_SUFFIXES
+# The suffix of the one binary format the repository tracks, the ZIP archive (the committed skill archives
+# under site/downloads/). Every tracked file under it goes through the leak gate's archive rule
+# (check_leaks.verify_archive) whether or not its bytes decode as UTF-8, so the suffix only selects the rule:
+# a file the rule refuses cannot be evaluated, and only a file it accepts can be skipped as binary. A
+# tracked file in any other binary format cannot be evaluated until a rule for it is added here.
+TRACKED_ARCHIVE_SUFFIX = ".zip"
 HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
 
 # The QA-suite shipped surfaces this gate is responsible for keeping genericized. Files are scanned
@@ -136,29 +185,67 @@ _PROVENANCE = [
 _ROLE_NAMES = [
     (re.compile(r'\bArchitect\b'), "internal role name"),
 ]
+# Internal REVIEW-ROUND LABEL patterns: a reviewer family name followed by a QA round number, and a QA round
+# number followed by a severity grade (BLOCKER, MAJOR, MEDIUM or MINOR) or a finding id, in each case with at
+# most one space between the parts (a tab, two spaces or punctuation there is not matched). A shipped
+# comment or message says what the code guards and why, never which review round asked for it.
+# Case-insensitive, since such labels are written in either case. Each needs the round NUMBER, so "QA" alone
+# in prose, "quality", a bare grade word, a family name alone and a round number with neither a family before
+# it nor a grade after it never match. The grade or finding id must end at a word boundary, so an ordinary
+# word that starts with a grade ("minority", "majority", "mediums") or an F, digits and then letters is not
+# a label; a grade or finding id run straight into a letter, digit or underscore (MINOR1, F2a) is therefore
+# not matched either. Like the role-name pattern, these run over every tracked file, this
+# one included; the pattern sources do not match themselves because a family name here is followed by a bar
+# or a parenthesis and "QA" by a bracket.
+_REVIEW_LABELS = [
+    (re.compile(r'\b(?:codex|claude|gemini)[ ]?QA[0-9]+', re.IGNORECASE), "internal review-round label"),
+    (re.compile(r'\bQA[0-9]+[ ]?(?:BLOCKER|MAJOR|MEDIUM|MINOR|F[0-9]+)\b', re.IGNORECASE),
+     "internal review-round label"),
+]
+# The patterns the tracked-file rule applies to every tracked file (see scan_role_text).
+_TRACKED_RULES = _ROLE_NAMES + _REVIEW_LABELS
 # Reuse the leak gate's structural host/IP/token/account patterns verbatim (imported, never re-typed, so
-# this file stays self-clean the way check_leaks.py does), and add the provenance-id and role-name shapes.
-STRUCTURAL = list(check_leaks.STRUCTURAL) + _PROVENANCE + _ROLE_NAMES
+# this file stays self-clean the way check_leaks.py does), and add the provenance-id, role-name and
+# review-round label shapes.
+STRUCTURAL = list(check_leaks.STRUCTURAL) + _PROVENANCE + _TRACKED_RULES
+
+# Internal maintainer-decision id SHAPE (generic; carries no codename), checked over the WHOLE tree by
+# scan_tree_decision_ids rather than over SCOPE_RELPATHS alone. A D- head that is an ordinal or an upper-case
+# word of two or more characters, then one or more segments of upper-case letters and digits: an ordinal head
+# with word segments, a segment carrying a digit, a word head with word segments, a final one-letter segment.
+# It does NOT match a bare ordinal with no further segment (D-3), a lower-case check id or label (D-no-remote,
+# D-a4), a lower-case prose word (D-part), or a D- glued to a longer word (GD-, PD-: no word boundary before
+# the D).
+DECISION_ID = (re.compile(r'\bD-(?:[0-9]+|[A-Z][A-Z0-9]+)(?:-[A-Z0-9]+)+\b'), "internal maintainer-decision id")
 
 
-def _read_present_text(path):
-    """Read `path` as UTF-8 text, failing closed on a present-but-unreadable input WITHOUT blocking. Presence
-    is classified with an S_ISREG check BEFORE any open (mirroring the QA adapter's _classify_presence), so a
-    NON-REGULAR file (a FIFO above all, whose open() would BLOCK waiting for a writer, but also a device,
-    socket, or directory) is a fail-closed OSError rather than a hanging open, and a BROKEN SYMLINK (a present
-    dentry whose target is missing) re-raises fail-closed. A genuinely ABSENT path (no dentry at all) returns
-    None so a caller for whom absence is intended (the denylist) can treat it as empty; every PRESENT dentry
-    that is not a readable regular file raises OSError to the fail-closed caller (exit 2). path.stat() FOLLOWS
-    a symlink, so a dangling link raises FileNotFoundError exactly as an absent path, and path.is_symlink()
-    (lstat) is what tells a present-but-dangling dentry from a truly missing one."""
+def _present(path):
+    """True when `path` is a present regular file, False when it is genuinely ABSENT (no dentry at all).
+    Presence is classified with an S_ISREG check BEFORE any open (mirroring the QA adapter's
+    _classify_presence), so a NON-REGULAR file (a FIFO above all, whose open() would BLOCK waiting for a
+    writer, but also a device, socket, or directory) is a fail-closed OSError rather than a hanging open, and a
+    BROKEN SYMLINK (a present dentry whose target is missing) re-raises fail-closed: every PRESENT dentry that
+    is not a regular file raises OSError to the fail-closed caller (exit 2). path.stat() FOLLOWS a symlink, so
+    a dangling link raises FileNotFoundError exactly as an absent path, and path.is_symlink() (lstat) is what
+    tells a present-but-dangling dentry from a truly missing one."""
     try:
         st = path.stat()
     except FileNotFoundError:
         if path.is_symlink():
             raise
-        return None
+        return False
     if not stat.S_ISREG(st.st_mode):
         raise OSError("{} is present but not a regular file; fail closed".format(path))
+    return True
+
+
+def _read_present_text(path):
+    """Read `path` as UTF-8 text, failing closed on a present-but-unreadable input WITHOUT blocking: _present
+    classifies the path before any open. A genuinely ABSENT path returns None so a caller for whom absence is
+    intended (the denylist) can treat it as empty; every PRESENT dentry that is not a readable regular file
+    raises OSError to the fail-closed caller (exit 2)."""
+    if not _present(path):
+        return None
     return path.read_text(encoding="utf-8")
 
 
@@ -263,6 +350,34 @@ def scan_scope(root, scope_relpaths, hashes, maxn):
     return findings
 
 
+def scan_tree_decision_ids(root):
+    """Return findings for the maintainer-decision id shape (DECISION_ID) over the WHOLE tree under root,
+    walked fail-closed (an unlistable directory raises OSError) with SKIP_DIRS, SKIP_NAMES and TEXT_SUFFIXES
+    as in _iter_scope. A line carrying an internal-allow marker is exempt, as in scan_text. A present file
+    that is not a readable regular file raises OSError (through _read_present_text, so a FIFO never blocks);
+    a file that vanished during the walk is a fail-closed finding; a file that is not valid UTF-8 is skipped
+    (the whole-tree leak gate instead decodes such a file losslessly and scans it)."""
+    pattern, label = DECISION_ID
+    findings = []
+    for path in sorted(walk_files(root, SKIP_DIRS)):
+        if path.name in SKIP_NAMES:
+            continue
+        if path.suffix and path.suffix not in TEXT_SUFFIXES:
+            continue
+        rel = path.relative_to(root).as_posix()
+        try:
+            text = _read_present_text(path)
+        except UnicodeDecodeError:
+            continue
+        if text is None:
+            findings.append("{}: file vanished during the tree scan; fail-closed".format(rel))
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
+            if "internal-allow" not in line and pattern.search(line):
+                findings.append("{}:{}: {}".format(rel, number, label))
+    return findings
+
+
 def tracked_files(root):
     """The sorted tracked relpaths under `root` from `git ls-files -z --cached`, the role rule's input set.
     Pinned like gen_manifest's index read: the GIT_* environment is dropped (a repository-selecting variable
@@ -291,35 +406,49 @@ def tracked_files(root):
 
 
 def scan_role_text(text):
-    """(line, label) role-name findings in `text`. A line carrying an `internal-allow` marker is exempt; the
-    marker exempts that line only, never the rest of the file."""
+    """(line, label) role-name and review-round label findings in `text`. A line carrying an `internal-allow`
+    marker is exempt; the marker exempts that line only, never the rest of the file."""
     found = []
     for number, line in enumerate(text.splitlines(), 1):
         if "internal-allow" in line:
             continue
-        found += [(number, label) for pattern, label in _ROLE_NAMES if pattern.search(line)]
+        found += [(number, label) for pattern, label in _TRACKED_RULES if pattern.search(line)]
     return found
 
 
 def scan_tracked_roles(root, relpaths):
-    """Return (findings, unevaluable) for the role rule over the tracked `relpaths`, independent of
-    SCOPE_RELPATHS and SKIP_NAMES. A file that is not valid UTF-8 is skipped only under the walk rule this
-    gate already applies (a present suffix outside TEXT_SUFFIXES marks a non-text file); any other
-    non-UTF-8 file, or a tracked path absent from the working tree, is unevaluable. A tracked path that is
-    present but not a readable regular file raises OSError (exit 2) through _read_present_text."""
+    """Return (findings, unevaluable) for the role rule (the role name and the review-round labels) over the
+    tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file whose suffix is
+    TRACKED_ARCHIVE_SUFFIX goes through check_leaks.verify_archive, the leak gate's archive rule, whether or
+    not its bytes decode as UTF-8: one the rule refuses is unevaluable, named with the leak gate's reason (and
+    the member, when one member is the cause); one it accepts is scanned when its bytes decode as UTF-8 and is
+    otherwise skipped as binary. Any other file that is not valid UTF-8, whatever its suffix, and a tracked
+    path absent from the working tree are unevaluable too. A tracked path that is present but not a regular
+    file raises OSError (exit 2) through _present, before any open, and so does a read error."""
     findings, unevaluable = [], []
+    cannot = "; the role-name and review-round label rule cannot evaluate it"
     for rel in relpaths:
+        path = root / rel
         try:
-            text = _read_present_text(root / rel)
+            if path.suffix != TRACKED_ARCHIVE_SUFFIX:
+                text = _read_present_text(path)
+            elif _present(path):
+                data = check_leaks.verify_archive(path)
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue  # an archive the leak gate reads in full, in binary form: skipped
+            else:
+                text = None
         except UnicodeDecodeError:
-            suffix = Path(rel).suffix
-            if suffix and suffix not in TEXT_SUFFIXES:
-                continue
-            unevaluable.append("{}: tracked file is not valid UTF-8; the role-name rule cannot evaluate it".format(rel))
+            unevaluable.append("{}: tracked file is not valid UTF-8{}".format(rel, cannot))
+            continue
+        except check_leaks.CannotEvaluate as exc:
+            unevaluable.append("{}: tracked .zip fails the leak gate's archive rule ({}{}){}".format(
+                rel, "" if exc.member is None else "member " + exc.member + ": ", exc, cannot))
             continue
         if text is None:
-            unevaluable.append("{}: tracked file is absent from the working tree; the role-name rule cannot "
-                               "evaluate it".format(rel))
+            unevaluable.append("{}: tracked file is absent from the working tree{}".format(rel, cannot))
             continue
         for number, label in scan_role_text(text):
             findings.append("{}:{}: {}".format(rel, number, label))
@@ -327,34 +456,36 @@ def scan_tracked_roles(root, relpaths):
 
 
 def run_gate(root):
-    """The real scan of the tree at `root`: the scoped layers over SCOPE_RELPATHS plus the role rule over
-    every tracked file. Returns the exit code and prints the report."""
+    """The real scan of the tree at `root`: the scoped layers over SCOPE_RELPATHS, the role rule over every
+    tracked file, and the decision-id layer over the whole tree. Returns the exit code and prints the report."""
     try:
         hashes, maxn, findings = load_hashes(root)
         findings = list(findings)
         findings += scan_scope(root, SCOPE_RELPATHS, hashes, maxn)
         role_findings, unevaluable = scan_tracked_roles(root, tracked_files(root))
         findings += role_findings
+        findings += scan_tree_decision_ids(root)
     except (OSError, UnicodeDecodeError) as exc:
-        print("error: cannot read a required input (denylist, scoped surface or tracked file) ({}); "
+        print("error: cannot read a required input (denylist, scoped surface, tracked file or tree) ({}); "
               "fail-closed".format(exc), file=sys.stderr)
         return 2
     # A role-name hit inside a tracked scoped file is reported by both scans in the same form; report it once.
     findings = sorted(set(findings))
     if findings:
-        print("FAIL: {} internal-name leak(s) in the scanned surfaces".format(len(findings)))
+        print("FAIL: {} internal-name leak(s) in the scanned surfaces or decision id(s) in the tree".format(
+            len(findings)))
         for finding in findings:
             print("  " + finding)
     if unevaluable:
-        print("error: the role-name rule cannot evaluate {} tracked file(s); fail-closed".format(len(unevaluable)),
-              file=sys.stderr)
+        print("error: the role-name and review-round label rule cannot evaluate {} tracked file(s); "
+              "fail-closed".format(len(unevaluable)), file=sys.stderr)
         for item in unevaluable:
             print("  " + item, file=sys.stderr)
         return 2
     if findings:
         return 1
-    print("PASS: no internal provenance vocabulary in the scanned QA-suite surfaces, and no internal role "
-          "name in any tracked file")
+    print("PASS: no internal provenance vocabulary in the scanned QA-suite surfaces, no internal role "
+          "name or review-round label in any tracked file, and no maintainer-decision id in the tree")
     return 0
 
 
@@ -410,7 +541,7 @@ def _caller_snapshot(environ):
 
 
 # A self-test that launches a child self-test sets _CHILD_SENTINEL in the child's environment to its OWN pid,
-# and the child skips the subprocess-launching cases 19 to 23 (its parent runs them; a child running them
+# and the child skips the subprocess-launching cases 19 to 23 and 25 (its parent runs them; a child running them
 # would recurse). Case 23 likewise sets _INHERITED_PROBE to its own pid in three of the runs it launches (its
 # two mutated lanes and its clean lane), which skips case 23 alone. A value is honoured only when it equals
 # this process's parent pid. That match does not prove a self-test launched this process: a caller that
@@ -638,6 +769,97 @@ def _self_test(caller_env=None):
             failures.append("a role-name hit in a SKIP_NAMES basename expected to be skipped by the scoped scan, "
                             "got {}".format(f))
 
+        # 27. DISCRIMINATING (internal review-round labels): a reviewer family name followed by a QA round
+        #     number, and a QA round number followed by a severity grade (BLOCKER included) or a finding id,
+        #     are each caught by the tracked-file rule (scan_role_text) and by the scoped scan, in either
+        #     case and with or without the space. Removing _REVIEW_LABELS, or either of its patterns, leaves
+        #     hits unflagged; making them case-sensitive misses the lower-case hits; dropping BLOCKER from
+        #     the grade group leaves the BLOCKER hit unflagged; allowing one digit only in the finding id
+        #     leaves the F12 hit unflagged. The controls stay unflagged, and each names the mutation it
+        #     catches: dropping the round-number requirement in pattern 1 flags a family name before "QA"
+        #     alone, dropping it in pattern 2 flags "QA" before a bare grade, dropping pattern 1's leading
+        #     word boundary flags a family name glued to a longer word, dropping pattern 2's leading word
+        #     boundary flags a round glued to a longer word, dropping the grade or finding id flags a round
+        #     number alone, dropping the digit from the finding id leaves the F4 and F12 hits unflagged (with
+        #     the trailing word boundary, a round number before an ordinary word that starts with F stays
+        #     unmatched either way), dropping pattern 2's trailing word boundary flags a round number before
+        #     "minority", "majority", "mediums", "Blockers" or an F, digits and then letters, narrowing that
+        #     boundary to "no letter follows" flags the F, two digits and then letters, and the grade run
+        #     straight into a digit, narrowing it to "no letter or digit follows" flags the grade or finding
+        #     id run straight into an underscore, widening the finding id to zero digits (one or more digits
+        #     is part of the pattern) flags the bare F after a round number, and widening either
+        #     pattern's one optional space (to any run of spaces, any whitespace, any character, or a set
+        #     that adds any one ASCII punctuation character) flags two spaces, a tab or that punctuation
+        #     character between the parts, the documented separator limit: each pattern has a control for
+        #     two spaces, a tab and every character of string.punctuation. Every vector is assembled at
+        #     runtime, so no contiguous label sits in this source (the rule scans this file). The round
+        #     numbers in the hits, the controls and the fixtures below are synthetic three-digit values naming
+        #     no real round, and the subjects are neutral.
+        write_hashes([])
+        qa = "QA"
+        review_label = "internal review-round label"
+        label_hits = (
+            "codex " + qa + "932: a sample note",
+            "Claude" + qa + "909 wrote this line",
+            "gemini " + qa.lower() + "935",
+            "codex/claude " + qa + "934",
+            qa + "916 MINOR-1: an example remark",
+            qa + "904 MAJOR",
+            qa + "917 MAJOR 2: a sample item",
+            qa + "929 BLOCKER 1: a placeholder item",
+            qa.lower() + "907 medium",
+            qa + "919 F4: a sample entry",
+            qa + "918 F12 in a sample list",
+            qa.lower() + "908f2",
+        )
+        label_controls = (
+            "the quality gate passes",
+            "the QA suite and its QA skills",
+            "a MAJOR change, then MINOR-1 and F2",
+            "codex, claude and gemini, each alone",
+            "the codex " + qa + " suite, with no round number",
+            "the " + qa + " MAJOR backlog, with no round number",
+            "a mutation vector of round " + qa + "901/" + qa + "902",
+            "a planted " + qa + "945-CAUSE marker and a " + qa.lower() + "946-st-size probe",
+            "vector:codex" + "901-1 and vector:claude" + "901-3",
+            "a glued token non" + qa + "903 F1 and pre" + qa + "916 MINOR",
+            "an autocodex " + qa + "901 build and a preclaude " + qa + "902 run",
+            "the " + qa + "905 Final summary and a " + qa.lower() + "906 follow-up",
+            "codex  " + qa + "937 and claude\t" + qa + "938, two spaces and a tab apart",
+            "gemini:" + qa + "939 and codex: " + qa + "940, punctuation between",
+            qa + "941  MINOR and " + qa + "942\tMAJOR, two spaces and a tab apart",
+            qa + "943:F1 and " + qa + "944-BLOCKER, punctuation between",
+            qa + "949 minority participation",
+            qa + "950 majority vote",
+            qa.lower() + "951 mediums and " + qa + "952 Blockers",
+            qa + "953 F2fa, an F, a digit and then letters",
+            qa + "954 F12abc, an F, digits and then letters",
+            qa + "955 F: a bare F with no digits after it",
+            qa + "956 MINOR1, a grade run straight into a digit",
+            qa + "957 MINOR_note and " + qa + "958 F2_x, a grade and a finding id run into an underscore",
+        )
+        import string
+        for mark in string.punctuation:
+            label_controls += ("codex" + mark + qa + "947, one punctuation character between",
+                               qa + "948" + mark + "MINOR, one punctuation character between")
+        for text in label_hits:
+            found = scan_role_text(text + "\n")
+            if not found or {item for _number, item in found} != {review_label}:
+                failures.append("review-round label {!r} expected a tracked-rule finding, got {}".format(text, found))
+            state, f = run(text + "\n")
+            if state != "ok" or not any(review_label in x for x in f):
+                failures.append("review-round label {!r} expected a scoped finding, got {} {}".format(text, state, f))
+        for text in label_controls:
+            found = scan_role_text(text + "\n")
+            state, f = run(text + "\n")
+            if found or state != "ok" or f:
+                failures.append("review-round label control {!r} expected no finding, got {} {} {}".format(
+                    text, found, state, f))
+        allowed = label_hits[0] + "  # internal-allow\n"
+        if scan_role_text(allowed):
+            failures.append("an internal-allow line holding a review-round label expected exemption, got {}".format(
+                scan_role_text(allowed)))
+
         # 14-17 run the real gate entry point (run_gate) on a fixture git repository, so the tracked-file
         # enumeration and its wiring into the gate are exercised, not only the helpers. Fixture git calls use
         # the shared hermetic fixture environment (no caller config, no auto-maintenance); only init and add
@@ -659,12 +881,16 @@ def _self_test(caller_env=None):
         (repo / "docs").mkdir()
         (repo / "tools").mkdir()
         (repo / "docs" / "outside.md").write_text("Signed off by the Architect.\n", encoding="utf-8")  # internal-allow
+        # A review-round label of each shape on lines 1 and 2 and a control on line 3, assembled at runtime (case 27).
+        (repo / "docs" / "labels.md").write_text("checked by codex " + qa + "932\n" + qa + "916 MINOR-1 in a sample\n"
+                                                 "the QA suite runs every quality check\n", encoding="utf-8")
         (repo / "tools" / "check_leaks.py").write_text("# the Architect said so\n", encoding="utf-8")  # internal-allow
         (repo / "notes.txt").write_text("Architect kept here  # internal-allow\n"  # internal-allow
                                         "the Architect again\n", encoding="utf-8")  # internal-allow
         (repo / "data.bin").write_text("binary-attributed but UTF-8: Architect\n", encoding="utf-8")  # internal-allow
         (repo / ".gitattributes").write_text("data.bin binary\nblob.zip binary\n", encoding="utf-8")
-        (repo / "blob.zip").write_bytes(b"PK\x03\x04\xff\xfe Architect \xff\n")  # internal-allow
+        with zipfile.ZipFile(repo / "blob.zip", "w", zipfile.ZIP_STORED) as blob:
+            blob.writestr("note.bin", b"\x80 Architect \xff\n")  # internal-allow
         (repo / "clean.md").write_text("An architectural note on the Architecture section.\n", encoding="utf-8")
         (repo / "untracked.md").write_text("the Architect, never added\n", encoding="utf-8")  # internal-allow
         init = subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, text=True,
@@ -687,20 +913,30 @@ def _self_test(caller_env=None):
                         expect, rc, report))
             if any(rel.startswith(("docs/outside", "tools/check_leaks")) for rel in SCOPE_RELPATHS):
                 failures.append("the outside-scope fixture paths must lie outside SCOPE_RELPATHS")
+            # DISCRIMINATING (review-round labels in the whole tracked tree): both label shapes in a tracked file
+            # outside SCOPE_RELPATHS are caught by the real gate and the control line is not. Leaving
+            # _REVIEW_LABELS out of the tracked-file rule drops these findings and fails the case.
+            for expect in ("docs/labels.md:1: " + review_label, "docs/labels.md:2: " + review_label):
+                if rc != 1 or expect not in report:
+                    failures.append("tracked review-round label {!r} expected (exit 1), got rc={} {!r}".format(
+                        expect, rc, report))
+            if "docs/labels.md:3:" in report:
+                failures.append("the review-round label control line expected no finding, got {!r}".format(report))
             # 15. DISCRIMINATING (the allow marker exempts ONE line): line 1 of notes.txt carries the marker
             #     and is exempt; line 2 does not and is caught. A whole-file exemption drops the line-2
             #     finding; ignoring the marker adds a line-1 finding; either fails the case.
             if "notes.txt:2: " + role not in report or "notes.txt:1: " + role in report:
                 failures.append("internal-allow expected to exempt notes.txt line 1 only, got {!r}".format(report))
             # 16. DISCRIMINATING (binary and non-UTF-8 files follow the stated rule): a .gitattributes
-            #     binary file that decodes as UTF-8 is scanned (data.bin is caught); a non-UTF-8 file whose
-            #     suffix is outside TEXT_SUFFIXES is skipped (blob.zip neither caught nor unevaluable); and
+            #     binary file that decodes as UTF-8 is scanned (data.bin is caught); a non-UTF-8 .zip the leak
+            #     gate's archive rule accepts is skipped (blob.zip, a real ZIP archive built with zipfile, is
+            #     neither caught nor unevaluable; case 28 covers the inputs that are not skipped); and
             #     an untracked file is out of the role rule's reach (untracked.md, a disclosed limit).
             if "data.bin:1: " + role not in report:
                 failures.append("a binary-attributed UTF-8 tracked file expected to be scanned, got {!r}".format(
                     report))
             if "blob.zip" in report or "untracked.md" in report:
-                failures.append("a non-text-suffix non-UTF-8 file and an untracked file expected to be outside "
+                failures.append("a tracked ZIP archive and an untracked file expected to be outside "
                                 "the role rule, got {!r}".format(report))
             # DISCRIMINATING (the tracked-file read drops the GIT_* environment): GIT_CONFIG_GLOBAL pointed at
             # a malformed file must not change the gate's result. A control first proves the file breaks a git
@@ -754,6 +990,169 @@ def _self_test(caller_env=None):
         if rc != 2:
             failures.append("a root that is not a git repository expected exit 2, got rc={} {!r}".format(rc, report))
 
+        # 28. DISCRIMINATING (every tracked .zip goes through the leak gate's archive rule,
+        #     check_leaks.verify_archive, whether or not its bytes decode as UTF-8, and only an archive the
+        #     rule accepts is skipped as binary): a real ZIP archive with non-UTF-8 bytes, tracked beside a
+        #     clean file, passes (exit 0). Each of the following, tracked in turn, cannot be evaluated (exit 2)
+        #     with the expected report: a malformed .csv holding a review-round label and a .csv that starts
+        #     with the ZIP signature (each reported as not valid UTF-8, since only the .zip suffix selects the
+        #     archive rule); and, each named with the leak gate's reason, a .zip without the signature, a
+        #     signature-prefixed .zip that is not an archive, a signature-prefixed .zip that is not an archive
+        #     and whose bytes are valid UTF-8, a real archive with one stored member byte changed (zipfile
+        #     opens it; its CRC fails when the member is read), and a review-round label in bytes ahead of an
+        #     empty archive's end record (zipfile opens it; the records do not cover its bytes). Skipping by a
+        #     suffix outside TEXT_SUFFIXES lets the .csv read clean; skipping on the signature, or on zipfile
+        #     opening the file, lets the non-archive, the CRC-failing and the prefixed .zip read clean; applying
+        #     the rule only to bytes that are not valid UTF-8 lets the valid UTF-8 one read clean; never
+        #     skipping fails the archive; each fails this case. An archive the rule accepts whose bytes are
+        #     all valid UTF-8 (one stored member holding a review-round label) is scanned and the label found
+        #     (exit 1): skipping every accepted archive drops the finding. The archive-size bound
+        #     (check_leaks.MAX_ARCHIVE_FILE_SIZE, patched around the archive's exact size) is then checked at
+        #     both ends: one byte above the size and at it, the archive passes; one byte below, it cannot be
+        #     evaluated, named with the size reason; and with the bound at the size, the same archive followed
+        #     by a review-round label past the bound cannot be evaluated either, named with the size reason.
+        #     Dropping the size check passes the archive one byte over the bound, and a read that stops at the
+        #     bound instead of one byte past it reads the whole archive and skips the label behind it. Last, the
+        #     tracked archive deleted from the working tree is reported as absent (exit 2).
+        binrepo = tmp / "binary-repo"
+        binrepo.mkdir()
+        (binrepo / "clean.md").write_text("A clean note.\n", encoding="utf-8")
+        with zipfile.ZipFile(binrepo / "archive.zip", "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("member.bin", b"\xff\xfe stored bytes \xff\n")
+        archive_bytes = (binrepo / "archive.zip").read_bytes()
+        label_bytes = ("checked by codex " + qa + "932\n").encode("utf-8")
+        plain_zip = b"PK\x03\x04plain text in valid UTF-8\n"
+        stored_at = archive_bytes.index(b"stored bytes")
+        corrupt_zip = archive_bytes[:stored_at] + b"S" + archive_bytes[stored_at + 1:]
+        empty = io.BytesIO()
+        with zipfile.ZipFile(empty, "w"):
+            pass
+        prefixed_zip = b"PK\x03\x04 \xff " + label_bytes + empty.getvalue()
+        # An accepted archive whose bytes are all valid UTF-8: one stored member with a fixed timestamp and a
+        # read-only mode whose bytes are ASCII (zipfile writes mode 0o600, a 0x80 byte, when none is set), its
+        # content ending in a counter raised until the CRC holds no byte that breaks the decode.
+        utf8_zip = None
+        for counter in range(4096):
+            built = io.BytesIO()
+            note = zipfile.ZipInfo("note.txt", (1980, 1, 1, 0, 0, 0))
+            note.external_attr = 0o444 << 16
+            with zipfile.ZipFile(built, "w") as archive:
+                archive.writestr(note, label_bytes + "counter {}\n".format(counter).encode("ascii"))
+            try:
+                built.getvalue().decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            utf8_zip = built.getvalue()
+            break
+        guarded = [("archive", archive_bytes, False), ("CRC-failing archive", corrupt_zip, False),
+                   ("label ahead of an empty archive", prefixed_zip, False),
+                   ("valid UTF-8 non-archive", plain_zip, True)]
+        if utf8_zip is not None:
+            guarded.append(("valid UTF-8 archive", utf8_zip, True))
+        for what, content, decodes in guarded:
+            try:
+                content.decode("utf-8")
+                valid = True
+            except UnicodeDecodeError:
+                valid = False
+            if valid != decodes:
+                failures.append("the case 28 {} expected {}to decode as UTF-8, so its vector would be "
+                                "vacuous".format(what, "" if decodes else "not "))
+        init = subprocess.run(["git", "-C", str(binrepo), "init", "-q"], capture_output=True, text=True,
+                              env=_git_fixture_env.git_fixture_env(), timeout=60)
+        add = subprocess.run(["git", "-C", str(binrepo), "add", "--", "clean.md", "archive.zip"],
+                             capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
+        if init.returncode != 0 or add.returncode != 0:
+            failures.append("the case 28 fixture could not be built: init rc={} add rc={} {!r}".format(
+                init.returncode, add.returncode, init.stderr + add.stderr))
+        else:
+            rc, report = gate(binrepo)
+            if rc != 0 or "archive.zip" in report:
+                failures.append("a tracked ZIP archive expected to pass (exit 0), got rc={} {!r}".format(rc, report))
+            not_utf8 = ": tracked file is not valid UTF-8"
+            rule = ": tracked .zip fails the leak gate's archive rule ("
+            not_archive = rule + "not a readable ZIP archive: "
+            for name, content, expect in (
+                    ("review.csv", label_bytes + b"\xff", not_utf8),
+                    ("signed.csv", b"PK\x03\x04\xff\xfe not an archive \xff\n", not_utf8),
+                    ("unsigned.zip", b"\xff\xfe not an archive \xff\n", not_archive),
+                    ("malformed.zip", b"PK\x03\x04\xff\xfe not an archive \xff\n", not_archive),
+                    ("plain.zip", plain_zip, not_archive),
+                    ("corrupt.zip", corrupt_zip, rule + "member member.bin: member cannot be read: BadZipFile"),
+                    ("prefixed.zip", prefixed_zip,
+                     rule + "the parsed records do not cover the archive's bytes exactly: {} byte(s) at offsets 0 "
+                     "to {} belong to no record".format(len(prefixed_zip) - 22, len(prefixed_zip) - 23))):
+                (binrepo / name).write_bytes(content)
+                add = subprocess.run(["git", "-C", str(binrepo), "add", "--", name], capture_output=True,
+                                     text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
+                rc, report = gate(binrepo)
+                wrong = name + (rule if expect == not_utf8 else not_utf8)
+                if add.returncode != 0 or rc != 2 or name + expect not in report or wrong in report:
+                    failures.append("a tracked {} expected cannot-evaluate (exit 2) reported as {!r}, got rc={} "
+                                    "{!r}".format(name, expect, rc, report))
+                remove = subprocess.run(["git", "-C", str(binrepo), "rm", "-q", "-f", "--", name],
+                                        capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(),
+                                        timeout=60)
+                if remove.returncode != 0:
+                    failures.append("the case 28 file {} could not be removed: {!r}".format(name, remove.stderr))
+            if utf8_zip is None:
+                failures.append("no case 28 archive with bytes that are all valid UTF-8 was found in 4096 tries")
+            else:
+                (binrepo / "utf8.zip").write_bytes(utf8_zip)
+                add = subprocess.run(["git", "-C", str(binrepo), "add", "--", "utf8.zip"], capture_output=True,
+                                     text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
+                rc, report = gate(binrepo)
+                hit = any(line.strip().startswith("utf8.zip:") and line.strip().endswith(": " + review_label)
+                          for line in report.splitlines())
+                if add.returncode != 0 or rc != 1 or not hit or "utf8.zip" + rule in report:
+                    failures.append("an accepted archive whose bytes are valid UTF-8 expected to be scanned (exit 1, "
+                                    "its label found), got rc={} {!r}".format(rc, report))
+                remove = subprocess.run(["git", "-C", str(binrepo), "rm", "-q", "-f", "--", "utf8.zip"],
+                                        capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(),
+                                        timeout=60)
+                if remove.returncode != 0:
+                    failures.append("the case 28 file utf8.zip could not be removed: {!r}".format(remove.stderr))
+            # Both ends of the archive-size bound, on the tracked real archive (the leak gate's
+            # MAX_ARCHIVE_FILE_SIZE, which the shared rule reads): one byte above the archive's exact size
+            # and at it, the archive passes; one byte below, the read stops one byte past the bound, holding
+            # the whole archive, and the archive cannot be evaluated, named with the size reason. Then, with
+            # the bound at the size, the archive followed by a label past the bound cannot be evaluated
+            # either. A bound comparison with the wrong direction or inclusiveness, a dropped size check, or
+            # a read that stops at the bound fails one of these.
+            size_reason = (rule + "a ZIP archive of more than MAX_ARCHIVE_FILE_SIZE ({}) bytes; the read stopped at "
+                           "{} bytes")
+            saved_bound = check_leaks.MAX_ARCHIVE_FILE_SIZE
+            try:
+                for bound, want_rc in ((len(archive_bytes) + 1, 0), (len(archive_bytes), 0),
+                                       (len(archive_bytes) - 1, 2)):
+                    check_leaks.MAX_ARCHIVE_FILE_SIZE = bound
+                    rc, report = gate(binrepo)
+                    over = "archive.zip" + size_reason.format(bound, bound + 1)
+                    if rc != want_rc or (want_rc == 2) != (over in report):
+                        failures.append("with the archive-size bound {} the archive ({} bytes) expected exit {}, "
+                                        "got rc={} {!r}".format(bound, len(archive_bytes), want_rc, rc, report))
+                (binrepo / "overrun.zip").write_bytes(archive_bytes + b"\xff " + label_bytes)
+                add = subprocess.run(["git", "-C", str(binrepo), "add", "--", "overrun.zip"], capture_output=True,
+                                     text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
+                bound = len(archive_bytes)
+                check_leaks.MAX_ARCHIVE_FILE_SIZE = bound
+                rc, report = gate(binrepo)
+                over = "overrun.zip" + size_reason.format(bound, bound + 1)
+                if add.returncode != 0 or rc != 2 or over not in report or "archive.zip" in report:
+                    failures.append("with the archive-size bound at the archive's size ({} bytes), the archive "
+                                    "followed by a label past the bound expected exit 2 named with the size "
+                                    "reason, got rc={} {!r}".format(bound, rc, report))
+            finally:
+                check_leaks.MAX_ARCHIVE_FILE_SIZE = saved_bound
+            # A tracked .zip absent from the working tree is unevaluable as absent, like any tracked file,
+            # classified before the archive read opens it (an archive read without that check is a read
+            # error instead).
+            (binrepo / "archive.zip").unlink()
+            rc, report = gate(binrepo)
+            if rc != 2 or "archive.zip: tracked file is absent from the working tree" not in report:
+                failures.append("a tracked .zip absent from the working tree expected cannot-evaluate (exit 2) "
+                                "reported as absent, got rc={} {!r}".format(rc, report))
+
         # 18. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path): a
         #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
         #     running the default scan path (which would let --self-testx masquerade as --self-test in CI
@@ -770,23 +1169,25 @@ def _self_test(caller_env=None):
         # (which re-enters --self-test) skips them rather than recursing without bound. A run recognized as a
         # child (see _CHILD_SENTINEL) skips them and therefore exits 3, or 1 when a case also failed, never 0.
         if launched_child:
-            not_run.append("cases 19 to 23 (the child sentinel matched the parent pid)")
+            not_run.append("cases 19 to 23 and 25 (the child sentinel matched the parent pid)")
         else:
             child_tag = {_CHILD_SENTINEL: str(os.getpid())}
             childenv = dict(os.environ, **child_tag)
             toolsdir = str(Path(__file__).resolve().parent)
 
             # 19. DISCRIMINATING (finding-1: a NON-REGULAR input FAILS CLOSED, never blocks on open): a FIFO
-            #     at the hash-file path and at a scoped path is classified non-regular BEFORE any open, so
-            #     load_hashes/scan_scope raise a fail-closed OSError PROMPTLY. Reverting the S_ISREG-before-open
-            #     guard (a bare read_text) blocks on open(FIFO) and the probe times out. Each probe imports
+            #     at the hash-file path, at a scoped path and at a tracked .zip path is classified non-regular
+            #     BEFORE any open, so load_hashes/scan_scope/scan_tracked_roles raise a fail-closed OSError
+            #     PROMPTLY. Reverting the S_ISREG-before-open guard (a bare read_text, or the archive read
+            #     without the _present check) blocks on open(FIFO) and the probe times out. Each probe imports
             #     this module in a child and calls the function on a FIFO under a short timeout; a hang is a
             #     recorded failure, never an unbounded wait. Needs os.mkfifo (POSIX); asserted where available.
             if hasattr(os, "mkfifo"):
                 for label, target_rel, call in (
                         ("hash-file", "tools/internal-name-hashes.txt", "cin.load_hashes(root)"),
                         ("scoped-file", "tools/subject.md",
-                         "cin.scan_scope(root, ('tools/subject.md',), set(), 3)")):
+                         "cin.scan_scope(root, ('tools/subject.md',), set(), 3)"),
+                        ("tracked-zip", "tools/skill.zip", "cin.scan_tracked_roles(root, ['tools/skill.zip'])")):
                     fifo_root = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-fifo-"))
                     (fifo_root / "tools").mkdir()
                     fifo_path = fifo_root / target_rel
@@ -860,7 +1261,7 @@ def _self_test(caller_env=None):
             #     whenever neither GIT_CONFIG_NOSYSTEM=1 nor GIT_CONFIG_SYSTEM is set (where git reads the
             #     host's system file), and only the fixture git lifecycle's PATH wrapper reasserts that pin
             #     after the drop. Each child must pass, print the child line and exit 3 (it skips cases 19
-            #     to 23, which this run runs). Reverting self_test_main to a bare _self_test() lets
+            #     to 23 and 25, which this run runs). Reverting self_test_main to a bare _self_test() lets
             #     the child's tracked-file read load the malformed file, so its cases 14 to 17 exit 2 and the
             #     child fails all three; applying the scrub without the lifecycle fails the system case. A
             #     control first proves each poisoned configuration breaks a git read that honours it; the home
@@ -980,7 +1381,7 @@ def _self_test(caller_env=None):
             #     cases 21 and 22 share (it fails case 21's system lane and case 22). This case requires all
             #     five failure messages, so honouring the inherited value (as a child) fails it. It shows this
             #     for these two values only: a value equal to the launching run's pid is honoured by design, and
-            #     a run misrecognized that way skips cases 19 to 23, so it exits 3, or 1 when a case also
+            #     a run misrecognized that way skips cases 19 to 23 and 25, so it exits 3, or 1 when a case also
             #     failed, never 0. The copy is launched with _INHERITED_PROBE naming this process, so it
             #     skips this case and does not recurse. Each copy therefore fails cases and skips one, and must
             #     exit 1 with its not-run line naming this case: a failure outranks a skip. A last lane runs
@@ -1124,6 +1525,147 @@ def _self_test(caller_env=None):
                 finally:
                     shutil.rmtree(platform_dir, ignore_errors=True)
 
+            # 25. DISCRIMINATING (the tree-wide decision-id layer is WIRED into the real scan): a copy of this
+            #     gate (with _walk and check_leaks) in a fixture git repository, run with no arguments, exits 1
+            #     naming a synthetic maintainer-decision id in docs/, a path outside SCOPE_RELPATHS, and exits 0
+            #     once the id is gone. The copy and the note are tracked so the role rule's tracked-file read
+            #     succeeds and the decision-id layer alone decides the result. Dropping the
+            #     scan_tree_decision_ids call from run_gate lets the planted run exit 0, failing this. The id is
+            #     assembled at runtime, as in case 26. The copy list starts with _walk.py so it does not repeat
+            #     the case 20 list that case 23 mutates (each mutated text must occur once in this file).
+            wired = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-wired-"))
+            try:
+                (wired / "tools").mkdir()
+                (wired / "docs").mkdir()
+                for name in ("_walk.py", "check_internal_names.py", "check_leaks.py"):
+                    shutil.copy(str(Path(toolsdir) / name), str(wired / "tools" / name))
+                note = wired / "docs" / "note.md"
+                note.write_text("Decided under a plain rule here.\n", encoding="utf-8")
+                init = subprocess.run(["git", "-C", str(wired), "init", "-q"], capture_output=True, text=True,
+                                      env=_git_fixture_env.git_fixture_env(), timeout=60)
+                add = subprocess.run(["git", "-C", str(wired), "add", "--", "tools", "docs/note.md"],
+                                     capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(),
+                                     timeout=60)
+                if init.returncode != 0 or add.returncode != 0:
+                    failures.append("the wired decision-id fixture repository could not be built: init rc={} "
+                                    "add rc={} {!r}".format(init.returncode, add.returncode,
+                                                            init.stderr + add.stderr))
+                for planted, want in ((True, 1), (False, 0)):
+                    note.write_text("Decided under {} here.\n".format(
+                        "D-" + "000-SYNTHETIC-FIXTURE" if planted else "a plain rule"), encoding="utf-8")
+                    try:
+                        proc = subprocess.run(
+                            [sys.executable, "-I", "-B", str(wired / "tools" / "check_internal_names.py")],
+                            capture_output=True, text=True, env=childenv, timeout=120)
+                    except subprocess.TimeoutExpired:
+                        failures.append("the wired tree-wide scan (planted={}) timed out".format(planted))
+                        continue
+                    named = "docs/note.md:1: internal maintainer-decision id" in proc.stdout
+                    if proc.returncode != want or named != planted:
+                        failures.append("the real scan over a tree {} a decision id expected exit {} (finding "
+                                        "named: {}), got rc={} out={!r} err={!r}".format(
+                                            "holding" if planted else "without", want, planted,
+                                            proc.returncode, proc.stdout, proc.stderr))
+
+                # 25 (continued). DISCRIMINATING (the tree-wide layer FAILS CLOSED in the real scan): each input
+                #     below is planted alone, untracked and outside SCOPE_RELPATHS, in the otherwise clean tree
+                #     above. An unreadable file, an unlistable directory and a FIFO each exit 2 with the
+                #     read-error diagnostic naming the input; a file that vanishes between the walk listing it
+                #     and the read exits 1 with the fail-closed vanished finding naming it, as in the scoped
+                #     layer. Skipping an OSError in scan_tree_decision_ids, skipping a vanished file, an rglob
+                #     walk (which lists nothing under an unlistable directory and bypasses the walker the vanish
+                #     probe wraps), and a run_gate that swallows the tree layer's OSError each fail at least one
+                #     probe. A plant this platform cannot produce (an unreadable entry when permissions do not
+                #     bind, as for root, or a FIFO without os.mkfifo) is a case not run, so the run exits 3 (or 1
+                #     when a case also failed), never 0.
+                gate = str(wired / "tools" / "check_internal_names.py")
+                readerr = "error: cannot read a required input"
+
+                def expect_fail_closed(label, script_args, want, stream, needles):
+                    try:
+                        proc = subprocess.run([sys.executable, "-I", "-B", *script_args], capture_output=True,
+                                              text=True, env=childenv, timeout=120)
+                    except subprocess.TimeoutExpired:
+                        failures.append("the tree-wide scan over {} timed out, not failed closed".format(label))
+                        return
+                    text = proc.stdout if stream == "stdout" else proc.stderr
+                    if proc.returncode != want or not all(n in text for n in needles):
+                        failures.append("the tree-wide scan over {} expected exit {} with {!r} on {}, got rc={} "
+                                        "out={!r} err={!r}".format(label, want, needles, stream, proc.returncode,
+                                                                   proc.stdout, proc.stderr))
+
+                unreadable = wired / "docs" / "unreadable.md"
+                unreadable.write_text("plain text\n", encoding="utf-8")
+                os.chmod(str(unreadable), 0)
+                try:
+                    try:
+                        unreadable.read_bytes()
+                        not_run.append("case 25 (an unreadable file could not be planted: permissions do not "
+                                       "bind here)")
+                    except PermissionError:
+                        expect_fail_closed("an unreadable file", (gate,), 2, "stderr",
+                                           (readerr, "docs/unreadable.md"))
+                finally:
+                    os.chmod(str(unreadable), 0o600)
+                    unreadable.unlink()
+
+                locked = wired / "notes" / "locked"
+                locked.mkdir(parents=True)
+                (locked / "inner.md").write_text("plain text\n", encoding="utf-8")
+                os.chmod(str(locked), 0)
+                try:
+                    try:
+                        os.listdir(str(locked))
+                        not_run.append("case 25 (an unlistable directory could not be planted: permissions do "
+                                       "not bind here)")
+                    except PermissionError:
+                        expect_fail_closed("an unlistable directory", (gate,), 2, "stderr",
+                                           (readerr, "notes/locked"))
+                finally:
+                    os.chmod(str(locked), 0o700)
+                    shutil.rmtree(wired / "notes")
+
+                pipe = wired / "docs" / "pipe.md"
+                made = False
+                if hasattr(os, "mkfifo"):
+                    try:
+                        os.mkfifo(str(pipe))
+                        made = True
+                    except OSError:
+                        made = False
+                if made:
+                    try:
+                        expect_fail_closed("a FIFO", (gate,), 2, "stderr",
+                                           (readerr, "docs/pipe.md is present but not a regular file"))
+                    finally:
+                        pipe.unlink()
+                else:
+                    not_run.append("case 25 (a FIFO could not be planted: os.mkfifo unavailable or refused)")
+
+                (wired / "docs" / "vanish.md").write_text("plain text\n", encoding="utf-8")
+                vanish_probe = (
+                    "import sys\n"
+                    "sys.path.append({tools!r})\n"
+                    "import check_internal_names as cin\n"
+                    "listed = cin.walk_files\n"
+                    "def vanishing_walk(*args, **kwargs):\n"
+                    "    for p in listed(*args, **kwargs):\n"
+                    "        if p.name == 'vanish.md':\n"
+                    "            p.unlink()\n"
+                    "        yield p\n"
+                    "cin.walk_files = vanishing_walk\n"
+                    "sys.exit(cin.main())\n"
+                ).format(tools=str(wired / "tools"))
+                expect_fail_closed("a file that vanishes during the walk", ("-c", vanish_probe), 1, "stdout",
+                                   ("docs/vanish.md: file vanished during the tree scan; fail-closed",))
+            finally:
+                for entry in (wired / "docs" / "unreadable.md", wired / "notes" / "locked"):
+                    try:
+                        os.chmod(str(entry), 0o700)
+                    except OSError:
+                        pass
+                shutil.rmtree(wired, ignore_errors=True)
+
         # 24. DISCRIMINATING (the inherited child-sentinel values case 23 runs, by direct calls, so no real
         #     PID 1 run is needed): "1" and the parent pid normally, and the replacements
         #     _stale_sentinel_values documents for a run that is PID 1 (parent pid 0, and parent pid 2, which
@@ -1137,6 +1679,62 @@ def _self_test(caller_env=None):
             if got != expected:
                 failures.append("the inherited child-sentinel values for own pid {} and parent pid {} expected "
                                 "{!r}, got {!r}".format(own, parent, expected, got))
+
+        # 26. DISCRIMINATING (maintainer-decision id SHAPES, tree-wide): one synthetic id of each decision
+        #     shape, planted in docs/ (outside SCOPE_RELPATHS), is caught by scan_tree_decision_ids, and so is
+        #     the first shape planted outside docs/ (a suffix-less file at the tree root and a page in site/);
+        #     removing DECISION_ID, or narrowing a head or segment class so a shape no longer matches, fails
+        #     its case.
+        #     Each non-id token class seen in the tree is a negative control that must stay unflagged, and an
+        #     internal-allow line is exempt as for the other shapes. The ids are SYNTHETIC (the 000 ordinal
+        #     and the SYNTHETIC word name no real decision) and assembled at runtime, so no contiguous
+        #     decision-id shape sits in this source.
+        tree = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-tree-"))
+        try:
+            (tree / "docs").mkdir()
+            note = tree / "docs" / "note.md"
+            positives = (
+                ("an ordinal head with word segments", "D-" + "000-SYNTHETIC-FIXTURE"),
+                ("an ordinal head with a segment carrying a digit", "D-" + "000-R0-FIXTURE"),
+                ("a word head with word segments", "D-" + "SYNTHETIC-FIXTURE-ONLY"),
+                ("a word head with a final one-letter segment", "D-" + "SYNTHETIC-Z"),
+            )
+            negatives = (
+                ("a bare ordinal", "closes D-3; a duplicate item D-1"),
+                ("a lower-case check id", 'ok("D-roster-excludes-init") and ("D-no-remote", argv)'),
+                ("a lower-case short label", "the D-a2 rename and the D-a4 header"),
+                ("a lower-case prose word", "a chain of depth D emits a D-part header"),
+                ("a D- glued to a longer word", "GD-" + "000-SYNTHETIC-FIXTURE"),
+            )
+            for shape, token in positives:
+                note.write_text("Decided under {} in prose.\n".format(token), encoding="utf-8")
+                f = scan_tree_decision_ids(tree)
+                if f != ["docs/note.md:1: internal maintainer-decision id"]:
+                    failures.append("a decision id ({}) expected one tree-wide finding, got {}".format(shape, f))
+                note.write_text("{} kept on purpose  # internal-allow\n".format(token), encoding="utf-8")
+                f = scan_tree_decision_ids(tree)
+                if f:
+                    failures.append("an internal-allow line holding a decision id ({}) expected exemption, "
+                                    "got {}".format(shape, f))
+            for shape, text in negatives:
+                note.write_text(text + "\n", encoding="utf-8")
+                f = scan_tree_decision_ids(tree)
+                if f:
+                    failures.append("a non-id token ({}) expected no decision-id finding, got {}".format(shape, f))
+            # The same id outside docs/: a suffix-less file at the tree root (read, as every file with no
+            # suffix is) and a listed text suffix in a nested directory, each named by its own path.
+            note.unlink()
+            for rel in ("NOTICE", "site/pages/index.html"):
+                elsewhere = tree / rel
+                elsewhere.parent.mkdir(parents=True, exist_ok=True)
+                elsewhere.write_text("Decided under {} here.\n".format(positives[0][1]), encoding="utf-8")
+                f = scan_tree_decision_ids(tree)
+                if f != ["{}:1: internal maintainer-decision id".format(rel)]:
+                    failures.append("a decision id in {} (outside docs/) expected one tree-wide finding, got "
+                                    "{}".format(rel, f))
+                elsewhere.unlink()
+        finally:
+            shutil.rmtree(tree, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1160,12 +1758,34 @@ def _self_test(caller_env=None):
           "hashed codename each fail (removing a layer fails a case); an internal-allow line is exempt from "
           "the structural layer; the whole capitalized internal role name is caught, while Architecture, "
           "architectural, the lowercase noun, the word inside a longer identifier, an internal-allow line and "
-          "a SKIP_NAMES basename are not in the scoped scan; the real gate run on a fixture git repository "
+          "a SKIP_NAMES basename are not in the scoped scan; a review-round label of each shape (a reviewer "
+          "family name and a QA round number, a QA round number and a grade (BLOCKER included) or finding "
+          "id) is caught by the "
+          "tracked-file rule and the scoped scan in either case, and by the real gate in a tracked file "
+          "outside SCOPE_RELPATHS, while \"quality\", \"QA\" alone, a bare grade word, a family name alone, a "
+          "family name before \"QA\" with no round number, \"QA\" before a grade with no round number, a "
+          "round number alone, a round number before a word that starts with F, a bare F with no digits, a "
+          "grade or finding id run straight into a digit or an underscore, a family name or a round "
+          "glued to a longer word and parts separated by two spaces, a tab or any one ASCII punctuation "
+          "character are not, and an "
+          "internal-allow line holding "
+          "one is exempt; the real gate run on a fixture git repository "
           "catches the role name in a tracked file outside SCOPE_RELPATHS and in a tracked file whose basename "
           "is in SKIP_NAMES, exempts only the one internal-allow line, scans a binary-attributed file that "
-          "decodes as UTF-8, skips a non-UTF-8 file with a non-text suffix and an untracked file, and exits 2 "
+          "decodes as UTF-8, skips a non-UTF-8 tracked ZIP archive the leak gate's archive rule accepts and an "
+          "untracked file, and exits 2 "
           "(cannot evaluate) on a tracked non-UTF-8 text file, a tracked file absent from the working tree and "
-          "a root that is not a git repository; a GIT_CONFIG_GLOBAL pointed at a malformed file does not "
+          "a root that is not a git repository; every tracked .zip goes through the leak gate's archive rule "
+          "(check_leaks.verify_archive) whether or not its bytes decode as UTF-8, and a non-UTF-8 tracked file "
+          "is skipped only when it is a .zip that rule accepts (a real tracked archive passes, with the "
+          "archive-size bound at its exact size and one byte above too, and an accepted archive whose bytes are "
+          "valid UTF-8 is scanned and its label found; a malformed .csv and a .csv carrying the ZIP signature "
+          "each exit 2 reported as not valid UTF-8; a .zip without the signature, a signature-prefixed .zip "
+          "that is not an archive, valid UTF-8 or not, a .zip with one member failing its CRC, a label ahead of "
+          "an empty archive's end record, the archive with the bound one byte under its size, and the archive "
+          "followed by a label past the bound with the bound at its size each exit 2 named with the leak "
+          "gate's reason, and the archive deleted from the working tree exits 2 reported as absent); a "
+          "GIT_CONFIG_GLOBAL pointed at a malformed file does not "
           "change the gate result (the gate's tracked-file read drops the GIT_* environment); a child "
           "self-test still passes (child line, exit 3) with a malformed .gitconfig under the caller's HOME, a "
           "malformed git/config "
@@ -1191,11 +1811,19 @@ def _self_test(caller_env=None):
           "live SCOPE_RELPATHS members, so a synthetic provenance id planted in each is caught (removing "
           "either from scope fails the case); an UNRECOGNIZED option (a misspelled --self-testx or a "
           "stray flag) is a loud exit 2, never a silent default scan that would let it masquerade as "
-          "--self-test; a NON-REGULAR input (a FIFO) at the hash-file path and at a scoped path fails closed "
+          "--self-test; a NON-REGULAR input (a FIFO) at the hash-file path, at a scoped path and at a tracked "
+          ".zip path fails closed "
           "PROMPTLY (classified non-regular before any open) rather than blocking on the open; and a hostile "
           "sibling json.py/hashlib.py beside the script does NOT shadow a stdlib import (the sibling modules "
           "are imported via sys.path.append, keeping stdlib precedence), so the copy still runs and passes its "
-          "self-test as a child under -I rather than being silently neutered.")
+          "self-test as a child under -I rather than being silently neutered; a maintainer-decision id of each "
+          "shape (an ordinal or word head, word segments, a segment carrying a digit, a final one-letter "
+          "segment) is caught anywhere in the tree, outside the scoped surfaces too, by the real scan on a "
+          "fixture repository as well as by scan_tree_decision_ids, while a bare ordinal, a lower-case check "
+          "id, label or prose word and a D- glued to a longer word are not, and an internal-allow line holding "
+          "a decision id is exempt; and in the real scan the tree-wide layer fails closed outside the scoped "
+          "surfaces: an unreadable file, an unlistable directory and a FIFO each exit 2 naming the input, and a "
+          "file that vanishes during the walk is a fail-closed finding naming it.")
     return 0
 
 

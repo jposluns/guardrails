@@ -26,6 +26,33 @@ canonical-text = "If a constraint forces a compromise on the tier, halt and esca
 source-digest = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
 
 [[clause]]
+clause-id = "prjint1.4"
+corpus-id = "prjint1"
+source-path = ".aiqt/core/rules/00-project-integrity.md"
+start-line = 11
+end-line = 11
+canonical-text = "(Accuracy = Integrity = Quality = Trust) > Progress > Speed > Cost."
+source-digest = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
+
+[[clause]]
+clause-id = "prjint1.5"
+corpus-id = "prjint1"
+source-path = ".aiqt/core/rules/00-project-integrity.md"
+start-line = 11
+end-line = 12
+canonical-text = "The four facets form one\nnon-negotiable top tier with no internal ranking"
+source-digest = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
+
+[[clause]]
+clause-id = "prjint1.6"
+corpus-id = "prjint1"
+source-path = ".aiqt/core/rules/00-project-integrity.md"
+start-line = 12
+end-line = 13
+canonical-text = "the tier is lexicographically above Progress, Progress\nabove Speed, Speed above Cost."
+source-digest = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
+
+[[clause]]
 clause-id = "clmobs.1"
 corpus-id = "clmobs"
 source-path = ".aiqt/core/rules/accur-claims-rest-on-observation.md"
@@ -68,7 +95,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 15
 end-line = 17
 canonical-text = "A completion-class claim over a set, that all of it is handled, that none remains, that every item is\ncovered, or that the set is exhausted, is made only by enumerating that set from its authoritative index and\nshowing the enumeration, never from an impression of having covered it."
-source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
 clause-id = "setcmp.2"
@@ -77,7 +104,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 15
 end-line = 17
 canonical-text = "A completion-class claim over a set, that all of it is handled, that none remains, that every item is\ncovered, or that the set is exhausted, is made only by enumerating that set from its authoritative index and\nshowing the enumeration, never from an impression of having covered it."
-source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
 clause-id = "setcmp.3"
@@ -86,34 +113,34 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 17
 end-line = 20
 canonical-text = "The authoritative index is the\nsource that defines the set's membership, such as a registry, a manifest, a directory listing, or a backlog;\na count or a work-list the assistant holds in its own context is not that index, and is reconciled against it\nbefore it can support a claim about the whole set."
-source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
 clause-id = "setcmp.4"
 corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
-start-line = 22
-end-line = 24
+start-line = 26
+end-line = 28
 canonical-text = "A claim that licenses less work, that nothing remains, or that an item may stop, defer, wind down, or close,\nclears a higher evidence bar than a claim that licenses more, because an unfounded stop conceals work that is\nstill owed while an unfounded continue only spends effort."
-source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
 clause-id = "setcmp.5"
 corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
-start-line = 24
-end-line = 25
+start-line = 28
+end-line = 29
 canonical-text = "Under partial or missing evidence the default is\nto continue rather than to declare the set complete."
-source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
 clause-id = "setcmp.6"
 corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
-start-line = 25
-end-line = 27
+start-line = 29
+end-line = 31
 canonical-text = "When such a claim rests on the remaining items being\nunable to proceed, the enumeration records, for each remaining item, the observed condition that blocks it,\nso the claim cannot rest on an unshown assertion that work is blocked."
-source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
 clause-id = "corrob.1"
@@ -140,7 +167,7 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 13
 end-line = 14
 canonical-text = "A reported count, size, or population is meaningful only together with the predicate that selected it:\nwhat was counted, over what set, under what filter, and as of when."
-source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+source-digest = "2563a03b33981c517e231da672d197b54ad005507207e00efb3eef3b9f8513b7"
 
 [[clause]]
 clause-id = "cntprd.2"
@@ -149,7 +176,7 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 14
 end-line = 16
 canonical-text = "Two counts of nominally the same\nthing produced by different predicates are different figures, and they are never quoted interchangeably,\ncompared as though they measured one quantity, or carried forward as a single number."
-source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+source-digest = "2563a03b33981c517e231da672d197b54ad005507207e00efb3eef3b9f8513b7"
 
 [[clause]]
 clause-id = "cntprd.3"
@@ -158,7 +185,7 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 18
 end-line = 24
 canonical-text = "A count reused across statements is pinned to the recorded\npredicate that produced it and, where a reconcilable basis is available and its retention permitted, to\nthat basis, an authoritative snapshot or revision of the source or the identifiers the reading returned\nwhere that set is complete, so a later statement reconciles against the recorded figure rather than\nsilently re-deriving a different one; where no such basis is available, the statement records that the\nfigure cannot be reconciled and is re-measured under the same predicate rather than carried forward as\nthough it were."
-source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+source-digest = "2563a03b33981c517e231da672d197b54ad005507207e00efb3eef3b9f8513b7"
 
 [[clause]]
 clause-id = "dscres.1"
@@ -464,7 +491,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 14
 end-line = 15
 canonical-text = "A figure obtained by measurement or instrumentation is not summed, averaged, or otherwise blended with an\nestimated, inferred, or self-reported one into a single number presented as a measurement."
-source-digest = "2321618ff2db7ba71f4ae2cb7af4b88ee60e740faad4c51f3f176a8d352ff56a"
+source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
 
 [[clause]]
 clause-id = "estsep.2"
@@ -473,7 +500,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 15
 end-line = 17
 canonical-text = "The two grades of\nfigure are reported in labelled separation, so a reader can see which part was measured and which was\nestimated."
-source-digest = "2321618ff2db7ba71f4ae2cb7af4b88ee60e740faad4c51f3f176a8d352ff56a"
+source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
 
 [[clause]]
 clause-id = "estsep.3"
@@ -482,7 +509,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 17
 end-line = 18
 canonical-text = "A quantity that is not known is reported as unknown, never silently entered as zero, because a\nzero sits in a total as though it were measured."
-source-digest = "2321618ff2db7ba71f4ae2cb7af4b88ee60e740faad4c51f3f176a8d352ff56a"
+source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
 
 [[clause]]
 clause-id = "estsep.4"
@@ -491,7 +518,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 18
 end-line = 19
 canonical-text = "Any figure derived from an estimate, including a ratio, a\npercentage, or a total that an estimated input feeds, is itself an estimate and is labelled as one."
-source-digest = "2321618ff2db7ba71f4ae2cb7af4b88ee60e740faad4c51f3f176a8d352ff56a"
+source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
 
 [[clause]]
 clause-id = "nofabr.1"
@@ -518,7 +545,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 13
 end-line = 14
 canonical-text = "Do not assert what a system shows, renders, prints, outputs, or does in its live state unless you observed\nthat behaviour directly."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.2"
@@ -527,7 +554,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 17
 end-line = 19
 canonical-text = "A claim that a system is launch-ready,\nlive, or working is such a behavioural claim: it rests on having exercised the relevant runtime path and\nobserved the expected result, not on a static check that the configuration or registration looks correct."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.3"
@@ -536,7 +563,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.4"
@@ -545,7 +572,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.5"
@@ -554,7 +581,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.6"
@@ -563,7 +590,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.7"
@@ -572,7 +599,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.8"
@@ -581,7 +608,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.9"
@@ -590,7 +617,16 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+
+[[clause]]
+clause-id = "obsbeh.10"
+corpus-id = "obsbeh"
+source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
+start-line = 30
+end-line = 33
+canonical-text = "You read the\nresource's own state, the host's available capacity, and your own footprint directly before asserting\nsuch a failure or reporting it onward; absent that reading the condition resolves to a local error to\ninvestigate while work continues, never a stop or a resource-wide alarm."
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "rdbchr.1"
@@ -599,7 +635,16 @@ source-path = ".aiqt/core/rules/accur-read-before-characterizing.md"
 start-line = 14
 end-line = 15
 canonical-text = "Never assert what a file, interface, or system contains, lacks, or requires without reading it first.\nCharacterize a thing only after examining it."
-source-digest = "0bc2aa52717e6ce8ab222b6009b650484484e7b658d99dc197a381611d518698"
+source-digest = "0f3ab20e561d75181f5e5c573688f78154add9c115e51a2eeaa85aaabc7fffb5"
+
+[[clause]]
+clause-id = "rdbchr.2"
+corpus-id = "rdbchr"
+source-path = ".aiqt/core/rules/accur-read-before-characterizing.md"
+start-line = 16
+end-line = 17
+canonical-text = "A restatement keeps its source's force and scope: a must, must not, or never stays a requirement, and\na platform, version, or condition qualifier is neither dropped nor added."
+source-digest = "0f3ab20e561d75181f5e5c573688f78154add9c115e51a2eeaa85aaabc7fffb5"
 
 [[clause]]
 clause-id = "refcap.1"
@@ -707,7 +752,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.2"
@@ -716,7 +761,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.3"
@@ -725,7 +770,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.4"
@@ -734,7 +779,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.5"
@@ -743,7 +788,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.6"
@@ -752,7 +797,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.7"
@@ -761,7 +806,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.8"
@@ -770,7 +815,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.9"
@@ -779,7 +824,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.10"
@@ -788,7 +833,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.11"
@@ -797,7 +842,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "csttir.1"
@@ -1115,13 +1160,22 @@ canonical-text = "Where a case is covered by a surviving sibling control rather 
 source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
+clause-id = "gatdis.21"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 18
+end-line = 19
+canonical-text = "No bypass flags, no piping a check to a\ntruncating sink, no `|| true`, no deleted tests, no lowered thresholds."
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
+
+[[clause]]
 clause-id = "gensrc.1"
 corpus-id = "gensrc"
 source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "42fb16d7257af3084dd556cd4ef4ac5053707ffd7aee70034843aab6673dfebc"
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
 
 [[clause]]
 clause-id = "gensrc.2"
@@ -1130,7 +1184,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "42fb16d7257af3084dd556cd4ef4ac5053707ffd7aee70034843aab6673dfebc"
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
 
 [[clause]]
 clause-id = "gensrc.3"
@@ -1139,7 +1193,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "42fb16d7257af3084dd556cd4ef4ac5053707ffd7aee70034843aab6673dfebc"
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
 
 [[clause]]
 clause-id = "gensrc.4"
@@ -1148,7 +1202,16 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 13
 end-line = 13
 canonical-text = "Source and derivative land in the same change, so the two cannot drift apart."
-source-digest = "42fb16d7257af3084dd556cd4ef4ac5053707ffd7aee70034843aab6673dfebc"
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
+
+[[clause]]
+clause-id = "gensrc.5"
+corpus-id = "gensrc"
+source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
+start-line = 14
+end-line = 16
+canonical-text = "Deriving an artefact leaves its source originals byte-for-byte unchanged and writes separate outputs;\nin-place derivation uses copies in an area excluding the originals and refuses any path or alias\nwriting outside it or back to an original."
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
 
 [[clause]]
 clause-id = "liccmp.1"
@@ -1238,6 +1301,15 @@ source-path = ".aiqt/core/rules/integ-protected-branch-integrity.md"
 start-line = 19
 end-line = 20
 canonical-text = "The protected line of development is never rewritten, overwritten, or changed directly; it changes only\nthrough a reviewed, verified integration."
+source-digest = "59c40e70c51a3915f791927248162ecff2887ec97ed65b428149b3d2c6d327cf"
+
+[[clause]]
+clause-id = "prtbrn.4"
+corpus-id = "prtbrn"
+source-path = ".aiqt/core/rules/integ-protected-branch-integrity.md"
+start-line = 20
+end-line = 21
+canonical-text = "On git that means no force-push and no direct commit to the\nprotected branch, only a merged pull request."
 source-digest = "59c40e70c51a3915f791927248162ecff2887ec97ed65b428149b3d2c6d327cf"
 
 [[clause]]
@@ -1643,6 +1715,15 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 57
 end-line = 59
 canonical-text = "This is a rule on what the orchestrator\nruns and where, not OS containment: only the full reading checks a path the code builds at run time or\nconfiguration it inherits."
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+
+[[clause]]
+clause-id = "wowo01.21"
+corpus-id = "wowo01"
+source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
+start-line = 24
+end-line = 25
+canonical-text = "Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be\nundone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to)."
 source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
@@ -2290,107 +2371,116 @@ corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 13
 end-line = 16
-canonical-text = "A verifier's output counts as a verdict only when the verifier actually delivered one. Completeness is\njudged by a single criterion: the delivery carries the positive evidence of a finished verdict that the\nverification agreed on in advance, whether that agreed evidence is a completion marker the verifier emits,\nthe explicit verdict the verification asked for, or both."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+canonical-text = "A verifier's output counts as a verdict only if the verifier delivered one. Completeness has one test:\nthe delivery carries the positive evidence, agreed in advance by the verification, of a finished\nverdict, whether a completion marker the verifier emits, the explicit verdict the verification asked\nfor, or both."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.2"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 16
-end-line = 18
-canonical-text = "A delivery that lacks that agreed evidence, or\nthat is truncated, empty, or errored, is treated as no verdict, never as a pass, a vote, or a finding-free\nresult."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+end-line = 17
+canonical-text = "A delivery lacking that agreed evidence, or truncated, empty, or errored, counts as no\nverdict, never a pass, a vote, or a finding-free result."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.3"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 21
-end-line = 23
-canonical-text = "Completeness is never inferred from the length or volume of the output or from the mere absence of\na reported problem, because a run cut off before it reached its verdict is indistinguishable from a clean\none when judged by silence or size."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 20
+end-line = 21
+canonical-text = "Completeness is never inferred from output length, volume, or a reported problem's absence: a run cut\noff before its verdict is indistinguishable from a clean one judged by silence or size."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.4"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 21
-end-line = 23
-canonical-text = "Completeness is never inferred from the length or volume of the output or from the mere absence of\na reported problem, because a run cut off before it reached its verdict is indistinguishable from a clean\none when judged by silence or size."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 20
+end-line = 21
+canonical-text = "Completeness is never inferred from output length, volume, or a reported problem's absence: a run cut\noff before its verdict is indistinguishable from a clean one judged by silence or size."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.5"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 23
-end-line = 25
-canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 21
+end-line = 23
+canonical-text = "A delivery\nfailing this test is re-dispatched and contributes nothing; it alone does not justify reducing the\npanel, since one failed delivery is not evidence that a verifier family is unavailable."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.6"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 23
-end-line = 25
-canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 21
+end-line = 23
+canonical-text = "A delivery\nfailing this test is re-dispatched and contributes nothing; it alone does not justify reducing the\npanel, since one failed delivery is not evidence that a verifier family is unavailable."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.7"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 23
-end-line = 25
-canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 21
+end-line = 23
+canonical-text = "A delivery\nfailing this test is re-dispatched and contributes nothing; it alone does not justify reducing the\npanel, since one failed delivery is not evidence that a verifier family is unavailable."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.8"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 25
-end-line = 27
-canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 23
+end-line = 25
+canonical-text = "A required\nfamily leaves the panel only if genuinely unreachable, on the verifier-diversity rule's terms, and that\nreduction is recorded and re-run when the family returns."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.9"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 25
-end-line = 27
-canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 23
+end-line = 25
+canonical-text = "A required\nfamily leaves the panel only if genuinely unreachable, on the verifier-diversity rule's terms, and that\nreduction is recorded and re-run when the family returns."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.10"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 25
-end-line = 27
-canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 23
+end-line = 25
+canonical-text = "A required\nfamily leaves the panel only if genuinely unreachable, on the verifier-diversity rule's terms, and that\nreduction is recorded and re-run when the family returns."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.11"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 19
-end-line = 20
-canonical-text = "A capture piped through a truncating sink is a degraded delivery, not a verdict, even when its retained\nprefix appears complete."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 18
+end-line = 19
+canonical-text = "A capture piped through a truncating sink is a degraded delivery, not a verdict, even if its retained\nprefix looks complete."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.12"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 28
-end-line = 35
-canonical-text = "The same fail-closed posture applies when the verifier itself cannot read or access a required input it was\nmeant to cover: it does not emit a permissive verdict over the gap. It emits UNVERIFIABLE, the\ncannot-evaluate outcome guard-input-soundness names, identifying the input it could not read; this is a\nterminal fail-closed result, not the transient degraded delivery above that a re-dispatch can cure, so it\nis treated as not-passed and resolved by fixing the input, never a clean, passing, or finding-free verdict.\nA clean verdict asserted over an input the verifier never actually read is the same false-clean this rule\nalready guards against, applied to the unreadable-required-input case, meeting the fail-closed posture\ncheck-fails-closed-on-unreadable requires of a gate that cannot read its own input."
-source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+start-line = 26
+end-line = 32
+canonical-text = "The same fail-closed posture holds when the verifier cannot read or access a required input it should\ncover: it emits no permissive verdict over the gap but UNVERIFIABLE, the cannot-evaluate outcome\nguard-input-soundness names, identifying the unread input. Terminal and fail-closed, not a transient\ndegraded delivery a re-dispatch can cure, it counts as not-passed, resolved by fixing the input, never a\nclean, passing, or finding-free verdict. A clean verdict over a required input the verifier never read\nis the false-clean this rule guards against, meeting the posture check-fails-closed-on-unreadable\nrequires of a gate unable to read its input."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
+
+[[clause]]
+clause-id = "vrfdlv.13"
+corpus-id = "vrfdlv"
+source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
+start-line = 33
+end-line = 36
+canonical-text = "A worker run ending in a safety refusal or provider content stop, known by the provider's stop or result\nsignal, not by matching output text, counts as a refusal, not a delivery, whatever its status line: the\nstep needing it is held and the refusal reported to the maintainer, never routed around by rewording,\nnarrowing, splitting or reframing."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdiv.1"
@@ -2975,7 +3065,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 31
 end-line = 32
 canonical-text = "Dependencies, tools, external servers, and any model or artefact file that executes on load come from trusted\nsources with pinned provenance."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.2"
@@ -2984,7 +3074,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 31
 end-line = 32
 canonical-text = "Dependencies, tools, external servers, and any model or artefact file that executes on load come from trusted\nsources with pinned provenance."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.3"
@@ -2993,7 +3083,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 32
 end-line = 33
 canonical-text = "A file that runs code when loaded is scanned before use, and none is\nintroduced on the strength of its name or popularity alone."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.4"
@@ -3002,7 +3092,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 32
 end-line = 33
 canonical-text = "A file that runs code when loaded is scanned before use, and none is\nintroduced on the strength of its name or popularity alone."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.5"
@@ -3011,7 +3101,7 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 33
 end-line = 36
 canonical-text = "Before relying on a tool, MCP server,\nconnector, or external server, the active surface is reconciled against the approved pinned inventory; an\nunrecognized, shadow, changed, or unpinned entry is treated as unavailable until it is reviewed and\nauthorized."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secsup.6"
@@ -3020,7 +3110,16 @@ source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
 start-line = 33
 end-line = 36
 canonical-text = "Before relying on a tool, MCP server,\nconnector, or external server, the active surface is reconciled against the approved pinned inventory; an\nunrecognized, shadow, changed, or unpinned entry is treated as unavailable until it is reviewed and\nauthorized."
-source-digest = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
+
+[[clause]]
+clause-id = "secsup.7"
+corpus-id = "secsup"
+source-path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
+start-line = 36
+end-line = 38
+canonical-text = "A tag or branch name is a movable label, not pinned provenance: a source fetched by one is\npinned to the commit or digest it resolved to, and where the fetched content declares its own version, a\nmismatch with the version the label names is a changed entry."
+source-digest = "3c14a6ea288a902ba213b62ad9cc8b555eb3e107319188d1e02c53fb4a8e71d3"
 
 [[clause]]
 clause-id = "secfcl.1"
@@ -3896,6 +3995,15 @@ canonical-text = "A state-changing request authenticated by ambient credentials 
 source-digest = "78e3bb96a62f0d2a33bcc3d346503bc00ad387ee69926cd2f9f5b4c74ae200eb"
 
 [[clause]]
+clause-id = "sectok.8"
+corpus-id = "sectok"
+source-path = ".aiqt/core/rules/security-seci-session-token-management.md"
+start-line = 26
+end-line = 26
+canonical-text = "Code the assistant writes and operations it performs handle sessions and tokens securely."
+source-digest = "78e3bb96a62f0d2a33bcc3d346503bc00ad387ee69926cd2f9f5b4c74ae200eb"
+
+[[clause]]
 clause-id = "secssr.1"
 corpus-id = "secssr"
 source-path = ".aiqt/core/rules/security-seci-ssrf-prevention.md"
@@ -4271,6 +4379,15 @@ source-path = ".aiqt/core/rules/trust-authorization.md"
 start-line = 15
 end-line = 16
 canonical-text = "Execution of a plan-initiating unit of work begins only on an\nexplicit, work-naming go."
+source-digest = "0b4b235c936219010fda0629e5820600042dd1649845fcdc40e57468426bb45d"
+
+[[clause]]
+clause-id = "exauth.2"
+corpus-id = "exauth"
+source-path = ".aiqt/core/rules/trust-authorization.md"
+start-line = 15
+end-line = 15
+canonical-text = "A planning discussion is not authorization."
 source-digest = "0b4b235c936219010fda0629e5820600042dd1649845fcdc40e57468426bb45d"
 
 [[clause]]
@@ -5330,10 +5447,10 @@ source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab7
 clause-id = "setcmp.7"
 corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
-start-line = 39
-end-line = 40
+start-line = 45
+end-line = 46
 canonical-text = "Ending a turn, scheduling an idle wake, or declaring a work queue drained or all blocked is such a\ncompletion-class claim over the backlog, and it carries the same enumeration burden."
-source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
 clause-id = "trkasy.5"
@@ -5556,19 +5673,37 @@ source-digest = "58e4611231a23d3d58849c2b42f4f2030f19749d45b38c3439adaa3f8cbd374
 clause-id = "setcmp.8"
 corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
-start-line = 27
-end-line = 31
+start-line = 31
+end-line = 35
 canonical-text = "The recorded condition blocks the\nitem only when it leaves the item no step that can proceed while the condition holds, every sanctioned\npath completed or observed closed; a condition that gates only a later step of the item, or that degrades\na resource only that later step consumes, shows that step held, not the item blocked, while a step can\nstill proceed or a sanctioned path is not yet completed or observed closed."
-source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
+
+[[clause]]
+clause-id = "setcmp.9"
+corpus-id = "setcmp"
+source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
+start-line = 20
+end-line = 24
+canonical-text = "Retiring, splitting, or merging a record that names more\nthan one item, or removing items from it, is such a claim over the items the record names: each named item is\nshown either in a record that carries it forward or as closed on its own evidence, because a check over\nrecord ids or item counts alone can pass while a named item is lost, when the record's id leaves the index or\nthe counts are preserved."
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
+
+[[clause]]
+clause-id = "setcmp.10"
+corpus-id = "setcmp"
+source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
+start-line = 40
+end-line = 41
+canonical-text = "Retiring, splitting, merging, or removing items from a record that names more than one item\nis not such a bounded claim and carries the burden the first paragraph sets for it."
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
 clause-id = "setcmp.11"
 corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
-start-line = 33
-end-line = 36
+start-line = 37
+end-line = 40
 canonical-text = "A partial statement scoped to what was\nactually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a\nnamed, closed set, such as that all three of the listed modules pass, are not completeness claims and carry\nno added burden."
-source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
 clause-id = "expbnd.1"
@@ -5784,7 +5919,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 13
 end-line = 14
 canonical-text = "The assistant cites a path and line number only from a file it opened this session at the commit under\nreview, never from memory, a prior report, or an inferred layout."
-source-digest = "e3c4fb5b1fb13e8014beb2a81315090fbb37d38f8a9ee59485fe17b0c7b9ca39"
+source-digest = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
 
 [[clause]]
 clause-id = "citint.2"
@@ -5793,7 +5928,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 14
 end-line = 15
 canonical-text = "Where it is unsure of the line, it\ncites the symbol alone rather than guessing a number."
-source-digest = "e3c4fb5b1fb13e8014beb2a81315090fbb37d38f8a9ee59485fe17b0c7b9ca39"
+source-digest = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
 
 [[clause]]
 clause-id = "citint.3"
@@ -5802,7 +5937,16 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 15
 end-line = 16
 canonical-text = "Code or document text is quoted only from what\nthe assistant actually read, so a quotation is an excerpt, never a reconstruction presented as one."
-source-digest = "e3c4fb5b1fb13e8014beb2a81315090fbb37d38f8a9ee59485fe17b0c7b9ca39"
+source-digest = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
+
+[[clause]]
+clause-id = "citint.4"
+corpus-id = "citint"
+source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
+start-line = 17
+end-line = 18
+canonical-text = "Before delivering, re-open each cited range at its stated lines and confirm that it starts and ends\non lines that carry the cited content, not on a blank line, a comment banner, or a closing delimiter."
+source-digest = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
 
 [[clause]]
 clause-id = "attint.1"

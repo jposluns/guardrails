@@ -1,0 +1,418 @@
+# Rule text that carries no clause row on purpose: the TEXT COVERAGE leg of tools/check_clauses.py.
+# Every sentence or clause of every rule body under .aiqt/core/rules/ lies inside a clause row's
+# canonical-text in .aiqt/core/clauses.toml or is named here, byte-exact, with the reason it needs
+# no row. The body is the text after the frontmatter and after the first-line title heading; the
+# title is never checked, so an obligation written only as the title passes. An entry with no
+# reason, an entry whose text no longer occurs in its rule (stale), and an entry whose text a
+# clause row already covers (redundant) each fail the gate. The file is required
+# and must hold the exempt key: the gate refuses (exit 2) when it is absent, unreadable, or has no
+# exempt key (an empty or comment-only file), so deleting or emptying it is never read as no
+# exemption. An intentionally empty register is the explicit `exempt = []`. The gate cannot detect a
+# valid replacement of this content: rows removed, or `exempt = []` written in place of the register,
+# read as the reviewed register, so review every change to this file.
+# Author-maintained; review an entry whenever its rule changes.
+
+[[exempt]]
+corpus-id = "prjint1"
+text = "This rule defines the ordering; it guards no single facet."
+reason = "Scope note on the rule itself; no obligation of its own."
+
+[[exempt]]
+corpus-id = "citint"
+text = "This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the\nspecific reference captured when the claim is made, never reconstructed from memory, and the\nobligations above scope that capture to a file opened this session at the commit under review."
+reason = "Cross-reference explaining how citint.1 to citint.3 narrow the reference-capture rule (refcap); no obligation of its own."
+
+[[exempt]]
+corpus-id = "setcmp"
+text = "This governs completion-class quantifiers over an open or indexed set."
+reason = "Scope note for setcmp.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "setcmp"
+text = "The enumeration\nrequirement attaches to a quantifier that asserts the whole set, and the higher bar attaches only to a claim\nthat reduces work."
+reason = "Scope note restating where setcmp.1 and setcmp.4 apply; it adds no obligation."
+
+[[exempt]]
+corpus-id = "cntprd"
+text = "The same nominal\npopulation admitted under a structural definition and under a behavioural one, for instance, yields two\nfigures, not one figure measured twice."
+reason = "Example illustrating cntprd.2; no obligation of its own."
+
+[[exempt]]
+corpus-id = "cntprd"
+text = "This complements the measured-and-estimated-figures-stay-separate rule on an orthogonal axis:\nthat rule attaches a figure's grade, measured or estimated; this one attaches its definition, the\npredicate that selected it; a sound figure carries both."
+reason = "Cross-reference to the measured-and-estimated-figures-stay-separate rule (estsep); no obligation of its own."
+
+[[exempt]]
+corpus-id = "cntprd"
+text = "It differs from the\ncompleteness-claim-enumerates-its-set rule, which governs completion-class quantifiers over a whole\nset and already holds that the assistant's count is not that set's authoritative index; this rule governs any\nreported count, claiming completeness or not."
+reason = "Scope note separating this rule from the completeness-claim rule (setcmp); no obligation of its own."
+
+[[exempt]]
+corpus-id = "dscres"
+text = "A coverage boundary named where the guard is defined is\nreviewable; a boundary left implicit reads as a guarantee the guard cannot honour."
+reason = "Rationale for dscres.1 to dscres.3; no obligation of its own."
+
+[[exempt]]
+corpus-id = "evgcmp"
+text = "A stated intention is a claim"
+reason = "Premise of evgcmp.7, the clause after the ';', which carries the obligation."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "A check whose logic is correct is still worthless when its input cannot answer the question asked of it."
+reason = "Rationale for grdinp.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "Inputs absent from the author's own examples are a particular silent-failure\nrisk."
+reason = "Rationale for grdinp.3 and grdinp.5; no obligation of its own."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "A command or control parameter that names the repository, target, or other context an artefact will act\non is itself such an input."
+reason = "Classifies a control parameter as a guard input, so grdinp.7 applies; no obligation of its own."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "A guard whose own logic is correct still answers about the wrong target when the parameter\nit was handed cannot answer for the current one, so a parameter that cannot be derived or confirmed is a\ncannot-evaluate, not a clean pass."
+reason = "Applies grdinp.5 (a cannot-evaluate when the source cannot answer) to a target parameter; it adds no obligation."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "A document's own wording is itself such an input when a check verifies a fact by matching it."
+reason = "Classifies a document's wording as a guard input, so grdinp.8 applies; no obligation of its own."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "The wording\nestablishes only that the text is present, never that what it asserts is true, so a suite of such presence or\nwording checks passing is not evidence the document is correct."
+reason = "Rationale for grdinp.8; no obligation of its own."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "A negative check that asserts a string is absent is only as sound as its input in the same way: run against\na whole artefact it cannot tell an operative occurrence from the same string quoted in a correction that\nwarns against it, or recorded as what a value used to be, so it fires on the correction and trains its\nauthor to weaken the check or delete the explanation."
+reason = "Rationale for grdinp.10 and grdinp.11; no obligation of its own."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "A list kept by hand that selects what a generated view contains is itself such an input."
+reason = "Classifies a hand-kept selection list as a guard input, so grdinp.12 applies; no obligation of its own."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "Comparing the view\nwith a fresh run of its generator shows that it is current, never that it is complete, since both read the\nlist and an item the list omits is missing from each."
+reason = "Rationale for grdinp.12; no obligation of its own."
+
+[[exempt]]
+corpus-id = "grdinp"
+text = "a view that declares itself a curated selection makes no such claim."
+reason = "Scope carve-out bounding grdinp.12 (a view that declares itself a curated selection makes no coverage claim); a permission, not an obligation."
+
+[[exempt]]
+corpus-id = "estsep"
+text = "This does not forbid estimates, forecasts, or a combined figure whose composition is stated, such as a\nmeasured 40 plus an estimated 25 reported as roughly 65."
+reason = "Scope carve-out naming what estsep.1 permits; a permission, not an obligation."
+
+[[exempt]]
+corpus-id = "estsep"
+text = "It forbids the unlabelled blend: an estimate\nfolded into a measured total, the whole presented as measured."
+reason = "Restates estsep.1; it adds no obligation."
+
+[[exempt]]
+corpus-id = "estsep"
+text = "The label is the release."
+reason = "Summary of estsep.2; it adds no obligation."
+
+[[exempt]]
+corpus-id = "estsep"
+text = "A figure that\ncarries its grade honestly is sound however uncertain; one that hides it misreports precision it does\nnot have."
+reason = "Rationale for estsep.2; no obligation of its own."
+
+[[exempt]]
+corpus-id = "obsbeh"
+text = "Reading a configuration, a setting, or source tells you what a system is configured\nto do, not what it actually produces: precedence, environment, inputs, and runtime state sit between the\nconfiguration and the result."
+reason = "Rationale for obsbeh.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "obsbeh"
+text = "This differs from reading a file for its static contents, where the reading is\nitself the observation; here the observation is the rendered output."
+reason = "Scope note separating a static read from the behavioural claim obsbeh.1 governs; no obligation of its own."
+
+[[exempt]]
+corpus-id = "obsbeh"
+text = "A\nconfident assertion of unobserved behaviour is not made."
+reason = "Closing restatement of obsbeh.1; it adds no obligation."
+
+[[exempt]]
+corpus-id = "obsbeh"
+text = "A claim that a shared or external resource has failed, or that you are blocked because it has, is a\nbehavioural claim about the resource's live state; a symptom seen only in your own dependent work, a killed\nworker or a rejected payload, is not that observation and cannot tell a resource-wide failure from a\nself-caused local condition such as your own footprint or a malformed request."
+reason = "Classifies a resource-failure claim as a behavioural claim and names what does not count as observing it; the obligation it triggers is obsbeh.10."
+
+[[exempt]]
+corpus-id = "prtwhl"
+text = "This is the consumer-side counterpart to a\ntruncated deliverable not being observable completion."
+reason = "Cross-reference to trkasy.5 (a truncated deliverable is not observable completion); no obligation of its own."
+
+[[exempt]]
+corpus-id = "vfxcmt"
+text = "Applying a fix on disk is not the same as landing it."
+reason = "Rationale for vfxcmt.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "vfxcmt"
+text = "A commit message that asserts a fix, with no matching change in the commit, is an inaccurate record; verify the artefact before the claim."
+reason = "Restates vfxcmt.1 (confirm the fix is in its commit before claiming it); it adds no obligation."
+
+[[exempt]]
+corpus-id = "vfxcmt"
+text = "Uncommitted work outside the declared review set does not block the dispatch."
+reason = "Scope bound restating vfxcmt.9, whose cleanliness check runs over each declared path, so uncommitted work outside the declared set is outside that check; it adds no obligation."
+
+[[exempt]]
+corpus-id = "vfxcmt"
+text = "This reconciliation answers only what the declaration and the repository can answer."
+reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11; no obligation of its own."
+
+[[exempt]]
+corpus-id = "vfxcmt"
+text = "It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
+reason = "Disclosed residuals of vfxcmt.3 to vfxcmt.11; the closing clause restates vfxcmt.10 (the verifier reads the declared revision)."
+
+[[exempt]]
+corpus-id = "vfxcmt"
+text = "Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
+reason = "Restates vfxcmt.7 and its cannot-evaluate case inside the disclosure paragraph; it adds no obligation."
+
+[[exempt]]
+corpus-id = "vfxcmt"
+text = "These bounds are disclosed here, not implied covered."
+reason = "Disclosure note; no obligation of its own."
+
+[[exempt]]
+corpus-id = "csttir"
+text = "Cost is the lowest priority."
+reason = "States the tier's place in the prjint1 ordering; the obligations are csttir.1 and csttir.2."
+
+[[exempt]]
+corpus-id = "csttir"
+text = "Frugality serves\nthe work; it never overrides it."
+reason = "Summary of csttir.1; it adds no obligation."
+
+[[exempt]]
+corpus-id = "artbr1"
+text = "What lands on the protected line is the reviewed, verified state,\nnever a work in progress."
+reason = "Restates the outcome of artbr1.1 (integrate only when the checks pass); it adds no obligation of its own."
+
+[[exempt]]
+corpus-id = "artbr1"
+text = "On git the usual form is a feature branch and a pull request merged on green;\nthe mechanism varies, the gate does not."
+reason = "Illustrates artbr1.1 on git and notes that the mechanism may vary; an example, not an obligation."
+
+[[exempt]]
+corpus-id = "chkfcl"
+text = "The presence-test-then-run-or-succeed shape, which\nlets a missing declared input read as nothing to do, is exactly this failure; absence reads as a clean\nresult only for an input outside what the work declares or its specification or contract requires."
+reason = "Names a common shape of the failure chkfcl.3 forbids and restates that clause's scope; it adds no obligation."
+
+[[exempt]]
+corpus-id = "expbnd"
+text = "Ambient context is inherited mutable state not named at the point\nof use: the current working directory, the current tree or index state, the process environment, the\nwall clock, and the order in which results arrive or complete."
+reason = "Defines the ambient context that expbnd.1 to expbnd.5 govern; no obligation of its own."
+
+[[exempt]]
+corpus-id = "expbnd"
+text = "This manifests in three recurring forms."
+reason = "Signpost to the three forms that expbnd.2 to expbnd.4 govern; no obligation of its own."
+
+[[exempt]]
+corpus-id = "expbnd"
+text = "A bare mutation left in the session's working directory,\nwith no such shift confusing its target, is not thereby a violation: its ambient target is confirmed\nby observation under confirm-execution-target rather than forced to carry that flag."
+reason = "Scope carve-out bounding expbnd.3 that defers to the confirm-execution-target rule (exetgt); a permission, not an obligation."
+
+[[exempt]]
+corpus-id = "expbnd"
+text = "The preference is to remove the ambient dependency, not merely to check it: an explicit binding\nremoves that ambient dependency, whereas a confirmed ambient binding is correct only until the\nsurrounding state next shifts."
+reason = "Rationale for the preference expbnd.5 states; no obligation of its own."
+
+[[exempt]]
+corpus-id = "expbnd"
+text = "This is the prefer-removing-a-path preference applied to how an\naction names its referent, and it sits beside confirm-execution-target, which governs the residual\ncase where only an ambient binding exists, and absolute-paths, its file-path instance."
+reason = "Cross-reference to the prefer-removing-a-path (rmvpth), confirm-execution-target (exetgt) and absolute-paths rules; no obligation of its own."
+
+[[exempt]]
+corpus-id = "expbnd"
+text = "An explicit\nbinding is still not proof of intent: a named target can be the wrong target, and confirming it is\nconfirm-execution-target's obligation."
+reason = "Cross-reference: confirming a named target is the confirm-execution-target rule's (exetgt) obligation, not this rule's."
+
+[[exempt]]
+corpus-id = "expbnd"
+text = "When an ambient binding would discard uncommitted work or\nabsorb unrelated changes into a change set, preserve-uncommitted-work and separate-task-changes\ngovern that loss; this rule governs the prior choice of what the action was bound to."
+reason = "Scope note separating this rule from the preserve-uncommitted-work (prsunc) and separate-task-changes rules; no obligation of its own."
+
+[[exempt]]
+corpus-id = "prsunc"
+text = "A command that reverts a file drops uncommitted changes in it."
+reason = "Rationale for prsunc.1 and prsunc.2; no obligation of its own."
+
+[[exempt]]
+corpus-id = "prsunc"
+text = "git checkout -- <path> and git restore <path> overwrite the working tree from the index or a commit, discarding your unstaged edits; git reset --hard drops both staged and unstaged changes."
+reason = "Examples of the commands prsunc.1 and prsunc.2 govern; no obligation of their own."
+
+[[exempt]]
+corpus-id = "prsunc"
+text = "Any of them can throw away a real fix you have applied but not yet committed."
+reason = "Rationale for prsunc.2; no obligation of its own."
+
+[[exempt]]
+corpus-id = "stgprm"
+text = "Promotion that races ahead of verification, or that ships a different\nartefact than the one verified, is the failure this prevents."
+reason = "Rationale for stgprm.1 and stgprm.2; no obligation of its own."
+
+[[exempt]]
+corpus-id = "stgprm"
+text = "This governs an artefact reaching a runtime\nor distribution target, and is distinct from integrating a change into the protected line of development."
+reason = "Scope note separating this rule from the branch-and-merge-on-green rule (artbr1); no obligation of its own."
+
+[[exempt]]
+corpus-id = "trkasy"
+text = "A task started and abandoned, a background process whose completion\nis neither collected nor monitored, an asynchronous result neither awaited nor otherwise observed, or a queued\njob whose outcome no one reads, hides any failure it carries and leaves a later claim that it finished\nungrounded."
+reason = "Rationale for trkasy.1 and trkasy.2; no obligation of its own."
+
+[[exempt]]
+corpus-id = "trkasy"
+text = "Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less\nthan an explicit background dispatch does: the foreground call returns while the detached child runs on,\nso its result and its failure are lost unless they are collected."
+reason = "Classifies a detached child as launched asynchronous work, so trkasy.6 applies; no obligation of its own."
+
+[[exempt]]
+corpus-id = "wowo01"
+text = "Parallelism lives in the research stage; authority\nand seriality live in the apply stage."
+reason = "Summary of wowo01.1; it adds no obligation."
+
+[[exempt]]
+corpus-id = "wowo01"
+text = "The residual is not limited to on-disk config: it spans the non-`GIT_` environment (HOME,\nXDG_CONFIG_HOME, PATH, TMPDIR), on-disk git configuration and attributes (repository, global, or system\n`.gitconfig` and `.gitattributes`), index and ignore state, submodules and embedded repositories,\nconfigured hooks and filters, PATH-based git resolution, and partial-clone object availability, all of\nwhich git reads by design."
+reason = "Disclosed residual of wowo01.7; no obligation of its own."
+
+[[exempt]]
+corpus-id = "wowo01"
+text = "That inert guarantee is bounded, not categorical: git may additionally run a\ngit-configured (repo, global, system, or command-scope) clean/process filter, fsmonitor, or\nreference-transaction hook while the snapshot is taken,\nand a clean filter can transform the captured bytes, so the snapshot is not guaranteed byte-exact."
+reason = "Disclosed residual of wowo01.6; no obligation of its own."
+
+[[exempt]]
+corpus-id = "exetgt"
+text = "A correct\ncommand aimed by a stale kubeconfig, cloud profile, or connection string at the wrong system is still\na wrong action."
+reason = "Rationale for exetgt.1 and exetgt.2; no obligation of its own."
+
+[[exempt]]
+corpus-id = "exetgt"
+text = "The command derives that parameter for the target it is now aimed\nat, or confirms the retained value points there; a literal left in place from the command's origin is not\nthat confirmation, and a command aimed by it at the wrong target is a wrong action however correct its\nlogic."
+reason = "Restates how exetgt.6 is met (derive or confirm the parameter, never trust a literal from the origin); it adds no obligation."
+
+[[exempt]]
+corpus-id = "dfdpth"
+text = "The preference never mandates gold-plating."
+reason = "Scope note bounding dfdpth.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "dfdpth"
+text = "A layer that over-fires is not cheap: one that raises false alarms trains its own bypass and\nerodes trust in the controls around it, so a noisy layer is not the low-cost overlap this prefers, and adding\none is not warranted by this rule."
+reason = "Scope note: an over-firing layer is outside what dfdpth.1 recommends; no obligation of its own."
+
+[[exempt]]
+corpus-id = "tmrrst"
+text = "This is the companion of the kill-timeout rule:\nthat one keeps a wrapper's bound from cutting a correctly-waiting callee short, while this one\nkeeps a borrower's restore from silently moving or losing the deadline the caller had already set."
+reason = "Cross-reference to the kill-timeout rule (kltwat); no obligation of its own."
+
+[[exempt]]
+corpus-id = "kltwat"
+text = "A bound set\nbelow that budget can terminate a callee that is still behaving correctly, and the termination can then\nbe misdiagnosed as a failure of the callee or of whatever it was waiting on."
+reason = "Rationale for kltwat.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "kltwat"
+text = "An environment override meant to grant a longer wait can be silently stripped when it crosses a\nprivilege boundary, for instance when it is placed on the wrong side of a privilege-elevation command,\nso the intended wait never reaches the callee and its default applies unseen"
+reason = "States the hazard that kltwat.4, the clause after the ';', guards against; no obligation of its own."
+
+[[exempt]]
+corpus-id = "kltwat"
+text = "This is the companion of\nthe bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this\none keeps a bound that is meant to allow completion from being set below the callee's own end-to-end\nbudget, so a command that is waiting correctly is not cut short and then misread as the failure it was\ntolerating."
+reason = "Cross-reference to the bounded-consumption rule; no obligation of its own."
+
+[[exempt]]
+corpus-id = "rmvpth"
+text = "Monitoring a capability that could be removed, or constraining one the\ntask does not need at all, leaves standing an attack surface that subtraction would have eliminated."
+reason = "Rationale for rmvpth.1 and rmvpth.3; no obligation of its own."
+
+[[exempt]]
+corpus-id = "rmvpth"
+text = "This orders the hardening; it does not argue against layered defence of what\nis kept."
+reason = "Scope note relating this rule to the defence-in-depth-default rule (dfdpth); no obligation of its own."
+
+[[exempt]]
+corpus-id = "rmvpth"
+text = "It is a design-time preference over how a path is hardened, distinct from minimizing dependencies,\nwhich governs what is brought in, and from least-privilege tool scope, which governs the runtime access a\nretained capability is granted."
+reason = "Scope note separating this rule from the dependency-minimizing and least-privilege rules; no obligation of its own."
+
+[[exempt]]
+corpus-id = "rmvpth"
+text = "Using a retained, constrained path is not itself a violation."
+reason = "Scope carve-out bounding rmvpth.1; a permission, not an obligation."
+
+[[exempt]]
+corpus-id = "secaud"
+text = "This prevents or makes detectable attempts by the recorded actor to rewrite or erase its own trail."
+reason = "Rationale for secaud.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "secvln"
+text = "Authentic provenance does not make a version safe; a legitimate, correctly named package can still resolve\nto an artefact that is unsafe to ship."
+reason = "Rationale for secvln.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "secpub"
+text = "An adopter can then\nverify that what they installed matches that authenticated reference."
+reason = "Rationale for secpub.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "secthm"
+text = "This makes identified gaps reviewable before implementation rather than waiting for production evidence."
+reason = "Rationale for secthm.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "bgcwai"
+text = "A wait is a resource."
+reason = "Rationale for bgcwai.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "asadv1"
+text = "When asked to assess, advise, consider, evaluate, review, compare, or weigh something, the request is for\nanalysis, not execution."
+reason = "Defines the request class that asadv1.1 governs; the obligation (assess and stop) is asadv1.1."
+
+[[exempt]]
+corpus-id = "asadv1"
+text = "This is a specific instance of\nrequiring express authorization before execution."
+reason = "Cross-reference to the express-authorization rule (exauth); no obligation of its own."
+
+[[exempt]]
+corpus-id = "atmclm"
+text = "The mechanism can be a transaction, a conditional write, a compare-and-set, or a lock; the\natomicity is what matters, not the primitive."
+reason = "Scope note: any atomic primitive satisfies atmclm.1; it adds no obligation."
+
+[[exempt]]
+corpus-id = "atmclm"
+text = "This extends the concurrency-lease\ndiscipline from a single session's lease to selection from a shared pool."
+reason = "Cross-reference to the concurrency-lease discipline; no obligation of its own."
+
+[[exempt]]
+corpus-id = "clrfy1"
+text = "A clarifying question asked\nearly is cheaper than a confident wrong answer delivered late."
+reason = "Rationale for clrfy1.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "humovs"
+text = "Autonomy has a threshold."
+reason = "Lead-in to humovs.1 to humovs.4; no obligation of its own."
+
+[[exempt]]
+corpus-id = "recncl"
+text = "Records-first establishes the record; this keeps it true."
+reason = "Cross-reference to the records-first discipline; no obligation of its own."

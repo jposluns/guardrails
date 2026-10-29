@@ -140,21 +140,19 @@ GITIGNORE_BEGIN = "# >>> opf-managed >>>"
 GITIGNORE_END = "# <<< opf-managed <<<"
 DEFAULT_MACHINE_SUBDIR = "toml"        # standard machine-store subdir name, tried first (spec 4.4)
 MANIFEST_NAME = "manifest.toml"        # discovery marker filename (spec 4.5)
+COUNTERS_NAME = "counters.toml"        # the machine store's id high-water ledger (spec 8.2)
 STANDARD_TOKEN = "opf"          # exact discovery token in [opf].standard (spec 4.5)
-PRIOR_STANDARD_TOKEN = "devprocess"    # the RETIRED 1.0.0 discovery token (base table [devprocess]); the
-                                       # OPFiles rebrand (1.1.0) renamed it to STANDARD_TOKEN. It is
-                                       # recognized ONLY by `opf upgrade`, which passes it via accept_tokens
-                                       # so a legacy 1.0.0 store can still be located and migrated (spec 9.2).
-                                       # No other tool accepts it; the base table name always equals the
-                                       # token the base declares, so acceptance is expressed as a token set.
 MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (manifest/pointer); a larger
                                        # store input is refused rather than read unboundedly (SECA)
 SUPPORTED_SPEC_VERSION = "1.2.0"       # the OPFiles base spec_version this tooling implements; a store
                                        # declaring an OLDER spec_version is fail-closed with a distinct
-                                       # migration-needed finding naming the `opf upgrade` remedy (spec 9.x),
+                                       # finding stating that no store upgrade reaches 2.0.0,
+                                       # naming the hand step that makes its tree foreign content (spec 9.2),
                                        # and one declaring a NEWER spec_version is fail-closed with an
                                        # upgrade-the-tooling finding, except only the reserved homes-2
-                                       # declaration pair, which stays gated on activation (spec 9.2/4.2)
+                                       # declaration pair (spec_version 2.0.0 with homes = 2), which this
+                                       # tooling grades under its 1.2.0 rules (spec 16.1) and which
+                                       # homes_generation() keeps at generation 1 while SUPPORTED_HOMES is 1
 
 # Resolution outcomes.
 RESOLVED = "RESOLVED"                  # a machine store was resolved and located
@@ -376,8 +374,10 @@ def imported_series_supported():
 def imported_series_declared(manifest_data):
     """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later AND
     this tooling itself supports that series (imported_series_supported: SUPPORTED_SPEC_VERSION
-    at or above IMPORTED_SPEC_VERSION), the activation gate the imported-series registrations
-    read (spec 8.2/4.2).
+    at or above IMPORTED_SPEC_VERSION): the version-and-support half of the activation flag the
+    imported-series registrations read (spec 8.2/4.2). That flag, _opf_check.imported_series_active,
+    also requires the graded homes-2 declaration (homes_generation), since the imported series
+    activates only inside the 2.0.0 declaration.
     Graded through the house SemVer parser; an absent, non-string, or unparseable spec_version reads
     False (manifest validation, not this helper, reports it). The tooling-support condition mirrors
     homes_generation's gate on SUPPORTED_HOMES: validate_manifest does NOT fail every newer
@@ -633,13 +633,15 @@ def _close_fd_exc_safe(fd):
     inside an `except` handler of the SAME function would read that handled exception as in flight (as in
     #378), and no call site is nested that way; a platform that keeps the descriptor on a failed close
     (HP-UX, and POSIX.1-2024 as close(2) reports it) leaks it until exit, which Linux does not, and macOS
-    is assumed not to."""
+    is assumed not to. A close error raised leaves marked (_journal._mark_fd_release_raised), so a handler
+    reading OSError as a signal raises it (_journal._fd_release_fault)."""
     tb = sys.exc_info()[2]
     in_flight = tb is not None and tb.tb_frame is sys._getframe(1)
     try:
         os.close(fd)
-    except OSError:
+    except OSError as exc:
         if not in_flight:
+            _journal._mark_fd_release_raised(exc)
             raise
 
 
@@ -649,11 +651,12 @@ def _close_fd_on_exit(fd, exc_type, exc, tb):
     exception it is unwinding (the body's, or an earlier callback's close error), so the close is quiet
     while one is and propagates fail-closed when none is. One os.close either way (P1, as
     _close_fd_exc_safe): a raising close has released the number, which is never probed or closed again.
-    Returns None, so it never suppresses."""
+    Returns None, so it never suppresses. A close error raised leaves marked, as _close_fd_exc_safe's."""
     try:
         os.close(fd)
-    except OSError:
+    except OSError as cexc:
         if exc is None:
+            _journal._mark_fd_release_raised(cexc)
             raise
 
 
@@ -726,15 +729,25 @@ def _open_dir_nofollow(abspath, *, traverse_only=False):
         for index, comp in enumerate(parts[1:], 1):
             access = final_access if index == last else _WALK_O_TRAVERSE
             held.append(os.open(comp, access | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
-            _journal._close_fd_propagating(held.pop(-2))
+            try:
+                _journal._close_fd_propagating(held.pop(-2))
+            except BaseException as cexc:  # noqa: BLE001  marked: a caller never reads it as an open error
+                _journal._mark_fd_release_raised(cexc)
+                raise
         return held.pop()
     except BaseException as exc:
+        closing = []    # what a close raised that is not an OSError: resolved against `exc` below
         while held:
             try:
                 _journal._close_fd_propagating(held.pop())
             except OSError as cexc:
                 exc.add_note("additionally the no-follow walk descriptor could not be closed ({})".format(
                     cexc))
+            except BaseException as cexc:   # noqa: BLE001  keep closing; resolved below, never dropped
+                closing.append(cexc)
+        # the one first-interrupt selection: an interrupt in flight keeps propagating as itself, each
+        # close exception noted on it, and none replaces it (_journal._yield_close_exceptions)
+        _journal._yield_close_exceptions(exc, closing)
         raise
 
 
@@ -773,6 +786,7 @@ def _read_store_bytes_contained(root_fd, relpath, allowance=None):
     try:
         st = _journal._lstat_contained(root_fd, relpath)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # _lstat_contained walks the contained parents no-follow and can raise JournalError (a backslash,
         # control-character, or refused/unreadable intermediate component) or OSError; neither is a
         # StoreError, so an unwrapped raise escapes resolve_store/discover/load_manifest uncaught. Map it to
@@ -816,6 +830,7 @@ def _read_store_bytes_contained(root_fd, relpath, allowance=None):
         else:
             data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True, cap=limit)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
         # raise a BARE OSError (a device/EIO-level failure) that would otherwise escape resolve_store
         # uncaught; catch OSError alongside JournalError here (as the _lstat_contained choke point above
@@ -908,7 +923,13 @@ def _immediate_subdirs(store_root_fd, working_rel):
     try:
         return _list_real_subdirs(wfd, working_rel)
     finally:
-        _close_fd_exc_safe(wfd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(wfd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
 
 def _open_working_dir_fd(store_root_fd, working_rel):
@@ -919,9 +940,11 @@ def _open_working_dir_fd(store_root_fd, working_rel):
     _immediate_subdirs: a present non-directory or a refused symlink fails closed."""
     try:
         pfd, name = _journal._open_parent(store_root_fd, working_rel)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is never read as absent
         return None
     except (OSError, _journal.JournalError) as exc:
+        _journal._fd_release_fault(exc)    # nor as a cannot-evaluate
         raise StoreError("cannot open the store tree parent of {} ({})".format(working_rel, exc))
     wfd = None
     try:
@@ -941,12 +964,15 @@ def _open_working_dir_fd(store_root_fd, working_rel):
         # is _close_fd_exc_safe's single os.close (P1: a raising close has released its number, close(2),
         # and it is never touched again), and its close error propagates fail-closed unless an exception is
         # already in flight here, which then keeps propagating in its place.
+        inflight = _journal._in_flight_in(sys._getframe())
         try:
             _close_fd_exc_safe(pfd)
         except OSError:
             if wfd is not None:
                 _journal._close_fd_quietly(wfd)
             raise
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
     return wfd
 
 
@@ -961,6 +987,7 @@ def _list_real_subdirs(wfd, working_rel):
     try:
         names = sorted(_journal._listdir_fresh(wfd, working_rel))
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
         # an empty (no-store) directory (check-fails-closed-on-unreadable).
         raise StoreError("cannot list {} ({})".format(working_rel, exc))
@@ -977,7 +1004,7 @@ def _list_real_subdirs(wfd, working_rel):
 
 # --- discovery (spec 4.5) ----------------------------------------------------------------------------
 
-def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
+def discover_machine_store(store_root_fd, store_root):
     """Locate the single machine store under `.working/`. Returns (status, machine_dir, detail):
       "one"      exactly one immediate `.working/` subdir carries an opf manifest (machine_dir set)
       "absent"   `.working/` is absent (no store tree here at all: a genuinely un-adopted location)
@@ -989,24 +1016,19 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     result is otherwise unique, is reported as the machine_dir), but a second stray store is NOT masked
     (spec 4.5, residual 17).
 
-    `accept_tokens` is the set of discovery tokens accepted here; None means the sole current
-    STANDARD_TOKEN (the frozen general contract, spec 4.5). `opf upgrade` passes the legacy
-    PRIOR_STANDARD_TOKEN alongside it so a 1.0.0 store carrying the retired `[devprocess]` base can be
-    located for migration (spec 9.2). Because the base table name always equals the token the base
-    declares, a candidate matches when, for some accepted token, `[<token>].standard == <token>`."""
-    accept = (STANDARD_TOKEN,) if accept_tokens is None else tuple(accept_tokens)
+    A candidate matches when `[opf].standard == "opf"` (STANDARD_TOKEN, the frozen general contract,
+    spec 4.5); no other token is accepted."""
     subdirs = _immediate_subdirs(store_root_fd, WORKING_DIRNAME)
     if subdirs is None:
         return "absent", None, "{}/ is absent".format(WORKING_DIRNAME)
-    matches, legacy = _classify_working_names(
+    matches = _classify_working_names(
         subdirs,
         lambda name: _read_toml_contained(          # StoreError propagates (fail-closed)
-            store_root_fd, "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)),
-        accept)
-    return _discovery_result(matches, legacy)
+            store_root_fd, "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)))
+    return _discovery_result(matches)
 
 
-def discover_machine_store_fd(store_root_fd, accept_tokens=None, allowance=None):
+def discover_machine_store_fd(store_root_fd, allowance=None):
     """Descriptor-bound sibling of discover_machine_store (round-5 defect 1): the `.working` LISTING
     descriptor is held for the whole discovery and every listed name's manifest is read BENEATH it,
     so a `.working` swapped in after the listing is never read (the rounds-2-4 invariant: every name
@@ -1014,10 +1036,9 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None, allowance=None)
     (status, machine_dir, detail, manifest_raw): the discover_machine_store triple plus, when the
     status is "one", the resolved manifest's EXACT bytes as read through the held descriptor (None
     otherwise), so a descriptor-bound caller (resolve_store_fd, the adoption planner) parses the very
-    bytes discovery matched rather than re-opening the manifest by path. Statuses, details, StoreError
-    behaviour and `accept_tokens` are exactly discover_machine_store's. `allowance` meters each manifest
-    read (_read_store_bytes_contained); None reads unmetered."""
-    accept = (STANDARD_TOKEN,) if accept_tokens is None else tuple(accept_tokens)
+    bytes discovery matched rather than re-opening the manifest by path. Statuses, details and StoreError
+    behaviour are exactly discover_machine_store's. `allowance` meters each manifest read
+    (_read_store_bytes_contained); None reads unmetered."""
     wfd = _open_working_dir_fd(store_root_fd, WORKING_DIRNAME)
     if wfd is None:
         return "absent", None, "{}/ is absent".format(WORKING_DIRNAME), None
@@ -1034,57 +1055,45 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None, allowance=None)
             raws[name] = data
             return parsed
 
-        matches, legacy = _classify_working_names(names, load, accept)
-        status, machine_dir, detail = _discovery_result(matches, legacy)
+        matches = _classify_working_names(names, load)
+        status, machine_dir, detail = _discovery_result(matches)
         return status, machine_dir, detail, (raws.get(machine_dir) if status == "one" else None)
     finally:
-        _close_fd_exc_safe(wfd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(wfd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
 
-def _classify_working_names(names, load, accept):
+def _classify_working_names(names, load):
     """The candidate classification both discovery variants share. `load(name)` returns the parsed
     `.working/<name>/manifest.toml` (None when absent) through that variant's own read binding, raising
-    StoreError fail-closed on an unreadable or unparseable manifest. Returns (matches, legacy)."""
+    StoreError fail-closed on an unreadable or unparseable manifest. Returns the matching names."""
     matches = []
-    legacy = []
     for name in names:
         data = load(name)
         if data is None:
             continue
-        matched = False
-        for token in accept:
-            base = data.get(token)
-            if isinstance(base, dict) and base.get("standard") == token:
-                matches.append(name)
-                matched = True
-                break
-        # m2: when the CURRENT discovery accepts no legacy token but a candidate carries the RETIRED
-        # [devprocess] 1.0.0 base, collect it so the operator-facing detail can name the `opf upgrade`
-        # remedy (spec 9.2), mirroring the older-spec finding _validate_base already surfaces. This only
-        # ENRICHES the detail; the status stays "present", so resolution stays CANNOT-EVALUATE (fail-closed).
-        if not matched and PRIOR_STANDARD_TOKEN not in accept:
-            legacy_base = data.get(PRIOR_STANDARD_TOKEN)
-            if isinstance(legacy_base, dict) and legacy_base.get("standard") == PRIOR_STANDARD_TOKEN:
-                legacy.append(name)
-    return matches, legacy
+        base = data.get(STANDARD_TOKEN)
+        if isinstance(base, dict) and base.get("standard") == STANDARD_TOKEN:
+            matches.append(name)
+    return matches
 
 
-def _discovery_result(matches, legacy):
+def _discovery_result(matches):
     """The (status, machine_dir, detail) verdict both discovery variants share (spec 4.5); raises
     StoreError for a reserved sole match."""
     if not matches:
-        base_detail = "{}/ is present but no {}/*/{} declares standard = {!r}".format(
+        return "present", None, "{}/ is present but no {}/*/{} declares standard = {!r}".format(
             WORKING_DIRNAME, WORKING_DIRNAME, MANIFEST_NAME, STANDARD_TOKEN)
-        if legacy:
-            locs = ", ".join("{}/{}".format(WORKING_DIRNAME, n) for n in sorted(legacy))
-            base_detail += ("; a retired [{}] 1.0.0 store is present at {} (run `opf upgrade` to migrate "
-                            "it, spec 9.2)".format(PRIOR_STANDARD_TOKEN, locs))
-        return "present", None, base_detail
     if len(matches) > 1:
         return "multiple", None, "{} machine stores declare the opf token: {}".format(
             len(matches), ", ".join(sorted(matches)))
     # Retain the legacy staging reservation as well as the inert homes-2 names.
-    # A reserved sole match is never a machine store, including during legacy-token discovery.
+    # A reserved sole match is never a machine store.
     if matches[0] in RESERVED_MACHINE_SUBDIRS:
         raise StoreError("the machine subdirectory name {!r} is reserved for store-level control "
                          "area {}/{} (spec 4.4); it cannot name the machine store".format(
@@ -1171,14 +1180,10 @@ def _read_pointer_target(product_root_fd, relpath, allowance=None):
 
 # --- resolution (spec 4.3) ---------------------------------------------------------------------------
 
-def resolve_store(product_root, accept_tokens=None):
+def resolve_store(product_root):
     """Resolve the machine store from a product repository root (spec 4.3). Never raises for an expected
-    outcome; returns a Resolution whose status is RESOLVED, NOT_ADOPTED, or CANNOT_EVALUATE.
-
-    `accept_tokens` selects the discovery tokens accepted during machine-store discovery; None is the
-    frozen general contract (the sole current STANDARD_TOKEN, spec 4.5). Only `opf upgrade` widens it,
-    passing (STANDARD_TOKEN, PRIOR_STANDARD_TOKEN) so a legacy 1.0.0 `[devprocess]` store resolves for
-    migration (spec 9.2); every other caller keeps the default single-token discovery.
+    outcome; returns a Resolution whose status is RESOLVED, NOT_ADOPTED, or CANNOT_EVALUATE. Discovery
+    accepts the sole STANDARD_TOKEN (spec 4.5).
 
     Order (spec 4.3): the local override first, then the committed pointer; where NEITHER pointer file
     exists, the default location (`.working/` at the product root) is tried. A pointer that exists but
@@ -1225,9 +1230,16 @@ def resolve_store(product_root, accept_tokens=None):
             # override already settled (MAJOR 1).
             committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc))
     finally:
-        _close_fd_exc_safe(product_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(product_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
     if local is not None or committed is not None:
         # A pointer named the store: the override wins wholesale, else it completes with the committed
@@ -1237,19 +1249,20 @@ def resolve_store(product_root, accept_tokens=None):
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
                               product_root=product_root)
-        res = _resolve_at(store_root, source, target, pointer=True, accept_tokens=accept_tokens)
+        res = _resolve_at(store_root, source, target, pointer=True)
         res.product_root = product_root
         return res
 
     # Neither pointer file exists: try the default in-repo location.
-    res = _resolve_at(product_root, "default", None, pointer=False, accept_tokens=accept_tokens)
+    res = _resolve_at(product_root, "default", None, pointer=False)
     res.product_root = product_root
     return res
 
 
-def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
+def _resolve_at(store_root, source, target, pointer):
     """Open the store root and run discovery there. `pointer` selects the fail-closed policy: a pointer
     that resolves to a root with no (or multiple) machine store is CANNOT-EVALUATE, while the default
     fallback reports NOT-ADOPTED for a genuinely empty location (spec 4.3/4.5)."""
@@ -1275,17 +1288,27 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
         # root or ancestor is refused, MAJOR 2); the default location is the trusted product-root anchor.
         store_root_fd = _open_store_root_fd(store_root, pointer)
     except OSError as exc:
+        _journal._fd_release_fault(exc)    # the no-follow walk's close: raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, "cannot open store root {} ({})".format(store_root, exc),
                           target=target, pointer_source=source)
     try:
         try:
-            status, machine_dir, detail = discover_machine_store(
-                store_root_fd, store_root, accept_tokens=accept_tokens)
+            status, machine_dir, detail = discover_machine_store(store_root_fd, store_root)
         except StoreError as exc:
+            # a close's exception (marked as it left the close helper) is raised as itself, every fault
+            # recorded on it kept, never this cannot-evaluate posture (_store_posture_or_refuse admits a
+            # cannot-evaluate default location once fresh discovery succeeds, so it would vanish there)
+            _journal._fd_release_fault(exc)
             return Resolution(CANNOT_EVALUATE, str(exc), store_root=store_root, target=target,
                               pointer_source=source)
     finally:
-        _close_fd_exc_safe(store_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
     if status == "one":
         return Resolution(RESOLVED, detail, store_root=store_root, machine_dir=machine_dir,
@@ -1310,7 +1333,7 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
                       store_root=store_root, pointer_source=source)
 
 
-def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowance=None):
+def resolve_store_fd(product_root_fd, product_root, allowance=None):
     """Descriptor-bound resolve_store (round-5 defect 1), for a caller that already HOLDS the product
     root open and keeps that descriptor for every subsequent read (the adoption planner, which opened
     it with the _open_dir_nofollow walk). Nothing is re-resolved by path: the pointer files are read
@@ -1324,7 +1347,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowanc
     manifest's exact bytes as read through the listing descriptor (None unless RESOLVED), so the
     caller parses the same bytes discovery matched instead of re-opening the manifest by path.
     `product_root` is the path the held descriptor was opened from, used only for pointer-target
-    resolution and reporting; `accept_tokens` as in resolve_store. `allowance` meters every pointer and
+    resolution and reporting. `allowance` meters every pointer and
     manifest read (_read_store_bytes_contained), so a caller that charged resolution to its own budget
     (source discovery) is never read past that charge; a read that does not fit is CANNOT-EVALUATE. None
     (investigation and every other caller) reads unmetered. Statuses and details follow
@@ -1338,6 +1361,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowanc
         # The local override wins WHOLESALE (spec 4.3), exactly as in resolve_store (MAJOR 1).
         committed = _read_pointer_target(product_root_fd, POINTER_REL, allowance) if local is None else None
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), product_root=product_root), None
     pointer = local is not None or committed is not None
     target = local if local is not None else committed
@@ -1347,6 +1371,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowanc
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
                               product_root=product_root), None
         if store_root != product_root:
@@ -1357,8 +1382,9 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowanc
                 target=target, pointer_source=source, product_root=product_root), None
     try:
         status, machine_dir, detail, manifest_raw = discover_machine_store_fd(
-            product_root_fd, accept_tokens=accept_tokens, allowance=allowance)
+            product_root_fd, allowance=allowance)
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), store_root=product_root, target=target,
                           pointer_source=source, product_root=product_root), None
     if status == "one":
@@ -2091,9 +2117,12 @@ def _materialize_majors(value):
     return out
 
 
-def validate_manifest(data, supported_profiles=None):
+def validate_manifest(data, supported_profiles=None, *, manifest_rel=None):
     """Validate a parsed manifest against the base schema and, for each SUPPORTED profile, the profile
     schema. Returns a ManifestValidation.
+
+    manifest_rel is the store-relative path the manifest was read from, where the caller knows it; the
+    refusal of an older spec_version names it (spec 9.2), and None names "the store manifest" instead.
 
     supported_profiles is a mapping {profile_name: iterable of supported MAJOR ints}; empty or None
     means BASE-ONLY (every declared profile is recorded as present-but-unevaluated, never enforced,
@@ -2156,7 +2185,7 @@ def validate_manifest(data, supported_profiles=None):
 
     findings = []
     _validate_top_level(data, findings)
-    spec_tuple = _validate_base(base, findings)
+    spec_tuple = _validate_base(base, findings, manifest_rel)
     _validate_store_section(data.get("store"), findings)
     modules_enabled = _validate_modules(data.get("modules"), findings)
     registered_vendors = _validate_vendors(data.get("vendors"), findings)
@@ -2226,8 +2255,9 @@ def _check_enum(table, key, allowed, where, findings):
     return value
 
 
-def _validate_base(base, findings):
-    """Validate the [opf] base table; returns the parsed spec_version tuple or None."""
+def _validate_base(base, findings, manifest_rel=None):
+    """Validate the [opf] base table; returns the parsed spec_version tuple or None. manifest_rel is
+    the path validate_manifest was given, named by the older-spec_version refusal."""
     extra = set(base) - OPF_KEYS - OPF_OPTIONAL_KEYS
     if extra:
         findings.append("[opf] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
@@ -2254,11 +2284,19 @@ def _validate_base(base, findings):
             # the census in _opf_manifest_regressions pins the validator's reviewed emission-site set, and
             # a message selected above a shared censused append keeps each wording reviewable without
             # widening that set.
+            # The older refusal names the manifest path and the declared spec_version, states that no
+            # store upgrade reaches spec_version 2.0.0 (spec 9.2 defines none, and the 1.0.0 and 1.1.0
+            # route to 1.2.0 is not one), and states the hand step spec 9.2 gives a tree under a refused older
+            # manifest: the operator moves that manifest aside by hand (no OPF command writes it), after
+            # which its files are ordinary foreign content for a first adoption.
             if spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
-                mismatch = ("[opf].spec_version {} is older than the {} this tooling implements; "
-                            "run the store schema upgrade (`opf upgrade`) to migrate this store to {} "
-                            "(spec 9.x; fail-closed)".format(
-                                _safe_display(sv), SUPPORTED_SPEC_VERSION, SUPPORTED_SPEC_VERSION))
+                where = "the store manifest" if manifest_rel is None else _safe_display(manifest_rel)
+                mismatch = ("{} declares [opf].spec_version {}, older than the {} this tooling "
+                            "implements; no store upgrade reaches spec_version 2.0.0, so the store is "
+                            "refused; to adopt this tree instead, first move {} aside by hand: "
+                            "its files are then ordinary foreign content for a first adoption "
+                            "(spec 9.2; fail-closed)".format(
+                                where, _safe_display(sv), SUPPORTED_SPEC_VERSION, where))
             else:
                 mismatch = ("[opf].spec_version {} is above the {} this tooling implements; "
                             "upgrade the tooling before operating on this store "
@@ -2275,11 +2313,25 @@ def _validate_base(base, findings):
     # value is a fail-closed finding. Absence means generation 1 and is not a finding: the key becomes
     # REQUIRED only when homes 2 activates (L4). This validates the DECLARATION; homes_generation()
     # decides ACTIVATION and does not activate while SUPPORTED_HOMES == 1.
+    # homes = 2 is a valid declaration only inside the homes-2 declaration pair, spec_version
+    # HOMES2_SPEC_VERSION with homes = 2 (spec 4.2 / 9.2), so homes = 2 beside any other spec_version,
+    # an absent or unparseable one included, is a fail-closed finding for every caller of
+    # validate_manifest, not only for the record verb's journal-home probe. The check keys on the
+    # declared pair alone, never on SUPPORTED_SPEC_VERSION or SUPPORTED_HOMES. A malformed homes value
+    # keeps its own finding and never reaches the pair check. Both findings share this ONE censused
+    # emission site, as the spec_version mismatch findings above do.
     if "homes" in base:
         homes = base["homes"]
+        homes_finding = None
         if type(homes) is not int or homes not in (1, 2):
-            findings.append("[opf].homes {} is not an integer generation (1 or 2)".format(
-                _safe_display(homes)))
+            homes_finding = "[opf].homes {} is not an integer generation (1 or 2)".format(
+                _safe_display(homes))
+        elif homes == 2 and sv != HOMES2_SPEC_VERSION:
+            homes_finding = ("[opf].homes = 2 is declared with spec_version {}, but homes 2 is "
+                             "declared only by spec_version {} with homes = 2 (spec 4.2 / 9.2; "
+                             "fail-closed)".format(_safe_display(sv), HOMES2_SPEC_VERSION))
+        if homes_finding is not None:
+            findings.append(homes_finding)
     return spec_tuple
 
 
@@ -2636,13 +2688,20 @@ def load_manifest(resolution, supported_profiles=None):
     try:
         data = _read_toml_contained(store_root_fd, manifest_rel)
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
     finally:
-        _close_fd_exc_safe(store_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
     if data is None:
         # Discovery already read this file, so its disappearance now is a race/fail-closed error.
         return ManifestValidation(CANNOT_EVALUATE, ["{} vanished after discovery".format(manifest_rel)])
-    return validate_manifest(data, supported_profiles)
+    return validate_manifest(data, supported_profiles, manifest_rel=manifest_rel)
 
 
 # --- self-test ---------------------------------------------------------------------------------------
@@ -2802,7 +2861,7 @@ def self_test():
         root = build_store(make_working=False)
         check("no-store-not-adopted", resolve_store(root).status == NOT_ADOPTED)
 
-        # 3b (codex BLOCKER 1, TOCTOU): the product root is a readable directory when resolve_store opens
+        # 3b (TOCTOU): the product root is a readable directory when resolve_store opens
         # its fd, then is renamed/removed at the resolution boundary before the default-location check. That
         # disappearance is a product root that could no longer be evaluated (CANNOT-EVALUATE, exit 2), NEVER
         # a false NOT-ADOPTED that render --check would report as a clean NOT-APPLICABLE (exit 0). Simulate
@@ -2859,16 +2918,16 @@ def self_test():
         root = build_store(manifest=manifest_text(standard="dev-process"))
         check("typo-token-default-cannot-eval", resolve_store(root).status == CANNOT_EVALUATE)
 
-        # 6c (m2): a RETIRED [devprocess] 1.0.0 store discovered with the DEFAULT tokens is present-but-
-        # legacy: resolution is CANNOT-EVALUATE (fail-closed, never resolved on the retired token) and the
-        # operator-facing detail names the `opf upgrade` migration remedy (spec 9.2), mirroring the older-
-        # spec finding _validate_base surfaces on an already-[opf] store.
-        legacy_manifest = ('[devprocess]\nstandard = "devprocess"\nspec_version = "1.0.0"\n'
-                           'layout = "inline"\nposture = "required"\nimport_status = "none"\n')
-        legacy_res = resolve_store(build_store(manifest=legacy_manifest))
-        check("legacy-devprocess-default-cannot-eval", legacy_res.status == CANNOT_EVALUATE)
-        check("legacy-devprocess-names-upgrade-remedy",
-              "devprocess" in legacy_res.detail and "opf upgrade" in legacy_res.detail)
+        # 6c: a manifest whose base table is not [opf] (here a [devprocess] table declaring that token) is
+        # no discovery match: resolution is CANNOT-EVALUATE (fail-closed, never resolved), and the detail
+        # is the plain no-match detail, recognizing no other token and naming no upgrade route.
+        other_manifest = ('[devprocess]\nstandard = "devprocess"\nspec_version = "1.0.0"\n'
+                          'layout = "inline"\nposture = "required"\nimport_status = "none"\n')
+        other_res = resolve_store(build_store(manifest=other_manifest))
+        check("other-token-default-cannot-eval", other_res.status == CANNOT_EVALUATE)
+        check("other-token-detail-names-no-route",
+              other_res.detail == ".working/ is present but no .working/*/manifest.toml declares "
+                                  "standard = 'opf'")
 
         # 7: an unresolvable pointer (target dir absent) -> CANNOT-EVALUATE, no default fallback.
         root = build_store(manifest=manifest_text(),      # a valid default store IS present...
@@ -3002,15 +3061,41 @@ def self_test():
         check("wrong-typed-posture-named", any("posture must be a string" in f for f in aware.findings))
 
         # 10g: a store declaring a spec_version OLDER than SUPPORTED_SPEC_VERSION is fail-closed with a
-        # distinct migration-needed finding naming the `opf upgrade` remedy (not the confusing roster
-        # cascade); a store at the current spec_version is clean.
+        # distinct finding stating that no store upgrade reaches 2.0.0 (not the confusing roster
+        # cascade, and naming no upgrade command); a store at the current spec_version is clean.
         m_old = _t.loads(manifest_text(spec_version="1.0.0"))
         mv_old = validate_manifest(m_old)
         check("spec-version-floor-invalid", mv_old.status == INVALID)
         check("spec-version-floor-named",
-              any("older than the" in f and "opf upgrade" in f for f in mv_old.findings))
+              any("older than the" in f and "no store upgrade reaches spec_version 2.0.0" in f
+                  and "opf upgrade" not in f for f in mv_old.findings))
+        # The older refusal names the manifest path and the declared spec_version, states that no
+        # store upgrade reaches 2.0.0 and that the store is refused, and states the hand step
+        # (spec 9.2), pinned whole: rewording it, dropping the path or the hand step, or offering an
+        # upgrade again, is red.
+        floor_rel = ".working/toml/manifest.toml"
+        floor_message = (
+            "'.working/toml/manifest.toml' declares [opf].spec_version '1.0.0', older than the 1.2.0 "
+            "this tooling implements; no store upgrade reaches spec_version 2.0.0, so the store is "
+            "refused; to adopt this tree instead, first move '.working/toml/manifest.toml' "
+            "aside by hand: its files are then ordinary foreign content for a first adoption "
+            "(spec 9.2; fail-closed)")
+        check("spec-version-floor-message-pinned",
+              SUPPORTED_SPEC_VERSION == "1.2.0"
+              and floor_message in validate_manifest(m_old, manifest_rel=floor_rel).findings)
+        check("spec-version-floor-message-unnamed-path",
+              any(f.startswith("the store manifest declares [opf].spec_version '1.0.0',")
+                  and "no store upgrade reaches spec_version 2.0.0, so the store is refused" in f
+                  and "first move the store manifest aside by hand" in f for f in mv_old.findings))
         check("spec-version-current-ok",
               validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)
+        # 10g1: load_manifest threads the RESOLVED manifest's own path into validation, so the
+        # older-spec_version refusal read through store resolution names that path, never the
+        # "the store manifest" fallback.
+        mv_old_loaded = load_manifest(resolve_store(
+            build_store(manifest=manifest_text(spec_version="1.0.0"))))
+        check("spec-version-floor-load-manifest-names-path",
+              mv_old_loaded.status == INVALID and floor_message in mv_old_loaded.findings)
 
         # 10g2 (spec 9.2): a store declaring a spec_version ABOVE SUPPORTED_SPEC_VERSION is fail-closed at
         # validation with its own named finding, so older tooling never certifies a newer store (a bare
@@ -3034,7 +3119,8 @@ def self_test():
               validate_manifest(_t.loads(above_pair)).status == INVALID)
 
         # 10h: [opf].homes is an optional, validated integer generation declaration.
-        # Recognition does not activate homes 2 or require a declaration in legacy manifests.
+        # Recognition does not activate homes 2 or require a declaration in legacy manifests, and
+        # homes = 2 is valid only inside the homes-2 declaration pair (spec 4.2 / 9.2).
         homes_manifest_text = manifest_text(spec_version=SUPPORTED_SPEC_VERSION)
         homes_anchor = 'import_status = "none"'
         check("homes-fixture-anchor", homes_manifest_text.count(homes_anchor) == 1)
@@ -3048,16 +3134,35 @@ def self_test():
         check("homes-absent-legacy-generation",
               homes_generation(m_homes_absent) == 1)
 
-        for generation in (1, 2):
-            m_homes = _t.loads(homes_manifest_text.replace(
-                homes_anchor, homes_anchor + "\nhomes = {}".format(generation)))
-            mv_homes = validate_manifest(m_homes)
-            check("homes-{}-valid".format(generation),
-                  type(m_homes["opf"].get("homes")) is int
-                  and m_homes["opf"]["homes"] == generation
-                  and mv_homes.status == VALID
-                  and not any("unknown key" in f or "[opf].homes" in f
-                              for f in mv_homes.findings))
+        m_homes = _t.loads(homes_manifest_text.replace(homes_anchor, homes_anchor + "\nhomes = 1"))
+        mv_homes = validate_manifest(m_homes)
+        check("homes-1-valid",
+              type(m_homes["opf"].get("homes")) is int
+              and m_homes["opf"]["homes"] == 1
+              and mv_homes.status == VALID
+              and not any("unknown key" in f or "[opf].homes" in f
+                          for f in mv_homes.findings))
+
+        # homes = 2 outside the declaration pair is INVALID with exactly one named finding: at this
+        # tooling's spec_version, below it, above it, unparseable, and with spec_version absent. The
+        # versions are literals, never SUPPORTED_SPEC_VERSION, so each stays off the pair whatever that
+        # constant becomes. Each vector rebuilds only the [opf] table of the manifest parsed above.
+        for label, version in (("base", "1.2.0"), ("older", "1.0.0"), ("above", "1.3.0"),
+                               ("unparseable", "bad"), ("absent", None)):
+            opf_off_pair = dict(m_homes["opf"], homes=2, spec_version=version)
+            if version is None:
+                del opf_off_pair["spec_version"]
+            mv_off_pair = validate_manifest(dict(m_homes, opf=opf_off_pair))
+            check("homes-2-off-pair-{}-invalid-named".format(label),
+                  mv_off_pair.status == INVALID
+                  and sum("[opf].homes = 2 is declared with spec_version" in f
+                          and HOMES2_SPEC_VERSION in f for f in mv_off_pair.findings) == 1)
+        # The pair itself stays VALID (spec-version-ceiling-homes2-pair-recognized, above) and carries
+        # no homes finding.
+        check("homes-2-pair-no-homes-finding",
+              not any("[opf].homes" in f for f in validate_manifest(
+                  dict(m_homes, opf=dict(m_homes["opf"], homes=2,
+                                         spec_version=HOMES2_SPEC_VERSION))).findings))
 
         for label, rhs in (
                 ("zero", "0"),

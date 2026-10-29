@@ -10,14 +10,15 @@
 # and that run then ends RESULT: FAIL (the newtab-repo-contract and cited-standards-repo-contract gate lines
 # fail in such a tree too, their .github scripts not being shipped).
 #
-# The corpus is the rule files plus the OPF prompt-pack members, the adopter-facing skills that
-# opf/prompt-pack/pack.toml lists. The members sit one directory down (adopt/, flow/), so the glob is
-# recursive. Each glob must match at least one file, so an emptied directory fails closed (exit 2). The glob
-# reads Markdown only: every member pack.toml lists is a .md file, and pack.toml itself (member paths and
-# digests, not prose) is not scanned. A member added with another extension is not scanned until a glob
+# The corpus is the rule files plus the OPF prompt-pack members that opf/prompt-pack/pack.toml lists: the
+# adopter-facing skills and the import examples. The skills sit one directory down (adopt/, flow/, import/), so their
+# glob is recursive. Each glob must match at least one file, so an emptied directory fails closed (exit 2).
+# The skills glob reads Markdown only, and the import examples, the members that are not .md files, have
+# their own glob (import/examples/*.batch.toml), narrow so that pack.toml itself (member paths and digests,
+# not prose) is not scanned. A member added with another extension or elsewhere is not scanned until a glob
 # names it.
 #
 # No exclusion is recorded: when the prompt-pack glob was added, the wider scan found no numbered standard
-# designator in any member (nor in pack.toml).
+# designator in any member (nor in pack.toml), and the import examples carry none either.
 format-version = 1
-corpus = [".aiqt/core/rules/*.md", "opf/prompt-pack/**/*.md"]
+corpus = [".aiqt/core/rules/*.md", "opf/prompt-pack/**/*.md", "opf/prompt-pack/import/examples/*.batch.toml"]
