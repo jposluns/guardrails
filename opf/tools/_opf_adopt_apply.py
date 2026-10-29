@@ -1644,7 +1644,8 @@ def _root_binding(root_fd):
     kept, put back for any other worktree whose journal names its operation and whose recovery comes before any
     fresh run here, and a person deletes it only once no worktree's journal names that operation
     (_substrate_record_kept); the reconcile remedy leaves it where it is and names a person's next step where a
-    fresh run then refuses on it."""
+    fresh run then refuses on it, which that fresh run's refusal names again, conditionally
+    (_orphan_record_next_step)."""
     st = os.fstat(root_fd)
     return dict(device=st.st_dev, inode=st.st_ino)
 
@@ -1703,16 +1704,46 @@ def _substrate_record_kept(product_root, op_id):
     another worktree's journal may name that operation and that worktree's recovery needs the record back at
     its path, and a remedy cannot tell that from here. That recovery comes before any fresh run here: a fresh
     run here records its own operation at the same control root, and that worktree's recovery then refuses on
-    the recorded init history."""
+    the recorded init history. Nor does that order free a fresh run here: it refuses on that worktree's
+    operation at the same control root, first the record put back and then the one that worktree's recovery
+    records, until that recovery completes and a person removes that worktree's record, as the text warns."""
     return ("moves its substrate record of operation {} ({}), if one is there, to a place outside this product "
             "root, keeping it, never deleting it: where the repository has linked worktrees, each of them, the "
             "main one included, finds the record at that same path, so another worktree's journal may name that "
             "operation, and that worktree's reconcile and recovery then need the record put back at that path, "
             "BEFORE any fresh run here: the record is put back and that worktree's recovery completed first, "
             "since a fresh run here records its own operation at that same control root and that worktree's "
-            "recovery then refuses on the recorded init history; a person deletes the kept record only once no "
-            "worktree's journal names that operation".format(
+            "recovery then refuses on the recorded init history; after that order a fresh run here refuses in "
+            "turn on that worktree's operation at that same control root until that worktree's recovery "
+            "completes and a person removes that worktree's record from that path; a person deletes the kept "
+            "record only once no worktree's journal names that operation".format(
                 op_id, _substrate_record_said(product_root, op_id)))
+
+
+def _orphan_record_next_step(product_root, op_id):
+    """The next step a person takes where a fresh run here refuses on the substrate record of operation `op_id`
+    after the reconcile remedy moved an open init-store transaction copied in from another tree out of this
+    journal, kept: stated by that remedy (_reconcile_run) and again by the fresh run's own refusal
+    (_init_store_orphan_or_refuse), which states it conditionally since that refusal also serves this product
+    root's own init history. Neither can tell from here whether another worktree's journal names that operation:
+    every worktree of a repository with linked worktrees, the main one included, resolves the same control root,
+    and a worktree moved with a plain mv rather than `git worktree move` is listed by `git worktree list` under
+    its old path, marked prunable, while its journal still lies where it now is. So a person checks every
+    worktree first, and only where none names the operation moves the record, what its run left at the paths
+    the kept INTENT names, each staging leftover its publication left beside them (.<name>.opf-init-stage-<id>
+    in the same directory) and each directory beneath `.working` then holding nothing to a place outside the
+    product root, kept, deleting nothing; a fresh run here then publishes (the self-test executes this after
+    a kill mid-publication and after a kill between a member's link and its staging unlink)."""
+    return ("checking every worktree of the repository for a journal that names operation {}: each one git "
+            "worktree list shows, the main one included, and each moved with a plain mv rather than git worktree "
+            "move, which that list shows by its old path, marked prunable, and which is still a worktree to check "
+            "where it now lies; and only where none does, moving that record ({}), whatever its run left at the "
+            "paths the kept INTENT names, each staging leftover its publication left beside those paths "
+            "(.<name>{}<id>, in the same directory as <name>) and each directory beneath {} that then holds "
+            "nothing to a place outside this product root, keeping them, deleting nothing, after which a fresh "
+            "run here is no longer refused on them; where one does, that worktree's reconcile and recovery come "
+            "first".format(op_id, _substrate_record_said(product_root, op_id), init_op._STAGE_MARKER,
+                           store.WORKING_DIRNAME))
 
 
 def _binding_cleared_by_hand(run_id, op_id=None, product_root=None):
@@ -2141,13 +2172,8 @@ def _reconcile_run(product_root, root_fd, taken, broke):
                                   "only once no worktree's journal names that operation, and the members, staging "
                                   "leftovers and store lease its run may have published stay too. Where a fresh run "
                                   "here then refuses on that recorded operation, the next step is a person's: "
-                                  "checking every worktree of the repository (git worktree list, the main one "
-                                  "included) for a journal that names that operation, and only where none does, "
-                                  "moving that record, whatever its run left at the paths the kept INTENT names and "
-                                  "each directory beneath .working that then holds nothing to a place outside this "
-                                  "product root, keeping them, deleting nothing, after which a fresh run here is no "
-                                  "longer refused on them; where one does, that worktree's reconcile and recovery "
-                                  "come first".format(op_id, _substrate_record_said(product_root, op_id)))
+                                  "{}".format(op_id, _substrate_record_said(product_root, op_id),
+                                              _orphan_record_next_step(product_root, op_id)))
                     raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the open adoption transaction {!r} {} "
                                            "(spec 14.2). Nothing was written; a later reconcile refuses the "
                                            "same way and every run refuses into reconcile until the operator, "
@@ -4359,7 +4385,9 @@ def _init_store_orphan_or_refuse(product_root, root_fd, jr_fd, journal_root, rec
     thing it removed in `removed`, when given, so a later refusal of the same dispatch says what it
     wrote. Anything else — an initialized store's completed operation, a partial or unevaluable
     record no intent of this journal names — refuses fail-closed: recorded init history is never
-    adopted, resumed across runs, or silently chosen."""
+    adopted, resumed across runs, or silently chosen. That refusal names, conditionally, the next step
+    a person takes where this tree was copied with another tree's open init-store transaction since
+    moved out of this journal (_orphan_record_next_step)."""
     intent = None
     try:
         for txn_dir in _journal._journal_txn_dirs(jr_fd, journal_root):
@@ -4381,10 +4409,15 @@ def _init_store_orphan_or_refuse(product_root, root_fd, jr_fd, journal_root, rec
     except OSError as exc:
         raise AdoptApplyError("cannot read the product root's binding ({}); fail-closed".format(exc))
     if intent is None:
+        # The same refusal serves an initialized store's own record, so the next step is stated conditionally.
         raise AdoptApplyError("the coupled-init substrate already records init history (operation "
                               "{}) that no rolled-back init-store transaction of this adoption "
                               "journal names; it is never adopted, resumed across runs, or silently "
-                              "chosen (fail-closed)".format(record.op_id))
+                              "chosen (fail-closed). Where that operation is this product root's own "
+                              "init history, its record stays. Where instead this tree was copied with "
+                              "another tree's open init-store transaction, since moved out of this journal "
+                              "and kept as the reconcile remedy states, the next step is a person's: "
+                              "{}".format(record.op_id, _orphan_record_next_step(product_root, record.op_id)))
     # Spec 14.2: only journal state this tree's own run wrote is recovery state, so the scrub below
     # consumes the rolled-back intent only when it records the live product root's binding.
     recorded = _recorded_binding(intent["header"])
@@ -15650,6 +15683,35 @@ def _st_settled_by_hand(root, name, kept):
     _st_keep(root, "{}/{}".format(JOURNAL_REL, name), kept)
 
 
+# The cautions the init-store and reconcile remedies give against restoring from what they keep, each allowed
+# verbatim by _st_directs_copy_back; any other wording that pairs a restoring word with a kept thing is not.
+_ST_CAUTIONS = (
+    "The operator restores nothing from what is kept",
+    "restoring from them could write another tree's bytes over this one, so a person decides from the kept copies "
+    "what, if anything, is restored",
+    "The operator restores, deletes and moves nothing else",
+    "Restoring from those preimages could write another tree's bytes over this one, and deleting what its create "
+    "ops name could delete this tree's own files, so a person decides from the kept transaction whether any of this "
+    "tree's state is restored",
+)
+_ST_RESTORING = re.compile(r"\brestor\w*|\breinstat\w*|\bback\b", re.IGNORECASE)
+_ST_KEPT_THING = re.compile(r"\b(?:originals?|sources?|kept|preimages?|archives?|evidence|cop(?:y|ies))\b",
+                            re.IGNORECASE)
+
+
+def _st_directs_copy_back(text):
+    """Whether remedy `text` directs putting back, copying back or restoring something from what is kept: with
+    each of _ST_CAUTIONS cut out, any clause (ended by a sentence end, a colon, a semicolon or a parenthesis) that
+    pairs a restoring word (restore, reinstate, or `back` as in put, copy, move or want back) with a kept thing (an
+    original, a source, a preimage, the archive, the evidence, a copy, or anything kept). It reads words, not
+    meaning: a directive using no listed restoring word or no listed kept thing passes, and any other caution
+    that pairs them reads as a directive."""
+    for caution in _ST_CAUTIONS:
+        text = text.replace(caution, " ")
+    return any(_ST_RESTORING.search(clause) and _ST_KEPT_THING.search(clause)
+               for clause in re.split(r"[;:()]|\.(?=\s|$)", text))
+
+
 def _reconcile_binding_self_test(check):
     """Spec 14.2: journal state a foreign tree planted at the reserved home is touched only by a fail-closed
     refusal, never consumed as recovery state. A transaction interrupted in tree T1 right after its first op
@@ -15747,7 +15809,7 @@ def _reconcile_binding_self_test(check):
         check("reconcile-copied-in-refusal-stands-without-its-remedy",
               again == RECONCILE_UNCLASSIFIABLE and said_again == why and moves in (why or "")
               and "The operator restores, deletes and moves nothing else" in (why or "")
-              and "a person decides from the kept transaction" in (why or "")
+              and "a person decides from the kept transaction" in (why or "") and not _st_directs_copy_back(why or "")
               and "must be reconciled" in (refused_fresh or "") and state(t2) == "open", (said_again, refused_fresh))
         landed = product(t2)
         kept = str(t2) + "-kept"
@@ -15902,7 +15964,7 @@ def _reconcile_binding_self_test(check):
         check("reconcile-retirement-copy-into-sourceless-tree-restores-nothing",
               shape == ["remove", "remove", "create"] and got == RECONCILE_UNCLASSIFIABLE
               and "The operator restores, deletes and moves nothing else" in (why or "")
-              and "a person decides from the kept transaction" in (why or "")
+              and "a person decides from the kept transaction" in (why or "") and not _st_directs_copy_back(why or "")
               and product(t3) == before and not overwritten(t3, own)
               and not any(os.path.lexists(t3 / rel) for rel in sources)
               and os.path.isdir(os.path.join(kept, JOURNAL_REL, retired, "preimages")) and after == (None, []),
@@ -18077,15 +18139,21 @@ def _init_store_git_checks(check, ctx, refused):
             """Copy the directory `src` to `dst` (symlinks kept), first creating each missing directory above
             `dst` one level at a time pinned to EXACTLY 0755, the mode a run itself makes. A bare copytree
             creates those with the ambient umask (0775 under umask 002) or a default ACL on the TMPDIR, and a
-            fresh run in the product root then refuses on `.working`'s mode instead of the fact a row pins."""
-            made, parent = [], os.path.dirname(dst)
-            while not os.path.lexists(parent):
-                made.append(parent)
-                parent = os.path.dirname(parent)
-            for path in reversed(made):
-                os.mkdir(path)
-                os.chmod(path, init_op.DIR_MODE)
-            shutil.copytree(src, dst, symlinks=True)
+            fresh run in the product root then refuses on `.working`'s mode instead of the fact a row pins. The
+            copy runs under a pinned umask 002 (restored in the finally), so a dropped mode pin fails under every
+            ambient umask, never only under a group-writable one."""
+            saved_umask = os.umask(0o002)
+            try:
+                made, parent = [], os.path.dirname(dst)
+                while not os.path.lexists(parent):
+                    made.append(parent)
+                    parent = os.path.dirname(parent)
+                for path in reversed(made):
+                    os.mkdir(path)
+                    os.chmod(path, init_op.DIR_MODE)
+                shutil.copytree(src, dst, symlinks=True)
+            finally:
+                os.umask(saved_umask)
 
         def kept_by_hand(root, runs):
             """What the init-store remedy has the operator move, never delete, before any removal
@@ -18138,14 +18206,15 @@ def _init_store_git_checks(check, ctx, refused):
             moves named, the move said to come first and never to delete, then the rest moved there too, deleting
             nothing, and the substrate record of `op_id` at `record_at`, where substrate_records finds it, when one
             is given, moved out and kept, never deleted, and put back for another worktree's recovery before any
-            fresh run here; nothing is restored from what is kept, a person deciding that from the kept copies (red
-            against the remedy that removed the archive and evidence with the rest, moves the rest before the
-            originals, deletes anything, deletes the record, names the record at a path where it does not lie,
-            states no order between another worktree's recovery and a fresh run here, or directs a copy-back)."""
+            fresh run here, and that worktree's operation then refusing a fresh run here; nothing is restored from
+            what is kept, a person deciding that from the kept copies (red against the remedy that removed the
+            archive and evidence with the rest, moves the rest before the originals, deletes anything, deletes the
+            record, names the record at a path where it does not lie, states no order between another worktree's
+            recovery and a fresh run here or no refusal after it, or pairs a restoring word with a kept thing
+            anywhere outside the stated cautions, _st_directs_copy_back)."""
             said = " ".join(res.findings)
             restores_nothing = (
-                "wanted back" not in said and "copied from" not in said and "at its source path" not in said
-                and "The operator restores nothing from what is kept" in said
+                not _st_directs_copy_back(said) and "The operator restores nothing from what is kept" in said
                 and "restoring from them could write another tree's bytes over this one, so a person decides from "
                     "the kept copies what, if anything, is restored" in said)
             journal = "{}/{}".format(JOURNAL_REL, run)
@@ -18163,7 +18232,10 @@ def _init_store_git_checks(check, ctx, refused):
                     "product root, keeping it, never deleting it".format(op_id, record_at) in said
                 and "a person deletes the kept record only once no worktree's journal names that operation" in said
                 and "need the record put back at that path, BEFORE any fresh run here: the record is put back and "
-                    "that worktree's recovery completed first" in said)
+                    "that worktree's recovery completed first" in said
+                and "after that order a fresh run here refuses in turn on that worktree's operation at that same "
+                    "control root until that worktree's recovery completes and a person removes that worktree's "
+                    "record from that path" in said)
             return res.status == store.CANNOT_EVALUATE and 0 <= moves < removes and record and restores_nothing
 
         def cleared_by_hand(root, runs, records=()):
@@ -18686,6 +18758,25 @@ def _init_store_git_checks(check, ctx, refused):
               len(killed) == 1 and len(records) == 1 and remedy_said(again, killed[0], partial[0], records[0])
               and files_beneath(kept, rels) == held and files_beneath(cleared, rels) == {},
               observed=(sorted(held), sorted(files_beneath(kept, rels))))
+        # remedy_said reads a copy-back by its words, not by exact phrases: the same refusal with any of these
+        # insertions after its first move, each alone and the first three together, fails it, the wording an earlier
+        # remedy gave included, while the refusal as stated and its caution alone pass (red against a check that
+        # matches only the earlier remedy's exact phrases).
+        anchor = "to a place outside this product root, and only then moves"
+        insertions = ("having first put back, from those kept copies, any original the operator needs at its original "
+                      "location", "restore each original from the archive to where it was",
+                      "copy each needed original back into place from them",
+                      "having first copied from them any original wanted back at its source path")
+        mutants = [schema.AdoptValidation(again.status, [f.replace(anchor, "to a place outside this product root ({}), "
+                                                                           "and only then moves".format(text))
+                                                         for f in again.findings])
+                   for text in insertions + ("; ".join(insertions[:3]),)]
+        check("init-store-remedy-copy-back-wording-refused",
+              len(killed) == 1 and len(records) == 1 and remedy_said(again, killed[0], partial[0], records[0])
+              and all(m.findings != again.findings for m in mutants)
+              and not any(remedy_said(m, killed[0], partial[0], records[0]) for m in mutants)
+              and not _st_directs_copy_back("The operator restores nothing from what is kept."),
+              observed=[_st_directs_copy_back(" ".join(m.findings)) for m in mutants])
         # A product root nested in an enclosing repository keeps its substrate beneath that repository's common git
         # directory, keyed under opf-oplock/<key>, never at <product root>/.git. The same copied-in orphan there
         # (as above, the killed run's operation lock cleared by a plain recover resume and the run reconciled in
@@ -18749,10 +18840,57 @@ def _init_store_git_checks(check, ctx, refused):
 
         def leaves_record(why, op_id, at):
             """Whether a reconcile refusal leaves the substrate record of `op_id` at `at` where it is, never
-            directing its removal."""
+            directing its removal, and directs no copy-back (_st_directs_copy_back)."""
             return why is not None and (
                 "leaves its substrate record of operation {} ({}), if one is there, where it is".format(op_id, at)
-                in str(why) and "removes its substrate record" not in str(why))
+                in str(why) and "removes its substrate record" not in str(why)
+                and not _st_directs_copy_back(str(why)))
+
+        def next_step_said(res, op_id, at):
+            """Whether a refusal, the reconcile refusal or a fresh run's (`res` or its text), names the next step
+            for the record of `op_id` at `at` (_orphan_record_next_step): every worktree checked first, a worktree
+            moved with a plain mv included, and only where no journal names the operation, the record, what its run
+            left, its staging leftovers and each emptied directory moved out, kept, deleting nothing, and no
+            copy-back directed."""
+            said = " ".join(res.findings) if hasattr(res, "findings") else str(res)
+            return (("checking every worktree of the repository for a journal that names operation {}: each one "
+                     "git worktree list shows, the main one included, and each moved with a plain mv rather than "
+                     "git worktree move, which that list shows by its old path, marked prunable, and which is still "
+                     "a worktree to check where it now lies; and only where none does, moving that record ({}), "
+                     "whatever its run left at the paths the kept INTENT names, each staging leftover its "
+                     "publication left beside those paths (.<name>{}<id>, in the same directory as <name>) and each "
+                     "directory beneath {} that then holds nothing to a place outside this product root, keeping "
+                     "them, deleting nothing".format(op_id, at, init_op._STAGE_MARKER, store.WORKING_DIRNAME))
+                    in said and not _st_directs_copy_back(said))
+
+        def next_step_by_hand(root, name, record, step, staging=True):
+            """The next step those refusals name, followed in a copy with no other worktree, so no journal names the
+            operation: the record at `record` moved to `step`/<its name>, then each file the run left at a path the
+            INTENT of transaction `name` (kept in `<root>-kept`) names, with each staging leftover beside it when
+            `staging`, and each directory beneath `.working` then holding nothing, moved to the same path beneath
+            `step`, outside the product root: nothing is deleted. Returns {path: bytes} of each file moved."""
+            intent, moved = _st_intent(root + "-kept", name), {}
+            os.makedirs(step, exist_ok=True)
+            if os.path.isdir(record):
+                os.rename(record, os.path.join(step, os.path.basename(record)))
+            for op in intent["ops"]:
+                parent = os.path.dirname(op["path"])
+                leftovers = sorted(os.path.join(parent, entry) for entry in os.listdir(os.path.join(root, parent))
+                                   if entry.startswith("." + os.path.basename(op["path"]) + init_op._STAGE_MARKER)
+                                   ) if staging and os.path.isdir(os.path.join(root, parent)) else []
+                for rel in [op["path"]] + leftovers:
+                    if os.path.isfile(os.path.join(root, rel)):
+                        with open(os.path.join(root, rel), "rb") as fh:
+                            moved[rel] = fh.read()
+                        _st_keep(root, rel, step)
+            for rel in sorted({os.path.dirname(op["path"]) for op in intent["ops"]}, key=len, reverse=True):
+                emptied = os.path.join(root, rel)
+                if rel.startswith(store.WORKING_DIRNAME + "/") and os.path.isdir(emptied) and not os.listdir(emptied):
+                    if os.path.isdir(os.path.join(step, rel)):
+                        os.rmdir(emptied)  # moved: its entries already lie at the same path beneath `step`
+                    else:
+                        _st_keep(root, rel, step)
+            return moved
         why = reconcile_refusal(open_twin)
         open_op = os.path.basename(records[0]) if len(records) == 1 else None
         said = record_named(why, open_op) if why is not None and open_op else None
@@ -18768,39 +18906,42 @@ def _init_store_git_checks(check, ctx, refused):
               and os.path.isdir(os.path.join(open_twin + "-kept", JOURNAL_REL, opened[0])),
               observed=(records, str(why), after))
         # The next step that refusal names for a person, executed: a fresh run then refuses on the recorded operation
-        # the kept transaction names. This copy has no other worktree, so no journal names that operation, and once a
-        # person moves the record, the files its run left at the paths the kept INTENT names and each directory
-        # beneath .working then holding nothing outside the product root, kept, a fresh run publishes and every moved
-        # file keeps its bytes there (red against a refusal that names no next step, or one that leaves a fresh run
-        # refused after it).
+        # the kept transaction names, and that refusal names the same step, conditionally, since it also serves a
+        # store's own record. This copy has no other worktree, so no journal names that operation, and once a person
+        # moves the record, the files its run left at the paths the kept INTENT names and each directory beneath
+        # .working then holding nothing outside the product root, kept, a fresh run publishes and every moved file
+        # keeps its bytes there (red against a refusal, either one, that names no next step, or one that leaves a
+        # fresh run refused after it).
         stuck = dispatch(row, ctx(open_twin, run_id=rid(), recover=True))
         step, moved = open_twin + "-next", {}
         if len(opened) == 1 and len(records) == 1:
-            intent = _st_intent(open_twin + "-kept", opened[0])
-            os.makedirs(step)
-            os.rename(records[0], os.path.join(step, open_op))
-            for op in intent["ops"]:
-                if os.path.isfile(os.path.join(open_twin, op["path"])):
-                    with open(os.path.join(open_twin, op["path"]), "rb") as fh:
-                        moved[op["path"]] = fh.read()
-                    _st_keep(open_twin, op["path"], step)
-            for rel in sorted({os.path.dirname(op["path"]) for op in intent["ops"]}, key=len, reverse=True):
-                emptied = os.path.join(open_twin, rel)
-                if rel.startswith(store.WORKING_DIRNAME + "/") and os.path.isdir(emptied) and not os.listdir(emptied):
-                    if os.path.isdir(os.path.join(step, rel)):
-                        os.rmdir(emptied)  # moved: its entries already lie at the same path beneath `step`
-                    else:
-                        _st_keep(open_twin, rel, step)
+            moved = next_step_by_hand(open_twin, opened[0], records[0], step)
         fresh = dispatch(row, ctx(open_twin, run_id=rid()))
         check("init-store-copied-in-open-transaction-next-step-resolves",
               why is not None and "Where a fresh run here then refuses on that recorded operation, the next step is a "
-                                  "person's" in str(why)
-              and "only where none does, moving that record" in str(why)
-              and refused(stuck, "already records init history") and bool(moved)
+                                  "person's: checking every worktree" in str(why)
+              and next_step_said(why, open_op, said) and next_step_said(stuck, open_op, said)
+              and refused(stuck, "already records init history (operation {})".format(open_op))
+              and refused(stuck, "Where that operation is this product root's own init history, its record stays. "
+                                 "Where instead this tree was copied with another tree's open init-store transaction, "
+                                 "since moved out of this journal and kept as the reconcile remedy states, the next "
+                                 "step is a person's: checking every worktree")
+              and bool(moved)
               and {rel: Path(step, rel).read_bytes() for rel in moved if os.path.isfile(os.path.join(step, rel))} == moved
               and fresh.status == valid
               and store.resolve_store(open_twin).status == store.RESOLVED,
               observed=(str(why), stuck.findings, sorted(moved), fresh.findings))
+        # The reconcile refusal is read for a copy-back by its words too: the same refusal with a sentence putting each
+        # source back from the kept preimages fails the reading every reconcile row applies, while the refusal as
+        # stated passes (red against a check that matches only exact phrases).
+        stated = str(why)
+        inserted = stated.replace("reconcile finds nothing to reconcile.", "reconcile finds nothing to reconcile, "
+                                  "and then puts each source back from the kept preimages.")
+        check("init-store-reconcile-remedy-copy-back-wording-refused",
+              why is not None and inserted != stated and leaves_record(why, open_op, said)
+              and not _st_directs_copy_back(stated) and _st_directs_copy_back(inserted)
+              and not leaves_record(inserted, open_op, said),
+              observed=(_st_directs_copy_back(stated), _st_directs_copy_back(inserted)))
         # The same OPEN transaction copied alone into a sibling repository whose own init-store published its store:
         # every member present there is byte-identical to the default publication, so by path state each create op
         # reads at its poststate. Following the remedy deletes nothing: the sibling's store still resolves and its
@@ -18819,10 +18960,52 @@ def _init_store_git_checks(check, ctx, refused):
               published.status == valid and len(opened) == 1 and why is not None
               and why.finding == RECONCILE_UNCLASSIFIABLE and outside_journal(sibling) == found
               and "The operator restores, deletes and moves nothing else" in str(why)
-              and "a person decides from the kept transaction" in str(why)
+              and "a person decides from the kept transaction" in str(why) and not _st_directs_copy_back(str(why))
               and substrate_records(sibling) == own_records and reconcile(sibling) == []
               and store.resolve_store(sibling).status == store.RESOLVED,
               observed=(str(why), sorted(set(outside_journal(sibling)) ^ set(found))))
+        # The next step where the run was killed between a member's link and its staging unlink: the whole repository
+        # copied while that transaction was open, the transaction moved out as the reconcile remedy states, reconcile
+        # then finding nothing to reconcile, and the fresh run's refusal naming the step. Moving the record, what the
+        # run left at the paths the kept INTENT names and the emptied directories but not the staging leftover beside
+        # the member leaves a fresh run refused on that leftover as undispositioned .working content; once the
+        # leftover is moved out too, kept, as the step says, a fresh run publishes (red against a step that does not
+        # name the staging leftovers).
+        staged = init_op._plain_repo(os.path.join(base, "killlinked"), env)
+        rc = _init_store_child(staged, env, "linked:" + manifest_rel, row, ctx(staged, run_id=rid()))
+        init_op.run_init_operation(staged, recover=True)
+        staged_twin = os.path.join(base, "killlinkedtwin")
+        shutil.copytree(staged, staged_twin, symlinks=True)
+        s_opened = [n for n in os.listdir(_journal_root(staged_twin)) if n.endswith("." + INIT_STORE_PHASE)]
+        s_records = substrate_records(staged_twin)
+        s_op = os.path.basename(s_records[0]) if len(s_records) == 1 else None
+        s_why = reconcile_refusal(staged_twin)
+        s_leftovers = sorted(os.path.relpath(os.path.join(d, n), staged_twin) for d, _dirs, files
+                             in os.walk(os.path.join(staged_twin, store.WORKING_DIRNAME))
+                             for n in files if init_op._STAGE_MARKER in n)
+        if len(s_opened) == 1:
+            _st_settled_by_hand(staged_twin, s_opened[0], staged_twin + "-kept")
+        s_after = reconcile(staged_twin)
+        s_stuck = dispatch(row, ctx(staged_twin, run_id=rid(), recover=True))
+        s_step, s_moved, s_half = staged_twin + "-next", {}, None
+        if len(s_opened) == 1 and len(s_records) == 1:
+            s_moved = next_step_by_hand(staged_twin, s_opened[0], s_records[0], s_step, staging=False)
+            s_half = dispatch(row, ctx(staged_twin, run_id=rid()))
+            s_moved.update(next_step_by_hand(staged_twin, s_opened[0], s_records[0], s_step))
+        s_fresh = dispatch(row, ctx(staged_twin, run_id=rid()))
+        check("init-store-killed-at-link-next-step-moves-staging-leftovers",
+              rc != 0 and len(s_opened) == 1 and len(s_records) == 1 and s_why is not None and s_after == []
+              and next_step_said(s_why, s_op, s_records[0]) and next_step_said(s_stuck, s_op, s_records[0])
+              and refused(s_stuck, "already records init history (operation {})".format(s_op))
+              and [os.path.dirname(rel) for rel in s_leftovers] == [os.path.dirname(manifest_rel)]
+              and s_half is not None and all(refused(s_half, rel) for rel in s_leftovers)
+              and refused(s_half, "undispositioned foreign")
+              and set(s_leftovers) <= set(s_moved) and manifest_rel in s_moved
+              and {rel: Path(s_step, rel).read_bytes() for rel in s_moved} == s_moved
+              and s_fresh.status == valid and store.resolve_store(staged_twin).status == store.RESOLVED,
+              observed=dict(rc=rc, leftovers=s_leftovers, why=str(s_why), stuck=(s_stuck.status, s_stuck.findings),
+                            half=s_half and (s_half.status, s_half.findings), moved=sorted(s_moved),
+                            fresh=(s_fresh.status, s_fresh.findings)))
         # A linked worktree's substrate record lies in the common git directory every worktree of the repository
         # shares, the main worktree included. The same OPEN init-store transaction in worktree W of repository M
         # (added by git worktree add, the killed run's operation lock cleared by a plain recover resume, as above),
@@ -18865,6 +19048,25 @@ def _init_store_git_checks(check, ctx, refused):
         check("init-store-main-worktree-copy-remedy-keeps-shared-record",
               recovered and settled.get("main", (False,))[0],
               observed=(records, settled.get("main"), outcomes, res.findings))
+        # The worktree the next step has a person check where git worktree list no longer shows it: a worktree moved
+        # with a plain mv rather than git worktree move is listed by its old path, marked prunable, and is not listed
+        # where it now lies, which still holds its .git file, so the step names it among the worktrees to check (red
+        # against a step that names only the worktrees that list shows where they lie).
+        mmain = init_op._plain_repo(os.path.join(base, "movedmain"), env)
+        mwt = os.path.join(base, "movedwt")
+        init_op._git(["worktree", "add", "-q", "--detach", mwt], mmain, env)
+        os.rename(mwt, mwt + "-moved")
+        listed = init_op._git(["worktree", "list", "--porcelain"], mmain, env).stdout.decode("utf-8", "replace")
+        stanzas = [s.splitlines() for s in listed.split("\n\n") if s.strip()]
+        old = [s for s in stanzas if s[0] == "worktree " + mwt]
+        check("init-store-next-step-names-moved-worktree-listed-prunable",
+              len(old) == 1 and any(line.split(" ", 1)[0] == "prunable" for line in old[0])
+              and not any(s[0] == "worktree " + mwt + "-moved" for s in stanzas)
+              and os.path.isfile(os.path.join(mwt + "-moved", ".git"))
+              and "each moved with a plain mv rather than git worktree move, which that list shows by its old path, "
+                  "marked prunable, and which is still a worktree to check where it now lies"
+                  in _orphan_record_next_step(main, linked_op or "-"),
+              observed=listed)
         # The orphan path in the same shape, which reaches the init-store refusal's kept-record step: worktree V of
         # repository N killed at source:2, its operation lock cleared and its transaction reconciled in V, V's
         # journal then copied into N itself. N's recover dispatch refuses on the binding, naming the record where it
@@ -18890,6 +19092,7 @@ def _init_store_git_checks(check, ctx, refused):
         kept_record = files_beneath(kept, [orphan_op]) if orphan_op else None
         if moved_out and os.path.isdir(os.path.join(kept, orphan_op)):
             os.rename(os.path.join(kept, orphan_op), records[0])
+        put_back = dispatch(row, ctx(nmain, run_id=rid()))
         res = dispatch(row, ctx(vwt, run_id=rid(), recover=True))
         check("init-store-main-worktree-orphan-remedy-keeps-shared-record",
               rc != 0 and "rolled-back" in [outcome for _t, outcome in v_outcomes] and len(killed) == 1
@@ -18898,6 +19101,25 @@ def _init_store_git_checks(check, ctx, refused):
               and kept_record == record_bytes and res.status == valid
               and store.resolve_store(vwt).status == store.RESOLVED,
               observed=(records, said, again.findings, res.findings))
+        # What the remedy warns of after that order, executed: a fresh run in N refuses on V's operation at the
+        # control root both resolve, the record put back while V's recovery is still to come and then the operation
+        # V's recovery recorded, and once a person removes V's record from that path a fresh run in N publishes (red
+        # against a remedy that reads the order as leaving a fresh run here unrefused).
+        v_records = substrate_records(nmain)
+        v_op = os.path.basename(v_records[0]) if len(v_records) == 1 else None
+        after_order = dispatch(row, ctx(nmain, run_id=rid()))
+        if v_op is not None:
+            os.rename(v_records[0], os.path.join(kept, v_op))
+        removed = dispatch(row, ctx(nmain, run_id=rid()))
+        check("init-store-orphan-remedy-warns-fresh-run-refused-after-order",
+              remedy_said(again, killed[0], orphan_op, records[0]) and res.status == valid
+              and refused(put_back, "already records init history (operation {})".format(orphan_op))
+              and v_op is not None and v_op != orphan_op
+              and refused(after_order, "already records init history (operation {})".format(v_op))
+              and removed.status == valid and store.resolve_store(nmain).status == store.RESOLVED,
+              observed=dict(put_back=(put_back.status, put_back.findings), v_records=v_records,
+                            after_order=(after_order.status, after_order.findings),
+                            removed=(removed.status, removed.findings)))
         # The order that step states, run the other way in the same shape (worktree V2 of repository N2): a fresh run
         # in N2 after the remedy, before V2's record is put back and its recovery completed, publishes its own
         # operation at the control root V2 resolves too, and V2's recover dispatch then refuses on the recorded init
@@ -18928,7 +19150,7 @@ def _init_store_git_checks(check, ctx, refused):
               and early.status == valid and refused(late, "already records init history")
               and store.resolve_store(owt).status != store.RESOLVED,
               observed=dict(rc=rc, reconciled=o_outcomes, killed=killed, records=records, working_mode=working_mode,
-                            said=said, remedy=again.findings, early=(early.status, early.findings),
+                            said=said, remedy=(again.status, again.findings), early=(early.status, early.findings),
                             late=(late.status, late.findings), store=store.resolve_store(owt).status))
         # files_beneath, the helper every keep-originals row reads, raises on a directory it cannot list, never
         # reading it as holding nothing (red against an os.walk that drops the error and reports no file).
