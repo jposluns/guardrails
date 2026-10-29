@@ -26,8 +26,8 @@ terminal condition that blocks it; the next action meets the human-oversight thr
 authorization that threshold requires, or that authorization is in doubt; a decision reserved to a
 human, not covered by standing authorization and determining the next action, must be answered
 first; or a validation finding reveals a process-integrity or systemic lapse, of which a concrete,
-quotable self-inconsistency is one instance. These triggers are not mutually exclusive; a single
-situation may satisfy more than one, and any one of them suffices.
+quotable self-inconsistency is one instance. These triggers are not mutually exclusive, and any one
+of them suffices.
 A systemic-lapse trigger licenses only a recorded wind-down: the lapse is recorded as a fact the
 moment it is confirmed, the work is parked behind the human decision it now awaits or exits through
 the project's bounded, recorded exit, and the maintainer's later confirmation or refutation settles

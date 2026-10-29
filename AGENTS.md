@@ -22,9 +22,9 @@ the assistant actually read, so a quotation is an excerpt, never a reconstructio
 Before delivering, re-open each cited range at its stated lines and confirm that it starts and ends
 on lines that carry the cited content, not on a blank line, a comment banner, or a closing delimiter.
 
-This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the
-specific reference captured when the claim is made, never reconstructed from memory, and the
-obligations above scope that capture to a file opened this session at the commit under review.
+This rule narrows the reference-capture rule (refcap), which requires the specific reference captured
+when the claim is made, never reconstructed from memory, to a file opened this session at the commit
+under review.
 
 ## Claims about the work rest on observation
 
@@ -147,8 +147,7 @@ re-reading the resulting source and confirming the intended change is present in
 own stdout, exit code, or narration of what it did. A successful process, a narrated or reported
 replacement, a zero-match conditional skip, or an exception raised before the write can each report success
 while leaving the file unchanged, so an applier's account of itself is not the evidence this rule requires.
-This is claims-rest-on-observation applied to an edit the author did not directly make: the changed source,
-not the applier's report, is the observation completion rests on.
+This is claims-rest-on-observation applied to an edit the author did not directly make.
 
 ## A guard is only as good as its input
 
@@ -300,11 +299,11 @@ Validate an inferred premise before taking an action that depends on it.
 
 ## Verify a fix is in its commit
 
-Applying a fix on disk is not the same as landing it. Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state. A commit message that asserts a fix, with no matching change in the commit, is an inaccurate record; verify the artefact before the claim.
+Applying a fix on disk is not the same as landing it. Before recording or claiming that a fix shipped, confirm it is present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state. A claim that a change someone else drafted shipped, wherever the claim is recorded (a commit message, a report, or a ledger), is withheld unless a digest of the change as delivered, by any channel, identifies the draft, and until the draft is confirmed against the derived base (defined below) of the commit claimed to carry it: a draft is confirmed shipped, file by file, only where applying the draft's own change to that file's derived-base content reproduces the file's committed content exactly (except lines reflecting an alteration the maintainer, not the claimant, authorized on record in a place the claimant cannot write), and otherwise the claim is withheld. A commit message asserting a fix its commit lacks is an inaccurate record; verify the artefact before the claim.
 
-The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs. The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate. The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit. The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing. This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content. The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below. The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass. The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read. A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make. Uncommitted work outside the declared review set does not block the dispatch.
+The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs. The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires of a target or context parameter at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate. The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, the first parent for a merge commit, and the empty tree for a root commit. The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing. Every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution, and where one cannot, the dispatch is withheld as a cannot-evaluate, so no read either relies on resolves to bytes other than the authoritative commit's; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so none of the first three can empty a real changed set into a clean declaration or feed the verifier substituted content. The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced, not silently absorbed; this equality cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below. The working-tree cleanliness the dispatch requires over each declared path covers all of that path's uncommitted state, a difference between the declared revision and the index, one between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass. The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read. A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make. Uncommitted work outside the declared review set does not block the dispatch.
 
-This reconciliation answers only what the declaration and the repository can answer. It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it. Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base. These bounds are disclosed here, not implied covered.
+This reconciliation answers only what the declaration and the repository can answer. It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it. In a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base. These bounds are disclosed here, not implied covered.
 
 ## Anything wrong is fixed first
 
@@ -370,7 +369,7 @@ wall clock, and the order in which results arrive or complete. Where an explicit
 and unused, the action is bound to it; where only an ambient binding exists, the execution target is
 confirmed by observation before the action runs, per the confirm-execution-target discipline.
 
-This manifests in three recurring forms. An asynchronous result is correlated to the dispatch that
+This manifests in four recurring forms. An asynchronous result is correlated to the dispatch that
 produced it only through the authoritative identifier that dispatch returns, a handle, a path, or an
 id, never by wall-clock proximity or arrival order, because two dispatches can complete out of order
 or at the same instant and ambient timing cannot tell them apart; a result with no identifier is
@@ -387,11 +386,16 @@ or broad operation takes its scope from the specific thing under change, an enum
 rather than from ambient whole-tree state; a breadth selector that stages, commits, or discards
 whatever the tree currently holds can sweep in unrelated work, and where committed state is needed
 for a fixture or test, an isolated checkout provides it rather than reshaping the shared working
-tree in place.
+tree in place. At its start, a relied-on check, one whose result gates a merge, release, or
+completion claim, binds every repository it reads (any worktree or mirror of it) other than the tree
+it checks to an identified immutable snapshot, or holds a lock no writer of that repository can
+bypass for the duration of those reads, and otherwise refuses, naming that repository, even where
+the confirm-by-observation fallback above would apply; comparing HEAD at start and end is a
+diagnostic, not a binding.
 
-The preference is to remove the ambient dependency, not merely to check it: an explicit binding
-removes that ambient dependency, whereas a confirmed ambient binding is correct only until the
-surrounding state next shifts. This is the prefer-removing-a-path preference applied to how an
+The preference is to remove the ambient dependency, as an explicit binding does, not merely to check
+it: a confirmed ambient binding is correct only until the surrounding state next shifts.
+This is the prefer-removing-a-path preference applied to how an
 action names its referent, and it sits beside confirm-execution-target, which governs the residual
 case where only an ambient binding exists, and absolute-paths, its file-path instance. An explicit
 binding is still not proof of intent: a named target can be the wrong target, and confirming it is
@@ -555,7 +559,7 @@ completion: the completion signal must carry the full result, never a truncated 
 
 Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less
 than an explicit background dispatch does: the foreground call returns while the detached child runs on,
-so its result and its failure are lost unless they are collected. Such work is launched through a tracked
+so its result and failure are lost unless collected. Such work is launched through a tracked
 background mechanism that keeps its completion observable; where its result and completion are genuinely
 not needed, detaching it is a deliberate, recorded choice, not a reflex.
 
@@ -679,9 +683,9 @@ removed.
 
 The preference never mandates gold-plating. Where a layer's marginal cost is considerable, it is weighed
 rather than assumed, and omitting an expensive layer on a weighed, recorded judgement is sound, not a
-violation. A layer that over-fires is not cheap: one that raises false alarms trains its own bypass and
-erodes trust in the controls around it, so a noisy layer is not the low-cost overlap this prefers, and adding
-one is not warranted by this rule.
+violation. A layer that over-fires is not cheap: its false alarms train its own bypass and erode trust
+in the controls around it, so it is not the low-cost overlap this prefers, and this rule does not warrant
+such a layer.
 
 ## A borrowed process timer is restored elapsed-aware
 
@@ -732,7 +736,7 @@ refute rather than confirm.
 ## A kill timeout outlives the wait it bounds
 
 When a wrapper is meant to let a command finish its own work, the runtime bound it imposes is set above
-the command's intended end-to-end execution budget: its sequential waits, its retries and their backoff,
+the command's intended end-to-end budget: its sequential waits, its retries and their backoff,
 any queue residence, and the follow-on work that runs once those resolve, plus a margin. A bound set
 below that budget can terminate a callee that is still behaving correctly, and the termination can then
 be misdiagnosed as a failure of the callee or of whatever it was waiting on. Before wrapping a command
@@ -740,15 +744,14 @@ in a timeout meant to let it complete, establish the budget the command grants i
 concluding that a contended resource is starving a caller, establish that the caller actually outlived
 its own configured budget rather than being killed under it. A deliberately shorter deadline is
 legitimate where cutting the work short is the explicit intent, such as a latency limit or a fast-fail
-probe, provided the termination is attributed to that deadline rather than reported as a failure of the
+probe, provided the termination is attributed to that deadline, not reported as a failure of the
 callee. An environment override meant to grant a longer wait can be silently stripped when it crosses a
-privilege boundary, for instance when it is placed on the wrong side of a privilege-elevation command,
+privilege boundary, as when it is placed on the wrong side of a privilege-elevation command,
 so the intended wait never reaches the callee and its default applies unseen; the override is confirmed
 to land where the callee reads it rather than assumed to have carried across. This is the companion of
 the bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this
-one keeps a bound that is meant to allow completion from being set below the callee's own end-to-end
-budget, so a command that is waiting correctly is not cut short and then misread as the failure it was
-tolerating.
+one keeps a bound meant to allow completion from being set below the callee's own end-to-end budget, so
+a command that is waiting correctly is not cut short and then misread as the failure it was tolerating.
 
 ## Isolate verifiers and judge by their result signal
 
@@ -857,8 +860,8 @@ cannot-evaluate outcome guard-input-soundness names, identifying the input it co
 terminal fail-closed result, not the transient degraded delivery above that a re-dispatch can cure, so it
 is treated as not-passed and resolved by fixing the input, never a clean, passing, or finding-free verdict.
 A clean verdict asserted over an input the verifier never actually read is the same false-clean this rule
-already guards against, applied to the unreadable-required-input case, meeting the fail-closed posture
-check-fails-closed-on-unreadable requires of a gate that cannot read its own input.
+guards against, meeting the fail-closed posture check-fails-closed-on-unreadable requires of a gate
+that cannot read its own input.
 
 ## Verifier diversity
 
@@ -938,8 +941,8 @@ terminal condition that blocks it; the next action meets the human-oversight thr
 authorization that threshold requires, or that authorization is in doubt; a decision reserved to a
 human, not covered by standing authorization and determining the next action, must be answered
 first; or a validation finding reveals a process-integrity or systemic lapse, of which a concrete,
-quotable self-inconsistency is one instance. These triggers are not mutually exclusive; a single
-situation may satisfy more than one, and any one of them suffices.
+quotable self-inconsistency is one instance. These triggers are not mutually exclusive, and any one
+of them suffices.
 A systemic-lapse trigger licenses only a recorded wind-down: the lapse is recorded as a fact the
 moment it is confirmed, the work is parked behind the human decision it now awaits or exits through
 the project's bounded, recorded exit, and the maintainer's later confirmation or refutation settles
