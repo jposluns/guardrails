@@ -1770,10 +1770,16 @@ OWNERSHIP_REMEDY = ("git refused it for dubious ownership: the repository is own
                     "point --repo at a checkout you own")
 
 
-def _run_git(repo, *args):
-    """git -C `repo` with `args` under _git_read_env(), output captured."""
-    return subprocess.run(["git", "-C", str(repo)] + list(args), capture_output=True, timeout=GIT_READ_TIMEOUT,
-                          env=_git_read_env())
+def _rev_parse(repo, rev):
+    """git rev-parse of `rev` as a commit in `repo` under _git_read_env(), output captured."""
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", rev + "^{commit}"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+
+def _cat_file(repo, commit, path):
+    """git cat-file -e of `path` at `commit` in `repo` under _git_read_env(), output captured."""
+    return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", commit + ":" + path],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
 
 
 def _ownership_refused(probe):
@@ -1787,7 +1793,7 @@ def resolve_revision(repo, rev):
     resolve, a repository git refuses for its ownership (named as such), or a git that cannot be launched or
     times out, leaves the question open, never a pass."""
     try:
-        probe = _run_git(repo, "rev-parse", "--verify", "--quiet", rev + "^{commit}")
+        probe = _rev_parse(repo, rev)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CannotEvaluate("pinned revision {}: cannot run git in {}: {}".format(rev, repo, exc))
     if _ownership_refused(probe):
@@ -1803,7 +1809,7 @@ def exists_at_revision(repo, commit, path):
     working tree), or CannotEvaluate when git refuses the repository for its ownership, or cannot be launched
     or times out."""
     try:
-        probe = _run_git(repo, "cat-file", "-e", commit + ":" + path)
+        probe = _cat_file(repo, commit, path)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CannotEvaluate("cannot read {} at {} in {}: {}".format(path, commit, repo, exc))
     if _ownership_refused(probe):
@@ -3727,6 +3733,14 @@ def self_test(report_path=None):
                 return env
             return read_env
 
+        def caller_git_dir_env():
+            """_git_read_env with the caller's GIT_DIR and GIT_OBJECT_DIRECTORY put back (the GIT_ scrub undone for
+            the variables under_foreign_git_env sets); HOME and XDG_CONFIG_HOME stay pinned, so this revert never
+            reads the caller's own git configuration."""
+            env = real_read_env()
+            env.update((name, os.environ[name]) for name in ("GIT_DIR", "GIT_OBJECT_DIRECTORY") if name in os.environ)
+            return env
+
         # git's ownership refusal as it prints it in English, and a translation that keeps only the hint's command
         ownership_stderr = ("fatal: detected dubious ownership in repository at '{0}'\nTo add an exception for "
                             "this directory, call:\n\n\tgit config --global --add safe.directory {0}\n",
@@ -3747,7 +3761,7 @@ def self_test(report_path=None):
                     return subprocess.CompletedProcess(["git"], 128, b"", template.format(repo).encode("utf-8"))
 
                 printed = io.StringIO()
-                with _patched(_run_git=refused), contextlib.redirect_stdout(printed):
+                with _patched(_rev_parse=refused, _cat_file=refused), contextlib.redirect_stdout(printed):
                     code = main(argv)
                     try:
                         read = repr(exists_at_revision(repo, head, "docs/present.md"))
@@ -3879,7 +3893,7 @@ def self_test(report_path=None):
         check("revert/p3-unresolved-red", *flip([lambda: p3("docs/present.md", "0123456789ab")],
                                                 [(0, [("P3", "ADVISORY")])], resolve_revision=lambda repo, rev: rev))
         check("revert/p3-git-env-red", *flip([lambda: under_foreign_git_env()[0]], ["CannotEvaluate"],
-                                             _git_read_env=lambda: dict(os.environ)))
+                                             _git_read_env=caller_git_dir_env))
         # with the caller's HOME kept, the malformed global config there fails every read
         check("revert/p3-hermetic-config-red", *flip([lambda: under_malformed_config()[0]], ["CannotEvaluate"],
                                                      _git_read_env=caller_config_env))
