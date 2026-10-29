@@ -978,6 +978,13 @@ def _rdp_cases(tmp):
     check("rdp/malformed-binding-without-tool-input-unverifiable", _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
         hook_event_name="PreToolUse", cwd=str(mf.root), tool_name="Bash", tool_input="ls"))), "unverifiable")
     mf.write_registry(mf.binding)
+    # In a session the binding scopes, every malformed shape is withheld through the shared reader, the
+    # reason naming the malformed field.
+    _mb = [aiqt_hooks.review_dispatch_pin(dict(hook_event_name="PreToolUse", cwd=str(mf.root), session_id="s1",
+                                               tool_name="Bash", **fields)) for fields in _MALFORMED_BASH_FIELDS]
+    check("rdp/malformed-command-shapes-unverifiable",
+          [(_rdp_kind(r), "not a JSON object" in _rwh_reason(r) or "not a string" in _rwh_reason(r)) for r in _mb],
+          [("unverifiable", True)] * len(_MALFORMED_BASH_FIELDS))
     real_review_git = aiqt_hooks._review_git
 
     failed_probe = []
@@ -1276,6 +1283,27 @@ def _rwh_without_gate(fn):
         aiqt_hooks._rwh_program_gate = saved
 
 
+# A Bash payload whose command cannot be read: the six malformed command shapes (absent, null, an array, a
+# number, an object, a boolean), then a tool_input that is itself missing or not an object (the same class),
+# as the payload fields beside the event, the tool name and the cwd.
+_MALFORMED_BASH_FIELDS = (
+    {"tool_input": {}}, {"tool_input": {"command": None}}, {"tool_input": {"command": ["git", "push"]}},
+    {"tool_input": {"command": 42}}, {"tool_input": {"command": {"command": "git push"}}},
+    {"tool_input": {"command": True}}, {}, {"tool_input": None}, {"tool_input": ["git push"]},
+    {"tool_input": "git push"})
+
+
+def _lax_bash_command(fn):
+    """fn() with the reader every Bash hook shares (_bash_command) reverted to the lax read that took an
+    unreadable command for an empty one: the revert leg of the malformed-payload rows."""
+    saved = aiqt_hooks._bash_command
+    aiqt_hooks._bash_command = lambda data: ("", None)
+    try:
+        return fn()
+    finally:
+        aiqt_hooks._bash_command = saved
+
+
 def _rwh_reason(result):
     """The decision reason text of a hook result, '' when it carries none: some refuse cases share
     one kind (unverifiable) and are told apart by the cause their reason names."""
@@ -1332,6 +1360,19 @@ def _rwh_cases(tmp):
         return _rdp_kind(run(cwd, command))
 
     marker("rev-1")
+
+    def malformed_kinds():
+        return [_rdp_kind(aiqt_hooks.review_workdir_hold(dict(
+            hook_event_name="PreToolUse", cwd=str(main), session_id="s1", tool_name="Bash", **fields)))
+            for fields in _MALFORMED_BASH_FIELDS]
+    # while a hold is live, every malformed shape the shared reader reports is withheld, its reason naming
+    # the malformed field; with the hold reader reverted the same shapes are allowed (red on revert)
+    _mh = aiqt_hooks.review_workdir_hold(dict(hook_event_name="PreToolUse", cwd=str(main), session_id="s1",
+                                              tool_name="Bash", tool_input={"command": True}))
+    check("rwh/malformed-command-live-hold-unverifiable-red-on-revert",
+          [malformed_kinds(), "tool_input.command is a boolean" in _rwh_reason(_mh),
+           _rwh_without_hold(malformed_kinds)],
+          [["unverifiable"] * len(_MALFORMED_BASH_FIELDS), True, ["allow"] * len(_MALFORMED_BASH_FIELDS)])
     # ---------- refuse cases (git forms that can reach the held worktree), each red on revert ----------
     co = "git -C " + str(held) + " checkout " + seed
     check("rwh/held-checkout-denies-red-on-revert",
@@ -13001,6 +13042,12 @@ def _main_isolated(report_path=None):
               raw({"tool_input": {"command": "ls", "run_in_background": None}}), "deny")
         check("trunc/malformed-fg-command-nonstr-denies", raw({"tool_input": {"command": 42}}), "deny")
         check("trunc/malformed-fg-command-missing-denies", raw({"tool_input": {}}), "deny")
+        # every malformed shape of the class, foreground and (for the six command shapes) background
+        check("trunc/malformed-command-shapes-deny",
+              [raw(fields) for fields in _MALFORMED_BASH_FIELDS] +
+              [raw({"tool_input": dict(fields["tool_input"], run_in_background=True)})
+               for fields in _MALFORMED_BASH_FIELDS[:6]],
+              ["deny"] * (len(_MALFORMED_BASH_FIELDS) + 6))
         check("trunc/rib-omitted-foreground-allows", raw({"tool_input": {"command": "ls -la"}}), "allow")
         check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
               "deny")
@@ -14506,6 +14553,15 @@ def _main_isolated(report_path=None):
             w.payload("PreToolUse", "Bash", {}))), "deny")
         check("wl/failopen-empty", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             w.payload("PreToolUse", "Bash", {"command": ""}))), "allow")
+        # Every malformed shape denies in registry scope through the shared reader, and each goes red (the
+        # empty-command allow) with that reader reverted to the lax read.
+
+        def _wl_shapes():
+            return [_verdict(aiqt_hooks.orch_untracked_wait_loop(w.payload(
+                "PreToolUse", extra=dict({"tool_name": "Bash"}, **fields)))) for fields in _MALFORMED_BASH_FIELDS]
+        check("wl/failclosed-malformed-shapes", _wl_shapes(), ["deny"] * len(_MALFORMED_BASH_FIELDS))
+        check("wl/failclosed-malformed-shapes-red-on-lax-read", _lax_bash_command(_wl_shapes),
+              ["allow"] * len(_MALFORMED_BASH_FIELDS))
         wi = Fixture(tmp, "waitloop-inert")
         (wi.root / ".aiqt" / "orchestration.local.json").unlink()
         check("wl/failopen-no-registry", _verdict(aiqt_hooks.orch_untracked_wait_loop(

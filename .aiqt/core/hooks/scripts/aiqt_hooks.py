@@ -58,8 +58,12 @@ option-classifier and helper narration that still uses the historical term.
 Error posture at the PreToolUse layer: FAIL CLOSED. A control that cannot read the input it is meant to
 cover, or is invoked in a context it does not understand, DENIES rather than waving the action through (per
 integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command string, or an
-unreadable required field deny (except where the check is a pure convention nudge - abspth, expbnd - whose
-unreadable-input case allows with a note, since there is no hazard to fail closed on). A confirmed violation
+unreadable required field deny. Every Bash hook reads its command through one shared reader (_bash_command),
+so a tool_input that is missing or not an object, or a command that is missing or not a string, reads the
+same way in each, and a hook that judges the command denies it with a reason naming the malformed field
+(_deny_unreadable_command), the convention-nudge Bash hooks (abspth, expbnd) included, since each also has
+a deny tier that may sit in what was not read. The hooks scoped by an orchestration registry, a review
+dispatch binding or a review hold read it that way only inside their scope. A confirmed violation
 denies. A clean pass emits NO decision and exits 0 silently.
 
 gensrc_guard (gensrc): a CONFIRMED registry match (a hand-edit of a registered generated artefact) DENIES
@@ -366,7 +370,7 @@ NOTE_CONSTRUCTORS = (
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
+    "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
     "_protected_line_fallback", "_raw_push_guard", "_redirect_deny", "_wrtscp_deny")
 
@@ -428,6 +432,35 @@ def _deny_missing_tool_name(rule):
     return _deny("AIQT rule {} (fail-closed): malformed payload: missing tool_name.".format(rule),
                  "AIQT guardrail: denied a PreToolUse call with no tool_name (rule {}, fail-closed)."
                  .format(rule))
+
+
+def _bash_command(data):
+    """The one reader of a Bash payload's command, shared by every Bash hook so that none reads it more
+    laxly than the others: (command, None) when tool_input is a JSON object whose command member is a
+    string (an empty string included: it is readable and runs nothing), otherwise (None, detail), where
+    detail names the malformed field and what it held (a tool_input that is missing or not an object, or
+    a command that is missing, null, or an array, number, object or boolean). A hook that judges the
+    command cannot clear what it did not read, so it fails closed on that detail
+    (_deny_unreadable_command)."""
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
+        return None, "its tool_input is {}, not a JSON object".format(kind)
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        kind = "missing" if "command" not in tool_input else _orch_json_kind(command)
+        return None, "its tool_input.command is {}, not a string".format(kind)
+    return command, None
+
+
+def _deny_unreadable_command(rule, check, detail):
+    """Fail closed on a Bash payload whose command _bash_command could not read: the reason names the
+    malformed field (detail) and the check that could not run over it."""
+    return _deny("AIQT rule {}: the Bash payload carried no readable command string ({}), so the {} could "
+                 "not run; failing closed. Re-issue the call with a tool_input object carrying a string "
+                 "command.".format(rule, detail, check),
+                 "AIQT guardrail: denied a Bash call with no readable command (rule {}, fail-closed)."
+                 .format(rule.split(" ", 1)[0]))
 
 
 # --- shared raw-command tokenizer (quote/redirect-aware) ---------------------------------------------
@@ -3743,12 +3776,9 @@ def diff_source_pretool(data):
         return _deny_missing_tool_name("cnsdif")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule cnsdif (no-console-diff-dumps): the Bash payload carried no readable command "
-            "string, so the diff-source check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("cnsdif (no-console-diff-dumps)", "diff-source check", unread)
     reads = _SubstHeredocs.reads
     try:
         segments = _lex_command(command)
@@ -4566,12 +4596,9 @@ def commit_identity(data):
         return _deny_missing_tool_name("cmtidn")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule cmtidn (commit-identity): the Bash payload carried no readable command string, "
-            "so the commit-identity check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("cmtidn (commit-identity)", "commit-identity check", unread)
     reads = _SubstHeredocs.reads
     try:
         hit = find_ai_authorship(command)
@@ -5581,11 +5608,13 @@ def bash_absolute_paths(data):
         return _deny_missing_tool_name("abspth")
     if tool != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command:
-        # Cannot read the command to resolve either position: allow with a note (absolute-paths is a
-        # convention nudge, not a hazard; hooks never ask).
+    command, unread = _bash_command(data)
+    if unread is not None:
+        # A truncating redirect to a relative target, the deny tier, may sit in what was not read.
+        return _deny_unreadable_command("abspth (absolute-paths)", "relative-cwd check", unread)
+    if not command:
+        # An empty command runs nothing: allow with a note (absolute-paths is a convention nudge, not a
+        # hazard; hooks never ask).
         return _allow_note(
             "AIQT guardrail (rule abspth, absolute-paths): the Bash payload carried no readable command "
             "string, so the relative-cwd check could not run. Allowing; prefer absolute paths so a command "
@@ -7187,9 +7216,12 @@ def git_explicit_binding(data):
         return _deny_missing_tool_name("expbnd")
     if tool != "Bash":
         return _allow()
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command:
+    command, unread = _bash_command(data)
+    if unread is not None:
+        # The breadth-then-publish pair, the deny tier, may sit in what was not read.
+        return _deny_unreadable_command("expbnd (explicit-binding-over-ambient-context)",
+                                        "explicit-binding check", unread)
+    if not command:
         return _allow_note(
             "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
@@ -7327,12 +7359,13 @@ def git_stash_ref(data):
     another stash verb, or an operand the lexer could not read: an over-note, never a refusal), and text
     naming no such pair allows. A command whose '#' the lexer cannot judge that way gets the note when its
     text (_hash_doubt_scan) names git and stash, or holds quoting that text does not decode
-    (_hash_doubt_opaque), since the lexer read nothing past that '#'. An absent/unreadable command gets the
-    sibling's convention note.
+    (_hash_doubt_opaque), since the lexer read nothing past that '#'. An empty command gets the sibling's
+    convention note; a tool_input that is missing or not an object, or a command that is missing or not a
+    string, denies (_bash_command, _deny_unreadable_command), as it does in the sibling.
     This note can co-occur with git_discard's raw/pristine fallback note on a wrapped or compound
     pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
     pop`); such sibling notes are consistent, never conflicting.
-    Only missing tool_name produces a structured deny;
+    Only a missing tool_name and an unreadable command produce a structured deny;
     a miswired event hard-blocks and dispatcher errors retain the manifest's fail-closed posture."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_stash_ref wired to unexpected event {!r}; failing "
@@ -7342,9 +7375,11 @@ def git_stash_ref(data):
         return _deny_missing_tool_name("expbnd")
     if tool != "Bash":
         return _allow()
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command:
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("expbnd (explicit-binding-over-ambient-context)", "stash-ref check",
+                                        unread)
+    if not command:
         return _allow_note(
             "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
@@ -10422,17 +10457,12 @@ def git_discard(data):
         return _deny_missing_tool_name("prsunc")
     if tool_name != "Bash":
         return _allow()  # boundary: a present non-Bash tool is out of scope
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
+    command, unread = _bash_command(data)
+    if unread is not None:
         # A missing, non-object or non-string command container is a cannot-evaluate input, not the true
         # boundary: a discard could hide in what was not read, so it denies under the shared fail-closed
         # contract (check-fails-closed-on-unreadable) rather than passing clean.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the Bash payload carried no readable command "
-            "string, so the discard check could not run; failing closed. Re-issue the call with a string "
-            "command.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule prsunc, fail-closed).")
+        return _deny_unreadable_command("prsunc (preserve-uncommitted-work)", "discard check", unread)
     try:
         # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
         # segment with no command word, and _pristine_single_bare_git returns before reading the segments
@@ -12604,12 +12634,9 @@ def protected_line(data):
         return _deny_missing_tool_name("prtbrn")
     if tool_name != "Bash":
         return _allow()
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule prtbrn (protected-branch-integrity): the Bash payload carried no readable command "
-            "string, so the protected-line check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule prtbrn, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("prtbrn (protected-branch-integrity)", "protected-line check", unread)
     # After the input validation above (the PreToolUse
     # event, the Bash tool, and a readable command string), the raw-text backstop runs
     # unconditionally on every call, ahead of the commit-grammar reading and the lexer, so no
@@ -13253,13 +13280,9 @@ def branch_root(data):
         return _deny_missing_tool_name("brnrot")
     if tool_name != "Bash":
         return _allow()
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule brnrot (branch-rooted-on-live-main): the Bash payload carried no readable "
-            "command string, so branch creation could not be checked; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("brnrot (branch-rooted-on-live-main)", "branch-creation check", unread)
     named = _git_alias_named(command)
     built = False  # a git command that reads as under an alias only through a word built at run time (_BRNROT_BUILT)
     reads = _SubstHeredocs.reads
@@ -16177,12 +16200,9 @@ def gate_weakening(data):
         return _deny_missing_tool_name("gatdis")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule gatdis (gate-discipline): the Bash payload carried no readable command string, "
-            "so the gate-weakening check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("gatdis (gate-discipline)", "gate-weakening check", unread)
     reads = _SubstHeredocs.reads
     try:
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
@@ -16609,15 +16629,10 @@ def commit_msg_subst(data):
         return _deny_missing_tool_name("sectvl")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command "
-            "string, so the git-commit argument substitution check could not run; it is denied fail-safe "
-            "(the payload could not be parsed safely). Re-issue a well-formed Bash command.",
-            "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
-            "(rule sectvl, fail-safe).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("sectvl (tool-argument-validation)",
+                                        "git-commit argument substitution check", unread)
     reads = _SubstHeredocs.reads
     try:
         # _commit_msg_subst_hit reads only the segment's own words, and finds no git commit in a segment with
@@ -16859,13 +16874,18 @@ def secrets_shift_left(data):
     # A non-dict tool_input cannot answer the scan; fail CLOSED cleanly in-handler (mirrors git_discard's
     # isinstance-dict guard) rather than raising an AttributeError only the dispatcher would catch.
     tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
+    if tool_name == "Bash":
+        # The Bash command comes through the reader every Bash hook shares.
+        target, unread = _bash_command(data)
+        if unread is not None:
+            return _deny_unreadable_command("secsec (keep-secrets-out)", "secret scan", unread)
+    elif not isinstance(tool_input, dict):
         return _deny(
             "AIQT rule secsec (keep-secrets-out): the {} payload carried no readable tool_input, so the "
             "secret scan could not run over what would be written; failing closed.".format(tool_name),
             "AIQT guardrail: denied a {} call with no readable payload (rule secsec, fail-closed)."
             .format(tool_name))
-    if tool_name == "MultiEdit":
+    elif tool_name == "MultiEdit":
         target = _secsec_multiedit_text(tool_input)
         if target is None:
             return _deny(
@@ -21941,17 +21961,13 @@ def orch_untracked_wait_loop(data):
     status, _reg = _orch_registry(root)
     if status == "absent":
         return _allow()                     # no registry at the git toplevel: inert (the truncation guard's walk may still find one above)
-    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    command = tool_input.get("command")
-    if not isinstance(command, str):
+    command, unread = _bash_command(data)
+    if unread is not None:
         # In registry scope a missing, non-object or non-string command is a cannot-evaluate input: the
         # loop scan cannot run over what was not read, so it denies (check-fails-closed-on-unreadable)
         # rather than passing clean.
-        return _deny(
-            "AIQT rule trkasy (untracked wait loop): the Bash payload carried no readable command string, "
-            "so this guard could not scan it for an untracked background wait loop; failing closed. "
-            "Re-issue the call with a string command.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-closed).")
+        return _deny_unreadable_command("trkasy (untracked wait loop)", "untracked background wait loop scan",
+                                        unread)
     if not command:
         return _allow()                     # an empty command runs nothing: no loop to scan, out of scope
     if _orch_bg_poll_loop(command) == "match":
@@ -24626,9 +24642,9 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
     declared command elsewhere (_rdp_mentions) is UNVERIFIABLE, and one that names none is allowed. Names
     are compared without regard to case, since a case-insensitive filesystem runs ORCH-DISPATCH as
     orch-dispatch."""
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return ("unverifiable", "the Bash tool_input carries no command string")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return ("unverifiable", "the Bash payload carries no command string ({})".format(unread))
     commands = cfg["commands"]
     words, why = _rdp_plain_words(command, commands)
     if words is None:
@@ -26810,8 +26826,7 @@ def _rwh_decide(data):
     ignored with a note; a live marker whose recorded head differs from its worktree's HEAD notes
     the drift without denying."""
     cwd = data.get("cwd")
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    command, unread = _bash_command(data)
     views, holds, cw_cache, notes = {}, {}, {}, []
     # the NUL test runs before isdir, which raises on an embedded NUL; a nonexistent absolute cwd
     # is the same fail-closed case (git cannot be asked anything there, so neither can its holds)
@@ -26821,12 +26836,13 @@ def _rwh_decide(data):
     s_state, s_payload = _rwh_holds(sview[1], holds, notes) if isinstance(sview, tuple) \
         else ("absent", [])
     s_live = s_payload if s_state == "ok" else []
-    if not isinstance(command, str) or not command:
+    if unread is not None or not command:
         if s_state == "bad":
             return ("deny", _rwh_bad_text(s_payload))
         if s_live:
-            return ("unverifiable", "AIQT rule rvwpin: the Bash command is absent or unreadable while "
-                    "a review hold is live, so a mutation of the held worktree cannot be ruled out.")
+            return ("unverifiable", "AIQT rule rvwpin: the Bash command is absent or unreadable{} while "
+                    "a review hold is live, so a mutation of the held worktree cannot be ruled out."
+                    .format(" ({})".format(unread) if unread is not None else ""))
         if not cwd_ok:
             return ("unverifiable", _rwh_cwd_text(cwd))
         if sview is _RWH_VIEW_ERROR:

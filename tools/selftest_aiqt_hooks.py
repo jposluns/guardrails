@@ -2468,20 +2468,26 @@ def _test_git_stash_ref(failures):
         if result != aiqt_hooks._deny_missing_tool_name("expbnd"):
             failures.append("{}: expected shared missing-tool deny, got {!r}".format(label, result))
 
-    # These payloads take the sibling's exact unreadable-command note path.
-    for tool_input in (None, [], {}, {"command": None}, {"command": 42}, {"command": ""}):
+    # An unreadable command denies through the shared reader, as in the sibling; an empty command is
+    # readable and takes the sibling's exact convention note.
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}):
         data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
                 "tool_input": tool_input}
         result = run("(sr-unreadable)", data)
         code, stdout_obj, stderr = result
-        if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
-                isinstance(stdout_obj, dict) and
-                isinstance(stdout_obj.get("systemMessage"), str) and
-                stdout_obj["systemMessage"] and
-                "hookSpecificOutput" not in stdout_obj and
-                "permissionDecision" not in stdout_obj and stderr is None):
-            failures.append("(sr-unreadable) expected sibling note for {!r}, got {!r}"
+        if _reduce_result(code, stdout_obj) != "deny" or stderr is not None:
+            failures.append("(sr-unreadable) expected the unreadable-command deny for {!r}, got {!r}"
                             .format(tool_input, result))
+    data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "tool_input": {"command": ""}}
+    result = run("(sr-empty)", data)
+    code, stdout_obj, stderr = result
+    if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
+            isinstance(stdout_obj, dict) and
+            isinstance(stdout_obj.get("systemMessage"), str) and
+            stdout_obj["systemMessage"] and
+            "hookSpecificOutput" not in stdout_obj and
+            "permissionDecision" not in stdout_obj and stderr is None):
+        failures.append("(sr-empty) expected sibling note for an empty command, got {!r}".format(result))
 
     data = payload("git stash pop")
     data["tool_name"] = "Read"
@@ -2498,6 +2504,68 @@ def _test_git_stash_ref(failures):
     if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
             aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
+# A Bash payload whose command cannot be read: the six malformed command shapes, then a tool_input that is
+# itself missing or not an object (the same class). Each row is (name, the payload fields beside
+# hook_event_name and tool_name, the phrase the deny reason must hold to name the malformed field).
+_MALFORMED_BASH_INPUTS = (
+    ("command-absent", {"tool_input": {}}, "tool_input.command is missing"),
+    ("command-null", {"tool_input": {"command": None}}, "tool_input.command is null"),
+    ("command-list", {"tool_input": {"command": ["git", "push"]}}, "tool_input.command is an array"),
+    ("command-int", {"tool_input": {"command": 42}}, "tool_input.command is a number"),
+    ("command-object", {"tool_input": {"command": {"command": "git push"}}}, "tool_input.command is an object"),
+    ("command-bool", {"tool_input": {"command": True}}, "tool_input.command is a boolean"),
+    ("tool-input-absent", {}, "tool_input is missing"),
+    ("tool-input-null", {"tool_input": None}, "tool_input is null"),
+    ("tool-input-list", {"tool_input": ["git push"]}, "tool_input is an array"),
+    ("tool-input-string", {"tool_input": "git push"}, "tool_input is a string"),
+)
+# The Bash hooks with a deny tier that judge every session's commands. The others read the command only
+# inside the scope an orchestration registry, a review dispatch binding or a live review hold gives them,
+# and inert outside it, so tools/selftest_orch_hooks.py builds that scope for their rows.
+_SCOPED_BASH_HANDLERS = frozenset((
+    "orch_truncation_guard", "orch_untracked_wait_loop", "review_dispatch_pin", "review_workdir_hold"))
+
+
+def _malformed_bash_handlers():
+    """The handler of every PreToolUse hook the manifest registers for Bash with the block default, outside
+    _SCOPED_BASH_HANDLERS, read from the manifest itself so a new Bash hook is covered when it lands."""
+    hooks = load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+    return [h["handler"] for h in hooks
+            if h.get("event") == "PreToolUse" and h.get("default") == "block" and h.get("matcher")
+            and re.fullmatch(h["matcher"], "Bash") and h["handler"] not in _SCOPED_BASH_HANDLERS]
+
+
+def _test_malformed_bash_payload(failures):
+    """Every always-on Bash hook with a deny tier denies each _MALFORMED_BASH_INPUTS shape with a reason
+    naming the malformed field, and each case goes red with the shared reader (_bash_command) reverted to
+    the lax read that took an unreadable command for an empty one; a well-formed command is judged as
+    before (the rows above pin it), and an empty one still reads as a command."""
+    names = _malformed_bash_handlers()
+    if len(names) < 11:
+        failures.append("(mbp-enumeration) expected at least the 11 always-on Bash hooks with a deny tier in the "
+                        "manifest, got {!r}".format(names))
+    saved = aiqt_hooks._bash_command
+    for name in names:
+        handler = aiqt_hooks.HANDLERS[name]
+        for shape, fields, phrase in _MALFORMED_BASH_INPUTS:
+            data = dict({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash"}, **fields)
+            code, stdout_obj, _stderr = handler(data)
+            got = _reduce_result(code, stdout_obj)
+            reason = (stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                      if isinstance(stdout_obj, dict) else "")
+            if got != "deny" or phrase not in reason:
+                failures.append("(mbp-{}-{}) a Bash payload whose {} must deny with a reason naming it; got {} "
+                                "({!r})".format(name, shape, phrase, got, reason))
+            aiqt_hooks._bash_command = lambda payload: ("", None)
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                aiqt_hooks._bash_command = saved
+            if _reduce_result(code, stdout_obj) == "deny":
+                failures.append("(mbp-{}-{}-revert) with the shared reader reverted to the lax read the case "
+                                "must go red (not deny), so the deny comes from the reader".format(name, shape))
 
 
 # === PreToolUse deadline posture ======================================================================
@@ -23697,15 +23765,18 @@ def _main_isolated(monitor):
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": {"command": 5}}) != "allow-note":
-            failures.append("(ap-c29) non-string command allows with a note (abspth is a convention, not a "
-                            "hazard; cannot read)")
+                          "tool_input": {"command": 5}}) != "deny":
+            failures.append("(ap-c29) non-string command denies (a truncating redirect, the deny tier, may sit "
+                            "in what was not read)")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": None}) != "allow-note":
-            failures.append("(ap-c30) non-mapping tool_input allows with a note (cannot read command)")
+                          "tool_input": None}) != "deny":
+            failures.append("(ap-c30) non-mapping tool_input denies (cannot read command)")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": {}}) != "allow-note":
-            failures.append("(ap-c31) missing command allows with a note (cannot read)")
+                          "tool_input": {}}) != "deny":
+            failures.append("(ap-c31) missing command denies (cannot read)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {"command": ""}}) != "allow-note":
+            failures.append("(ap-c31b) an empty command is readable and still allows with a note")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Read",
                           "tool_input": {"command": "cd rel"}}) != "allow":
             failures.append("(ap-c32) out-of-scope tool must allow (matcher governs)")
@@ -23792,9 +23863,13 @@ def _main_isolated(monitor):
         ebexpect("(eb-e16) unparseable command outside the visible patterns allows",
                  'ls -la "unbalanced', "allow")
         if _reduce(aiqt_hooks.git_explicit_binding,
-                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "allow-note":
-            failures.append("(eb-e17) absent command allows with a note (expbnd is a binding convention, not a "
-                            "hazard; cannot evaluate target or scope)")
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "deny":
+            failures.append("(eb-e17) absent command denies (the breadth-then-publish pair, the deny tier, may "
+                            "sit in what was not read)")
+        if _reduce(aiqt_hooks.git_explicit_binding,
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": ""}}) != "allow-note":
+            failures.append("(eb-e17b) an empty command is readable and still allows with a note")
         if _reduce(aiqt_hooks.git_explicit_binding,
                    {"hook_event_name": "PreToolUse", "tool_input": {"command": "git commit -m x"}}) != "deny":
             failures.append("(eb-e18) missing tool_name must DENY (shared fail-closed contract)")
@@ -24251,6 +24326,7 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_malformed_bash_payload(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
@@ -25197,7 +25273,7 @@ def _main_isolated(monitor):
           "cnsdif (diff_source_pretool) DENIES-and-educates a confirmed console diff dump and ALLOWS "
           "with a note any producer-capable-but-unproven or unparseable form (a convention, not a "
           "hazard). abspth (bash_absolute_paths) ALLOWS with a note a relative or opaque cd/redirect and "
-          "an unreadable command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
+          "an empty command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
           "('>'/'>|'/'&>'/'>&') to a relative or opaque target (it could zero the wrong file; finding 10). "
           "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
           "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "
