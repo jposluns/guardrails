@@ -2329,7 +2329,7 @@ def _make_stash_fixture(repo, failures):
 def _symlink_probe(target, link, failures):
     """Create and remove a probe symlink at link and return True; on a platform that cannot create it
     record the NAMED cannot-evaluate failure and return False. A failure to REMOVE the probe link once it
-    was created is its own named failure (cs-symlink-cleanup), never conflated with creation failure: the
+    was created is its own named failure (ws-cs-symlink-cleanup), never conflated with creation failure: the
     platform can create symlinks, so this still returns True and the symlink cases still run."""
     try:
         os.symlink(str(target), str(link))
@@ -2340,7 +2340,7 @@ def _symlink_probe(target, link, failures):
     try:
         os.unlink(str(link))
     except OSError as exc:
-        failures.append("(cs-symlink-cleanup) the symlink probe was created but could not be unlinked ({}); "
+        failures.append("(ws-cs-symlink-cleanup) the symlink probe was created but could not be unlinked ({}); "
                         "the frozen-floor, frozen-registry and lexical-tree symlink cases still "
                         "ran".format(exc))
     return True
@@ -2368,6 +2368,7 @@ def _test_cannot_evaluate_paths(failures, tmp):
     # A probe link that is created but cannot be removed records its own named failure and still lets the
     # symlink cases run: the removal is made to fail by an os.unlink that raises, put back before the link
     # is removed for real.
+    name = "ws-cs-symlink-cleanup"
     link = tmp / "cannot-evaluate-cleanup-link"
     probe = []
     real_unlink = os.unlink
@@ -2379,8 +2380,8 @@ def _test_cannot_evaluate_paths(failures, tmp):
         made = _symlink_probe(tmp, link, probe)
     finally:
         os.unlink = real_unlink
-    if made is not True or len(probe) != 1 or not probe[0].startswith("(cs-symlink-cleanup)"):
-        failures.append("(cs-symlink-cleanup-inject) a probe link that cannot be removed must record the named "
+    if made is not True or len(probe) != 1 or not probe[0].startswith("(" + name + ")"):
+        failures.append("(ws-cs-symlink-cleanup-inject) a probe link that cannot be removed must record the named "
                         "cleanup failure and still run the case; got made={!r} recorded={!r}".format(made, probe))
     if os.path.lexists(str(link)):
         os.unlink(str(link))
@@ -2553,9 +2554,10 @@ def _test_git_stash_ref(failures):
 
 # The destructive guard's text-marker regex and function-header pattern as they stood before their linear
 # rewrites (_destruct_text_search, and the third alternative of _DESTRUCT_SHADOW_RE), kept verbatim as the
-# references those rewrites must agree with (_destruct_scan_equivalence_failures).
+# references those rewrites must agree with (_destruct_scan_equivalence_failures). A pattern opening with a
+# group is passed by keyword so the label-unique check never reads its text as a case label.
 _DESTRUCT_TEXT_RE_BEFORE = re.compile(
-    r"(?<![\w.-])(?:rm|rmdir|unlink|shred|truncate|dropdb|mke2fs|mkswap|wipefs|mkfs(?:\.\w+)?)(?![\w.-])"
+    pattern=r"(?<![\w.-])(?:rm|rmdir|unlink|shred|truncate|dropdb|mke2fs|mkswap|wipefs|mkfs(?:\.\w+)?)(?![\w.-])"
     r"|(?<![\w.-])dd\s[^\n]*\bof="
     r"|(?<![\w.-])find\s[^\n]*\s-delete\b"
     r"|(?<![\w.-])kubectl\s[^\n]*\bdelete\b"
@@ -2595,20 +2597,20 @@ _DESTRUCT_SHADOW_EDGES = (
 # each head and option, a stop character between them, a tail on the next line, a backslash, newline or head
 # run with and without a hit after it, Unicode space and word characters, and the case-folded spellings.
 _DESTRUCT_WRITER_RES_BEFORE = (
-    re.compile(r"(?<![\w.-])curl(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-[oO]|-s[oO]|--output)(?![\w.-])"),
-    re.compile(r"(?<![\w.-])wget(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-O|--output-document)(?![\w.-])"),
-    re.compile(r"(?<![\w.-])tar(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-C(?![\w.-])"),
-    re.compile(r"(?<![\w.-])unzip(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-d(?![\w.-])"),
-    re.compile(r"(?<![\w.-])chmod(?![\w.-])[^\n;&|()`]*?\+x"),
-    re.compile(r"(?<![\w.-])(?:python3?|perl|ruby|node)(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-[ce](?![\w.-])"),
+    re.compile(pattern=r"(?<![\w.-])curl(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-[oO]|-s[oO]|--output)(?![\w.-])"),
+    re.compile(pattern=r"(?<![\w.-])wget(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-O|--output-document)(?![\w.-])"),
+    re.compile(pattern=r"(?<![\w.-])tar(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-C(?![\w.-])"),
+    re.compile(pattern=r"(?<![\w.-])unzip(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-d(?![\w.-])"),
+    re.compile(pattern=r"(?<![\w.-])chmod(?![\w.-])[^\n;&|()`]*?\+x"),
+    re.compile(pattern=r"(?<![\w.-])(?:python3?|perl|ruby|node)(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-[ce](?![\w.-])"),
 )
 _DESTRUCT_SQL_EXEC_RE_BEFORE = {
-    "psql": re.compile(r"(?is)\\+(?:!|e[fv]?\b|ir?\b|include(?:_relative)?\b|(?:gx?|o|w|copy)\b[^\n]*\|)"
-                       r"|\bcopy\b[^;]*\b(?:to|from)\s+program\b"),
-    "mysql": re.compile(r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
-    "mariadb": re.compile(r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
-    "sqlite3": re.compile(r"(?im)(?:^|\n)\s*\.(?:shell|system|import|load|read)\b"
-                          r"|(?:^|\n)\s*\.(?:output|once)\s+[\x22\x27]?\|"),
+    "psql": re.compile(pattern=r"(?is)\\+(?:!|e[fv]?\b|ir?\b|include(?:_relative)?\b|(?:gx?|o|w|copy)\b[^\n]*\|)"
+                               r"|\bcopy\b[^;]*\b(?:to|from)\s+program\b"),
+    "mysql": re.compile(pattern=r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
+    "mariadb": re.compile(pattern=r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
+    "sqlite3": re.compile(pattern=r"(?im)(?:^|\n)\s*\.(?:shell|system|import|load|read)\b"
+                                  r"|(?:^|\n)\s*\.(?:output|once)\s+[\x22\x27]?\|"),
 }
 _DESTRUCT_WRITER_EDGES = (
     "curl -o f", "curl x -O f", "curl -so f", "curl -sO f", "curl --output f", "curl -oo f", "curl -o.f",
