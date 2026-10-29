@@ -1244,33 +1244,58 @@ def self_test(report_path=None):
     check("revert/custom-base-exception-guard-narrowed-red",
           all(rc == 1 and "Stop" in output for rc, output in own), own)
 
-    # and so is one that opf.py's _bootstrap() imports for the self-test, past its ImportError and OSError arms: a
-    # copy of this gate beside a copy of opf.py in a scratch tree of stub helpers, _opf_worklog ending its import
-    # with a SystemExit(0) or a bare sys.exit(), exits 2; with the _bootstrap() call moved out of its guard the
-    # SystemExit escapes and the self-test exits 0
+    # and so is one that opf.py's _bootstrap() imports for the self-test, at either of the two layers that catch it.
+    # opf.py's _bootstrap() maps any import-time fault but a KeyboardInterrupt (its except BaseException arm and its
+    # bare arm) to its exit 2, and the gate's check of that status turns it into the self-test's exit 2: a copy of
+    # this gate beside a copy of opf.py in a scratch tree of stub helpers, _opf_worklog ending its import with a
+    # SystemExit(0) or a bare sys.exit(), exits 2 with opf.py's cannot-bootstrap line and the gate's fixed line;
+    # with that status check removed (in a copy with the guard in main() removed as well) the self-test goes on
+    # past the failed bootstrap and exits 1. The gate's own guard around the _bootstrap() call catches what an
+    # opf.py without those two arms lets through: beside such a copy the same helper exits 2 with the cause the
+    # guard names; with the call moved out of that guard the SystemExit escapes and the self-test exits 0
     bootstrap_guard = "    try:\n        bootstrapped = opf._bootstrap()\n"
     outside = removed_main.replace(bootstrap_guard, "    bootstrapped = opf._bootstrap()\n    try:\n        pass\n")
-    with_opf = dict(stubs, **{"opf/tools/opf.py": (OPF_TOOLS / "opf.py").read_text(encoding="utf-8")})
+    status_check = "    if bootstrapped != 0:\n"
+    unchecked = removed_main.replace(status_check, "    if False:\n")
+    opf_source = (OPF_TOOLS / "opf.py").read_text(encoding="utf-8")
+    broad_arms = ("    except BaseException as exc:  # an import-time fault is a cannot-evaluate, never exit 0 or 1\n",
+                  "        return EXIT_MALFORMED\n    return EXIT_OK\n")
+    arms_anchored = all(opf_source.count(anchor) == 1 for anchor in broad_arms)
+    arms_end = opf_source.find(broad_arms[1]) + len("        return EXIT_MALFORMED\n")
+    with_opf = dict(stubs, **{"opf/tools/opf.py": opf_source})
+    with_narrow_opf = dict(stubs, **{"opf/tools/opf.py": opf_source[:opf_source.find(broad_arms[0])]
+                                     + opf_source[arms_end:]})
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
         bootstrapping = {}
         for kind, text in (("exit-0", system_exit_0), ("bare-exit", bare_exit)):
-            for removed in (False, True):
-                bootstrapping[kind, removed] = launch(Path(tmp, "bootstrap-{}-{}".format(kind, int(removed))), None,
-                                                      "opf/tools/_opf_worklog.py", text, ["--self-test"], None,
-                                                      with_opf, outside if removed else None)
+            for layer, helpers, gate in (("mapped", with_opf, source), ("unchecked", with_opf, unchecked),
+                                         ("guarded", with_narrow_opf, source), ("removed", with_narrow_opf, outside)):
+                bootstrapping[kind, layer] = launch(Path(tmp, "bootstrap-{}-{}".format(kind, layer)), None,
+                                                    "opf/tools/_opf_worklog.py", text, ["--self-test"], None,
+                                                    helpers, gate)
     finally:
         shutil.rmtree(tmp)
-    for check_id, kind, removed, rc in (
-        ("live/self-test-bootstrap-helper-system-exit-0-cannot-evaluate", "exit-0", False, 2),
-        ("revert/self-test-bootstrap-guard-removed-system-exit-0-red", "exit-0", True, 0),
-        ("live/self-test-bootstrap-helper-bare-sys-exit-cannot-evaluate", "bare-exit", False, 2),
-        ("revert/self-test-bootstrap-guard-removed-bare-sys-exit-red", "bare-exit", True, 0),
+    mapped = "opf: cannot bootstrap: helper _opf_worklog raised SystemExit ("
+    for check_id, kind, layer, rc in (
+        ("live/self-test-bootstrap-helper-mapped-system-exit-0-cannot-evaluate", "exit-0", "mapped", 2),
+        ("revert/self-test-bootstrap-status-check-removed-system-exit-0-red", "exit-0", "unchecked", 1),
+        ("live/self-test-bootstrap-helper-mapped-bare-sys-exit-cannot-evaluate", "bare-exit", "mapped", 2),
+        ("revert/self-test-bootstrap-status-check-removed-bare-sys-exit-red", "bare-exit", "unchecked", 1),
+        ("live/self-test-bootstrap-helper-system-exit-0-cannot-evaluate", "exit-0", "guarded", 2),
+        ("revert/self-test-bootstrap-guard-removed-system-exit-0-red", "exit-0", "removed", 0),
+        ("live/self-test-bootstrap-helper-bare-sys-exit-cannot-evaluate", "bare-exit", "guarded", 2),
+        ("revert/self-test-bootstrap-guard-removed-bare-sys-exit-red", "bare-exit", "removed", 0),
     ):
-        found, output = bootstrapping[kind, removed]
-        check(check_id, source.count(bootstrap_guard) == 1 and found == rc
-              and (removed or "CANNOT EVALUATE" in output and "bootstrapped\n  cause: SystemExit" in output),
-              (found, output))
+        found, output = bootstrapping[kind, layer]
+        shown = {"mapped": mapped in output and "SELF-TEST CANNOT EVALUATE: opf-declaration: opf.py helpers could "
+                 "not be bootstrapped\n" in output and "  cause:" not in output,
+                 "unchecked": mapped in output and "CANNOT EVALUATE" not in output,
+                 "guarded": mapped not in output and "CANNOT EVALUATE" in output
+                 and "bootstrapped\n  cause: SystemExit" in output,
+                 "removed": "CANNOT EVALUATE" not in output}[layer]
+        check(check_id, arms_anchored and source.count(bootstrap_guard) == source.count(status_check) == 1
+              and found == rc and shown, (found, output))
 
     # and so is any escape from the gate body once the helpers are loaded: a copy of this gate in a scratch tree of
     # stub helpers, one helper function raising a SystemExit(0) or a RuntimeError when the gate calls it during
@@ -1312,7 +1337,9 @@ def self_test(report_path=None):
     # exit 2 at every site that describes a caught exception: the site prints its fixed line first and the cause
     # line falls back to the type name; with that site reverted to the single print that formats the cause into
     # its line, the SystemExit escapes and the gate exits 0 (a site inside run() or the self-test is reverted in a
-    # copy with the guard in main() removed as well, and every site in a copy whose entry point calls main() bare)
+    # copy with the guard in main() removed as well, and every site in a copy whose entry point calls main() bare;
+    # the bootstrap site beside the copy of opf.py without its broad arms, since opf.py's own arms map the cause
+    # before that site sees it)
     unprintable = "class Unprintable(Exception):\n    def __str__(self):\n        raise SystemExit(0)\n\n\n"
 
     def single_print(what, name, self_test=False):
@@ -1338,7 +1365,7 @@ def self_test(report_path=None):
             ("self-test", "self-test", "opf/tools/opf.py", unprintable + "raise Unprintable()\n", ["--self-test"],
              stubs),
             ("bootstrap", "bootstrap", "opf/tools/_opf_worklog.py", unprintable + "raise Unprintable()\n",
-             ["--self-test"], with_opf),
+             ["--self-test"], with_narrow_opf),
             ("main-run", "main", "opf/tools/_opf_declaration.py",
              unprintable + "def parse_declaration(data):\n    raise Unprintable()\n", [], tree),
             ("main-self-test", "main", "opf/tools/_opf_declaration.py",
@@ -1367,7 +1394,8 @@ def self_test(report_path=None):
     ):
         found, output = undescribed[name, reverted]
         what = describing[site][0].split('"')[1]
-        check(check_id, source.count(describing[site][0]) == 1 and found == rc and (reverted or (
+        check(check_id, source.count(describing[site][0]) == 1 and (site != "bootstrap" or arms_anchored)
+              and found == rc and (reverted or (
             "CANNOT EVALUATE" in output and what + "\n  cause: Unprintable (its message cannot be read)\n" in output)),
               (found, output))
 
@@ -1495,7 +1523,8 @@ def self_test(report_path=None):
     # claims KeyboardInterrupt, ends the gate with exit 2 and that site's fixed line; with the site's test back on
     # isinstance (a site inside run() or the self-test in a copy with the guard in main() removed as well, and every
     # site in a copy whose entry point calls main() bare) the first exits 0 on that SystemExit and the second is
-    # re-raised, exiting 1 with a traceback
+    # re-raised, exiting 1 with a traceback (the bootstrap site is driven beside the copy of opf.py without its
+    # broad arms, which would otherwise map either exception before that site sees it)
     class_raises = ("class ClassRaises(Exception):\n    @property\n    def __class__(self):\n"
                     "        raise SystemExit(0)\n\n\n")
     class_claims = "class ClaimsInterrupt(Exception):\n    __class__ = KeyboardInterrupt\n\n\n"
@@ -1518,14 +1547,15 @@ def self_test(report_path=None):
             ("tools", "tools/check_selftest_execution.py", "raise {}\n", [], stubs),
             ("run", "opf/tools/_opf_store.py", "raise {}\n", [], stubs),
             ("self-test", "opf/tools/opf.py", "raise {}\n", ["--self-test"], stubs),
-            ("bootstrap", "opf/tools/_opf_worklog.py", "raise {}\n", ["--self-test"], with_opf),
+            ("bootstrap", "opf/tools/_opf_worklog.py", "raise {}\n", ["--self-test"], with_narrow_opf),
             ("main", "opf/tools/_opf_declaration.py", "def parse_declaration(data):\n    raise {}\n", [], tree),
         ):
             gate = (called if site in ("tools", "main") else removed_main).replace(told[site], on_isinstance(told[site]))
             for kind, text in (("raises", class_raises + raising.format("ClassRaises('its __class__ raises')")),
                                ("claims", class_claims + raising.format("ClaimsInterrupt('not an interrupt')"))):
                 for reverted in (False, True):
-                    lying[site, kind, reverted] = (source.count(told[site]) == 1,) + launch(
+                    lying[site, kind, reverted] = (source.count(told[site]) == 1
+                                                   and (site != "bootstrap" or arms_anchored),) + launch(
                         Path(tmp, "lying-{}-{}-{}".format(site, kind, int(reverted))), None, rel, text, args, None,
                         helpers, gate if reverted else source)
     finally:
