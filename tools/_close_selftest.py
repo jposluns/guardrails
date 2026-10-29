@@ -296,7 +296,7 @@ def _st_close_run(call, masking, expect, watch=True):
     # A deliberately leaked number is reported and left open: the harness records no opens, so it cannot
     # prove the number is still the tested call's own. Another thread may have reused it (a released
     # number included) through os.open, builtin open() or any other route, so closing it could close
-    # someone else's descriptor (#378 P1).
+    # someone else's descriptor (#378, single close).
     leaked = sorted(fd for fd, ident in after.items() if before.get(fd) != ident)
     if leaked:
         problems.append("LEAK: descriptor(s) {} survived the failing close".format(leaked))
@@ -320,7 +320,7 @@ def _st_close_check(ns, vectors):
     assertion alone. `ns` is the namespace whose close helpers the sites resolve at call time. A vector is
     (label, masking, flips, call, expect). The flips: A, _close_fd_yielding replaced by
     _close_fd_propagating, so every site is back to propagating (red: MASKED); B, the helper always quiet
-    (red: SILENT); C, the caller-frame check removed (red: SILENT); R (RECLOSE), the pre-P1 bodies of
+    (red: SILENT); C, the caller-frame check removed (red: SILENT); R (RECLOSE), the pre-single-close bodies of
     _close_fd_propagating and _close_fd_quietly put back, which fstat the number after a failed close and
     close it again when it looks open (red: REUSE alone, so this leg runs with the PROBE watch off); P, an
     fstat probe after the failed close with no second close (red: PROBE); F, the same probe made with
