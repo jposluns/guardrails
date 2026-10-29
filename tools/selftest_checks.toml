@@ -1277,7 +1277,7 @@ expected-check-ids = [
   "attest/anchor-fifo-holds-without-blocking",
   "attest/anchor-regular-after-type-vectors-ok",
   "attest/git-failure-tracked-decision-holds",
-  # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
+  # ---------- the systemic-lapse lifecycle (verdict-preservation legs) ----------
   "lapse/klass-recorded",
   "lapse/no-bypass-still-denies",
   "lapse/park-allows-with-disposition",

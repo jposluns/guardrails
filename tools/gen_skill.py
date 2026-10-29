@@ -125,7 +125,7 @@ ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.6.zip")  # the versi
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
-# gate read from). The public attribution line (GD-56) is built from the [plugin] author-name here plus
+# gate read from). The public attribution line is built from the [plugin] author-name here plus
 # the pack's public source URL, so the maintainer's name is never a literal in any scanned source file;
 # it enters the two download artefacts only, where the portability gate carries its narrow exemption.
 IDENTITY_MANIFEST_PARTS = (".aiqt", "core", "hooks", "manifest.toml")
@@ -166,7 +166,7 @@ _EVIDENCE_VERSION_END = re.compile(r"(?:\Z|[ \t\n]|\.(?:\Z|[ \t\n]|<))")
 RENDERER_DECL = {"renderer-id": "skill", "semantics-revision": 2}
 # GENSRC_OUTPUTS is STATICALLY parsed by gen_gensrc.py and must be a LITERAL (a tuple of dict literals),
 # so each source list is inlined rather than shared through a name. The hooks manifest is a content-bearing
-# source: the public attribution line (GD-56) is rendered from its [plugin] author-name, so a change to that
+# source: the public attribution line is rendered from its [plugin] author-name, so a change to that
 # name changes these outputs and must re-trigger regeneration. LICENSE is likewise a content-bearing source
 # of the two download zips: render_zip packs it as a member, so a LICENSE edit changes those archives.
 GENSRC_OUTPUTS = (
@@ -451,7 +451,7 @@ def render_skill(data):
         "# Rules\n\n" + data["body_rules"],
         _conduct_block(data),
         _security_block(data),
-        # Public attribution footer (GD-56): attributes both the project and the maintainer under the
+        # Public attribution footer: attributes both the project and the maintainer under the
         # pack's Apache License 2.0. The portability gate carries a narrow, reviewed exemption for exactly this line.
         "---\n\n" + data["attribution"],
     ]
@@ -865,7 +865,7 @@ def plugin_identity(root, root_fd=None):
         # build_outputs surfaces as exit 2 and passes unchanged. tomllib raises RecursionError (a RuntimeError)
         # on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more than 1000 dotted
         # parts, and MemoryError on a many-part key under a memory limit; map each into that family
-        # (F-TOML-BARE-VALUEERROR-CLASS). A MemoryError is named as the resource failure it is, never as
+        # (a bare parser error is not a TOMLDecodeError). A MemoryError is named as the resource failure it is, never as
         # nesting.
         if isinstance(exc, ValueError):
             raise
@@ -885,7 +885,7 @@ def plugin_identity(root, root_fd=None):
 
 
 def attribution_string(name):
-    """The public attribution line (GD-56), built from the operator name plus the pack's public source URL,
+    """The public attribution line, built from the operator name plus the pack's public source URL,
     so the maintainer's name is never a literal in a scanned source file. The exact string must match the
     portability gate's exempt line."""
     return "AIQT Guardrails by {}, {}, Apache License 2.0".format(name, ATTRIBUTION_SOURCE_URL)
@@ -1123,7 +1123,7 @@ def main():
 #   3. a hand-edited (drifted) SKILL.md makes --check report drift (exit 1),
 #   4. an orphan file in the reserved output subtree is detected (exit 1),
 #   5. an invalid-UTF-8 reserved target fails closed (exit 2), not a raw UnicodeDecodeError traceback:
-#      guards the widened (OSError, UnicodeError) reconcile arm (F-154),
+#      guards the widened (OSError, UnicodeError) reconcile arm, so an unreadable target fails closed,
 #   6. a stale versioned zip or ANY undeclared top-level entry (the allow-list) is never deleted: a normal
 #      run fails closed (exit 2, writing nothing) and --check exits 1, each naming the entry for git rm,
 #   7. the scan refuses by lstat a symlink, directory or dangling link at a skill zip name (including the
@@ -1307,7 +1307,7 @@ def self_test_main():
         return 2
     try:
         # 1. Well-formed source renders and round-trips clean.
-        # 0. F-TOML-BARE-VALUEERROR-CLASS: a parser overflow in the identity manifest makes tomllib raise
+        # 0. A parser overflow in the identity manifest makes tomllib raise
         #    RecursionError (a RuntimeError, not a ValueError); plugin_identity must map it into the ValueError
         #    family run_gen surfaces as exit 2, carrying the overflow.
         #    The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
@@ -1338,7 +1338,7 @@ def self_test_main():
         finally:
             tomllib.loads, tomllib.load = real_loads, real_load
 
-        # F-TOML-BARE-VALUEERROR-CLASS, memory leg: an injected MemoryError at the parse maps into the same
+        # Memory leg: an injected MemoryError at the parse maps into the same
         # ValueError family but is named as a memory failure, never as nesting.
         def oom_loads(text, **kwargs):
             if "injected-overflow" in text:
@@ -1799,7 +1799,7 @@ def self_test_main():
             os.rename(str(moved), str(rdl))
 
         # 13. A hard link at a declared output is refused and named in both modes (exit 2), never read and
-        #     accepted, whether its content matches (round-4 QA: --check passed it) or has drifted (a normal
+        #     accepted, whether its content matches (--check must not pass it) or has drifted (a normal
         #     run regenerated it silently); both names keep their bytes. Red if the link-count refusal is
         #     dropped. The writer itself still never writes THROUGH a hard link: it renames a fresh inode over
         #     the directory entry, so the outside name keeps its bytes (and the output drops to one link). Red
@@ -1856,7 +1856,7 @@ def self_test_main():
                 code, out))
         ver = zip_versioned_version()
         cur_line = "The chat skill now served from the install page is {} under the Apache License 2.0.\n"
-        # The canonical-form rule (round-4 QA, both reviews): the raw page must mention 'served from the'
+        # The canonical-form rule: the raw page must mention 'served from the'
         # exactly once, in the one plain canonical sentence. Each of these is drift (exit 1) naming the page:
         # a second mention, styled, linked or commented; a current sentence with markup or an entity between
         # the phrase and the version, or capitalized, wrapped or commented; and a version followed by anything
@@ -2067,7 +2067,7 @@ def self_test_main():
         # 20. The repository root is opened ONCE per run and EVERY walk starts from that descriptor: the
         #     fixture's root path is swapped for a symlink to an outside look-alike tree right after the run
         #     opens it. The look-alike differs from the real tree once per walk, so a walk that reopens the
-        #     root by path goes red whichever walk it is (round-4 and round-5 QA): its instructions file is
+        #     root by path goes red whichever walk it is: its instructions file is
         #     current while the real one is drifted (an output READER that reopens sees no drift and the real
         #     file stays drifted); each input this generator reads differs (its LICENSE, its skill-source.md body
         #     and its hooks-manifest author name, so an input read that reopens renders outside content into
@@ -2153,7 +2153,7 @@ def self_test_main():
                             "the evidence read or another walk reopens the root by path), got {}\n{}".format(
                                 code, out))
 
-        # 21. Inputs are read through the descriptor reader too (round-4 QA, both reviews): a symlink at
+        # 21. Inputs are read through the descriptor reader too: a symlink at
         #     LICENSE, skill-source.md or the hooks manifest, pointing at an outside file, is refused in both
         #     modes (exit 2, named), never read through or packed into the zip. Red if any of the three is
         #     read by plain path.
@@ -2198,7 +2198,7 @@ def self_test_main():
             outside_hl.unlink()
         # A FIFO at LICENSE is refused at once in both modes, never blocking the run; and a FIFO at one output
         # plus a drifted other output makes a normal run exit 2 having written nothing (the pre-write pass;
-        # round-4 QA codex 4). Each bounded by a 10 s alarm; red if an input is read by plain path (it blocks)
+        # so a partial write never lands). Each bounded by a 10 s alarm; red if an input is read by plain path (it blocks)
         # or an output is written before every output's type is checked.
         if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
             class _Blocked21(Exception):

@@ -349,7 +349,7 @@ def load_config(path):
         cfg = tomllib.loads(raw.decode("utf-8"))
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise ConfigError("malformed assurance config {}: {}".format(path, exc))
     # SCHEMA validation, past mere parseability: the config must be a table with a [surfaces] table, and
@@ -1026,7 +1026,7 @@ def _self_test_isolated():
         # 17. DISCRIMINATING (FAIL/available is legitimate): a FAIL on an AVAILABLE surface is a real verdict
         #     (the surface was present and probed, the audit's check observed the property violated), so
         #     validate_result ACCEPTS it; an UNVERIFIABLE carrying the available kind is still REJECTED. A
-        #     guard that rejects EVERY non-PASS available result (the round-1 regression) fails the accept half.
+        #     guard that rejects EVERY non-PASS available result (an over-strict guard) fails the accept half.
         try:
             validate_result({"schema": RESULT_SCHEMA, "status": FAIL, "kind": KIND_AVAILABLE,
                              "evidence": ["tools/x.py:1"], "audit": "x", "summary": "s",
@@ -1105,7 +1105,7 @@ def _self_test_isolated():
             failures.append("load_config accepted a string-valued schema-version")
         except ConfigError:
             pass
-        # 21b. DISCRIMINATING (F-TOML-BARE-VALUEERROR-CLASS): an integer literal past CPython's 4300-digit
+        # 21b. DISCRIMINATING (a bare parser ValueError): an integer literal past CPython's 4300-digit
         #      int-string limit makes tomllib raise a BARE ValueError (not TOMLDecodeError); load_config must
         #      still refuse with a ConfigError. Narrowing the parse handler back to (TOMLDecodeError,
         #      UnicodeDecodeError) lets the ValueError escape. The digit limit is pinned to the default 4300
@@ -1209,9 +1209,9 @@ def _self_test_isolated():
         # 26. DISCRIMINATING (make_result rejects non-list evidence): make_result with a bare STRING
         #     evidence is refused, never coerced with list() (which would split 'x:1' into ['x', ':', '1']
         #     and let a hollow PASS through). Reverting the non-list guard to list(evidence or []) lets the
-        #     string char-split and the result construct, failing this case (the round-4 BLOCKER). A VALID
+        #     string char-split and the result construct, failing this case (a hollow PASS). A VALID
         #     `required` is passed so the construction reaches and ISOLATES the string-evidence guard rather
-        #     than failing first on a required=None field (the round-14 finding-4 masking).
+        #     than failing first on a required=None field, which would mask it.
         try:
             make_result("x", PASS, "s", required=True, kind=KIND_AVAILABLE, evidence="x:1")
             failures.append("make_result accepted a bare-string evidence (char-split into a hollow PASS)")
@@ -1768,14 +1768,14 @@ def _self_test_isolated():
         except (OSError, NotImplementedError, AttributeError):
             made_sym = False
         if made_sym:
-            # 44a. the NEAREST-config walk (the round-12 BLOCKER): a dangling nearest .aiqt/assurance.toml is
+            # 44a. the NEAREST-config walk: a dangling nearest .aiqt/assurance.toml is
             #      a ConfigError, never a silent fall-through to portable defaults. Reverting find_nearest_
             #      config's broken-symlink fail-closed (letting the FileNotFoundError `continue`) makes
             #      resolution fall through to portable defaults, failing this.
             try:
                 resolve_config(start=sroot, environ={})
                 failures.append("a dangling nearest .aiqt/assurance.toml fell through to portable defaults "
-                                "(the round-12 BLOCKER) instead of raising ConfigError")
+                                "instead of raising ConfigError")
             except ConfigError:
                 pass
             # 44b. the PINNED --config/env load: a --config pointing at a dangling symlink is a ConfigError

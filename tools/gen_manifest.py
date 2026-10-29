@@ -276,8 +276,8 @@ def git_tracked(root):
     """The tracked path set from `git ls-files -z --cached --stage`, strictly decoded and validated.
     Fail-closed (GateError) on an unusable repository, a nonzero exit, empty output, a duplicate path,
     a case-fold or NFC/NFD collision, a symlink (120000), a gitlink (160000), or an unknown mode.
-    NEVER a filesystem walk and never a silent empty tree. Pinned like the release-gate funnels (QA
-    round-7 claude F3): core.fsmonitor=false (a repo-config fsmonitor hook is attacker-chosen code and
+    NEVER a filesystem walk and never a silent empty tree. Pinned like the release-gate funnels:
+    core.fsmonitor=false (a repo-config fsmonitor hook is attacker-chosen code and
     must never run under a gate read; the genesis and delta branches of check_release_delta consume
     this enumerator), protocol.allow=never and GIT_NO_LAZY_FETCH=1 (a missing object is a refusal,
     never a transport), atop the GIT_* environment scrub."""
@@ -323,13 +323,13 @@ def git_tracked(root):
 
 
 def check_output_modes(root):
-    """F-236: the GENERATED_OUTPUTS_REL are generated TEXT and MUST carry git index mode 100644, never
+    """The GENERATED_OUTPUTS_REL are generated TEXT and MUST carry git index mode 100644, never
     100755. gen_manifest reads the index mode at build and check_manifest re-reads it (defence in depth);
     otherwise a mode flip 100644->100755 on a generated output passes both gates unnoticed. Scoped STRICTLY
     to the generated outputs: run_all_checks.sh and other *.sh are legitimately executable and are NEVER
     touched. An output not yet tracked (genesis, before the release commit git-adds it) is not in the index
     and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read.
-    Pinned exactly as git_tracked (QA round-7 claude F3, the sibling index read): core.fsmonitor=false,
+    Pinned exactly as git_tracked (the sibling index read): core.fsmonitor=false,
     protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
@@ -562,7 +562,7 @@ def read_genesis(root):
     """genesis derives from the release-order record: zero [[release]] rows -> True (2.5). A missing or
     unreadable record never bootstraps genesis.
 
-    F-237 SCOPED, VC-4 QA #6 RECONCILED: reject an unknown TOP-LEVEL key, and apply a per-row guard when a
+    Reject an unknown TOP-LEVEL key, and apply a per-row guard when a
     [[release]] row is present (rows first appear at the Step-4 attestation commit; at Step 2 the record is
     header-only). read_genesis needs only the ROW COUNT, so it validates the two mandatory identity fields
     (version and the candidate commit SHA, spec 2.4 / the releases.toml header comment) and ACCEPTS every
@@ -804,7 +804,7 @@ def run(root, check):
         return 2
     if check:
         try:
-            check_output_modes(root)  # F-236: the five outputs are generated text, index mode 100644 only.
+            check_output_modes(root)  # the five outputs are generated text, index mode 100644 only.
         except GateError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
@@ -878,7 +878,7 @@ def main():
 #       (the same tree with a regular file exits 0), a roster path under a symlinked directory at the first,
 #       second or third level, or under a directory whose lstat fails, exits 2 naming it (the same tree with real
 #       directories exits 0), and the real one reads as exactly the two shipped roster paths;
-#   F-FROZEN-PARTITION: a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
+#   a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
 #       and a class outside the vocabulary each fail closed.
 
 _OWN_BASE = '''format-version = 1
@@ -1042,7 +1042,7 @@ def _roster_fixture(base, own_extra, files=None):
 
 
 def _frozen_partition_vector():
-    """F-FROZEN-PARTITION: the shipped class sets partition the vocabulary (the floor renders), and each
+    """The shipped class sets partition the vocabulary (the floor renders), and each
     broken partition makes the floor raise GateError: a class appended to RELEASE_CLASSES but recorded in
     neither FROZEN_CLASSES nor UNFROZEN_CLASSES (undecided); an UNFROZEN_CLASSES class also appended to
     FROZEN_CLASSES, so the union still equals the vocabulary (overlap); and a class outside the vocabulary
@@ -1052,7 +1052,7 @@ def _frozen_partition_vector():
     try:
         _frozen_text([], [])
     except GateError as exc:
-        return ("F-FROZEN-PARTITION: the shipped class sets expected to partition the vocabulary ({})"
+        return ("the shipped class sets expected to partition the vocabulary ({})"
                 .format(exc))
     saved_release, saved_frozen = RELEASE_CLASSES, FROZEN_CLASSES
     for label, release, frozen in (
@@ -1066,7 +1066,7 @@ def _frozen_partition_vector():
             continue
         finally:
             RELEASE_CLASSES, FROZEN_CLASSES = saved_release, saved_frozen
-        return "F-FROZEN-PARTITION: {} expected GateError from the frozen floor".format(label)
+        return "{} expected GateError from the frozen floor".format(label)
     return None
 
 
@@ -1283,11 +1283,11 @@ def _self_test_main_isolated():
         if run_quiet(marker, check=False) != 2:
             failures.append("a missing CLAUDE.md marker pair expected exit 2")
 
-        # (i) F-235: workflow exclusions are EXACT path= literals, never a glob. With exact literals a
+        # (i) workflow exclusions are EXACT path= literals, never a glob. With exact literals a
         #     newly tracked .github/workflows/deploy.yml carries no reviewed exclusion and no class, so it
         #     trips COMPLETENESS (exit 2) and cannot silently escape NO-STRAYS. The contrasting glob case
         #     shows exactly what the fix removes: a pattern=".github/workflows/**" would swallow the new
-        #     workflow silently (exit 0), which is the escape F-235 closes.
+        #     workflow silently (exit 0), which is the escape this case closes.
         wf_files = {".github/workflows/currency.yml": "on: push\n",
                     ".github/workflows/quality.yml": "on: push\n",
                     ".github/workflows/deploy.yml": "on: push\n"}
@@ -1295,31 +1295,31 @@ def _self_test_main_isolated():
                     '\n[[exclusion]]\npath = ".github/workflows/quality.yml"\nreason = "CI"\n')
         wf = _build_fixture(tmp / "workflow-exact", own_extra=wf_exact, extra_files=wf_files)
         if run_quiet(wf, check=False) != 2:
-            failures.append("F-235: a new tracked .github/workflows/deploy.yml outside the exact-literal "
+            failures.append("a new tracked .github/workflows/deploy.yml outside the exact-literal "
                             "exclusion set expected exit 2 (COMPLETENESS: no silent escape)")
         wf_glob = _build_fixture(
             tmp / "workflow-glob",
             own_extra='\n[[exclusion]]\npattern = ".github/workflows/**"\nreason = "CI"\n',
             extra_files=wf_files)
         if run_quiet(wf_glob, check=False) != 0:
-            failures.append("F-235: a glob workflow exclusion is expected to (unsafely) swallow a new "
+            failures.append("a glob workflow exclusion is expected to (unsafely) swallow a new "
                             "workflow (exit 0); this documents the escape the exact-literal fix removes")
 
-        # (j) F-236: an output with git index mode 100755 fails closed. Generate, git-add the outputs at
+        # (j) an output with git index mode 100755 fails closed. Generate, git-add the outputs at
         #     their 100644 mode (drift-clean), then chmod one executable and re-stage so the index mode is
         #     100755 -> exit 2. Scoped to the five outputs; *.sh stay legitimately executable.
         modef = _build_fixture(tmp / "outmode")
         run_quiet(modef, check=False)
         _git(modef, "add", "-A")
         if run_quiet(modef, check=True) != 0:
-            failures.append("F-236: a freshly generated 100644 output set expected drift-clean exit 0")
+            failures.append("a freshly generated 100644 output set expected drift-clean exit 0")
         os.chmod(modef / MANIFEST_REL, 0o755)
         _git(modef, "add", MANIFEST_REL)
         if run_quiet(modef, check=True) != 2:
-            failures.append("F-236: an output at git index mode 100755 expected exit 2 (generated text is "
+            failures.append("an output at git index mode 100755 expected exit 2 (generated text is "
                             "never executable)")
 
-        # (k) F-237: the releases.toml minimal row guard. A row with an unknown key and a row missing a
+        # (k) the releases.toml minimal row guard. A row with an unknown key and a row missing a
         #     mandatory field each fail closed (exit 2); a header-only record (zero rows) is genesis-clean.
         relbad = _build_fixture(tmp / "releases-badkey", do_commit=False)
         (relbad / ".aiqt" / "core" / "releases.toml").write_text(
@@ -1329,7 +1329,7 @@ def _self_test_main_isolated():
         _git(relbad, "add", "-A")
         _git(relbad, "commit", "-q", "-m", "relbad", "--no-verify")
         if run_quiet(relbad, check=False) != 2:
-            failures.append("F-237: a releases row with an unknown key expected exit 2")
+            failures.append("a releases row with an unknown key expected exit 2")
         relmiss = _build_fixture(tmp / "releases-missing", do_commit=False)
         (relmiss / ".aiqt" / "core" / "releases.toml").write_text(
             'format-version = 1\n\n[[release]]\nversion = "1.0.0"\n', encoding="utf-8")
@@ -1337,21 +1337,21 @@ def _self_test_main_isolated():
         _git(relmiss, "add", "-A")
         _git(relmiss, "commit", "-q", "-m", "relmiss", "--no-verify")
         if run_quiet(relmiss, check=False) != 2:
-            failures.append("F-237: a releases row missing the mandatory commit_sha expected exit 2")
+            failures.append("a releases row missing the mandatory commit_sha expected exit 2")
 
-        # (l) F-GENMANIFEST-UNKNOWN-OPT: an unrecognized option is a LOUD exit 2 BEFORE any regeneration, so a
+        # (l) an unrecognized option is a LOUD exit 2 BEFORE any regeneration, so a
         #     misspelled --checkx (or a stray --help) can never silently run a full regeneration that writes
         #     the five outputs. A freshly built fixture has no generated outputs yet; the guard returns 2 and
         #     leaves them absent. Removing the guard lets --checkx fall through to run(check=False), which
         #     writes the outputs and returns 0, so this vector fails on both counts (it bites).
         unk = _build_fixture(tmp / "unknown-opt")
         if unk is None:
-            failures.append("F-GENMANIFEST-UNKNOWN-OPT: cannot init a git fixture for the unknown-option vector")
+            failures.append("cannot init a git fixture for the unknown-option vector")
         else:
             if run_main_quiet(["--root", str(unk), "--checkx"]) != 2:
-                failures.append("F-GENMANIFEST-UNKNOWN-OPT: an unrecognized option expected a loud exit 2")
+                failures.append("an unrecognized option expected a loud exit 2")
             if any((unk / rel).exists() for rel in GENERATED_OUTPUTS_REL):
-                failures.append("F-GENMANIFEST-UNKNOWN-OPT: an unrecognized option must not write any output")
+                failures.append("an unrecognized option must not write any output")
 
         # (m) The authoring-only roster (tools/gen_hooks.py AUTHORING_ONLY_REL) is tracked but never shipped. Both
         #     roster files tracked and each excluded by an exact literal: exit 0 although the settings file is
@@ -1610,10 +1610,10 @@ def _self_test_main_isolated():
           "broken CLAUDE.md marker pair all fail closed (exit 2), while raw-byte hashing records a CRLF "
           "file's exact bytes and a declared-binary file passes; a new tracked .github/workflows file "
           "outside the EXACT-literal exclusion set trips COMPLETENESS (exit 2) while a glob would swallow "
-          "it silently (F-235); an output at git index mode 100755 fails closed (exit 2) while a clean "
-          "100644 set passes (F-236); and a releases row with an unknown key or a missing mandatory field "
-          "each fail closed (exit 2) under the minimal Step-2 row guard (F-237); and an unrecognized option "
-          "is a loud exit 2 that writes no output (F-GENMANIFEST-UNKNOWN-OPT); the authoring-only roster "
+          "it silently; an output at git index mode 100755 fails closed (exit 2) while a clean "
+          "100644 set passes; and a releases row with an unknown key or a missing mandatory field "
+          "each fail closed (exit 2) under the minimal Step-2 row guard; and an unrecognized option "
+          "is a loud exit 2 that writes no output; the authoring-only roster "
           "excluded by exact literals passes and never reaches the manifest, while a roster path given a "
           "class, a pattern exclusion over it, the settings without the marker, an exact exclusion of a "
           "gensrc target off the roster, a tracked marker missing on disk, and a shipped roster path given a "
@@ -1624,7 +1624,7 @@ def _self_test_main_isolated():
           "closed (exit 2); "
           "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
-          "class outside the vocabulary each fail the frozen floor closed (F-FROZEN-PARTITION)")
+          "class outside the vocabulary each fail the frozen floor closed")
     return 0
 
 

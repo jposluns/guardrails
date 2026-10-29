@@ -92,13 +92,13 @@ def _load_toml(path):
     except FileNotFoundError:
         raise GateError("required input {} is absent".format(path))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
-    # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    # array or inline table; neither is a TOMLDecodeError.
     except (OSError, ValueError, RecursionError, MemoryError, tomllib.TOMLDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(path, exc))
 
 
 def _validate_row_container(doc, where, keys):
-    """codex hardening: every array-of-tables the legs iterate MUST be a list of tables. A non-list value,
+    """Every array-of-tables the legs iterate MUST be a list of tables. A non-list value,
     or a non-dict row inside it, is a GateError (exit 2), never an uncaught AttributeError when a leg calls
     row.get(...) on a bare string or int."""
     for key in keys:
@@ -335,7 +335,7 @@ def _substring_offsets(window, text):
 
 
 def _check_predecessor_span(pid, row, root, sha, text):
-    """The 7.2 tight whole-line window (F-226, spec 7.2 which supersedes the round-10 'byte-identical to the
+    """The 7.2 tight whole-line window (spec 7.2, which supersedes the earlier 'byte-identical to the
     span's content' wording): start-line and end-line are 1-based integers with start-line <= end-line, and
     the canonical-text occurs EXACTLY ONCE as a contiguous byte-exact SUBSTRING within the
     [start-line, end-line] whole-line window of the archived bytes, BEGINNING on start-line and ENDING on
@@ -879,7 +879,7 @@ def self_test():
         return 2
     failures = []
     n = 0
-    # F-TOML-BARE-VALUEERROR-CLASS: a parser overflow makes tomllib raise RecursionError (a RuntimeError,
+    # A parser overflow makes tomllib raise RecursionError (a RuntimeError,
     # not a ValueError); _load_toml must still refuse with GateError (exit 2) carrying the overflow.
     # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
     # input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
@@ -1218,11 +1218,11 @@ def self_test():
             failures.append("fix #3: a non-cutover terminal must not be mis-gated (real cutover PASSes)")
         n += 1
 
-        # codex: a non-dict row container is a GateError (exit 2), never an uncaught AttributeError.
+        # A non-dict row container is a GateError (exit 2), never an uncaught AttributeError.
         badrow = _build_install(tmp / "badrow", 'schema-version = 1\narchive-file = ["x"]\n',
                                 [_LEGACY_ONE, _LEGACY_TWO], inv)
         if run_quiet(badrow) != 2:
-            failures.append("codex: a non-dict archive-file row expected exit 2")
+            failures.append("a non-dict archive-file row expected exit 2")
         n += 1
 
         # a NON-STRING scalar successor-quote (e.g. an integer) must become a controlled GateError (exit 2),

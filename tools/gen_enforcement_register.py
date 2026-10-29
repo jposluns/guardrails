@@ -137,7 +137,7 @@ EN, EM = "–", "—"
 RESIDUAL_HEADING = "Technical limits (from the enforcement ledger)"
 
 # The class-letter legend, single-sourced here so a class letter is never the only boundary signal on the
-# page (codex's requirement). The legend renders only for the class letters actually present among the
+# page. The legend renders only for the class letters actually present among the
 # enforced mechanisms. The text is the enforceability grading rubric (gen_enforceability) in plain terms.
 CLASS_LEGEND = (
     ("a", "deterministic gate: a machine predicate over committed artefacts, total for what it examines"),
@@ -506,7 +506,7 @@ def _enforced_cell_md(mechanisms, controls):
 # overclaim gate consumes) iterate the SAME field set and cannot fork on which fields ship: a field added
 # to the page is added here once and flows to both render and the source-side overclaim scan. The "entry"
 # field is the mechanism's entry point, which for a hook is "<event> on <matcher>", so the hook matcher is
-# a verbatim page-bound string carried through this field BY CONSTRUCTION (the round-10 escape channel).
+# a verbatim page-bound string carried through this field BY CONSTRUCTION, so it must be escaped like any page text.
 _MECH_FIELDS = (
     ("Platform", "platform"),
     ("Default", "default"),
@@ -617,7 +617,7 @@ def render_html(rows, roadmap, controls, enforced_union):
         # The technical-limits residual is rendered VERBATIM from the ledger inside a labelled blockquote:
         # the residue is element text (HTML-escaped by _t), so a residue token shaped like a tag renders
         # as visible text, not markup. The data-mech attribute names the control this quotation declares.
-        # The block carries no marketing exemption (round 7 removed the carve-out): the residue is kept
+        # The block carries no marketing exemption: the residue is kept
         # marketing-clean at its manifest source, so the overclaim gate scans this page plainly like any
         # other. The generation-time verbatim check below asserts this exact block ships byte-for-byte.
         # A multi-line residue keeps its newlines here verbatim; the .ledger-residual style is white-space:
@@ -635,8 +635,8 @@ def render_html(rows, roadmap, controls, enforced_union):
 
 
 # --- generation-time verbatim check -------------------------------------------------------------------
-# Round 7 (GER-1) replaced the earlier "re-parse the emitted HTML and compare rendered visible text"
-# fidelity assertion (which was static-DOM fidelity, not rendered-visible fidelity, and codex showed a
+# This replaced an earlier "re-parse the emitted HTML and compare rendered visible text"
+# fidelity assertion (which was static-DOM fidelity, not rendered-visible fidelity, and a
 # CSS-generated ::after content could diverge from it) with a plain BYTE check over the generated source:
 # each mechanism's residue is emitted by escaping the residue string into a fixed block shape, so asserting
 # that exact block appears byte-for-byte in the composed HTML (and the residue verbatim in the mechanism's
@@ -649,7 +649,7 @@ def _md_mechanism_fence(md_text, ref):
     """The residue text inside `ref`'s OWN Markdown fence: locate the mechanism's '### `ref`' heading, then
     the first fenced code block after it (a run of >=3 backticks alone on a line, closed by an identical
     run), and return the fenced content. This binds the residue to the mechanism's own fence, so a residue
-    that appears ANYWHERE ELSE in the file cannot satisfy fidelity (F-330 fix 3). Returns None if the
+    that appears ANYWHERE ELSE in the file cannot satisfy fidelity. Returns None if the
     mechanism's heading or its fence is not found before the next mechanism heading."""
     heading = "### `{}`".format(ref)
     lines = md_text.split("\n")
@@ -812,7 +812,7 @@ def page_content_strings(root):
     recomputed IN MEMORY from the corpus, the manifests, and the roadmap (guard-input-soundness), as
     (channel, key, raw) tuples. This is the AUTHORITATIVE, single-sourced set the render functions draw
     from (via the shared _MECH_FIELDS) and the overclaim gate's source-side scan consumes, so the checked
-    set cannot fork from what the page renders (FIX 1, GER-1 round 11: the round-8/round-10 class where a
+    set cannot fork from what the page renders (the class where a
     hand-maintained channel list in check_overclaim drifted from the generator, letting the rule TITLE and
     the hook MATCHER ship unscanned). One channel per verbatim interpolation the page emits:
       - "title"       each rule's display title (the corpus '# ' heading render_* puts in the Rule cell)

@@ -547,7 +547,7 @@ def _st_watch_drop_check():
     return failures, runs
 
 
-# F-JOURNAL-HELD-FD-LISTING: the deterministic stale-listing seam. A listing read through a held directory
+# The deterministic stale-listing seam. A listing read through a held directory
 # descriptor can miss every entry created since that descriptor was opened, but only on some filesystems
 # (btrfs does; tmpfs does not), so a vector that relies on the native behaviour discriminates only where its
 # fixture happens to sit. Under this seam the stale view is served on ANY filesystem, so each fresh-descriptor
@@ -580,7 +580,7 @@ class _StStaleScandir:
 
 
 class _StStaleListing:
-    """A deterministic model of a STALE directory listing (F-JOURNAL-HELD-FD-LISTING), so a vector proves
+    """A deterministic model of a STALE directory listing, so a vector proves
     that a listing reads through a FRESH descriptor whatever filesystem its fixture is on.
 
     hold(fd) records a held directory descriptor and the entry names its directory had at that moment (a

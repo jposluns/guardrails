@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Published-artifact checksum gate for the pack downloads (GD-7). Offline, stdlib only, fail-closed.
+"""Published-artifact checksum gate for the pack downloads. Offline, stdlib only, fail-closed.
 
 check_site.py:21-22 records the deferral this closes: "Download-artifact checksums are tracked separately
 (they need a final content baseline)." The baseline does not exist until the 1.0.5 content freeze, so this

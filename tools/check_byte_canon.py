@@ -788,8 +788,8 @@ def self_test_main():
         print("error: vector class(es) {} have no CLASS_FINDING binding; fail-closed".format(
             ", ".join(unbound)), file=sys.stderr)
         return 2
-    # FIX B: the class->finding binding is exercised, not bool(findings). A cross-class payload swap
-    # (codex round-2 replaced every failure payload with identical CRLF bytes) must now be flagged:
+    # The class->finding binding is exercised, not bool(findings). A cross-class payload swap
+    # (every failure payload replaced with identical CRLF bytes) must be flagged:
     # a non-CR class bound against a CRLF-only finding set fails its binding, while the CR classes and
     # each class against its own scan leg pass. This is the durable in-code mutation guard; the class
     # lists derive from CLASS_FINDING itself, so a removed binding is caught by the guard above.
@@ -809,8 +809,8 @@ def self_test_main():
             failures.append("class {!r} failed to bind to its own scan leg".format(cls))
     # The published vectors (3.4), run through the same scan. Each non-pass class is bound to the
     # SPECIFIC finding its scan leg emits (CLASS_FINDING), so a class name proves its own leg fired: a
-    # cross-class payload swap (codex round-2 replaced every failure payload with identical CRLF bytes)
-    # no longer passes.
+    # cross-class payload swap (every failure payload replaced with identical CRLF bytes)
+    # does not pass.
     try:
         for row in _load_vectors(repo_root()):
             data = base64.b64decode(row["payload-base64"], validate=True)
