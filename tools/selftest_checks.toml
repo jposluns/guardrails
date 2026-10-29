@@ -930,6 +930,7 @@ expected-check-ids = [
   "trunc/registry-required-padded-off-denies",
   "trunc/registry-required-exact-off-values-off",
   "trunc/fg-quoted-heredoc-amp-allows",
+  "trunc/fg-quoted-heredoc-cat-write-amp-is-data-allows",
   "trunc/fg-commit-heredoc-quoted-amp-allows",
   "trunc/fg-quote-shift-single-quoted-amp-allows",
   "trunc/fg-quote-shift-double-quoted-amp-allows",

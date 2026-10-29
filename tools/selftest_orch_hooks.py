@@ -12782,12 +12782,21 @@ def _main_isolated(report_path=None):
             else:
                 os.environ[_rr] = _rr_old
         # The guard reads a foreground detach through the shared lexer beside the raw scan
-        # (_orch_foreground_detach_lexed). The scan reads a here-document body as code, so it reads each `&`
-        # in the allow rows below as a bare detach; the lexer places that `&` in one of the three shapes that
-        # alone lift the scan's deny: a quoted here-document body (<<'EOF', <<"EOF", the commit-message
-        # form's body), a single- or double-quoted string (the scan's quote state shifted by a body quote),
-        # and a comment. Each allow row denies with the guard reading the scan alone (as it did before).
+        # (_orch_foreground_detach_lexed), on one of two paths. (1) In a command that is nothing but plain
+        # `cat > FILE <<'DELIM'` writes, the scan itself reads each body as data up to its delimiter line (the
+        # body skip, rows further below), so it reads no detach and the lexer's narrowing is never reached:
+        # the cat-write row allows on the scan alone. (2) In any other command the scan reads a here-document
+        # body as code, so it reads each `&` in the other allow rows below as a bare detach; the lexer places
+        # that `&` in one of the three shapes that alone lift the scan's deny: a quoted here-document body
+        # (<<'EOF', <<"EOF", the commit-message form's body), a single- or double-quoted string (the scan's
+        # quote state shifted by a body quote), and a comment. Each of those rows denies with the guard
+        # reading the scan alone (as it did before), except the commit-template row, where the scan alone already
+        # reads no detach; the first is a cat to standard output, not a cat write, so that its body takes
+        # this path.
         check("trunc/fg-quoted-heredoc-amp-allows",
+              [_verdict(bg("cat <<'EOF'\nFix A & B\nEOF", rib=False)),
+               _verdict(bg('cat <<"EOF"\nFix A & B\nEOF', rib=False))], ["allow", "allow"])
+        check("trunc/fg-quoted-heredoc-cat-write-amp-is-data-allows",
               [_verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)),
                _verdict(bg('cat > f <<"EOF"\nFix A & B\nEOF', rib=False))], ["allow", "allow"])
         check("trunc/fg-commit-heredoc-quoted-amp-allows",
