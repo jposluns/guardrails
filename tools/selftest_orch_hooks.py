@@ -12848,6 +12848,49 @@ def _main_isolated(report_path=None):
                   "cat > /abs/f <<'EOF'\nit's\nEOFX", "cat > /abs/f <<'EOF'\nit's\n\tEOF",
                   "cat > /abs/f <<'EOF'\nit's\nEOF\r\n", "(cat > /abs/f <<'EOF'\nit's\nEOF\n)")],
               ["deny"] * 4)
+        # A quoted here-document body that a shell runs is code, not data: fed to a shell, sourced from
+        # stdin, or piped into one, its `&` detaches in real bash, so the scan reads it as code and the body
+        # apostrophe denies, as it did before the body skip. Each row allows if the skip ignores the consumer.
+        check("trunc/fg-quoted-heredoc-fed-to-shell-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "bash <<'EOF'\nsleep 1 &\necho it's\nEOF", "cat <<'EOF' | bash\nsleep 1 &\necho it's\nEOF",
+                  ". /dev/stdin <<'EOF'\nsleep 1 &\necho it's\nEOF", "sh <<'EOF'\nsleep 1 &\necho it's\nEOF")],
+              ["deny"] * 4)
+        check("trunc/fg-quoted-heredoc-shell-forms-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "/usr/bin/bash <<'EOF'\nsleep 1 &\necho it's\nEOF", "env bash <<'EOF'\nsleep 1 &\necho it's\nEOF",
+                  "bash -s <<'EOF'\nsleep 1 &\necho it's\nEOF", "source /dev/stdin <<'EOF'\nsleep 1 &\necho it's\nEOF",
+                  "cat <<'EOF' | sh -s\nsleep 1 &\necho it's\nEOF", "<<'EOF' bash\nsleep 1 &\necho it's\nEOF",
+                  "bash \\\n<<'EOF'\nsleep 1 &\necho it's\nEOF")],
+              ["deny"] * 7)
+        # cat's output can still reach a shell through a pipe after an enclosing group or loop, the shell's
+        # own output or a process substitution; a here-document after another on the same line, or one read
+        # inside a body the scan read as code, has a consumer or an end the scan cannot tell. Each is a real
+        # detach in bash that the body skip allowed.
+        check("trunc/fg-quoted-heredoc-shell-output-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "{\ncat <<'EOF'\nsleep 1 &\necho it's\nEOF\n} | bash",
+                  "while :; do\ncat <<'EOF'\nsleep 1 &\necho it's\nEOF\nbreak\ndone | bash",
+                  "{\ncat > /dev/stdout <<'EOF'\nsleep 1 &\necho it's\nEOF\n} | bash",
+                  "{\ncat > /proc/self/fd/1 <<'EOF'\nsleep 1 &\necho it's\nEOF\n} | bash",
+                  "cat <<'EOF' > >(bash)\nsleep 1 &\necho it's\nEOF",
+                  "cat > /abs/f <<'EOF'; bash <<'X'\nit's\nEOF\nsleep 1 &\nX",
+                  "cat <<EOF\ncat > /abs/f <<'X'\nEOF\nsleep 1 &\nX",
+                  "bash <<'A'\ncat > /abs/f <<'X'\nit's\nX\nsleep 1 &\nA")],
+              ["deny"] * 8)
+        # A consumer the scan cannot show writes the body only to a file reads the body as code (fail
+        # closed): cat to standard output, a quoted or expanded target, tee, and a target under /dev.
+        check("trunc/fg-quoted-heredoc-unknown-consumer-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF'\nit's\nEOF", "cat > \"/abs/f\" <<'EOF'\nit's\nEOF", "cat > $F <<'EOF'\nit's\nEOF",
+                  "tee /abs/f <<'EOF'\nit's\nEOF", "cat > dev/stdout <<'EOF'\nit's\nEOF")],
+              ["deny"] * 5)
+        check("trunc/fg-quoted-heredoc-cat-to-file-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat >> /abs/f <<'EOF'\nit's & more\nEOF", "cat <<'EOF' > /abs/f\nit's\nEOF",
+                  "cat >| f.txt <<\"EOF\"\nit's\nEOF", "cat>/abs/f <<'EOF'\nit's\nEOF",
+                  "  cat > /abs/f <<'A' 3<<'B'\nit's\nA\nx\"y\nB")],
+              ["allow"] * 5)
         # A substitution after the commit-message form's body makes the lexer lex again reading no body
         # (_SubstHeredocRetry); that pass places the body `&` in the substitution, so the deny stands. It
         # allows if a pass keeps the places recorded by the pass it replaced.

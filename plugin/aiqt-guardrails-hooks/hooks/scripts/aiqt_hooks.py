@@ -19636,6 +19636,41 @@ def _orch_heredoc_spec(command, i):
     return (delimiter, quoted, strip_tabs) if delimiter else None
 
 
+# The one line shape whose here-document bodies the detach scan may skip as data: a plain `cat` (not a
+# shell, eval, '.', source or any other program that can run its input), with only plain words, quoted
+# here-document operators and redirects, its standard output sent to a plain file, so neither a pipe on the
+# line nor one after an enclosing compound command, a brace group or a process substitution can carry the
+# body into a shell. Anything else (a quote, '$', backslash, '|', ';', '&', '(', ')', backquote or '#' on
+# the line, another command word, a wrapper or assignment before it) does not match and the body is code.
+_ORCH_HEREDOC_DATA_WORD = r"[A-Za-z0-9_./+,:@%=-]+"
+_ORCH_HEREDOC_DATA_LINE = re.compile(
+    r"[ \t]*cat(?![A-Za-z0-9_./+,:@%=-])(?:[ \t]+" + _ORCH_HEREDOC_DATA_WORD + r"|[ \t]*[0-9]?(?:>>|>\|?)[ \t]*"
+    + _ORCH_HEREDOC_DATA_WORD + r"|[ \t]*<<-?[ \t]*(?:'[A-Za-z0-9_.+-]+'|\"[A-Za-z0-9_.+-]+\"))*[ \t]*")
+# Every output redirect on such a line, as (descriptor, target): the descriptor is a digit only where bash
+# reads it as one (a whole word before the operator), so `a2>f` redirects standard output, as it does to bash.
+_ORCH_HEREDOC_DATA_REDIRECT = re.compile(
+    r"(?:(?<=[ \t])([0-9]))?(?:>>|>\|?)[ \t]*(" + _ORCH_HEREDOC_DATA_WORD + r")")
+
+
+def _orch_heredoc_data_line(line):
+    """True when line, the whole line that opens one or more quoted here-documents (from the start of a
+    command to the newline where the bodies begin), is a plain `cat` whose standard output goes to a plain
+    file (_ORCH_HEREDOC_DATA_LINE): cat copies its input to that file and executes none of it, so the bodies
+    are data wherever the command sits. There must be a standard output redirect, and every output redirect
+    must name a file outside /dev and /proc with no '..' component, so the body cannot reach the shell's own
+    output (/dev/stdout, /dev/fd/1, /proc/self/fd/1) and through it a pipe into a shell. A relative target
+    is read as written, not against the working directory, and a symlink is not followed, so a target that
+    reaches that output only through a changed directory or a symlink is not seen (disclosed)."""
+    if not _ORCH_HEREDOC_DATA_LINE.fullmatch(line):
+        return False
+    redirects = _ORCH_HEREDOC_DATA_REDIRECT.findall(line)
+    for _fd, target in redirects:
+        parts = [part for part in target.split("/") if part not in ("", ".")]
+        if not parts or ".." in parts or parts[0] in ("dev", "proc"):
+            return False
+    return any(fd in ("", "1") for fd, _target in redirects)
+
+
 def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True):
     """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
     unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
@@ -19657,9 +19692,12 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     data to bash, so where every here-document opened on a line has a quoted delimiter this pass parses
     (_orch_heredoc_spec), was opened with no '(', backquote or '$[' anywhere before it and nothing open on
     the nesting stack, and ends at a line that is, whole, its delimiter (leading tabs stripped under <<-),
-    the pass resumes past the last delimiter line without reading the bodies. Any other body (an unquoted
-    delimiter, one this pass does not parse, one with no delimiter line), and every body when skip_bodies
-    is False, is read as shell text."""
+    and where the line that opens them starts a command and is a plain cat writing to a file
+    (_orch_heredoc_data_line), the pass resumes past the last delimiter line without reading the bodies. A
+    body a shell can run (fed to bash or sh, sourced from stdin, piped into a shell, or any consumer this
+    pass cannot show only writes it to a file) is code, not data. Any other body (an unquoted delimiter,
+    one this pass does not parse, one with no delimiter line, one with such a consumer), every body after
+    one read as shell text, and every body when skip_bodies is False, is read as shell text."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
@@ -19669,6 +19707,10 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
     dq_single = False  # inside a single-quoted span within such a substitution
     heredocs = []  # the here-documents opened on the current line, each a _orch_heredoc_spec or None
+    line_start = 0  # where the current line starts, just past the last newline this pass read as live text
+    # Set once a here-document body is read as code: a line in it may be a nested shell's input or data
+    # bash ends elsewhere, so no later here-document is skipped.
+    code_body = False
     # The first '(', backquote or '$[' anywhere in the command: a here-document opened after one may sit in
     # a substitution or an arithmetic expansion, whose body bash can end elsewhere, so it is never skipped.
     grouped = min((at for at in (command.find("("), command.find("`"), command.find("$[")) if at != -1),
@@ -19734,19 +19776,25 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
                 continue
         if ch == "\n" and heredocs:
             # The bodies of the here-documents opened on this line start here. Where every one has a quoted
-            # delimiter, was opened at the top level and ends at a delimiter line, the bodies are literal
-            # data to bash, so the scan resumes past the last delimiter line and no quote in them shifts its
-            # quote state. Any other here-document (an unquoted delimiter, whose body bash expands, one
-            # unparsed or unterminated) keeps the body read as shell text, as before.
+            # delimiter, was opened at the top level and ends at a delimiter line, and the line is a plain
+            # cat writing to a file (_orch_heredoc_data_line), the bodies are literal data that nothing runs,
+            # so the scan resumes past the last delimiter line and no quote in them shifts its quote state.
+            # Any other here-document (an unquoted delimiter, whose body bash expands, one unparsed or
+            # unterminated, or one a shell, eval, '.', a pipe or any other consumer may run) keeps the body
+            # read as shell text, as before.
             specs, heredocs = heredocs, []
-            literal = not nest and all(spec and spec[1] for spec in specs)
+            literal = (not nest and not code_body and all(spec and spec[1] for spec in specs)
+                       and _orch_heredoc_data_line(command[line_start:i]))
             end, closed = (_orch_heredoc_bodies_end(command, i + 1, n, [(spec[0], spec[2]) for spec in specs])
                            if literal else (i, False))
             if closed:
                 prev_dup, prev, after_dollar = False, "break", False
-                i = end
+                i = line_start = end
                 continue
+            code_body = True
         if ch.isspace():
+            if ch == "\n":
+                line_start = i + 1
             prev_dup, after_dollar = False, False
             prev = "break" if ch in _ORCH_BASH_WORD_BREAKS or not bash_word_starts else "word"
             i += 1
@@ -19988,20 +20036,28 @@ def _orch_foreground_detach(command):
     is a disclosed residual; where such a construct still leaves an unquoted bare `&`, or leaves the scan
     inside an unbalanced quote at the end, it errs toward the DENY, but a detacher that carries no bare `&`
     (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
-    in the manifest.
+    in the manifest. It judges only the `&` the top-level shell reads: a here-document body fed to a shell
+    is read as code, but the guard's lexer narrowing still lifts an `&` such a body holds under a quoted
+    delimiter where the scan reads the rest of the command to its end (`bash <<'EOF'` then `job &`), a
+    silent allow disclosed in the manifest.
 
     OVER-REFUSAL RESIDUAL (disclosed): this scan skips a here-document body as data only under a quoted
     delimiter (<<'EOF' or <<"EOF") it parses, opened with no '(', backquote or '$[' anywhere before it and
-    nothing open, whose body ends at a line that is, whole, its delimiter (_orch_foreground_scan), so a
-    quote, `&` or substitution in such a body (`cat > f <<'EOF'` then `the user's file`) reads as no
-    detach. Every other body it reads as CODE: an unquoted delimiter's, the commit-message form's in
-    "$(cat <<'EOF' ... EOF)", one in a subshell or after any '(' or backquote, and one with no delimiter
-    line. The guard's lexer reading lifts that for an `&` only: a body `&` under a quoted delimiter (`say
-    "a & b"` in the commit-message form) is allowed where the scan reads the rest of the command to its
-    end. A body the scan reads as code with an unbalanced apostrophe, or one whose quote leaves the scan
-    open at the end, is still DENIED although nothing detaches, and so is a body `&` under an unquoted
-    delimiter, which the lexer refuses. The remedy is to quote the delimiter where the body needs no
-    expansion, or to write the text to a file and pass the file.
+    nothing open, whose body ends at a line that is, whole, its delimiter, on a line that is a plain cat
+    writing to a file (_orch_foreground_scan), so a quote, `&` or substitution in such a body (`cat > f
+    <<'EOF'` then `the user's file`) reads as no detach. Every other body it reads as CODE: an unquoted
+    delimiter's, one fed to a shell or any consumer it cannot show only writes the body to a file (cat to
+    standard output and tee included), the commit-message form's in "$(cat <<'EOF' ... EOF)", one in a
+    subshell or after any '(' or backquote, one after a body read as code, and one with no delimiter line.
+    The guard's lexer reading lifts that for an `&` only: a body `&` under a quoted delimiter (`say "a &
+    b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
+    body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
+    to standard output, or one with no delimiter line), or one whose quote leaves the scan open at the end,
+    is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
+    lexer refuses. The commit-message form's body is NOT denied for an unbalanced apostrophe: it sits
+    inside the outer double quotes, where the scan reads an apostrophe as a literal character. The remedy
+    is to quote the delimiter and write the body with `cat > file`, or to write the text to a file and
+    pass the file.
 
     KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
     lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
@@ -21662,7 +21718,8 @@ def orch_truncation_guard(data):
                 "rather than allowed unread (check-fails-closed-on-unreadable). The open quote may be a "
                 "real unbalanced quote, or one the scan misreads: an apostrophe or double quote in a "
                 "here-document body this scan reads as code (an unquoted delimiter's, or a quoted one's it "
-                "cannot end at a whole delimiter line) or an ANSI-C $'...' "
+                "cannot end at a whole delimiter line or whose command may run it: only a plain "
+                "cat > file is read as writing data) or an ANSI-C $'...' "
                 "quote. Balance the quoting, put a blank before such a '#' outside any grouping or "
                 "substitution, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
