@@ -356,7 +356,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.2"
@@ -365,7 +365,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.3"
@@ -374,7 +374,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.4"
@@ -383,7 +383,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.5"
@@ -392,7 +392,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.6"
@@ -401,7 +401,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.7"
@@ -410,7 +410,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 30
 end-line = 33
 canonical-text = "A value hardcoded into a reusable command, or carried over from the source the\ncommand was copied or templated from, is not evidence of the target the command now runs against: it is\nderived from the authoritative source at the point of use, or validated against it, before the guard\nrelies on it."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.8"
@@ -419,7 +419,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 39
 end-line = 42
 canonical-text = "Where a document asserts a fact about the\nsystem it governs, an owning account, a path, a schedule, or an interface, that fact is verified against an\nauthority the document's author does not control, the live system or a second in-tree artefact whose purpose\nis to state that same fact, rather than against the document's own words."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.9"
@@ -428,7 +428,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 42
 end-line = 46
 canonical-text = "A membership question over a range\nor interval is likewise answered by a membership test, whether a value falls within the interval, not by\nmatching the literal endpoint tokens: a range expressed by its endpoints is not the set of its members, so a\nliteral-token scan is a proxy that structurally cannot see a member the range includes only implicitly, one\nlying between its endpoints and written nowhere as a literal token."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.10"
@@ -437,7 +437,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 51
 end-line = 53
 canonical-text = "It is therefore scoped to the narrowest locus where\nthe string's presence would be a defect; a whole-artefact scope is right only where every occurrence is a\ndefect, such as a leaked secret, an invalid byte, or a forbidden character with no legitimate quotation."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.11"
@@ -446,7 +446,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 54
 end-line = 56
 canonical-text = "Where the string legitimately appears elsewhere, the invariant is asserted against the parsed or semantic\nstate, or the negative predicate is scoped to the defect locus, rather than run as a naive whole-artefact\nstring scan."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.12"
@@ -455,7 +455,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 60
 end-line = 62
 canonical-text = "A view that claims to cover a set checks, as it is\ngenerated, that each item of the authoritative set appears in it or is named in a recorded exclusion, and\nfails on an item in neither"
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.13"
@@ -463,8 +463,8 @@ corpus-id = "grdinp"
 source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 64
 end-line = 66
-canonical-text = "A check run ahead of an expensive apply step to report whether it will succeed (a pre-check) is such a guard too and\nevaluates every condition the apply enforces, the expected state after the change as well as the state\nbefore it."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+canonical-text = "A check run ahead of an expensive apply step to report whether it will succeed is such a guard too and\nevaluates every condition the apply enforces, the expected state after the change as well as the state\nbefore it."
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.14"
@@ -472,8 +472,8 @@ corpus-id = "grdinp"
 source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 66
 end-line = 68
-canonical-text = "The pre-check and the apply decide from one shared predicate, or,\nwhere the apply's predicate is out of reach, a test holds the pre-check to failing on every input the apply\nrejects."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+canonical-text = "An expensive apply and a check of whether it will succeed decide from one shared predicate, or,\nwhere the apply's predicate is out of reach, a test holds the check to failing on every input the apply\nrejects."
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.15"
@@ -481,8 +481,8 @@ corpus-id = "grdinp"
 source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 68
 end-line = 69
-canonical-text = "A pre-check refuses an input the apply would refuse, such\nas a version or sequence number no greater than the last one consumed, before any long work begins."
-source-digest = "a85e98132824c55d0f700cb500be4f21d52234eacbb33b3e4e5f1fc2eac6d48a"
+canonical-text = "A check of whether an expensive apply will succeed refuses an input the apply would refuse, such\nas a version or sequence number no greater than the last one consumed, before any long work begins."
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "estsep.1"
@@ -752,7 +752,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.2"
@@ -761,7 +761,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.3"
@@ -770,7 +770,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.4"
@@ -779,7 +779,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.5"
@@ -788,7 +788,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.6"
@@ -796,8 +796,8 @@ corpus-id = "vfxcmt"
 source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
-canonical-text = "The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), as the guard-input-soundness rule requires of a target or context parameter. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+canonical-text = "The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate."
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.7"
@@ -806,7 +806,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.8"
@@ -815,7 +815,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.9"
@@ -824,7 +824,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.10"
@@ -833,7 +833,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.11"
@@ -841,8 +841,8 @@ corpus-id = "vfxcmt"
 source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
-canonical-text = "This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content."
-source-digest = "c17e40cdd84577e1b944842f2c7637c3cf115d458cccaa555d9905c1ecc8652c"
+canonical-text = "This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content."
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "csttir.1"
@@ -1544,7 +1544,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.2"
@@ -1553,7 +1553,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.3"
@@ -1562,7 +1562,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.4"
@@ -1571,7 +1571,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.5"
@@ -1580,151 +1580,151 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.6"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 24
-end-line = 28
+start-line = 25
+end-line = 29
 canonical-text = "The\nsnapshot's OWN git operations change no working state (the ref is not a branch, HEAD, the index, or the\nworking tree, and is invisible to plain `git status`, `git branch`, and `git log`, though reachable via `git\nlog --all`, `git for-each-ref refs/aiqt-recovery`, and `git show-ref` as the real ref it is), so it keeps\nthe inert posture."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.7"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 28
-end-line = 34
+start-line = 29
+end-line = 35
 canonical-text = "To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient\n`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited\nenvironment cannot redirect the call to a decoy repository, inject configuration into it, redirect its\nattribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a\nread-only call write a trace file; the call re-applies only the few variables it sets itself after the\nscrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent\nallow."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.8"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 28
-end-line = 34
+start-line = 29
+end-line = 35
 canonical-text = "To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient\n`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited\nenvironment cannot redirect the call to a decoy repository, inject configuration into it, redirect its\nattribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a\nread-only call write a trace file; the call re-applies only the few variables it sets itself after the\nscrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent\nallow."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.9"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 28
-end-line = 34
+start-line = 29
+end-line = 35
 canonical-text = "To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient\n`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited\nenvironment cannot redirect the call to a decoy repository, inject configuration into it, redirect its\nattribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a\nread-only call write a trace file; the call re-applies only the few variables it sets itself after the\nscrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent\nallow."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.10"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 41
-end-line = 43
+start-line = 42
+end-line = 44
 canonical-text = "The\nexception is limited to recovery snapshots written for the actor's own protection; it is not a general\nlicence to mutate repository metadata."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.11"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 45
-end-line = 45
+start-line = 46
+end-line = 46
 canonical-text = "Running code a worker returns is an apply step, not an inspection;"
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.12"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 45
-end-line = 47
+start-line = 46
+end-line = 48
 canonical-text = "this governs the orchestrator running a\ndeliverable it receives, not a worker running a candidate in its own scratch, which needs the same\nisolation as a disposable copy."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.13"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 47
-end-line = 49
+start-line = 48
+end-line = 50
 canonical-text = "A label, a claimed print-only purpose, or a check the deliverable carries\ndoes not show that its code changes nothing, so the orchestrator extracts, decodes, and prints a\ndeliverable with a reader it wrote or reviewed, never with code the deliverable supplies."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.14"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 49
-end-line = 50
+start-line = 50
+end-line = 51
 canonical-text = "That code runs,\nto evaluate it or to produce a candidate, only after a full reading and only in a disposable copy."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.15"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 50
-end-line = 52
+start-line = 51
+end-line = 53
 canonical-text = "A\ndisposable copy is an exported tree or a clone sharing no object storage (no hard links or alternates),\noutside every live checkout and never a linked worktree of the live repository;"
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.16"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 52
-end-line = 53
+start-line = 53
+end-line = 54
 canonical-text = "it shares nothing writable\nwith a live checkout, git metadata included, and has no remote it can push to."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.17"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 53
-end-line = 55
+start-line = 54
+end-line = 56
 canonical-text = "The code's working directory\nand every target it names are inside the copy, and no argument, path, or environment value it is given\nnames a live checkout;"
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.18"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 55
-end-line = 55
+start-line = 56
+end-line = 56
 canonical-text = "a changed working directory alone is not that isolation."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.19"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 55
-end-line = 56
+start-line = 56
+end-line = 57
 canonical-text = "That code's changes reach a\nlive checkout only through the orchestrator's own verified apply."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.20"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 56
-end-line = 58
+start-line = 57
+end-line = 59
 canonical-text = "This is a rule on what the orchestrator\nruns and where, not OS containment: only the full reading checks a path the code builds at run time or\nconfiguration it inherits."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "wowo01.21"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 23
-end-line = 24
+start-line = 24
+end-line = 25
 canonical-text = "Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be\nundone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to)."
-source-digest = "caa496fe021b5d403a101094da1129db675bd460b305e98830808af71ff2b86e"
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
 clause-id = "deccls.1"

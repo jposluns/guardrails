@@ -48,7 +48,7 @@ everything Claude Code loads at the start of a session under 150,000 characters 
 the loader of the pinned Claude Code build the gate models (2.1.287, pinned with its binary hash in
 `.aiqt/core/instruction-budget.toml`) carries its own 120,000-character check on loaded file contents,
 a total limit below that figure (Claude Code behaviour, which can change, not a pack guarantee), so
-budget to 120,000. Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the committed ratchet, 134,685 UTF-16 code units, the unit the budget gate counts.
+budget to 120,000. Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the committed ratchet, 134,991 UTF-16 code units, the unit the budget gate counts.
 The counting rules, the totals the gate prints, and what not to load twice are
 in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
 

@@ -269,6 +269,11 @@ reason = "Classifies a detached child as launched asynchronous work, so trkasy.6
 
 [[exempt]]
 corpus-id = "wowo01"
+text = "Parallelism lives in the research stage; authority\nand seriality live in the apply stage."
+reason = "Summary of wowo01.1; it adds no obligation."
+
+[[exempt]]
+corpus-id = "wowo01"
 text = "The residual is not limited to on-disk config: it spans the non-`GIT_` environment (HOME,\nXDG_CONFIG_HOME, PATH, TMPDIR), on-disk git configuration and attributes (repository, global, or system\n`.gitconfig` and `.gitattributes`), index and ignore state, submodules and embedded repositories,\nconfigured hooks and filters, PATH-based git resolution, and partial-clone object availability, all of\nwhich git reads by design."
 reason = "Disclosed residual of wowo01.7; no obligation of its own."
 
