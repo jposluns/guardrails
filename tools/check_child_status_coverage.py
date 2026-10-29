@@ -11,8 +11,8 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py and tools/_load_bound.py; the constant and both
-     functions) and in the
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
+     tools/check_verifier_delivery.py; the constant and both functions) and in the
      hooks dispatcher and its generated plugin copy (the constant and the probe) are each defined once at the
      top level and AST-identical (ast.dump, docstrings included) to the canonical text, and each is bound
      nowhere else in the module (_binding_count: no import, assignment, global or other binding of the name
@@ -194,7 +194,8 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_adopt_state.py", "_opf_adopt_state.py"),
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
-              ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"))
+              ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
+              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
 HOOK_COPIES = (".aiqt/core/hooks/scripts/aiqt_hooks.py", "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
 HOOKS_JSON_REL = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
 HOOK_TARGET = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"

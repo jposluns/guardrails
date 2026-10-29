@@ -2968,6 +2968,125 @@ def _read_visit_failures(cwd, size=65536):
     return out
 
 
+def _read_lead_outcome(text, partial, locale, skip_empty):
+    """_lex_readings(text, partial, locale, skip_empty) inside _CommandReading with origins: (readings, added,
+    origins, shared), or the ValueError's type and text."""
+    try:
+        with aiqt_hooks._CommandReading(origins=True) as reading:
+            readings = aiqt_hooks._lex_readings(text, partial, locale, skip_empty)
+    except ValueError as exc:
+        return type(exc).__name__, str(exc)
+    return readings, reading.added, reading.origins, reading.shared
+
+
+def _read_lead_problem(text, partial, got, want, counts):
+    """What _read_lead_failures finds wrong with got, the _read_lead_outcome of text under the _shared_lead in
+    place, against want, the same with no reading given a head (None for nothing); counts[0] gains each own
+    reading given a head and counts[1] each own reading given none that holds at least as many records."""
+    if got != want:
+        return "_lex_readings({!r}, partial={}) gave {!r}, with no head shared {!r}".format(text, partial, got, want)
+    if len(got) == 2:
+        return None  # the same ValueError both ways
+    readings, added, _origins, shared = got
+    lists = [reading[0] if partial else reading for reading in readings]
+    own = sum(len(segs) for segs in lists) - added
+    offset = 0
+    for segs in lists:
+        if offset < own:
+            lead = aiqt_hooks._shared_lead(segs, shared)
+            if lead:
+                counts[0] += 1
+                if any(segs[at] is not shared[at] for at in range(lead)):
+                    return "a reading of {!r} given a head of {} records does not hold them".format(text, lead)
+            elif shared and len(segs) >= len(shared):
+                counts[1] += 1
+        offset += len(segs)
+    if not partial:
+        joined = [seg for segs in lists for seg in segs]
+        found = aiqt_hooks._diff_possibles(lists, added, shared)
+        joined_found = [(index, seg) for index, seg in enumerate(joined)
+                        if (seg.argv or seg.raw) and aiqt_hooks._is_possible_producer(seg)]
+        if (len(found) != len(joined_found)
+                or any(a[0] != b[0] or a[1] is not b[1] for a, b in zip(found, joined_found))):
+            return "_diff_possibles on {!r} gave {!r}, the joined segments {!r}".format(text, found, joined_found)
+    return None
+
+
+def _read_lead_failures(cwd, count=2000, seed=20261029, size=65536):
+    """(dl-read-lead) The records each reading of an uncertain '#' that resumed from the first reading's stop
+    holds at its head (aiqt_hooks._shared_lead) are judged once, as each reading's own would be: on
+    _LEX_FORK_TEXTS and `count` seeded texts over _LEX_FORK_ALPHABET, in every partial, skip_empty and locale
+    mode, inside _CommandReading, every own reading _shared_lead gives a head holds each record of the
+    context's shared at its index (the same object), and _lex_readings gives the same readings, added count,
+    origins and shared as it gives with _shared_lead giving no reading a head; on each full lex,
+    diff_source_pretool's possible producers (_diff_possibles) are, by index and record, those of the joined
+    segments _lex_command returns. The corpus must hold an own reading given a head and one at least as long
+    given none (a reading lexed from the start, or main's) (dl-read-lead-corpus).
+    (dl-read-lead-red) A wrong head, one given to every reading at least as long as shared, must be caught by
+    the same check.
+    (dl-read-lead-taken) One diff_source_pretool call on the seps_hash_lines shape at 64 KB (sixteen readings
+    of one long run of separators) gives a head at least 32 times: to each of the sixteen readings, in the
+    command reading (_read_segments) and in the possible-producer test (_diff_possibles)."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_LEX_FORK_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_FORK_ALPHABET) for _ in range(rng.randint(1, 12))))
+    modes = [(partial, skip_empty, locale) for partial in (False, True) for skip_empty in (False, True)
+             for locale in (False, True)]
+    real = aiqt_hooks._shared_lead
+
+    def wrong(segments, shared):
+        return len(shared) if shared and len(segments) >= len(shared) else 0
+
+    def problems(lead):
+        found = []
+        counts = [0, 0]
+        try:
+            for text in texts:
+                for partial, skip_empty, locale in modes:
+                    aiqt_hooks._shared_lead = lead
+                    got = _read_lead_outcome(text, partial, locale, skip_empty)
+                    aiqt_hooks._shared_lead = lambda segments, shared: 0
+                    want = _read_lead_outcome(text, partial, locale, skip_empty)
+                    aiqt_hooks._shared_lead = lead
+                    problem = _read_lead_problem(text, partial, got, want, counts)
+                    if problem is not None:
+                        found.append(problem)
+                        if len(found) == 3:
+                            return found, counts
+        finally:
+            aiqt_hooks._shared_lead = real
+        return found, counts
+
+    found, counts = problems(real)
+    out.extend("(dl-read-lead) {}".format(problem) for problem in found)
+    if not (counts[0] and counts[1]):
+        out.append("(dl-read-lead-corpus) the corpus must hold an own reading given a head ({}) and one at least as "
+                   "long given none ({})".format(counts[0], counts[1]))
+    if not problems(wrong)[0]:
+        out.append("(dl-read-lead-red) a head given to every reading at least as long passes the check")
+    command = _DEADLINE_SHAPES["seps_hash_lines"](size, cwd)[1]["command"]
+    data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+            "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
+    heads = [0]
+
+    def counted(segments, shared):
+        lead = real(segments, shared)
+        heads[0] += lead > 0
+        return lead
+    aiqt_hooks._shared_lead = counted
+    try:
+        aiqt_hooks.HANDLERS["diff_source_pretool"](data)
+    finally:
+        aiqt_hooks._shared_lead = real
+    if heads[0] < 32:
+        out.append("(dl-read-lead-taken) diff_source_pretool gave a head {} times on a {}-character command of one "
+                   "run of separators before four '#' lines; sixteen readings, each read twice, need 32".format(
+                       heads[0], len(command)))
+    return out
+
+
 # Commands for the continuation-join fast path: with no backslash-newline pair (backslashes, newlines and
 # quoting apart from each other) and with pairs at top level, inside quotes, substitutions, an expansion and
 # comments, including pairs the walk keeps.
@@ -3830,6 +3949,93 @@ def _lex_skip_floor_failures():
     return out
 
 
+def _lex_left_repeats(segments, newlines=False):
+    """segments with each record left out that has no word, no redirect and a separator other than '' (a newline
+    or the end of the command), where the record kept before it has no word, no redirect and the same separator:
+    the reference for skip_empty _SKIP_EMPTY_REPEATS. newlines True also leaves out such a record ended by '', a
+    wrong reading for _lex_repeats_failures."""
+    kept = []
+    for seg in segments:
+        last = kept[-1] if kept else None
+        if (not seg.argv and not seg.redirects and (seg.sep_after or newlines) and last is not None
+                and not last.argv and not last.redirects and last.sep_after == seg.sep_after):
+            continue
+        kept.append(seg)
+    return kept
+
+
+def _lex_repeats_want(text, partial, newlines=False):
+    """What _lex_readings(text, partial, skip_empty=_SKIP_EMPTY_REPEATS) must give: the full lex's readings, each
+    read through _lex_left_repeats (newlines passed on), with the same complete and in_progress flags in partial
+    mode, or the same ValueError."""
+    full = _lex_outcome(lambda: aiqt_hooks._lex_readings(text, partial))
+    if full == "ValueError":
+        return full
+    if partial:
+        return [(_lex_left_repeats(segs, newlines), done, open_) for segs, done, open_ in full]
+    return [_lex_left_repeats(segs, newlines) for segs in full]
+
+
+def _lex_repeats_mismatches(lex, texts):
+    """The (text, partial) readings on which lex(text, partial) differs from _lex_repeats_want: [(text, partial,
+    got, want)], at most three."""
+    out = []
+    for text in texts:
+        for partial in (False, True):
+            want = _lex_repeats_want(text, partial)
+            got = _lex_outcome(lambda: lex(text, partial))
+            if got != want:
+                out.append((text, partial, got, want))
+                if len(out) == 3:
+                    return out
+    return out
+
+
+def _lex_repeats_failures(count=4000, seed=20261029):
+    """(dl-lex-repeats) _lex_readings with skip_empty _SKIP_EMPTY_REPEATS gives the full lex's readings, each with
+    every record left out that repeats the record kept before it (_lex_left_repeats: no word, no redirect and the
+    same separator, not a newline's), with the same ValueError and the same complete and in_progress flags in
+    partial mode, on _LEX_SKIP_TEXTS, _LEX_FORK_TEXTS and `count` seeded random texts over _LEX_SKIP_ALPHABET;
+    dl-lex-fork reads the same mode resumed where a reading stopped. Three wrong readings (every record kept,
+    every record with no word and no redirect left out, and a newline-ended repeat left out too) must each be
+    caught by the same comparison, so it discriminates and the corpus holds a record it leaves out.
+    (dl-lex-repeats-taken) gate_weakening, which lexes in this mode, builds fewer than 50 records on a run of 200
+    separators before four '#' lines (sixteen readings), counted with aiqt_hooks._Segment wrapped
+    (_lex_records_built), where the default lex of that command builds more than 200 (dl-lex-repeats-taken-red),
+    so the count discriminates."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_LEX_SKIP_TEXTS) + list(_LEX_FORK_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_SKIP_ALPHABET) for _ in range(rng.randint(0, 10))))
+    repeats = aiqt_hooks._SKIP_EMPTY_REPEATS
+    for text, partial, got, want in _lex_repeats_mismatches(
+            lambda text, partial: aiqt_hooks._lex_readings(text, partial, skip_empty=repeats), texts):
+        out.append("(dl-lex-repeats) _lex_readings({!r}, partial={}, skip_empty={!r}) gave {!r}, want {!r}".format(
+            text, partial, repeats, got, want))
+    wrong = (
+        ("keep-all", lambda text, partial: aiqt_hooks._lex_readings(text, partial)),
+        ("skip-all", lambda text, partial: aiqt_hooks._lex_readings(text, partial, skip_empty=True)),
+        ("newlines", lambda text, partial: _lex_repeats_want(text, partial, newlines=True)),
+    )
+    for name, lex in wrong:
+        if not _lex_repeats_mismatches(lex, texts):
+            out.append("(dl-lex-repeats-red-{}) a wrong reading passes the comparison".format(name))
+    lines = "(" + ";" * 200 + " #a\n #b\n #c\n #d\n)"
+    data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": lines},
+            "session_id": "lex-repeats-session", "tool_use_id": "lex-repeats-call"}
+    built, _empty = _lex_records_built(lambda: aiqt_hooks.HANDLERS["gate_weakening"](data))
+    if built >= 50:
+        out.append("(dl-lex-repeats-taken) gate_weakening built {} records for {!r}; a run of separators must "
+                   "build one record, so fewer than 50 in all".format(built, lines[:12] + "..."))
+    default_built, _empty = _lex_records_built(lambda: aiqt_hooks._lex_command(lines))
+    if default_built <= 200:
+        out.append("(dl-lex-repeats-taken-red) the default lex of {!r} built {} records, not more than 200, so "
+                   "the count cannot see a caller that builds one per separator".format(lines[:12] + "...",
+                                                                                      default_built))
+    return out
+
+
 def _lex_words_only(result):
     """A wrong skip_empty reading for _lex_skip_failures: it also leaves out a record with a redirect and no
     word."""
@@ -3898,8 +4104,8 @@ def _lex_fork_mismatches(texts):
     """The (text, partial, skip_empty, locale) readings on which _lex_readings differs from
     _lex_readings_restart, or a partial _lex_command from that reference's partial recovery: at most three."""
     out = []
-    modes = [(partial, skip_empty, locale) for partial in (False, True) for skip_empty in (False, True)
-             for locale in (False, True)]
+    modes = [(partial, skip_empty, locale) for partial in (False, True)
+             for skip_empty in (False, True, aiqt_hooks._SKIP_EMPTY_REPEATS) for locale in (False, True)]
     for text in texts:
         for partial, skip_empty, locale in modes:
             got = _lex_fork_outcome(lambda: aiqt_hooks._lex_readings(text, partial, locale, skip_empty))
@@ -3939,8 +4145,8 @@ def _lex_fork_failures(count=6000, seed=20261018):
     '#' (_LexFork), gives what lexing every reading from the start gives (_lex_readings_restart: the same
     segments, flags and _SubstHeredocs.reads change, or the same ValueError), and a partial _lex_command
     whose readings cannot be judged gives the reference's recovery, on _LEX_FORK_TEXTS and `count` seeded
-    texts over _LEX_FORK_ALPHABET, in every partial, skip_empty and locale mode. The corpus must hold commands
-    whose first reading stops where a reading can resume (dl-lex-fork-corpus).
+    texts over _LEX_FORK_ALPHABET, in every partial, skip_empty (_SKIP_EMPTY_REPEATS included) and locale mode.
+    The corpus must hold commands whose first reading stops where a reading can resume (dl-lex-fork-corpus).
     (dl-lex-fork-red-nest, dl-lex-fork-red-tail) Two wrong resumptions, one with an empty nesting stack and
     one taking a recorded rest by its index alone, must each be caught by the same comparison.
     (dl-lex-fork-taken) The text before the first uncertain '#' is lexed once: on a run of separators before
@@ -6621,9 +6827,11 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_procsubst_taken_failures())
     failures.extend(_suffix_reading_failures())
     failures.extend(_read_visit_failures(str(tmp)))
+    failures.extend(_read_lead_failures(str(tmp)))
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
     failures.extend(_lex_skip_floor_failures())
+    failures.extend(_lex_repeats_failures())
     failures.extend(_lex_fork_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
