@@ -12,13 +12,13 @@ own hook dispatcher carries), re-verified at build time for this pack member. Wa
 for denial here: every protected operation takes a structured DENY decision or a blocking error, never an
 advisory note.
 
-Installation (per user or per project; `install-pack` wires this automatically once it ships, and the
-adoption `enable-hook` op writes exactly this registration through its structured JSON merge): register
-one PreToolUse group in `.claude/settings.json` whose matcher is "*" (match-all: a narrower matcher would
-silently exempt tools) and whose single command entry launches this file isolated:
+Installation (per project): an adoption plan plants this file at opf/enforcement/claude/pretooluse_deny.py,
+where it must live (it derives the trees it guards from its own path), and registers it in
+`.claude/settings.json`, planting the pack's reviewed settings.opf.json there or merging the same group into
+an existing file through the `enable-hook` op's structured JSON merge: one PreToolUse group whose matcher is
+"*" (match-all: a narrower matcher would silently exempt tools) and whose single command entry is
 
-    hooks . PreToolUse : one group, matcher "*", with one hooks entry of type "command" whose command is
-    python3 -I <absolute path to>/pretooluse_deny.py
+    python3 -I "$CLAUDE_PROJECT_DIR"/opf/enforcement/claude/pretooluse_deny.py
 
 I/O contract (doc-confirmed, above): the tool-call payload arrives as JSON on stdin, carrying
 hook_event_name, tool_name, tool_input and the session cwd. A decision goes to stdout on exit 0 as a JSON

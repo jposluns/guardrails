@@ -8,7 +8,6 @@ format-version = 1
 [[path]]
 path = ".aiqt/core/gates/manifest.toml"
 review-round = 6
-qa-round = 1
 
 [[path]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -21,7 +20,7 @@ fix-id = 3
 [[path]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
 fix-id = 33
-review-round = 131
+review-round = 127
 reviewer-source = 27
 
 [[path]]
@@ -100,13 +99,14 @@ fix-id = 3
 
 [[path]]
 path = "opf/tools/_opf_adopt.py"
-review-round = 14
+review-round = 13
 reviewer-source = 2
 
 [[path]]
 path = "opf/tools/_opf_adopt_apply.py"
-review-round = 101
-reviewer-source = 40
+fix-id = 1
+review-round = 98
+reviewer-source = 44
 
 [[path]]
 path = "opf/tools/_opf_adopt_complete.py"
@@ -132,14 +132,14 @@ reviewer-source = 1
 
 [[path]]
 path = "opf/tools/_opf_check.py"
-review-round = 78
-reviewer-source = 22
+review-round = 77
+reviewer-source = 21
 
 [[path]]
 path = "opf/tools/_opf_emit.py"
 fix-id = 1
-review-round = 20
-qa-round = 98
+review-round = 19
+qa-round = 76
 reviewer-source = 53
 
 [[path]]
@@ -166,10 +166,6 @@ review-round = 226
 reviewer-source = 69
 
 [[path]]
-path = "opf/tools/_opf_record.py"
-qa-round = 5
-
-[[path]]
 path = "opf/tools/_opf_release.py"
 fix-id = 6
 review-round = 10
@@ -185,14 +181,7 @@ reviewer-source = 2
 path = "opf/tools/_opf_store.py"
 fix-id = 2
 review-round = 17
-reviewer-source = 3
-
-[[path]]
-path = "opf/tools/_opf_views.py"
-fix-id = 3
-review-round = 47
-qa-round = 2
-reviewer-source = 14
+reviewer-source = 2
 
 [[path]]
 path = "opf/tools/_opf_write_guard.py"
@@ -209,8 +198,7 @@ fix-id = 3
 
 [[path]]
 path = "opf/tools/check_opf_homes.py"
-review-round = 69
-qa-round = 2
+review-round = 67
 reviewer-source = 8
 
 [[path]]
@@ -222,19 +210,19 @@ reviewer-source = 46
 [[path]]
 path = "opf/tools/check_opf_record.py"
 review-round = 10
-qa-round = 13
+qa-round = 9
 
 [[path]]
 path = "opf/tools/opf.py"
 fix-id = 2
 review-round = 180
-qa-round = 399
-reviewer-source = 265
+qa-round = 325
+reviewer-source = 232
 
 [[path]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
 fix-id = 33
-review-round = 131
+review-round = 127
 reviewer-source = 27
 
 [[path]]
@@ -259,10 +247,6 @@ path = "tools/check_byte_canon.py"
 fix-id = 9
 review-round = 2
 reviewer-source = 2
-
-[[path]]
-path = "tools/check_ci_parity.py"
-review-round = 4
 
 [[path]]
 path = "tools/check_clauses.py"
@@ -315,10 +299,6 @@ fix-id = 11
 review-round = 21
 
 [[path]]
-path = "tools/check_version_monotonicity.py"
-fix-id = 6
-
-[[path]]
 path = "tools/gen_enforcement_register.py"
 fix-id = 1
 review-round = 6
@@ -352,7 +332,7 @@ review-round = 10
 [[path]]
 path = "tools/selftest_aiqt_hooks.py"
 fix-id = 23
-review-round = 241
+review-round = 239
 reviewer-source = 77
 
 [[path]]

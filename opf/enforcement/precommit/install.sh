@@ -53,8 +53,11 @@
 # A hangup, interrupt or termination signal runs the same removal and report and exits 2, at any point.
 # A directory counts as this run's only once its mkdir has succeeded, so a mkdir that fails leaves a
 # directory that arrived in its place alone; a signal in the instant between that success and the record
-# can leave one empty directory, which the report names.
-# Exit status: 0 installed or already installed, 2 refused or cannot evaluate.
+# can leave that empty directory, and the hooks directory holding it when this run made that one too (an
+# rmdir does not remove a directory that is not empty); the report names what is left.
+# Exit status: 0 installed or already installed, 2 refused or cannot evaluate. A standard output that is
+# closed, or a pipe whose reader has gone, does not change the 0: the closing message is lost, not the
+# status (a broken pipe is ignored for those last writes).
 #
 # Threat model: the installer runs unprivileged, as the user who owns the clone. It defends against a
 # misconfigured clone and against repository content a branch supplies. A concurrent process running as
@@ -404,6 +407,7 @@ elif [ -e "$hooks" ]; then
         fail "the hooks directory $hooks cannot be read, searched and written by this user"
     if [ -e "$stub" ] || [ -L "$stub" ]; then
         if is_stub "$stub"; then
+            trap '' PIPE
             printf '%s\n' "opf-pre-commit install: already installed in this clone ($stub)"
             exit 0
         fi
@@ -438,5 +442,9 @@ is_stub "$stub" || rollback "the stub $stub did not read back as a readable, exe
 rm -f -- "$tmp" && [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || rollback "could not remove the temporary file $tmp"
 rmdir -- "$priv" || rollback "could not remove the private directory $priv"
 trap - HUP INT TERM
+# The stub is in place, so a message that cannot be written (stdout closed, or a pipe with no reader) must
+# not turn the status into a failure or a signal death.
+trap '' PIPE
 printf '%s\n' "opf-pre-commit install: installed for this clone and its linked worktrees ($stub runs ./$rel/pre-commit)."
 echo "opf-pre-commit install: other clones must run this installer too; git commit --no-verify, cherry-pick, revert, rebase, am and a clean merge commit without the hook, and CI does not catch a history violation committed that way (see pre-commit)."
+exit 0
