@@ -24,9 +24,9 @@ revision or a coverage figure, is emitted from an observation that ran that exac
 alongside the checks. For a claim about the current or working state, that observation follows the last
 write to any of the set's inputs, and a later write to such an input invalidates the claim; a claim bound to
 an immutable revision remains evidence about that revision. A review carried to a rebased or replayed
-revision transfers only where the change's own diff decides its correctness: an unchanged patch identity
-shows the diff is the same, not the files it relies on, so each such file that changed between the reviewed
-and new bases reopens review of the parts that rely on it.
+revision transfers only if the replayed diff is byte-identical to the reviewed diff, and even then review
+reopens wherever the change interacts with a file that differs between the reviewed and new bases, whether
+one it relies on or one that calls or consumes what it changes; any other diff needs a new review.
 
 A fix claim scoped to a defect class, not merely the cited instance, is complete only when it
 also accounts for every sibling instance of that class. Such a claim carries either a recorded,
