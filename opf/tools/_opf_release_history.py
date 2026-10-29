@@ -931,8 +931,9 @@ def _builder_vectors(check):
 
 def self_test():
     """Pure in-memory vectors, judged on returned statuses, findings, bytes and ledgers: no file, process,
-    network or clock (the builder vectors replace every public function of the time module, so every clock
-    read, with one that raises, and restore it).
+    network or clock (the builder vectors replace every public function of the time module, so every
+    time-module clock read, and datetime's now, utcnow and today with ones that raise, and restore them; a
+    clock reached another way, such as a closure or a bound method held in a name, is not replaced).
     Exit 0 all pass, 1 a failed check, 2 a harness error (fail-closed)."""
     results = []
 
