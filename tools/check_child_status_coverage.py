@@ -2428,6 +2428,65 @@ def _behaviour(probe, base):
     runner = _copy(LOCAL_RUNNER, tree, _swap(text, RUNNER_PROBES[0][1] + "\n", ""))
     got = via("ignore", ["bash", str(runner)], cwd=str(tree))
     out.append(("revert/runner-probe-removed-red", got[0] == 0 and "RESULT: PASS" in got[1], got))
+
+    # Leg 7 reads its baseline only as a regular file, never through a final symlink: a symlink to a regular copy of
+    # the real baseline, a FIFO, a directory and an unreadable file (mode 000, its open also refused with EACCES so
+    # the vector holds whoever runs it) each stop a copy of this gate with exit 2, naming the baseline. Each refusal
+    # removed from a copy of the reader turns its vector red: the symlink is followed and the FIFO read as an empty
+    # baseline (the run goes on to its next input, absent from the copy), the directory fails only at its read, and
+    # the refused open escapes as an uncaught error (exit 1).
+    reader = (ROOT / "tools/check_entry_guard.py").read_text(encoding="utf-8")
+    baseline_text = (ROOT / RESIDUAL_BASELINE_REL).read_text(encoding="utf-8")
+    deny = ("_open = os.open\n", "def _open(path, flags):\n    if path.endswith({!r}):\n        raise PermissionError("
+            "errno.EACCES, \"open refused by the self-test\")\n    return os.open(path, flags)\n".format(
+                "/" + RESIDUAL_BASELINE_REL))
+    nofollow = ("OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC\n",
+                "OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC\n")
+    regular = ("        if not stat.S_ISREG(os.fstat(fd).st_mode):\n"
+               "            raise CannotEvaluate(\"{}: not a regular file\".format(label))\n", "")
+    opened = ("        raise CannotEvaluate(\"{}: cannot open ({})\".format(label, type(exc).__name__))\n",
+              "        raise\n")
+
+    def stopped(reason):
+        return 2, "", "error: cannot evaluate child-status coverage ({}); fail-closed\n".format(reason)
+
+    def baseline_gate(name, case, edits):
+        """A copy of this gate and the modules it imports, its reader edited by edits, its baseline made case."""
+        tree = Path(base) / name
+        for rel in ("tools/_selftest_exit_report.py", "tools/check_ci_parity.py", "tools/check_python_floor.py",
+                    "tools/check_selftest_execution.py", CANONICAL_REL):
+            _copy(rel, tree)
+        text = reader
+        for old, new in edits:
+            text = _swap(text, old, new)
+        _copy("tools/check_entry_guard.py", tree, text)
+        path = tree / RESIDUAL_BASELINE_REL
+        if case == "symlink":
+            _copy(RESIDUAL_BASELINE_REL + ".target", tree, baseline_text)
+            path.symlink_to(path.name + ".target")
+        elif case == "fifo":
+            os.mkfifo(path)
+        elif case == "directory":
+            path.mkdir()
+        else:
+            _copy(RESIDUAL_BASELINE_REL, tree).chmod(0)
+        return _copy(COVERAGE_REL, tree)
+
+    for case, edits, reason, flip, flipped in (
+            ("symlink", (), "is a symlink (refused)", nofollow, stopped("opf/tools/opf.py: missing")),
+            ("fifo", (), "not a regular file", regular, stopped("opf/tools/opf.py: missing")),
+            ("directory", (), "not a regular file", regular,
+             stopped(RESIDUAL_BASELINE_REL + ": unreadable (IsADirectoryError)")),
+            ("unreadable", (deny,), "cannot open (PermissionError)", opened, None)):
+        refusal = stopped(RESIDUAL_BASELINE_REL + ": " + reason)
+        gate = baseline_gate("baseline-" + case, case, edits)
+        got = via("default", python + [str(gate)], cwd=str(gate.parents[1]))
+        out.append(("behaviour/baseline-{}-refused".format(case), got == refusal, got))
+        gate = baseline_gate("baseline-{}-flipped".format(case), case, edits + (flip,))
+        got = via("default", python + [str(gate)], cwd=str(gate.parents[1]))
+        red = (got == flipped if flipped is not None else got[0] == 1 and got[1] == ""
+               and got[2].endswith("PermissionError: [Errno 13] open refused by the self-test\n"))
+        out.append(("revert/baseline-{}-refusal-removed-red".format(case), got != refusal and red, got))
     return out
 
 
@@ -2573,7 +2632,14 @@ def self_test(lane, report_path=None):
                                 ("behaviour/opf-runner-first-gate-fails", 0), ("control/opf-runner-default-passes", 0),
                                 ("revert/launcher-guard-removed-red", 0), ("revert/opf-guard-removed-red", 0),
                                 ("revert/hook-guard-removed-red", 0), ("revert/probe-guard-removed-red", 0),
-                                ("revert/coverage-guard-removed-red", 0), ("revert/runner-probe-removed-red", 0)):
+                                ("revert/coverage-guard-removed-red", 0), ("revert/runner-probe-removed-red", 0),
+                                ("behaviour/baseline-symlink-refused", 0),
+                                ("revert/baseline-symlink-refusal-removed-red", 0),
+                                ("behaviour/baseline-fifo-refused", 0), ("revert/baseline-fifo-refusal-removed-red", 0),
+                                ("behaviour/baseline-directory-refused", 0),
+                                ("revert/baseline-directory-refusal-removed-red", 0),
+                                ("behaviour/baseline-unreadable-refused", 0),
+                                ("revert/baseline-unreadable-refusal-removed-red", 0)):
             check(check_id, behaviour.get(check_id, (False, "not run"))[0], behaviour.get(check_id, (False, None))[1])
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

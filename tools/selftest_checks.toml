@@ -2837,6 +2837,14 @@ expected-check-ids = [
   "revert/probe-guard-removed-red",
   "revert/coverage-guard-removed-red",
   "revert/runner-probe-removed-red",
+  "behaviour/baseline-symlink-refused",
+  "revert/baseline-symlink-refusal-removed-red",
+  "behaviour/baseline-fifo-refused",
+  "revert/baseline-fifo-refusal-removed-red",
+  "behaviour/baseline-directory-refused",
+  "revert/baseline-directory-refusal-removed-red",
+  "behaviour/baseline-unreadable-refused",
+  "revert/baseline-unreadable-refusal-removed-red",
   "live/real-tree-passes",
 ]
 
