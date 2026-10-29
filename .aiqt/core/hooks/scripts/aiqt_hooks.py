@@ -63,7 +63,9 @@ so a tool_input that is missing or not an object, or a command that is missing, 
 (bash ends a command string at its first NUL, so the text after it never runs), reads the same way in each, and a hook that judges the command denies it with a reason naming the malformed field
 (_deny_unreadable_command), the convention-nudge Bash hooks (abspth, expbnd) included, since each also has
 a deny tier that may sit in what was not read. The hooks scoped by an orchestration registry, a review
-dispatch binding or a review hold read it that way only inside their scope. A confirmed violation
+dispatch binding or a review hold read a missing or non-string command that way only inside their scope;
+a command string holding a NUL is not absent (the text before the NUL runs and can name any repository),
+so each of them fails closed on it whatever its scope (_bash_command_holds_nul). A confirmed violation
 denies. A clean pass emits NO decision and exits 0 silently.
 
 gensrc_guard (gensrc): a CONFIRMED registry match (a hand-edit of a registered generated artefact) DENIES
@@ -86,7 +88,9 @@ re-issue (single quotes, escape the marker, or git commit -F <file>); the unpars
 
 git_explicit_binding (expbnd): an ambient git target or a relocated whole-tree breadth stage is a binding
 CONVENTION where the orchestrator normally binds its own target, not a hazard, so every former ask
-(including the unreadable-command case) ALLOWS with a note - EXCEPT the whole-tree stage-then-push pair: a
+ALLOWS with a note, while an unreadable command (a tool_input that is missing or not an object, or a command
+that is missing, not a string or holds a NUL) DENIES under the shared fail-closed contract above, since the
+deny tier may sit in what was not read - EXCEPT the whole-tree stage-then-push pair: a
 breadth stage ('git add -A/./:/', 'git commit -a/--all') followed by a 'git push' later in the same command
 publishes whatever the tree holds, so it is DENIED, on the parsed path and on every fallback alike (the
 fallback tests that pair before its directory-change note, so the note cannot mask the denial).
@@ -117,7 +121,7 @@ takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN
 verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) that resolution applies unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND
 the tree is provably clean (or the form is genuinely non-destructive), in
-which case it ALLOWS. A Bash payload whose tool_input.command is MISSING or NOT A STRING is not that
+which case it ALLOWS. A Bash payload whose tool_input.command is MISSING, NOT A STRING or HOLDS A NUL is not that
 boundary but a cannot-evaluate input (a discard could hide in what was not read), so it DENIES under the
 shared fail-closed contract (check-fails-closed-on-unreadable), like the fail-closed controls above. PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
@@ -457,6 +461,19 @@ def _bash_command(data):
                       "string at its first NUL, so what runs is not the text a check would read"
                       .format(command.index("\x00")))
     return command, None
+
+
+def _bash_command_holds_nul(data):
+    """True when the Bash payload's command IS a string but holds a NUL. Such a command is not absent:
+    bash still runs the text before the NUL, which can name any directory, so a hook whose scope (a
+    registry, a dispatch binding, a review hold) is read from the session or the command's own targets
+    cannot treat it as a command that runs nothing. Each scoped hook fails closed on it whatever its
+    scope, never weaker than reading the targets from the raw text would be."""
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command")
+    return isinstance(command, str) and "\x00" in command
 
 
 def _deny_unreadable_command(rule, check, detail):
@@ -7366,8 +7383,8 @@ def git_stash_ref(data):
     naming no such pair allows. A command whose '#' the lexer cannot judge that way gets the note when its
     text (_hash_doubt_scan) names git and stash, or holds quoting that text does not decode
     (_hash_doubt_opaque), since the lexer read nothing past that '#'. An empty command gets the sibling's
-    convention note; a tool_input that is missing or not an object, or a command that is missing or not a
-    string, denies (_bash_command, _deny_unreadable_command), as it does in the sibling.
+    convention note; a tool_input that is missing or not an object, or a command that is missing, not a
+    string or holds a NUL, denies (_bash_command, _deny_unreadable_command), as it does in the sibling.
     This note can co-occur with git_discard's raw/pristine fallback note on a wrapped or compound
     pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
     pop`); such sibling notes are consistent, never conflicting.
@@ -10380,7 +10397,7 @@ def git_discard(data):
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a present non-Bash tool, a non-git command, or no recognized lossy
     verb); a payload with NO tool_name is malformed, not another tool, and DENIES under the shared
-    missing-tool_name contract, and a tool_input whose command is MISSING or NOT A STRING is a
+    missing-tool_name contract, and a tool_input whose command is MISSING, NOT A STRING or HOLDS A NUL is a
     cannot-evaluate input, not that boundary, and DENIES under the shared fail-closed contract
     (check-fails-closed-on-unreadable), since a discard could hide in what was not read. A wrapper is in
     scope while the raw scan, the continuation-joined text or
@@ -21318,9 +21335,10 @@ def orch_truncation_guard(data):
     quoted here-document body, a quoted string or a comment, is no detach (as in registry scope) and
     draws no note for that `&` or for a span the second reader cannot read, only for a setsid, nohup
     or disown it names. A call there whose input cannot be read (a tool_input that is missing, null or not an
-    object, a command that is missing, not a string or holds a NUL, or a run_in_background that is present but not a
+    object, a command that is missing or not a string, or a run_in_background that is present but not a
     real boolean) is allowed WITH A NOTE naming the field this guard could not read
-    (_orch_oos_unreadable_input_note), never silently and never a deny; a readable background dispatch
+    (_orch_oos_unreadable_input_note), never silently; a command string holding a NUL is not absent (the
+    text before the NUL runs) and DENIES there too (_bash_command_holds_nul); a readable background dispatch
     (run_in_background exactly true) and a readable foreground command neither reader flags are the
     silent allow. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
@@ -21416,12 +21434,12 @@ def orch_truncation_guard(data):
                 "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
                 "registry found (rule trkasy, fail-closed).")
         # Not an orchestrated session: no registry on the chain or at a git toplevel. A call whose input this
-        # guard cannot read (a tool_input that is missing, null or not an object, a command that is missing,
-        # not a string or holds a NUL, read through the shared _bash_command, or a run_in_background that is
+        # guard cannot read (a tool_input that is missing, null or not an object, a command that is missing
+        # or not a string, read through the shared _bash_command, or a run_in_background that is
         # present but not a real boolean) is allowed with a
         # note naming the field it could not read, never silently (a detach such an input carries is never
-        # scanned, so silence would read ignorance as clean) and never a deny (no fail-closed case outside
-        # registry scope); a readable background dispatch (run_in_background exactly true) keeps the silent
+        # scanned, so silence would read ignorance as clean); a command string holding a NUL is not absent
+        # (the text before the NUL runs) and denies here too; a readable background dispatch (run_in_background exactly true) keeps the silent
         # allow. A readable foreground command gets ONE note when either reader finds work that may detach:
         # the detector the registry scope denies on (a bare-& detach, or quoting or comments it cannot read
         # to the end, where a later '&' can be a hidden detach) gives its own note, and otherwise the note
@@ -21433,6 +21451,11 @@ def orch_truncation_guard(data):
         # anywhere, a line continuation, an unclosed expansion, and every other cause outside those
         # shapes keeps its note (the single note is the true union of both readers).
         out_command, out_unread = _bash_command(data)
+        if out_unread is not None and _bash_command_holds_nul(data):
+            # a command string holding a NUL is not absent: the text before the NUL runs, so it
+            # denies outside registry scope too, as every Bash hook that judges the command does
+            return _deny_unreadable_command("trkasy (track-launched-work)", "foreground detach scan",
+                                            out_unread)
         if out_unread is not None:
             return _orch_oos_unreadable_input_note("{}; it cannot be scanned".format(out_unread))
         out_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
@@ -21945,10 +21968,12 @@ def orch_untracked_wait_loop(data):
     allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
     bounded worker building a fire-and-forget poll is equally wrong. A payload with NO tool_name is
     malformed, not another tool, and DENIES in every session (the shared missing-tool_name contract,
-    checked before the registry scope as orch_truncation_guard checks it). Fail-open (silent allow) on a
+    checked before the registry scope as orch_truncation_guard checks it). A command string holding a NUL
+    is not absent (the text before the NUL runs) and DENIES in every session, before the registry scope is
+    read (_bash_command_holds_nul). Fail-open (silent allow) on a
     present non-Bash tool, no git toplevel, an absent registry, or an empty command (it runs nothing); in
     registry scope a MISSING, NON-OBJECT or NON-STRING command is a cannot-evaluate input and DENIES
-    (check-fails-closed-on-unreadable), never a clean pass. A NUL, heredoc,
+    (check-fails-closed-on-unreadable), never a clean pass. A heredoc,
     unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
     the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
     Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
@@ -21962,6 +21987,10 @@ def orch_untracked_wait_loop(data):
         return _deny_missing_tool_name("trkasy")
     if tool_name != "Bash":
         return _allow()                     # a present non-Bash tool is out of scope
+    if _bash_command_holds_nul(data):
+        # the text before the NUL still runs, so it denies whatever the registry scope
+        return _deny_unreadable_command("trkasy (untracked wait loop)", "untracked background wait loop scan",
+                                        _bash_command(data)[1])
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -24799,7 +24828,8 @@ def review_dispatch_pin(data):
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
     dispatch runs; where the binding declares the draft labels, a brief naming the worker draft the commit
     applies declares every path the draft's diff headers name less the paths it records as skipped, so a
-    drafted path neither committed nor skipped is refused. Inert without a review_dispatch binding; in a
+    drafted path neither committed nor skipped is refused. A command string holding a NUL is withheld in
+    every session, bound or not (the text before the NUL runs). Inert without a review_dispatch binding; in a
     session a binding scopes, a Bash call that is not one provably plain command (its command word on the
     allowlist, or a declared dispatch command) is withheld, a plain one naming the registry is refused
     unless it only reads, a plain git command that sets configuration (every git config write, every -c or
@@ -24821,7 +24851,12 @@ def review_dispatch_pin(data):
         return _deny_missing_tool_name("vfxcmt")
     if tool_name != "Bash":
         return _allow()
-    kind, message = _rdp_decide(data)
+    if _bash_command_holds_nul(data):
+        # the text before the NUL still runs, so it is withheld whatever binding scopes the session
+        kind, message = ("unverifiable", "the Bash payload carries no readable command string ({})"
+                         .format(_bash_command(data)[1]))
+    else:
+        kind, message = _rdp_decide(data)
     if kind in ("deny", "unverifiable"):
         prefix = "UNVERIFIABLE: " if kind == "unverifiable" else ""
         return _deny("{}AIQT rule vfxcmt: review dispatch withheld: {}.".format(prefix, message),
@@ -26722,8 +26757,10 @@ def _rwh_core_worktree(directory, cache):
 
 def _rwh_decide(data):
     """The review-workdir-hold decision for one Bash payload: ("allow"|"note"|"deny"|"unverifiable",
-    message). INERT where no review-hold marker directory exists and the payload carries an absolute
-    cwd: the only state read is the markers of the repositories the command names, so adopters who
+    message). A command string holding a NUL is UNVERIFIABLE whatever the markers say (an unreadable
+    session marker state still denies first): the text before the NUL runs and can name a held
+    worktree in any repository (_bash_command_holds_nul). INERT where no review-hold marker directory
+    exists and the payload carries an absolute cwd: the only state read is the markers of the repositories the command names, so adopters who
     write no markers see nothing. A cwd that is missing, relative, carries a NUL byte or names no
     directory that exists hides the
     session repository, so every git-word command outside the read-only grammar, and an absent
@@ -26846,6 +26883,13 @@ def _rwh_decide(data):
     if unread is not None or not command:
         if s_state == "bad":
             return ("deny", _rwh_bad_text(s_payload))
+        if _bash_command_holds_nul(data):
+            # the text before the NUL still runs and can name a held worktree of ANY repository,
+            # not only the session's, and its targets are not read from text that is not what
+            # runs: withheld whatever the session repository's own holds say
+            return ("unverifiable", "AIQT rule rvwpin: the Bash command is unreadable ({}); the text "
+                    "before its NUL still runs and can name a held worktree in any repository, so a "
+                    "mutation of a held worktree cannot be ruled out.".format(unread))
         if s_live:
             return ("unverifiable", "AIQT rule rvwpin: the Bash command is absent or unreadable{} while "
                     "a review hold is live, so a mutation of the held worktree cannot be ruled out."
@@ -27105,7 +27149,9 @@ def review_workdir_hold(data):
     modified until the review returns or is abandoned. The hold is an adopter-written marker file in
     GIT_COMMON_DIR/aiqt/review-holds/ naming the held worktree, its head at dispatch, a dispatch id
     and a required expiry; the dispatcher writes it before the reviewer starts and removes it when the
-    review ends. INERT (silent allow) where no marker directory exists and the payload carries an
+    review ends. A command string holding a NUL is withheld (UNVERIFIABLE) whatever the holds: the
+    text before the NUL runs and can name a held worktree in any repository, and its targets are
+    not read from text that is not what runs. INERT (silent allow) where no marker directory exists and the payload carries an
     absolute cwd; a cwd that is missing, relative, carries a NUL byte or names no directory that
     exists fails closed (UNVERIFIABLE)
     for every git-word command outside the read-only grammar and for an absent command, in the
