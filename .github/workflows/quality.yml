@@ -936,6 +936,9 @@ jobs:
       - name: Entry-guard gate
         shell: bash
         run: python3 -I -B tools/check_entry_guard.py
+      - name: Verifier delivery self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
 
       # The child-status probe's own vectors and the coverage gate that holds every probe placement, every
       # inline copy of the guard and every entry point's classification (execution-reconciled self-tests).
