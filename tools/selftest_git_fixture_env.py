@@ -927,7 +927,9 @@ def _config_poison_fixture(base):
 # tools/check_opf_standalone_closure.py --self-test --ci-job entries, sized outside SIZING: their
 # MEASURED figures are standalone runs of the pre-split whole self-test (and one of the
 # opf-closure-c member when it held one leg) and their ESTIMATED figure scales the latest
-# whole-self-test run by load alone, not by the SIZING formula (their shared comment gives both).
+# whole-self-test run by load alone, not by the SIZING formula (their shared comment gives both),
+# and the tools/check_selftest_execution.py --suite child-status-coverage-selftest entry, whose
+# MEASURED figures are standalone runs (its own comment), fed to the SIZING formula.
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
@@ -943,12 +945,14 @@ def _config_poison_fixture(base):
 # to the deadline rather than reported as a failure of the callee. Every bound in this table takes
 # that exception: none of them is offered as a bound above its member's whole self-granted budget.
 # CHOICE: the default is NOT raised above 5766 s, and neither is any entry below (each but the
-# five tools/check_opf_standalone_closure.py --self-test --ci-job entries is sized from config-lane
-# runs MEASURED on this host, see SIZING; those five are sized from standalone runs of the
-# pre-split whole self-test, see their shared comment); each entry
+# five tools/check_opf_standalone_closure.py --self-test --ci-job entries and the
+# child-status-coverage-selftest entry is sized from config-lane runs MEASURED on this host, see
+# SIZING; those five are sized from standalone runs of the pre-split whole self-test, see their
+# shared comment, and that one from standalone runs, see its own comment); each entry
 # stays a deliberate shorter deadline relative to the member's self-granted budget, yet each
-# formula-sized entry is sized above the member's measured lane runs so that the member finishes
-# under the load the SIZING factor covers;
+# formula-sized entry is sized above the member's measured runs (lane runs, or standalone runs for
+# the child-status-coverage-selftest entry) so that the member finishes under the load the SIZING
+# factor covers;
 # reaching a bound stays cannot-evaluate, attributed to the bound, never a FAIL of that member
 # and never a pass, because this lane owns no member's verdict.
 # Every roster member is a registered step or the runner behind a registered --suite step
@@ -1046,7 +1050,11 @@ def _config_poison_fixture(base):
 # The child-status change (2026-10-17) registers four more members, each outside the account
 # and with no recorded time: opf/tools/_child_status.py --self-test,
 # tools/check_child_status_coverage.py, and tools/check_selftest_execution.py --suite
-# child-status-selftest and the same with --suite child-status-coverage-selftest.
+# child-status-selftest and the same with --suite child-status-coverage-selftest. Of these, only
+# the --suite child-status-coverage-selftest member has a later measurement since (2026-10-29,
+# standalone runs, no config-lane time known): it carries a SIZING_LATER_MEASURED entry and its own
+# entry below, sized outside SIZING by the SIZING formula; the other three still have no recorded
+# time.
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
@@ -1132,6 +1140,18 @@ CONFIG_MEMBER_BOUNDS = {
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): 3600,
+    # Sized outside SIZING, by its formula (no config-lane time of this member is known: its lane
+    # runs reached the 1200 s default in two of three config lanes of one CI run, so they have no
+    # known length and none is fed to the formula; the same lanes had passed on the same tree in an
+    # earlier run).
+    # MEASURED (2026-10-29, CI, the "Child-status coverage self-test (execution-reconciled)" step of
+    # the Execution-reconciled self-tests job, this same command run standalone): started 00:21:14Z,
+    # completed 00:34:30Z, 796 s wall, passed.
+    # MEASURED (2026-10-29, on an 80-CPU host, load5 about 6): one standalone run of
+    # tools/check_child_status_coverage.py --self-test (the self-test this suite runs) took 604.9 s
+    # wall.
+    # ESTIMATED: 796 * 20 / 3 = 5306.7, so 5400 s.
+    ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): 5400,
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
 # from them and config/member-roster-figures pins them against _registered_selftests().
@@ -1288,6 +1308,9 @@ SIZING_LATER_MEASURED = {
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): (
         "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
         " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): (
+        "Standalone runs only (2026-10-29, CI 796 s, local 604.9 s), no config-lane time known:"
+        " see this member's CONFIG_MEMBER_BOUNDS comment."),
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
