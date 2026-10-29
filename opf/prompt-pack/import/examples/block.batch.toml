@@ -1,0 +1,13 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-freeze.md"
+
+[[record]]
+key = "quarter-close-freeze"
+type = "block"
+created_at = "2019-09-23T07:30:00Z"
+scopes = ["imported:BI-1"]
+status = "released"
+title = "No report schema changes during quarter close"
+unrecorded = [{field = "updated_at", reason = "not_recorded_in_source"}]

@@ -43,7 +43,8 @@ Five things live here, all from OPF-SPEC.md section 8 (with the release triad's 
   5. THE IMPORTED ENVELOPE (spec 8.3). validate_imported_record is a pure validator for one imported
      record: the closed imported envelope (an `imported:<NS>-<n>` id, no `/proposed`, an importer actor
      with an id), the closed `import` provenance table, and the `unrecorded` missingness contract (exactly
-     one closed-reason row per omitted non-exempt field). It is not yet wired into the doctor.
+     one closed-reason row per omitted non-exempt field). The doctor wires it in as C-IMPORTED-SCHEMA,
+     one validation per imported leaf row.
 
 Every malformed, unknown, illegal, or unidentifiable input fails closed to an INVALID or CANNOT-EVALUATE
 outcome, never a silent VALID (spec 3 "Fail closed"; the check-fails-closed-on-unreadable rule: a
@@ -229,6 +230,9 @@ PROPOSER_KINDS = frozenset({"assistant", "automation"})
 # ride the 1.1.0 base-schema bump.
 LINK_RELS = ("supersedes", "resolves", "remediates", "receipt_of", "corrects", "follows", "relates",
              "exemplifies", "derives_from")
+# The relations a clean record MAY carry to an imported-series id (spec 8.6). `supersedes` is limited further
+# to a target of the source record's own type, which _validate_links judges against the record's namespace.
+CLEAN_TO_IMPORTED_RELS = frozenset({"relates", "derives_from", "follows", "supersedes"})
 # The closed reference-capture kinds (spec 8.6).
 REF_KINDS = ("path", "url", "doc")
 
@@ -655,9 +659,12 @@ def _validate_actor(record, findings, display=_safe_display):
     return kind
 
 
-def _validate_links(record, findings):
+def _validate_links(record, findings, namespace):
     """Validate the optional `links` array of {rel, id} (spec 8.6): rel from the closed vocabulary, id a
-    well-formed `<NS>-<n>` (any namespace, since a link may point at any type)."""
+    well-formed `<NS>-<n>` (any namespace, since a link may point at any type). A clean record MAY also
+    link an imported-series id `imported:<NS>-<n>` over IMPORTED_NAMESPACES, but only by `relates`,
+    `derives_from`, `follows`, or a `supersedes` whose target namespace is `namespace`, the record's own
+    type's (spec 8.6); every other clean-to-imported relation is refused."""
     if "links" not in record:
         return
     links = record.get("links")
@@ -679,6 +686,21 @@ def _validate_links(record, findings):
         elif link.get("rel") not in LINK_RELS:
             findings.append("{}.rel {!r} is not one of {} (spec 8.6)".format(
                 where, link.get("rel"), list(LINK_RELS)))
+        series = parse_series_id(link.get("id"))
+        if series is not None and series[0] != series[1]:
+            # A clean-to-imported link: its namespace must be one the imported series carries, and a
+            # vocabulary relation one of those spec 8.6 permits across series (a rel outside the vocabulary
+            # is already a finding above). C-LINKS resolves the target over the union of both series.
+            rel = link.get("rel")
+            if series[1] not in IMPORTED_NAMESPACES:
+                findings.append("{}.id {!r} uses namespace {!r}, which the imported series refuses: {}".format(
+                    where, link.get("id"), series[1], _imported_namespace_refusal(series[1])))
+            if isinstance(rel, str) and rel in LINK_RELS and (
+                    rel not in CLEAN_TO_IMPORTED_RELS or (rel == "supersedes" and series[1] != namespace)):
+                findings.append("{} {} -> {!r} is refused: a clean-to-imported link is limited to relates, "
+                                "derives_from, follows, and same-type supersedes (spec 8.6)".format(
+                                    where, rel, link.get("id")))
+            continue
         shape = _valid_id_shape(link.get("id"))
         if shape is None:
             findings.append("{}.id {} is not a well-formed <NS>-<n> id".format(
@@ -1202,7 +1224,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     if spec.reduced:
         _validate_worklog(record, spec, registered_vendors, findings, registered_kinds)
         _validate_actor(record, findings)
-        _validate_links(record, findings)
+        _validate_links(record, findings, spec.namespace)
         _validate_refs(record, findings)
         return RecordValidation(INVALID if findings else VALID, findings, rtype, rid)
 
@@ -1254,7 +1276,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     if "summary" in record and not isinstance(record.get("summary"), str):
         findings.append("summary must be a string when present")
 
-    _validate_links(record, findings)
+    _validate_links(record, findings, spec.namespace)
     _validate_refs(record, findings)
     _validate_proposed_from(record, spec, findings)
     _validate_type_specific(record, spec, findings, standing_auth)
@@ -3667,6 +3689,41 @@ def self_test():
                                    links=[{"rel": "derives_from", "id": "FN-1"}],
                                    **contrib_base)).status == VALID)
 
+    # Clean-to-imported links (spec 8.6): relates, derives_from, follows and same-type supersedes are the
+    # only relations a clean record may carry to an imported-series id, judged on the full envelope and on
+    # the reduced worklog alike. Every other relation, a supersedes of another type, and an imported
+    # namespace the series refuses are each INVALID with exactly one named finding.
+    _xs_refused = "a clean-to-imported link is limited to relates, derives_from, follows, and same-type"
+
+    def _xs_one(v, text):
+        return v.status == INVALID and len(v.findings) == 1 and text in v.findings[0]
+
+    for _rel in ("relates", "derives_from", "follows"):
+        _xs = validate_record(envelope("finding", 40, "open", links=[{"rel": _rel, "id": "imported:BI-3"}]))
+        check("clean-to-imported-{}-ok".format(_rel), _xs.status == VALID and not _xs.findings)
+    _xs = validate_record(envelope("finding", 41, "open", links=[{"rel": "supersedes", "id": "imported:FN-3"}]))
+    check("clean-to-imported-same-type-supersedes-ok", _xs.status == VALID and not _xs.findings)
+    _xs = validate_record(dict(wl, links=[{"rel": "supersedes", "id": "imported:WL-2"}]), expected_type="worklog")
+    check("clean-to-imported-worklog-same-type-supersedes-ok", _xs.status == VALID and not _xs.findings)
+    for _rel, _tid in (("resolves", "imported:BI-3"), ("remediates", "imported:BI-3"),
+                       ("receipt_of", "imported:BI-3"), ("corrects", "imported:BI-3"),
+                       ("exemplifies", "imported:PP-3")):
+        _xs = validate_record(envelope("finding", 42, "open", links=[{"rel": _rel, "id": _tid}]))
+        check("clean-to-imported-{}-refused".format(_rel), _xs_one(_xs, _xs_refused))
+    _xs = validate_record(envelope("finding", 43, "open", links=[{"rel": "supersedes", "id": "imported:BI-3"}]))
+    check("clean-to-imported-cross-type-supersedes-refused", _xs_one(_xs, _xs_refused))
+    _xs = validate_record(dict(wl, links=[{"rel": "supersedes", "id": "imported:BI-2"}]), expected_type="worklog")
+    check("clean-to-imported-worklog-cross-type-supersedes-refused", _xs_one(_xs, _xs_refused))
+    # A clean done's receipt_of MUST target a clean backlog item (spec 8.6), so an imported one is refused.
+    _xs = validate_record(envelope("done", 40, "recorded", links=[{"rel": "receipt_of", "id": "imported:BI-3"}]))
+    check("clean-to-imported-done-receipt-refused", _xs_one(_xs, _xs_refused))
+    _xs = validate_record(envelope("finding", 44, "open", links=[{"rel": "relates", "id": "imported:LF-1"}]))
+    check("clean-to-imported-refused-namespace-invalid", _xs_one(_xs, "which the imported series refuses"))
+    # A relation outside the vocabulary is named once, by the vocabulary rule, and never again as a
+    # cross-series refusal.
+    _xs = validate_record(envelope("finding", 45, "open", links=[{"rel": "blesses", "id": "imported:BI-3"}]))
+    check("clean-to-imported-unknown-rel-one-finding", _xs_one(_xs, ".rel 'blesses' is not one of"))
+
     # The imported series (spec 8.2): `imported:<NS>-<n>` ids and `"imported:<NS>"` counters, opt-in, each
     # series on its own number line; with no opt-in every helper keeps its clean-only behaviour.
     def _alloc_refused(thunk):
@@ -4777,7 +4834,8 @@ def self_test():
         _res = _imp_try(_rec, **_kw)
         check("imported-module-name-bounded-" + _name, _res is not None and _res.status == _status
               and any(_needle in f for f in _res.findings) and _bounded_findings(_res, 2))
-    # The clean validators keep their messages byte for byte: their renderer is _safe_display, the repr.
+    # The clean validators keep their messages byte for byte: their renderer is _safe_display, the repr (whole
+    # up to 65,536 characters, _opf_store._DISPLAY_FULL_MAX_CHARS, within its depth and value bounds).
     _bi_spec = BASELINE_SPECS["backlog_item"]
     check("clean-status-and-roster-messages-unchanged",
           parse_status("bogus", _bi_spec) == (
@@ -4786,7 +4844,8 @@ def self_test():
               None, "state 'open' may not carry '/proposed' for a backlog_item (spec 8.4/8.5)")
           and _specs_roster_error({"not_a_type": _bi_spec}) == (
               "the type-spec roster names a type absent from the section-8.1 taxonomy: 'not_a_type' (fail-closed)"))
-    # A name over the display budget appears there uncut, as its repr, so a switch to the bounded renderer
+    # A name over the display budget appears there uncut, as its repr, up to _safe_display's 65,536-character
+    # limit (_opf_store._DISPLAY_FULL_MAX_CHARS; a longer repr is cut), so a switch to the bounded renderer
     # (which would cut it) shows.
     _over = "x" * (_DISPLAY_BUDGET + 808)
     check("clean-status-and-roster-long-name-uncut",
@@ -4795,9 +4854,9 @@ def self_test():
           and _specs_roster_error({_over: _bi_spec}) == (
               "the type-spec roster names a type absent from the section-8.1 taxonomy: " + repr(_over)
               + " (fail-closed)"))
-    # The same names reach the clean validators' findings uncut through each call site whose message a
-    # finding carries (the gated-snapshot, type-specific and proposed-from sites drop theirs), so a switch
-    # to the bounded renderer at those call sites shows too.
+    # The same names reach the clean validators' findings uncut, up to the same 65,536-character limit,
+    # through each call site whose message a finding carries (the gated-snapshot, type-specific and
+    # proposed-from sites drop theirs), so a switch to the bounded renderer at those call sites shows too.
     _over_state = ("status state " + repr(_over) + " is not a backlog_item state "
                    "['active', 'done', 'dropped', 'open']")
     _over_roster = ("the type-spec roster names a type absent from the section-8.1 taxonomy: " + repr(_over)
@@ -5370,6 +5429,63 @@ def self_test():
                               ("mask-left-sigusr2-blocked", signal.SIG_BLOCK)):
             check("self-test-caller-timer-mask-clause-sees-" + _name,
                   _lost_on(_mask_left(_start), "mask", "", _start))
+
+    # ----- Deep values: a finding message renders a parsed value through the bounded
+    # _safe_display. tomllib builds a dotted table header iteratively, so a 100,000-part header parses into a
+    # 100,000-level nested table whose plain repr() overflowed the stack pre-fix (RecursionError, "Stack
+    # overflow ... while getting the repr of an object", escaping validate_record). CPython 3.14.8 and later
+    # refuse a TOML key of more than 1,000 dotted parts, so the deep vectors build that table directly and
+    # iteratively, in the shape tomllib gives the header, and run on every supported interpreter: no vector
+    # parses a longer key. Each deep check also compares the direct build with tomllib's own parse of the
+    # same header at 999 parts, under that cap. The deep vectors run in a bounded child (run_bounded), so a
+    # regression is the ERROR:RecursionError sentinel rather than a crash of this suite. Each refusal still
+    # stands: the record is INVALID with its finding. The wide vector rendered a megabyte-scale finding
+    # pre-fix; the small vector pins the byte-identical render. -----
+    import tomllib
+    from _opf_emit import run_bounded
+
+    def _dr_nest(parts):
+        # What tomllib gives for a table header [<name>.a.a ... .a] of `parts` a-parts holding b = 1.
+        nest = {"b": 1}
+        for _ in range(parts):
+            nest = {"a": nest}
+        return nest
+
+    _dr_id_shape = tomllib.loads("[id" + ".a" * 998 + "]\nb = 1\n")["id"] == _dr_nest(998)
+    _dr_link_shape = (tomllib.loads("[[links]]\nrel = 'relates'\n[links.id" + ".a" * 997 + "]\nb = 1\n")["links"]
+                      == [{"rel": "relates", "id": _dr_nest(997)}])
+
+    def _dr_outcome(rec, prefix):
+        res = validate_record(rec)
+        hit = [f for f in res.findings if f.startswith(prefix) and "is not a well-formed" in f]
+        return "{}|{}|{}".format(res.status, len(hit) == 1 and "nested deeper than" in hit[0],
+                                 all(len(f) <= 2048 for f in res.findings))
+
+    def _dr_deep_id():
+        rec = envelope("backlog_item", 90, "open")
+        rec["id"] = _dr_nest(100000)
+        return _dr_outcome(rec, "id ")
+
+    def _dr_deep_link():
+        rec = envelope("backlog_item", 91, "open")
+        rec["links"] = [{"rel": "relates", "id": _dr_nest(100000)}]
+        return _dr_outcome(rec, "links[0].id ")
+
+    check("deeprender-deep-id-refused-as-finding",
+          _dr_id_shape and run_bounded(_dr_deep_id, timeout_s=60) == "INVALID|True|True")
+    check("deeprender-deep-link-id-refused-as-finding",
+          _dr_link_shape and run_bounded(_dr_deep_link, timeout_s=60) == "INVALID|True|True")
+    _dr_wide = envelope("backlog_item", 92, "open")
+    _dr_wide["id"] = tomllib.loads("id = [" + "1, " * 200000 + "]\n")["id"]
+    _dr_wide_res = validate_record(_dr_wide)
+    check("deeprender-wide-id-finding-bounded",
+          _dr_wide_res.status == INVALID and all(len(f) <= 2048 for f in _dr_wide_res.findings)
+          and any(f.startswith("id [1, 1, ") and "...<truncated>" in f for f in _dr_wide_res.findings))
+    _dr_small = envelope("backlog_item", 93, "open")
+    _dr_small["id"] = tomllib.loads("id = [1, 'x', {a = 2}]\n")["id"]
+    check("deeprender-small-id-byte-identical",
+          "id {!r} is not a well-formed <NS>-<n> id (spec 8.2)".format([1, "x", {"a": 2}])
+          in validate_record(_dr_small).findings)
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))

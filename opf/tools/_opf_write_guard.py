@@ -2,17 +2,18 @@
 """The pre-mutation guards the in-place OPF writers share: write-scope planning, working-tree cleanliness, and
 the single-writer lease (spec 5.7).
 
-`opf upgrade` (spec 9.2) and `opf record` (spec 8.8) both rewrite an in-repo store in place and offer the
-uncommitted change for the adopter's own review and merge, so both need the same shell around the mutation:
-plan the destinations (the operation's own store files plus every declared view the post-mutation render
-writes), prove the working tree is clean over exactly that scope (including ignored files, so HEAD is a
-verified restore path), and claim the lease atomically, hold it across mutation, render, and final doctor,
-and release it only as this run's own. These helpers were MOVED here from opf.py (they are not a copy); each
-takes the calling verb explicitly so its refusals name the operation the operator actually ran.
+`opf record` (spec 8.8) rewrites an in-repo store in place and offers the uncommitted change for the
+adopter's own review and merge, so it needs this shell around the mutation: plan the destinations (the
+operation's own store files plus every declared view the post-mutation render writes), prove the working
+tree is clean over exactly that scope (including ignored files, so HEAD is a verified restore path), and
+claim the lease atomically, hold it across mutation, render, and final doctor, and release it only as this
+run's own. These helpers were MOVED here from opf.py (they are not a copy); each takes the calling verb
+explicitly so its refusals name the operation the operator actually ran.
 
 Stdlib only; the sibling _opf_* helpers are imported directly. Every refusal is a WriteGuardError, which the
-calling verb maps to exit 2. Nothing here stages or commits anything. `--self-test` runs the
-lease message vectors (self_test), which opf.py --self-test also runs.
+calling verb maps to exit 2. Nothing here stages or commits anything. `--self-test` runs the lease message,
+porcelain grammar, dirty-probe, lease ownership and filter-neutralization vectors (self_test), which opf.py
+--self-test also runs.
 """
 import sys
 
@@ -77,6 +78,11 @@ def plan_write_scope(machine_rel, manifest_model, store_paths, verb):
         (product if scope == "product" else store).add(relpath)
     findings = []
     _opf_store._validate_unmanaged(manifest_model.get("unmanaged"), findings)
+    # The SAME single authority the doctor reads (F10-1), which itself derives the imported-series
+    # activation from the manifest (spec 8.2/4.2) through the SAME function the doctor driver reads
+    # (_opf_check.imported_series_active, keyed on the homes-2 declaration): once activation makes the
+    # flag true, an [unmanaged] declaration naming an imported leaf refuses here exactly as the doctor
+    # flags it, so the writer and the doctor cannot diverge on the imported managed set.
     classification = _opf_check.classify_containment(manifest_model, machine_rel)
     findings += classification.malformed + classification.colliding
     if findings:
@@ -361,7 +367,7 @@ def check_ignored(root, relpaths, verb):
                               str(root), ", ".join(repr(os.fsdecode(p[2:])) for p in matches[:-1]), verb))
 
 
-# --- homes-2 gitignore reconciliation: the read-only inspector (spec 4.2; unwired until J) -------------
+# --- homes-2 gitignore reconciliation: the read-only inspector (spec 4.2; generation-2 init only) ------
 # The store-relative control paths this inspector reasons about, derived from the topology constants so
 # this reader cannot drift from the layout the validator enforces (single source of truth).
 _HOMES_GITIGNORE_REL = "{}/.gitignore".format(_opf_store.WORKING_DIRNAME)
@@ -405,6 +411,87 @@ def _ignore_file_candidates(prefix, paths):
         posix = directory.as_posix()
         candidates.add(".gitignore" if posix == "." else posix + "/.gitignore")
     return sorted(candidates)
+
+
+INIT_IGNORED = "ignored"
+INIT_IGNORE_UNEVALUATED = "cannot-evaluate"
+
+
+def init_ignore_refusal(git, repo, prefix, paths):
+    """The ONE init ignore preflight (OPF spec 5.1: an untracked or ignored store is a hard failure in
+    scaffolding, with no gitignore fallback). MOVED here from opf.py _init_unignored (not a copy): the plain
+    `opf init` (opf.py _init_unignored, an adapter) and the init operation (_opf_init_operation
+    run_init_operation, which adoption's init-store composes, under its held mutex before its first write)
+    both call it. `repo` is the repository toplevel, `prefix` the product root relative to it (a PurePath,
+    "." at the toplevel), and `paths` the product-relative destinations the caller CREATES. Returns None when
+    no planned destination is ignored and that answer is sound, else (kind, message): INIT_IGNORED for a
+    destination git would ignore, INIT_IGNORE_UNEVALUATED for a check that cannot evaluate. Each caller
+    refuses on either kind; a cannot-evaluate never reads as not ignored.
+
+    check-ignore reports at least one ignored path with rc 0, none ignored with rc 1, and an error
+    with rc >= 128. The rc drives the three-way decision; the output is only for the diagnostic. Paths
+    are passed as arguments (git check-ignore accepts neither -z without --stdin, which the run helper has
+    no channel for, nor --literal-pathspecs, which it rejects as unsupported magic). Each scoped path is
+    given a literal "./" prefix so a leading colon or other pathspec-magic sigil in an adopter-supplied
+    --root prefix is read as a path, not as magic: without it a ":name/..." prefix has its colon consumed
+    as an empty magic signature and the check silently bypasses (rc 1, the store looks unignored), while a
+    recognized short-magic letter over-refuses (rc >= 128). The prefix is a plain string because Path
+    would normalize "./x" back to "x". The output is then one path per line over the controlled,
+    newline-free internal destinations. Outside a git work tree (no repository, or a bare one) check-ignore
+    exits 128, so the check answers cannot-evaluate; both callers already refuse such a root earlier.
+
+    OPF-D2B: the probe runs under _opf_observe._run_git_config_discovery, which lets git DISCOVER the
+    adopter's real global and system configuration through its default locations (unlike the default scrubbed
+    observer environment, which neutralizes it), so a store ignored ONLY by the adopter's global or system
+    core.excludesFile is caught here, matching what the adopter's own `git add` would honour
+    (guard-input-soundness). Env-based config overrides are dropped and trace/fsmonitor are forced off, so no
+    reachable configuration can turn the read-only probe into a write or a launched process. Lazy fetching is
+    forced off so a missing indexed ignore blob cannot trigger a promisor fetch that would reach
+    core.sshCommand. DISCLOSED RESIDUAL (disclose-guard-residuals): this rc-only check reads ignore rules
+    exactly as git add does when git add can read them too. For an ignore input git cannot READ (a
+    permission-denied core.excludesFile, ~/.config/git/ignore, or .git/info/exclude), git add is equally unable
+    to read it and stages the destination, so reading not-ignored here matches git add and the store is never
+    silently ignored. The one input where that parity BREAKS is a skip-worktree (or otherwise unmaterialized)
+    .gitignore whose blob is absent in a partial clone: this probe forces lazy fetch off and reads no-rule, but
+    the adopter's own git add fetches the blob and can then ignore the store. That case is NOT left as a
+    residual: after an rc-1 result the availability of every applicable indexed .gitignore blob is checked
+    (_opf_observe.indexed_ignore_availability), and an unavailable one is a cannot-evaluate that REFUSES rather
+    than passing (guard-input-soundness); so is that check failing to run (its RuntimeError). A fail-closed
+    treatment of the unreadable-FILE arms above is deliberately not attempted, because git and the caller
+    resolve config paths differently and refusing there would over-refuse a case git add itself skips. A
+    timeout, launch failure, or unexpected rc fails closed and refuses. Matching `git add`, a benign git
+    diagnostic on an rc-1 (not-ignored) result is not itself a refusal.
+
+    rc 1 (not ignored) is sound only when every applicable .gitignore is answerable WITHOUT a promisor fetch.
+    In a partial clone a skip-worktree (or otherwise unmaterialized) .gitignore whose blob is absent reads as
+    no-rule here (lazy fetch is forced off), yet the adopter's own `git add` fetches that blob and can then
+    silently ignore the store; an available blob is read identically by both (parity) and a checked-out
+    .gitignore is read from disk by both. So a missing indexed ignore blob is a cannot-evaluate, not a clean
+    pass (guard-input-soundness)."""
+    scoped = sorted("./" + str(prefix / path) for path in paths)
+    result = _opf_observe._run_git_config_discovery(
+        git, repo, ["check-ignore", "--"] + scoped)
+    if not result.completed:
+        return INIT_IGNORE_UNEVALUATED, (
+            "git preflight: could not evaluate ignore status for planned destinations ({})".format(
+                result.err))
+    if result.rc == 0:
+        ignored = [p for p in os.fsdecode(result.out).splitlines() if p]
+        return INIT_IGNORED, "planned destination is git-ignored: {!r}".format(ignored)
+    if result.rc != 1:
+        return INIT_IGNORE_UNEVALUATED, "git preflight: check-ignore failed (rc={}): {}".format(
+            result.rc, result.err)
+    try:
+        unavailable = _opf_observe.indexed_ignore_availability(
+            git, repo, _ignore_file_candidates(prefix, paths))
+    except RuntimeError as exc:
+        return INIT_IGNORE_UNEVALUATED, str(exc)
+    if unavailable:
+        return INIT_IGNORE_UNEVALUATED, (
+            "git preflight: an indexed .gitignore blob is unavailable in this partial clone, so ignore "
+            "status cannot be determined; `git add` would fetch it and could silently ignore the store "
+            "({}). Check out or fetch the blob and retry.".format(sorted(unavailable)))
+    return None
 
 
 def _homes_config_read(options):
@@ -536,7 +623,7 @@ def _homes_run_git_discovery(git, root, args, input_bytes=None):
     (path namespace race): each probe resolves its pathname again when git launches, so a symlink or
     directory on either path that a concurrent local actor swaps during the inspection (between
     _homes_logical_path's check and a launch, or between probes) can direct a probe at another
-    repository whose answer is then read as this one's; such an actor is outside this unwired
+    repository whose answer is then read as this one's; such an actor is outside this read-only
     helper's threat model, and the inspection does not bind the path namespace against it."""
     head = _homes_allowlisted_verb(args)
     dropped = _homes_config_overrides()
@@ -858,11 +945,13 @@ def _homes_indexed_ignore_guard(git, repo, rel_prefix, verb):
 
 
 def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_existing=None):
-    """The read-only homes-2 .working/.gitignore reconciliation inspection (spec 4.2). UNWIRED in
-    this release: no production verb calls it; homes-2 init (J), its planned consumer, will call it,
-    write the returned bytes through its journal (prestate and poststate digests, so a change
-    between inspection and write fails closed), and re-check with verify_homes_gitignore_effective
-    after the write.
+    """The read-only homes-2 .working/.gitignore reconciliation inspection (spec 4.2). Its callers are
+    the two generation-2 init paths: the init operation (_opf_init_operation._inspect_homes_gitignore),
+    reached only through that operation's explicit homes2 input, and plain `opf init`
+    (opf._init_homes_gitignore_inspect), reached only while this tooling activates homes 2. Each
+    requires an absent file, no hold, and planned bytes equal to its own create-only payload before
+    it writes those bytes, and re-checks with verify_homes_gitignore_effective after the write. No
+    verb calls it at the shipped constants.
 
     Returns (planned, holds, prestate): `planned` is the full new file bytes
     _opf_store.plan_homes_gitignore computed (None for no change), `prestate` is the exact file
@@ -918,9 +1007,11 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_ex
 
 
 def verify_homes_gitignore_effective(store_root, verb):
-    """The post-write effectiveness re-check for the planned caller that installs the managed block
-    (J, after its journaled write): re-runs the inspector's contained read of .working/.gitignore
-    (homes-gitignore-unreadable), confirms the exact managed block in those bytes
+    """The post-write effectiveness re-check for the callers that install the managed block (the
+    generation-2 init operation, after its journaled write and on every later attempt of that
+    plan, _opf_init_operation._verify_homes_gitignore, and generation-2 plain `opf init` under its
+    held mutex, opf._init_homes_gitignore_verify): re-runs the inspector's contained read of
+    .working/.gitignore (homes-gitignore-unreadable), confirms the exact managed block in those bytes
     (homes-gitignore-block-missing when it is absent, adopter-only or drifted: other ignore rules
     covering the homes do not stand in for it), the read-only tracked-control-path index probe, the
     .working/.gitignore index-flag check, the effectiveness probes, and the partial-clone
@@ -1532,8 +1623,9 @@ def self_test():
     removes another run's lease, never that it removes none. An oversized lease is reported oversized, never
     by a holder read from its prefix. The ownership-verified release reports an oversized, non-regular or
     unreadable replacement as what it is, never ABSENT, and the holder diagnostic names each unread lease by
-    its cause. Each vector runs over a real lease beneath a private temporary root. Returns 0 clean, 1 on a
-    failure, 2 on a harness error."""
+    its cause. Each vector runs over a real lease beneath a private temporary root. The porcelain grammar,
+    dirty-probe, ignore-probe, lease ownership and filter-neutralization vectors follow
+    (_self_test_guard_vectors). Returns 0 clean, 1 on a failure, 2 on a harness error."""
     import shutil
     import tempfile
     failures = []
@@ -1556,6 +1648,7 @@ def self_test():
         return 2
     try:
         _self_test_vectors(check, base)
+        _self_test_guard_vectors(check, base)
     except Exception as exc:  # noqa: BLE001  a harness fault is cannot-evaluate, never a pass
         print("opf-write-guard self-test: harness error ({!r}); fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -1569,7 +1662,8 @@ def self_test():
         return 1
     print("opf-write-guard self-test: PASS ({} checks: examination-lock refusals, held-lease and "
           "failed-acquisition remedies, oversized lease, release over each replacement, holder "
-          "diagnostic)".format(checked[0]))
+          "diagnostic, porcelain grammar, dirty and ignore probes, lease ownership, filter "
+          "neutralization over real git)".format(checked[0]))
     return 0
 
 
@@ -1747,6 +1841,468 @@ def _self_test_vectors(check, base):
                          (None, "no holder named (the lease was not read)")):
         check("the holder diagnostic names an unread lease by its cause ({})".format(cause or "none given"),
               lambda cause=cause, words=words: diagnosed(cause, words))
+
+
+def _self_test_guard_vectors(check, base):
+    """The porcelain grammar, dirty-probe, ignore-probe and lease ownership vectors self_test runs. They
+    were carried by the removed store-upgrade gate; `opf record` still uses each guard they exercise.
+    parse_porcelain is called directly; probe_dirty and check_ignored run over a stubbed git; the lease
+    vectors run over the lease g/lease.toml beneath `base`; the lease-removal docstring keeps its disclosed
+    residual; the filter vectors (_self_test_filter_vectors) run probe_dirty over real git."""
+    from unittest import mock
+    obs = _opf_observe
+    outcome = obs._GitOutcome
+    target = ".working/CONTRIBUTIONS.md"
+    lease = ".working/toml/lease.toml"
+
+    def refused(call):
+        try:
+            call()
+        except WriteGuardError:
+            return None
+        return "no refusal"
+
+    def parsed(raw, prefix="", lease_rel=None, specs=(".working",)):
+        """(records, None) for parse_porcelain over `raw`, or (None, its refusal)."""
+        try:
+            return parse_porcelain(raw, prefix, lease_rel, list(specs), "record"), None
+        except WriteGuardError as exc:
+            return None, str(exc)
+
+    def records(raw, wanted, **kwargs):
+        got, error = parsed(raw, **kwargs)
+        return None if error is None and got == wanted else "got {!r} ({})".format(got, error)
+
+    def refusal(raw, **kwargs):
+        got, error = parsed(raw, **kwargs)
+        return None if got is None and error is not None else "parsed as {!r}".format(got)
+
+    # Git diagnostics on stderr: an ignore input git could not read refuses, whatever the exit code, and a
+    # quiet non-match passes; a status diagnostic refuses on the matching and the expanded probe alike.
+    with mock.patch.object(obs, "_git_path", return_value="git"), \
+            mock.patch.object(obs, "_filter_neutralizing_config", return_value=[]):
+        for source in (".gitignore", ".git/info/exclude", "core.excludesFile"):
+            warning = "warning: unable to access '{}': Permission denied\n".format(source)
+            for rc, payload in ((1, b""), (0, b"./.working/CONTRIBUTIONS.md\x00")):
+                with mock.patch.object(obs, "_run_git", return_value=outcome(True, rc, payload, warning)):
+                    check("an ignore-probe diagnostic refuses ({}, rc {})".format(source, rc),
+                          lambda: refused(lambda: check_ignored("/fixture", [target], "record")))
+        with mock.patch.object(obs, "_run_git", return_value=outcome(True, 1, b"", "")):
+            check("a quiet ignore-probe non-match passes",
+                  lambda: None if refused(lambda: check_ignored("/fixture", [target], "record")) else "refused")
+
+        for where in ("matching", "expanded"):
+            def status(_git, _root, args, where=where, **kwargs):
+                if "rev-parse" in args:
+                    return outcome(True, 0, b"\n", "")
+                if "ls-files" in args:
+                    return outcome(True, 0, b"", "")
+                expanded = "--ignored=traditional" in args
+                err = "warning: cannot read ignore input\n" if expanded == (where == "expanded") else ""
+                return outcome(True, 0, b"" if expanded else b"!! .working/\x00", err)
+            with mock.patch.object(obs, "_run_git", side_effect=status):
+                check("a status diagnostic on the {} probe refuses".format(where),
+                      lambda: refused(lambda: probe_dirty("git", "/fixture", [target], None, "record")))
+
+        # Index flags: H (tracked, ordinary) passes; S, h and s (skip-worktree, assume-unchanged) refuse.
+        for tag in (b"H", b"S", b"h", b"s"):
+            def index_flags(_git, _root, args, tag=tag, **kwargs):
+                raw = tag + b" " + os.fsencode(target) + b"\x00" if "ls-files" in args else b""
+                return outcome(True, 0, raw, "")
+            with mock.patch.object(obs, "_run_git", side_effect=index_flags):
+                check("index flag {!r} {}".format(tag, "passes" if tag == b"H" else "refuses"),
+                      lambda tag=tag: (
+                          refused(lambda: probe_dirty("git", "/fixture", [target], None, "record"))
+                          if tag != b"H" else
+                          None if refused(lambda: probe_dirty("git", "/fixture", [target], None, "record"))
+                          else "refused"))
+        for tag in (b"M", b"m"):
+            def unmerged(_git, _root, args, tag=tag, **kwargs):
+                raw = ((tag + b" " + os.fsencode(target) + b"\x00") * 3
+                       if "ls-files" in args else
+                       b"UU " + os.fsencode(target) + b"\x00" if "status" in args else b"\n")
+                return outcome(True, 0, raw, "")
+
+            def names_conflict():
+                try:
+                    probe_dirty("git", "/fixture", [target], None, "record")
+                except WriteGuardError as exc:
+                    text = str(exc)
+                    return None if (target in text and "is unmerged; resolve the conflict" in text
+                                    and "malformed" not in text) else "said {!r}".format(text)
+                return "no refusal"
+            with mock.patch.object(obs, "_run_git", side_effect=unmerged):
+                check("an unmerged index entry {!r} refuses naming the conflict".format(tag), names_conflict)
+        for bad in (b"H", b"H path", b"\x00", b"? path\x00"):
+            def bad_flags(_git, _root, args, bad=bad, **kwargs):
+                return outcome(True, 0, bad if "ls-files" in args else b"", "")
+            with mock.patch.object(obs, "_run_git", side_effect=bad_flags):
+                check("malformed index flags {!r} refuse".format(bad),
+                      lambda: refused(lambda: probe_dirty("git", "/fixture", [target], None, "record")))
+
+    # A tracked record beneath the lease path is a spec 5.7 anomaly and refuses; an untracked or ignored one
+    # is the held-lease exclusion.
+    for pair in (b" M", b"M ", b" D"):
+        def tracked(pair=pair):
+            try:
+                parse_porcelain(pair + b" " + os.fsencode(lease) + b"/child\x00", b"", lease, [lease], "record")
+            except WriteGuardError as exc:
+                return None if "TRACKED" in str(exc) else "said {!r}".format(str(exc))
+            return "no refusal"
+        check("a tracked lease descendant {!r} refuses".format(pair), tracked)
+    for pair in (b"??", b"!!"):
+        check("a held lease descendant {!r} is excluded".format(pair),
+              lambda pair=pair: records(pair + b" " + os.fsencode(lease) + b"/child\x00", [],
+                                        prefix=b"", lease_rel=lease, specs=(lease,)))
+
+    # The porcelain -z grammar: a malformed payload refuses, never reads as clean.
+    check("an empty payload is clean", lambda: records(b"", []))
+    check("a well-formed untracked record parses", lambda: records(b"?? .working/toml/x\x00", [".working/toml/x"]))
+    check("a lone NUL refuses", lambda: refusal(b"\x00"))
+    check("a payload without its NUL terminator refuses", lambda: refusal(b"?? .working/toml/x"))
+    check("a record without status framing refuses", lambda: refusal(b"XYZno-space\x00"))
+    check("a nested store's lease is excluded after the prefix strip",
+          lambda: records(b"?? sub/.working/toml/lease.toml\x00", [], prefix="sub/", lease_rel=lease))
+    # An out-of-vocabulary or impossible status pair refuses on the lease path (where a silent drop would read
+    # dirt as clean) and on any other path: the whole XY pair is checked against git's enumeration.
+    for bad, label in ((b"ZZ", "out-of-vocabulary ZZ"), (b"  ", "blank status"), (b"R ", "rename R"),
+                       (b"C ", "copy C"), (b"UT", "UT"), (b"TU", "TU"), (b"DM", "DM"), (b"DT", "DT"),
+                       (b"DA", "DA"), (b"MA", "MA"), (b"TA", "TA")):
+        check("status {} refuses on the lease path".format(label),
+              lambda bad=bad: refusal(bad + b" " + os.fsencode(lease) + b"\x00", lease_rel=lease))
+        check("status {} refuses on another path".format(label),
+              lambda bad=bad: refusal(bad + b" .working/toml/x\x00", lease_rel=lease))
+    # Every pair git emits for this command parses: ??, !!, the 17 ordinary pairs and the 7 unmerged pairs.
+    for pair in (b"??", b"!!", b" A", b" M", b" T", b" D", b"M ", b"MM", b"MT", b"MD", b"T ", b"TM", b"TT",
+                 b"TD", b"A ", b"AM", b"AT", b"AD", b"D ", b"DD", b"AU", b"UD", b"UA", b"DU", b"AA", b"UU"):
+        check("emittable pair {!r} parses".format(pair),
+              lambda pair=pair: records(pair + b" .working/toml/x\x00", [".working/toml/x"]))
+    check("an untracked exact lease is excluded",
+          lambda: records(b"?? " + os.fsencode(lease) + b"\x00", [], lease_rel=lease))
+    check("an ignored exact lease beneath a prefix is excluded",
+          lambda: records(b"!! sub/" + os.fsencode(lease) + b"\x00", [], prefix="sub/", lease_rel=lease))
+    for pair in (b" D", b"D ", b" M", b"MM", b"M ", b"MD", b"A ", b"AD", b"DD", b"AU", b"UU"):
+        def tracked_lease(pair=pair):
+            got, error = parsed(pair + b" " + os.fsencode(lease) + b"\x00", lease_rel=lease)
+            return None if got is None and error is not None and "5.7" in error else "parsed as {!r}".format(got)
+        check("a tracked lease status {!r} refuses under spec 5.7".format(pair), tracked_lease)
+    check("a dirty record off the lease path is surfaced",
+          lambda: records(b" M .working/toml/x\x00", [".working/toml/x"], lease_rel=lease))
+    # Scope filtering applies to well-formed ignored records only, by path component.
+    for payload, wanted in ((b"!! .working\x00", [".working"]), (b"!! .working/\x00", [".working/"]),
+                            (b"!! .working/child\x00", [".working/child"]), (b"!! .working.bak/\x00", []),
+                            (b"?? .working.bak/child\x00", [".working.bak/child"]),
+                            (b" M .working.bak/child\x00", [".working.bak/child"])):
+        check("component scope {!r}".format(payload), lambda payload=payload, wanted=wanted: records(payload, wanted))
+    check("a malformed status out of scope still refuses", lambda: refusal(b"ZZ .working.bak/child\x00"))
+    # Byte paths stay lossless through prefix stripping, lease exclusion and scope matching.
+    byte_prefix, byte_path = b"nested-\xff/", b".working/\xfe"
+    check("a byte path keeps its filesystem bytes",
+          lambda: records(b"!! " + byte_prefix + byte_path + b"\x00", [os.fsdecode(byte_path)],
+                          prefix=byte_prefix, specs=(os.fsdecode(byte_path),)))
+    check("a byte prefix still excludes the lease",
+          lambda: records(b"!! " + byte_prefix + os.fsencode(lease) + b"\x00", [], prefix=byte_prefix,
+                          lease_rel=lease))
+    for bad_path in (b"elsewhere/file", b"sub/", b"sub//file", b"sub/../file", b"sub/./file", b"/sub/file"):
+        check("an unnormalizable ignored path {!r} refuses".format(bad_path),
+              lambda bad_path=bad_path: refusal(b"!! " + bad_path + b"\x00", prefix="sub/"))
+
+    # The show-prefix strip removes only the trailing newline, so a store directory whose name begins with a
+    # space keeps its prefix and its untracked lease stays excluded.
+    def leading_space_git(_git, _root, args, **kwargs):
+        if "ls-files" in args:
+            return outcome(True, 0, b"", "")
+        if "rev-parse" in args:
+            return outcome(True, 0, b" leading/\n", b"")
+        if "config" in args:
+            return outcome(True, 0, b"", b"")
+        return outcome(True, 0, b"??  leading/.working/toml/lease.toml\x00", b"")
+
+    def leading_space():
+        with mock.patch.object(obs, "_run_git", leading_space_git):
+            dirty = probe_dirty("git", base, [".working"], lease, "record")
+        return None if dirty == [] else "surfaced {!r}".format(dirty)
+    check("a leading-space store prefix keeps the lease excluded", leading_space)
+
+    # Lease ownership: a failed acquisition leaves its lease as a leftover, a lease a peer substituted in that
+    # window survives, and release removes this run's own lease but never a peer's replacement.
+    os.mkdir(os.path.join(base, "g"))
+    path = os.path.join(base, "g", "lease.toml")
+    peer = b'acquired_at = "2026-02-02T00:00:00Z"\nholder = "peer-runner"\noperation = "record"\nschema = 1\n'
+
+    def clear():
+        if os.path.lexists(path):
+            os.unlink(path)
+
+    root_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        def failed_acquisition():
+            clear()
+
+            def write_fault(fd, data):
+                raise OSError(errno.EIO, "injected write failure")
+            with mock.patch.object(_opf_store._journal, "_write_all", write_fault):
+                try:
+                    acquire_lease(root_fd, "g", "record")
+                except WriteGuardError as exc:
+                    if "never seized" not in str(exc):
+                        return "said {!r}".format(str(exc))
+                else:
+                    return "no refusal"
+            return None if os.path.isfile(path) else "the lease was removed"
+        check("a failed acquisition leaves its lease in place", failed_acquisition)
+
+        def replaced_acquisition():
+            clear()
+
+            def replace_then_fail(fd, data):
+                os.unlink(path)
+                Path(path).write_bytes(peer)
+                raise OSError(errno.EIO, "injected write failure after a peer replaced the lease")
+            with mock.patch.object(_opf_store._journal, "_write_all", replace_then_fail):
+                if refused(lambda: acquire_lease(root_fd, "g", "record")) is not None:
+                    return "no refusal"
+            return None if Path(path).read_bytes() == peer else "the peer's lease was removed or changed"
+        check("a failed acquisition never removes a peer's replacement", replaced_acquisition)
+
+        def replaced_release():
+            clear()
+            payload = acquire_lease(root_fd, "g", "record")
+            if payload != Path(path).read_bytes():
+                return "acquire did not return the on-disk payload"
+            os.unlink(path)
+            Path(path).write_bytes(peer)
+            try:
+                release_lease(root_fd, "g", payload, "record")
+            except WriteGuardError as exc:
+                text = str(exc)
+                if ("never seized" not in text and "NEVER seized" not in text) or "peer-runner" not in text:
+                    return "said {!r}".format(text)
+            else:
+                return "no refusal"
+            if not os.path.isfile(path) or Path(path).read_bytes() != peer:
+                return "the peer's replacement was removed or changed"
+            clear()
+            Path(path).write_bytes(payload)
+            release_lease(root_fd, "g", payload, "record")
+            return None if not os.path.lexists(path) else "this run's own lease was not removed"
+        check("release refuses a peer's replacement and removes this run's own lease", replaced_release)
+    finally:
+        os.close(root_fd)
+
+    # The ownership-verified release keeps its disclosed residual: the false "released" over a swapped peer
+    # lease, reachable only when the release-only-when-no-run-is-live reconciliation is violated. Read from
+    # the source, so the check holds under -OO too.
+    import _optlevel
+    disclosure = " ".join((_optlevel.source_docstring(__file__, "unlink_owned_lease") or "").lower().split())
+    check("the lease-removal residual discloses the false release and its reachability", lambda: None if (
+        "reports exit-0 success" in disclosure and 'false "released"' in disclosure
+        and "release-only-when-no-run-is-live" in disclosure) else "the disclosure is incomplete")
+
+    _self_test_filter_vectors(check, base)
+
+
+def _self_test_filter_vectors(check, base):
+    """probe_dirty over real git repositories beneath `base`: a repository- or worktree-configured clean or
+    process filter never runs during the dirty probe (its command would create a sentinel), whatever its
+    name, while real dirt is still detected and git's built-in text/eol conversion is kept. A corrupt
+    configuration fails closed, and a normalizing filter of the git-lfs shape over-refuses (the record gate
+    drives its refusal note end to end). An un-neutralized status runs each planted filter (the positive
+    control), and the neutralizer stubbed to return [] or rendered as the old `-c key=value` argv runs it
+    again (the flips)."""
+    import subprocess
+    from unittest import mock
+    obs = _opf_observe
+    git = obs._git_path()
+    if git is None:
+        check("the real-git filter vectors find git", lambda: "git is not on PATH")
+        return
+    lease = ".working/toml/lease.toml"
+    target = ".working/toml/pwn.dat"
+    future = (4102444800, 4102444800)   # 2100-01-01: a fixed future mtime, so status must re-hash the target
+    status_args = ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                   "--no-renames", "--", ".working"]
+
+    def refused(call):
+        try:
+            call()
+        except WriteGuardError:
+            return None
+        return "no refusal"
+
+    def fixture_git(root, *args):
+        proc = subprocess.run(
+            [git, "-C", str(root), "-c", "init.defaultBranch=main", "-c", "user.email=gate@example.invalid",
+             "-c", "user.name=gate", "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+             "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + list(args),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=obs._scrubbed_env(), timeout=60)
+        if proc.returncode != 0:
+            raise OSError("fixture git {} failed: {}".format(args, proc.stderr.decode("utf-8", "replace")))
+        return proc.stdout
+
+    def store(name, files=None):
+        """A committed repository holding .working/toml/pwn.dat and `files` (relpath -> bytes)."""
+        root = Path(base, "filter", name)
+        (root / ".working" / "toml").mkdir(parents=True)
+        fixture_git(root, "init", "-q")
+        for rel, data in {target: b"hello\n", **(files or {})}.items():
+            (root / rel).write_bytes(data)
+        fixture_git(root, "--literal-pathspecs", "add", "-A")
+        fixture_git(root, "commit", "-q", "-m", "seed")
+        return root
+
+    def filtered(name, driver, form="clean", required=None, worktree=False):
+        """A committed store whose pwn.dat a `driver` filter claims; its command creates <store>/SENTINEL."""
+        root = store(name)
+        scope = ["--worktree"] if worktree else []
+        if worktree:
+            fixture_git(root, "config", "extensions.worktreeConfig", "true")
+        fixture_git(root, "config", *scope, "filter.{}.{}".format(driver, form),
+                    "sh -c 'touch \"{}\"; cat'".format(root / "SENTINEL"))
+        if required is not None:
+            fixture_git(root, "config", *scope, "filter.{}.required".format(driver), str(required).lower())
+        (root / ".gitattributes").write_text("{} filter={}\n".format(target, driver), encoding="utf-8")
+        return root
+
+    def reset(root):
+        """Remove any sentinel and bump pwn.dat's mtime, content unchanged, so the next status re-hashes it."""
+        Path(root, "SENTINEL").unlink(missing_ok=True)
+        os.utime(str(Path(root, target)), future)
+
+    def probe(root, lease_rel=lease):
+        return probe_dirty(git, str(root), [".working"], lease_rel, "record")
+
+    def ran(root, call):
+        """Whether `call` ran the planted filter, after a reset."""
+        reset(root)
+        call()
+        return Path(root, "SENTINEL").exists()
+
+    def suppressed(root, lease_rel=lease):
+        """None when an un-neutralized status runs the filter and the probe neither runs it nor reads dirt."""
+        if not ran(root, lambda: obs._run_git(git, str(root), status_args)):
+            return "the positive control did not run the planted filter"
+        reset(root)
+        dirty = probe(root, lease_rel)
+        if Path(root, "SENTINEL").exists():
+            return "the dirty probe ran the planted filter"
+        return None if dirty == [] else "an unchanged store read dirty: {!r}".format(dirty)
+
+    for label, name, args in (("a clean filter", "clean", ("pwn",)),
+                              ("a process filter", "process", ("pwn", "process")),
+                              ("a dotted filter name", "dotted", ("a.b",)),
+                              ("a filter name holding '='", "equals", ("pwn=bypass",)),
+                              ("a required filter", "required", ("pwn", "clean", True)),
+                              ("a worktree-scoped filter", "worktree", ("wpwn", "clean", None, True))):
+        check("{} never runs during the dirty probe".format(label),
+              lambda name=name, args=args: suppressed(filtered(name, *args)))
+    check("a filter on a product-root binding never runs during the dirty probe",
+          lambda: suppressed(filtered("product", "ppwn"), lease_rel=None))
+
+    def unneutralized():
+        root = filtered("flip-empty", "pwn")
+        with mock.patch.object(obs, "_filter_neutralizing_config", return_value=[]):
+            return None if ran(root, lambda: probe(root)) else "the probe without neutralization ran no filter"
+    check("FLIP: a probe without neutralization runs the planted filter", unneutralized)
+
+    def old_argv():
+        root = filtered("flip-argv", "pwn=bypass")
+        argv = []
+        for key, value in obs._filter_neutralizing_config(git, str(root)):
+            argv += ["-c", "{}={}".format(key, value)]
+        return None if ran(root, lambda: obs._run_git(git, str(root), argv + status_args)) else (
+            "the -c key=value form neutralized the '='-named filter")
+    check("FLIP: the old -c key=value form leaves a filter name holding '=' executable", old_argv)
+
+    def required_unreleased():
+        root = filtered("flip-required", "pwn", required=True)
+        reset(root)
+        with mock.patch.object(obs, "_filter_neutralizing_config",
+                               return_value=[("filter.pwn.clean", ""), ("filter.pwn.process", "")]):
+            return refused(lambda: probe(root))
+    check("FLIP: emptying a required filter without required=false breaks the probe", required_unreleased)
+
+    def overrides():
+        root = store("overrides")
+        fixture_git(root, "config", "filter.pwn.clean", "sh -c cat")
+        fixture_git(root, "config", "filter.lfs.smudge", "git-lfs smudge -- %f")
+        got = obs._filter_neutralizing_config(git, str(root))
+        return None if got == [("filter.pwn.clean", ""), ("filter.pwn.process", ""),
+                               ("filter.pwn.required", "false")] else "got {!r}".format(got)
+    check("the neutralizer empties a clean driver with three overrides and leaves a smudge-only driver",
+          overrides)
+
+    # Real dirt is still detected under neutralization, without running the filter.
+    def modified(root):
+        Path(root, target).write_bytes(b"changed\n")
+
+    def untracked(root):
+        Path(root, ".working/toml/new.txt").write_bytes(b"new\n")
+        return ".working/toml/new.txt"
+
+    def staged(root):
+        Path(root, target).write_bytes(b"staged change\n")
+        fixture_git(root, "--literal-pathspecs", "add", "--", target)
+
+    for label, change in (("an unstaged modification", modified), ("an untracked file", untracked),
+                          ("a deleted tracked file", lambda root: Path(root, target).unlink()),
+                          ("a staged change", staged),
+                          ("an executable-mode change", lambda root: os.chmod(str(Path(root, target)), 0o755))):
+        def detected(label=label, change=change):
+            root = filtered("dirt-" + label.replace(" ", "-"), "pwn")
+            wanted = change(root) or target
+            Path(root, "SENTINEL").unlink(missing_ok=True)
+            dirty = probe(root)
+            if wanted not in dirty:
+                return "not detected: {!r}".format(dirty)
+            return "the planted filter ran" if Path(root, "SENTINEL").exists() else None
+        check("{} is detected dirty under neutralization".format(label), detected)
+
+    def eol_kept():
+        root = store("eol", {".gitattributes": b".working/toml/text.dat text eol=crlf\n",
+                             ".working/toml/text.dat": b"a\nb\nc\n"})
+        Path(root, ".working/toml/text.dat").unlink()
+        fixture_git(root, "--literal-pathspecs", "checkout", "--", ".working/toml/text.dat")
+        if b"\r\n" not in Path(root, ".working/toml/text.dat").read_bytes():
+            return "the fixture's worktree file is not CRLF"
+        os.utime(str(Path(root, ".working/toml/text.dat")), future)
+        dirty = probe(root)
+        return None if dirty == [] else "the CRLF worktree read dirty: {!r}".format(dirty)
+    check("built-in text/eol conversion is kept: a CRLF worktree of an LF blob reads clean", eol_kept)
+
+    def corrupt():
+        root = filtered("corrupt", "pwn")
+        Path(root, ".git", "config").write_text("[this is not valid\n = = =\n", encoding="utf-8")
+        try:
+            obs._filter_neutralizing_config(git, str(root))
+        except RuntimeError:
+            return refused(lambda: probe(root))
+        return "the neutralizer read a corrupt configuration"
+    check("a corrupt configuration fails closed in the neutralizer and the probe", corrupt)
+
+    def normalizing():
+        """The git-lfs shape: the index holds the cleaned blob and the worktree the uncleaned body."""
+        root = store("normalizing")
+        fixture_git(root, "config", "filter.norm.clean", "sed 's/[0-9]//g'")
+        fixture_git(root, "config", "filter.norm.required", "true")
+        Path(root, ".gitattributes").write_text(".working/norm.md filter=norm\n", encoding="utf-8")
+        Path(root, ".working/norm.md").write_bytes(b"abc123\n")
+        fixture_git(root, "--literal-pathspecs", "add", "-A")
+        fixture_git(root, "commit", "-q", "-m", "a normalizing filter")
+        if fixture_git(root, "show", ":.working/norm.md") != b"abc\n":
+            return "the fixture's index blob is not the cleaned body"
+        os.utime(str(Path(root, ".working/norm.md")), future)
+        native = obs._run_git(git, str(root), status_args)
+        if not native.completed or native.out != b"":
+            return "the store is not clean with its filter active"
+        os.utime(str(Path(root, ".working/norm.md")), future)
+        if ".working/norm.md" not in probe(root):
+            return "the normalizing store read clean under neutralization"
+        Path(root, ".working/toml/genuine.txt").write_bytes(b"real\n")
+        dirty = probe(root)
+        return None if ".working/toml/genuine.txt" in dirty else "real dirt was missed: {!r}".format(dirty)
+    check("a normalizing filter over-refuses under neutralization and real dirt is still detected",
+          normalizing)
 
 
 if __name__ == "__main__":

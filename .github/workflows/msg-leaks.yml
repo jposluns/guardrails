@@ -1,0 +1,36 @@
+name: Message leaks
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  msg-leaks:
+    name: Message/metadata leaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Message/metadata leak self-test
+        shell: bash
+        run: python3 -I -B tools/check_msg_leaks.py --self-test
+      - name: Message/metadata leak scan
+        shell: bash
+        run: python3 -I -B tools/check_msg_leaks.py

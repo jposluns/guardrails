@@ -106,7 +106,7 @@ def _wrap(text, indent=""):
 
 def build(root):
     """Return the NOTICE text, or raise SystemExit(2) if a vendored publisher is unverified/unattributed."""
-    manifests = load_manifests(root / ".aiqt" / "standards")  # raises ManifestError/OSError -> main exits 2
+    manifests = load_manifests(root / ".aiqt" / "standards", root=root)  # raises ManifestError/OSError -> main exits 2
     kinds = _oxford(sorted({m.kind for m in manifests.values()}))
     # Derive the catalogue-completeness clause from the standards data so the claim is true by
     # construction (notice-drift then also enforces it): name exactly the frameworks whose vendored id
@@ -235,7 +235,7 @@ def main():
     except (ManifestError, OSError, ValueError, KeyError) as exc:
         print("error: cannot build NOTICE ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
-    if reconcile(root / "NOTICE", text, check):
+    if reconcile(root / "NOTICE", text, check, root):
         print("drift: NOTICE is out of date; run tools/gen_notice.py", file=sys.stderr)
         return 1
     if not check:

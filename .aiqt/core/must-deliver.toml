@@ -1,0 +1,111 @@
+# .aiqt/core/must-deliver.toml: rules whose WHOLE text must lie inside the first
+# check_release_build.CAP_BYTES bytes of AGENTS.md; read by tools/check_must_deliver.py.
+# Hand-edited policy, like instruction-budget.toml: additions may be proposed in any PR.
+# A removal is a reviewed change that the gate does not block: the schema has no field
+# that could record an approval, so review must judge it.
+# warn-margin-bytes: the gate prints a WARNING (still exit 0) when the tightest listed
+# margin drops under this figure. When this was written the tightest margin was already
+# below it (cmtidn, 8 bytes inside the cap), so every run warns; 512 is kept so a tight
+# margin stays visible rather than being tuned away. The gate prints the live margins.
+format-version = 1
+warn-margin-bytes = 512
+
+[[rule]]
+id = "prjint1"
+reason = "The apex (highest precedence); the floor profile requires it and the span layout places it first."
+
+[[rule]]
+id = "citint"
+reason = "Cite only from a file opened at the reviewed commit."
+
+[[rule]]
+id = "clmobs"
+reason = "Claims about the work rest on observation."
+
+[[rule]]
+id = "setcmp"
+reason = "A completeness claim enumerates its set."
+
+[[rule]]
+id = "corrob"
+reason = "Corroborate external claims."
+
+[[rule]]
+id = "cntprd"
+reason = "A count carries its predicate."
+
+[[rule]]
+id = "dscres"
+reason = "Disclose a guard's residual coverage."
+
+[[rule]]
+id = "evgcmp"
+reason = "Evidence-grounded completion."
+
+[[rule]]
+id = "grdinp"
+reason = "A guard is only as good as its input."
+
+[[rule]]
+id = "estsep"
+reason = "Measured and estimated figures stay separate."
+
+[[rule]]
+id = "nofabr"
+reason = "No fabrication."
+
+[[rule]]
+id = "obsbeh"
+reason = "Observe before asserting behaviour."
+
+[[rule]]
+id = "prtwhl"
+reason = "A partial read is not the whole."
+
+[[rule]]
+id = "rdbchr"
+reason = "Read before characterizing."
+
+[[rule]]
+id = "refcap"
+reason = "Capture the reference when the claim is made."
+
+[[rule]]
+id = "reprod"
+reason = "Reproduce a defect before fixing it."
+
+[[rule]]
+id = "tstamp"
+reason = "A current timestamp is read from the clock."
+
+[[rule]]
+id = "valinf"
+reason = "Validate an inferred premise before acting."
+
+[[rule]]
+id = "vfxcmt"
+reason = "Verify a fix is in its commit."
+
+[[rule]]
+id = "actbef"
+reason = "Anything wrong is fixed first."
+
+[[rule]]
+id = "attint"
+reason = "Attestation lines are harness-owned."
+
+[[rule]]
+id = "artbr1"
+reason = "Branch and merge only on green."
+
+[[rule]]
+id = "brnrot"
+reason = "Branches are cut from the live protected line."
+
+[[rule]]
+id = "chkfcl"
+reason = "A check fails closed on input it cannot read; restored to the delivered prefix after it straddled the cap."
+
+[[rule]]
+id = "cmtidn"
+reason = "Commit identity (no AI listed as author); restored to the delivered prefix after it fell past the cap."
