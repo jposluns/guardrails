@@ -33444,30 +33444,18 @@ _PUSH_STEP_COMMAND_PLACES = frozenset("cspb")  # the top level, a '$(', a '(' su
 _PUSH_STEP_WORD_STARTS = frozenset(" \t\n;&|()")
 
 
-def _push_step_heredoc_word(command, j, n):
-    """(delimiter, quoted, end) for the delimiter word of a here-document operator starting at index j of
-    command: the word with its quotes and backslashes removed, whether any were present (bash then reads the
-    body as data), and the index past the word. None when the word is empty or a quote in it is left open."""
-    word = []
-    quoted = False
-    while j < n and command[j] not in " \t\n;&|<>()":
-        c = command[j]
-        if c in "'\"":
-            k = command.find(c, j + 1)
-            if k < 0:
-                return None
-            word.append(command[j + 1:k])
-            quoted = True
-            j = k + 1
-        elif c == "\\":
-            word.append(command[j + 1:j + 2])
-            quoted = True
-            j += 2
-        else:
-            word.append(c)
-            j += 1
-    delimiter = "".join(word)
-    return (delimiter, quoted, j) if delimiter else None
+def _push_step_delim(command, at, n):
+    """The ONE here-document delimiter reading every push_then_step reader rests on: (quoted, delimiter,
+    strip_tabs, next_i) for the operator whose '<<' ends at index at of command, read by the shared parser
+    (_parse_heredoc_delim) as bash reads the word, with bash's own quote removal over every quoting form
+    ('', "", $'...', $"...", a backslash, and mixed fragments, line continuations removed), so an ANSI-C or
+    locale-quoted spelling resolves to the same delimiter bash compares lines against. None for a word the
+    parser cannot resolve to bash's delimiter (fail closed: the caller treats the body's end as one it
+    cannot place). The shared lexer reads the word with the same parser, so the masking walk, the fallback's
+    line reading and the lexer place a body's end on the line bash does or not at all, and the early-end
+    decision (_push_step_early_end) is one predicate over that bash-level delimiter, never over a list of
+    spellings."""
+    return _parse_heredoc_delim(command, at, n)
 
 
 def _push_step_early_end(text, at, heredocs, backquoted):
@@ -33489,19 +33477,24 @@ def _push_step_early_end(text, at, heredocs, backquoted):
 
 
 def _push_step_quoted_masked(command):
-    """command with each quoted here-document body masked (_GATE_HEREDOC_BODY_MASK, one character for one, so
-    every index and line stays where it was). bash reads such a body as data wherever its operator stands, at
+    """(masked, followed): command with each quoted here-document body masked (_GATE_HEREDOC_BODY_MASK, one
+    character for one, so every index and line stays where it was), and whether this walk followed the whole
+    command. bash reads such a body as data wherever its operator stands, at
     the top level or inside a '$(' a double-quoted word holds ('git commit -m "$(cat <<'EOF' ...)"'), so a
     backquote, '$(' or quote in it starts nothing; unmasked, the shared lexer's command reading takes a
     backquoted 'git push' there for a command. The operators are found by a walk that follows quoting, not by
     a line pattern: a '<<' counts only where bash reads a command (_PUSH_STEP_COMMAND_PLACES), never inside
-    quotes, a '${', arithmetic or a comment, and the bodies of the operators read start after the next newline
+    quotes, a '${', arithmetic or a comment, each delimiter is bash's own (_push_step_delim), and the bodies
+    of the operators read start after the next newline
     read in such a place, each up to its delimiter line (after its leading tabs for '<<-'). An unquoted body,
     which bash expands, is passed over unmasked. When the walk cannot follow command (a ')' it did not open,
     as a case pattern writes, a quote, substitution or body still open at the end, a newline inside double quotes
-    while a body is pending), command is returned unchanged, which can only keep a deny. When an operator or the
+    while a body is pending, a delimiter word _push_step_delim cannot resolve), (command, False) is returned
+    unchanged and the caller falls back to the line reading (_push_step_early_lines, _push_step_heredoc_split).
+    When an operator or the
     newline its bodies follow stands inside a '$(', a '(' or a backquote and bash may end one of those bodies
-    before its delimiter line (_push_step_early_end), None is returned: this walk cannot place that body's end
+    before its delimiter line (_push_step_early_end), (None, True) is returned: this walk cannot place that
+    body's end
     where bash does, and the shared lexer's body skip, wherever it reads a command, reads the body on to its
     delimiter line as this walk does. Linear in the length of command."""
     n = len(command)
@@ -33521,13 +33514,13 @@ def _push_step_quoted_masked(command):
             i += 2
         elif c == "\n" and pending:
             if not command_place:
-                return command
+                return command, False
             pos = i + 1
             for delimiter, strip_tabs, quoted in pending:
                 start = pos
                 while True:
                     if pos >= n:
-                        return command
+                        return command, False
                     eol = command.find("\n", pos)
                     eol = n if eol < 0 else eol
                     line = command[pos:eol]
@@ -33542,7 +33535,7 @@ def _push_step_quoted_masked(command):
                     lined = command + "\n"
                 if _push_step_early_end(lined, i + 1, [(delimiter, strip_tabs) for delimiter, strip_tabs, _q
                                                        in pending], backquoted or backquotes > 0):
-                    return None
+                    return None, True
             pending = []
             nested = backquoted = False
             i = pos
@@ -33579,13 +33572,13 @@ def _push_step_quoted_masked(command):
                 stack.pop()
                 i += 2
             elif c == ")":
-                return command
+                return command, False
             else:
                 i += 1
         elif c == "'":
             j = command.find("'", i + 1)
             if j < 0:
-                return command
+                return command, False
             i = j + 1
         elif c == '"':
             stack.append("d")
@@ -33606,28 +33599,24 @@ def _push_step_quoted_masked(command):
                 i += 1
         elif c == ")":
             if top not in "sp":
-                return command
+                return command, False
             stack.pop()
             i += 1
         elif command.startswith("<<<", i):
             i += 3
         elif command.startswith("<<", i):
-            j = i + 2
-            strip_tabs = command.startswith("-", j)
-            j += 1 if strip_tabs else 0
-            while j < n and command[j] in " \t":
-                j += 1
-            word = _push_step_heredoc_word(command, j, n)
-            if word is None:
-                return command
-            pending.append((word[0], strip_tabs, word[1]))
+            parsed = _push_step_delim(command, i + 2, n)
+            if parsed is None:
+                return command, False
+            quoted, delimiter, strip_tabs, j = parsed
+            pending.append((delimiter, strip_tabs, quoted))
             nested = nested or len(stack) > 1
             backquoted = backquoted or backquotes > 0
-            i = word[2]
+            i = j
         else:
             i += 1
     if stack != ["c"] or pending:
-        return command
+        return command, False
     out = []
     last = 0
     for start, end in spans:
@@ -33635,13 +33624,14 @@ def _push_step_quoted_masked(command):
         out.append(command[start:end].translate(_GATE_HEREDOC_BODY_MASK))
         last = end
     out.append(command[last:])
-    return "".join(out)
+    return "".join(out), True
 
 
 def _push_step_heredoc_split(command):
     """(text, bodies) for push_then_step's fallback. text is command with each here-document body that ends at
-    its delimiter line removed, that line with it (the operators found by _GATE_HEREDOC_OP_RE, as
-    _gate_heredoc_masked reads them), so a body bash reads as data names no push and no separator. bodies holds,
+    its delimiter line removed, that line with it (the operator positions found by _GATE_HEREDOC_OP_RE, each
+    delimiter word read as bash reads it, _push_step_delim; a word that reading cannot resolve opens no
+    body), so a body bash reads as data names no push and no separator. bodies holds,
     read in one pass as _push_step_finding reads a segment, the substitution bodies of the whole command text
     outside those bodies (_push_step_bodies, quotes read as bash reads them: 'step "$(git push)" <<EOF'), and
     then those of each removed body whose delimiter word is unquoted, which bash expands (quotes read as text);
@@ -33666,22 +33656,28 @@ def _push_step_heredoc_split(command):
             continue
         out.append(line)
         for m in _GATE_HEREDOC_OP_RE.finditer(line):
-            word = m.group(2)
-            delimiter = word.replace("'", "").replace('"', "").replace(chr(92), "")
-            if delimiter:
-                pending.append((delimiter, m.group(1) == "-", delimiter != word))
+            parsed = _push_step_delim(line, m.start() + 2, len(line))
+            if parsed is not None and parsed[1]:
+                pending.append((parsed[1], parsed[2], parsed[0]))
     text = "\n".join(out + held)
     return text, _push_step_bodies(text, True) + bodies
 
 
 def _push_step_early_lines(command):
     """True when a here-document body, read as the fallback reads the bodies (_push_step_heredoc_split: the
-    operators _GATE_HEREDOC_OP_RE finds on each line outside a body, each body up to the line that is exactly
-    its delimiter), may end earlier in bash (_push_step_early_end). A body counts as inside a substitution or
+    operator positions _GATE_HEREDOC_OP_RE finds on each line outside a body, each delimiter word read as bash
+    reads it, _push_step_delim, each body up to the line that is exactly its delimiter), may end earlier in
+    bash (_push_step_early_end), or when such an operator carries a delimiter word that reading cannot resolve
+    (fail closed: the body's end cannot be placed at all, so where bash ends it cannot be known). A body
+    counts as inside a substitution or
     backquotes when a '(' or a backquote appears anywhere before it, quoted or not (the shared lexer's own test
-    for a body it can trust, the span comment in _lex_pass), and as inside backquotes when a backquote does.
-    This reading needs no quoting followed, so it covers a command _push_step_quoted_masked cannot follow (a case
-    pattern's ')'), where the shared lexer still reads such a body to its delimiter line. Linear in the length of
+    for a body it can trust, the span comment in _lex_pass), and as inside backquotes when a backquote does;
+    an unresolvable word counts on the same terms, a '(' or backquote anywhere before its operator's line end.
+    This reading needs no quoting followed, and it runs only on a command _push_step_quoted_masked could not
+    follow (a case
+    pattern's ')'), where the shared lexer still reads such a body to its delimiter line; where that walk
+    followed the command, its own early-end reading is the decision and this one is not consulted
+    (_push_step_judge). Linear in the length of
     command."""
     paren, tick = command.find("("), command.find("`")
     if "<<" not in command or (paren < 0 and tick < 0):
@@ -33702,10 +33698,12 @@ def _push_step_early_lines(command):
                 start = pos
             continue
         for m in _GATE_HEREDOC_OP_RE.finditer(line):
-            word = m.group(2)
-            delimiter = word.replace("'", "").replace('"', "").replace(chr(92), "")
-            if delimiter:
-                pending.append((delimiter, m.group(1) == "-"))
+            parsed = _push_step_delim(line, m.start() + 2, len(line))
+            if parsed is None or not parsed[1]:
+                if -1 < paren < pos or -1 < tick < pos:
+                    return True
+                continue
+            pending.append((parsed[1], parsed[2]))
         start = pos
     return False
 
@@ -33721,25 +33719,30 @@ def _push_step_judge(command, depth=0, cache=None):
     separator (_PUSH_STEP_RAW_RE), and counts as a push when it names git then push (_RAW_PUSH_RE). A
     substitution nested past _PUSH_STEP_DEPTH_LIMIT is not read: it finds when its raw text names git then
     push. A command holding a here-document body that bash may end before its delimiter line, where no reading
-    here places the body's end where bash does (_push_step_quoted_masked returns None, or _push_step_early_lines),
-    is uncertain and fails closed: its whole text, no body taken as data, finds when it names git, then push,
-    then a separator (_PUSH_STEP_RAW_RE); a push run from such a body is followed by at least the newline before
-    the delimiter line that ends it. Otherwise it is judged as above, unmasked. Each text is judged once per call
+    here places the body's end where bash does (_push_step_quoted_masked returns None, or, only where that
+    walk could not follow the command, _push_step_early_lines), is uncertain, and the uncertain state itself
+    is the decision: it finds outright, whatever the rest of the text names, because the commands bash runs
+    from the unplaced text cannot be read at all and a push word spelled through quotes or a backslash
+    (g''it push) is invisible to any text probe, so no probe may gate this deny. Where the walk followed the
+    command, its own early-end reading is the decision and the fallback's line reading is not consulted, so a
+    backquote inside a body the walk placed (a commit message or PR body quoting `make` or `git push`) makes
+    nothing uncertain. Otherwise the command is judged as above, unmasked. Each text is judged once per call
     (cache)."""
     if cache is None:
         cache = {}
     if command in cache:
         return cache[command]
     key = command
-    masked = _push_step_quoted_masked(command)
-    if masked is None or _push_step_early_lines(command):
-        if _PUSH_STEP_RAW_RE.search(command) is not None:
-            result = ("a here-document body inside a command substitution or backquotes can end in bash before its "
-                      "delimiter line (a line in it begins with the delimiter, or it holds a backquote inside "
-                      "backquotes), and bash then runs what follows as commands; the command text, with no body read "
-                      "as data, names git push followed by a command separator", True)
-            cache[key] = result
-            return result
+    masked, followed = _push_step_quoted_masked(command)
+    if masked is None or (not followed and _push_step_early_lines(command)):
+        result = ("a here-document body inside a command substitution or backquotes can end in bash before its "
+                  "delimiter line (a line in it begins with the delimiter, it holds a backquote inside "
+                  "backquotes, or its delimiter is a word this guard cannot resolve), and bash then runs text "
+                  "this guard cannot place as commands; it fails closed on that uncertainty itself, whatever "
+                  "the rest of the text names", True)
+        cache[key] = result
+        return result
+    if not followed:
         masked = command
     command = masked
     if depth > _PUSH_STEP_DEPTH_LIMIT:
@@ -33811,27 +33814,33 @@ def push_then_step(data):
     stands in runs after it whatever its result, so 'step $(git push)' and 'echo "$(git push)"; step' deny,
     unless that command is an assignment alone ('x=$(git push)'), whose exit status is the substitution's, and
     is then judged as the push itself (_push_step_finding, _push_step_judge). A quoted here-document body
-    (<<'EOF', <<"EOF", <<\\EOF) is data to bash wherever it stands, inside a substitution too, so it is masked
+    (<<'EOF', <<"EOF", <<\\EOF, <<$'EOF', <<$"EOF", or any mix of fragments) is data to bash wherever it
+    stands, inside a substitution too, so it is masked
     before any reading (_push_step_quoted_masked): 'git commit -m "$(cat <<'EOF'', a body naming `git push`
     in backquotes, 'EOF', ')"' allows; an unquoted body is expanded by bash and its substitutions are read.
+    Every reading here takes the delimiter from one predicate over the word's bash-level identity after bash's
+    own quote removal (_push_step_delim, the shared lexer's own parser), never from a list of spellings, so an
+    ANSI-C or locale-quoted, partly quoted or blank-holding delimiter compares as bash compares it, and a word
+    that predicate cannot resolve places no body at all (fail closed).
     Inside a '$(', a '(' or backquotes bash can end a here-document body, quoted or not, before the line that
     is exactly its delimiter (_push_step_early_end): at a line that begins with the delimiter ('x=$(cat
     <<'EOF'', 'body', 'EOF)', 'git push; step', 'EOF', ')' runs the push and the step under bash 5.3), and,
     inside backquotes, at a backquote. This check's masking and fallback, and the shared lexer's body skip where
-    it reads a command, read such a body on to its delimiter line, so the command is uncertain and fails closed:
-    it denies when its whole text names git, then push, then a separator (_push_step_judge).
+    it reads a command, read such a body on to its delimiter line, so the command is uncertain and fails closed
+    on the uncertain state itself: it denies outright, whatever the rest of its text names, so no spelling of
+    the push word (quoted, split or escaped, 'g''it push') can reach an allow from an uncertain command
+    (_push_step_judge). The uncertainty is the masking walk's own early-end reading wherever that walk followed
+    the command; the fallback's line reading decides it only where the walk could not follow (a case pattern's
+    ')'), so a backquote inside a body the walk placed (a commit message quoting `make`) makes nothing
+    uncertain, and the standard commit, push and PR command with backquotes in its quoted bodies allows.
 
     DISCLOSED SILENT ALLOWS (the lexer does not see the push): a push inside a script or program the command
     runs, a shell function or alias, eval or an sh -c string, a variable or substituted command word ($GIT
     push), a git alias that runs push, and a wrapper carrying its own options (env -i, sudo -u u); a push in
     a case arm inside a quoted substitution ('echo "$(case a in a) git push;; esac)"; step'), whose pattern ')'
-    the substitution reader takes for the close; and, in a command the lexer cannot read, a quoted '<<' the
-    fallback takes for an operator on a line after a real here-document (a body, then echo '<<Y', then
-    git push, then step, then Y), which removes the lines up to Y as a body. A body bash ends early is missed
-    when the masking walk cannot follow the command (a case pattern's ')' before it) and the fallback's line
-    reading misreads its operator too (a quoted '<<' on an earlier line taken for an operator whose body runs
-    past it, or a delimiter spelled with a blank, a line continuation, an ANSI-C or locale quote): the shared
-    lexer then reads it as data. DISCLOSED OVER-DENY: a step bash
+    the substitution reader takes for the close; and, in a command the lexer cannot read, a push word no raw
+    probe assembles ("g''it push <<<x; step", the fallback's pre-existing raw-text gap). DISCLOSED OVER-DENY:
+    a step bash
     gates on the push through a compound command ('if git push; then x; fi', '{ git push; } && x') reads as
     ';' and denies, and so does one after a subshell ('(git push) && x', the ')' above _PUSH_STEP_GATED_SEPS)
     or after an assignment from a bare substitution or a backquote ('x=$(git push) && y', 'x=`git push` && y');
@@ -33840,12 +33849,17 @@ def push_then_step(data):
     x'), whose ';' still reads as ungated, a substitution standing alone as the command ('$(git push)'), and,
     in a command the lexer cannot read, an assignment alone from a substitution holding a push
     ('x=$(git push) && y <<EOF'); join the step with '&&' to a bare push instead. An uncertain here-document
-    denies whenever its text names git, then push, then a separator, '&&' included, so it over-denies wherever
-    bash runs no step after a failed push: a gated push after the body ('x=$(cat <<'EOF'', 'EOF is the
-    marker', 'EOF', ') && git push && x'), and, not run under bash here, a body line that begins with the
-    delimiter with no ')' or backquote after it, a body in a plain '(' subshell or after any earlier '(' or
-    backquote (the fallback's line reading), and an early end inside a double-quoted substitution, after which
-    the rest is quoted text. Fail posture: a missing tool_name denies (the shared
+    denies outright, its text read not at all, so it over-denies wherever
+    bash runs no step after a failed push, a command with no push in it included: a gated push after the body
+    ('x=$(cat <<'EOF'', 'EOF is the
+    marker', 'EOF', ') && git push && x'), an escaped backquote in a body inside backquotes ('x=`cat <<'EOF'',
+    'body \\`', 'EOF', '` && git push && x', where bash reads the escape and does not end the body), an early
+    end inside a double-quoted substitution (after it the rest is quoted text and bash runs no step), and a
+    body line that begins with the delimiter in a plain '(' subshell (bash runs no push there); and, not run
+    under bash here, a body line that begins with the
+    delimiter with no ')' or backquote after it, a body after any earlier '('
+    or backquote in a command the walk could not follow (the fallback's line reading), and an operator there
+    whose delimiter word the predicate cannot resolve. Fail posture: a missing tool_name denies (the shared
     contract); a missing or non-string command denies (check-fails-closed-on-unreadable); an empty one runs
     nothing and allows. A command the lexer cannot read (an unbalanced quote, a here-string, an unquoted
     here-document, a '#' it cannot judge, a command reading past its budget) is read with each here-document
@@ -33854,7 +33868,11 @@ def push_then_step(data):
     one denies, since the command it stands in (an assignment alone included) or the one reading the body
     runs after it; the rest denies when its raw text names git, then push, then any of ';', '&', '|' or a
     newline (_PUSH_STEP_RAW_RE), an over-deny of such a command joined only by '&&' ('git push <<<x && y'),
-    and allows otherwise."""
+    and allows otherwise. That line reading can still take an unquoted '<<' it should not (an arithmetic
+    shift) for an operator whose resolvable word opens a phantom body, a disclosed misread; a quoted '<<'
+    whose word does not resolve on its line ("echo '<<Y'") now opens no body, so the lines after it stay read
+    as raw text ('cat <<EOF', 'x', 'EOF', then "echo '<<Y'", 'git push', 'step' and 'Y' on lines of their own
+    denies, where removing the lines up to Y as a body once allowed it)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: push_then_step wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))

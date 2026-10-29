@@ -2630,13 +2630,20 @@ def _pts_oracle_runs(failures, tmp):
 
 _PTS_BQ = "`"
 _PTS_QUOTED_BODY = "\"$(cat <<'EOF'\n"
+# The delimiter-word charset of the pre-fix spelling-list reading, kept only for the delim revert flip.
+_PTS_SPELLED_WORD_RE = re.compile(r"[^\s;&|<>()]*")
 # The real-bash table: (label, command, kind, guard). kind says what bash does with a git push that fails and
 # what the hook must decide: "deny" (bash runs a step after the failed push, the hook denies), "allow" (no
 # step runs after it, the hook allows), "over" (no step runs after it, yet the hook denies: a disclosed
 # over-deny) and "under" (a step runs after it, yet the hook allows: a disclosed wrong allow). guard names the
 # reading the row's decision rests on, "subst" for the fallback's substitutions in the whole command text,
-# "quoted" for the masking of quoted here-document bodies and "early" for the bodies bash may end before their
-# delimiter line (_push_step_early_end): with that reading reverted the decision must flip.
+# "quoted" for the masking of quoted here-document bodies, "early" for the bodies bash may end before their
+# delimiter line (_push_step_early_end), "delim" for the one bash-level delimiter reading every reader shares
+# (_push_step_delim, reverted to the pre-fix spelling-list reading), and "lines" for the walk's authority over
+# the fallback's line reading (reverted by declaring the walk unable to follow, so that line reading decides):
+# with that reading reverted the decision must flip. An uncertain command (a body end this guard cannot place
+# where bash does) denies on the uncertain state itself, so its deny must survive the removal of every text
+# probe (the pts-bash-bind loop), where a certain deny row must stop denying (pts-bash-flip).
 _PTS_BASH_ROWS = (
     ("(pts-b1) quoted substitution argument, unquoted here-document",
      'step "$(git push origin br)" <<EOF\nbody\nEOF', "deny", "subst"),
@@ -2715,10 +2722,85 @@ _PTS_BASH_ROWS = (
      "x=$(cat <<'EOF'\nbody\nEOF\n) && git push origin br && step", "allow", None),
     ("(pts-b35) case inside a quoted substitution", 'echo "$(case a in a) git push origin br;; esac)"; step',
      "under", None),
-    ("(pts-b36) a quoted '<<' the fallback reads as an operator",
-     "cat <<EOF\nx\nEOF\necho '<<Y'\ngit push origin br\nstep\nY", "under", None),
-    ("(pts-b45) body ended early after a case pattern and a quoted '<<' the line reading takes for an operator",
-     "case a in a) echo '<<Y';; esac\nx=$(cat <<'EOF'\nEOF)\ngit push origin br; step\nEOF\n)\nY", "under", None),
+    ("(pts-b36) a quoted '<<' whose word does not resolve on its line opens no body",
+     "cat <<EOF\nx\nEOF\necho '<<Y'\ngit push origin br\nstep\nY", "deny", "delim"),
+    ("(pts-b45) body ended early after a case pattern, the earlier quoted '<<' resolving as no operator",
+     "case a in a) echo '<<Y';; esac\nx=$(cat <<'EOF'\nEOF)\ngit push origin br; step\nEOF\n)\nY", "deny", "delim"),
+    # The delimiter is read as bash reads it (_push_step_delim), whatever its quoting form spells.
+    ("(pts-b46) ANSI-C-quoted delimiter in a substitution ended early by 'EOF)'",
+     "x=$(cat <<$'EOF'\nbody\nEOF)\ngit push origin br; step\nEOF\n)", "deny", "delim"),
+    ("(pts-b47) locale-quoted delimiter in a substitution ended early by 'EOF)'",
+     'x=$(cat <<$"EOF"\nbody\nEOF)\ngit push origin br; step\nEOF\n)', "deny", "delim"),
+    ("(pts-b48) ANSI-C-quoted delimiter, empty body ended early by 'EOF)'",
+     "x=$(cat <<$'EOF'\nEOF)\ngit push origin br; step\nEOF\n)", "deny", "delim"),
+    ("(pts-b49) ANSI-C-quoted delimiter in a backquote ended early by a backquote",
+     "x=" + _PTS_BQ + "cat <<$'EOF'\nbody " + _PTS_BQ + "\ngit push origin br; step\nEOF\n" + _PTS_BQ,
+     "deny", "delim"),
+    ("(pts-b55) delimiter holding a quoted ';' after a case pattern, ended early",
+     "case a in a) :;; esac\nx=$(cat <<'E;F'\nbody\nE;F)\ngit push origin br; step\nE;F\n)", "deny", "delim"),
+    ("(pts-b57) delimiter holding a quoted blank, ended early by 'E F)'",
+     "x=$(cat <<'E F'\nbody\nE F)\ngit push origin br; step\nE F\n)", "deny", "delim"),
+    # An uncertain command denies on the uncertain state itself: no spelling of the push word gates it.
+    ("(pts-b50) quote-split command word after an early end",
+     "x=$(cat <<'EOF'\nbody\nEOF)\ng''it push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b51) backslash-spelled command word after an early end",
+     "x=$(cat <<'EOF'\nbody\nEOF)\ng\\it push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b52) quote-split subcommand after an early end",
+     "x=$(cat <<'EOF'\nbody\nEOF)\ngit pu'sh' origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b76) quote-split push word, no here-document", "g''it push origin br; step", "deny", None),
+    ("(pts-b77) quote-split push word, here-string: the fallback's pre-existing raw-text gap",
+     "g''it push origin br <<<x; step", "under", None),
+    ("(pts-b78) uncertain command with no push in it", "x=$(cat <<'EOF'\nEOF)\necho hi\nEOF\n)", "over", "early"),
+    # The standard commit, push and PR command: backquotes inside bodies the walk placed make nothing uncertain.
+    ("(pts-b53) standard commit, push and PR command, backquotes in both bodies",
+     'git commit -m "$(cat <<\'EOF\'\nfix ' + _PTS_BQ + "foo" + _PTS_BQ + '\nEOF\n)" && git push -u origin br '
+     '&& gh pr create --title t --body "$(cat <<\'EOF\'\n- run ' + _PTS_BQ + "make" + _PTS_BQ + '\nEOF\n)"',
+     "allow", "lines"),
+    ("(pts-b54) standard command, single-quoted message holding backquotes",
+     "git commit -m 'fix " + _PTS_BQ + "foo" + _PTS_BQ + "' && git push -u origin br && gh pr create --title t "
+     '--body "$(cat <<\'EOF\'\n- run ' + _PTS_BQ + "make" + _PTS_BQ + '\nEOF\n)"', "allow", "quoted"),
+    # More early-end shapes under real bash: each rests on the early predicate over the bash-level delimiter.
+    ("(pts-b56) escaped backquote in a backquote body, bash reads the escape",
+     "x=" + _PTS_BQ + "cat <<'EOF'\nbody \\" + _PTS_BQ + "\nEOF\n" + _PTS_BQ + " && git push origin br && step",
+     "over", "early"),
+    ("(pts-b58) partly quoted delimiter ended early by 'EOF)'",
+     "x=$(cat <<E'O'F\nbody\nEOF)\ngit push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b59) backslash-quoted delimiter ended early by 'EOF)'",
+     "x=$(cat <<\\EOF\nbody\nEOF)\ngit push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b60) substitution nested in a quoted substitution, ended early",
+     'echo "$(x=$(cat <<\'EOF\'\nbody\nEOF)\ngit push origin br; step\nEOF\n))"', "deny", "early"),
+    ("(pts-b61) '<<-' body ended early by a tab-indented 'EOF)'",
+     "x=$(cat <<-'EOF'\nbody\n\tEOF)\ngit push origin br; step\n\tEOF\n)", "deny", "early"),
+    ("(pts-b62) a CR after the delimiter on the early line",
+     "x=$(cat <<'EOF'\nbody\nEOF\r)\ngit push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b63) delimiter extended on the early line ('EOFX)')",
+     "x=$(cat <<'EOF'\nbody\nEOFX)\ngit push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b64) a blank between the delimiter and the ')' on the early line",
+     "x=$(cat <<'EOF'\nbody\nEOF )\ngit push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b65) the push on the early-end line itself",
+     "x=$(cat <<'EOF'\nbody\nEOF); git push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b66) two bodies read on one line, the second ended early",
+     "x=$(cat <<'A' <<'B'\nbodyA\nA\nbodyB\nB)\ngit push origin br; step\nB\n)", "deny", "early"),
+    ("(pts-b67) body in a process substitution ended early by 'EOF)'",
+     "cat <(cat <<'EOF'\nbody\nEOF)\ngit push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b68) early end inside a double-quoted substitution, the rest quoted text",
+     'x="$(cat <<\'EOF\'\nbody\nEOF)\ngit push origin br; step\nEOF\n)"', "over", "early"),
+    ("(pts-b69) backquote in a substitution inside backquotes ends the outer body",
+     "x=" + _PTS_BQ + "y=$(cat <<'EOF'\nbody " + _PTS_BQ + "\ngit push origin br; step\nEOF\n)" + _PTS_BQ,
+     "deny", "early"),
+    ("(pts-b70) a list before the operator inside the substitution",
+     "x=$(true; cat <<'EOF'\nbody\nEOF)\ngit push origin br; step\nEOF\n)", "deny", "early"),
+    ("(pts-b71) a newline inside double quotes while a body is pending",
+     'x=$(cat <<\'EOF\' "a\nb"\nbody\nEOF)\ngit push origin br; step\nEOF\n)', "deny", "early"),
+    ("(pts-b75) body line beginning with the delimiter in a plain '(' subshell",
+     "(cat <<'EOF'\nEOF is the marker\nEOF\n) && git push origin br && step", "over", "early"),
+    # Shapes bash does NOT end early: the bash-level delimiter identity keeps them read as data.
+    ("(pts-b72) space-indented delimiter line is no early end",
+     "x=$(cat <<'EOF'\nbody\n EOF)\ngit push origin br; step\nEOF\n)", "allow", None),
+    ("(pts-b73) tab-indented delimiter line under plain '<<' is no early end",
+     "x=$(cat <<'EOF'\nbody\n\tEOF)\ngit push origin br; step\nEOF\n)", "allow", None),
+    ("(pts-b74) CRLF throughout: the delimiter itself carries the CR",
+     "x=$(cat <<'EOF'\r\nbody\r\nEOF)\r\ngit push origin br; step\r\nEOF\r\n)", "allow", None),
 )
 
 
@@ -2727,10 +2809,15 @@ def _pts_bash_table(failures, tmp):
     fixture that records each push it is asked for and exits 1 (a push that failed) and a step fixture that
     leaves a mark: the step ran after a failed push exactly when both marks are present, and that must match
     the row's kind ("deny" and "under" rows run it, the others do not). The hook must deny exactly the "deny"
-    and "over" rows. Then the flips: with the finding and the fallback probe patched out every "deny" row must
-    stop denying; with both patched to always find every "allow" row must deny; with the fallback's
-    substitutions in the command text dropped, the quoted here-document bodies left unmasked, or no body read
-    as one bash may end early, every row resting on that reading must change its decision."""
+    and "over" rows. Then the flips: with the finding and the fallback probe patched out, every "deny" or
+    "over" row the hook holds uncertain (its own reading, taken live) must KEEP denying, because the uncertain
+    state itself is the decision and no text probe gates it (pts-bash-bind), while every other "deny" row must
+    stop denying (pts-bash-flip); with both patched to always find every "allow" row must deny; and with the
+    fallback's
+    substitutions in the command text dropped, the quoted here-document bodies left unmasked, no body read
+    as one bash may end early, the delimiter read by the pre-fix spelling list instead of bash's own quote
+    removal, or the masking walk declared unable to follow (so the fallback's line reading decides), every row
+    resting on that reading ("subst", "quoted", "early", "delim", "lines") must change its decision."""
     if not os.access(_PTS_BASH, os.X_OK):
         failures.append("(pts-bash) {} is not executable; the real-bash table cannot run".format(_PTS_BASH))
         return
@@ -2772,17 +2859,41 @@ def _pts_bash_table(failures, tmp):
 
     finding, probe = aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE
     split, masked = aiqt_hooks._push_step_heredoc_split, aiqt_hooks._push_step_quoted_masked
-    early = aiqt_hooks._push_step_early_end
+    early, delim = aiqt_hooks._push_step_early_end, aiqt_hooks._push_step_delim
 
     def split_without_text_bodies(command):
         text, bodies = split(command)
         return text, bodies[len(aiqt_hooks._push_step_bodies(text, True)):]
 
+    def spelled_delim(command, at, n):
+        # The pre-fix spelling-list reading (a regex word, quote characters dropped, '$' an ordinary
+        # character): a row resting on the bash-level delimiter identity must change its decision under it.
+        j = at
+        strip_tabs = j < n and command[j] == "-"
+        if strip_tabs:
+            j += 1
+        while j < n and command[j] in " \t":
+            j += 1
+        word = _PTS_SPELLED_WORD_RE.match(command, j, n).group(0)
+        delimiter = word.replace("'", "").replace('"', "").replace(chr(92), "")
+        if not delimiter:
+            return None
+        return (delimiter != word, delimiter, strip_tabs, j + len(word))
+
+    def uncertain(command):
+        # The hook's own uncertain state, taken live from the unpatched readings.
+        body, followed = masked(command)
+        return body is None or (not followed and aiqt_hooks._push_step_early_lines(command))
+
     try:
         aiqt_hooks._push_step_finding = lambda segments, depth=0, cache=None: (None, False)
         aiqt_hooks._PUSH_STEP_RAW_RE = aiqt_hooks._RawSequence(r"[^\s\S]")
         for label, command, kind, _guard in _PTS_BASH_ROWS:
-            if kind == "deny" and _decision(handler, command) == "deny":
+            if kind in ("deny", "over") and uncertain(command):
+                if _decision(handler, command) != "deny":
+                    failures.append("{} (pts-bash-bind): an uncertain command must keep denying with every text "
+                                    "probe removed; the uncertain state itself is the decision".format(label))
+            elif kind == "deny" and _decision(handler, command) == "deny":
                 failures.append("{} (pts-bash-flip): still denies with the deny logic removed".format(label))
         aiqt_hooks._push_step_finding = lambda segments, depth=0, cache=None: ("a forced finding", True)
         aiqt_hooks._PUSH_STEP_RAW_RE = aiqt_hooks._RawSequence(r"")
@@ -2791,8 +2902,11 @@ def _pts_bash_table(failures, tmp):
                 failures.append("{} (pts-bash-flip-deny): still allows under an always-deny handler".format(label))
         aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE = finding, probe
         for guard, attr, reverted in (("subst", "_push_step_heredoc_split", split_without_text_bodies),
-                                      ("quoted", "_push_step_quoted_masked", lambda command: command),
-                                      ("early", "_push_step_early_end", lambda text, at, heredocs, backquoted: False)):
+                                      ("quoted", "_push_step_quoted_masked", lambda command: (command, True)),
+                                      ("early", "_push_step_early_end",
+                                       lambda text, at, heredocs, backquoted: False),
+                                      ("delim", "_push_step_delim", spelled_delim),
+                                      ("lines", "_push_step_quoted_masked", lambda command: (command, False))):
             setattr(aiqt_hooks, attr, reverted)
             try:
                 for label, command, _kind, row_guard in _PTS_BASH_ROWS:
@@ -2801,11 +2915,11 @@ def _pts_bash_table(failures, tmp):
                                         "reverted, so the row does not discriminate".format(label, guard))
             finally:
                 aiqt_hooks._push_step_heredoc_split, aiqt_hooks._push_step_quoted_masked = split, masked
-                aiqt_hooks._push_step_early_end = early
+                aiqt_hooks._push_step_early_end, aiqt_hooks._push_step_delim = early, delim
     finally:
         aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE = finding, probe
         aiqt_hooks._push_step_heredoc_split, aiqt_hooks._push_step_quoted_masked = split, masked
-        aiqt_hooks._push_step_early_end = early
+        aiqt_hooks._push_step_early_end, aiqt_hooks._push_step_delim = early, delim
 
 
 def _test_push_then_step(failures, tmp):
