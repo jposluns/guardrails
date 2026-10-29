@@ -56,7 +56,7 @@ these rules:
               members carry the new block.
   behaviour   the gate calls the LOADED hook's own file-tool rule (_file_tool_rule) directly, for the
               Write tool only, at one throwaway fixture product root: a Write to one concrete instance
-              of every rendered protected-path entry must be denied, and a Write to the two rendered
+              of every rendered protected-path entry must be denied, and a Write to the rendered
               imported-series exemption leaves, to one keep-disposed plan source and to one unlisted
               file must be allowed. So a hook whose file-tool rule stops denying the probed instance of
               a rendered entry (a disposition no longer frozen, the store, evidence, archive, view,

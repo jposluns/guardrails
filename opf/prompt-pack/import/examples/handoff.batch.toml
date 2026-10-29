@@ -1,0 +1,15 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-handoff.md"
+
+[[record]]
+key = "autumn-handoff"
+type = "handoff"
+created_at = "2019-10-04T17:10:00Z"
+span = [0, 412]
+status = "superseded"
+summary = "Open items: the CSV export and the cache fix; both owners named in the note."
+title = "Handoff of the reporting work before leave"
+unparsed = ["Last updated: after the Tuesday sync (see the whiteboard photo)."]
+unrecorded = [{field = "updated_at", reason = "unparsed"}]
