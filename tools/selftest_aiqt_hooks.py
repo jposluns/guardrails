@@ -2402,7 +2402,14 @@ def _test_git_stash_ref(failures):
             ("(sr-w24) parse failure with visible relocation notes", 'cd /abs && git stash pop "unbalanced'),
             ("(sr-w25) here-string beside stash pop notes", "git stash pop <<<x"),
             ("(sr-w26) here-string + quote-fragmented stash notes", "git st'ash' pop <<<x"),
-            ("(sr-w27) here-string + ANSI-C escape spelling stash notes", "git $'\\x73'tash pop <<<x")):
+            ("(sr-w27) here-string + ANSI-C escape spelling stash notes", "git $'\\x73'tash pop <<<x"),
+            # A bare pop/apply behind a compound command's reserved words is read from its command word (the
+            # command reading, _CommandReading), so the former disclosed lexical bound notes.
+            ("(sr-a36) brace group is read through to its pop and notes", "{ git stash pop; }"),
+            ("(sr-a37) brace group with option is read through and notes", "{ git stash apply --index; }"),
+            ("(sr-a38) shell-keyword block is read through and notes", "if true; then git stash pop; fi"),
+            ("(sr-a39) shell-keyword condition position is read through and notes",
+             "if git stash pop; then :; fi")):
         expect_warn(label, command)
 
     for label, command in (
@@ -2443,11 +2450,7 @@ def _test_git_stash_ref(failures):
              'git add -A && git push "unbalanced'),
             ("(sr-a40) parse failure naming no stash", "wc -l <<<x"),
             ("(sr-a41) parse failure with a quoted commit message naming no stash",
-             'git commit -m "fix bug" <<<x'),
-            ("(sr-a36) brace group is a disclosed lexical bound", "{ git stash pop; }"),
-            ("(sr-a37) brace group with option", "{ git stash apply --index; }"),
-            ("(sr-a38) shell-keyword block is a disclosed bound", "if true; then git stash pop; fi"),
-            ("(sr-a39) shell-keyword condition position is a disclosed bound", "if git stash pop; then :; fi")):
+             'git commit -m "fix bug" <<<x')):
         expect_silent(label, command)
 
     # The shared lexer keeps an unquoted brace-bearing ref as one positional token.
@@ -2812,6 +2815,155 @@ def _procsubst_taken_failures():
     if not _procsubst_walk_problems(_procsubst_equal_copy_walk, command):
         out.append("(dl-procsubst-taken-red-equal) a walk that passes a fresh full-length copy, equal to the "
                    "command in value, for each substitution passes the call record")
+    return out
+
+
+def _per_suffix_checker(argv):
+    """The gatdis note tier's checker reading judged afresh on every _gate_suffix_starts suffix, the reading
+    _gate_checker_suffix replaced (and must agree with)."""
+    return any(aiqt_hooks._is_checker_segment(argv[m:]) or aiqt_hooks._gate_verify_shaped(argv[m:])
+               for m in aiqt_hooks._gate_suffix_starts(argv))
+
+
+def _per_suffix_sink_kind(argv):
+    """The gatdis note tier's sink reading judged afresh on every _gate_suffix_starts suffix, the reading
+    _gate_suffix_sink_kind replaced (and must agree with)."""
+    return next((k for k in (aiqt_hooks._gate_note_sink_kind(argv[m:])
+                             for m in aiqt_hooks._gate_suffix_starts(argv)) if k is not None), None)
+
+
+# Words for the suffix-reading agreement row: wrappers, assignments, '--', '--test', runners and their checker
+# operands, verify options with and without a value, text commands, peeled wrappers and sink words.
+_SUFFIX_WORDS = ("setsid", "nohup", "sudo", "env", "nice", "timeout", "time", "-n", "5", "-c", "-k", "--",
+                 "--test", "--check", "--check=x", "--verify", "--selftestx", "FOO=1", "A+=b", "X=--check",
+                 "python3", "-m", "pytest", "node", "npx", "jest", "make", "test", "bash", "tools/run_all_checks.sh",
+                 "-c-check.py", "/usr/bin/pytest", "\\pytest", "latest", "checks", "echo", "grep", "git", "head",
+                 "tail", "cut", "sed", "-1", "-20", "-m", "1", "-q", "{", "!", "if", "x")
+
+
+@contextlib.contextmanager
+def _suffix_call_record(lengths):
+    """While the block runs, every call of the three per-suffix judges appends the length of the argv it got."""
+    names = ("_is_checker_segment", "_gate_verify_shaped", "_gate_note_sink_kind")
+    saved = dict((name, getattr(aiqt_hooks, name)) for name in names)
+
+    def recording(judge):
+        def judged(argv):
+            lengths.append(len(argv))
+            return judge(argv)
+        return judged
+    for name in names:
+        setattr(aiqt_hooks, name, recording(saved[name]))
+    try:
+        yield
+    finally:
+        for name in names:
+            setattr(aiqt_hooks, name, saved[name])
+
+
+def _suffix_flow_tokens_read(command, checker=None, sink=None):
+    """The argv tokens the three per-suffix judges are handed while _gate_flow_note reads command, with the
+    suffix readings optionally replaced by checker and sink (a wrong reading for the -red rows)."""
+    lengths = []
+    records = aiqt_hooks._lex_command(command)
+    saved = aiqt_hooks._gate_checker_suffix, aiqt_hooks._gate_suffix_sink_kind
+    aiqt_hooks._gate_checker_suffix = checker or saved[0]
+    aiqt_hooks._gate_suffix_sink_kind = sink or saved[1]
+    try:
+        with _suffix_call_record(lengths):
+            aiqt_hooks._gate_flow_note(records, command)
+    finally:
+        aiqt_hooks._gate_checker_suffix, aiqt_hooks._gate_suffix_sink_kind = saved
+    return sum(lengths)
+
+
+def _suffix_reading_failures():
+    """(dl-suffix-*) The note tier reads a wrapper's suffixes in time linear in the command. The other bounded
+    timed rows had no case for it: gate_weakening on fg_setsid_options (a wrapper before a long run of
+    words) once judged every suffix afresh, building all of them at once, about 9.8 to 10.8 s of CPU at 64 KB
+    and a MemoryError at 256 KB under an 8 GiB address-space limit (in-process on a 24-core host, 2026-10-28).
+    dl-suffix-equal and dl-suffix-sink-equal: the one-pass readings agree with the per-suffix readings on
+    3,000 seeded argvs. dl-suffix-calls: on 'setsid' and 1,200 '-c' words, and on the same after 'pytest |',
+    the per-suffix judges are handed at most a few times the command's tokens in all; dl-suffix-calls-red and
+    dl-suffix-sink-calls-red: the per-suffix readings, which hand them about the square of it over two, fail
+    that bound, so the record discriminates."""
+    out = []
+    rng = random.Random(20261028)
+    for _ in range(3000):
+        argv = [rng.choice(_SUFFIX_WORDS) for _ in range(rng.randint(0, 9))]
+        if aiqt_hooks._gate_checker_suffix(argv) != _per_suffix_checker(argv):
+            out.append("(dl-suffix-equal) _gate_checker_suffix gives {} on {!r}, the per-suffix reading {}".format(
+                aiqt_hooks._gate_checker_suffix(argv), argv, _per_suffix_checker(argv)))
+            break
+    for _ in range(3000):
+        argv = [rng.choice(_SUFFIX_WORDS) for _ in range(rng.randint(0, 9))]
+        if aiqt_hooks._gate_suffix_sink_kind(argv) != _per_suffix_sink_kind(argv):
+            out.append("(dl-suffix-sink-equal) _gate_suffix_sink_kind gives {!r} on {!r}, the per-suffix reading "
+                       "{!r}".format(aiqt_hooks._gate_suffix_sink_kind(argv), argv, _per_suffix_sink_kind(argv)))
+            break
+    words = 1201
+    bound = 4 * words
+    plain = "setsid" + " -c" * (words - 1)
+    piped = "pytest | " + plain
+    for label, command, wrong in (("calls", plain, dict(checker=_per_suffix_checker)),
+                                  ("sink-calls", piped, dict(sink=_per_suffix_sink_kind))):
+        read = _suffix_flow_tokens_read(command)
+        if read > bound:
+            out.append("(dl-suffix-{}) the per-suffix judges were handed {} tokens for a {}-word wrapper "
+                       "command, over the linear bound of {}".format(label, read, words, bound))
+        red = _suffix_flow_tokens_read(command, **wrong)
+        if red <= bound:
+            out.append("(dl-suffix-{}-red) the per-suffix reading was handed only {} tokens (bound {}), so the "
+                       "record cannot tell it from the one-pass reading".format(label, red, bound))
+    return out
+
+
+def _read_visit_count(command, cwd, read_segments=None):
+    """The _command_start calls one diff_source_pretool call makes on command (with read_segments in place of
+    aiqt_hooks._read_segments when given), and the number of the lexer's own records that hold a word."""
+    calls = [0]
+    start = aiqt_hooks._command_start
+    real = aiqt_hooks._read_segments
+
+    def counted(argv):
+        calls[0] += 1
+        return start(argv)
+    data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+            "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
+    aiqt_hooks._command_start = counted
+    if read_segments is not None:
+        aiqt_hooks._read_segments = read_segments
+    try:
+        aiqt_hooks.HANDLERS["diff_source_pretool"](data)
+    finally:
+        aiqt_hooks._command_start = start
+        aiqt_hooks._read_segments = real
+    return calls[0], sum(1 for seg in aiqt_hooks._lex_command(command) if seg.argv)
+
+
+def _read_visit_failures(cwd, size=65536):
+    """(dl-read-visits) The command reading passes over a record with no word without a call per record: on
+    the seps_hash_lines shape at 64 KB (sixteen readings of one long run of separators, each a record with no
+    word) diff_source_pretool calls _command_start no more often than the lexer's own records hold a word. A
+    reading that visits each record through it, about sixteen calls per separator, fails here on any runner,
+    where the CPU bound of the dl-shape rows sees it only on a runner slow enough (at 1 MB such a reading took
+    about 3.5 times main's CPU time on one host, and the 7 s bound failed only on a runner about 2.3 times
+    slower). A reading that calls it on every record must be caught by the same count (dl-read-visits-red)."""
+    command = _DEADLINE_SHAPES["seps_hash_lines"](size, cwd)[1]["command"]
+    out = []
+    calls, worded = _read_visit_count(command, cwd)
+    if calls > worded:
+        out.append("(dl-read-visits) diff_source_pretool called _command_start {} times on a {}-character command "
+                   "of one run of separators whose lexer records hold {} with a word".format(
+                       calls, len(command), worded))
+    real = aiqt_hooks._read_segments
+
+    def every_record(segments, *args):
+        for seg in segments:
+            aiqt_hooks._command_start(seg.argv)
+        return real(segments, *args)
+    if _read_visit_count(command, cwd, every_record)[0] <= worded:
+        out.append("(dl-read-visits-red) a reading that calls _command_start on every record passes the count")
     return out
 
 
@@ -3254,6 +3406,10 @@ def _gate_runtime_cost_failures(cost_inputs):
 
 _GW_FLOOR = 0.1
 _GW_SIZES = 9
+# The most a gw-lin row's t_2n/t_n may be, and how many timings of each size a ratio over it may take: a ratio
+# over the bound times both sizes again and compares the least time of each (_gw_scan_ratio).
+_GW_RATIO = 3.0
+_GW_TIMINGS = 3
 # The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
 # system CPU time, minor page faults, involuntary context switches, and the collector's collection count.
 _GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
@@ -3303,33 +3459,50 @@ def _gw_scan_once(cmd, scan):
     return t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
 
 
-def _gw_scan_ratio(unit, prefix, suffix, scan):
+def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once):
     """Double n (from 4000, at most _GW_SIZES sizes) until t_n clears the _GW_FLOOR floor, then compare
-    t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions, (usage_n, usage_2n)), or (None, t_n, None,
-    length, decisions, None) when the floor was never cleared in the bound, so the caller fails 'linearity not
-    evaluated'; decisions lists every timed scan's decision, in order. The input is a command string for the
-    whole-command scan or a word list for the dequoted-word scan."""
+    t_2n/t_n. While that ratio is over _GW_RATIO, both sizes are timed again (at most _GW_TIMINGS timings of
+    each) and the least time of each is compared, so one call charged for stray work cannot fail a linear scan,
+    while a scan that grows faster than its input in every timing still fails. Returns (ratio, t_n, t_2n,
+    length_2n, decisions, (usage_n, usage_2n), timings), the times and usages being those of the least timing
+    of each size and timings how many of each were taken, or (None, t_n, None, length, decisions, None, 1) when
+    the floor was never cleared in the bound, so the caller fails 'linearity not evaluated'; decisions lists
+    every timed scan's decision, in order. The input is a command string for the whole-command scan or a word
+    list for the dequoted-word scan; once times one scan (a check stands in scripted times through it)."""
     reps = 4000
     decisions = []
     for _ in range(_GW_SIZES):
-        t_n, decision, use_n = _gw_scan_once(prefix + unit * reps + suffix, scan)
+        cmd_n = prefix + unit * reps + suffix
+        t_n, decision, use_n = once(cmd_n, scan)
         decisions.append(decision)
         if t_n > _GW_FLOOR:
             cmd_2n = prefix + unit * (reps * 2) + suffix
-            t_2n, decision, use_2n = _gw_scan_once(cmd_2n, scan)
+            t_2n, decision, use_2n = once(cmd_2n, scan)
             decisions.append(decision)
-            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n)
+            timings = 1
+            while t_2n / t_n > _GW_RATIO and timings < _GW_TIMINGS:
+                timings += 1
+                again_n, decision, again_use_n = once(cmd_n, scan)
+                decisions.append(decision)
+                again_2n, decision, again_use_2n = once(cmd_2n, scan)
+                decisions.append(decision)
+                if again_n < t_n:
+                    t_n, use_n = again_n, again_use_n
+                if again_2n < t_2n:
+                    t_2n, use_2n = again_2n, again_use_2n
+            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n), timings
         reps *= 2
-    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None
+    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None, 1
 
 
 def _gw_lin_failures(cases):
     """What the gw-lin timing rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each
     timed by _gw_scan_ratio, and a row fails on a decision other than want, on a t_n that never cleared the
-    floor, or on a ratio over 3 (reporting the usage of both timed calls)."""
+    floor, or on a ratio of the least timings over _GW_RATIO (reporting the usage of the two calls those
+    least timings came from)."""
     out = []
     for label, unit, prefix, suffix, scan, want in cases:
-        ratio, t_n, t_2n, length_2n, got, use = _gw_scan_ratio(unit, prefix, suffix, scan)
+        ratio, t_n, t_2n, length_2n, got, use, timings = _gw_scan_ratio(unit, prefix, suffix, scan)
         wrong = [decision for decision in got if decision != want]
         if wrong:
             out.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
@@ -3337,10 +3510,43 @@ def _gw_lin_failures(cases):
         if ratio is None:
             out.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
                        "{} sizes (last {:.4f}s)".format(label, _GW_FLOOR, _GW_SIZES, t_n))
-        elif ratio > 3.0:
+        elif ratio > _GW_RATIO:
             out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
-                       "{:.3f}s then {:.3f}s for an input of length {} ({})"
-                       .format(label, ratio, t_n, t_2n, length_2n, _gw_usage_text(*use)))
+                       "{:.3f}s then {:.3f}s, the least of {} timings of each, for an input of length {} ({})"
+                       .format(label, ratio, t_n, t_2n, timings, length_2n, _gw_usage_text(*use)))
+    return out
+
+
+def _gw_retime_failures():
+    """(gw-lin-retime-edge) _gw_scan_ratio over scripted times (no scan runs): the first size's time clears the
+    floor, then each pair is (t_n, t_2n) for one timing of both sizes. A first ratio just under or exactly at
+    _GW_RATIO is final with one timing; one just over it retimes, and a retimed pair at the bound ends the
+    retiming. One slow timing of either size is outvoted by the least of the others (the CI shape: 0.109 s then
+    0.328 s, then 0.115 s then 0.230 s), a slow retimed t_n never replaces a faster one, a ratio over the bound
+    in all but the last allowed timing passes on that last one, and a ratio over the bound in every timing stops
+    at _GW_TIMINGS timings of each and stays over it."""
+    out = []
+    for name, pairs, want_ratio, want_timings in (
+            ("under", [(0.25, 0.7499)], 0.7499 / 0.25, 1),
+            ("at", [(0.25, 0.75)], 0.75 / 0.25, 1),
+            ("over-then-at", [(0.25, 0.7501), (0.25, 0.75)], 0.75 / 0.25, 2),
+            ("slow-2n", [(0.109, 0.328), (0.115, 0.230)], 0.230 / 0.109, 2),
+            ("slow-n-retimed", [(0.109, 0.33), (0.3, 0.22), (0.11, 0.44)], 0.22 / 0.109, 2),
+            ("over-until-last", [(0.25, 0.7501), (0.25, 0.7502), (0.25, 0.5)], 0.5 / 0.25, _GW_TIMINGS),
+            ("quadratic", [(0.11, 0.44), (0.12, 0.46), (0.115, 0.45), (0.1, 0.1)], 0.44 / 0.11, _GW_TIMINGS)):
+        times = [t for pair in pairs for t in pair]
+        taken = []
+
+        def once(cmd, _scan):
+            taken.append(len(cmd))
+            return times[len(taken) - 1], None, (len(taken),) * len(_GW_USAGE_LABELS)
+
+        ratio, _t_n, _t_2n, length_2n, decisions, _use, timings = _gw_scan_ratio("x", "", "", None, once)
+        if (ratio is None or abs(ratio - want_ratio) > 1e-9 or timings != want_timings
+                or taken != [4000, 8000] * timings or len(decisions) != 2 * timings or length_2n != 8000):
+            out.append("(gw-lin-retime-edge) {}: the scripted times {} gave ratio {!r} over {} timings of lengths "
+                       "{}, want {!r} over {} timings of 4000 then 8000".format(
+                           name, pairs, ratio, timings, taken, want_ratio, want_timings))
     return out
 
 
@@ -3353,6 +3559,36 @@ def _gw_spin_scan(power):
             pass
         return None
     return scan
+
+
+def _gw_slow_once_scan(power):
+    """_gw_spin_scan(power) whose second call (the first timing of the doubled input) also spends 2 * _GW_FLOOR
+    more CPU time, standing in for one timed call charged for stray work."""
+    spin = _gw_spin_scan(power)
+    calls = []
+
+    def scan(cmd):
+        calls.append(None)
+        if len(calls) == 2:
+            until = time.process_time() + 2 * _GW_FLOOR
+            while time.process_time() < until:
+                pass
+        return spin(cmd)
+    return scan
+
+
+def _gw_retime_cpu_failures():
+    """(gw-lin-retime-linear, gw-lin-retime-super) The retiming in CPU time: with one timing of the doubled input
+    charged 0.2 s more (a first ratio of about 3.7 for a linear stand-in), the linear row still passes on its
+    least timings and the quadratic one still fails after _GW_TIMINGS timings of each."""
+    out = []
+    got = _gw_lin_failures((("gw-lin-retime-linear", "x", "", "", _gw_slow_once_scan(1), None),
+                            ("gw-lin-retime-super", "x", "", "", _gw_slow_once_scan(2), None)))
+    if len(got) != 1 or not got[0].startswith("(gw-lin-retime-super) doubling the input scaled the scan ") \
+            or ", the least of {} timings of each, ".format(_GW_TIMINGS) not in got[0]:
+        out.append("(gw-lin-retime-linear/super) the rows gave {!r}, want only the quadratic row's failure after "
+                   "{} timings of each".format(got, _GW_TIMINGS))
+    return out
 
 
 @contextlib.contextmanager
@@ -3403,8 +3639,8 @@ def _gw_lin_usage_failures():
              "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
              "cyclic collections {2}".format(pair_s, pair, lost))):
         want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input scaled the scan "
-                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s for an input of "
-                          r"length 8000 \(" + clause + r"\)\Z")
+                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s, the least of "
+                          + str(_GW_TIMINGS) + r" timings of each, for an input of length 8000 \(" + clause + r"\)\Z")
         rows = ((label + "-super", "x", "", "", _gw_spin_scan(2), None),)
         if module is not None:
             rows = ((label + "-linear", "x", "", "", _gw_spin_scan(1), None),) + rows
@@ -3943,7 +4179,7 @@ _DEADLINE_CASES = {
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
-                       "ansi_c_herestr", "ansi_c_noverify_after"),
+                       "ansi_c_herestr", "ansi_c_noverify_after", "fg_setsid_options"),
     "gensrc_guard": ("write_content", "write_deep_path"),
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
@@ -6382,6 +6618,8 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_raw_mirror_failures())
     failures.extend(_procsubst_skip_failures())
     failures.extend(_procsubst_taken_failures())
+    failures.extend(_suffix_reading_failures())
+    failures.extend(_read_visit_failures(str(tmp)))
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
     failures.extend(_lex_skip_floor_failures())
@@ -18049,6 +18287,14 @@ def _main_isolated(monitor):
         # switches and cyclic collections. Those readings are best effort (_gw_usage): one the host cannot
         # give (no resource module, a missing getrusage field, a collector statistic without 'collections')
         # is reported as unavailable, never raised, and gw-lin-usage-* pins both the report and that.
+        # A CI runner later measured gw-lin-span-optgit at 3.01x (0.109 s then 0.327 s, with 2763 then 7290
+        # minor page faults) where 14 local runs gave 2.00 to 2.04x, so one call charged for stray work still
+        # failed a linear row. A ratio over 3 now times both sizes again, at most _GW_TIMINGS timings of each,
+        # and judges the least time of each size: stray work only adds time, so the least timing is the one
+        # nearest the scan's own cost, a linear row needs one clean timing of each size to pass, and a scan that
+        # grows faster than its input fails on every timing. A passing first ratio is final, so a passing run
+        # times what it did before. gw-lin-retime-edge pins the retiming over scripted times (each end of the
+        # bound, a slow timing of either size, the timing cap) and gw-lin-retime-linear/super in CPU time.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
@@ -18119,6 +18365,8 @@ def _main_isolated(monitor):
         )
         failures.extend(_gw_lin_failures(_gw_lin_cases))
         failures.extend(_gw_lin_usage_failures())
+        failures.extend(_gw_retime_failures())
+        failures.extend(_gw_retime_cpu_failures())
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
@@ -20514,10 +20762,11 @@ def _main_isolated(monitor):
                  'git commit -m "unbalanced', "allow")
         cmexpect("(cm-ad) present non-Bash tool allows",
                  'git commit -m "x `y`"', "allow", tool="Read")
-        # DISCLOSED residuals: the lexer does not parse through a reserved-word compound to its inner
-        # command, and an unquoted pre-subcommand $( fragments the git invocation into separate segments.
-        cmexpect("(cm-residual-compound) reserved-word compound allows (documented residual)",
-                 'if git commit -m "$(x)"; then :; fi', "allow")
+        # A git commit behind a compound command's reserved word is read from its command word (the command
+        # reading, _CommandReading), so the former reserved-word compound residual now denies. DISCLOSED
+        # residual: an unquoted pre-subcommand $( fragments the git invocation into separate segments.
+        cmexpect("(cm-residual-compound) reserved-word compound is read through to its commit and denies",
+                 'if git commit -m "$(x)"; then :; fi', "deny")
         cmexpect("(cm-residual-global-subst) pre-subcommand unquoted $( fragments the segment and allows",
                  'git -C $(x) commit -m "$(y)"', "allow")
 
@@ -20526,6 +20775,284 @@ def _main_isolated(monitor):
                      {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}, "deny")
         cmdataexpect("(cm-af) missing tool_name denies",
                      {"hook_event_name": "PreToolUse", "tool_input": {"command": "ls"}}, "deny")
+
+        # === The command reading (_CommandReading): a guard's subject behind a compound command's reserved
+        # words, or inside a backquote substitution, is read as its own command, in a reading the lexer adds
+        # after its own, so a wrapped form decides at least as strictly as the bare form. crd-bare pins each
+        # bare shape; crd-<guard>-<wrapper>-<shape> pins each wrapped form the lexer's own reading decided
+        # more loosely than the bare one (a wrapped form it already decided as strictly has no row here: the
+        # guard's own rows pin it, cm-wrap-negation among them); crd-control pins inputs the reading must not
+        # move; crd-read, crd-spell and crd-off pin the reader itself.
+        crd_wrappers = (
+            ("bang", "! {}"), ("if", "if {}; then :; fi"), ("then", "if true; then {}; fi"),
+            ("elif", "if false; then :; elif {}; then :; fi"), ("else", "if false; then :; else {}; fi"),
+            ("do", "while false; do {}; done"), ("while", "while {}; do :; done"),
+            ("until", "until {}; do :; done"), ("brace", "{{ {}; }}"), ("time-p", "time -p {}"),
+            ("coproc", "coproc {}"), ("function", "function f {{ {}; }}"), ("for-do", "for x do {}; done"),
+            ("select-do", "select x in a; do {}; done"), ("backquote", "x=`{}`"))
+        crd_all = frozenset(wrapper for wrapper, _template in crd_wrappers)
+        # (guard, shape, bare command, its decision, the wrappers the lexer's own reading already decided so)
+        crd_shapes = (
+            ("commit_identity", "author", 'git commit --author="Claude <c@example.invalid>" -m x', "deny",
+             crd_all - {"for-do", "backquote"}),
+            ("commit_identity", "env", "GIT_AUTHOR_NAME=Claude git commit -m x", "deny", crd_all - {"backquote"}),
+            ("commit_msg_subst", "paren", 'git commit -m "a$(id)"', "deny", frozenset(("bang",))),
+            ("commit_msg_subst", "backquote", 'git commit -m "`id`"', "deny", frozenset(("bang",))),
+            ("branch_root", "checkout", "git checkout --orphan nb", "deny", frozenset()),
+            ("branch_root", "switch", "git switch --orphan nb", "deny", frozenset()),
+            ("diff_source_pretool", "diff", "git diff", "deny", frozenset()),
+            ("diff_source_pretool", "show", "git show HEAD", "deny", frozenset()),
+            ("git_explicit_binding", "publish", "git add -A && git push origin feature", "deny", frozenset()),
+            ("git_stash_ref", "pop", "git stash pop", "allow-note", frozenset()))
+        # Every name this section binds carries the crd_ prefix, so no later row reads a name it rebinds (the
+        # expect helper above reads handler).
+        for crd_guard, crd_shape, crd_bare, crd_want, crd_already in crd_shapes:
+            crd_handler = getattr(aiqt_hooks, crd_guard)
+            crd_got = _decision(crd_handler, crd_bare)
+            if crd_got != crd_want:
+                failures.append("(crd-bare-{}-{}) {!r}: expected {}, got {}".format(
+                    crd_guard, crd_shape, crd_bare, crd_want, crd_got))
+            for crd_wrapper, crd_template in crd_wrappers:
+                if crd_wrapper in crd_already:
+                    continue
+                # A backquote nested in the backquote wrapper is escaped, as bash needs it.
+                crd_command = crd_template.format(
+                    crd_bare.replace("`", "\\`") if crd_wrapper == "backquote" else crd_bare)
+                crd_got = _decision(crd_handler, crd_command)
+                if crd_got != crd_want:
+                    failures.append("(crd-{}-{}-{}) {!r}: expected {} as the bare form decides, got {}"
+                                    .format(crd_guard, crd_wrapper, crd_shape, crd_command, crd_want, crd_got))
+        crd_guards = ("commit_identity", "commit_msg_subst", "branch_root", "gate_weakening", "diff_source_pretool",
+                      "protected_line", "git_discard", "git_explicit_binding", "git_stash_ref", "bash_absolute_paths")
+        # (control, each guard that does not allow it silently with its decision); every other guard allows it.
+        crd_controls = (
+            ("echo if then", {}),
+            ("echo do done fi esac", {}),
+            ("git log --oneline -- if then do", {"diff_source_pretool": "allow-note"}),
+            ('echo "git commit --no-verify -m x"', {"gate_weakening": "deny", "protected_line": "deny"}),
+            ("echo 'git push --force origin main'", {"gate_weakening": "deny", "protected_line": "deny"}),
+            ("echo '`git diff`'", {"gate_weakening": "deny", "diff_source_pretool": "allow-note"}),
+            ("cat <<'EOF'\nif true; then git commit --no-verify -m x; fi\nEOF", {"gate_weakening": "deny"}))
+        for crd_number, (crd_command, crd_decided) in enumerate(crd_controls, 1):
+            for crd_guard in crd_guards:
+                crd_want = crd_decided.get(crd_guard, "allow")
+                crd_got = _decision(getattr(aiqt_hooks, crd_guard), crd_command)
+                if crd_got != crd_want:
+                    failures.append("(crd-control-{}-{}) {!r}: expected {}, got {}"
+                                    .format(crd_guard, crd_number, crd_command, crd_want, crd_got))
+
+        # A backquote substitution after a double-quoted '$(...)' that holds a quote: bash 5.3 runs the body (a
+        # quote there opens a string of that substitution's own), so each guard decides as on the bare shape.
+        crd_quoted = (("hash", 'echo "$(echo " #")" `{}`'), ("quote", 'echo "$(echo "\'")" `{}` "\'"'))
+        for crd_guard, crd_shape, crd_bare, crd_want, _crd_already in crd_shapes:
+            for crd_name, crd_template in crd_quoted:
+                # A backquote nested in the substitution is escaped, as bash needs it.
+                crd_command = crd_template.format(crd_bare.replace("`", "\\`"))
+                crd_got = _decision(getattr(aiqt_hooks, crd_guard), crd_command)
+                if crd_got != crd_want:
+                    failures.append("(crd-quoted-{}-{}-{}) {!r}: expected {} as the bare form decides, got {}"
+                                    .format(crd_name, crd_guard, crd_shape, crd_command, crd_want, crd_got))
+        # A compound's output goes where its closing word sends it, so diff_source_pretool notes a producer in
+        # one redirected to a file or piped into a pager, as for any compound; one reaching the console, or
+        # captured by a backquote substitution or a coprocess as by '$(...)', denies. Each compound has its own
+        # destination: a second one reaching the console denies though the first is redirected, a deny that
+        # only a read segment gives (main notes that command).
+        crd_destinations = (
+            ("{ git diff; } > out.txt", "allow-note"), ("if true; then git diff; fi > out.txt", "allow-note"),
+            ("for i in 1; do git diff; done > out.txt", "allow-note"),
+            ("function f { git diff; }; f > out.txt", "allow-note"), ("f() { git diff; }; f | less", "allow-note"),
+            ("{ git diff; } | less", "allow-note"), ("while true; do git diff; break; done | less", "allow-note"),
+            ("{ if true; then git diff; fi; } > out.txt", "allow-note"), ("{ git diff; } | cat", "deny"),
+            ("function f { git diff; }; f", "deny"), ("x=`git diff`", "deny"), ("coproc git diff", "deny"),
+            ("{ git diff; } > out.txt; { git diff; }", "deny"))
+        for crd_command, crd_want in crd_destinations:
+            crd_got = _decision(aiqt_hooks.diff_source_pretool, crd_command)
+            if crd_got != crd_want:
+                failures.append("(crd-destination) diff_source_pretool {!r}: expected {}, got {}".format(
+                    crd_command, crd_want, crd_got))
+        # A body is lexed partially, so what it runs before a construct the lexer does not read is still read
+        # (bash creates the orphan branch here).
+        crd_got = _decision(aiqt_hooks.branch_root, "x=`git checkout --orphan nb; cat <<<y`")
+        if crd_got != "deny":
+            failures.append("(crd-partial-body) branch_root on a body ending in a here-string: expected deny, "
+                            "got {}".format(crd_got))
+        # The closed proofs read the lexer's own segments (own), as main does: this command is the redirect proof
+        # there and allows, where the proof read over the added segments too (the body's 'true') would fail and
+        # the command would take the note.
+        crd_got = _decision(aiqt_hooks.diff_source_pretool, "git diff 2> `true` > out.txt")
+        if crd_got != "allow":
+            failures.append("(crd-own-proofs) diff_source_pretool 'git diff 2> `true` > out.txt': expected allow, "
+                            "got {}".format(crd_got))
+
+        # The command reading's body budget (COST above _COMMAND_LEAD_WORDS): every guard that asks for the reading
+        # catches _ReadingLimitError before its other lex errors and gives its strictest decision, so a command
+        # whose bodies spend the budget is never allowed where main's reading denies it.
+        def crd_bodies_text(crd_count):
+            return "".join(" `: {}`".format(crd_number) for crd_number in range(crd_count))
+
+        def crd_raises(crd_command, crd_partial=False):
+            try:
+                aiqt_hooks._lex_command_read(crd_command, partial=crd_partial)
+            except aiqt_hooks._ReadingLimitError:
+                return True
+            return False
+
+        crd_over = "echo" + crd_bodies_text(7506)
+        # branch_root's partial recovery, reached past a construct the full lex does not read, spent the budget
+        # and took its open-grammar allow on these, where main denies them (bash creates the orphan branch).
+        crd_limit_shapes = (
+            "git checkout --orphan nb; echo" + crd_bodies_text(7506) + "; cat <<<y",
+            "git switch --orphan nb; echo" + crd_bodies_text(7506) + "; cat <(true)",
+            "git checkout --orphan nb; git commit -m \"$(cat <<'EOF'\nDon't\nEOF\n)\"; echo" + crd_bodies_text(9000),
+            "git checkout --orphan nb; echo \"$(cat <<'EOF'\n'\nEOF\n)\"" + crd_bodies_text(9000))
+        for crd_command in crd_limit_shapes:
+            crd_got = _decision(aiqt_hooks.branch_root, crd_command)
+            if crd_got != "deny":
+                failures.append("(crd-limit-branch-root) an orphan creation in {} characters past the reading "
+                                "budget: expected deny, got {}".format(len(crd_command), crd_got))
+        # Each guard's own catch, on commands that name none of its subjects: the fallback each took before
+        # allowed them (git_stash_ref, which never denies, notes). commit_identity's run line is one git builds
+        # from an operand, read at depth 1, alone and after a run line left unread.
+        crd_limit_sites = (
+            ("diff_source_pretool", crd_over, "deny"), ("commit_identity", crd_over, "deny"),
+            ("commit_identity", "git rebase --exec 'echo" + crd_bodies_text(7506) + "' main", "deny"),
+            ("commit_identity", "git rebase --exec 'cat <<<x' --exec 'echo" + crd_bodies_text(7506) + "' main",
+             "deny"),
+            ("git_explicit_binding", crd_over, "deny"), ("git_stash_ref", crd_over, "allow-note"),
+            ("branch_root", crd_over, "deny"), ("commit_msg_subst", crd_over, "deny"))
+        for crd_guard, crd_command, crd_want in crd_limit_sites:
+            crd_got = _decision(getattr(aiqt_hooks, crd_guard), crd_command)
+            if crd_got != crd_want:
+                failures.append("(crd-limit-site) {} on {} characters past the reading budget: expected {}, got {}"
+                                .format(crd_guard, len(crd_command), crd_want, crd_got))
+        # branch_root's third lex, of main's reading past a here-document body (_SubstHeredocFloor), reads the
+        # backquotes its first lex reads, so no command spends the budget there alone: the budget is set to 0
+        # inside that floor only, and the guard denies rather than raise.
+        crd_floor = aiqt_hooks._SubstHeredocFloor
+
+        class crd_zero_floor(crd_floor):
+            def __enter__(self):
+                self.crd_limit = aiqt_hooks._READ_BODY_LIMIT
+                aiqt_hooks._READ_BODY_LIMIT = 0
+                return super().__enter__()
+
+            def __exit__(self, *crd_exc_info):
+                aiqt_hooks._READ_BODY_LIMIT = self.crd_limit
+                return super().__exit__(*crd_exc_info)
+
+        aiqt_hooks._SubstHeredocFloor = crd_zero_floor
+        try:
+            crd_got = _decision(aiqt_hooks.branch_root, "git commit -m \"$(cat <<'EOF'\nit's `x`\nEOF\n)\"")
+        except aiqt_hooks._ReadingLimitError as crd_exc:
+            crd_got = "raised {!r}".format(crd_exc)
+        finally:
+            aiqt_hooks._SubstHeredocFloor = crd_floor
+        if crd_got != "deny":
+            failures.append("(crd-limit-floor) branch_root with the budget spent in main's floor reading: expected "
+                            "deny, got {}".format(crd_got))
+        # The budget's three ends: bodies ':NNNNN' charge 70 each, so 7488 of them and one of 64 + d characters
+        # charge _READ_BODY_LIMIT + d, and only d = 1 raises.
+        crd_ends = [crd_raises("echo" + "".join(" `:{:05d}`".format(crd_number) for crd_number in range(7488))
+                               + " `:" + "x" * (63 + crd_delta) + "`") for crd_delta in (-1, 0, 1)]
+        if (aiqt_hooks._READ_BODY_LIMIT, aiqt_hooks._READ_BODY_COST, crd_ends) != (1 << 19, 64, [False, False, True]):
+            failures.append("(crd-limit-ends) budget {} and body cost {}: raised at one under, at and one over the "
+                            "budget {!r}, expected 524288, 64 and [False, False, True]".format(
+                                aiqt_hooks._READ_BODY_LIMIT, aiqt_hooks._READ_BODY_COST, crd_ends))
+        # A partial lex raises at the budget rather than resume: resumed, it recovers only the text before the
+        # uncertain '#', which holds no body, and returns.
+        if not crd_raises("true $( #a\n) | cat; echo" + crd_bodies_text(7506), crd_partial=True):
+            failures.append("(crd-limit-partial) a partial lex past the reading budget returned rather than raise")
+        # A body read again charges 1, not a lex: 9000 copies of one body fit the budget, where 9000 lexes would
+        # not, so branch_root allows this as main does.
+        crd_got = _decision(aiqt_hooks.branch_root, "git status; echo" + " `:`" * 9000)
+        if crd_got != "allow":
+            failures.append("(crd-limit-reuse) branch_root on 9000 copies of one body: expected allow, got {}"
+                            .format(crd_got))
+
+        def crd_pairs(crd_list):
+            return [(list(crd_seg.argv), crd_seg.sep_after) for crd_seg in crd_list]
+
+        crd_starts = (
+            (["if", "git", "diff"], 1), (["then", "git", "diff"], 1), (["!", "{", "git", "x"], 2),
+            (["while", "until", "git"], 2), (["time", "-p", "--", "git"], 3), (["coproc", "C", "{", "git"], 3),
+            (["coproc", "git", "x"], 1), (["function", "f", "{", "git"], 3), (["function"], 1),
+            (["for", "x", "do", "git", "diff"], 3), (["select", "x", "do", "git"], 3),
+            (["for", "x", "in", "a", "b"], 5), (["select", "x", "in", "a"], 4), (["case", "x", "in", "x"], 4),
+            (["git", "diff"], 0), ([], 0), (["done"], 0))
+        for crd_argv, crd_want in crd_starts:
+            crd_got = aiqt_hooks._command_start(crd_argv)
+            if crd_got != crd_want:
+                failures.append("(crd-read-start) _command_start({!r}): expected {}, got {}".format(
+                    crd_argv, crd_want, crd_got))
+        crd_bodies = (
+            ("a `b` 'c `d`' \"e `f`\" \\`g\\` # `h`", [(2, "b"), (17, "f")]),
+            ("x=`a \\`b\\` \\\\ \\$c`", [(2, "a `b` \\ $c")]),
+            ("echo $'`a`' `b", [(12, "b")]),
+            # A '#' at the start of a word inside a substitution: from there every run between two backquotes is
+            # read as a possible body, since a comment there can hold a quote (re-pinned from [(11, "a"),
+            # (24, "b")], which read those two bodies only).
+            ("x=$( echo #`a`\n) ${y:- #`b`}", [(11, "a"), (13, "\n) ${y:- #"), (24, "b"), (26, "}")]),
+            # A quote inside a '$(...)' that a double-quoted string holds opens a string of that substitution's
+            # own, so the backquote after it is read (bash runs it).
+            ('echo "$(echo " #")" `git stash pop`', [(20, "git stash pop")]),
+            ('echo "$(echo "\'")" `git stash pop` "\'"', [(19, "git stash pop")]))
+        for crd_text, crd_want in crd_bodies:
+            crd_got = aiqt_hooks._backquote_bodies(crd_text)
+            if crd_got != crd_want:
+                failures.append("(crd-read-bodies) _backquote_bodies({!r}): expected {!r}, got {!r}".format(
+                    crd_text, crd_want, crd_got))
+        crd_reads = (
+            ("if git diff; then :; fi", [(["git", "diff"], ";"), ([":"], ";"), (["fi"], "")]),
+            ("x=`make | head`",
+             [(["make"], "|"), (["head"], ""), (["x=`make"], "|"), (["head`"], "")]),
+            ('echo "`git diff`"', [(["git", "diff"], ""), (["echo", "`git diff`"], "")]))
+        for crd_command, crd_want in crd_reads:
+            crd_got = crd_pairs(aiqt_hooks._read_segments(aiqt_hooks._lex_command(crd_command)))
+            if crd_got != crd_want:
+                failures.append("(crd-read-segments) _read_segments of {!r}: expected {!r}, got {!r}".format(
+                    crd_command, crd_want, crd_got))
+        for crd_command in ("echo '`git diff`'", "git log # `git diff`", "git diff | less", "echo if then"):
+            crd_lexed = aiqt_hooks._lex_command(crd_command)
+            if aiqt_hooks._read_segments(crd_lexed) is not crd_lexed:
+                failures.append("(crd-read-unchanged) _read_segments of {!r} added a reading".format(crd_command))
+        crd_nested = crd_pairs(aiqt_hooks._lex_command_read("echo `echo \\`git diff\\``"))
+        if (["git", "diff"], "") not in crd_nested:
+            failures.append("(crd-read-nested) a backquote nested in a backquote body was not read: {!r}".format(
+                crd_nested))
+        for crd_command in ("{ git $X push; }", "if true; then git $X push; fi", "x=`git $X push`"):
+            with aiqt_hooks._WordSpellings():
+                crd_lexed = aiqt_hooks._lex_command_read(crd_command)
+            crd_read = [crd_seg.argv for crd_seg in crd_lexed if list(crd_seg.argv[:1]) == ["git"]]
+            if not (crd_read and all(isinstance(crd_argv, aiqt_hooks._SpelledWords)
+                                     and len(crd_argv.spelling) == len(crd_argv)
+                                     and aiqt_hooks._git_local_alias(crd_argv) for crd_argv in crd_read)):
+                failures.append("(crd-spell) {!r}: the read segment lost its spelling record: {!r}".format(
+                    crd_command, [(type(crd_argv).__name__, list(crd_argv)) for crd_argv in crd_read]))
+        for crd_command in ("if git diff; then :; fi", "x=`make | head`", "for x do git diff; done",
+                            "{ git stash pop; }"):
+            crd_own = crd_pairs(aiqt_hooks._lex_command(crd_command))
+            crd_read = crd_pairs(aiqt_hooks._lex_command_read(crd_command))
+            if not (len(crd_read) > len(crd_own) and crd_read[:len(crd_own)] == crd_own
+                    and not aiqt_hooks._CommandReading.on and (["git", "diff"], ";") not in crd_own
+                    and (["git", "stash", "pop"], ";") not in crd_own and (["make"], "|") not in crd_own):
+                failures.append("(crd-off-full) {!r}: outside _CommandReading the lex must hold only the lexer's own "
+                                "segments, the read lex them first: own {!r}, read {!r}".format(
+                                    crd_command, crd_own, crd_read))
+        # The last holds two readings of its '#', the first changed by the command reading and the last not, so
+        # the flags stay the lexer's only where the last reading follows the added one again.
+        for crd_command in ("if git diff; then cat <<<x", "{ git stash pop; } && cat <<<x; ls",
+                            "x=$(echo #'\n); if true; then :; fi"):
+            crd_own = aiqt_hooks._lex_command(crd_command, partial=True)
+            crd_read = aiqt_hooks._lex_command_read(crd_command, partial=True)
+            if not (crd_read[1:] == crd_own[1:] and len(crd_read[0]) > len(crd_own[0])):
+                failures.append("(crd-off-partial) {!r}: the partial flags moved under the command reading: own {!r}, "
+                                "read {!r}".format(crd_command, crd_own[1:], crd_read[1:]))
+        try:
+            aiqt_hooks._lex_command_read('if git diff "unbalanced')
+        except ValueError:
+            pass
+        if aiqt_hooks._CommandReading.on:
+            failures.append("(crd-off-restore) _CommandReading stayed on after a lex that raised")
 
         # === L11: git_discard redirect regression locks (prsunc) - a redirect is still non-pristine ->
         # ASK; no redirect may become a new ALLOW, and the clean-parse lossy scan sees redirect-free argv ==
@@ -23568,11 +24095,11 @@ def _main_isolated(monitor):
              "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOF)\necho y > out.txt\nEOF\n))", "deny")
         bcmd("(ap-c100m) an unquoted here-document body in a double-quoted '$(...)' is read for its substitutions "
              "only, so its '->' and a backquoted 'c' allow", 'echo "$(cat <<EOF\nfix: a -> b `c`\nEOF\n)"', "allow")
-        # The second reading reads the command as it models bash's parser (_AbspthReader; its known misses are
-        # disclosed in the residue): a substitution ends at the ')' or '}' its grammar closes it with, and a
-        # here-document body inside '$(...)' or '${ cmd; }' ends early at a line that STARTS with the delimiter
-        # and holds that closer later on. bash 5.3.9 writes out.txt for every deny below, and every one allowed
-        # before this reading; each allow is a shape bash writes no relative file in.
+        # The second reading reads the command as it models bash's parser (_AbspthReader): a substitution ends at
+        # the ')' or '}' its grammar closes it with, and a here-document body inside '$(...)' or '${ cmd; }' ends
+        # early at a line that STARTS with the delimiter and holds that closer later on. bash 5.3.9 writes out.txt
+        # for every deny in the next two loops, and every one allowed before this reading; each allow in them is
+        # a shape bash writes no relative file in.
         for _rd_label, _rd_cmd in (
                 ("a case pattern's ')' in a double-quoted '$(...)'", 'echo "$(case a in a) echo a > out.txt;; esac)"'),
                 ("a case pattern's ')' in an assigned double-quoted '$(...)'",
@@ -23645,6 +24172,233 @@ def _main_isolated(monitor):
              "(disclosed over-deny of the unread-text scan)", "cat <<<y; echo `echo a \\\\\\\\>> out.txt`", "deny")
         bcmd("(ap-c104c) a nested body ended at 'EOFX)' where bash then fails on a syntax error DENIES (disclosed "
              "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOFX)\necho y > out.txt\nEOF\n))", "deny")
+        # Bash expands arithmetic text as if double-quoted, so it runs a substitution between single quotes
+        # there: in '$((...))', '((...))' and 'for ((...))' (not in a bare subscript there, ap-c108c), in a
+        # '${...}' subscript, offset or length of a set variable, in a '${...}' inside arithmetic, and in the
+        # subscript of an array element assignment ('a[...]=1', '+=', an array's '[...]=' element, a declaration
+        # builtin's argument). A truncating redirect whose target word the reader cannot read is judged at its
+        # operator, and a quote glued to the '}' that closes a double-quoted '${ cmd; }' is text of the outer
+        # string. Every deny in these three loops allowed before (each fails with its fix reverted).
+        for _ar_label, _ar_cmd in (
+                ("a '$(...)' between single quotes in '$((...))'", "echo $(( '$(echo a > out.txt)' ))"),
+                ("a '$(...)' between single quotes in a '((...))' command", "(( '$(echo a > out.txt)' ))"),
+                ("a '$(...)' between single quotes in 'for ((...))'",
+                 "for (( i='$(echo a > out.txt)'; 0; )); do :; done"),
+                ("a '$(...)' between single quotes in a double-quoted '$((...))'",
+                 "echo \"$(( '$(echo a > out.txt)' ))\""),
+                ("a backquote substitution between single quotes in '$((...))'", "echo $(( '`echo a > out.txt`' ))"),
+                ("a single-quoted '$(...)' in a '${...}' word inside '$((...))'",
+                 "echo $(( ${u:-'$(echo a > out.txt)'} ))"),
+                ("a single-quoted '$(...)' in a '${...}' subscript", "echo ${a['$(echo a > out.txt)']}"),
+                ("a single-quoted '$(...)' in a '${#...}' subscript", "a=(1); echo ${#a['$(echo a > out.txt)']}"),
+                ("a single-quoted '$(...)' in a '${!...}' subscript", "echo ${!a['$(echo a > out.txt)']}"),
+                ("a single-quoted '$(...)' in a subscript before ':-'", "echo ${a['$(echo a > out.txt)']:-x}"),
+                ("a single-quoted backquote substitution in a '${...}' subscript", "echo ${a['`echo a > out.txt`']}"),
+                ("a single-quoted '$(...)' in a '${...}' offset", "x=abc; echo ${x:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in a '${...}' offset after a blank",
+                 "x=abc; echo ${x: '$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in a '${...}' length", "x=abc; echo ${x:0:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in a '${@:...}' offset", "echo ${@:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in an offset after a subscript",
+                 "a=(abc); echo ${a[0]:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in an offset in a '${...}' word",
+                 "x=abc; echo ${u:-${x:'$(echo a > out.txt)'}}"),
+                ("a single-quoted '$(...)' in an 'a[...]=1' subscript", "a['$(echo a > out.txt)']=1"),
+                ("a single-quoted backquote substitution in an 'a[...]=1' subscript", "a['`echo a > out.txt`']=1"),
+                ("a single-quoted '$(...)' in an 'a[...]+=1' subscript", "a['$(echo a > out.txt)']+=1"),
+                ("a single-quoted '$(...)' in a second assignment's subscript", "x=1 a['$(echo a > out.txt)']=1"),
+                ("a single-quoted '$(...)' in a declare argument's subscript",
+                 "declare a['$(echo a > out.txt)']=1"),
+                ("a single-quoted '$(...)' in an array element's subscript", "a=(['$(echo a > out.txt)']=1)"),
+                ("a single-quoted '$(...)' in an 'a[...]=1' subscript in a double-quoted '$(...)'",
+                 "echo \"$(a['$(echo a > out.txt)']=1)\"")):
+            bcmd("(ap-c105) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a '>' to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a > $[1])\""),
+                ("a '>|' to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a >| $[1])\""),
+                ("a '&>' to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a &> $[1])\""),
+                ("a '>' to a target with '$[...]' glued in a double-quoted '$(...)'", "echo \"$(echo a >x$[1])\""),
+                ("a '>' to a target holding a 'coproc' substitution in a double-quoted '$(...)'",
+                 "echo \"$(echo a > x$(coproc true))\"")):
+            bcmd("(ap-c106) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a single quote glued to the '}' of a double-quoted '${ cmd; }'",
+                 "echo \"${ echo b; }'$(echo a > out.txt)\" \"'\""),
+                ("a single quote glued to the '}' of a double-quoted '${ cmd; }' before a newline",
+                 "echo \"${ echo b; }'$(echo a > out.txt)\"\necho \"'\""),
+                ("a single quote glued to the '}' of a double-quoted '${| cmd; }'",
+                 "echo \"${| echo b; }'$(echo a > out.txt)\" \"'\""),
+                ("a single quote glued to the '}' before a backquote substitution",
+                 "echo \"${ echo b; }'`echo a > out.txt`\" \"'\"")):
+            bcmd("(ap-c107) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # Safe shapes with arithmetic, single quotes or '${ cmd; }' that write no relative file keep their allow.
+        for _ar_label, _ar_cmd in (
+                ("plain '$((...))' arithmetic", "echo $(( 1 + 2 ))"),
+                ("a '((...))' command", "(( i = 1 + 2 ))"),
+                ("a single-quoted '>' in '$((...))'", "echo $(( '1 > 2' ))"),
+                ("a single-quoted '$(...)' with no redirect in '$((...))'", "echo $(( '$(date)' ))"),
+                ("an absolute '>' in a single-quoted '$(...)' in '$((...))'",
+                 "echo $(( '$(echo a > {}/out.txt)' ))".format(rp)),
+                ("an offset and length", "echo ${x:1:2} ${x: -1}"),
+                ("subscripts and lengths", "echo ${a[0]} ${a[i+1]} ${#a[@]} ${!a[@]}"),
+                ("a single-quoted '>' in a '${...}' word", "echo ${u:-'a > b'}"),
+                ("a single-quoted '$(...)' in an unquoted '${...}' word", "echo ${u:-'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in an unquoted '${...}' pattern", "echo ${x/'$(echo a > out.txt)'/y}"),
+                ("element assignments with single quotes", "a[0]=1; a[i+1]='x > y'; a['k']=2"),
+                ("a single-quoted '$(...)' in an element assignment's value", "a[0]='$(echo a > out.txt)'"),
+                ("a single-quoted '$(...)' in a glob's brackets", "ls a['$(echo a > out.txt)']"),
+                ("a single-quoted '$(...)' in a '${...}' word in a glob's brackets",
+                 "ls a[${u:-'$(echo a > out.txt)'}]"),
+                ("a single-quoted '$(...)' in a '((' bash reads as a subshell", "((echo '$(echo a > out.txt)') )"),
+                ("a single-quoted '$(...)' in a '${...}' word in a '((' bash reads as a subshell",
+                 "((echo ${u:-'$(echo a > out.txt)'}) )"),
+                ("a single-quoted '$(...)' in a '$((' bash reads as a command substitution",
+                 "echo $((echo '$(echo a > out.txt)') )"),
+                ("a double-quoted '${ cmd; }'", "echo \"${ echo b; }\""),
+                ("a single-quoted word glued to a double-quoted '${ cmd; }'", "echo \"${ echo b; }'x'\""),
+                ("a group in a double-quoted '${ cmd; }'", "echo \"${ { echo b; }; }\""),
+                ("absolute targets in and after a double-quoted '${ cmd; }'",
+                 "echo \"${{ echo b > {0}/o; }}\" > {0}/out.txt".format(rp)),
+                ("an append to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a >> $[1])\"")):
+            bcmd("(ap-c108) {} allows".format(_ar_label), _ar_cmd, "allow")
+        bcmd("(ap-c108b) a single-quoted '$(...)' in an 'a[...]=1' word that is echo's argument DENIES (disclosed "
+             "over-deny)", "echo a['$(echo a > out.txt)']=1", "deny")
+        bcmd("(ap-c108c) a single-quoted '$(...)' in a bare subscript inside '$((...))', where bash reports a syntax "
+             "error and writes nothing, DENIES (disclosed over-deny)", "echo $(( a['$(echo a > out.txt)'] ))", "deny")
+        # Single-quoted text held until '))' or ']=' is read from its first character by the fail-closed scan
+        # where the reader gives up later in the same arithmetic or subscript ('$[...]', 'coproc', a nesting
+        # bound), since that scan would start past it. Bash writes out.txt for every deny in this loop and the
+        # next two, and each fails with its own fix reverted.
+        for _ar_label, _ar_cmd in (
+                ("a held '$(...)' before a '$[...]' in '$((...))'", "echo $(( '$(echo a > out.txt)' + $[1] ))"),
+                ("a held '$(...)' before a '$[...]' in '((...))'", "(( '$(echo a > out.txt)' + $[1] ))"),
+                ("a held '$(...)' before a '$[...]' in 'for ((...))'",
+                 "for (( i='$(echo a > out.txt)' + $[1]; 0; )); do :; done"),
+                ("a held '$(...)' in a '${...}' word before a '$[...]' in '$((...))'",
+                 "echo $(( ${u:-'$(echo a > out.txt)'} + $[1] ))"),
+                ("a held '$(...)' before a '$[...]' in an 'a[...]=1' subscript", "a['$(echo a > out.txt)'$[1]]=1"),
+                ("a held '$(...)' before a '$[...]' in an array element's subscript",
+                 "a=(['$(echo a > out.txt)'$[1]]=1)"),
+                ("a held '$(...)' before a double-quoted '$[...]' in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + \"$[1]\" ))"),
+                ("a held '$(...)' before a '$[...]' in a backquote substitution in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + `echo $[1]` ))"),
+                ("a held '$(...)' before a '$[...]' in a double-quoted '$((...))'",
+                 "echo \"$(( '$(echo a > out.txt)' + $[1] ))\""),
+                ("a held '$(...)' before a 'coproc' substitution in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + $(coproc true) ))"),
+                ("a held '$(...)' before a '$[...]' in a '${...}' word in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + ${x:-$[1]} ))"),
+                ("a held '$(...)' before a 'coproc' substitution in an 'a[...]=1' subscript",
+                 "a['$(echo a > out.txt)'+$(coproc :)]=1"),
+                ("a held '$(...)' before seventeen nested '${...}' expansions in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + " + "${x:-" * 17 + "1" + "}" * 17 + " ))")):
+            bcmd("(ap-c109) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # An ANSI-C $'...' string's text in arithmetic or a subscript is read as single-quoted text is there.
+        for _ar_label, _ar_cmd in (
+                ("a $'...' '$(...)' in an 'a[...]=1' subscript", "a[$'$(echo a > out.txt)']=1"),
+                ("a $'...' '$(...)' in '$((...))'", "echo $(( $'$(echo a > out.txt)' ))"),
+                ("a $'...' '$(...)' in '((...))'", "(( $'$(echo a > out.txt)' ))"),
+                ("a $'...' '$(...)' in a '${...}' subscript", "echo ${a[$'$(echo a > out.txt)']}"),
+                ("a $'...' '$(...)' in a '${...}' offset", "x=abc; echo ${x:$'$(echo a > out.txt)'}"),
+                ("a $'...' '$(...)' in an array element's subscript", "a=([$'$(echo a > out.txt)']=1)"),
+                ("a $'...' '$(...)' in a double-quoted '$((...))'", "echo \"$(( $'$(echo a > out.txt)' ))\"")):
+            bcmd("(ap-c110) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # Bash removes a backslash-newline before it forms an element assignment word, and reads its subscript
+        # to the ']' as one word.
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline before an 'a[...]=1' word's '='", "a['$(echo a > out.txt)']\\\n=1"),
+                ("a backslash-newline in an 'a[...]=1' word's name", "a\\\n['$(echo a > out.txt)']=1"),
+                ("blanks in an 'a[...]+=1' subscript and a backslash-newline before its '+='",
+                 "a[ '$(echo a > out.txt)' ]\\\n+=1"),
+                ("a backslash-newline before a declare argument's '='", "declare a['$(echo a > out.txt)']\\\n=1"),
+                ("a backslash-newline before an array element's '='", "a=(['$(echo a > out.txt)']\\\n=1)")):
+            bcmd("(ap-c111) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # The same shapes as bash's parser reads them, not run under bash: blanks or a metacharacter in an
+        # element assignment's subscript, and a backslash-newline between its '+' and '='.
+        for _ar_label, _ar_cmd in (
+                ("blanks in an 'a[...]+=1' subscript", "a[ '$(echo a > out.txt)' ]+=1"),
+                ("a '|' in an 'a[...]=1' subscript", "a[1|'$(echo a > out.txt)']=1"),
+                ("a backslash-newline between an 'a[...]+=1' word's '+' and '='",
+                 "a['$(echo a > out.txt)']+\\\n=1")):
+            bcmd("(ap-c111b) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a $'...' string in '$((...))'", "echo $(( $'1' + 2 ))"),
+                ("$'...' strings in subscripts", "a[$'k']=1; echo ${a[$'k']}"),
+                ("a backslash-newline before an element assignment's '=' and an absolute '>'",
+                 "a[0]\\\n=1; echo hi > {}/out.txt".format(rp))):
+            bcmd("(ap-c112) {} allows".format(_ar_label), _ar_cmd, "allow")
+        # Bash removes a backslash-newline before it reads '((', '$((', '))', '$(', '${' or a '${...}' name and
+        # operator, so the reader gives up at one there and the fail-closed scan reads on from it. Bash writes
+        # out.txt for every deny in this loop, and each fails with its own give-up reverted.
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline inside a '((' command", "(\\\n( '$(echo a > out.txt)' ))"),
+                ("a backslash-newline inside a '((' command on a second line",
+                 "true\n(\\\n( '$(echo a > out.txt)' ))"),
+                ("a backslash-newline inside a '$(('", "echo $(\\\n( '$(echo a > out.txt)' ))"),
+                ("a backslash-newline inside a '$((' before a '$[...]'",
+                 "echo $(\\\n( '$(echo a > out.txt)' + $[1] ))"),
+                ("a backslash-newline inside a double-quoted '$(('", 'echo "$(\\\n( \'$(echo a > out.txt)\' ))"'),
+                ("a backslash-newline inside a '$((' in an 'a[...]=1' subscript",
+                 "a[$(\\\n( '$(echo a > out.txt)' ))]=1"),
+                ("a backslash-newline inside the '))' of a '$((...))'", "echo $(( '$(echo a > out.txt)' )\\\n)"),
+                ("a backslash-newline inside the '))' of a double-quoted '$((...))'",
+                 'echo "$(( \'$(echo a > out.txt)\' )\\\n)"'),
+                ("a backslash-newline after a '${...}' name", "x=abc; echo ${x\\\n:'$(echo a > out.txt)'}"),
+                ("a backslash-newline before a '${...}' name", "x=abc; echo ${\\\nx:'$(echo a > out.txt)'}"),
+                ("a backslash-newline before a '${...}' subscript", "a=(1); echo ${a\\\n['$(echo a > out.txt)']}"),
+                ("a backslash-newline after a '${#...}' '#'", "a=(1); echo ${#\\\na['$(echo a > out.txt)']}"),
+                ("a backslash-newline after a '${@...}' name", "set -- a b; echo ${@\\\n:'$(echo a > out.txt)'}"),
+                ("a backslash-newline between '$' and '{' before an offset",
+                 "x=abc; echo $\\\n{x:'$(echo a > out.txt)'}"),
+                ("a backslash-newline between '$' and '{' before a subscript",
+                 "a=(1); echo $\\\n{a['$(echo a > out.txt)']}")):
+            bcmd("(ap-c113) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # The same give-ups on shapes not run under bash (each fails with its own give-up reverted): a '$('
+        # or '$[' joined across a backslash-newline, and one before an offset after a '${...}' subscript.
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline between '$' and '(' in a double-quoted string", 'echo "$\\\n(echo a > out.txt)"'),
+                ("a backslash-newline between '$' and '['", "echo $\\\n[ '$(echo a > out.txt)' ]"),
+                ("a backslash-newline after a '${...}' subscript before an offset",
+                 "a=(abc); echo ${a[0]\\\n:'$(echo a > out.txt)'}")):
+            bcmd("(ap-c113b) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline in a subshell's text", "(\\\necho hi )"),
+                ("a backslash-newline in a '$(...)' text", "echo $(\\\necho hi )"),
+                ("a backslash-newline after a '${...}' offset's ':'", "x=abc; echo ${x:\\\n1}"),
+                ("a give-up at a backslash-newline before an absolute '>'",
+                 "(\\\n( 1 )); echo hi > {}/out.txt".format(rp))):
+            bcmd("(ap-c113c) {} allows".format(_ar_label), _ar_cmd, "allow")
+        # Known misses the residue discloses (NOT YET JUDGED): a value bash evaluates as arithmetic after quote
+        # removal, in a command's argument or in an assignment to an integer-attribute variable, and a $'...'
+        # escape in arithmetic text that changes what runs. Each allows though bash may truncate out.txt, so a
+        # later fix shows up here as a row change.
+        for _ar_label, _ar_cmd in (
+                ("an integer-attribute variable's assigned value", "declare -i x; x='a[$(echo a > out.txt)]'"),
+                ("a typeset -i variable's assigned value", "typeset -i x; x='a[$(echo a > out.txt)]'"),
+                ("an integer-attribute variable's appended value", "declare -i x=1; x+='a[$(echo a > out.txt)]'"),
+                ("a test -v argument", "test -v 'a[$(echo a > out.txt)]'"),
+                ("a '[ -v' argument", "[ -v 'a[$(echo a > out.txt)]' ]"),
+                ("a '[[ -v' argument", "[[ -v 'a[$(echo a > out.txt)]' ]]"),
+                ("a '[[ ... -lt ... ]]' operand", "[[ 'a[$(echo a > out.txt)]' -lt 1 ]]"),
+                ("a quoted local element assignment", "f() { local 'a[$(echo a > out.txt)]=1'; }; f"),
+                ("a quoted typeset element assignment", "typeset 'a[$(echo a > out.txt)]=1'"),
+                ("a quoted declare -a element assignment", "declare -a 'a[$(echo a > out.txt)]=1'"),
+                ("a declare -i value", "declare -i x='a[$(echo a > out.txt)]'"),
+                ("a local -i value", "f() { local -i x='a[$(echo a > out.txt)]'; }; f"),
+                ("a wait -n -p name", "wait -n -p 'v[$(echo a > out.txt)]'"),
+                ("a let argument", "let 'a[$(echo a > out.txt)]'"),
+                ("a '[[ ... -eq ... ]]' operand", "[[ 'a[$(echo a > out.txt)]' -eq 1 ]]"),
+                ("an unset argument", "unset 'a[$(echo a > out.txt)]'"),
+                ("a read name", "read 'a[$(echo a > out.txt)]' < /dev/null"),
+                ("a printf -v name", "printf -v 'a[$(echo a > out.txt)]' x"),
+                ("a quoted declare element assignment", "declare 'a[$(echo a > out.txt)]=1'"),
+                ("a $'\\c\\' escape in '$((...))'", "echo $(( $'\\c\\$(echo a > out.txt)' ))"),
+                ("a $'\\c\\' escape in an 'a[...]=1' subscript", "a[$'\\c\\$(echo a > out.txt)']=1"),
+                ("a $'\\c\\' escape in a '${...}' subscript", "echo ${a[$'\\c\\$(echo a > out.txt)']}"),
+                ("a $'\\x3e' escape in '$((...))'", "echo $(( $'$(echo a \\x3e out.txt)' ))"),
+                ("a $'\\x24' escape in '$((...))'", "echo $(( $'\\x24(echo a > out.txt)' ))")):
+            bcmd("(ap-c114) {} allows (disclosed known miss)".format(_ar_label), _ar_cmd, "allow")
         # the deny names the target and asks for an absolute one.
         _pt_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": 'echo "$(echo a > out.txt)"'}})
