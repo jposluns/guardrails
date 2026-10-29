@@ -2267,6 +2267,21 @@ class _LexFork:
         self.tails = tails
 
 
+# The skip_empty value under which a lex leaves out only a segment with no word and no redirect that repeats the
+# record before it (_empty_repeat), so a run of one separator builds one record (_lex_command).
+_SKIP_EMPTY_REPEATS = "repeats"
+
+
+def _empty_repeat(segments, sep):
+    """True when a segment with no word and no redirect, ended by sep, repeats the last record of segments: sep is a
+    separator, not '' (a newline or the end of the command), and that record has no word and no redirect and was
+    ended by the same separator (_SKIP_EMPTY_REPEATS)."""
+    if not sep or not segments:
+        return False
+    last = segments[-1]
+    return last.sep_after == sep and not last.argv and not last.redirects
+
+
 def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
@@ -2316,7 +2331,14 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     would be _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no
     record, list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only
     a caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
-    list) passes it; the default False keeps every record.
+    list) passes it; the default False keeps every record. skip_empty _SKIP_EMPTY_REPEATS leaves out, under
+    every reading, only such a segment that repeats the record before it in its reading's list (_empty_repeat:
+    that record has no word and no redirect either and was ended by the same separator, not a newline or the
+    end of the command), so a long run of one separator builds one record for the run, not one per separator;
+    every record left in, its order and the partial-mode flags are unchanged. Only a caller that reads such a
+    segment by its sep_after alone, never its raw slice or its index, and that decides a run of them as it
+    decides one, passes it (gate_weakening). A segment ended by a newline is never left out, so what a resumed
+    pass builds after its first newline (_LexFork.tails) does not depend on the record before that newline.
 
     Inside _CommandReading the command reading follows the readings above, the segments of each read from its
     command word and with its backquote substitutions read as commands (A COMMAND'S SUBJECT PAST ITS COMPOUND
@@ -2486,7 +2508,8 @@ def _beside_main_reading(command, partial, locale, readings, skip_empty=False):
 def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None):
     """One pass of _lex_reading, reading a quoted here-document's body inside a command substitution through
     subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None.
-    skip_empty True leaves out every segment with no word and no redirect (_lex_command). fork, when given,
+    skip_empty True leaves out every segment with no word and no redirect, and _SKIP_EMPTY_REPEATS only one that
+    repeats the record before it (_lex_command). fork, when given,
     is the _LexFork the pass resumes from (_lex_reading), with copies of its lists and nesting stack. Where
     hash_reading does not map an uncertain '#' met at a word boundary or at the start of a redirect target,
     the _UncertainHashError raised carries the _LexFork of this pass at the start of that token. Inside
@@ -2551,7 +2574,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     def end_segment(sep, op_start, next_start):
         # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde, argv_spelling
         # and opaque change only together with argv, so a skipped segment leaves them empty and False as well.
-        if argv or redirects or not skip_empty:
+        if (argv or redirects or not skip_empty
+                or (skip_empty == _SKIP_EMPTY_REPEATS and not _empty_repeat(segments, sep))):
             # words(), written out: this runs once per segment, and a long run of separators makes many.
             segments.append(_Segment(list(argv) if argv_spelling is None or not argv
                                      else _SpelledWords(argv, argv_spelling), sep, list(redirects),
@@ -2704,6 +2728,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                             empty = []
                             segments.extend([_Segment(empty, op, empty, "", False, empty, empty)
                                              for _ in range(count)])
+                        elif skip_empty == _SKIP_EMPTY_REPEATS and not _empty_repeat(segments, op):
+                            # The run's first record, as the per-character path builds it; each later one
+                            # would repeat it (_empty_repeat), so none is built.
+                            empty = []
+                            segments.append(_Segment(empty, op, empty, "", False, empty, empty))
                         seg_start[0] = run
                         i = run
                     continue
@@ -17223,9 +17252,14 @@ def gate_weakening(data):
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
         # below, whose canonical shape needs every earlier segment benign; every other check reads the
         # segments of all readings in turn, as _lex_command returns them. Each word's spelling is recorded for
-        # the git alias reading below (_WordSpellings).
+        # the git alias reading below (_WordSpellings). A run of segments with no word and no redirect, ended by
+        # the same separator, keeps one record (_SKIP_EMPTY_REPEATS): every check here reads such a segment by its
+        # separator alone and decides a run of them as it decides one (the loop below passes each over, the note
+        # tier stops only at one ending in a pipe, and the deny tier's _gate_benign_prefix, _gate_conditional_run
+        # and stage walk answer the same for each of a run), so a long run of separators, which every reading of
+        # an uncertain '#' after it shares, builds and is read as one record, not one per separator per reading.
         with _WordSpellings():
-            readings = _lex_readings(command)
+            readings = _lex_readings(command, skip_empty=_SKIP_EMPTY_REPEATS)
     except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;

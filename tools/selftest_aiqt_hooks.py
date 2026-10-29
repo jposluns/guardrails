@@ -3948,6 +3948,93 @@ def _lex_skip_floor_failures():
     return out
 
 
+def _lex_left_repeats(segments, newlines=False):
+    """segments with each record left out that has no word, no redirect and a separator other than '' (a newline
+    or the end of the command), where the record kept before it has no word, no redirect and the same separator:
+    the reference for skip_empty _SKIP_EMPTY_REPEATS. newlines True also leaves out such a record ended by '', a
+    wrong reading for _lex_repeats_failures."""
+    kept = []
+    for seg in segments:
+        last = kept[-1] if kept else None
+        if (not seg.argv and not seg.redirects and (seg.sep_after or newlines) and last is not None
+                and not last.argv and not last.redirects and last.sep_after == seg.sep_after):
+            continue
+        kept.append(seg)
+    return kept
+
+
+def _lex_repeats_want(text, partial, newlines=False):
+    """What _lex_readings(text, partial, skip_empty=_SKIP_EMPTY_REPEATS) must give: the full lex's readings, each
+    read through _lex_left_repeats (newlines passed on), with the same complete and in_progress flags in partial
+    mode, or the same ValueError."""
+    full = _lex_outcome(lambda: aiqt_hooks._lex_readings(text, partial))
+    if full == "ValueError":
+        return full
+    if partial:
+        return [(_lex_left_repeats(segs, newlines), done, open_) for segs, done, open_ in full]
+    return [_lex_left_repeats(segs, newlines) for segs in full]
+
+
+def _lex_repeats_mismatches(lex, texts):
+    """The (text, partial) readings on which lex(text, partial) differs from _lex_repeats_want: [(text, partial,
+    got, want)], at most three."""
+    out = []
+    for text in texts:
+        for partial in (False, True):
+            want = _lex_repeats_want(text, partial)
+            got = _lex_outcome(lambda: lex(text, partial))
+            if got != want:
+                out.append((text, partial, got, want))
+                if len(out) == 3:
+                    return out
+    return out
+
+
+def _lex_repeats_failures(count=4000, seed=20261029):
+    """(dl-lex-repeats) _lex_readings with skip_empty _SKIP_EMPTY_REPEATS gives the full lex's readings, each with
+    every record left out that repeats the record kept before it (_lex_left_repeats: no word, no redirect and the
+    same separator, not a newline's), with the same ValueError and the same complete and in_progress flags in
+    partial mode, on _LEX_SKIP_TEXTS, _LEX_FORK_TEXTS and `count` seeded random texts over _LEX_SKIP_ALPHABET;
+    dl-lex-fork reads the same mode resumed where a reading stopped. Three wrong readings (every record kept,
+    every record with no word and no redirect left out, and a newline-ended repeat left out too) must each be
+    caught by the same comparison, so it discriminates and the corpus holds a record it leaves out.
+    (dl-lex-repeats-taken) gate_weakening, which lexes in this mode, builds fewer than 50 records on a run of 200
+    separators before four '#' lines (sixteen readings), counted with aiqt_hooks._Segment wrapped
+    (_lex_records_built), where the default lex of that command builds more than 200 (dl-lex-repeats-taken-red),
+    so the count discriminates."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_LEX_SKIP_TEXTS) + list(_LEX_FORK_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_SKIP_ALPHABET) for _ in range(rng.randint(0, 10))))
+    repeats = aiqt_hooks._SKIP_EMPTY_REPEATS
+    for text, partial, got, want in _lex_repeats_mismatches(
+            lambda text, partial: aiqt_hooks._lex_readings(text, partial, skip_empty=repeats), texts):
+        out.append("(dl-lex-repeats) _lex_readings({!r}, partial={}, skip_empty={!r}) gave {!r}, want {!r}".format(
+            text, partial, repeats, got, want))
+    wrong = (
+        ("keep-all", lambda text, partial: aiqt_hooks._lex_readings(text, partial)),
+        ("skip-all", lambda text, partial: aiqt_hooks._lex_readings(text, partial, skip_empty=True)),
+        ("newlines", lambda text, partial: _lex_repeats_want(text, partial, newlines=True)),
+    )
+    for name, lex in wrong:
+        if not _lex_repeats_mismatches(lex, texts):
+            out.append("(dl-lex-repeats-red-{}) a wrong reading passes the comparison".format(name))
+    lines = "(" + ";" * 200 + " #a\n #b\n #c\n #d\n)"
+    data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": lines},
+            "session_id": "lex-repeats-session", "tool_use_id": "lex-repeats-call"}
+    built, _empty = _lex_records_built(lambda: aiqt_hooks.HANDLERS["gate_weakening"](data))
+    if built >= 50:
+        out.append("(dl-lex-repeats-taken) gate_weakening built {} records for {!r}; a run of separators must "
+                   "build one record, so fewer than 50 in all".format(built, lines[:12] + "..."))
+    default_built, _empty = _lex_records_built(lambda: aiqt_hooks._lex_command(lines))
+    if default_built <= 200:
+        out.append("(dl-lex-repeats-taken-red) the default lex of {!r} built {} records, not more than 200, so "
+                   "the count cannot see a caller that builds one per separator".format(lines[:12] + "...",
+                                                                                      default_built))
+    return out
+
+
 def _lex_words_only(result):
     """A wrong skip_empty reading for _lex_skip_failures: it also leaves out a record with a redirect and no
     word."""
@@ -4016,8 +4103,8 @@ def _lex_fork_mismatches(texts):
     """The (text, partial, skip_empty, locale) readings on which _lex_readings differs from
     _lex_readings_restart, or a partial _lex_command from that reference's partial recovery: at most three."""
     out = []
-    modes = [(partial, skip_empty, locale) for partial in (False, True) for skip_empty in (False, True)
-             for locale in (False, True)]
+    modes = [(partial, skip_empty, locale) for partial in (False, True)
+             for skip_empty in (False, True, aiqt_hooks._SKIP_EMPTY_REPEATS) for locale in (False, True)]
     for text in texts:
         for partial, skip_empty, locale in modes:
             got = _lex_fork_outcome(lambda: aiqt_hooks._lex_readings(text, partial, locale, skip_empty))
@@ -4057,8 +4144,8 @@ def _lex_fork_failures(count=6000, seed=20261018):
     '#' (_LexFork), gives what lexing every reading from the start gives (_lex_readings_restart: the same
     segments, flags and _SubstHeredocs.reads change, or the same ValueError), and a partial _lex_command
     whose readings cannot be judged gives the reference's recovery, on _LEX_FORK_TEXTS and `count` seeded
-    texts over _LEX_FORK_ALPHABET, in every partial, skip_empty and locale mode. The corpus must hold commands
-    whose first reading stops where a reading can resume (dl-lex-fork-corpus).
+    texts over _LEX_FORK_ALPHABET, in every partial, skip_empty (_SKIP_EMPTY_REPEATS included) and locale mode.
+    The corpus must hold commands whose first reading stops where a reading can resume (dl-lex-fork-corpus).
     (dl-lex-fork-red-nest, dl-lex-fork-red-tail) Two wrong resumptions, one with an empty nesting stack and
     one taking a recorded rest by its index alone, must each be caught by the same comparison.
     (dl-lex-fork-taken) The text before the first uncertain '#' is lexed once: on a run of separators before
@@ -6743,6 +6830,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
     failures.extend(_lex_skip_floor_failures())
+    failures.extend(_lex_repeats_failures())
     failures.extend(_lex_fork_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
