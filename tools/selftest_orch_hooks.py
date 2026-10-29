@@ -12002,6 +12002,15 @@ def _main_isolated(report_path=None):
         # the truncating sink is caught through subshell/brace wrappers too (class width).
         check("trunc/subshell-tail-denies", _verdict(bg("( python3 build.py | tail )")), "deny")
         check("trunc/brace-tail-denies", _verdict(bg("{ python3 build.py | tail; }")), "deny")
+        # A pipe into a sink inside a backquote substitution: the shared lexer splits it at the '|' into words that
+        # keep the backquotes ('x=`make' and 'head`'), and the command reading (_CommandReading) reads the body
+        # whole, so the sink denies as the bare pipe does; with no pipe in the body the note stands.
+        check("crd/trunc-backquote-sink", _verdict(bg("x=`make | head`")), "deny")
+        check("crd/trunc-backquote-control", _verdict(bg("x=`make`")), "warn")
+        # Backquote bodies that spend the command reading's budget deny, with a reason that names the budget
+        # rather than a '#' the command does not hold.
+        _crd_over = bg("make" + "".join(" `: {}`".format(_crd_n) for _crd_n in range(7506)))
+        check("crd/trunc-backquote-limit", (_verdict(_crd_over), "budget" in str(_crd_over[1])), ("deny", True))
         # ROUND-7 (codex finding 5): the sink is resolved THROUGH shell command-modifier wrappers
         # (command/env/nice/stdbuf/... with their own option/assignment args), so a truncating sink hidden
         # behind a wrapper is still caught; a genuine NON-truncating wrapped command still allows-with-note.
@@ -14605,6 +14614,13 @@ def _main_isolated(report_path=None):
               "allow")
         check("wl/handler-allow-nested",
               _verdict(wl("while outer; do while inner; do gh api x; sleep 1; done; done &")), "allow")
+        # A control, not a test of the command reading: neither path here asks for that reading, so the row
+        # passes with it on or off. A poll loop behind a compound command's reserved word classifies
+        # 'indeterminate' by design: this guard emits nothing and defers to the truncation guard, which denies the
+        # foreground bare-& detach on the same event, so the wrapped loop is still refused.
+        _crd_loop = "if true; then while true; do gh run view 1; sleep 10; done & fi"
+        check("crd/waitloop-wrapped-deferred", (_verdict(wl(_crd_loop)), _verdict(tg(_crd_loop))),
+              ("allow", "deny"))
         # fail-open: non-Bash tool and absent registry -> silent allow even on a match command; an EMPTY
         # command is readable (it runs nothing) and also allows. In registry scope a MISSING or NON-STRING
         # command is a cannot-evaluate input and DENIES (check-fails-closed-on-unreadable), never a clean
