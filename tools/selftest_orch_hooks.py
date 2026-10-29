@@ -153,6 +153,10 @@ def _verdict(result):
     return "unexpected({!r})".format(result)
 
 
+def _fg(command):
+    return {"command": command, "run_in_background": False}
+
+
 def _registry_ceiling(root, probe):
     """Wrap a registry probe of the truncation guard's ancestor walk (aiqt_hooks._orch_dirfd_has_registry)
     so that every directory STRICTLY ABOVE root reads as carrying no registry while every other directory
@@ -1241,6 +1245,2002 @@ def _rdp_cases(tmp):
     check("rdp/handler-crash-fails-closed", rc, 2)
     _rdp_draft_cases(base)
     _rdp_scope_cases(base, bare)
+
+
+def _rwh_iso(hours=0):
+    """An ISO-8601 UTC timestamp `hours` from now (negative for the past), for review-hold markers."""
+    return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)).isoformat()
+
+
+def _rwh_without_hold(fn):
+    """fn() with the hold reader patched inert, so every marker reads as absent: the revert leg of each
+    refuse case. The refuse case's deny leg goes red when the hook's check is reverted, and this leg
+    shows the deny comes from the marker check alone (the command is allowed today without it)."""
+    saved = aiqt_hooks._rwh_holds
+    aiqt_hooks._rwh_holds = lambda common, cache, notes: ("absent", [])
+    try:
+        return fn()
+    finally:
+        aiqt_hooks._rwh_holds = saved
+
+
+def _rwh_without_gate(fn):
+    """fn() with the program gate patched to find no program-running form: the leg that shows a
+    refusal comes from the gate (it goes red when the gate is removed), or that a branch the gate
+    pre-empts still withholds the same shape on its own."""
+    saved = aiqt_hooks._rwh_program_gate
+    aiqt_hooks._rwh_program_gate = lambda segments: None
+    try:
+        return fn()
+    finally:
+        aiqt_hooks._rwh_program_gate = saved
+
+
+def _rwh_reason(result):
+    """The decision reason text of a hook result, '' when it carries none: some refuse cases share
+    one kind (unverifiable) and are told apart by the cause their reason names."""
+    if not result[1]:
+        return ""
+    return result[1].get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+
+
+def _rwh_cases(tmp):
+    """The review-workdir-hold vectors (rwh/*), enforcing rvwpin: a live adopter-written marker in
+    GIT_COMMON_DIR/aiqt/review-holds/ pins its worktree against mutating git commands. Every refuse
+    case is asserted as a deny AND shown allowed with the hold reader reverted
+    (red on revert); every allow case names the over-broad implementation it catches."""
+    base = tmp / "rwh"
+    main = base / "main"
+    main.mkdir(parents=True)
+    _rdp_git(base, "init", "-q", "-b", "main", str(main))
+    (main / "f").write_text("x\n", encoding="utf-8")
+    (main / "sub").mkdir()
+    (main / "sub" / "g").write_text("y\n", encoding="utf-8")
+    _rdp_git(main, "add", "-A")
+    _rdp_git(main, "commit", "-q", "-m", "seed")
+    seed = _rdp_git(main, "rev-parse", "HEAD")
+    (main / "f").write_text("x2\n", encoding="utf-8")
+    _rdp_git(main, "add", "f")
+    _rdp_git(main, "commit", "-q", "-m", "change")
+    tip = _rdp_git(main, "rev-parse", "HEAD")
+    held = base / "held"
+    _rdp_git(main, "worktree", "add", "-q", "-b", "review", str(held), "main")
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(base / "held2"), tip)
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(base / "other"), tip)
+    (base / "alias").symlink_to(held)
+    # an unrelated repository with NO holds: the allow control for every fail-closed uncertain-target
+    # deny, showing the hold set discriminates (uncertain plus a clear hold set stays allowed)
+    free = base / "free"
+    free.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(free))
+    (free / "sub").mkdir()
+    holds = main / ".git" / "aiqt" / "review-holds"
+    holds.mkdir(parents=True)
+
+    def marker(name, **over):
+        doc = dict(version=1, workdir=str(held), head=tip, dispatch_id=name,
+                   created_utc=_rwh_iso(), expires_utc=_rwh_iso(4))
+        doc.update(over)
+        (holds / (name + ".json")).write_text(json.dumps(doc), encoding="utf-8")
+
+    def run(cwd, command):
+        return aiqt_hooks.review_workdir_hold(dict(
+            hook_event_name="PreToolUse", cwd=str(cwd), session_id="s1", tool_name="Bash",
+            tool_input=dict(command=command)))
+
+    def kind(cwd, command):
+        return _rdp_kind(run(cwd, command))
+
+    marker("rev-1")
+    # ---------- refuse cases (git forms that can reach the held worktree), each red on revert ----------
+    co = "git -C " + str(held) + " checkout " + seed
+    check("rwh/held-checkout-denies-red-on-revert",
+          [kind(base, co), _rwh_without_hold(lambda: kind(base, co))], ["deny", "allow"])
+    sw = "git -C " + str(held) + " switch main"
+    check("rwh/held-switch-denies-red-on-revert",
+          [kind(base, sw), _rwh_without_hold(lambda: kind(base, sw))], ["deny", "allow"])
+    rh = "git -C " + str(held) + " reset --hard " + seed
+    check("rwh/held-reset-denies-red-on-revert",
+          [kind(base, rh), kind(base, "git -C " + str(held) + " reset --soft " + seed),
+           _rwh_without_hold(lambda: kind(base, rh))], ["deny", "deny", "allow"])
+    mg = "git -C " + str(held) + " merge --ff-only main"
+    check("rwh/held-merge-denies-red-on-revert",
+          [kind(base, mg), _rwh_without_hold(lambda: kind(base, mg))], ["deny", "allow"])
+    pl = "git -C " + str(held) + " pull"
+    check("rwh/held-pull-denies-red-on-revert",
+          [kind(base, pl), _rwh_without_hold(lambda: kind(base, pl))], ["deny", "allow"])
+    rb = "git -C " + str(held) + " rebase main"
+    check("rwh/held-rebase-denies-red-on-revert",
+          [kind(base, rb), _rwh_without_hold(lambda: kind(base, rb))], ["deny", "allow"])
+    cf = ["git -C " + str(held) + " " + c for c in
+          ("commit -m x", "cherry-pick " + seed, "revert " + seed, "am")]
+    check("rwh/held-commit-family-denies-red-on-revert",
+          [kind(base, c) for c in cf] + [_rwh_without_hold(lambda: kind(base, cf[0]))],
+          ["deny"] * 4 + ["allow"])
+    # tree mutations that keep HEAD still mutate the held artefact (rvwpin: "not modified")
+    tm = ["git -C " + str(held) + " " + c for c in
+          ("restore f", "checkout -- f", "stash pop", "clean -f")]
+    check("rwh/held-tree-mutation-denies-red-on-revert",
+          [kind(base, c) for c in tm] + [_rwh_without_hold(lambda: kind(base, tm[0]))],
+          ["deny"] * 4 + ["allow"])
+    # any directory change makes a later ambient-target git uncertain, so the deny is the fail-closed
+    # UNVERIFIABLE form, driven by the held repository the cd operand puts in the hold set
+    cd = "cd " + str(held) + " && git checkout " + seed
+    check("rwh/cd-into-held-denies-red-on-revert",
+          [kind(base, cd), _rwh_without_hold(lambda: kind(base, cd))], ["unverifiable", "allow"])
+    check("rwh/cwd-inside-held-denies-red-on-revert",
+          [kind(held / "sub", "git switch main"),
+           _rwh_without_hold(lambda: kind(held / "sub", "git switch main"))], ["deny", "allow"])
+    al = "git -C " + str(base / "alias") + " checkout " + seed
+    check("rwh/symlink-alias-denies-red-on-revert",
+          [kind(base, al), _rwh_without_hold(lambda: kind(base, al))], ["deny", "allow"])
+    wr = ["command " + co, "env " + co]
+    check("rwh/wrapper-peel-denies-red-on-revert",
+          [kind(base, c) for c in wr] + [_rwh_without_hold(lambda: kind(base, wr[0]))],
+          ["deny", "deny", "allow"])
+    ur = "git -C " + str(main) + " update-ref refs/heads/review " + seed
+    check("rwh/update-ref-held-branch-denies-red-on-revert",
+          [kind(base, ur), _rwh_without_hold(lambda: kind(base, ur))], ["deny", "allow"])
+    wt = ["git -C " + str(main) + " worktree remove " + str(held),
+          "git -C " + str(main) + " worktree move " + str(held) + " " + str(base / "elsewhere")]
+    check("rwh/worktree-remove-or-move-denies-red-on-revert",
+          [kind(base, c) for c in wt] + [_rwh_without_hold(lambda: kind(base, wt[0]))],
+          ["deny", "deny", "allow"])
+    ut = 'git -C "$X" checkout y'
+    check("rwh/unresolvable-target-unverifiable-red-on-revert",
+          [kind(main, ut), _rwh_without_hold(lambda: kind(main, ut))], ["unverifiable", "allow"])
+    (holds / "bad.json").write_text("{not json", encoding="utf-8")
+    bad_got = [kind(base, co), kind(held, "git status")]
+    (holds / "bad.json").unlink()
+    (holds / "link.json").symlink_to(holds / "rev-1.json")
+    bad_got.append(kind(base, co))
+    bad_got.append(_rwh_without_hold(lambda: kind(base, co)))
+    (holds / "link.json").unlink()
+    # an unreadable or malformed marker state withholds mutating git commands only (fail closed);
+    # read-only commands pass, and the revert leg shows the deny comes from the marker state alone
+    check("rwh/malformed-marker-state-denies-red-on-revert", bad_got,
+          ["deny", "allow", "deny", "allow"])
+    # both ends of the marker size bound: a marker of exactly _RWH_MARKER_MAX bytes is still a live
+    # hold (the opaque-target probe reads it as live: unverifiable), and one byte over is malformed
+    # (the same probe denies fail-closed), so the bound is tested at and just outside its edge
+    pad = dict(version=1, workdir=str(held), head=tip, dispatch_id="rev-pad",
+               created_utc=_rwh_iso(), expires_utc=_rwh_iso(4))
+    pad["dispatch_id"] = "rev-pad" + "x" * (aiqt_hooks._RWH_MARKER_MAX - len(json.dumps(pad)))
+    (holds / "pad.json").write_text(json.dumps(pad), encoding="utf-8")
+    size_got = [len(json.dumps(pad)) == aiqt_hooks._RWH_MARKER_MAX, kind(main, ut)]
+    pad["dispatch_id"] += "x"
+    (holds / "pad.json").write_text(json.dumps(pad), encoding="utf-8")
+    size_got.append(kind(main, ut))
+    (holds / "pad.json").unlink()
+    check("rwh/marker-size-boundary", size_got, [True, "unverifiable", "deny"])
+    # a GIT_DIR/GIT_WORK_TREE assignment (inline, behind env, via -c, or inherited from the session
+    # environment) moves the repository away from the lexical target, so the mutation is never
+    # silently bound to the session directory while a hold is live: the inline assignment and the
+    # -c override are refused by the program gate (a leading assignment or a global option other
+    # than -C can name a program), and the env-wrapped and inherited spellings are unresolvable
+    held_gd = main / ".git" / "worktrees" / "held"
+    ev = ["GIT_DIR=" + str(held_gd) + " GIT_WORK_TREE=" + str(held) + " git reset --hard " + seed,
+          "env GIT_DIR=" + str(held_gd) + " git reset --hard " + seed,
+          "git -c core.worktree=" + str(held) + " reset --hard " + seed]
+    ev_got = [kind(main, c) for c in ev]
+    os.environ["GIT_DIR"] = str(held_gd)
+    try:
+        ev_got.append(kind(main, "git reset --hard " + seed))
+    finally:
+        del os.environ["GIT_DIR"]
+    ev_got.append(_rwh_without_hold(lambda: kind(main, ev[0])))
+    check("rwh/env-override-unverifiable-red-on-revert", ev_got,
+          ["deny", "unverifiable", "deny", "unverifiable", "allow"])
+    # a glob the shell may expand to the held worktree, and a target that resolves to no worktree,
+    # are unresolvable: fail closed while a hold is live, never a silent allow
+    gl = "git -C " + str(base / "hel*") + " checkout " + seed
+    nx = "git -C " + str(base / "missing") + " checkout " + seed
+    check("rwh/glob-or-unresolved-target-unverifiable-red-on-revert",
+          [kind(main, gl), kind(main, nx),
+           _rwh_without_hold(lambda: kind(main, gl)), _rwh_without_hold(lambda: kind(main, nx))],
+          ["unverifiable", "unverifiable", "allow", "allow"])
+    # a piped or subshell cd does not move the shell that runs the later mutation, and a cd to a
+    # missing directory fails in place, so whether any of the three leaves the held worktree cannot
+    # be read from the text: each is fail-closed UNVERIFIABLE while the session repository is held.
+    # The allow control walks from an unheld session into the unrelated free repository: the same
+    # uncertain shape with a clear hold set stays allowed
+    pc = "cd " + str(main) + " | true; git reset --hard " + seed
+    sc = "(cd " + str(main) + "); git reset --hard " + seed
+    fc = "cd " + str(base / "missing") + "; git reset --hard " + seed
+    check("rwh/pipeline-or-failed-cd-refused-red-on-revert",
+          [kind(held, pc), kind(held, sc), kind(held, fc),
+           kind(base, "cd " + str(free) + " && git commit -m x"),
+           _rwh_without_hold(lambda: kind(held, pc))],
+          ["unverifiable", "unverifiable", "unverifiable", "allow", "allow"])
+    # git also accepts a worktree named by the unique last components of its path; an unknown name
+    # is unresolvable (fail closed), and removing an UNHELD sibling worktree is withheld while the
+    # repository is held (the repository-wide withholding, a stated over-refusal; the held name
+    # still gets the specific deny)
+    ws = ["git worktree remove held", "git worktree move held " + str(base / "elsewhere2")]
+    check("rwh/worktree-shorthand-denies-red-on-revert",
+          [kind(main, c) for c in ws] +
+          [kind(main, "git worktree remove nosuchname"),
+           kind(main, "git worktree remove " + str(base / "other")),
+           _rwh_without_hold(lambda: kind(main, ws[0]))],
+          ["deny", "deny", "unverifiable", "unverifiable", "allow"])
+    # the cross-worktree ref path worktrees/<id>/HEAD moves a held worktree's HEAD without entering
+    # it; the same path of an unheld worktree is withheld too while the repository is held (the
+    # repository-wide withholding), and the same write in an unheld repository still passes
+    cr = "git update-ref worktrees/held/HEAD " + seed
+    check("rwh/cross-worktree-head-ref-denies-red-on-revert",
+          [kind(main, cr), kind(main, "git update-ref worktrees/other/HEAD " + seed),
+           kind(free, "git update-ref refs/heads/zref " + seed),
+           _rwh_without_hold(lambda: kind(main, cr))],
+          ["deny", "unverifiable", "allow", "allow"])
+    # a symbolic-ref write can move the held HEAD (in place or through the cross-worktree path) or
+    # re-point its checked-out branch; the read form still passes, and a write of an UNHELD HEAD
+    # in the held repository is withheld (the repository-wide withholding, a stated over-refusal)
+    sr = ["git -C " + str(held) + " symbolic-ref HEAD refs/heads/main",
+          "git symbolic-ref worktrees/held/HEAD refs/heads/main",
+          "git symbolic-ref refs/heads/review refs/heads/main"]
+    check("rwh/symbolic-ref-held-head-denies-red-on-revert",
+          [kind(main, c) for c in sr] +
+          [kind(held, "git symbolic-ref -q HEAD"),
+           kind(main, "git symbolic-ref HEAD refs/heads/main"),
+           _rwh_without_hold(lambda: kind(main, sr[0]))],
+          ["deny", "deny", "deny", "allow", "unverifiable", "allow"])
+    # a marker-directory path that exists but is not a directory is invalid state, not absence:
+    # mutating git is withheld (at review-holds itself and at its aiqt parent), reads still pass
+    shutil.rmtree(holds)
+    holds.write_text("x", encoding="utf-8")
+    nd_got = [kind(base, co), kind(held, "git status")]
+    holds.unlink()
+    aiqt_dir = main / ".git" / "aiqt"
+    aiqt_dir.rmdir()
+    aiqt_dir.write_text("x", encoding="utf-8")
+    nd_got.append(kind(base, co))
+    nd_got.append(kind(held, "git log --oneline"))
+    nd_got.append(_rwh_without_hold(lambda: kind(base, co)))
+    aiqt_dir.unlink()
+    holds.mkdir(parents=True)
+    marker("rev-1")
+    check("rwh/marker-dir-not-a-directory-denies-red-on-revert", nd_got,
+          ["deny", "allow", "deny", "allow", "allow"])
+    # a marker version of another type that compares equal to 1 (True, 1.0) is malformed state, not
+    # a live version-1 hold: a valid marker pins only its worktree (see rwh/other-worktree-allows),
+    # malformed state withholds every mutating git command and still passes reads
+    marker("rev-1", version=True)
+    vt_got = [kind(base, "git -C " + str(base / "other") + " checkout " + seed)]
+    marker("rev-1", version=1.0)
+    vt_got.append(kind(base, "git -C " + str(base / "other") + " checkout " + seed))
+    vt_got.append(kind(held, "git status"))
+    marker("rev-1")
+    check("rwh/marker-version-type-strict", vt_got, ["deny", "deny", "allow"])
+    # malformed marker state withholds mutating git only: worktree list is a read and passes while
+    # worktree remove stays withheld
+    (holds / "bad.json").write_text("{not json", encoding="utf-8")
+    wl_got = [kind(held, "git worktree list"), kind(main, "git worktree remove " + str(held))]
+    (holds / "bad.json").unlink()
+    check("rwh/worktree-list-under-bad-state-allows", wl_got, ["allow", "deny"])
+    # ---------- fail-closed certainty cases, the session cwd OUTSIDE every repository ----------
+    # a -c/--config-env override, a GIT_ assignment or export, or a cd anywhere earlier makes the
+    # target uncertain; the deny comes from the held repository in the command's HOLD SET (the -C,
+    # cd and GIT_ path operands), never from the session repository alone, so a session outside
+    # every repository still fails closed (the -c and inline GIT_ spellings through the program
+    # gate, the cd and export spellings as unresolvable); the same shapes against the unheld free
+    # repo pass
+    ov = ["git -c user.name=x -C " + str(held) + " reset --hard " + seed,
+          "git -C " + str(held) + " -c user.name=x reset --hard " + seed,
+          "GIT_NAMESPACE=x git -C " + str(held) + " reset --hard " + seed,
+          "cd " + str(held) + " || exit 1; git reset --hard " + seed,
+          "export GIT_DIR=" + str(held_gd) + "; git reset --hard " + seed]
+    check("rwh/outside-session-override-unverifiable-red-on-revert",
+          [kind(base, c) for c in ov] +
+          [kind(base, "git -c user.name=x -C " + str(free) + " commit -m x"),
+           kind(base, "export GIT_DIR=" + str(free / ".git") + "; git commit -m x"),
+           _rwh_without_hold(lambda: kind(base, ov[0]))],
+          ["deny"] * 3 + ["unverifiable"] * 2 + ["allow", "allow", "allow"])
+    # a wrapper the peel cannot see through (timeout, nice, env with an option, a quoted sh -c or
+    # eval body) hides which repository its git mutates: fail closed on the hold set, with the raw
+    # -C and cd operands inside quoted bodies still contributing to it
+    wv = ["timeout 60 git -C " + str(held) + " reset --hard " + seed,
+          "nice git -C " + str(held) + " reset --hard " + seed,
+          "env -i git -C " + str(held) + " reset --hard " + seed,
+          "sh -c 'git -C " + str(held) + " reset --hard " + seed + "'",
+          "eval 'cd " + str(held) + "; git reset --hard " + seed + "'"]
+    check("rwh/wrapper-word-unverifiable-red-on-revert",
+          [kind(base, c) for c in wv] +
+          [kind(base, "timeout 60 git -C " + str(free) + " commit -m x"),
+           _rwh_without_hold(lambda: kind(base, wv[0]))],
+          ["unverifiable"] * 5 + ["allow", "allow"])
+    # a git behind a shell reserved word, inside a quoted command substitution, or in a heredoc
+    # body is not one plain git segment: the raw git word fails closed on the hold set, from the
+    # held session and from outside with the held path as a literal -C operand alike; the same
+    # shapes naming only the unheld free repository pass
+    rsv = ["{ git reset --hard " + seed + "; }",
+           "if true; then git reset --hard " + seed + "; fi",
+           "! git reset --hard " + seed,
+           "bash <<'EOF'\ngit reset --hard " + seed + "\nEOF",
+           'echo "$(git reset --hard ' + seed + ')"']
+    check("rwh/reserved-word-or-substitution-denies-red-on-revert",
+          [kind(held, c) for c in rsv] +
+          [kind(base, "{ git -C " + str(held) + " reset --hard; }"),
+           kind(base, "{ git -C " + str(free) + " reset --hard; }"),
+           kind(base, "if true; then git -C " + str(free) + " commit -m x; fi"),
+           _rwh_without_hold(lambda: kind(held, rsv[0]))],
+          ["unverifiable"] * 6 + ["allow", "allow", "allow"])
+    # a --git-dir/--work-tree value (= and separated forms), a later -C in an accumulated chain,
+    # and a quoted operand inside a shell body all join the hold set from the raw text, so these
+    # spellings fail closed from a session outside every repository (the global-option spellings
+    # through the program gate, the quoted body as unresolvable); the same spellings naming only
+    # the unheld free repository pass, and an opaque operand ($VAR, a tilde) from an unheld outside
+    # session is the disclosed allow residual of a hold set built from literal text
+    oo = ["git --git-dir=" + str(held_gd) + " --work-tree=" + str(held) + " reset --hard",
+          "git --git-dir " + str(held_gd) + " --work-tree " + str(held) + " checkout -f",
+          "git -C " + str(free) + " --work-tree=" + str(held) + " checkout -f main",
+          "git -c user.name=x -C " + str(base) + " -C held reset --hard",
+          "sh -c \"git -C '" + str(held) + "' reset --hard\""]
+    check("rwh/override-operand-denies-red-on-revert",
+          [kind(base, c) for c in oo] +
+          [kind(base, "git --git-dir=" + str(free / ".git") + " --work-tree=" + str(free) +
+                " reset --hard"),
+           kind(base, "git -c user.name=x -C " + str(base) + " -C free reset --hard"),
+           kind(base, 'git -C "$HELD" reset --hard'),
+           kind(base, "git -C ~/held reset --hard"),
+           _rwh_without_hold(lambda: kind(base, oo[0]))],
+          ["deny"] * 4 + ["unverifiable"] + ["allow"] * 5)
+    # ANY wrapper word, listed or not, and a git-<name> executable path carry the raw git word, so
+    # they fail closed while a hold-set repository is held; the same shapes against the unheld free
+    # repository pass
+    wo = ["watch -n 1 -g git reset --hard",
+          "script -qc 'git reset --hard' /dev/null",
+          "find . -maxdepth 0 -exec git reset --hard ;",
+          "/usr/lib/git-core/git-reset --hard"]
+    check("rwh/wrapper-outside-list-denies-red-on-revert",
+          [kind(held, c) for c in wo] +
+          [kind(base, "watch -n 1 -g git -C " + str(held) + " reset --hard"),
+           kind(base, "bash -c 'cd \"" + str(held) + "\" && git reset --hard'"),
+           kind(base, "watch -n 1 -g git -C " + str(free) + " reset --hard"),
+           kind(free, wo[3]),
+           _rwh_without_hold(lambda: kind(held, wo[0]))],
+          ["unverifiable"] * 6 + ["allow"] * 3)
+    # a read-only positional operand after a shell body does not mask the body: the raw git word
+    # fails closed from the held worktree, while the same command in the unheld free repository
+    # passes
+    pb = "sh -c 'git reset --hard HEAD' git status"
+    check("rwh/positional-body-denies-red-on-revert",
+          [kind(held, pb), kind(free, pb), _rwh_without_hold(lambda: kind(held, pb))],
+          ["unverifiable", "allow", "allow"])
+    # a wrapped or quoted git, read-only included, is not one plain git segment, so it fails closed
+    # while the session repository is held: the stated over-deny of a raw-text rule that classifies
+    # no shell bodies. The same wrapped reads in the unheld free repository still pass, and plain
+    # unwrapped reads in the held worktree stay allowed (rwh/held-read-only-allows)
+    wro = ["env SAFE=1 git worktree list", "timeout 5 git status", "nice git log --oneline",
+           "sh -c 'git worktree list'"]
+    check("rwh/wrapped-read-only-held-denies-unheld-allows",
+          [kind(held, c) for c in wro] + [kind(free, c) for c in wro] +
+          [_rwh_without_hold(lambda: kind(held, wro[0]))],
+          ["unverifiable"] * 4 + ["allow"] * 5)
+    # git prefers the registered-worktree name over an ordinary directory carrying the same name,
+    # so the held name denies BEFORE any path resolution; a same-shaped ordinary directory whose
+    # name matches no held worktree is withheld inside the held repository (the repository-wide
+    # withholding) and passes in the unheld free one
+    (main / "held").mkdir()
+    (main / "spare").mkdir()
+    (free / "spare").mkdir()
+    nc = ["git worktree remove held", "git worktree move held " + str(base / "elsewhere3")]
+    check("rwh/worktree-name-collision-denies-red-on-revert",
+          [kind(main, c) for c in nc] +
+          [kind(main, "git worktree remove spare"),
+           kind(free, "git worktree remove spare"),
+           _rwh_without_hold(lambda: kind(main, nc[0]))],
+          ["deny", "deny", "unverifiable", "allow", "allow"])
+    (free / "spare").rmdir()
+    (main / "spare").rmdir()
+    (main / "held").rmdir()
+    # -C operands resolve physically before any identity lookup: 'link/..' traverses the symlink
+    # the way the kernel does for git, reaching the held worktree, never the link's lexical parent
+    (base / "lnkp").symlink_to(held / "sub")
+    (base / "lnkf").symlink_to(free / "sub")
+    lp = "git -C " + str(base / "lnkp") + "/.. reset --hard " + seed
+    check("rwh/symlink-parent-target-denies-red-on-revert",
+          [kind(base, lp), kind(base, "git -C " + str(base / "lnkf") + "/.. commit -m x"),
+           _rwh_without_hold(lambda: kind(base, lp))],
+          ["deny", "allow", "allow"])
+    (base / "lnkp").unlink()
+    (base / "lnkf").unlink()
+    # a repository-file core.worktree moves the files a mutation writes without changing the
+    # compared git-directory identity, so the target is uncertain and the configured worktree's
+    # repository joins the hold set; a core.worktree naming an unheld tree passes
+    evil = base / "evil"
+    evil.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(evil))
+    _rdp_git(evil, "config", "core.worktree", str(held))
+    evil2 = base / "evil2"
+    evil2.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(evil2))
+    _rdp_git(evil2, "config", "core.worktree", str(free))
+    _rdp_git(main, "config", "core.worktree", str(held))
+    cwv = "git -C " + str(evil) + " reset --hard"
+    cw_got = [kind(base, cwv), kind(main, "git reset --hard " + tip),
+              kind(base, "git -C " + str(evil2) + " reset --hard"),
+              _rwh_without_hold(lambda: kind(base, cwv))]
+    _rdp_git(main, "config", "--unset", "core.worktree")
+    check("rwh/repo-config-worktree-unverifiable-red-on-revert", cw_got,
+          ["unverifiable", "unverifiable", "allow", "allow"])
+    # a candidate repository's core.worktree expands the hold set even where the mutation hides
+    # behind a wrapper or a configuration override, so the held tree it points at still fails
+    # closed (the override through the program gate); the same shapes through the repository
+    # whose core.worktree names the unheld free tree pass
+    cwx = ["timeout 5 git -C " + str(evil) + " reset --hard",
+           "git -c user.name=x -C " + str(evil) + " reset --hard"]
+    check("rwh/config-worktree-hold-set-denies-red-on-revert",
+          [kind(base, c) for c in cwx] +
+          [kind(base, "timeout 5 git -C " + str(evil2) + " reset --hard"),
+           kind(base, "git -c user.name=x -C " + str(evil2) + " reset --hard"),
+           _rwh_without_hold(lambda: kind(base, cwx[0]))],
+          ["unverifiable", "deny"] + ["allow"] * 3)
+    # a cd that fails (arity) or is skipped (behind &&) leaves the shell where it was, so the later
+    # mutation is never bound to the cd's destination: uncertain, judged by the hold set from the
+    # held session AND from a session outside every repository
+    ca = ["cd " + str(main) + " extra; git reset --hard " + seed,
+          "false && cd " + str(main) + "; git reset --hard " + seed]
+    check("rwh/cd-arity-or-conditional-unverifiable-red-on-revert",
+          [kind(held, c) for c in ca] +
+          [kind(base, "cd " + str(held) + " extra; git reset --hard " + seed),
+           kind(base, "cd " + str(free) + " extra; git commit -m x"),
+           _rwh_without_hold(lambda: kind(held, ca[0]))],
+          ["unverifiable"] * 3 + ["allow", "allow"])
+    # every ref in the held HEAD's symbolic chain is protected (review is symbolic to main here, so
+    # writing either moves the held HEAD), and a symbolic-ref delete in any accepted spelling (the
+    # --del abbreviation, the clustered -qd, and clusters where m consumes a reason, attached or
+    # separated) is a write of the ref the cluster leaves as the operand; a cluster whose operand
+    # cannot be determined fails closed; deleting an unrelated ref inside the held repository is
+    # withheld (the repository-wide withholding), and the same delete in the unheld free
+    # repository passes
+    _rdp_git(main, "branch", "sparebr")
+    _rdp_git(main, "symbolic-ref", "refs/heads/review", "refs/heads/main")
+    sd = ["git symbolic-ref --del refs/heads/review", "git symbolic-ref -qd refs/heads/review",
+          "git symbolic-ref -qm reason -d refs/heads/review",
+          "git symbolic-ref -qdm reason refs/heads/review",
+          "git symbolic-ref -dmreason refs/heads/review",
+          "git symbolic-ref refs/heads/review refs/heads/sparebr",
+          "git update-ref refs/heads/main " + seed]
+    sd_got = [kind(main, c) for c in sd]
+    sd_got.append(kind(main, "git symbolic-ref -qz refs/heads/review"))
+    sd_got.append(kind(main, "git symbolic-ref -qd refs/heads/sparebr"))
+    sd_got.append(kind(base, "git -C " + str(free) + " symbolic-ref -qdm reason refs/heads/x"))
+    sd_got.append(_rwh_without_hold(lambda: kind(main, sd[0])))
+    _rdp_git(main, "symbolic-ref", "--delete", "refs/heads/review")
+    _rdp_git(main, "update-ref", "refs/heads/review", tip)
+    _rdp_git(main, "branch", "-D", "sparebr")
+    check("rwh/symbolic-ref-chain-and-spellings-denies-red-on-revert", sd_got,
+          ["deny"] * 7 + ["unverifiable", "unverifiable", "allow", "allow"])
+    # update-ref option clusters: m consumes its reason attached or separated, so -dm reason REF
+    # deletes REF, never a ref named by the reason; a cluster character outside d/m leaves the
+    # written operand undetermined (fail closed); the same cluster on an unheld ref of the HELD
+    # repository is withheld (the repository-wide withholding), and on the unheld free repository
+    # it passes
+    uc = "git -C " + str(main) + " update-ref -dm reason refs/heads/review"
+    check("rwh/update-ref-cluster-denies-red-on-revert",
+          [kind(base, uc),
+           kind(base, "git -C " + str(main) + " update-ref -mreason -d refs/heads/review"),
+           kind(base, "git -C " + str(main) + " update-ref -dz refs/heads/review"),
+           kind(base, "git -C " + str(main) + " update-ref -dm reason refs/heads/unrelated"),
+           kind(base, "git -C " + str(free) + " update-ref -dm reason refs/heads/unrelated"),
+           _rwh_without_hold(lambda: kind(base, uc))],
+          ["deny", "deny", "unverifiable", "unverifiable", "allow", "allow"])
+    # update-ref dereferences a symbolic ref by default, so writing or deleting through a chain
+    # that converges on the held branch moves the held HEAD without naming it; --no-deref writes
+    # the symbolic ref itself (not the held branch) and an unrelated chain misses the held HEAD,
+    # but both are writes inside the held repository, withheld by the repository-wide withholding
+    # (the specific convergence denies tell the reach apart from the blanket withhold)
+    _rdp_git(main, "branch", "sparebr")
+    _rdp_git(main, "symbolic-ref", "refs/heads/alias", "refs/heads/review")
+    _rdp_git(main, "symbolic-ref", "refs/heads/alias2", "refs/heads/sparebr")
+    ua = "git -C " + str(main) + " update-ref refs/heads/alias " + seed
+    check("rwh/update-ref-symref-convergence-denies-red-on-revert",
+          [kind(base, ua),
+           kind(base, "git -C " + str(main) + " update-ref -d refs/heads/alias"),
+           kind(base, "git -C " + str(main) + " update-ref --no-deref refs/heads/alias " + seed),
+           kind(base, "git -C " + str(main) + " update-ref refs/heads/alias2 " + seed),
+           _rwh_without_hold(lambda: kind(base, ua))],
+          ["deny", "deny", "unverifiable", "unverifiable", "allow"])
+    _rdp_git(main, "symbolic-ref", "--delete", "refs/heads/alias")
+    _rdp_git(main, "symbolic-ref", "--delete", "refs/heads/alias2")
+    _rdp_git(main, "branch", "-D", "sparebr")
+    # a held worktree nested inside another worktree: a mutating command whose target repository's
+    # TOP LEVEL encloses the held directory on disk can delete or rewrite it (git clean -ffdx
+    # removes a nested worktree the way the denied worktree-remove would, and run from a
+    # subdirectory a :/ or .. pathspec still sweeps the whole tree), so the enclosing test is
+    # judged against rev-parse --show-toplevel, never the -C directory alone, and a subdirectory
+    # target denies with or without a pathspec; a sibling worktree of the held repository is
+    # withheld (the repository-wide withholding), and a whole-tree clean of an unheld unrelated
+    # repository passes
+    nest = main / "nested"
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(nest), tip)
+    marker("rev-n", workdir=str(nest))
+    en = "git -C " + str(main) + " clean -ffdx"
+    es = "git -C " + str(main / "sub") + " clean -ffdx"
+    check("rwh/nested-held-worktree-ancestor-denies-red-on-revert",
+          [kind(base, en), kind(base, "git -C " + str(main) + " reset --hard " + tip),
+           kind(base, es), kind(base, es + " :/"), kind(base, es + " .."),
+           kind(base, "git -C " + str(base / "other") + " clean -ffdx"),
+           kind(base, "git -C " + str(free) + " clean -ffdx"),
+           _rwh_without_hold(lambda: kind(base, en))],
+          ["deny", "deny", "deny", "deny", "deny", "unverifiable", "allow", "allow"])
+    (holds / "rev-n.json").unlink()
+    _rdp_git(main, "worktree", "remove", "--force", str(nest))
+    # while a hold is live only the enumerated read-only subcommands pass the shortcut: a verb
+    # outside the set that mutates the held tree in place (bisect, read-tree, checkout-index,
+    # sparse-checkout), fetch (an explicit refspec with --update-head-ok moves the held branch,
+    # from inside the held worktree or from a sibling), and a -c override on any verb (an alias
+    # can hide any mutation, refused by the program gate) each fail closed; the same shapes in the
+    # unheld free repository pass
+    ro = ["git bisect start " + tip + " " + seed, "git read-tree -u --reset " + seed,
+          "git checkout-index -f -a", "git sparse-checkout set sub", "git fetch",
+          "git fetch --update-head-ok . +" + seed + ":refs/heads/review",
+          "git -c alias.zz=reset zz --hard " + seed]
+    check("rwh/held-unlisted-verb-or-config-denies-red-on-revert",
+          [kind(held, c) for c in ro] +
+          [kind(main, "git fetch . +" + seed + ":refs/heads/review"),
+           kind(free, ro[0]), kind(free, ro[4]),
+           _rwh_without_hold(lambda: kind(held, ro[0]))],
+          ["deny"] * 8 + ["allow", "allow", "allow"])
+    # a leading assignment of any kind drops the read-only shortcut: a GIT_ override carried in
+    # the command (GIT_EXTERNAL_DIFF, the GIT_CONFIG_* family) can make a listed read verb run a
+    # program or re-point its repository, so while a hold is live the program gate refuses every
+    # leading assignment, whatever it names; the same assignment against the unheld free
+    # repository passes
+    ep = ["GIT_EXTERNAL_DIFF=/bin/true git -C " + str(held) + " diff " + seed,
+          "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=/bin/true "
+          "git -C " + str(held) + " status",
+          "GIT_CONFIG_PARAMETERS=\"'core.fsmonitor=/bin/true'\" git -C " + str(held) + " status",
+          "X=1 git -C " + str(held) + " status"]
+    check("rwh/held-assignment-prefix-denies-red-on-revert",
+          [kind(base, c) for c in ep] +
+          [kind(base, "X=1 git -C " + str(free) + " status"),
+           _rwh_without_hold(lambda: kind(base, ep[0]))],
+          ["deny"] * 4 + ["allow", "allow"])
+    # an option outside the verb's closed read-only set drops the shortcut: the diff family's
+    # --output writes a file at an arbitrary path operand, and grep -O and ls-remote --upload-pack
+    # run a program named in the command, so each is refused while the hold is live, the held
+    # target included; the same --output against a sibling worktree and against the unheld free
+    # repository from a held session is refused too (the operand is not a directory move, so
+    # where it lands is not resolved, and from the free target it could write into the held
+    # worktree), and with the hold reader reverted the first shape passes
+    vo = ["git -C " + str(held) + " diff --output=zf " + seed,
+          "git -C " + str(held) + " log -p --output=zf -1",
+          "git -C " + str(held) + " show --output=zf",
+          "git -C " + str(held) + " stash list -p --output=zf",
+          "git -C " + str(held) + " grep -O/bin/true x",
+          "git -C " + str(held) + " ls-remote --upload-pack=/bin/true " + str(main)]
+    check("rwh/held-write-or-program-option-denies-red-on-revert",
+          [kind(base, c) for c in vo] +
+          [kind(base, "git -C " + str(base / "other") + " diff --output=zf " + seed),
+           kind(main, "git -C " + str(free) + " diff --output=zf " + seed),
+           _rwh_without_hold(lambda: kind(base, vo[0]))],
+          ["deny"] * 8 + ["allow"])
+    # any git global option other than a literal -C drops the shortcut (a held target then
+    # denies, and the program gate refuses a -c configuration override), and the
+    # grammar check is what carries the decision: with it patched open, the -c core.fsmonitor
+    # spelling would pass as read-only, so this leg goes red when the check is removed
+    go = ["git -p -C " + str(held) + " log -1",
+          "git --exec-path=/usr/lib/git-core -C " + str(held) + " status",
+          "git -P -C " + str(held) + " status",
+          "git --no-pager -C " + str(held) + " log -1"]
+    fs = "git -c core.fsmonitor=/bin/true -C " + str(held) + " status"
+    saved_form = aiqt_hooks._rwh_read_only_form
+    aiqt_hooks._rwh_read_only_form = lambda tokens: True
+    try:
+        open_grammar_got = kind(base, fs)
+    finally:
+        aiqt_hooks._rwh_read_only_form = saved_form
+    check("rwh/held-global-option-denies-red-on-revert",
+          [kind(base, c) for c in go] + [kind(base, fs), open_grammar_got,
+           kind(base, "git -P -C " + str(free) + " status"),
+           kind(held, "git log -1"), kind(held, "git log -1x"),
+           _rwh_without_hold(lambda: kind(base, go[0]))],
+          ["deny"] * 5 + ["allow", "allow", "allow", "deny", "allow"])
+    # fetch, pull, push and send-pack can write any ref of the repository they target (send-pack
+    # is push's plumbing, limited only by the receiving side's own refusal, which configuration
+    # can relax), so from a sibling worktree of a held repository each denies; the same pull
+    # against the unheld free repository passes
+    rw = ["git -C " + str(base / "other") + " push . +" + seed + ":refs/heads/review",
+          "git -C " + str(base / "other") + " pull . main",
+          "git -C " + str(base / "other") + " send-pack --force " + str(main) + " " + seed +
+          ":refs/heads/review"]
+    check("rwh/sibling-ref-writer-denies-red-on-revert",
+          [kind(base, c) for c in rw] +
+          [kind(base, "git -C " + str(free) + " pull . main"),
+           _rwh_without_hold(lambda: kind(base, rw[2]))],
+          ["deny", "deny", "deny", "allow", "allow"])
+    # git config edit (the subcommand spelling of --edit) opens the configuration in an editor,
+    # a write; the --edit flag spelling already denied, and the --get read form still passes
+    ce = "git -C " + str(held) + " config edit"
+    check("rwh/held-config-edit-denies-red-on-revert",
+          [kind(base, ce), kind(base, "git -C " + str(held) + " config --edit"),
+           kind(base, "git -C " + str(held) + " config --get user.name"),
+           _rwh_without_hold(lambda: kind(base, ce))],
+          ["deny", "deny", "allow", "allow"])
+    # a symbolic-ref probe that fails with a fatal code leaves the written ref's chain unknown,
+    # which fails closed on THAT cause while a hold is live, never read as a direct ref; the
+    # unpatched control is withheld too (an update-ref inside the held repository, the
+    # repository-wide withholding), so the two refusals are told apart by the cause each names
+    class _RwhFatal:
+        returncode = 128
+        stdout = b""
+        stderr = b""
+    saved_probe = aiqt_hooks._review_git
+
+    def _fatal_symref(repo, *args, **kw):
+        if args and args[0] == "symbolic-ref":
+            return _RwhFatal()
+        return saved_probe(repo, *args, **kw)
+    aiqt_hooks._review_git = _fatal_symref
+    try:
+        fatal_res = run(base, "git -C " + str(main) + " update-ref refs/heads/unrelated " + seed)
+    finally:
+        aiqt_hooks._review_git = saved_probe
+    plain_res = run(base, "git -C " + str(main) + " update-ref refs/heads/unrelated " + seed)
+    check("rwh/ref-chain-fatal-code-fails-closed",
+          [_rdp_kind(fatal_res), "dereferences cannot be resolved" in _rwh_reason(fatal_res),
+           _rdp_kind(plain_res), "outside the enumerated read-only form" in _rwh_reason(plain_res),
+           _rwh_without_hold(lambda: kind(
+               base, "git -C " + str(main) + " update-ref refs/heads/unrelated " + seed))],
+          ["unverifiable", True, "unverifiable", True, "allow"])
+    # a symbolic-ref write whose held-HEAD-chain probe fails with a fatal code leaves that chain
+    # unknown, so whether the write moves the held HEAD cannot be ruled out: fail closed on THAT
+    # cause, never read as an empty chain that would let a write of the held branch through. The
+    # unpatched control is withheld too (a ref write inside the held repository, the
+    # repository-wide withholding), so the two refusals are told apart by the cause each names,
+    # and the revert leg shows both come from the marker check alone.
+    saved_probe2 = aiqt_hooks._review_git
+
+    def _fatal_symref2(repo, *args, **kw):
+        if args and args[0] == "symbolic-ref":
+            return _RwhFatal()
+        return saved_probe2(repo, *args, **kw)
+    aiqt_hooks._review_git = _fatal_symref2
+    try:
+        head_fatal_res = run(base, "git -C " + str(main) +
+                             " symbolic-ref refs/heads/unrelated refs/heads/main")
+    finally:
+        aiqt_hooks._review_git = saved_probe2
+    head_plain_res = run(base, "git -C " + str(main) +
+                         " symbolic-ref refs/heads/unrelated refs/heads/main")
+    check("rwh/head-chain-fatal-code-fails-closed",
+          [_rdp_kind(head_fatal_res),
+           "symbolic HEAD chain" in _rwh_reason(head_fatal_res),
+           _rdp_kind(head_plain_res),
+           "outside the enumerated read-only form" in _rwh_reason(head_plain_res),
+           _rwh_without_hold(lambda: kind(
+               base, "git -C " + str(main) +
+               " symbolic-ref refs/heads/unrelated refs/heads/main"))],
+          ["unverifiable", True, "unverifiable", True, "allow"])
+    # a held worktree the raw text names only inside a program-running option value (ls-remote
+    # --upload-pack, grep -O, rebase -x, submodule foreach, difftool -x) joins the hold set but
+    # belongs to neither the unheld target's repository nor a tree it encloses, and the option runs
+    # a program the certain-target reasoning cannot bind: the program gate refuses each while the
+    # hold it names is live. The same option value naming the unheld free
+    # repository instead, with no other reachable live hold, passes, and the revert leg shows the
+    # refusal comes from the live hold alone.
+    fo = ["git -C " + str(free) + " ls-remote --upload-pack='git -C " + str(held) +
+          " reset --hard " + seed + "' " + str(free),
+          "git -C " + str(free) + " grep -O'git -C " + str(held) + " reset' x",
+          "git -C " + str(free) + " rebase -x 'git -C " + str(held) + " reset --hard " + seed +
+          "' HEAD",
+          "git -C " + str(free) + " submodule foreach 'git -C " + str(held) + " reset --hard " +
+          seed + "'",
+          "git -C " + str(free) + " difftool -x 'git -C " + str(held) + " reset --hard " + seed + "'"]
+    check("rwh/foreign-held-in-option-value-denies-red-on-revert",
+          [kind(base, c) for c in fo] +
+          [kind(base, "git -C " + str(free) + " ls-remote --upload-pack='git -C " + str(free) +
+                " reset' " + str(free)),
+           _rwh_without_hold(lambda: kind(base, fo[0]))],
+          ["deny"] * 5 + ["allow", "allow"])
+    # a held worktree nested under a worktree of a DIFFERENT repository, named by a -C step that is
+    # not the resolved target, is swept by a whole-tree clean of the enclosing foreign tree; the
+    # command's text names it, so the enclosing test (the target's top level, never the -C directory
+    # alone) denies. A -C step naming the unheld free repository instead, and the foreign clean that
+    # names no held worktree, both pass.
+    rep2 = base / "rep2"
+    rep2.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(rep2))
+    (rep2 / "f").write_text("z\n", encoding="utf-8")
+    _rdp_git(rep2, "add", "-A")
+    _rdp_git(rep2, "commit", "-q", "-m", "seed")
+    rep2tip = _rdp_git(rep2, "rev-parse", "HEAD")
+    foreign = base / "foreign"
+    foreign.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(foreign))
+    fnest = foreign / "nestedheld"
+    _rdp_git(rep2, "worktree", "add", "-q", "--detach", str(fnest), rep2tip)
+    rep2_holds = rep2 / ".git" / "aiqt" / "review-holds"
+    rep2_holds.mkdir(parents=True)
+    (rep2_holds / "rev-fn.json").write_text(json.dumps(dict(
+        version=1, workdir=str(fnest), head=rep2tip, dispatch_id="rev-fn",
+        created_utc=_rwh_iso(), expires_utc=_rwh_iso(4))), encoding="utf-8")
+    fn = "git -C " + str(fnest) + " -C " + str(foreign) + " clean -ffdx"
+    check("rwh/foreign-nested-held-clean-denies-red-on-revert",
+          [kind(base, fn),
+           kind(base, "git -C " + str(free) + " -C " + str(foreign) + " clean -ffdx"),
+           kind(base, "git -C " + str(foreign) + " clean -ffdx"),
+           _rwh_without_hold(lambda: kind(base, fn))],
+          ["deny", "allow", "allow", "allow"])
+    (rep2_holds / "rev-fn.json").unlink()
+    _rdp_git(rep2, "worktree", "remove", "--force", str(fnest))
+    # a config subcommand must be classified a write before any read-option shortcut: 'config edit',
+    # 'config set', 'config unset' open or alter configuration, so a trailing read flag cannot mask
+    # them (the pin's read-flag check ran first and let 'config edit -l' through). The read
+    # subcommands and the old-syntax read flag still pass.
+    cc = ["git -C " + str(held) + " config edit -l",
+          "git -C " + str(held) + " config edit --get",
+          "git -C " + str(held) + " config unset a.b --get",
+          "git -C " + str(held) + " config set a.b c --list"]
+    check("rwh/held-config-subcommand-write-denies-red-on-revert",
+          [kind(base, c) for c in cc] +
+          [kind(base, "git -C " + str(held) + " config get user.name"),
+           kind(base, "git -C " + str(held) + " config list"),
+           kind(base, "git -C " + str(held) + " config --get user.name"),
+           _rwh_without_hold(lambda: kind(base, cc[0]))],
+          ["deny"] * 4 + ["allow", "allow", "allow", "allow"])
+    # a held worktree named only inside a program-running option value (--upload-pack, grep -O,
+    # rebase -x, submodule foreach, difftool -x) is reachable by the option's program even when it
+    # is a SIBLING worktree of the target's own repository, which the one-plain-git-on-the-target
+    # reasoning cannot rule out, so the program gate refuses each, and the same option value naming
+    # no held worktree too; a plain read on the sibling still passes, and the revert leg shows every
+    # refusal comes from the live hold alone
+    sib = ["git -C " + str(base / "other") + " rebase -x 'git -C " + str(held) + " reset --hard " +
+           seed + "' HEAD",
+           "git -C " + str(base / "other") + " ls-remote --upload-pack='git -C " + str(held) +
+           " reset --hard " + seed + "' " + str(free),
+           "git -C " + str(base / "other") + " submodule foreach 'git -C " + str(held) +
+           " reset --hard " + seed + "'",
+           "git -C " + str(base / "other") + " difftool -x 'git -C " + str(held) + " reset --hard " +
+           seed + "'"]
+    check("rwh/sibling-held-in-option-value-denies-red-on-revert",
+          [kind(base, c) for c in sib] +
+          [kind(base, "git -C " + str(base / "other") + " rebase -x 'git -C " + str(free) +
+                " reset' HEAD"),
+           kind(base, "git -C " + str(base / "other") + " log --oneline"),
+           _rwh_without_hold(lambda: kind(base, sib[0]))],
+          ["deny"] * 5 + ["allow", "allow"])
+    # the opaque-path residual drops the session cwd from the hold set (a glob or brace character in
+    # its path), but the session's own live holds are still judged: a whole-tree clean of a foreign
+    # tree that encloses a held worktree of the SESSION's repository is denied even when the session
+    # cwd is opaque, so the reach is the union of the hold set, the session holds and the target
+    # holds. A plain session cwd reaches the same deny (the control that isolates the opaque path),
+    # and the same opaque session against an unrelated target that encloses nothing passes.
+    rsrc = base / "rsrc"
+    rsrc.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(rsrc))
+    (rsrc / "f").write_text("q\n", encoding="utf-8")
+    _rdp_git(rsrc, "add", "-A")
+    _rdp_git(rsrc, "commit", "-q", "-m", "seed")
+    rsrctip = _rdp_git(rsrc, "rev-parse", "HEAD")
+    (rsrc / "o[1]").mkdir()
+    (rsrc / "plain").mkdir()
+    rencl = base / "rencl"
+    rencl.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(rencl))
+    rsnest = rencl / "nestedheld"
+    _rdp_git(rsrc, "worktree", "add", "-q", "--detach", str(rsnest), rsrctip)
+    rsrc_holds = rsrc / ".git" / "aiqt" / "review-holds"
+    rsrc_holds.mkdir(parents=True)
+    (rsrc_holds / "rev-rs.json").write_text(json.dumps(dict(
+        version=1, workdir=str(rsnest), head=rsrctip, dispatch_id="rev-rs",
+        created_utc=_rwh_iso(), expires_utc=_rwh_iso(4))), encoding="utf-8")
+    rsc = "git -C " + str(rencl) + " clean -ffdx"
+    check("rwh/session-hold-opaque-cwd-reach-denies-red-on-revert",
+          [kind(rsrc / "o[1]", rsc), kind(rsrc / "plain", rsc),
+           kind(rsrc / "o[1]", "git -C " + str(free) + " commit --allow-empty -m x"),
+           _rwh_without_hold(lambda: kind(rsrc / "o[1]", rsc))],
+          ["deny", "deny", "allow", "allow"])
+    (rsrc_holds / "rev-rs.json").unlink()
+    _rdp_git(rsrc, "worktree", "remove", "--force", str(rsnest))
+    # a relative path after -C, cd or an override anywhere in the raw text resolves against a
+    # directory this rule cannot fix, so while a hold is live each is withheld, a relative -C value
+    # that is no directory at all included (commit -C HEAD, the disclosed over-refusal, withheld as
+    # unresolvable). The relative steps inside rebase -x, and the same option value naming an
+    # ABSOLUTE unheld path, are refused by the program gate first (a plain deny); the plain commit
+    # with no relative operand and no program option still passes, and the revert legs show each
+    # refusal comes from the live hold alone.
+    rel = ["git -C " + str(free) + " rebase -x 'git -C ../x reset --hard " + seed + "' HEAD",
+           "git -C " + str(free) + " rebase -x 'cd ../x && git reset --hard " + seed + "' HEAD",
+           "git -C " + str(free) + " commit -C HEAD --allow-empty"]
+    check("rwh/relative-raw-operand-unverifiable-red-on-revert",
+          [kind(main, c) for c in rel] +
+          [kind(main, "git -C " + str(free) + " rebase -x 'git -C " + str(free) + " reset --hard " +
+                seed + "' HEAD"),
+           kind(main, "git -C " + str(free) + " commit --allow-empty -m x"),
+           _rwh_without_hold(lambda: kind(main, rel[0])),
+           _rwh_without_hold(lambda: kind(main, rel[2]))],
+          ["deny", "deny", "unverifiable", "deny", "allow", "allow", "allow"])
+    # program-running options on a sibling worktree of the held repository (target 'other'): the
+    # option's program removes the held worktree by name, moves the held branch by ref, or runs
+    # through a transport helper (--upload-pack). The program gate refuses each first, and its
+    # reason legs pin that by text. Each also binds to a worktree of the HELD repository, so with
+    # the gate patched off the repository-wide withholding still withdraws it whether or not the
+    # option's path is read, and those reason legs pin THAT branch by its text: the kind alone
+    # cannot tell the two apart. A plain read on the same sibling and an unrelated-target commit
+    # with no program option still pass, and the revert leg shows the refusal comes from the live
+    # hold alone.
+    srev = ["git -C " + str(base / "other") + " rebase -x 'git worktree remove --force held' HEAD",
+            "git -C " + str(base / "other") +
+            " rebase -x 'git update-ref refs/heads/review HEAD' HEAD",
+            "git -C " + str(base / "other") +
+            " ls-remote --upload-pack='git worktree remove --force held; git-upload-pack' " +
+            str(free)]
+    srev_res = [run(base, c) for c in srev]
+    srev_nogate = _rwh_without_gate(lambda: [run(base, c) for c in srev])
+    check("rwh/sibling-repo-held-program-option-denies-red-on-revert",
+          [_rdp_kind(r) for r in srev_res] +
+          ["a form that runs a program or shell text" in _rwh_reason(r) for r in srev_res] +
+          [_rdp_kind(r) for r in srev_nogate] +
+          ["outside the enumerated read-only form" in _rwh_reason(r) for r in srev_nogate] +
+          [kind(base, "git -C " + str(base / "other") + " status"),
+           kind(base, "git -C " + str(free) + " commit --allow-empty -m x"),
+           _rwh_without_hold(lambda: kind(base, srev[0]))],
+          ["deny"] * 3 + [True] * 3 + ["unverifiable"] * 3 + [True] * 3 +
+          ["allow", "allow", "allow"])
+    # unrelated-target shapes (target the unheld 'free') that still reach the held worktree: the
+    # held worktree is named only through a relative step resolved against the target's tree
+    # ('-C ../held', 'cd ../held'), or through a spelling the raw scan does not read, run from a
+    # session inside the held repository (an env --chdir value, a quote-spliced -C operand, a 'cd'
+    # stuck to rebase's -x short option, a git '!' alias). The two relative-step shapes land the
+    # held repository in the hold set because the relative operand resolves against the target;
+    # the other four reach the session's own
+    # hold. While that hold is live the program gate refuses all six (rebase -x runs shell text). A
+    # plain read-only command and an unrelated commit with no program option still pass, and the
+    # revert leg shows each refusal comes from the live hold.
+    rurev = [(base, "git -C " + str(free) + " rebase -x 'git -C ../held reset --hard " + seed +
+              "' HEAD"),
+             (base, "git -C " + str(free) + " rebase -x 'cd ../held && git reset --hard " + seed +
+              "' HEAD"),
+             (main, "git -C " + str(free) + " rebase -x 'env --chdir=" + str(held) +
+              " git reset --hard " + seed + "' HEAD"),
+             (main, "git -C " + str(free) + " rebase -x 'git -C \"" + str(held)[:-2] + "\"" +
+              str(held)[-2:] + " reset --hard " + seed + "' HEAD"),
+             (main, "git -C " + str(free) + " rebase '-xcd " + str(held) + " && git reset --hard " +
+              seed + "' HEAD"),
+             (main, "git -C " + str(free) + " rebase -x 'git -c alias.z=\"!cd " + str(held) +
+              " && git reset --hard " + seed + "\" z' HEAD")]
+    check("rwh/unrelated-target-reaches-held-denies-red-on-revert",
+          [kind(cwd, c) for cwd, c in rurev] +
+          [kind(base, "git -C " + str(free) + " status"),
+           kind(base, "git -C " + str(free) + " commit --allow-empty -m x"),
+           _rwh_without_hold(lambda: kind(rurev[0][0], rurev[0][1])),
+           _rwh_without_hold(lambda: kind(rurev[2][0], rurev[2][1]))],
+          ["deny"] * 6 + ["allow", "allow", "allow", "allow"])
+    # the curated model inside the program gate is what carries the env --chdir,
+    # attached-short-option and alias shapes (the raw scan reads neither their held path nor any
+    # step of theirs): with _rwh_program_word patched to see no program, each falls through to the
+    # unrelated-target pass, so this leg goes red when the curated model is removed. The two
+    # relative-step shapes do not depend on it (raw_relative withholds them) and stay withheld under the patch,
+    # and so does the quote-spliced shape: its spliced prefix is an absolute raw-text directory
+    # step the resolved target does not account for, which the directory-step withholding catches
+    # even with the program guard off, a second guard on that shape.
+    saved_prog = aiqt_hooks._rwh_program_word
+    aiqt_hooks._rwh_program_word = lambda eff: None
+    try:
+        noprog_got = [kind(cwd, c) for cwd, c in rurev]
+    finally:
+        aiqt_hooks._rwh_program_word = saved_prog
+    check("rwh/unrelated-target-program-option-discriminates", noprog_got,
+          ["unverifiable", "unverifiable", "allow", "unverifiable", "allow", "allow"])
+    # directory steps INSIDE a program-running option's value, where the held worktree is reached
+    # through a relative step whose base the session cannot supply: a -C into a SUBDIRECTORY of
+    # the unheld target (rebase -x runs from the worktree's top level, here a textual ancestor of
+    # the walked directory), two cd steps in a row (found only because the first step lands on an
+    # ancestor; two relative steps in general are not resolved), and an absolute cd, -C,
+    # --work-tree or GIT_ step inside the value followed by a relative step. Each lands the held
+    # repository in the hold set through the widened resolution (every walked directory, every
+    # absolute raw-text step, and their textual ancestors), and the program gate then refuses the
+    # rebase -x while that hold is live. The same shape stepping into the unheld free repository
+    # stays allowed (the refusal comes from the live hold, not the shape), and the revert leg
+    # shows it comes from the marker alone.
+    out = base / "out"
+    out.mkdir()
+    nest = [(base, "git -C " + str(free) + "/sub rebase -x 'git -C ../held reset --hard " +
+             seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'cd .. && cd held && git reset --hard " +
+             seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'cd " + str(base) +
+             " && git -C held reset --hard " + seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'git -C " + str(base) +
+             " -C held reset --hard " + seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'git --work-tree=" + str(base) +
+             " log; git -C held reset --hard " + seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'GIT_WORK_TREE=" + str(base) +
+             " true; git -C held reset --hard " + seed + "' HEAD")]
+    check("rwh/option-value-directory-step-reaches-held-denies-red-on-revert",
+          [kind(cwd, c) for cwd, c in nest] +
+          [kind(out, "git -C " + str(free) + " rebase -x 'cd " + str(base) +
+                " && git -C free reset --hard " + seed + "' HEAD"),
+           _rwh_without_hold(lambda: kind(nest[0][0], nest[0][1]))],
+          ["deny"] * 6 + ["allow", "allow"])
+    # the widened resolution is what discovers each of those holds: with it patched empty, no
+    # case lands the held repository in the hold set, so every one falls through to the
+    # unrelated-target pass (this leg goes red when the resolution is removed); with it patched
+    # to the walked directories and the session cwd alone (no ancestors), the two cases whose
+    # only base is an ancestor stay undiscovered while the absolute-step cases still land,
+    # telling the two halves of the resolution apart.
+    saved_bases = aiqt_hooks._rwh_rel_bases
+    aiqt_hooks._rwh_rel_bases = lambda bases, cwd: []
+    try:
+        nobase_got = [kind(cwd, c) for cwd, c in nest]
+    finally:
+        aiqt_hooks._rwh_rel_bases = saved_bases
+    aiqt_hooks._rwh_rel_bases = lambda bases, cwd: list(bases) + ([cwd] if cwd else [])
+    try:
+        noanc_got = [kind(cwd, c) for cwd, c in nest]
+    finally:
+        aiqt_hooks._rwh_rel_bases = saved_bases
+    check("rwh/option-value-directory-step-resolution-discriminates",
+          nobase_got + noanc_got,
+          ["allow"] * 6 + ["allow", "allow", "deny", "deny", "deny", "deny"])
+    # a hold known only because the session sits in a held repository (or in a sibling worktree of
+    # it) does not withhold a one-plain-git command whose certain target is an unrelated repository
+    # and that carries no program-running form, so a session in a review-held repository can still
+    # commit elsewhere (a hook or program the target's configuration already names is the disclosed
+    # indirect-git residual, not a shape this check certifies as unable to reach the held
+    # worktree). From a worktree of the held repository and from a sibling worktree the commit
+    # passes; the same command against the held worktree itself still denies, and the revert leg
+    # shows that deny comes from the live hold alone.
+    so = "git -C " + str(held) + " reset --hard " + seed
+    check("rwh/session-only-hold-allows-unrelated-target",
+          [kind(main, "git -C " + str(free) + " commit --allow-empty -m x"),
+           kind(base / "other", "git -C " + str(free) + " commit --allow-empty -m x"),
+           kind(base, "git -C " + str(free) + " commit --allow-empty -m x"),
+           kind(main, so), _rwh_without_hold(lambda: kind(main, so))],
+          ["allow", "allow", "allow", "deny", "allow"])
+    # while a hold is live, every git form that runs a program or shell text is refused with a
+    # plain reason, whatever its target and without resolving where the program runs: the known
+    # routes to a held worktree from an unrelated target (a symlinked -C into a subdirectory, a
+    # submodule foreach program run below the walked tree, two relative steps in a row, an
+    # absolute cd written with an option) and forms outside the curated model (mergetool,
+    # difftool, a config write that can install a ! alias, an EDITOR assignment, hook run,
+    # clone --template, help -w). The session sits in the held repository, so the hold is live and
+    # seen; the revert legs show each refusal comes from the live hold alone.
+    (base / "lnk").symlink_to(free / "sub")
+    tpl = base / "tpl"
+    tpl.mkdir()
+    pf = [(main, "git -C " + str(base / "lnk") + " rebase -f -x 'git -C ../held reset --hard " +
+           seed + "' HEAD~1"),
+          (main, "git -C " + str(free) + " submodule foreach 'git -C ../../held reset --hard " +
+           seed + "'"),
+          (main, "git -C " + str(free) + " rebase -f -x 'cd sub && git -C ../../held reset --hard " +
+           seed + "' HEAD~1"),
+          (main, "git -C " + str(free) + " rebase -x 'cd -P " + str(base) +
+           " && git -C held reset --hard " + seed + "' HEAD"),
+          (main, "git -C " + str(free) + " mergetool"),
+          (main, "git -C " + str(free) + " difftool HEAD"),
+          (main, "git -C " + str(free) + " config alias.z '!true'"),
+          (main, "EDITOR=true git -C " + str(free) + " commit --allow-empty"),
+          (main, "git -C " + str(free) + " hook run pre-commit"),
+          (main, "git -C " + str(free) + " clone --template=" + str(tpl) + " " + str(free) + " " +
+           str(base / "clonex")),
+          (main, "git -C " + str(free) + " help -w log")]
+    pf_res = [run(cwd, c) for cwd, c in pf]
+    check("rwh/program-form-while-hold-live-denies-red-on-revert",
+          [_rdp_kind(r) for r in pf_res] +
+          ["a form that runs a program or shell text" in _rwh_reason(r) for r in pf_res] +
+          [_rwh_without_hold(lambda: kind(pf[0][0], pf[0][1])),
+           _rwh_without_hold(lambda: kind(pf[4][0], pf[4][1]))],
+          ["deny"] * 11 + [True] * 11 + ["allow", "allow"])
+    # the program gate is what refuses them: with it patched off, the four known routes fall
+    # back to the relative-operand withholding (UNVERIFIABLE, since the session's hold is live)
+    # and the seven forms outside the curated model reach the unrelated-target pass, so this leg
+    # goes red when the gate is removed
+    check("rwh/program-form-gate-discriminates",
+          _rwh_without_gate(lambda: [kind(cwd, c) for cwd, c in pf]),
+          ["unverifiable"] * 4 + ["allow"] * 7)
+    # the control: the same program-running forms with no live hold the rule can see (a session
+    # outside every repository, the unheld free repository as target) are still allowed, so the
+    # gate fires on the live hold, not on the form alone
+    pn = ["git -C " + str(free) + " rebase -x 'make' HEAD",
+          "git -C " + str(free) + " submodule foreach true",
+          "git -C " + str(free) + " mergetool",
+          "git -C " + str(free) + " config alias.z '!true'",
+          "EDITOR=true git -C " + str(free) + " commit --allow-empty"]
+    check("rwh/program-form-no-live-hold-allows", [kind(out, c) for c in pn], ["allow"] * 5)
+    # an absolute cd written with an option (-P, -L, --) inside an option value is read like a
+    # plain cd: the raw scan skips cd's option words, so the absolute directory becomes a base and
+    # the relative -C after it lands the held repository in the hold set. The target and the
+    # session lie outside the held worktree's parent, so no textual ancestor finds it. The same
+    # step landing in the unheld free repository stays allowed, and the revert leg shows the
+    # refusal comes from the live hold alone.
+    xroot = tmp / "rwhx"
+    xfree = xroot / "xfree"
+    xfree.mkdir(parents=True)
+    _rdp_git(xroot, "init", "-q", "-b", "main", str(xfree))
+    xout = xroot / "out"
+    xout.mkdir()
+    co_cases = ["git -C " + str(xfree) + " rebase -x 'cd " + flag + " " + str(base) +
+                " && git -C held reset --hard " + seed + "' HEAD" for flag in ("-P", "-L", "--")]
+    check("rwh/cd-option-absolute-step-reaches-held-denies-red-on-revert",
+          [kind(xout, c) for c in co_cases] +
+          [kind(xout, "git -C " + str(xfree) + " rebase -x 'cd -P " + str(base) +
+                " && git -C free reset --hard " + seed + "' HEAD"),
+           _rwh_without_hold(lambda: kind(xout, co_cases[0]))],
+          ["deny"] * 3 + ["allow", "allow"])
+    # a cwd that is missing, relative or carries a NUL byte hides the session repository and its
+    # holds, so a git command outside the read-only grammar, and an absent command, fail closed,
+    # in the standalone preflight (main with the payload on stdin) as in the handler; a non-git
+    # command and a read-only git still pass, and the same mutation from an absolute cwd outside
+    # every repository passes, so the refusal comes from the cwd alone
+    import contextlib
+    import io
+
+    def raw(command, **extra):
+        payload = dict(hook_event_name="PreToolUse", session_id="s1", tool_name="Bash",
+                       tool_input=dict(command=command))
+        payload.update(extra)
+        return _rdp_kind(aiqt_hooks.review_workdir_hold(payload))
+
+    rs = "git reset --hard " + seed
+    saved_stdin = sys.stdin
+    pre_out = io.StringIO()
+    try:
+        sys.stdin = io.StringIO(json.dumps(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                                tool_input=dict(command=rs))))
+        with contextlib.redirect_stdout(pre_out):
+            pre_rc = aiqt_hooks.main(["review_workdir_hold"])
+    finally:
+        sys.stdin = saved_stdin
+    check("rwh/unreadable-cwd-fails-closed",
+          [raw(rs), raw(rs, cwd="held"), raw(rs, cwd=str(held) + "\x00"),
+           raw(rs, cwd=None), _rdp_kind(aiqt_hooks.review_workdir_hold(dict(
+               hook_event_name="PreToolUse", session_id="s1", tool_name="Bash", tool_input={}))),
+           pre_rc, '"permissionDecision": "deny"' in pre_out.getvalue(),
+           "missing, relative or carries a NUL byte" in pre_out.getvalue(),
+           raw("ls"), raw("git -C " + str(held) + " status"), raw(rs, cwd=str(out))],
+          ["unverifiable"] * 5 + [0, True, True, "allow", "allow", "allow"])
+    # a git identity probe that cannot answer is never read as "not a repository": the probe
+    # returns its documented cannot-evaluate (None) when git could not be run, timed out or ran
+    # past the decision deadline, and reading that as an absent repository would hide the live
+    # hold and allow the mutation. One stub makes the identity probe time out, one makes it fail
+    # to run; under each, a mutation of the held worktree and one of the unheld free repository
+    # are both withheld (the holds are exactly what cannot be read), with the reason naming the
+    # unanswerable probe. The unstubbed controls show the probe is what carried each decision,
+    # and an absolute cwd naming no existing directory fails closed the same way.
+    saved_run = aiqt_hooks.subprocess.run
+
+    def _probe_stub(exc):
+        def stub(argv, **kw):
+            if "--absolute-git-dir" in argv:
+                raise exc
+            return saved_run(argv, **kw)
+        return stub
+
+    probe_got = []
+    for exc in (aiqt_hooks.subprocess.TimeoutExpired("git", 5), OSError("injected probe failure")):
+        aiqt_hooks.subprocess.run = _probe_stub(exc)
+        try:
+            stub_held = run(base, rh)
+            probe_got += [_rdp_kind(stub_held), "cannot be probed" in _rwh_reason(stub_held),
+                          kind(base, "git -C " + str(free) + " commit --allow-empty -m x")]
+        finally:
+            aiqt_hooks.subprocess.run = saved_run
+    gone_res = aiqt_hooks.review_workdir_hold(dict(
+        hook_event_name="PreToolUse", cwd=str(base / "gone"), session_id="s1", tool_name="Bash",
+        tool_input=dict(command=rh)))
+    check("rwh/identity-probe-error-fails-closed",
+          probe_got +
+          [_rdp_kind(gone_res), "names no directory that exists" in _rwh_reason(gone_res),
+           kind(base, rh), kind(base, "git -C " + str(free) + " commit --allow-empty -m x")],
+          ["unverifiable", True, "unverifiable"] * 2 +
+          ["unverifiable", True, "deny", "allow"])
+    # a probe git ANSWERS badly is the same cannot-evaluate: a signal kill (a negative return
+    # code), a nonzero fatal other than git's specific not-a-git-repository answer (a dubious
+    # ownership refusal), and an exit-0 reply that is empty or one line each read as the probe
+    # error, never as "not a repository" (which would hide the live hold and allow the mutation
+    # of the held worktree, and of the unheld free one too, since the holds are exactly what
+    # cannot be read); only the specific not-a-git-repository answer stays the inert allow,
+    # pinned by the last leg in the other direction (an implementation reading every 128 fatal
+    # as the error would withhold the unrelated commit there too)
+    saved_idp = aiqt_hooks._review_git
+
+    class _RwhReply:
+        def __init__(self, rc, out=b"", err=b""):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = err
+
+    def _reply_stub(rc, out=b"", err=b""):
+        def stub(repo, *args, **kw):
+            if args and args[0] == "rev-parse" and "--absolute-git-dir" in args:
+                return _RwhReply(rc, out, err)
+            return saved_idp(repo, *args, **kw)
+        return stub
+
+    shape_got = []
+    for stub in (_reply_stub(-9),
+                 _reply_stub(128, err=b"fatal: detected dubious ownership in repository at 'x'\n"),
+                 _reply_stub(0, out=b""),
+                 _reply_stub(0, out=b"/only/one/line\n")):
+        aiqt_hooks._review_git = stub
+        try:
+            shape_res = run(base, rh)
+            shape_got += [_rdp_kind(shape_res), "cannot be probed" in _rwh_reason(shape_res),
+                          kind(base, "git -C " + str(free) + " commit --allow-empty -m x")]
+        finally:
+            aiqt_hooks._review_git = saved_idp
+    aiqt_hooks._review_git = _reply_stub(
+        128, err=b"fatal: not a git repository (or any of the parent directories): .git\n")
+    try:
+        shape_got.append(kind(base, "git -C " + str(free) + " commit --allow-empty -m x"))
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    check("rwh/identity-probe-reply-shapes-fail-closed",
+          shape_got, ["unverifiable", True, "unverifiable"] * 4 + ["allow"])
+    # the echoed-option exit-0 reply (a git too old to know the probe's options prints them back)
+    # is pinned on its own: it must read as the probe error, never as a usable identity. With the
+    # dash-leading test reverted, the echo builds a bogus identity whose marker directory never
+    # exists, so every hold reads as absent and the held reset is allowed: this goes red then.
+    aiqt_hooks._review_git = _reply_stub(0, out=b"--absolute-git-dir\n--git-common-dir\n")
+    try:
+        echo_res = run(base, rh)
+        echo_got = [_rdp_kind(echo_res), "cannot be probed" in _rwh_reason(echo_res),
+                    kind(base, "git -C " + str(free) + " commit --allow-empty -m x")]
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    check("rwh/identity-probe-echoed-option-fails-closed",
+          echo_got, ["unverifiable", True, "unverifiable"])
+    # the not-a-repository answer is matched at the start of one of stderr's own lines, never as a
+    # substring: a 128 fatal that merely ECHOES a path holding those words (dubious ownership in a
+    # directory so named) stays the probe error. With a substring match reverted in, that reply
+    # reads as "not a repository", every hold is hidden and the held reset is allowed (red); the
+    # control shows the answer on its own line is still the inert allow.
+    aiqt_hooks._review_git = _reply_stub(
+        128, err=b"fatal: detected dubious ownership in repository at "
+                 b"'/srv/not a git repository/x'\n")
+    try:
+        line_res = run(base, rh)
+        line_got = [_rdp_kind(line_res), "cannot be probed" in _rwh_reason(line_res)]
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    aiqt_hooks._review_git = _reply_stub(
+        128, err=b"warning: something else\nfatal: not a git repository (or any of the parent "
+                 b"directories): .git\n")
+    try:
+        line_got.append(kind(base, "git -C " + str(free) + " commit --allow-empty -m x"))
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    check("rwh/identity-probe-not-a-repo-line-anchored",
+          line_got, ["unverifiable", True, "allow"])
+    # the identity probe pins LC_ALL=C into its child environment, so the not-a-repository answer
+    # is matched against untranslated text whatever locale the session inherits; with the pin
+    # reverted, the recorded environment carries the inherited locale instead (red on revert)
+    probe_envs = []
+
+    def _env_recorder(argv, **kw):
+        probe_envs.append(kw.get("env"))
+        return _RwhReply(
+            128, err=b"fatal: not a git repository (or any of the parent directories): .git\n")
+    saved_run_lc = aiqt_hooks.subprocess.run
+    saved_lc_all = os.environ.get("LC_ALL")
+    aiqt_hooks.subprocess.run = _env_recorder
+    os.environ["LC_ALL"] = "de_DE.UTF-8"
+    try:
+        aiqt_hooks._review_git(str(free), "rev-parse", "--absolute-git-dir", "--git-common-dir")
+    finally:
+        aiqt_hooks.subprocess.run = saved_run_lc
+        if saved_lc_all is None:
+            os.environ.pop("LC_ALL", None)
+        else:
+            os.environ["LC_ALL"] = saved_lc_all
+    check("rwh/identity-probe-locale-pin-red-on-revert",
+          [len(probe_envs), probe_envs and probe_envs[0] is not None and
+           probe_envs[0].get("LC_ALL")],
+          [1, "C"])
+    # end to end through main() with a stub git on PATH that is KILLED for the identity-probe
+    # argv and runs the real git for every other call: the standalone preflight withholds an
+    # unrelated-target commit, naming the unanswerable probe, and allows the same payload again
+    # with the stub off the PATH, so the fail-closed reading of a killed probe carries through
+    # the composed entry point, not only the in-process decision
+    stub_bin = base / "stubbin"
+    stub_bin.mkdir()
+    (stub_bin / "git").write_text(
+        "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = \"--absolute-git-dir\" ]; then\n"
+        "    kill -9 $$\n  fi\ndone\nexec " + shutil.which("git") + " \"$@\"\n",
+        encoding="utf-8")
+    os.chmod(stub_bin / "git", 0o755)
+    e2e_payload = json.dumps(dict(
+        hook_event_name="PreToolUse", cwd=str(main), tool_name="Bash",
+        tool_input=dict(command="git -C " + str(free) + " commit --allow-empty -m x")))
+    saved_path_env = os.environ["PATH"]
+    e2e_out = io.StringIO()
+    os.environ["PATH"] = str(stub_bin) + os.pathsep + saved_path_env
+    try:
+        sys.stdin = io.StringIO(e2e_payload)
+        with contextlib.redirect_stdout(e2e_out):
+            e2e_rc = aiqt_hooks.main(["review_workdir_hold"])
+    finally:
+        os.environ["PATH"] = saved_path_env
+        sys.stdin = saved_stdin
+    ctl_out = io.StringIO()
+    try:
+        sys.stdin = io.StringIO(e2e_payload)
+        with contextlib.redirect_stdout(ctl_out):
+            ctl_rc = aiqt_hooks.main(["review_workdir_hold"])
+    finally:
+        sys.stdin = saved_stdin
+    check("rwh/identity-probe-killed-e2e-fails-closed",
+          [e2e_rc, '"permissionDecision": "deny"' in e2e_out.getvalue(),
+           "cannot be probed" in e2e_out.getvalue(),
+           ctl_rc, '"permissionDecision": "deny"' in ctl_out.getvalue()],
+          [0, True, True, 0, False])
+    # a session cwd whose identity probe cannot answer hides the session repository's holds, so
+    # an ABSENT command fails closed exactly as it does for an unreadable cwd; the unstubbed
+    # control (the same absent command from the same cwd) still passes, so the refusal comes
+    # from the unanswerable probe alone
+
+    def _none_probe(repo, *args, **kw):
+        if args and args[0] == "rev-parse" and "--absolute-git-dir" in args:
+            return None
+        return saved_idp(repo, *args, **kw)
+
+    def _absent_cmd():
+        return aiqt_hooks.review_workdir_hold(dict(
+            hook_event_name="PreToolUse", cwd=str(base), session_id="s1", tool_name="Bash",
+            tool_input={}))
+    aiqt_hooks._review_git = _none_probe
+    try:
+        ac_res = _absent_cmd()
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    check("rwh/absent-command-probe-error-fails-closed",
+          [_rdp_kind(ac_res), "cannot be probed" in _rwh_reason(ac_res),
+           _rdp_kind(_absent_cmd())],
+          ["unverifiable", True, "allow"])
+    # the held worktree's OWN identity probe failing, while every other directory answers,
+    # leaves the one-plain-git unrelated-target pass unable to show its certain target distinct
+    # from the held worktree: fail closed, naming the unanswerable probe; the unstubbed control
+    # still passes, so the refusal comes from that one probe alone
+
+    def _held_probe(repo, *args, **kw):
+        if args and args[0] == "rev-parse" and "--absolute-git-dir" in args and \
+                str(repo) == str(held):
+            return None
+        return saved_idp(repo, *args, **kw)
+    aiqt_hooks._review_git = _held_probe
+    try:
+        hv_res = run(main, "git -C " + str(free) + " commit --allow-empty -m x")
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    check("rwh/held-worktree-probe-error-fails-closed",
+          [_rdp_kind(hv_res), "cannot be probed" in _rwh_reason(hv_res),
+           kind(main, "git -C " + str(free) + " commit --allow-empty -m x")],
+          ["unverifiable", True, "allow"])
+    # while a hold is visible, EVERY entry of the program gate's own lists is pinned by a form of
+    # its own that must deny: for-each-repo runs a git command in each repository a configuration
+    # key lists (an allowed command can write that key first), maintenance writes that list and
+    # schedules runs over it, the connection services (upload-pack, receive-pack, upload-archive,
+    # http-backend) run in the repository their operand or request names, and the rest run a tool,
+    # helper, hook, viewer or shell text. Each leg goes red when its entry is removed from the
+    # gate: the form then falls through to the unrelated-target pass (the target 'free' is
+    # unheld) and would be allowed.
+    ge = ["config user.email qa@example.invalid", "credential fill", "daemon --export-all",
+          "difftool HEAD", "for-each-repo --config=maintenance.repo status", "hook run pre-commit",
+          "http-backend", "imap-send x", "instaweb", "maintenance register", "mergetool",
+          "receive-pack .", "send-email x.patch", "shell", "svn fetch", "upload-archive .",
+          "upload-pack .", "verify-commit HEAD", "verify-tag v1", "web--browse x",
+          "clone --template=" + str(tpl) + " " + str(free) + " " + str(base / "clonez"),
+          "init --template=" + str(tpl) + " " + str(base / "initz"),
+          "help --web log", "help --info log", "help --man log",
+          "help -w log", "help -i log", "help -m log"]
+    ge_res = [run(main, "git -C " + str(free) + " " + c) for c in ge]
+    check("rwh/program-gate-each-entry-denies-red-on-revert",
+          [_rdp_kind(r) for r in ge_res] +
+          ["a form that runs a program or shell text" in _rwh_reason(r) for r in ge_res] +
+          [_rwh_without_hold(lambda: kind(
+               main, "git -C " + str(free) + " for-each-repo --config=maintenance.repo status")),
+           _rwh_without_hold(lambda: kind(main, "git -C " + str(free) + " maintenance register"))],
+          ["deny"] * 28 + [True] * 28 + ["allow", "allow"])
+    # while a hold is visible, a git option that writes a file or tree at an arbitrary path
+    # operand is refused whatever the operand names: the operand is not a directory move, so it
+    # joins no hold set and where it lands is not resolved, and from the unheld free target it
+    # could otherwise write into the held worktree (checkout-index --prefix= re-roots the whole
+    # checkout; --output and the archive, format-patch, index-pack, fast-import and mailsplit
+    # output options write at their operand). Each leg goes red when its verb's entry is removed:
+    # the form then reaches the unrelated-target pass and would be allowed. The same verb with no
+    # writing option, the same option with no hold the rule can see, and the first shape with the
+    # hold reader reverted each still pass. Red on revert: removing an entry whose form here has
+    # a RELATIVE operand lets that form reach the unrelated-target pass (allow), and removing one
+    # whose form names the held path lets it fall to the held-path gate, whose distinct reason
+    # turns that reason leg red.
+    wv = ["checkout-index -a -f --prefix=" + str(held) + "/",
+          "diff --output=" + str(held) + "/f HEAD",
+          "log -1 --output=zf", "show --output=zf", "whatchanged --output=zf",
+          "stash list --output=zf", "diff-tree --output=zf HEAD", "diff-index --output=zf HEAD",
+          "diff-files --output=zf",
+          "archive --output=" + str(held) + "/f HEAD", "archive -o zf HEAD",
+          "format-patch -o " + str(held) + " -1", "format-patch --output-directory=zd -1",
+          "index-pack -o zf.idx p.pack", "fast-import --export-marks=" + str(held) + "/m",
+          "mailsplit -o" + str(held) + " mbox"]
+    wv_res = [run(main, "git -C " + str(free) + " " + c) for c in wv]
+    check("rwh/write-path-option-while-hold-live-denies-red-on-revert",
+          [_rdp_kind(r) for r in wv_res] +
+          ["writes a file or tree" in _rwh_reason(r) for r in wv_res] +
+          [kind(main, "git -C " + str(free) + " checkout-index -a"),
+           kind(out, "git -C " + str(free) + " diff --output=zf HEAD"),
+           _rwh_without_hold(lambda: kind(main, "git -C " + str(free) + " " + wv[0]))],
+          ["deny"] * 16 + [True] * 16 + ["allow", "allow", "allow"])
+    # the write gate is what refuses the RELATIVE-operand shapes: with it patched off, each
+    # free-target relative form reaches the unrelated-target pass (the path operand is no
+    # directory step, so nothing else catches it), so this leg goes red when the gate is removed
+    # (a held-absolute operand is kept out: the held-path gate would still refuse that)
+    saved_wgate = aiqt_hooks._rwh_write_gate
+    aiqt_hooks._rwh_write_gate = lambda segments: None
+    try:
+        nowrite_got = [kind(main, "git -C " + str(free) + " " + c)
+                       for c in (wv[2], wv[3], wv[10])]
+    finally:
+        aiqt_hooks._rwh_write_gate = saved_wgate
+    check("rwh/write-path-option-gate-discriminates", nowrite_got, ["allow"] * 3)
+    # the write-option table's NEW entries, each pinned by a relative-operand form so the
+    # enumerated option alone (never the held-path gate) carries the deny: fast-export's marks
+    # export, range-diff/rev-list/shortlog/reflog --output, diagnose and bugreport in the letter
+    # and the long spelling, init and clone --separate-git-dir, and credential-store --file.
+    # Each leg goes red when its entry is removed (the form then reaches the unrelated-target
+    # pass and is allowed); the plain rev-list read and the revert leg are the controls.
+    wn = ["fast-export --export-marks=zm HEAD",
+          "range-diff --output=zrd HEAD~1 HEAD~1 HEAD",
+          "rev-list --output=zf HEAD", "shortlog --output=zs HEAD", "reflog --output=zr",
+          "diagnose -o zdir", "diagnose --output-directory=zdir",
+          "bugreport -o zdir", "bugreport --output-directory=zdir",
+          "init --separate-git-dir=zg znew",
+          "clone --separate-git-dir=zg " + str(free) + " " + str(base / "clonesep"),
+          "credential-store --file=zc get"]
+    wn_res = [run(main, "git -C " + str(free) + " " + c) for c in wn]
+    check("rwh/write-path-option-added-entries-deny-red-on-revert",
+          [_rdp_kind(r) for r in wn_res] +
+          ["writes a file or tree" in _rwh_reason(r) for r in wn_res] +
+          [kind(main, "git -C " + str(free) + " rev-list HEAD"),
+           _rwh_without_hold(lambda: kind(main, "git -C " + str(free) + " " + wn[0]))],
+          ["deny"] * 12 + [True] * 12 + ["allow", "allow"])
+    # fast-import's second marks export is pinned on its own: this goes red when
+    # --export-pack-edges is removed from the table (the relative operand keeps the held-path
+    # gate out of the decision), with the revert leg as the control
+    pe = "git -C " + str(free) + " fast-import --export-pack-edges=zpe"
+    pe_res = run(main, pe)
+    check("rwh/fast-import-export-pack-edges-denies-red-on-revert",
+          [_rdp_kind(pe_res), "writes a file or tree" in _rwh_reason(pe_res),
+           _rwh_without_hold(lambda: kind(main, pe))],
+          ["deny", True, "allow"])
+    # while a hold is visible, a git segment carrying a literal ABSOLUTE path that resolves to or
+    # inside the held worktree is refused whatever the word means to its verb: an option value
+    # outside the enumerated tables (apply's --directory relocation, and a spelling the verb does
+    # not even define, since the gate reads the operand path, never the verb's grammar)
+    # and a bare positional operand are caught, a symlinked alias resolves to the same held tree,
+    # and the boundary is exact (the held path itself and a path just inside deny; the prefix
+    # sibling held2 does not match). The same out-of-table option naming the unheld free tree
+    # passes while the hold is still live, and the revert leg shows each deny comes from the
+    # live hold alone.
+    hp = ["fast-export --anonymize-map-file=" + str(held) + "/f HEAD",
+          "apply --directory=" + str(held) + " x.patch",
+          "add " + str(held) + "/f",
+          "add " + str(held),
+          "add " + str(base / "alias") + "/f"]
+    hp_res = [run(main, "git -C " + str(free) + " " + c) for c in hp]
+    check("rwh/held-path-operand-denies-red-on-revert",
+          [_rdp_kind(r) for r in hp_res] +
+          ["resolves to or inside" in _rwh_reason(r) for r in hp_res] +
+          [kind(main, "git -C " + str(free) + " add " + str(base / "held2") + "/f"),
+           kind(main, "git -C " + str(free) + " fast-export --anonymize-map-file=" +
+                str(free) + "/f HEAD"),
+           _rwh_without_hold(lambda: kind(main, "git -C " + str(free) + " " + hp[0]))],
+          ["deny"] * 5 + [True] * 5 + ["allow", "allow", "allow"])
+    # the held-path gate is what refuses them: with it patched off, each shape reaches the
+    # unrelated-target pass (an absolute operand is no directory step, so nothing else reads
+    # it), so this leg goes red when the gate is removed
+    saved_hpgate = aiqt_hooks._rwh_held_path_gate
+    aiqt_hooks._rwh_held_path_gate = lambda segments, live: None
+    try:
+        nohp_got = [kind(main, "git -C " + str(free) + " " + c) for c in hp[:3]]
+    finally:
+        aiqt_hooks._rwh_held_path_gate = saved_hpgate
+    check("rwh/held-path-operand-gate-discriminates", nohp_got, ["allow"] * 3)
+    # a path INSIDE the held worktree that does not exist yet is still a hold-set candidate,
+    # consulted at its nearest existing ancestor: a command that creates the directory first and
+    # then mutates through it (-C, or cd) reads the held repository's markers and is refused. The
+    # session sits outside every repository, so the hold is visible only through that candidate;
+    # the same creation inside the unheld free repository stays allowed, and the revert leg shows
+    # each refusal comes from the live hold alone (with the ancestor consultation reverted, the
+    # missing path reads as "no repository" and every one of these is allowed: red on revert).
+    cp = ["mkdir " + str(held) + "/zznew && git -C " + str(held) + "/zznew reset --hard " + seed,
+          "mkdir " + str(held) + "/zxnew; git -C " + str(held) + "/zxnew checkout -q " + seed,
+          "mkdir -p " + str(held) + "/zynew && cd " + str(held) + "/zynew && git reset --hard " +
+          seed]
+    cp_res = [run(base, c) for c in cp]
+    check("rwh/created-path-into-held-denies-red-on-revert",
+          [_rdp_kind(r) for r in cp_res] +
+          ["review-in-flight-pins-its-artefact" in _rwh_reason(cp_res[0]),
+           kind(base, "mkdir " + str(free) + "/zznew && git -C " + str(free) +
+                "/zznew reset --hard " + seed),
+           _rwh_without_hold(lambda: kind(base, cp[0]))],
+          ["deny", "deny", "unverifiable", True, "allow", "allow"])
+    # a literal absolute path in ANY segment joins the hold set, so a command that first creates a
+    # link to the held worktree and then mutates through it is withheld: the held path appears as
+    # the ln operand, and the link itself does not exist at decision time. The same link to the
+    # unheld free repository stays allowed, and the revert legs show the refusal comes from the
+    # live hold through that operand alone (with the operand candidates reverted, nothing names
+    # the held repository and the command is allowed: red on revert).
+    ln_cmd = "ln -s " + str(held) + " " + str(base) + "/zlinknew && git -C " + str(base) + \
+        "/zlinknew reset --hard " + seed
+    check("rwh/created-link-into-held-denies-red-on-revert",
+          [kind(base, ln_cmd),
+           kind(base, "ln -s " + str(free) + " " + str(base) + "/zlinkfree && git -C " +
+                str(base) + "/zlinkfree reset --hard " + seed),
+           _rwh_without_hold(lambda: kind(base, ln_cmd))],
+          ["unverifiable", "allow", "allow"])
+    # from a session OUTSIDE every held repository, an absolute write operand or option value into
+    # the held worktree makes that hold visible (the operand is a hold-set candidate, its missing
+    # file consulted at the held ancestor), so the write gate or the held-path gate refuses it;
+    # before this, such a session saw no hold and every one of these forms was allowed (red on
+    # revert). The same forms writing into the unheld free tree, and the hold-reader revert leg,
+    # stay allowed.
+    vo2 = ["bundle create " + str(held) + "/zvb HEAD",
+           "diff --output=" + str(held) + "/zvd HEAD",
+           "worktree add " + str(held) + "/zwt",
+           "fast-export --export-marks=" + str(held) + "/zvm HEAD",
+           "rev-list --output=" + str(held) + "/zvf HEAD",
+           "read-tree --index-output=" + str(held) + "/zvi HEAD"]
+    vo2_res = [run(base, "git -C " + str(free) + " " + c) for c in vo2]
+    check("rwh/outside-session-held-write-operand-denies-red-on-revert",
+          [_rdp_kind(r) for r in vo2_res] +
+          ["resolves to or inside" in _rwh_reason(vo2_res[0]),
+           "writes a file or tree" in _rwh_reason(vo2_res[1]),
+           kind(base, "git -C " + str(free) + " bundle create " + str(free) + "/zvb HEAD"),
+           kind(base, "git -C " + str(free) + " diff --output=" + str(free) + "/zvd HEAD"),
+           _rwh_without_hold(lambda: kind(base, "git -C " + str(free) + " " + vo2[0]))],
+          ["deny"] * 6 + [True, True, "allow", "allow", "allow"])
+    # the two options that admit write paths from the command's INPUT are refused while a hold is
+    # visible: apply --unsafe-paths lets the patch content name paths outside the target tree, and
+    # fast-import --allow-unsafe-features admits a stream's own marks-export features, so the
+    # write path travels in data no argv scan reads. Each leg goes red when its table entry is
+    # removed (the form then reaches the unrelated-target pass and is allowed); the same verbs
+    # without the option, and the revert leg, stay allowed.
+    cc2 = ["fast-import --allow-unsafe-features --quiet",
+           "apply --unsafe-paths " + str(base) + "/zp.patch"]
+    cc2_res = [run(main, "git -C " + str(free) + " " + c) for c in cc2]
+    check("rwh/content-carried-write-options-deny-red-on-revert",
+          [_rdp_kind(r) for r in cc2_res] +
+          ["writes a file or tree" in _rwh_reason(r) for r in cc2_res] +
+          [kind(main, "git -C " + str(free) + " fast-import --quiet"),
+           kind(main, "git -C " + str(free) + " apply " + str(base) + "/zp.patch"),
+           _rwh_without_hold(lambda: kind(main, "git -C " + str(free) + " " + cc2[0]))],
+          ["deny", "deny", True, True, "allow", "allow", "allow"])
+    # the direct held-worktree mutation (-C into the held tree) carries the direct hold reason,
+    # never the held-path gate's write-path over-refusal text, while a held path in any other
+    # position keeps that gate's own reason: the two reasons are pinned apart (red when the
+    # direct classification is reverted)
+    dt_res = run(base, "git -C " + str(held) + " reset --hard " + seed)
+    in_res = run(main, "git -C " + str(free) + " add " + str(held) + "/f")
+    check("rwh/held-direct-target-deny-reason-red-on-revert",
+          [_rdp_kind(dt_res), "review-in-flight-pins-its-artefact" in _rwh_reason(dt_res),
+           _rdp_kind(in_res), "resolves to or inside" in _rwh_reason(in_res)],
+          ["deny", True, "deny", True])
+    # pins the DISCLOSED residual of the file-writing class: a RELATIVE positional write operand
+    # resolves against a directory this rule cannot fix and cannot be told from a ref or pathspec,
+    # so it stays allowed (the docs and the manifest residue state exactly this remainder); this
+    # check goes red if that residual is ever closed or widened silently
+    check("rwh/relative-write-operand-residual-allows",
+          kind(main, "git -C " + str(free) + " bundle create ../held/zwb HEAD"), "allow")
+    # every hold-set candidate is resolved PHYSICALLY before the nearest-existing-ancestor walk,
+    # so a literal absolute path that walks '..' out of a directory the same command creates
+    # still consults the held repository (a textual walk strips the missing component and the
+    # '..' and consults the unrelated parent, hiding the hold: red when the resolution is
+    # reverted). The -C form binds inside the held worktree (the direct deny), the cd form is
+    # withheld, and a write operand through the missing directory is refused by the held-path
+    # gate; the same shapes through the unheld free repository, and the hold-reader revert leg,
+    # stay allowed.
+    dd = ["mkdir " + str(base) + "/zdnew && git -C " + str(base) + "/zdnew/../held reset --hard "
+          + seed,
+          "mkdir " + str(base) + "/zdnew2 && cd " + str(base) + "/zdnew2/../held && git reset "
+          "--hard " + seed,
+          "git -C " + str(free) + " bundle create " + str(base) + "/zdnew3/../held/zdb HEAD"]
+    dd_res = [run(base, c) for c in dd]
+    check("rwh/dotdot-candidate-normalised-denies-red-on-revert",
+          [_rdp_kind(r) for r in dd_res] +
+          ["review-in-flight-pins-its-artefact" in _rwh_reason(dd_res[0]),
+           kind(base, "mkdir " + str(free) + "/zdnew && git -C " + str(free) +
+                "/zdnew/../sub reset --hard " + seed),
+           _rwh_without_hold(lambda: kind(base, dd[0]))],
+          ["deny", "unverifiable", "deny", True, "allow", "allow"])
+    # the TARGET of a link the command creates joins the hold set even where it is RELATIVE
+    # (a plain symbolic link's target resolved against the link's own directory, here also the
+    # session directory), so create-link-then-mutate is
+    # withheld for a relative ln target as for an absolute one; an ln operand no literal text
+    # resolves leaves the created link's destination unknown and is withheld while a hold is
+    # live rather than guessed. The free-target link and the revert legs stay allowed.
+    lr = "ln -s held " + str(base) + "/zlrel && git -C " + str(base) + "/zlrel reset --hard " + seed
+    lo = 'ln -s "$D" ' + str(base) + "/zlopq && git -C " + str(free) + " commit --allow-empty -m x"
+    lo_res = run(main, lo)
+    check("rwh/created-link-relative-target-denies-red-on-revert",
+          [kind(base, lr),
+           kind(base, "ln -s free " + str(base) + "/zlfre && git -C " + str(base) +
+                "/zlfre reset --hard " + seed),
+           _rdp_kind(lo_res), "creates a link" in _rwh_reason(lo_res),
+           _rwh_without_hold(lambda: kind(base, lr)),
+           _rwh_without_hold(lambda: kind(main, lo))],
+          ["unverifiable", "allow", "unverifiable", True, "allow", "allow"])
+    # a PROCESS-RELATIVE path (/proc/self/..., /proc/<pid>/..., /dev/fd/...) in any structural
+    # position (an operand, option value or directory step) cannot be resolved by the hook (its
+    # meaning depends on the process that opens it), so the command is withheld outright, with
+    # the hold reader reverted too (the holds where it lands are exactly what cannot be read);
+    # the read-only grammar still passes a process-relative -C. The shell-body leg here is
+    # withheld by the one-plain-git rule whichever screen reads it, so it pins no screen of its
+    # own; the raw-text process-relative screen is pinned by its dedicated decision-changing
+    # vector further down (red on revert there, not here).
+    pr = ["git -C " + str(free) + " -C /proc/self/cwd/../held reset --hard " + seed,
+          "git -C " + str(free) + " bundle create /proc/self/cwd/../held/zpw HEAD",
+          "git -C " + str(free) + " commit --allow-empty -F /dev/fd/3"]
+    pb = 'bash -c "git -C ' + str(free) + ' bundle create /proc/self/cwd/../held/zpb HEAD"'
+    pr_res = run(base, pr[0])
+    check("rwh/process-relative-path-fails-closed-red-on-revert",
+          [_rdp_kind(pr_res)] + [kind(base, c) for c in pr[1:]] +
+          ["process-relative" in _rwh_reason(pr_res),
+           _rwh_without_hold(lambda: kind(base, pr[0])),
+           kind(base, "git -C /proc/self/cwd status"),
+           kind(main, pb),
+           _rwh_without_hold(lambda: kind(main, pb))],
+          ["unverifiable"] * 3 + [True, "unverifiable", "allow", "unverifiable", "allow"])
+    # a literal ABSOLUTE held path anywhere in the raw text joins the hold set, a quoted shell
+    # body (bash -c, eval) and a heredoc body included, so from a session outside every held
+    # repository the body-wrapped write into the held worktree is withheld (the body is not one
+    # plain git segment); the same body writing into the unheld free tree, and the revert leg,
+    # stay allowed (red when the raw-text widening is reverted: the hold goes unseen and every
+    # one of these is allowed).
+    sb = ['bash -c "git -C ' + str(free) + ' bundle create ' + str(held) + '/zsb HEAD"',
+          "eval 'git -C " + str(free) + " bundle create " + str(held) + "/zse HEAD'",
+          "sh <<'EOF'\ngit -C " + str(free) + " bundle create " + str(held) + "/zsh HEAD\nEOF"]
+    check("rwh/shell-body-held-path-denies-red-on-revert",
+          [kind(base, c) for c in sb] +
+          [kind(base, 'bash -c "git -C ' + str(free) + ' bundle create ' + str(free) +
+                '/zsb HEAD"'),
+           _rwh_without_hold(lambda: kind(base, sb[0]))],
+          ["unverifiable"] * 3 + ["allow", "allow"])
+    # an ATTACHED short-option value (-o/abs/path) is a hold-set candidate of its own: from a
+    # session outside every held repository it is the only spelling that makes this hold
+    # visible (the raw-text scan reads no path glued to a word), so the write gate's refusal of
+    # this form goes red when the attached-value candidate is reverted; the same value into the
+    # unheld free tree, and the hold-reader revert leg, stay allowed.
+    so = "git -C " + str(free) + " format-patch -o" + str(held) + "/zso -1"
+    so_res = run(base, so)
+    check("rwh/attached-short-option-candidate-denies-red-on-revert",
+          [_rdp_kind(so_res), "writes a file or tree" in _rwh_reason(so_res),
+           kind(base, "git -C " + str(free) + " format-patch -o" + str(free) + "/zso -1"),
+           _rwh_without_hold(lambda: kind(base, so))],
+          ["deny", True, "allow", "allow"])
+    # the held-path gate reads the same attached short-option value: a verb OUTSIDE the
+    # enumerated write tables carrying -F<held path> is refused by the gate alone (red when the
+    # gate's attached-value read is reverted: the form then reaches the unrelated-target pass
+    # and is allowed); the same spelling naming the free tree, and the revert leg, stay allowed.
+    gv = "git -C " + str(free) + " commit -F" + str(held) + "/f"
+    gv_res = run(base, gv)
+    check("rwh/held-path-gate-short-value-denies-red-on-revert",
+          [_rdp_kind(gv_res), "resolves to or inside" in _rwh_reason(gv_res),
+           kind(base, "git -C " + str(free) + " commit -F" + str(free) + "/g"),
+           _rwh_without_hold(lambda: kind(base, gv))],
+          ["deny", True, "allow", "allow"])
+    # a configured core.worktree that names a MISSING path inside the held worktree is consulted
+    # at its nearest existing ancestor like every other candidate, so the expansion still shows
+    # the hold (red when the expansion's ancestor consultation is reverted: the missing path
+    # roots no repository and the command is allowed); unsetting it restores the allow, and the
+    # hold-reader revert leg shows the withhold comes from the live hold alone.
+    _rdp_git(free, "config", "core.worktree", str(held) + "/zcw")
+    cwc = "git -C " + str(free) + " add -A"
+    cwc_got = [kind(base, cwc), _rwh_without_hold(lambda: kind(base, cwc))]
+    _rdp_git(free, "config", "--unset", "core.worktree")
+    cwc_got.append(kind(base, cwc))
+    check("rwh/config-worktree-candidate-ancestor-denies-red-on-revert",
+          cwc_got, ["unverifiable", "allow", "allow"])
+    # a candidate whose existence cannot be read at all (a self-looping symlink) is probed
+    # itself and the probe failure fails closed, with the hold reader reverted too (red when the
+    # unreadable-existence branch is reverted to walk up: the walk lands on the readable parent,
+    # the loop roots no repository, and the command is allowed); the missing-file sibling that
+    # CAN be walked stays the allow control.
+    (base / "zloop").symlink_to(base / "zloop")
+    ul = "git -C " + str(free) + " commit --allow-empty -F " + str(base) + "/zloop"
+    ul_res = run(base, ul)
+    check("rwh/unresolvable-candidate-probe-fails-closed-red-on-revert",
+          [_rdp_kind(ul_res), "cannot be probed" in _rwh_reason(ul_res),
+           _rwh_without_hold(lambda: kind(base, ul)),
+           kind(base, "git -C " + str(free) + " commit --allow-empty -F " + str(base) +
+                "/zlfile")],
+          ["unverifiable", True, "unverifiable", "allow"])
+    # a core.worktree LOOKUP that cannot answer (git fails with neither the set nor the unset
+    # reply) may hide a configured worktree and its repository's holds, so it is the same
+    # cannot-evaluate as a failed identity probe, never a clean expansion (red when the failed
+    # lookup is read as unset again: discovery finishes clean and the commit is allowed); the
+    # unstubbed control still passes.
+    def _cw_fail_stub(repo, *args, **kw):
+        if args and args[0] == "config" and "core.worktree" in args and str(repo) == str(free):
+            return _RwhReply(3, err=b"fatal: injected config failure\n")
+        return saved_idp(repo, *args, **kw)
+    aiqt_hooks._review_git = _cw_fail_stub
+    try:
+        cwf_res = run(base, "git -C " + str(free) + " commit --allow-empty -m x")
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    check("rwh/config-worktree-lookup-unknown-fails-closed-red-on-revert",
+          [_rdp_kind(cwf_res), "cannot be probed" in _rwh_reason(cwf_res),
+           kind(base, "git -C " + str(free) + " commit --allow-empty -m x")],
+          ["unverifiable", True, "allow"])
+    # an exit-0 identity reply is accepted ONLY as exactly the two newline-terminated path
+    # lines: a reply carrying an extra line, or missing its final newline, is the probe error,
+    # never a usable identity (red when the exact-shape test is loosened to 'at least three
+    # split parts': the junk reply builds an identity whose marker directory never exists,
+    # every hold reads as absent, and the held reset is allowed).
+    for stub_out in (b"/nonexistent/gitdir\n/nonexistent/common\nzz\n",
+                     b"/nonexistent/gitdir\n/nonexistent/common"):
+        aiqt_hooks._review_git = _reply_stub(0, out=stub_out)
+        try:
+            xl_res = run(base, rh)
+            xl_got = [_rdp_kind(xl_res), "cannot be probed" in _rwh_reason(xl_res)]
+        finally:
+            aiqt_hooks._review_git = saved_idp
+        if stub_out.endswith(b"zz\n"):
+            xl_all = xl_got
+        else:
+            xl_all += xl_got
+    check("rwh/identity-probe-extra-line-reply-fails-closed-red-on-revert",
+          xl_all + [kind(base, rh)], ["unverifiable", True] * 2 + ["deny"])
+    # a marker-directory listing that fails with "not found" reads as ABSENT only where the
+    # hook-owned chain that exists is a real directory whose child is missing: a DANGLING
+    # review-holds symlink, or a dangling aiqt component, still EXISTS there and is malformed
+    # state, never absence (red when the absence probe is reverted: the dangling link reads as
+    # no markers and the commit is allowed). Genuine absence after the link is removed, and a
+    # read-only form under the bad state, stay allowed.
+    dang = base / "dang"
+    dang.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(dang))
+    (dang / ".git" / "aiqt").mkdir()
+    (dang / ".git" / "aiqt" / "review-holds").symlink_to(dang / ".git" / "aiqt" / "zz-nowhere")
+    dcmd = "git -C " + str(dang) + " commit --allow-empty -m x"
+    d1 = run(base, dcmd)
+    d1_got = [_rdp_kind(d1), "does not lead to a directory" in _rwh_reason(d1),
+              kind(base, "git -C " + str(dang) + " status")]
+    (dang / ".git" / "aiqt" / "review-holds").unlink()
+    d1_got.append(kind(base, dcmd))
+    (dang / ".git" / "aiqt").rmdir()
+    (dang / ".git" / "aiqt").symlink_to(dang / ".git" / "zz-nowhere")
+    d1_got.append(kind(base, dcmd))
+    (dang / ".git" / "aiqt").unlink()
+    check("rwh/dangling-marker-symlink-fails-closed-red-on-revert",
+          d1_got, ["deny", True, "allow", "allow", "deny"])
+    # a RELATIVE target of a plain symbolic link the command creates is resolved by the kernel
+    # against the directory that holds the link, never the shell cwd: resolved here against the
+    # link's own directory, the create-link-then-step shape is withheld from a session OUTSIDE
+    # that directory too (red when the target is resolved against the session cwd again: the
+    # session resolution names no repository and the reset is allowed); a link created INSIDE an
+    # existing directory resolves its target against that directory (red when an existing
+    # directory is read as the link's own name again: the target is then resolved one level too
+    # high, names no repository, and the reset is allowed); and a link the command creates
+    # toward the held worktree's PARENT is followed one level, so a later candidate stepping
+    # through it is consulted where the link will point (red when the created-link rewrite is
+    # reverted). The free-target link and the hold-reader revert legs stay allowed.
+    ld = "ln -s held " + str(base) + "/zld && git -C " + str(base) + "/zld reset --hard " + seed
+    lp = "ln -s " + str(base) + " " + str(base) + "/zlp && git -C " + str(base) + \
+        "/zlp/held reset --hard " + seed
+    le = "ln -s ../held " + str(out) + " && git -C " + str(out) + "/held reset --hard " + seed
+    check("rwh/created-link-destination-directory-denies-red-on-revert",
+          [kind(out, ld), kind(out, lp), kind(out, le),
+           kind(out, "ln -s free " + str(base) + "/zldf && git -C " + str(base) +
+                "/zldf reset --hard " + seed),
+           _rwh_without_hold(lambda: kind(out, ld)),
+           _rwh_without_hold(lambda: kind(out, lp)),
+           _rwh_without_hold(lambda: kind(out, le))],
+          ["unverifiable", "unverifiable", "unverifiable", "allow", "allow", "allow", "allow"])
+    # the TARGET of a hard link and of a -r/--relative symbolic link is opened by ln itself
+    # against the directory the segment runs from, never against the link's directory: from the
+    # session directory, a relative -sr target naming the held worktree, and a hard link to a
+    # held file that an --output write then truncates through, each surface the hold (red when
+    # such a target is resolved against the link's directory again: it names no repository and
+    # the reset, or the write, is allowed). The plain -s link with the same relative target is
+    # still resolved against its own directory, where it names no repository, so it stays
+    # allowed (red if every form were resolved against the session directory); the free-target
+    # forms and the hold-reader revert legs stay allowed.
+    rl = ["ln -sr held " + str(out) + "/zr1 && git -C " + str(out) + "/zr1 reset --hard " + seed,
+          "ln -s --relative held " + str(out) + "/zr2 && git -C " + str(out) +
+          "/zr2 reset --hard " + seed,
+          "ln -s -r held " + str(out) + "/zr3 && git -C " + str(out) + "/zr3 reset --hard " +
+          seed]
+    hl = "ln held/f " + str(out) + "/zhf && git -C " + str(free) + " diff --output=" + \
+        str(out) + "/zhf HEAD"
+    hl_res = run(base, hl)
+    check("rwh/created-link-relative-and-hard-targets-at-working-dir-deny-red-on-revert",
+          [kind(base, c) for c in rl] +
+          [_rdp_kind(hl_res), "writes a file or tree" in _rwh_reason(hl_res),
+           kind(base, "ln -s held " + str(out) + "/zr4 && git -C " + str(out) +
+                "/zr4 reset --hard " + seed),
+           kind(base, "ln -sr free " + str(out) + "/zr5 && git -C " + str(out) +
+                "/zr5 reset --hard " + seed),
+           kind(base, "ln free/zf " + str(out) + "/zhf2 && git -C " + str(free) +
+                " diff --output=" + str(out) + "/zhf2 HEAD"),
+           _rwh_without_hold(lambda: kind(base, rl[0])),
+           _rwh_without_hold(lambda: kind(base, hl))],
+          ["unverifiable"] * 3 + ["deny", True] + ["allow"] * 5)
+    # an ln option word outside the modelled set (a short-option cluster other than -sr, such as
+    # -sf or -sfn; -t or --target-directory; -T; any other option, such as -n) leaves where the
+    # link lands or points unmodelled, so while a hold is live the command is withheld, naming
+    # the option; its operands still join the hold set under the readings the modelled forms
+    # make, taken at once (a -t or --target-directory value is never a target base), so a
+    # RELATIVE operand naming the held worktree at the session directory surfaces the hold from a
+    # session outside every held repository, a hook created in the held repository's own .git is
+    # withheld from its main worktree, and a step through a link toward the held worktree's
+    # PARENT is followed, a -sfn link named over an existing link to a directory included (red
+    # when the unmodelled form's operands no longer join the hold set, or its link is no longer
+    # recorded for the rewrite: the hold is then unseen and the reset is allowed; the reason leg
+    # is red when the option branch is removed and the generic one-plain-git refusal answers
+    # instead). The same link spelled with the modelled -s, toward the unheld free tree, stays
+    # allowed.
+    (base / "zw2").mkdir()
+    (base / "zwl").symlink_to(base / "zw2")
+    uh = [c + " && git -C " + str(out) + "/" + d + " reset --hard " + seed for c, d in (
+        ("ln -sf held " + str(out) + "/zu1", "zu1"), ("ln -sfn held " + str(out) + "/zu2", "zu2"),
+        ("ln -s -t " + str(out) + " held", "held"),
+        ("ln -s --target-directory=" + str(out) + " held", "held"),
+        ("ln -s -T held " + str(out) + "/zu3", "zu3"),
+        ("ln -s -n held " + str(out) + "/zu4", "zu4"))]
+    up = ["ln -sf " + str(base) + " " + str(base) + "/zw1 && git -C " + str(base) +
+          "/zw1/held reset --hard " + seed,
+          "ln -sfn " + str(base) + " " + str(base) + "/zwl && git -C " + str(base) +
+          "/zwl/held reset --hard " + seed]
+    hook = "ln -sf ../x .git/hooks/pre-commit"
+    uh_res = run(base, uh[0])
+    check("rwh/ln-unmodelled-option-withheld-while-hold-live-red-on-revert",
+          [_rdp_kind(uh_res), "'-sf'" in _rwh_reason(uh_res)] +
+          [kind(base, c) for c in uh[1:]] + [kind(out, c) for c in up] +
+          [kind(main, hook), kind(main, hook + " && git commit --allow-empty -m x"),
+           kind(out, "ln -s free " + str(out) + "/zu5 && git -C " + str(free) +
+                " commit --allow-empty -m x")],
+          ["unverifiable", True] + ["unverifiable"] * 7 + ["unverifiable"] * 2 + ["allow"])
+    # the same unmodelled ln forms with NO live hold decide exactly as they would with no
+    # review-hold hook at all: with every repository the hold set consults clear (no marker
+    # directory in the free tree, or the hold reader reverted so every marker reads absent) each
+    # is the inert allow, so adopters who write no markers see no new refusal (red when the
+    # option withhold fires whatever the marker state again: each leg is then withheld)
+    uf = [c + " && git -C " + str(free) + " commit --allow-empty -m x" for c in (
+        "ln -sf free " + str(out) + "/zv1", "ln -sfn free " + str(out) + "/zv2",
+        "ln -s -t " + str(out) + " free", "ln -s --target-directory=" + str(out) + " free",
+        "ln -s -T free " + str(out) + "/zv3", "ln -s -n free " + str(out) + "/zv4")]
+    check("rwh/ln-unmodelled-option-no-live-hold-inert-red-on-revert",
+          [kind(free, hook), kind(free, hook + " && git commit --allow-empty -m x")] +
+          [kind(out, c) for c in uf] +
+          [_rwh_without_hold(lambda: kind(main, hook))] +
+          [_rwh_without_hold(lambda c=c: kind(base, c)) for c in uh] +
+          [_rwh_without_hold(lambda c=c: kind(out, c)) for c in up],
+          ["allow"] * 17)
+    # under an unmodelled option each operand before the last is read as a target at the
+    # directory the segment runs from, at the last operand and at the last operand's parent,
+    # all at once, so each reading on its own surfaces a hold no other reading reaches from a
+    # session outside every held repository: a target naming the held worktree only from the
+    # link name's parent (red when that reading is dropped, or when only the segment-directory
+    # reading is kept), only from inside the last operand (red when the last-operand reading
+    # is dropped), and only from the segment directory, stepped through by the recorded link
+    # (red when that reading is dropped); each such revert leaves the hold unseen and the reset
+    # allowed. The same shape toward the unheld free tree, and the hold-reader revert legs,
+    # stay allowed.
+    tb = ["ln -sf ../held " + str(out) + "/zt1 && git -C " + str(out) + "/zt1 reset --hard " +
+          seed,
+          "ln -sf ../held " + str(out) + " && git -C " + str(out) + "/held reset --hard " + seed,
+          "ln -srf . " + str(out) + "/zt2 && git -C " + str(out) + "/zt2/held reset --hard " +
+          seed]
+    tb_res = run(base, tb[0])
+    check("rwh/ln-unmodelled-option-target-bases-each-red-on-revert",
+          [_rdp_kind(tb_res), "'-sf'" in _rwh_reason(tb_res)] + [kind(base, c) for c in tb[1:]] +
+          [kind(base, "ln -sf ../free " + str(out) + "/zt3 && git -C " + str(out) +
+                "/zt3 commit --allow-empty -m x")] +
+          [_rwh_without_hold(lambda c=c: kind(base, c)) for c in tb],
+          ["unverifiable", True, "unverifiable", "unverifiable"] + ["allow"] * 4)
+    # the same readings are taken for every operand count: with three operands or more the
+    # last is the directory the links are created in, and a relative target read against it
+    # surfaces the hold, for -sf, -sv and -s -f alike (red when the readings are taken for two
+    # operands only again: each target is then read at the segment directory alone, names no
+    # repository, and the reset is allowed). The modelled -s spelling of the same command is
+    # still withheld by its own branch, and the free-tree shape and the hold-reader revert leg
+    # stay allowed.
+    t3 = [o + " ../held " + n + " " + str(out) + " && git -C " + str(out) + "/held reset --hard " +
+          seed for o, n in (("ln -sf", "zt4"), ("ln -sv", "../zt5"), ("ln -s -f", "../zt5"))]
+    t3_res = run(base, t3[0])
+    check("rwh/ln-unmodelled-option-three-operand-link-directory-red-on-revert",
+          [_rdp_kind(t3_res), "'-sf'" in _rwh_reason(t3_res)] + [kind(base, c) for c in t3[1:]] +
+          [kind(base, "ln -s ../held zt4 " + str(out) + " && git -C " + str(out) +
+                "/held reset --hard " + seed),
+           kind(base, "ln -sf ../free zt6 " + str(out) + " && git -C " + str(out) +
+                "/free commit --allow-empty -m x"),
+           _rwh_without_hold(lambda: kind(base, t3[0]))],
+          ["unverifiable", True] + ["unverifiable"] * 3 + ["allow"] * 2)
+    # a run of leading slashes collapses to one before every screen: the kernel reads '//x' as
+    # '/x', so '//proc' and '///proc' spellings are process-relative (withheld outright), a '..'
+    # spelling that a textual collapse would erase stays process-relative (the components are
+    # read in order, the way the kernel resolves them), a '//'-prefixed held path inside a
+    # quoted shell body is read by the raw-text widening, and a '//'-prefixed step through a
+    # link the command creates toward the held worktree's parent is matched by the created-link
+    # rewrite. Red on revert: the '..' spelling when the component walk is reverted to a
+    # normalised-text test, the shell body when the pattern is narrowed to one leading slash,
+    # and the created-link step when the collapse is reverted (each then reads as clean and is
+    # allowed); the '//proc' spelling is read by the component walk and by the collapse each on
+    # its own, so it goes red only when both are reverted, and the '///proc' spelling stays
+    # withheld even then (normalised text folds three slashes to one). The same body naming the
+    # free tree, and the hold-reader revert legs, stay allowed.
+    ds = ["git -C " + str(free) + " -C //proc/self/cwd/../held reset --hard " + seed,
+          "git -C " + str(free) + " -C ///proc/self/cwd/../held reset --hard " + seed,
+          "git -C " + str(free) + " -C /proc/self/cwd/../../../zx reset --hard " + seed]
+    db = 'bash -c "git -C ' + str(free) + ' bundle create /' + str(held) + '/zdb HEAD"'
+    dl = "ln -s " + str(base) + " " + str(out) + "/zq && git -C /" + str(out) + \
+        "/zq/held reset --hard " + seed
+    ds0_res = run(base, ds[0])
+    check("rwh/leading-slash-run-collapsed-fails-closed-red-on-revert",
+          [_rdp_kind(ds0_res), "process-relative" in _rwh_reason(ds0_res)] +
+          [kind(base, c) for c in ds[1:]] +
+          [kind(base, db), kind(out, dl),
+           kind(base, 'bash -c "git -C ' + str(free) + ' bundle create /' + str(free) +
+                '/zdb HEAD"'),
+           _rwh_without_hold(lambda: kind(base, db)),
+           _rwh_without_hold(lambda: kind(out, dl))],
+          ["unverifiable", True, "unverifiable", "unverifiable", "unverifiable",
+           "unverifiable", "allow", "allow", "allow"])
+    # a QUOTED span that is one whole absolute path is read whole, spaces included: a quoted
+    # write operand into a worktree of the held repository whose name carries a space surfaces
+    # the hold from an outside session (red when the quoted-span widening is reverted: the
+    # character-class scan truncates the path at the space, the truncated prefix names no
+    # repository, and the body is allowed); the same span into the free tree, and the
+    # hold-reader revert leg, stay allowed.
+    spwt = base / "zsp tree"
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(spwt), tip)
+    sp = "bash -c 'git -C " + str(free) + ' bundle create "' + str(spwt) + '/out" HEAD\''
+    check("rwh/quoted-span-space-path-denies-red-on-revert",
+          [kind(base, sp),
+           kind(base, "bash -c 'git -C " + str(free) + ' bundle create "' + str(free) +
+                '/sub dir/out" HEAD\''),
+           _rwh_without_hold(lambda: kind(base, sp))],
+          ["unverifiable", "allow", "allow"])
+    # a configured core.worktree value is kept byte-exact apart from its final newline: a
+    # configured path whose name ends in a space is consulted at the directory git writes (red
+    # when the value is whitespace-trimmed again: the trimmed path names no repository and the
+    # command is allowed); an ambiguous lookup reply (exit 0 with empty output, exit 1 carrying
+    # output, exit 0 with a value missing git's final newline) is cannot-say, never provably
+    # unset or a usable value (red when any of the three is read as a clean answer again: the
+    # unterminated value then names a path in no repository and the commit is allowed), with
+    # the refusal naming the configuration lookup; the unset control stays
+    # allowed, and the withhold does not come from the hold reader (clear state allows).
+    bytewt = base / "hs "
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(bytewt), tip)
+
+    def _cw_reply_stub(rc, out_bytes):
+        def stub(repo, *args, **kw):
+            if args and args[0] == "config" and "core.worktree" in args and \
+                    str(repo) == str(free):
+                return _RwhReply(rc, out_bytes)
+            return saved_idp(repo, *args, **kw)
+        return stub
+
+    _rdp_git(free, "config", "core.worktree", str(bytewt))
+    bw = "git -C " + str(free) + " add -A"
+    bw_got = [kind(base, bw), _rwh_without_hold(lambda: kind(base, bw))]
+    _rdp_git(free, "config", "--unset", "core.worktree")
+    for rc, stub_out in ((0, b""), (1, b"/zcw\n"), (0, (str(base) + "/zcwu").encode())):
+        aiqt_hooks._review_git = _cw_reply_stub(rc, stub_out)
+        try:
+            amb_res = run(base, "git -C " + str(free) + " commit --allow-empty -m x")
+        finally:
+            aiqt_hooks._review_git = saved_idp
+        bw_got += [_rdp_kind(amb_res), "core.worktree" in _rwh_reason(amb_res)]
+    bw_got.append(kind(base, bw))
+    check("rwh/config-worktree-reply-byte-exact-and-unambiguous-red-on-revert",
+          bw_got, ["unverifiable", "allow"] + ["unverifiable", True] * 3 + ["allow"])
+    # a configured core.worktree that is PROCESS-RELATIVE cannot be resolved by the hook (its
+    # meaning depends on the process that opens it): it counts as held and fails closed, with
+    # the refusal naming the configured worktree rather than the identity probe (red when the
+    # branch is reverted: the hook's own process then resolves the magic link and discovery
+    # finishes wherever that lands); the hold reader is not what carries this withhold (it stays
+    # withheld with the reader reverted), and the unset control stays allowed.
+    _rdp_git(free, "config", "core.worktree", "/proc/self/cwd")
+    pw = "git -C " + str(free) + " add -A"
+    pw_res = run(base, pw)
+    pw_got = [_rdp_kind(pw_res), "core.worktree" in _rwh_reason(pw_res),
+              "process-relative" in _rwh_reason(pw_res),
+              _rwh_without_hold(lambda: kind(base, pw))]
+    _rdp_git(free, "config", "--unset", "core.worktree")
+    pw_got.append(kind(base, pw))
+    check("rwh/config-worktree-process-relative-fails-closed-red-on-revert",
+          pw_got, ["unverifiable", True, True, "unverifiable", "allow"])
+    # the exact-two-line identity test holds each conjunct on its own: an exit-0 reply of three
+    # split parts whose third is NOT empty (a junk line with no final newline), and one of MORE
+    # than three parts whose third IS empty (a blank extra line), are each the probe error (red
+    # when either conjunct is loosened: the junk reply builds an identity whose marker directory
+    # never exists, every hold reads as absent, and the held reset is allowed); a relative FIRST
+    # line is the probe error too, never joined into an invented identity (red when the
+    # absoluteness test is reverted), and a path realpath cannot even process is the probe error
+    # rather than "no repository" (red when the unresolvable view is read as absent again). The
+    # unstubbed control still denies.
+    cj_got = []
+    for stub_out in (b"/nonexistent/gitdir\n/nonexistent/common\nzz",
+                     b"/nonexistent/gitdir\n/nonexistent/common\n\n",
+                     b"relative/gitdir\nrelative/common\n"):
+        aiqt_hooks._review_git = _reply_stub(0, out=stub_out)
+        try:
+            cj_res = run(base, rh)
+            cj_got += [_rdp_kind(cj_res), "cannot be probed" in _rwh_reason(cj_res)]
+        finally:
+            aiqt_hooks._review_git = saved_idp
+    cj_got.append(aiqt_hooks._rwh_view(str(base) + "/zv\x00", {}) is aiqt_hooks._RWH_VIEW_ERROR)
+    cj_got.append(kind(base, rh))
+    check("rwh/identity-reply-conjuncts-fail-closed-red-on-revert",
+          cj_got, ["unverifiable", True] * 3 + [True, "deny"])
+    # a process-relative path seen ONLY by the raw-text widening (no structural token carries
+    # it: here it sits inside a quoted message operand with spaces) withholds while a hold is
+    # live, naming the cause. This is the one shape where that screen DECIDES: the segment is
+    # otherwise one plain git segment with a certain unheld target, so with the screen reverted
+    # the command is ALLOWED (red on revert); without the hold it is allowed too.
+    pm = "git -C " + str(free) + ' commit --allow-empty -m "see /proc/self/cwd there"'
+    pm_res = run(main, pm)
+    check("rwh/raw-text-process-relative-decides-red-on-revert",
+          [_rdp_kind(pm_res), "process-relative" in _rwh_reason(pm_res),
+           _rwh_without_hold(lambda: kind(main, pm))],
+          ["unverifiable", True, "allow"])
+    # every allowlisted verb carries a closed read-only option set: a verb present in one set but
+    # not the other would either fail closed forever or skip the option check
+    check("rwh/read-only-option-table-covers-allowlist",
+          sorted(set(aiqt_hooks._RWH_READ_ONLY_OPTS) ^ set(aiqt_hooks._RWH_READ_ONLY_VERBS)), [])
+
+    # ---------- allow cases, each naming the over-broad implementation it catches ----------
+    # catches: matching on "git in the held path" instead of on the enumerated read-only forms
+    # (fetch is NOT among them: an explicit refspec reaches the held branch, so it is covered by
+    # rwh/held-unlisted-verb-or-config-denies-red-on-revert above)
+    check("rwh/held-read-only-allows", [kind(held, c) for c in (
+        "git status", "git log --oneline", "git diff", "git show", "git rev-parse HEAD",
+        "git branch", "git stash list", "git config --get user.name")], ["allow"] * 8)
+    # a mutation in another worktree of the held repository is withheld (shared refs, objects and
+    # configuration, and a program-running option reaches the held worktree without naming it, the
+    # stated over-refusal), with the withhold text, never the held-worktree deny text; a read in
+    # that worktree still passes, and without the hold the mutation is allowed (red on revert)
+    ow_res = run(base, "git -C " + str(base / "other") + " checkout " + seed)
+    check("rwh/other-worktree-mutation-withheld-reads-allow",
+          [_rdp_kind(ow_res), "outside the enumerated read-only form" in _rwh_reason(ow_res),
+           kind(base, "git -C " + str(base / "other") + " log --oneline"),
+           _rwh_without_hold(lambda: kind(
+               base, "git -C " + str(base / "other") + " checkout " + seed))],
+          ["unverifiable", True, "allow", "allow"])
+    # catches: a path-prefix match without a boundary check (held2 shares held's prefix): the
+    # prefix sibling gets the repository-wide withhold, never the held-worktree deny, and the
+    # revert leg shows that withhold comes from the marker check alone
+    check("rwh/prefix-sibling-withheld-not-held",
+          [_rdp_kind(run(base, "git -C " + str(base / "held2") + " checkout " + seed)),
+           "outside the enumerated read-only form" in _rwh_reason(
+               run(base, "git -C " + str(base / "held2") + " checkout " + seed)),
+           _rwh_without_hold(lambda: kind(
+               base, "git -C " + str(base / "held2") + " checkout " + seed))],
+          ["unverifiable", True, "allow"])
+    # catches: judging by the session cwd over an explicit -C target (a cwd-judged implementation
+    # would withhold this unrelated commit run from inside the held worktree)
+    check("rwh/explicit-target-over-cwd-allows",
+          kind(held / "sub", "git -C " + str(free) + " commit --allow-empty -m x"), "allow")
+    # catches: a raw substring scan that fires on the held path as data
+    check("rwh/path-as-data-allows", kind(base, "grep checkout " + str(held) + "/f"), "allow")
+    # catches: an armed hook in non-adopting repositories (no marker directory: silent allow)
+    norepo = base / "plain"
+    norepo.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(norepo))
+    check("rwh/no-marker-directory-inert", kind(norepo, "git checkout -b x"), "allow")
+    # catches: a hold that never ends (marker removed -> allow; expired -> allow with a note)
+    (holds / "rev-1.json").unlink()
+    ended = [kind(base, co)]
+    marker("rev-2", expires_utc=_rwh_iso(-1))
+    expired = run(base, co)
+    ended.append(_rdp_kind(expired))
+    ended.append("expired review-hold marker" in (expired[1] or {}).get("systemMessage", ""))
+    (holds / "rev-2.json").unlink()
+    check("rwh/removed-or-expired-marker-allows", ended, ["allow", "warn", True])
+    # catches: a missing drift check (the held HEAD moved outside the hook: the next Bash call notes
+    # the invalidated review without denying, and the hold still denies a mutation)
+    marker("rev-3")
+    _rdp_git(held, "checkout", "-q", "--detach", seed)
+    drift = run(main, "git -C " + str(main) + " status")
+    check("rwh/drift-notes-without-denying",
+          [_rdp_kind(drift), "re-dispatch" in (drift[1] or {}).get("systemMessage", ""),
+           _rdp_kind(run(main, "ls")), kind(base, "git -C " + str(held) + " checkout main")],
+          ["warn", True, "warn", "deny"])
 
 
 def _rdp_draft_diff(root, base, head):
@@ -8740,6 +10740,183 @@ def _leasehb_status_and_parse_cases(tmp):
           ("allow", True, True))
 
 
+# The git executable fixture the differential oracle runs under real bash: it records the argv git actually
+# receives (one JSON array per line) and does nothing else - no network, no repository writes - so a word a
+# builder expands into '-c alias.<name>=...' is observed as the argv git would have run. The shebang is the
+# running interpreter's absolute path so the fixture needs nothing on the env -i PATH but itself.
+_ORACLE_BASH = "/usr/bin/bash"
+_ORACLE_ALIAS = "alias.qx=version"
+
+
+def _oracle_fake_git_source():
+    return ("#!" + os.path.realpath(sys.executable) + "\n"
+            "import json, os, sys\n"
+            "with open(os.environ['AIQT_ORACLE_RECORD'], 'a') as _fh:\n"
+            "    _fh.write(json.dumps(sys.argv[1:]) + chr(10))\n"
+            "sys.exit(0)\n")
+
+
+def _oracle_corpus():
+    """A bounded corpus of shell commands from a small grammar: a git word (option or subcommand region) built
+    by the unquoted, double-quoted list, indirect, list, brace, glob and here-string forms, each in every
+    past-stop context (plain; a here-string separator; quoted git text; an unquoted heredoc; a '{fd}' redirect;
+    a process substitution, with and without an escaped parenthesis in its body; and a here-string that splits
+    a resolved wrapper's words), plus the past-stop shift families (A GIT REGION THE LEXER DID NOT READ),
+    which put a quoted blank in the built word's region through the same contexts and inside a process
+    substitution's own body. Each entry is (label, command). The alias builders expand to
+    '-c alias.qx=version'; the control builders build a non-alias word. Size and runtime are reported by the
+    caller; every command runs real bash once (well under 60 seconds total)."""
+    alias = "-c " + _ORACLE_ALIAS
+    # (label, setup, args): command = setup + context + "git " + args; builders that define an alias.
+    builders = (
+        ("literal", "", alias + " qx"),
+        ("unquoted", "C='" + alias + "'; ", "$C qx"),
+        ("list", "A=(" + alias + "); ", '"${A[@]}" qx'),
+        ("positional", "set -- " + alias + "; ", '"$@" qx'),
+        ("brace", "", "{-c," + _ORACLE_ALIAS + "} qx"),
+        ("indirect", "A=(" + alias + "); R='A[@]'; ", '"${!R}" qx'),
+        ("indirect-op", "A=(" + alias + "); R='A[@]'; ", '"${!R:-x}" qx'),
+        # an indirect expansion through an array element (a subscript of its own) or a positional parameter
+        # whose value is a list reference: bash splits it as it does "${!R}".
+        ("indirect-sub", "A=(" + alias + "); S=('A[@]'); ", '"${!S[0]}" qx'),
+        ("indirect-sub-op", "A=(" + alias + "); S=('A[@]'); ", '"${!S[0]:-x}" qx'),
+        ("indirect-sub-var", "A=(" + alias + "); S=(x 'A[@]'); i=1; ", '"${!S[$i]}" qx'),
+        ("indirect-assoc", "A=(" + alias + "); declare -A H; H[k]='A[@]'; ", '"${!H[k]}" qx'),
+        ("indirect-star-op", "A=(" + alias + "); S=('A[@]'); ", '"${!S[*]:-x}" qx'),
+        ("indirect-pos", "A=(" + alias + "); set -- 'A[@]'; ", '"${!1}" qx'),
+        ("indirect-args", "A=(" + alias + "); set -- 'A[@]'; ", '"${!*}" qx'),
+    )
+    # control builders: a git word built by a glob (no match, literal) or a double-quoted scalar, defining no
+    # alias; the oracle never fails on these (nothing in argv defines one) whatever the verdict.
+    controls = (
+        ("glob-sub", "", "lo* "),
+        ("dq-scalar", "P=less; ", '-c core.pager="$P" qx'),
+    )
+    contexts = (("plain", ""), ("sep", "cat <<<x; "), ("quoted", 'cat <<<x; echo "git log"; '),
+                ("heredoc", "cat <<EOF\nx\nEOF\n"), ("fd", "exec {fd}>/dev/null; "),
+                ("procsub", "cat <(true); "), ("procsub-esc", "cat <(echo \\(); "),
+                ("wrapper-split", "nice <<<x -n 5 "))
+    corpus = []
+    for bl, setup, args in builders + controls:
+        for cl, ctx in contexts:
+            corpus.append(("{}/{}".format(bl, cl), setup + ctx + "git " + args))
+    # the past-stop shift (fix B): a built word after a quoted blank or separator in a region the de-quoted
+    # reading splits, so the subcommand word moves and the plain reading misses the built word.
+    shift = "X='" + alias + "'; "
+    corpus.extend((
+        ("shift-c", shift + 'cat <<<x; echo "git log"; git -c "core.x=a b" $X qx'),
+        ("shift-C", shift + 'cat <<<x; echo "git log"; git -C "a b" $X qx'),
+        ("shift-past", shift + 'cat <<<x; git -C "a b" $X qx'),
+        ("shift-lead", shift + 'cat <<<x; git <<<y -C "a b" $X qx'),
+        ("shift-heredoc", shift + 'cat <<EOF\nx\nEOF\ngit -C "a b" $X qx'),
+        ("shift-fd", shift + 'exec {fd}>/dev/null; git -C "a b" $X qx'),
+        ("shift-fd-lead", shift + 'exec {fd}>/dev/null; git <<<y -C "a b" $X qx'),
+        ("shift-procsub", shift + 'cat <(true); git -C "a b" $X qx'),
+        ("shift-procsub-esc", shift + 'cat <(echo \\(); git -C "a b" $X qx; case a in a) true;; esac'),
+        ("shift-procsub-body", shift + 'cat <(git -C "a b" $X qx); true'),
+        ("shift-wrapper-split", shift + 'nice <<<x -n 5 git -C "a b" $X qx'),
+    ))
+    return corpus
+
+
+def _oracle_run_argv(bindir, workdir, record, command):
+    """Run command under real bash with env -i (only PATH, HOME and the record path set), the git fixture on
+    PATH, in workdir; return the argv lists git received, or None on malformed fixture evidence."""
+    try:
+        os.remove(record)
+    except FileNotFoundError:
+        pass
+    env = {"PATH": bindir, "HOME": str(workdir), "AIQT_ORACLE_RECORD": str(record)}
+    subprocess.run([_ORACLE_BASH, "-c", command], env=env, cwd=str(workdir),
+                   capture_output=True, timeout=30)
+    if not os.path.exists(record):
+        return []
+    calls = []
+    with open(record, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                argv = json.loads(line)
+            except ValueError:
+                return None
+            if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+                return None
+            calls.append(argv)
+    return calls
+
+
+def _oracle_defines_alias(calls):
+    """Whether any recorded git argv holds a configuration option that defines an alias, read exactly as the
+    guards read a literal argv (_git_alias_defined_at over the real post-bash words)."""
+    return any(aiqt_hooks._git_alias_defined_at(argv, i)
+               for argv in calls for i in range(len(argv)))
+
+
+def _gitalias_oracle_cases(tmp):
+    """Differential oracle for the git-alias guards: for each corpus command, run real bash with a recording
+    git fixture, then compare whether the argv git received defines an alias against each guard's verdict, and
+    FAIL on any case where a guard permits a command whose argv defines one (a fail-open). The alias builders
+    must each be observed to define an alias at run time; missing, malformed or unexpected fixture evidence
+    fails the test (the test-hermeticity rule)."""
+    root = tmp / "gitalias-oracle"
+    bindir = root / "bin"
+    bindir.mkdir(parents=True)
+    git_fixture = bindir / "git"
+    git_fixture.write_text(_oracle_fake_git_source(), encoding="utf-8")
+    os.chmod(str(git_fixture), 0o755)
+    # The wrapper-split context runs git under nice; the fixture bindir carries only git, so the real nice
+    # (resolved from this test process's own PATH) is linked beside it. Where nice is absent the wrapper-split
+    # commands record no argv and the hermeticity check reports them.
+    nice_path = shutil.which("nice")
+    if nice_path:
+        os.symlink(nice_path, str(bindir / "nice"))
+    record = root / "argv.jsonl"
+    repo = root / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True,
+                   capture_output=True, timeout=30)
+    (repo / "f.txt").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "f.txt"], check=True, capture_output=True, timeout=30)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed"],
+                   check=True, capture_output=True, timeout=30)
+    (repo / "f.txt").write_text("dirty\n", encoding="utf-8")
+    guards = (("protected_line", aiqt_hooks.protected_line, str(repo)),
+              ("gate_weakening", aiqt_hooks.gate_weakening, None),
+              ("git_discard", aiqt_hooks.git_discard, str(repo)),
+              ("branch_root", aiqt_hooks.branch_root, str(repo)))
+    corpus = _oracle_corpus()
+    alias_labels = {"literal", "unquoted", "list", "positional", "brace", "indirect", "indirect-op",
+                    "indirect-sub", "indirect-sub-op", "indirect-sub-var", "indirect-assoc", "indirect-star-op",
+                    "indirect-pos", "indirect-args", "shift-c", "shift-C", "shift-past", "shift-lead",
+                    "shift-heredoc", "shift-fd", "shift-fd-lead", "shift-procsub", "shift-procsub-esc",
+                    "shift-procsub-body", "shift-wrapper-split"}
+    fail_open = []
+    hermeticity = []
+    for label, command in corpus:
+        calls = _oracle_run_argv(str(bindir), repo, str(record), command)
+        if calls is None:
+            hermeticity.append("{}: malformed fixture evidence".format(label))
+            continue
+        defines = _oracle_defines_alias(calls)
+        builder = label.split("/", 1)[0]
+        if builder in alias_labels and not defines:
+            hermeticity.append("{}: builder recorded no alias-defining argv (calls={!r})".format(label, calls))
+        for gname, handler, cwd in guards:
+            payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": command}}
+            if cwd is not None:
+                payload["cwd"] = cwd
+            verdict = _verdict(handler(payload))
+            if defines and verdict in ("allow", "warn", "explicit-allow"):
+                fail_open.append("{}:{} permitted argv defining an alias ({})".format(label, gname, verdict))
+    check("gitalias-oracle/no-fail-open", sorted(fail_open), [])
+    check("gitalias-oracle/fixture-hermetic", sorted(hermeticity), [])
+    shutil.rmtree(str(root), ignore_errors=True)
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -9247,6 +11424,466 @@ def _main_isolated(report_path=None):
         check("ask/idempotent-append", len(keyed), 1)
         check("ask/redacted", any("SECRETPHRASE" in r for r in rows), False)
 
+        # ---------- the attended-ask backlog judgement (ctx kind "ask") ----------
+        # An attended-family mode with queued actionable work: the question is judged against the same
+        # fresh enumeration as the yield guard. Each deny case below ALLOWED on the code before this
+        # judgement existed (the attended branch returned unconditionally), so each fails without it.
+        def ask_att(tool_use_id, questions=1):
+            return aiqt_hooks.orch_ask_guard(h.payload(
+                "PreToolUse", "AskUserQuestion",
+                {"questions": [{"question": "pick"} for _ in range(questions)]},
+                extra={"tool_use_id": tool_use_id}))
+
+        def ask_reason(result):
+            _c, obj, _e = result
+            if isinstance(obj, dict) and isinstance(obj.get("hookSpecificOutput"), dict):
+                return obj["hookSpecificOutput"].get("permissionDecisionReason", "")
+            return ""
+
+        # two open items with no blocker and a four-question ask: denied, naming both items and the
+        # two exits (dispatch, or record each as blocked by this decision, then re-issue)
+        h.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+        h.set_items([item("A-1"), item("A-2")])
+        h.set_turn_state({})
+        att_res = ask_att("tu-a1", questions=4)
+        check("ask/attended-actionable-denies", _verdict(att_res), "deny")
+        check("ask/attended-actionable-names-items",
+              "A-1" in ask_reason(att_res) and "A-2" in ask_reason(att_res), True)
+        check("ask/attended-actionable-names-exits",
+              "DISPATCH" in ask_reason(att_res) and "pending-decisions" in ask_reason(att_res)
+              and "re-issue the question" in ask_reason(att_res), True)
+        check("ask/attended-deny-counts", h.turn_state().get("ask_denials"), 1)
+        # the compound attended spelling, one actionable item, the rest blocked by a RECORDED human
+        # decision: denied, naming only the actionable item
+        h.mode.write_text("Operating-mode: attended (iPad); continuous mode\n", encoding="utf-8")
+        h.pending.write_text("D-9: deferred to the maintainer\n", encoding="utf-8")
+        h.set_items([item("A-3"),
+                     item("B-1", blocker={"kind": "human-decision", "ref": "D-9"}),
+                     item("B-2", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        att_res = ask_att("tu-a2")
+        check("ask/attended-compound-one-actionable-denies", _verdict(att_res), "deny")
+        check("ask/attended-compound-names-the-item",
+              "A-3" in ask_reason(att_res) and "B-1" not in ask_reason(att_res), True)
+        # an enumerator error is cannot-evaluate: denied; the cap on an unchanged basis (just under,
+        # exactly at, and past it) then releases the question with findings
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-enum-error-denies", _verdict(ask_att("tu-a3")), "deny")
+        h.set_turn_state({"ask_denials": 2, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-enum-error-under-cap-denies", _verdict(ask_att("tu-a3b")), "deny")
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-enum-error-cap-allows-findings", _verdict(ask_att("tu-a3c")), "warn")
+        h.set_turn_state({"ask_denials": 4, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-enum-error-past-cap-allows-findings", _verdict(ask_att("tu-a3d")), "warn")
+        # a schedule count never relieves a question (the ask cap is its own counter)
+        h.set_turn_state({"schedule_denials": 3, "schedule_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-schedule-count-never-relieves", _verdict(ask_att("tu-a3e")), "deny")
+        h.enum_exit.write_text("0", encoding="utf-8")
+        # the JSON attended marker arms the same judgement
+        h.mode.write_text('{"mode": "attended"}\n', encoding="utf-8")
+        h.set_items([item("A-4")])
+        h.set_turn_state({})
+        check("ask/json-attended-actionable-denies", _verdict(ask_att("tu-a4")), "deny")
+        # controls the judgement must leave alone: a backlog with nothing actionable allows the question
+        h.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+        h.set_items([item("B-3", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        check("ask/attended-all-blocked-recorded-allows", _verdict(ask_att("tu-a5")), "allow")
+        (hsd / "dispatch-ledger.jsonl").write_text(
+            json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-9",
+                        "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        h.set_items([item("W-9", blocker={"kind": "tracked-task", "ref": "T-9"})])
+        h.set_turn_state({})
+        check("ask/attended-dispatched-waiting-allows", _verdict(ask_att("tu-a6")), "allow")
+        h.set_items([item("P-1", state="proposed")])
+        h.set_turn_state({})
+        check("ask/attended-proposed-only-allows", _verdict(ask_att("tu-a7")), "allow")
+        # the no-marker fail-open is unchanged even with actionable work queued
+        h.mode.write_text("shared notes with no mode declaration\n", encoding="utf-8")
+        h.set_items([item("A-5")])
+        h.set_turn_state({})
+        check("ask/prose-mode-actionable-allows", _verdict(ask_att("tu-a8")), "allow")
+        # the unattended deny is unchanged whatever the backlog: same verdict, same reason shape
+        h.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
+        h.set_turn_state({})
+        att_res = ask_att("tu-a9")
+        check("ask/unattended-actionable-denies", _verdict(att_res), "deny")
+        check("ask/unattended-actionable-reason-unchanged",
+              ask_reason(att_res).startswith(
+                  "AskUserQuestion BLOCKED: the session operating-mode is unattended"), True)
+        # the operator escape sentinel releases the attended deny (the stop/yield acceptance seam)
+        h.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+        h.set_items([item("A-6")])
+        _orig_ask_escape_stat = aiqt_hooks._orch_escape_stat
+        try:
+            aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o600, os.geteuid() + 1)
+            h.set_turn_state({})
+            check("ask/attended-escape-sentinel-allows", _verdict(ask_att("tu-a10")), "allow")
+        finally:
+            aiqt_hooks._orch_escape_stat = _orig_ask_escape_stat
+        # a registry with no enumerator keeps the attended judgement out of scope; an absent registry
+        # keeps the whole hook inert
+        _hregp = h.root / ".aiqt" / "orchestration.local.json"
+        _hreg = json.loads(_hregp.read_text(encoding="utf-8"))
+        _henum = _hreg.pop("enumerator")
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_items([item("A-7")])
+        h.set_turn_state({})
+        check("ask/attended-no-enumerator-allows", _verdict(ask_att("tu-a11")), "allow")
+        _hregp.unlink()
+        check("ask/attended-no-registry-allows", _verdict(ask_att("tu-a12")), "allow")
+        _hreg["enumerator"] = _henum
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        # the actionable deny is never cap-relieved: the fourth unchanged question is denied exactly
+        # as the first (its two exits, dispatch or record-then-re-issue, are always available), and
+        # every one of the four denials is counted
+        h.set_items([item("A-8")])
+        h.set_turn_state({})
+        check("ask/attended-actionable-fourth-call-still-denies",
+              [_verdict(ask_att("tu-b{}".format(i))) for i in range(4)], ["deny"] * 4)
+        check("ask/attended-actionable-four-denials-counted", h.turn_state().get("ask_denials"), 4)
+        # the cannot-evaluate cap is intact: four sequential questions against an enumerator error are
+        # denied three times, then the fourth is relieved with findings on the unchanged basis
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-enum-error-fourth-call-relieves",
+              [_verdict(ask_att("tu-c{}".format(i))) for i in range(4)],
+              ["deny", "deny", "deny", "warn"])
+
+        # a cap-relieved question past open work writes its forced_unresolved record
+        def forced_ask_rows():
+            fx = hsd / "forced-exit.jsonl"
+            if not fx.exists():
+                return 0
+            return sum(1 for row in fx.read_text(encoding="utf-8").splitlines()
+                       if json.loads(row).get("event") == "ask-guard")
+
+        _hforced = forced_ask_rows()
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-cap-allow-records-forced-exit",
+              (_verdict(ask_att("tu-c4")), forced_ask_rows() - _hforced), ("warn", 1))
+        h.enum_exit.write_text("0", encoding="utf-8")
+        # an open item whose proof source is unreadable (the declared pending-decisions record is gone)
+        # is an item-level cannot-evaluate: denied, naming the item and the re-issue exit; at the cap
+        # on the unchanged basis the question is relieved with findings
+        h.pending.unlink()
+        h.set_items([item("H-1", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        att_res = ask_att("tu-d1")
+        check("ask/attended-item-cannot-evaluate-denies", _verdict(att_res), "deny")
+        check("ask/attended-item-cannot-evaluate-reissue-exit",
+              "unreadable (cannot-evaluate)" in ask_reason(att_res) and "H-1" in ask_reason(att_res)
+              and "re-issue the question" in ask_reason(att_res), True)
+        # the cap is DRIVEN by four sequential questions (each denial recorded and counted), not by
+        # a preset counter, so a counting defect on this path cannot hide behind a planted count
+        h.set_turn_state({})
+        check("ask/attended-item-cannot-evaluate-cap-allows-findings",
+              [_verdict(ask_att("tu-d2-{}".format(i))) for i in range(4)],
+              ["deny", "deny", "deny", "warn"])
+        h.pending.write_text("D-9: deferred to the maintainer\n", encoding="utf-8")
+        # a deny whose counter cannot be saved STANDS (never fails open) and says so
+        h.set_items([item("A-9")])
+        h.set_turn_state({})
+        _hsave = aiqt_hooks._orch_save_turn_state
+        try:
+            aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
+            att_res = ask_att("tu-e1")
+        finally:
+            aiqt_hooks._orch_save_turn_state = _hsave
+        check("ask/attended-counter-unsaved-deny-stands", _verdict(att_res), "deny")
+        check("ask/attended-counter-unsaved-says-so",
+              "could not be written to turn-state.json" in ask_reason(att_res), True)
+        # the deny names at most ten actionable items, then the remaining count
+        h.set_items([item("N{:02d}".format(i)) for i in range(1, 12)])
+        h.set_turn_state({})
+        att_res = ask_att("tu-f1")
+        check("ask/attended-names-ten-items-and-more",
+              ("N10" in ask_reason(att_res), "N11" in ask_reason(att_res),
+               "; and 1 more" in ask_reason(att_res)), (True, False, True))
+        # genuine human input resets the ask pair exactly as it resets the schedule pair
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "X", "schedule_denials": 2,
+                          "stop_denials": 1})
+        aiqt_hooks.orch_prompt_stamp(h.payload("UserPromptSubmit",
+                                               extra={"prompt": "take the blue theme"}))
+        _hts = h.turn_state()
+        check("ask/human-input-resets-ask-counters",
+              (_hts.get("ask_denials"), "ask_basis" in _hts), (0, False))
+        # a TIMER-ORIGINATED prompt (a registered wake digest) never resets the ask pair: only
+        # genuine human input clears the count and the basis
+        _hwake = "wake: recheck T-9"
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "X",
+                          "wake_digests": [hashlib.sha256(_hwake.encode("utf-8")).hexdigest()]})
+        aiqt_hooks.orch_prompt_stamp(h.payload("UserPromptSubmit", extra={"prompt": _hwake}))
+        _hts = h.turn_state()
+        # the consumed digest proves the timer-originated branch RAN: an early allow (out of scope,
+        # or a registry that does not read ok) would also leave the planted counters untouched, but
+        # it would leave the planted digest unconsumed
+        check("ask/timer-wake-keeps-ask-counters",
+              (_hts.get("ask_denials"), _hts.get("ask_basis"), _hts.get("wake_digests")),
+              (3, "X", []))
+        # ask denials never relieve a scheduling call (the counter isolation's other direction)
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/ask-count-never-relieves-schedule",
+              _verdict(aiqt_hooks.orch_yield_tool(h.payload(
+                  "PreToolUse", "ScheduleWakeup", {"prompt": "recheck later"},
+                  extra={"tool_use_id": "tu-g1"}))), "deny")
+        h.enum_exit.write_text("0", encoding="utf-8")
+        # a DECLARED enumerator that is not an object is a configuration error: denied as
+        # cannot-evaluate, naming the shape, with a guard-events row (never a silent allow)
+        _hreg = json.loads(_hregp.read_text(encoding="utf-8"))
+        _hreg["enumerator"] = ["not", "an", "object"]
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_items([item("A-10")])
+        h.set_turn_state({})
+        _hev = hsd / "guard-events.jsonl"
+        _hev_count = len(_hev.read_text(encoding="utf-8").splitlines()) if _hev.exists() else 0
+        att_res = ask_att("tu-h1")
+        check("ask/attended-malformed-enumerator-denies",
+              (_verdict(att_res), "not enumerable" in ask_reason(att_res)
+               and "not an object" in ask_reason(att_res)), ("deny", True))
+        _hev_rows = _hev.read_text(encoding="utf-8").splitlines() if _hev.exists() else []
+        check("ask/attended-malformed-enumerator-logs-event",
+              any(json.loads(row).get("kind") == "ask-guard"
+                  and json.loads(row).get("decision") == "deny"
+                  and "not an object (a configuration error)" in json.loads(row).get("detail", "")
+                  for row in _hev_rows[_hev_count:]), True)
+        # the configuration-error deny carries the same cap as every other cannot-evaluate deny
+        # (nothing is enumerable here, so nothing is actionable): four sequential questions are
+        # denied three times, then the fourth is relieved with findings on the unchanged basis
+        h.set_turn_state({})
+        check("ask/attended-malformed-enumerator-fourth-call-relieves",
+              [_verdict(ask_att("tu-h2-{}".format(i))) for i in range(4)],
+              ["deny", "deny", "deny", "warn"])
+        _hreg["enumerator"] = _henum
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        # a session outside the live scope (a holder-scoped lease that does not name it) never
+        # inherits the global backlog: the judgement allows there, exactly as the yield guard does
+        _hreg["lease"]["holder_is_session_id"] = True
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_items([item("A-11")])
+        h.set_turn_state({})
+        check("ask/attended-nonholder-session-allows", _verdict(ask_att("tu-i1")), "allow")
+        # the holder the lease NAMES is still judged: a scope gate that under-fires (one that loses
+        # the caller's session id) would allow here too, so this positive shape pins the deny
+        h.lease.write_text("holder: s1\n", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-holder-session-denies", _verdict(ask_att("tu-i2")), "deny")
+        # the session-id and holder-token checks run only for a NON-EMPTY lease classified fresh or
+        # cannot-evaluate under a declared max_age_hours, or, with no horizon declared, for every
+        # non-empty lease whatever its mtime; every other lease shape (empty, path-less, stale past a
+        # declared horizon, future-dated past the tolerated skew under a declared usable horizon)
+        # skips the holder check and falls through to the live-mode scope source, which keeps EVERY
+        # session in scope, an id-less caller included (erring toward denying).
+        # First the off side: an id-less caller under a fresh holder-scoped lease is a non-holder
+        def ask_att_idless(tool_use_id):
+            _hp = h.payload("PreToolUse", "AskUserQuestion",
+                            {"questions": [{"question": "pick"}]},
+                            extra={"tool_use_id": tool_use_id})
+            del _hp["session_id"]
+            return aiqt_hooks.orch_ask_guard(_hp)
+        h.set_turn_state({})
+        check("ask/attended-fresh-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i3")), "allow")
+        # an EMPTY lease names no session, yet the judgement stays ON: the empty lease never reaches
+        # the holder check, and the live mode record keeps every session in scope, with and without
+        # a session id on the call
+        h.lease.write_text("", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-empty-lease-keeps-judgement-on", _verdict(ask_att("tu-i4")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-empty-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i5")), "deny")
+        # the stale boundary from both sides: just INSIDE max_age_hours the lease is fresh, so the
+        # holder check runs and the unnamed session is out of scope (allow); just PAST it the lease
+        # is stale, the holder check is skipped, and the live mode record keeps the judgement on
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        _hnow = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        os.utime(h.lease, (_hnow - 24 * 3600 + 600, _hnow - 24 * 3600 + 600))
+        h.set_turn_state({})
+        check("ask/attended-just-inside-stale-lease-nonholder-allows",
+              _verdict(ask_att("tu-i6")), "allow")
+        os.utime(h.lease, (_hnow - 24 * 3600 - 600, _hnow - 24 * 3600 - 600))
+        h.set_turn_state({})
+        check("ask/attended-stale-lease-keeps-judgement-on", _verdict(ask_att("tu-i7")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-stale-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i7a")), "deny")
+        # a stale lease that can be stat'ed but not read is never opened (the age gate skips the
+        # holder check before any read), so the live mode record keeps the judgement on even though
+        # the lease names the caller: only a non-empty fresh or cannot-evaluate lease that cannot be
+        # read is off. A privileged run reads a mode-0 file anyway, so there the seam supplies the
+        # kernel's EACCES for an open of the lease.
+        h.lease.write_text("holder: s1\n", encoding="utf-8")
+        os.utime(h.lease, (_hnow - 24 * 3600 - 600, _hnow - 24 * 3600 - 600))
+        _hlease_path = str(h.lease)
+
+        def _hopen_unreadable(file, *args, **kwargs):
+            if file == _hlease_path:
+                raise PermissionError(13, "Permission denied", _hlease_path)
+            return open(file, *args, **kwargs)
+        os.chmod(h.lease, 0)
+        try:
+            if os.geteuid() == 0:
+                aiqt_hooks.open = _hopen_unreadable
+            h.set_turn_state({})
+            check("ask/attended-unreadable-stale-lease-keeps-judgement-on",
+                  _verdict(ask_att("tu-i7b")), "deny")
+        finally:
+            aiqt_hooks.__dict__.pop("open", None)
+            os.chmod(h.lease, 0o644)
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        # the future boundary from both sides: a lease mtime within the tolerated clock skew still
+        # reads fresh (the holder check runs, allow for the unnamed session); one past the skew is
+        # the future-dated shape that skips the holder check (judgement on)
+        os.utime(h.lease, (_hnow + 60, _hnow + 60))
+        h.set_turn_state({})
+        check("ask/attended-future-lease-within-skew-nonholder-allows",
+              _verdict(ask_att("tu-i8")), "allow")
+        os.utime(h.lease, (_hnow + 900, _hnow + 900))
+        h.set_turn_state({})
+        check("ask/attended-future-lease-keeps-judgement-on", _verdict(ask_att("tu-i9")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-future-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i9a")), "deny")
+        # the future-dated skip needs a declared usable horizon: with max_age_hours omitted or null
+        # the age classifier is never consulted, so the same future-dated lease runs the holder check
+        # and an unnamed or id-less caller is out of scope (allow), while the session the lease names
+        # stays judged (deny, so these allows come from the holder check, not an earlier allow); an
+        # unusable horizon reads cannot-evaluate whatever the mtime, so the holder check runs there too
+        _hreg["lease"].pop("max_age_hours")
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-no-horizon-future-lease-nonholder-allows",
+              _verdict(ask_att("tu-i9b")), "allow")
+        h.set_turn_state({})
+        check("ask/attended-no-horizon-future-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i9c")), "allow")
+        h.lease.write_text("holder: s1\n", encoding="utf-8")
+        os.utime(h.lease, (_hnow + 900, _hnow + 900))
+        h.set_turn_state({})
+        check("ask/attended-no-horizon-future-lease-holder-denies",
+              _verdict(ask_att("tu-i9d")), "deny")
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        os.utime(h.lease, (_hnow + 900, _hnow + 900))
+        _hreg["lease"]["max_age_hours"] = None
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-null-horizon-future-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i9e")), "allow")
+        _hreg["lease"]["max_age_hours"] = 0
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-unusable-horizon-future-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i9f")), "allow")
+        _hreg["lease"]["max_age_hours"] = 24
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        # a holder-scoped lease that declares NO path never reaches the holder check either: the
+        # live mode record keeps the judgement on
+        _hlease_decl = _hreg["lease"]
+        _hreg["lease"] = {"max_age_hours": 24, "holder_is_session_id": True}
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-pathless-lease-keeps-judgement-on", _verdict(ask_att("tu-i10")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-pathless-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i10a")), "deny")
+        # an empty or a non-string path declares no path either
+        _hreg["lease"]["path"] = ""
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-empty-path-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i10b")), "deny")
+        _hreg["lease"]["path"] = 7
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-non-string-path-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i10c")), "deny")
+        _hreg["lease"] = _hlease_decl
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        _hreg["lease"].pop("holder_is_session_id")
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        # a MIXED backlog (an actionable item beside an item-level cannot-evaluate) keeps the
+        # actionable deny: the fourth unchanged question is denied exactly as the first (the
+        # cannot-evaluate cap grants no relief while anything is actionable), and the deny names
+        # the actionable item, the held item, and the held item's state in ONE reason
+        h.pending.unlink()
+        h.set_items([item("A-12"), item("H-2", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        _hmix = [ask_att("tu-j{}".format(i)) for i in range(4)]
+        check("ask/attended-mixed-cannot-evaluate-actionable-still-denies",
+              [_verdict(r) for r in _hmix], ["deny"] * 4)
+        check("ask/attended-mixed-deny-names-both-sets",
+              ("A-12" in ask_reason(_hmix[3]), "H-2" in ask_reason(_hmix[3]),
+               "cannot-evaluate" in ask_reason(_hmix[3])), (True, True, True))
+        h.pending.write_text("D-9: deferred to the maintainer\n", encoding="utf-8")
+        # the same mixed shape a session could manufacture itself: ONE schema-invalid line appended
+        # to the dispatch ledger holds a tracked item as cannot-evaluate beside an actionable item;
+        # still denied on every unchanged call, never relieved, and the fourth deny names both sets
+        (hsd / "dispatch-ledger.jsonl").write_text('{"event": "launch"}\n', encoding="utf-8")
+        h.set_items([item("A-13"), item("T-2", blocker={"kind": "tracked-task", "ref": "T-9"})])
+        h.set_turn_state({})
+        _hled = [ask_att("tu-k{}".format(i)) for i in range(4)]
+        check("ask/attended-mixed-invalid-ledger-line-still-denies",
+              [_verdict(r) for r in _hled], ["deny"] * 4)
+        check("ask/attended-mixed-invalid-ledger-deny-names-both-sets",
+              ("A-13" in ask_reason(_hled[3]), "T-2" in ask_reason(_hled[3]),
+               "cannot-evaluate" in ask_reason(_hled[3])), (True, True, True))
+        # the relief boundary is the CLASSIFIED actionable set: the same invalid ledger line over an
+        # ALL-tracked backlog holds every item (nothing stays classified actionable), so the fourth
+        # unchanged question is relieved at the cap; the mixed shape above, which keeps one
+        # classified-actionable item, is the control that still denies
+        h.set_items([item("T-3", blocker={"kind": "tracked-task", "ref": "T-9"}),
+                     item("T-4", blocker={"kind": "tracked-task", "ref": "T-8"})])
+        h.set_turn_state({})
+        _hall = [ask_att("tu-l{}".format(i)) for i in range(4)]
+        check("ask/attended-all-held-invalid-ledger-line-cap-relieves",
+              [_verdict(r) for r in _hall], ["deny", "deny", "deny", "warn"])
+        # the verdict sequence alone cannot tell the item-level hold from a whole-enumeration
+        # failure, so the first deny must also NAME the held items as cannot-evaluate (pinning
+        # that the ledger line held them rather than the enumeration failing)
+        check("ask/attended-all-held-first-deny-names-held-items",
+              ("T-3" in ask_reason(_hall[0]), "T-4" in ask_reason(_hall[0]),
+               "cannot-evaluate" in ask_reason(_hall[0])), (True, True, True))
+        (hsd / "dispatch-ledger.jsonl").write_text(
+            json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-9",
+                        "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        # an enumeration failure HIDES items rather than holding them: a duplicate item id fails the
+        # whole enumeration, so an item that would be actionable without the duplicate is absent from
+        # the classified sets and the fourth unchanged question is relieved at the cap; the
+        # four-denial actionable run above is the control that a valid enumeration retaining a
+        # classified actionable item is never cap-relieved
+        h.set_items([item("A-14"), item("A-14")])
+        h.set_turn_state({})
+        _hdup = [ask_att("tu-m{}".format(i)) for i in range(4)]
+        check("ask/attended-duplicate-id-cap-relieves",
+              [_verdict(r) for r in _hdup], ["deny", "deny", "deny", "warn"])
+        # the relief must come from THIS enumeration failure, not some other persistent fault, so
+        # the first deny must carry the duplicate-id diagnostic
+        check("ask/attended-duplicate-id-first-deny-names-duplicate",
+              "duplicate item id 'A-14'" in ask_reason(_hdup[0]), True)
+        # cap relief is best effort about its OWN records: when neither the forced_unresolved row
+        # nor the guard-events row can be written, the failure is REPORTED in the released message
+        # and the relief still proceeds (the allow-with-note is retained; the recorder never
+        # restores the deny)
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        _happend = aiqt_hooks._orch_append_jsonl
+        try:
+            aiqt_hooks._orch_append_jsonl = lambda path, obj: False
+            att_res = ask_att("tu-n1")
+        finally:
+            aiqt_hooks._orch_append_jsonl = _happend
+        check("ask/attended-cap-relief-record-failure-still-allows", _verdict(att_res), "warn")
+        _hnote = att_res[1].get("systemMessage", "") if isinstance(att_res[1], dict) else ""
+        check("ask/attended-cap-relief-record-failure-says-so",
+              ("could not be fully persisted (guard-events FAILED, forced-exit.jsonl FAILED)"
+               in _hnote, "proceeds with findings" in _hnote), (True, True))
+        h.enum_exit.write_text("0", encoding="utf-8")
+
         # ---------- component 3: the truncation guard ----------
         t = Fixture(tmp, "trunc")
         bg = lambda cmd, rib=True: aiqt_hooks.orch_truncation_guard(
@@ -9277,6 +11914,15 @@ def _main_isolated(report_path=None):
         # the truncating sink is caught through subshell/brace wrappers too (class width).
         check("trunc/subshell-tail-denies", _verdict(bg("( python3 build.py | tail )")), "deny")
         check("trunc/brace-tail-denies", _verdict(bg("{ python3 build.py | tail; }")), "deny")
+        # A pipe into a sink inside a backquote substitution: the shared lexer splits it at the '|' into words that
+        # keep the backquotes ('x=`make' and 'head`'), and the command reading (_CommandReading) reads the body
+        # whole, so the sink denies as the bare pipe does; with no pipe in the body the note stands.
+        check("crd/trunc-backquote-sink", _verdict(bg("x=`make | head`")), "deny")
+        check("crd/trunc-backquote-control", _verdict(bg("x=`make`")), "warn")
+        # Backquote bodies that spend the command reading's budget deny, with a reason that names the budget
+        # rather than a '#' the command does not hold.
+        _crd_over = bg("make" + "".join(" `: {}`".format(_crd_n) for _crd_n in range(7506)))
+        check("crd/trunc-backquote-limit", (_verdict(_crd_over), "budget" in str(_crd_over[1])), ("deny", True))
         # ROUND-7 (codex finding 5): the sink is resolved THROUGH shell command-modifier wrappers
         # (command/env/nice/stdbuf/... with their own option/assignment args), so a truncating sink hidden
         # behind a wrapper is still caught; a genuine NON-truncating wrapped command still allows-with-note.
@@ -9349,15 +11995,751 @@ def _main_isolated(report_path=None):
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
         check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
-        # inert BY DEFAULT when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
-        ti = Fixture(tmp, "trunc-inert")
+        # Inside registry scope the deny reads arithmetic as code and does not read setsid, nohup or
+        # disown, exactly as before the out-of-scope note was added: the note's own scan must not leak into
+        # the deny. (A bare `&` in a quoted here-document body is no detach and allows there: the
+        # trunc/fg-quoted-heredoc-amp-allows row below.)
+        check("trunc/fg-arith-amp-still-denies", _verdict(bg("echo $(( 6 & 3 ))", rib=False)), "deny")
+        check("trunc/fg-setsid-still-allows", _verdict(bg("setsid long_job", rib=False)), "allow")
+        # With no orchestration registry the guard denies nothing, but a readable foreground command that
+        # may detach work is allowed WITH ONE NOTE (the reducer's "warn") naming rule trkasy and the tracked
+        # background mechanism (run_in_background): the note of the detector the registry scope denies on
+        # where it reads a bare-& detach or cannot read the command to its end, else the note scan's note,
+        # never a prompt and never a silent allow; every other call stays the silent allow (a background
+        # dispatch, and an `&` that is no bare detach). Each warn row reads "allow" with the guard returning
+        # its silent allow before reading the call.
+        ti = Fixture(tmp, "trunc-no-registry")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
-        check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+        ti_call = lambda tool_input: aiqt_hooks.orch_truncation_guard(ti.payload("PreToolUse", "Bash", tool_input))
+        ti_warn = ti_call({"command": "long_job &", "run_in_background": False})
+        ti_note = (ti_warn[1] or {}).get("systemMessage", "")
+        check("trunc/fg-detach-no-registry-warns",
+              (_verdict(ti_warn), "trkasy" in ti_note, "run_in_background" in ti_note), ("warn", True, True))
+        check("trunc/fg-detach-shapes-no-registry-warn",
+              [_verdict(ti_call({"command": v})) for v in (
+                  "dispatch_retry.sh 12 &", "./gate_merge.sh &", "nohup dispatch_retry.sh > log 2>&1 &",
+                  "worker & wait", "cat > a <<'A'\nit's\nA\njob &\ncat > b <<'B'\nit's\nB")], ["warn"] * 5)
+        check("trunc/fg-nonbare-amp-no-registry-allows",
+              [_verdict(ti_call({"command": v, "run_in_background": False})) for v in (
+                  "build && test", "build &> out.log", "build 2>&1", "build |& tee log", "echo 'a & b'",
+                  "echo done # & comment", "cat > f <<'EOF'\nFix A & B\nEOF", "ls")], ["allow"] * 8)
+        # A command whose quoting or comments the detector cannot read to its end ("unbalanced": an open
+        # quote, or a '#' whose comment reading depends on context) warns with a note saying so, since a
+        # later `&` can be a hidden detach: in the unquoted here-document row the apostrophe leaves the scan
+        # open while bash starts `sleep 1` in the background. The quoted here-document row, whose delimiter
+        # line never comes, is the disclosed over-warn on a safe body. Each row reads ("allow", False, False, False) with the guard keeping its
+        # silent allow on "unbalanced", and the note check fails if it gives the detach note instead.
+        ti_note_of = lambda res: (res[1] or {}).get("systemMessage", "")
+        check("trunc/fg-unbalanced-no-registry-warns",
+              [(_verdict(res), "could not read this foreground command to its end" in ti_note_of(res),
+                "trkasy" in ti_note_of(res), "run_in_background" in ti_note_of(res))
+               for res in (ti_call({"command": v}) for v in (
+                   "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOX",
+                   "cat <<EOF\nuser's file\nEOF\nsleep 1 &", "[[ x =~ (a)#b ]] || echo RAN"))],
+              [("warn", True, True, True)] * 4)
+        # A run_in_background that is present but not a boolean gets the unreadable-input note naming the
+        # malformed flag (the platform's reading of such a flag is unknown, so the call may run in the
+        # foreground), whatever the command holds, so the open-quote row gets that note too, not the
+        # detector's "to its end" note. Each row reads ("allow", False, False, False, False) with the guard
+        # keeping its silent allow on a malformed flag.
+        check("trunc/fg-malformed-rib-no-registry-warns",
+              [(_verdict(res), "not a boolean" in ti_note_of(res), "trkasy" in ti_note_of(res),
+                "run_in_background" in ti_note_of(res), "to its end" in ti_note_of(res))
+               for res in (ti_call({"command": c, "run_in_background": r}) for c, r in (
+                   ("long_job &", "false"), ("long_job &", None), ("long_job &", 0), ("long_job &", "true"),
+                   ("echo 'oops & bg", None)))],
+              [("warn", True, True, True, False)] * 5)
+        # No readable command (a tool_input that is not an object, a command that is not a string), and a
+        # malformed run_in_background beside a command with no bare `&`, get the unreadable-input note,
+        # never the silent allow. Each row reads ("allow", False) with the guard keeping its silent allow on
+        # input it cannot read.
+        check("trunc/fg-malformed-no-registry-warns",
+              [(_verdict(res), "input could not be read" in ti_note_of(res))
+               for res in (aiqt_hooks.orch_truncation_guard(dict(
+                   ti.payload("PreToolUse", "Bash"), tool_input=tool_input)) for tool_input in (
+                   "long_job &", ["long_job &"], {"command": 5}, {}, {"command": 5, "run_in_background": "false"},
+                   {"command": "ls", "run_in_background": "false"}, {"command": "ls", "run_in_background": None}))],
+              [("warn", True)] * 7)
+        check("trunc/bg-no-registry-still-inert",
+              [_verdict(ti_call({"command": v, "run_in_background": True})) for v in (
+                  "python3 build.py | tail -5", "long_job &")], ["allow"] * 2)
+        check("trunc/fg-detach-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
-                       {"command": "long_job &", "run_in_background": False}))), "allow")
+                       {"command": "long_job &", "run_in_background": False}))), "warn")
+        # The same no-registry fixture: (check id, tool_input, reduced verdict). A foreground command that
+        # detaches work notes ("warn"); the controls stay the silent allow ("allow"). Each control carries an
+        # ampersand or a detach word that a scan ignoring quotes, comments, here-document bodies, arithmetic,
+        # command position (redirect targets included), setsid -w or the background flag would note.
+        for check_id, tool_input, want in (
+                ("trunc/oos-detach-no-space-notes", _fg("long_job&"), "warn"),
+                ("trunc/oos-detach-loop-end-notes", _fg('for d in a b; do run_one "$d"; done &'), "warn"),
+                ("trunc/oos-detach-loop-body-notes", _fg('for d in a b; do run_one "$d" & done'), "warn"),
+                ("trunc/oos-detach-subshell-notes", _fg("( long_job ) &"), "warn"),
+                ("trunc/oos-detach-brace-notes", _fg("{ long_job; } &"), "warn"),
+                ("trunc/oos-detach-redirect-notes", _fg("long_job > /tmp/log 2>&1 &"), "warn"),
+                ("trunc/oos-detach-here-string-notes", _fg('grep foo <<< "$x" &'), "warn"),
+                ("trunc/oos-detach-second-line-notes", _fg("cd /tmp\nlong_job &"), "warn"),
+                ("trunc/oos-detach-after-comment-notes", _fg("echo hi  # note\nsleep 100 &"), "warn"),
+                ("trunc/oos-detach-after-heredoc-notes",
+                 _fg("cat <<EOF\nthe user's file & more\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-detach-omitted-flag-notes", {"command": "long_job &"}, "warn"),
+                ("trunc/oos-setsid-notes", _fg("setsid long_job"), "warn"),
+                ("trunc/oos-setsid-fork-notes", _fg("setsid -f long_job"), "warn"),
+                ("trunc/oos-nohup-notes", _fg("nohup long_job > /tmp/log 2>&1"), "warn"),
+                ("trunc/oos-disown-notes", _fg("long_job; disown"), "warn"),
+                ("trunc/oos-wrapped-nohup-notes", _fg("timeout 5 nohup long_job"), "warn"),
+                ("trunc/oos-assign-setsid-notes", _fg("X=1 setsid long_job"), "warn"),
+                ("trunc/oos-after-and-setsid-notes", _fg("cd /tmp && setsid long_job"), "warn"),
+                ("trunc/oos-logical-and-allows", _fg("build && test"), "allow"),
+                ("trunc/oos-amp-redirect-allows", _fg("build &> /tmp/o"), "allow"),
+                ("trunc/oos-dup-allows", _fg("build 2>&1"), "allow"),
+                ("trunc/oos-pipe-stderr-allows", _fg("build |& tee /tmp/l"), "allow"),
+                ("trunc/oos-single-quoted-amp-allows", _fg("echo 'a & b'"), "allow"),
+                ("trunc/oos-double-quoted-amp-allows", _fg('echo "a & b"'), "allow"),
+                ("trunc/oos-escaped-amp-allows", _fg("echo a \\& b"), "allow"),
+                ("trunc/oos-comment-amp-allows", _fg("echo done # & comment"), "allow"),
+                # A here-document delimiter that is one plain word is its own delimiter, so the note scan
+                # skips the body as data (a detacher word in it stays silent). A body `&` under an unquoted
+                # delimiter, and a bitwise `&` in arithmetic, are a bare-& detach to the detector the
+                # registry scope denies on, which reads such a body and arithmetic as code, so each gives
+                # that detector's note: accepted over-warns for this warn-first release (nothing detaches).
+                # A body `&` under a QUOTED delimiter is no detach to that detector and draws no note (the
+                # trunc/fg-nonbare-amp-no-registry-allows row above).
+                ("trunc/oos-heredoc-unquoted-amp-notes",
+                 _fg("cat > /tmp/f <<EOF\nFix A & B\nEOF"), "warn"),
+                ("trunc/oos-heredoc-detach-word-allows", _fg("cat <<EOF\nsetsid x\nEOF"), "allow"),
+                ("trunc/oos-arith-expansion-notes", _fg("echo $(( 6 & 3 ))"), "warn"),
+                ("trunc/oos-arith-command-notes", _fg("(( x = 6 & 3 ))"), "warn"),
+                ("trunc/oos-setsid-wait-allows", _fg("setsid -w long_job"), "allow"),
+                ("trunc/oos-setsid-wait-long-allows", _fg("setsid --wait long_job"), "allow"),
+                ("trunc/oos-detach-word-argument-allows", _fg("git log --grep setsid"), "allow"),
+                ("trunc/oos-detach-word-redirect-target-allows", _fg("echo hi > nohup"), "allow"),
+                # A redirect operator and its target operand leave the pending command position alone, with
+                # a blank between operator and target or not: a leading redirect must not hide the real
+                # command word behind its target, and a spaced redirect target named like a detacher is a
+                # filename, not a command (bash runs long_job in `> nohup long_job`).
+                ("trunc/oos-redirect-target-detacher-name-allows", _fg("> nohup long_job"), "allow"),
+                ("trunc/oos-redirect-first-setsid-notes", _fg("2> /dev/null setsid -f long_job"), "warn"),
+                ("trunc/oos-redirect-first-nohup-notes", _fg("> /tmp/log nohup long_job"), "warn"),
+                ("trunc/oos-redirect-stdin-first-setsid-notes", _fg("< /dev/null setsid long_job"), "warn"),
+                ("trunc/oos-redirect-first-no-space-setsid-notes", _fg("2>/dev/null setsid long_job"), "warn"),
+                ("trunc/oos-redirect-target-no-space-detacher-notes", _fg(">nohup setsid long_job"), "warn"),
+                ("trunc/oos-redirect-pair-first-setsid-notes",
+                 _fg("> /dev/null 2> /tmp/e setsid long_job"), "warn"),
+                ("trunc/oos-redirect-mid-wrapper-nohup-notes",
+                 _fg("timeout 5 > /dev/null nohup long_job"), "warn"),
+                ("trunc/oos-redirect-quoted-target-setsid-notes", _fg("> 'nohup' setsid long_job"), "warn"),
+                # a dup target that is not a number: the blank after `>&` must not end the redirect hold
+                ("trunc/oos-dup-spaced-target-setsid-notes", _fg(">& /dev/null setsid long_job"), "warn"),
+                # A here-string `<<<` is a redirect whose word is its target, never a here-document opener:
+                # the command after the word is still read, and the lines after it are code, not a body.
+                # The escaped `\<` row is the control: bash reads `\<` as a word and `<<EOF` as a real
+                # here-document, so only an unquoted `<` before `<<` stops the opener.
+                ("trunc/oos-here-string-first-setsid-notes", _fg("<<< word setsid long_job"), "warn"),
+                ("trunc/oos-here-string-first-no-space-setsid-notes", _fg("<<<word setsid long_job"), "warn"),
+                ("trunc/oos-here-string-mid-wrapper-setsid-notes", _fg("nice <<< word setsid long_job"),
+                 "warn"),
+                ("trunc/oos-here-string-next-line-detach-notes", _fg("cat <<< word\nlong_job &"), "warn"),
+                ("trunc/oos-here-string-target-detacher-name-allows", _fg("<<< nohup long_job"), "allow"),
+                ("trunc/oos-escaped-lt-heredoc-body-allows", _fg("\\<<<EOF\nsetsid x\nEOF"), "allow"),
+                # The noclobber redirect `>|` is one operator, not a redirect then a pipe: its target named
+                # like a detacher is a filename, and the command after its target is still read. A pipe after
+                # the target still starts a command.
+                ("trunc/oos-noclobber-target-detacher-name-allows", _fg(">| nohup long_job"), "allow"),
+                ("trunc/oos-noclobber-trailing-detacher-name-allows", _fg("echo hi >| nohup"), "allow"),
+                ("trunc/oos-noclobber-first-setsid-notes", _fg(">| /tmp/f setsid long_job"), "warn"),
+                ("trunc/oos-noclobber-fd-first-setsid-notes", _fg("2>| /tmp/e setsid long_job"), "warn"),
+                ("trunc/oos-noclobber-then-pipe-nohup-notes", _fg("echo hi >| /tmp/f | nohup long_job"),
+                 "warn"),
+                # A named descriptor written directly before its operator is part of the redirect; a brace
+                # word with a blank after it is the command itself.
+                ("trunc/oos-named-fd-first-setsid-notes", _fg("{fd}> /tmp/x setsid long_job"), "warn"),
+                ("trunc/oos-brace-word-command-allows", _fg("{fd} setsid long_job"), "allow"),
+                # setsid waits under -w, --wait, or any unique prefix of --wait; --w is the shortest such
+                # prefix (just inside the bound), while `--` ends the options and --waitx is no prefix
+                # (both just outside, so each still notes).
+                ("trunc/oos-setsid-wait-prefix-allows", _fg("setsid --w long_job"), "allow"),
+                ("trunc/oos-setsid-double-dash-notes", _fg("setsid -- long_job"), "warn"),
+                ("trunc/oos-setsid-wait-nonprefix-notes", _fg("setsid --waitx long_job"), "warn"),
+                # bash removes a redirect from setsid's argument list, so a redirect between setsid and its
+                # wait option must be passed over while the options are read: `-w` after a redirect still
+                # makes setsid wait (allow), while a redirect before a non-waiting setsid still notes.
+                ("trunc/oos-setsid-redirect-then-wait-allows",
+                 _fg("setsid > /dev/null -w long_job"), "allow"),
+                ("trunc/oos-setsid-redirect-then-nonwait-notes",
+                 _fg("setsid > /dev/null -f long_job"), "warn"),
+                # A `${...}` parameter expansion that is the whole redirect target is ONE word to bash, so
+                # its inner blank does not end the operand: the command after it is still read (here setsid
+                # is noted), while a detacher word that sits INSIDE such an expansion is data, not a
+                # command: without the one-word consumption the inner `setsid` reads as a command word and
+                # draws a false note.
+                ("trunc/oos-redirect-param-expansion-target-setsid-notes",
+                 _fg("x=/dev/null; > ${x:-a b} setsid -f long_job"), "warn"),
+                ("trunc/oos-redirect-param-expansion-detacher-data-allows",
+                 _fg("> ${x:-a setsid b} echo done"), "allow"),
+                # A literal `{` in a default does not nest (bash ends the expansion at its matching `}`),
+                # so the command after the target is still read. A `${...}` target that is not provably
+                # simple (anything beyond a name and literal characters up to the first `}`) draws the
+                # note: one holding a `$(...)` or backtick command substitution or a `<(...)`/`>(...)`
+                # process substitution (bash runs each even in a redirect target), one whose quoting can
+                # hide a substitution (a nested default or quoted span included), and one left unclosed.
+                ("trunc/oos-param-expansion-literal-brace-setsid-notes",
+                 _fg("x=/dev/null; > ${x:-{ b} setsid -f long_job"), "warn"),
+                ("trunc/oos-param-expansion-nested-default-setsid-notes",
+                 _fg("> ${x:-${y:-a b}} setsid -f long_job"), "warn"),
+                ("trunc/oos-param-expansion-cmdsubst-target-notes",
+                 _fg("> ${x:-$(long_job &)} echo done"), "warn"),
+                ("trunc/oos-param-expansion-backtick-target-notes",
+                 _fg("> ${x:-`long_job`} echo done"), "warn"),
+                ("trunc/oos-param-expansion-procsub-out-target-notes",
+                 _fg("> ${x:->(long_job &)} echo done"), "warn"),
+                ("trunc/oos-param-expansion-procsub-in-target-notes",
+                 _fg("> ${x:-<(setsid -f long_job)} echo done"), "warn"),
+                ("trunc/oos-param-expansion-nested-quote-cmdsubst-notes",
+                 _fg("> ${x:-\"${y:-\"'$(long_job &)'\"}\"} echo done"), "warn"),
+                ("trunc/oos-param-expansion-unclosed-target-notes",
+                 _fg("> ${x:-a b setsid -f long_job"), "warn"),
+                # A `${...}` target must open with a name: a blank or `|` after `${` opens a bash 5.3
+                # `${ cmd; }` or `${| cmd; }` command substitution, which runs its command even in a
+                # redirect target. An escaped `\}` does not close the expansion to bash, so a scan that
+                # closed it there would read the rest of bash's expansion as a `#` comment and miss the
+                # real detach after it.
+                ("trunc/oos-param-expansion-funsub-target-notes",
+                 _fg("> ${ long_job & } echo done"), "warn"),
+                ("trunc/oos-param-expansion-funsub-setsid-target-notes",
+                 _fg("> ${ setsid -f long_job; } echo done"), "warn"),
+                ("trunc/oos-param-expansion-valsub-target-notes",
+                 _fg("> ${|long_job & } echo done"), "warn"),
+                ("trunc/oos-param-expansion-funsub-nohup-target-notes",
+                 _fg("2> ${ nohup long_job; } echo done"), "warn"),
+                ("trunc/oos-param-expansion-escaped-brace-comment-notes",
+                 _fg("x=/dev/null; > ${x:-a\\} #} long_job &"), "warn"),
+                # Any further `${` in a redirect target operand notes, unquoted or double-quoted: it is
+                # never read char by char as code. A `$` that opens no brace is still read (control).
+                ("trunc/oos-glued-target-funsub-setsid-notes",
+                 _fg("echo x > a${ setsid -f long_job; }"), "warn"),
+                ("trunc/oos-quoted-target-funsub-setsid-notes",
+                 _fg("> \"${ setsid -f long_job; }\" echo done"), "warn"),
+                ("trunc/oos-quoted-target-plain-param-allows", _fg("echo x > \"$out\""), "allow"),
+                # bash takes an fd prefix before `>` but never before `&>`: `2&>/dev/null` is the word `2`
+                # (setsid's command) then a redirect, so this setsid runs `2` and does not wait on
+                # long_job (note), while the prefixed `>` form really is a redirect and `-w` still waits.
+                ("trunc/oos-number-before-amp-redirect-setsid-notes",
+                 _fg("setsid 2&>/dev/null -w long_job"), "warn"),
+                ("trunc/oos-number-before-gt-redirect-wait-allows",
+                 _fg("setsid 2>/dev/null -w long_job"), "allow"),
+                # Control: a named descriptor before `&>` is a word, not an fd prefix, exactly as the
+                # number form above (bash runs `{fd}` as setsid's command, which does not wait on
+                # long_job), so this setsid still notes.
+                ("trunc/oos-named-fd-before-amp-redirect-setsid-notes",
+                 _fg("setsid {fd}&>/dev/null -w long_job"), "warn"),
+                # A here-document delimiter spec that is not one plain word draws the note rather than a
+                # guessed skip: a backslash in the word is an escape or a line continuation (bash removes
+                # the continuation and reads the joined delimiter, so a raw scan that kept it would skip
+                # the body at an invented delimiter and read the real detach after the body as data).
+                ("trunc/oos-heredoc-continued-delim-notes",
+                 _fg("cat <<EO\\\nF\nbody\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-quoted-continued-delim-notes",
+                 _fg("cat <<\"EO\\\nF\"\nbody\nEOF\nlong_job &"), "warn"),
+                # Only a whole word of letters, digits and `_ . + -` is a plain delimiter. bash keeps a
+                # `$(...)`, `$((...))`, `${...}` or backquoted span in the delimiter word, blanks and
+                # metacharacters included, and reads a `>(...)` or an extglob `+(...)` glued to the word as
+                # part of it; a scan that cut the word short would wait for a line that never comes and
+                # read the real detach after bash's delimiter line as body. The plain rows are controls.
+                ("trunc/oos-heredoc-cmdsubst-delim-notes",
+                 _fg("cat <<$(true)\nbody\n$(true)\nlong_job &\n$\n"), "warn"),
+                ("trunc/oos-heredoc-param-blank-delim-notes",
+                 _fg("cat <<${x:-a b}\nbody\n${x:-a b}\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-backtick-blank-delim-notes",
+                 _fg("cat <<`a b`\nbody\n`a b`\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-arith-delim-notes",
+                 _fg("cat <<$((1+1))\nbody\n$((1+1))\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-procsub-glued-delim-notes",
+                 _fg("cat <<EOF>(x y)\nbody\nEOF>(x y)\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-extglob-delim-notes",
+                 _fg("shopt -s extglob\ncat <<a+(b c)\nbody\na+(b c)\nlong_job &"), "warn"),
+                # The plain-delimiter controls below skip the body silently in the note scan; the
+                # body `&` under their unquoted delimiter gives the detector's note (accepted over-warns).
+                ("trunc/oos-heredoc-plain-set-delim-notes",
+                 _fg("cat <<-END.v1+x\n\tFix A & B\n\tEND.v1+x"), "warn"),
+                ("trunc/oos-heredoc-delim-then-redirect-notes",
+                 _fg("cat <<EOF>/tmp/f\nFix A & B\nEOF"), "warn"),
+                # bash joins a backslash-newline in an unquoted body before it matches the closing line,
+                # so `EO\` then `F` closes the body and a raw `x\` then `EOF` does not; either way the raw
+                # line match would skip the real detach, so one anywhere up to the closing line notes. A
+                # continuation after the closing line is live command text, and a live backslash-newline
+                # anywhere outside a single-quoted span notes too (the class is closed as a whole, below);
+                # a backslash before another character stays silent in the note scan (its body `&` under
+                # an unquoted delimiter gives the detector's note, an accepted over-warn).
+                ("trunc/oos-heredoc-continued-close-line-notes",
+                 _fg("cat <<EOF\nbody\nEO\\\nF\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-continued-body-line-notes",
+                 _fg("cat <<EOF\nx\\\nEOF\nit's\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-body-backslash-notes", _fg("cat <<EOF\na\\b & c\nEOF"), "warn"),
+                ("trunc/oos-heredoc-continuation-after-close-notes",
+                 _fg("cat <<EOF\nA & B\nEOF\necho a \\\nb"), "warn"),
+                # An ANSI-C $'...' delimiter is a quoted spelling, so it notes like any other non-plain
+                # delimiter; its body is never skipped at a guessed line, and a body that once shifted
+                # the quote state onto a later real detach now notes at the delimiter instead.
+                ("trunc/oos-ansi-c-delim-notes",
+                 _fg("cat <<$'E\\x4fF'\na & b\nEOF"), "warn"),
+                ("trunc/oos-ansi-c-delim-heredoc-hidden-detach-notes",
+                 _fg("cat <<$'E\\x4fF'\n'\nEOF\nlong_job &"), "warn"),
+                # Controls: an unparseable delimiter spec (a quote left open, or no delimiter word at
+                # all) keeps drawing the note, and so do the ANSI-C escape forms the retired decoder
+                # once handled case by case: a control escape (including one whose uppercase form is two
+                # characters, which once raised out of the handler and blocked), a NUL from any escape
+                # form, and a byte above 0x7F.
+                ("trunc/oos-heredoc-open-quote-delim-notes", _fg("cat <<'EOF\nbody"), "warn"),
+                ("trunc/oos-heredoc-no-word-delim-notes", _fg("cat <<\nlong_job &"), "warn"),
+                ("trunc/oos-ansi-c-ctl-escape-delim-notes",
+                 _fg("cat <<$'\\c\u00df'\ntext\nEOF\n"), "warn"),
+                ("trunc/oos-ansi-c-nul-octal-delim-notes",
+                 _fg("cat <<$'EOF\\0junk'\ntext\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-ansi-c-nul-hex-delim-notes",
+                 _fg("cat <<$'E\\x00F'\nx\nE\nlong_job &"), "warn"),
+                ("trunc/oos-ansi-c-high-byte-delim-notes",
+                 _fg("cat <<$'E\\xe9F'\nx\nlong_job &"), "warn"),
+                # bash 5.3 ends a here-document body inside a command or process substitution or
+                # backquotes at a line that merely STARTS with the delimiter when a `)` or a backquote
+                # follows it on that line (bash runs the rest of that line as commands, so the
+                # exact-delimiter-line skip would read real commands as data), so a here-document
+                # opened while a parenthesis, `${...}` or backquote substitution is open notes as
+                # unreadable instead of a guessed skip. The close-on-its-own-line row pins the
+                # disclosed over-note for the well-formed shape: nothing in it detaches, and the
+                # note still fires.
+                ("trunc/oos-heredoc-in-cmdsubst-eof-paren-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-in-cmdsubst-eof-spaced-paren-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF )\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-in-backquote-notes",
+                 _fg("msg=`cat <<EOF\nhello\nEOF`\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-in-procsub-notes",
+                 _fg("cat <(cat <<EOF\nhello\nEOF)\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-in-cmdsubst-nohup-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF)\nnohup long_job"), "warn"),
+                ("trunc/oos-heredoc-in-cmdsubst-close-own-line-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF\n)\necho done"), "warn"),
+                ("trunc/oos-heredoc-in-subshell-overnote-notes",
+                 _fg("(cat <<EOF\nhello\nEOF\n)"), "warn"),
+                # A bare case pattern's `)` inside a substitution pops the nesting stack's parenthesis
+                # but cannot close the scan's substitution count, so a here-document after it is still
+                # read as opened inside the substitution (bash ends such a body at a line that merely
+                # starts with the delimiter) and the real detach after it draws the note. The
+                # parenthesised-pattern row is the same shape held open by the stack alone (control).
+                ("trunc/oos-heredoc-after-case-bare-paren-cmdsubst-notes",
+                 _fg("x=$(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-in-case-branch-cmdsubst-setsid-notes",
+                 _fg("x=$(case y in y) cat <<EOF;; esac\nhi\nEOF)\nsetsid -f long_job"), "warn"),
+                ("trunc/oos-heredoc-after-case-bare-paren-procsub-notes",
+                 _fg("cat <(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-after-case-parenthesised-pattern-notes",
+                 _fg("x=$(case y in (y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                # A `)` that is text inside a `${...}` expansion is matched against nothing on the
+                # nesting stack, so it closes nothing on the substitution count either: the
+                # substitution stays counted open, the here-document after the bare case pattern
+                # still notes, and the real detach after it is never silently allowed (a count any
+                # `)` lowered read the substitution as closed there and skipped the body at a wrong
+                # line, so the detach got no note).
+                ("trunc/oos-heredoc-after-expansion-paren-cmdsubst-notes",
+                 _fg("x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"),
+                 "warn"),
+                ("trunc/oos-heredoc-after-expansion-paren-default-notes",
+                 _fg("x=$(echo ${y:-)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"),
+                 "warn"),
+                ("trunc/oos-heredoc-after-expansion-paren-procsub-notes",
+                 _fg("cat <(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"),
+                 "warn"),
+                ("trunc/oos-heredoc-after-expansion-paren-setsid-notes",
+                 _fg("x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\n"
+                     "setsid -f long_job"), "warn"),
+                # A backslash-newline line continuation outside a single-quoted span notes as
+                # unreadable wherever the scan meets it: bash removes the pair before it tokenizes,
+                # so any token can be split across one. A `<` or `>` split from its `(` still opens
+                # a process substitution to bash, whose inner here-document body bash ends at a line
+                # that merely STARTS with the delimiter, exactly the shape the substitution count
+                # guards; a raw per-shape scan of the unjoined text counted no substitution there
+                # and skipped the body at a wrong line, so the real detach after it was silently
+                # allowed (bash 5.3.9 runs it). The split `$(` rows are the same split-opener shape
+                # through the `$` path; the plain-word, double-quoted, comment-line and arithmetic
+                # rows pin the rest of the class (bash does not continue a comment past its newline,
+                # so that row is an over-note, never a miss); the single-quoted row is the boundary
+                # (the pair is literal data to bash and stays silent), and a backslash before
+                # another character stays silent too (the body-backslash row above).
+                ("trunc/oos-split-procsub-opener-heredoc-notes",
+                 _fg("cat <\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-split-procsub-opener-setsid-notes",
+                 _fg("cat <\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nsetsid -f long_job"),
+                 "warn"),
+                ("trunc/oos-split-outsub-opener-heredoc-notes",
+                 _fg("echo hi >\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-split-cmdsubst-dollar-heredoc-notes",
+                 _fg("x=$\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-split-cmdsubst-dollar-plain-notes",
+                 _fg("x=$\\\n(true)\necho done"), "warn"),
+                ("trunc/oos-continuation-plain-word-notes", _fg("echo a \\\nb"), "warn"),
+                ("trunc/oos-continuation-double-quoted-notes", _fg("echo \"a \\\nb\""), "warn"),
+                ("trunc/oos-continuation-comment-line-notes",
+                 _fg("true # tail \\\necho done"), "warn"),
+                ("trunc/oos-continuation-arith-notes", _fg("echo $((1 + \\\n2))"), "warn"),
+                ("trunc/oos-continuation-single-quoted-allows", _fg("echo 'a \\\nb'"), "allow"),
+                # Disclosed SILENT miss (the manifest residue): an unquoted expansion as the command
+                # word can vanish, so bash runs the word after it as the command; this scan reads
+                # that word as an argument and stays silent.
+                ("trunc/oos-expansion-command-word-detacher-allows",
+                 _fg("$(true) nohup long_job"), "allow"),
+                # A case pattern's `)` restores command position whether the pattern is parenthesised
+                # or bare (bash runs the word after `(x)`), and a function body the command itself
+                # defines is scanned as code (the empty `()` parens and the `function` keyword with
+                # its name each keep command position for the body); a word after a non-empty
+                # substitution's `)` is still an argument (the control row).
+                ("trunc/oos-case-paren-pattern-setsid-notes",
+                 _fg("case x in (x) setsid -f long_job;; esac"), "warn"),
+                ("trunc/oos-case-bare-pattern-setsid-notes",
+                 _fg("case x in x) setsid -f long_job;; esac"), "warn"),
+                ("trunc/oos-func-body-setsid-notes",
+                 _fg("f() { setsid -f long_job; }\nf"), "warn"),
+                ("trunc/oos-func-keyword-body-setsid-notes",
+                 _fg("function f { setsid -f long_job; }\nf"), "warn"),
+                ("trunc/oos-subst-then-word-argument-allows", _fg("echo $(true) nohup"), "allow"),
+                # A `<<` met inside a double-quoted command or backquote substitution (the
+                # commit-message form) draws the note at the operator itself, whatever the body holds,
+                # as a best-effort rule (the miss rows below show shapes it misses): the
+                # earlier reading of such a body as double-quoted text let a stray body quote flip
+                # the scan's quote state so that a later REAL bare `&` outside the substitution read as
+                # quoted text and was silently allowed (bash 5.3 backgrounds the job: the shifted-amp
+                # row's command sets `$!`). The balanced-body row is the disclosed over-note (nothing
+                # in it detaches, and the note still fires); the literal `<<` rows are the boundary:
+                # a `<<` inside plain double quotes with no substitution open, or inside a
+                # single-quoted span within the substitution, is data and stays silent. A body whose
+                # quotes expose its `&` to the raw scan is no detach to the detector (the shared lexer
+                # places that `&` in the quoted body) and draws no note: the
+                # trunc/oos-commit-heredoc-quoted-amp-no-note row below, which notes if the note scan's
+                # unreadable `<<` is not lifted with that `&`.
+                ("trunc/oos-commit-heredoc-amp-body-notes",
+                 _fg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\""), "warn"),
+                ("trunc/oos-commit-heredoc-quoted-amp-no-note",
+                 _fg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\""), "allow"),
+                ("trunc/oos-commit-heredoc-open-quote-notes",
+                 _fg("git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"\nlong_job &"), "warn"),
+                ("trunc/oos-dq-subst-heredoc-shifted-amp-notes",
+                 _fg(": \"$(cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+                 "warn"),
+                ("trunc/oos-dq-subst-heredoc-detach-control-notes",
+                 _fg(": \"$(cat <<'EOF'\nSupport 5 screens\nEOF\n)\" & long_job"), "warn"),
+                ("trunc/oos-dq-backquote-heredoc-notes",
+                 _fg("echo \"`cat <<EOF\nhi\nEOF`\""), "warn"),
+                ("trunc/oos-dq-literal-heredoc-chars-allows", _fg("echo \"a << b\""), "allow"),
+                ("trunc/oos-dq-subst-single-quoted-lt-allows",
+                 _fg("echo \"$(echo '<<')\""), "allow"),
+                # Disclosed SILENT misses (the manifest residue): the scan tracks quotes and
+                # parentheses inside a double-quoted substitution only approximately, so a shape
+                # whose quote or parenthesis state it misreads can leave a real `&` unnoted. These
+                # rows are examples, not a complete list: a nested double-quoted string, a double
+                # quote in a single-quoted span, a bare case pattern's `)` and a `)` inside `${...}`
+                # (each `)` pops the scan's substitution stack, so the `<<` is not read as inside a
+                # substitution and the body's stray quote carries the real `&` into quoted text).
+                # bash 5.3.9 backgrounds the job in each (`$!` is set). These rows record the
+                # current outcome (no note), so a scanner change that alters it shows here.
+                ("trunc/oos-dq-subst-nested-dq-heredoc-miss-allows",
+                 _fg(": \"$(cat \"-\" <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+                 "allow"),
+                ("trunc/oos-dq-subst-assign-dq-heredoc-miss-allows",
+                 _fg(": \"$(x=\"a\"; cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+                 "allow"),
+                ("trunc/oos-dq-subst-printf-dq-heredoc-miss-allows",
+                 _fg("git_commit_stub -m \"$(printf '%s\\n' \"Title\"; cat <<'EOF'\nSupport 5\" screens\n"
+                     "EOF\n)\" & long_job # 5\" screens"), "allow"),
+                # This row's real detach is now noted: the detector the registry scope denies on reads
+                # its `&` as a bare detach, so the note scan's miss no longer leaves it silent.
+                ("trunc/oos-dq-subst-sq-dq-amp-miss-notes",
+                 _fg("echo \"$(echo 'x\"y')\" & job # '"), "warn"),
+                ("trunc/oos-dq-subst-case-pattern-heredoc-miss-allows",
+                 _fg(": \"$(case a in a) cat <<'EOF'\nSupport 5\" screens\nEOF\n;; esac)\" & long_job"
+                     " # 5\" screens"), "allow"),
+                ("trunc/oos-dq-subst-param-paren-heredoc-miss-allows",
+                 _fg(": \"$(echo ${y%)}; cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job"
+                     " # 5\" screens"), "allow"),
+                # A backslash inside a single-quoted span within a double-quoted substitution is
+                # literal data to bash (bash prints the pair as written), so a backslash-newline
+                # there stays silent; outside that span, inside the same substitution, it is a live
+                # continuation and notes.
+                ("trunc/oos-dq-subst-sq-continuation-allows",
+                 _fg("echo \"$(echo 'a \\\nb')\""), "allow"),
+                ("trunc/oos-dq-subst-continuation-notes",
+                 _fg("echo \"$(echo a \\\nb)\""), "warn"),
+                # A scan that ends with an opened construct still open notes: an unterminated
+                # here-document body consumes the rest of the command while bash is still reading
+                # here-document input (bash 5.3 reads the trailing `long_job &` as body data, so
+                # nothing after the opener was really checked), a here-document opener with no body
+                # line, an unclosed `$(`, `${` or backquote (bash rejects or waits), and a trailing
+                # backslash that escapes nothing (bash joins it with whatever input follows). Each
+                # once ended the scan with nothing outstanding checked and allowed silently.
+                ("trunc/oos-unterminated-heredoc-notes", _fg("cat <<EOF\nbody"), "warn"),
+                ("trunc/oos-unterminated-heredoc-trailing-detach-notes",
+                 _fg("cat <<EOF\nbody\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-opener-no-newline-notes", _fg("cat <<EOF"), "warn"),
+                ("trunc/oos-unclosed-cmdsubst-notes", _fg("echo $("), "warn"),
+                ("trunc/oos-unclosed-param-expansion-end-notes", _fg("echo ${x"), "warn"),
+                ("trunc/oos-unclosed-backquote-notes", _fg("echo `true"), "warn"),
+                # The closing backquote pops the `(` from the nesting stack but not from the saved
+                # groups, so only the groups term of the end rule sees this parenthesis still open.
+                ("trunc/oos-unclosed-paren-in-backquote-notes", _fg("echo `(true`"), "warn"),
+                ("trunc/oos-trailing-escape-notes", _fg("echo a\\"), "warn"),
+                ("trunc/oos-plain-allows", _fg("python3 build.py"), "allow"),
+                ("trunc/oos-unbalanced-quote-notes", _fg("echo 'oops & bg"), "warn"),
+                # A readable background dispatch (run_in_background exactly the boolean true) stays
+                # the silent allow; a flag that is present but not a real boolean cannot be read as
+                # foreground or background, so it draws the unreadable-input note instead of the
+                # silent allow it was (the boolean rows are the boundary on each side of it).
+                ("trunc/oos-background-allows",
+                 {"command": "setsid long_job &", "run_in_background": True}, "allow"),
+                ("trunc/oos-flag-not-boolean-notes",
+                 {"command": "long_job &", "run_in_background": "true"}, "warn"),
+                ("trunc/oos-flag-string-false-notes",
+                 {"command": "long_job &", "run_in_background": "false"}, "warn"),
+                ("trunc/oos-flag-null-notes",
+                 {"command": "long_job &", "run_in_background": None}, "warn"),
+                ("trunc/oos-flag-number-notes",
+                 {"command": "long_job &", "run_in_background": 0}, "warn"),
+                ("trunc/oos-missing-command-notes", {}, "warn"),
+                ("trunc/oos-nonstring-command-notes", {"command": 7}, "warn")):
+            check(check_id, _verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", tool_input))), want)
+        _oos = aiqt_hooks.orch_truncation_guard(ti.payload(
+            "PreToolUse", "Bash", {"command": "setsid long_job", "run_in_background": False}))
+        _oos_note = (_oos[1] or {}).get("systemMessage", "")
+        check("trunc/oos-note-names-mechanism",
+              (_verdict(_oos), "run_in_background" in _oos_note, "setsid" in _oos_note), ("warn", True, True))
+        # The unreadable note's text is pinned: it names the causes the scan cannot read with
+        # certainty, including a substitution open or not provably closed, a backslash-newline line
+        # continuation outside a single-quoted span and a scan that ends inside an open quote
+        # (without this pin, reverting the note's wording to an older text that omits those causes
+        # would pass every check).
+        _unr = aiqt_hooks.orch_truncation_guard(ti.payload(
+            "PreToolUse", "Bash", _fg("msg=$(cat <<EOF\nhello\nEOF)\necho done")))
+        _unr_note = (_unr[1] or {}).get("systemMessage", "")
+        check("trunc/oos-unreadable-note-text-pins-causes",
+              (_verdict(_unr),
+               "a here-document opened while a parenthesis, '${...}' or backquote substitution is "
+               "open or not provably closed" in _unr_note,
+               "a backslash-newline line continuation outside a single-quoted "
+               "span, which can split any token" in _unr_note,
+               "a here-document opened inside a double-quoted command substitution" in _unr_note,
+               "a here-document, substitution or escape left open at the end of the command"
+               in _unr_note,
+               "or a scan that ends inside an open quote), so work that detaches and runs on after "
+               "this call returns cannot be ruled out" in _unr_note),
+              ("warn", True, True, True, True, True))
+        # The whole dispatcher, in a child process: a here-document delimiter the note scan cannot read
+        # with certainty (here an ANSI-C escape whose `\c` form once raised out of the handler and
+        # blocked) stays a NOTE with exit 0 outside registry scope: stdout is one JSON object whose keys
+        # are exactly systemMessage, holding non-whitespace text (a structured deny also exits 0 with a
+        # systemMessage, and a top-level decision or a hookSpecificOutput of any type would change what
+        # the platform does, so the whole key set is asserted), and no fail-closed stderr.
+        _ctl_env = {k: v for k, v in os.environ.items()
+                    if k != aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV}
+        _ctl = subprocess.run(
+            [sys.executable, "-I", "-B", aiqt_hooks.__file__, "orch_truncation_guard"],
+            input=json.dumps(ti.payload("PreToolUse", "Bash", {
+                "command": "cat <<$'\\c\u00df'\ntext\nEOF\n", "run_in_background": False})),
+            capture_output=True, text=True, timeout=60, env=_ctl_env)
+        try:
+            _ctl_out = json.loads(_ctl.stdout)
+        except ValueError:
+            _ctl_out = None
+        _ctl_keys = sorted(_ctl_out) if isinstance(_ctl_out, dict) else None
+        _ctl_note = _ctl_out.get("systemMessage") if isinstance(_ctl_out, dict) else None
+        check("trunc/oos-ctl-escape-dispatcher-notes-exit-0",
+              (_ctl.returncode, _ctl_keys, isinstance(_ctl_note, str) and bool(_ctl_note.strip()),
+               "failing closed" in _ctl.stderr),
+              (0, ["systemMessage"], True, False))
+        # Scanner-level: a literal `{` in a `${...}` default ends the target at the first `}` (as bash
+        # does), so the setsid after it is read in command position and named; a depth scan that nested
+        # the literal `{` read the target as unreadable or unclosed and never named it.
+        check("trunc/scan-param-literal-brace-reads-following-setsid",
+              aiqt_hooks._orch_foreground_note_kind("x=/dev/null; > ${x:-{ b} setsid -f long_job"),
+              "setsid")
+        # Scanner-level: a `${...}` redirect target that is not provably simple reports the unreadable
+        # kind itself, never the word after the target: a scan that modelled the nested or quoted span
+        # instead (the retired depth-and-quote walk) consumed it and named the following setsid, so
+        # these rows tell the two apart where the reduced verdict (both "warn") cannot. The same holds
+        # for a quoted here-document delimiter, which the plain-word rule declines rather than models.
+        check("trunc/scan-param-nested-default-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("> ${x:-${y:-a b}} setsid -f long_job"),
+              "unreadable")
+        check("trunc/scan-param-quoted-default-unreadable",
+              aiqt_hooks._orch_foreground_note_kind('x=/dev/null; > ${x:-"a b"} setsid -f long_job'),
+              "unreadable")
+        check("trunc/scan-heredoc-quoted-delim-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("cat > /tmp/f <<'EOF'\nFix A & B\nEOF"),
+              "unreadable")
+        # Scanner-level: a here-document opened inside a command substitution reports the unreadable
+        # kind itself (never "detach" from a guessed body end), and a scan that ends inside an open
+        # quote reports unreadable rather than returning None (the silent allow it once was).
+        check("trunc/scan-heredoc-in-cmdsubst-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("msg=$(cat <<EOF\nhello\nEOF)\nlong_job &"),
+              "unreadable")
+        check("trunc/scan-open-quote-end-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("echo 'oops & bg"),
+              "unreadable")
+        # Scanner-level: the substitution count, not the poppable nesting stack alone, gates the
+        # here-document rule. A bare case pattern's `)` leaves the count up (unreadable); the `)` of
+        # a substitution met before any `case` keyword closes it, so a later here-document is still
+        # skipped silently; after a `case` keyword no `)` is counted as closing, so a later
+        # here-document after a closed substitution notes (the disclosed over-note).
+        check("trunc/scan-heredoc-after-case-bare-paren-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "x=$(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\necho done"),
+              "unreadable")
+        check("trunc/scan-heredoc-after-closed-subst-skips-silently",
+              aiqt_hooks._orch_foreground_note_kind("x=$(true)\ncat <<EOF\nhello & 'hi\nEOF"),
+              None)
+        check("trunc/scan-heredoc-after-case-then-closed-subst-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "case a in a) :;; esac\nx=$(true)\ncat <<EOF\nhi\nEOF"),
+              "unreadable")
+        # Scanner-level: the count falls only at a `)` the nesting stack itself matches against a
+        # `(` on top. A `)` that is text inside a `${...}` expansion closes nothing, so the
+        # substitution stays counted open and the here-document inside it notes (a count any `)`
+        # lowered read it as closed and skipped the body at a wrong line). The closed row is the
+        # boundary: the same expansion inside a substitution the stack does prove closed leaves a
+        # later here-document silently skipped, exactly as one with no `)` in it.
+        check("trunc/scan-heredoc-after-expansion-paren-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\necho done"),
+              "unreadable")
+        check("trunc/scan-heredoc-after-expansion-closed-subst-skips-silently",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "x=$(echo ${y%)}; true)\ncat <<EOF\nhello & 'hi\nEOF"),
+              None)
+        # Scanner-level: a backslash-newline reports the unreadable kind itself, before any other
+        # reading. The split `<(` row was a silent None (the `(` after the raw newline was counted as
+        # no substitution, so the here-document body was skipped at a wrong line past the real
+        # detach), and the split `$(` row read the joined substitution and reported the detach from a
+        # guessed remainder; both now stop at the continuation.
+        check("trunc/scan-split-procsub-opener-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "cat <\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\necho done"),
+              "unreadable")
+        check("trunc/scan-continuation-before-detach-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("x=$\\\n(true)\nlong_job &"),
+              "unreadable")
+        # The glued-close emptiness test is pinned to the in-place running-index walk
+        # (_orch_span_blank): the slice it replaced copied the whole enclosed text once per closer,
+        # so nested glued substitutions cost time quadratic in the nesting depth while the manifest
+        # states linear passes, and the timed deadline shape alone cannot pin the walk (the sliced
+        # test stayed under the 1 MB CPU bound when measured). The rows pin the exact semantics the
+        # slice had: an empty span and a spaces-and-tabs span are blank, a newline or any other
+        # character is not (in "x=$( \t)" the span runs from index 4 up to the `)`).
+        _span = getattr(aiqt_hooks, "_orch_span_blank", None)
+        check("trunc/scan-glued-close-running-index-walk",
+              None if _span is None else
+              (_span("x=$( \t)", 4, 6), _span("x=$()", 4, 4),
+               _span("x=$(\n)", 4, 5), _span("x=$(a)", 4, 5)),
+              (True, True, False, False))
+        # The semantics rows above pass with the scan's call site reverted to the old slice (the
+        # helper still exists and answers the same), and with the helper's body reverted to a slice
+        # copy (the slice has the same semantics), so neither revert was red anywhere. This row pins
+        # both, deterministically, with no timing: the scan of a nested glued shape must CALL the
+        # walk once per glued close (a call site reverted to the slice makes zero calls), and the
+        # positions the walk reads over the whole scan, counted through an instrumented command
+        # string (a slice read counts every position it copies), must stay within the command's
+        # length (a walk body reverted to a slice copy reads the whole enclosed span at every close,
+        # quadratic in the nesting depth: about 100,000 positions here against 200 for the walk).
+        _walk_depth = 200
+        _walk_cmd = "x=$(" * _walk_depth + "true" + ")" * _walk_depth
+        _walk_calls = [0]
+        _walk_reads = [0]
+
+        class _ReadCountingStr(str):
+            def __getitem__(self, key):
+                if isinstance(key, slice):
+                    _s, _e, _st = key.indices(len(self))
+                    _walk_reads[0] += len(range(_s, _e, _st))
+                else:
+                    _walk_reads[0] += 1
+                return str.__getitem__(self, key)
+
+        _walk_orig = aiqt_hooks._orch_span_blank
+
+        def _walk_counting(command, start, end):
+            _walk_calls[0] += 1
+            return _walk_orig(_ReadCountingStr(command), start, end)
+
+        try:
+            aiqt_hooks._orch_span_blank = _walk_counting
+            _walk_kind = aiqt_hooks._orch_note_scan(_walk_cmd, False)
+        finally:
+            aiqt_hooks._orch_span_blank = _walk_orig
+        check("trunc/scan-glued-close-walk-called-linear",
+              (_walk_kind, _walk_calls[0], _walk_reads[0] <= len(_walk_cmd)),
+              (None, _walk_depth, True))
+        # Scanner-level kinds for the dq-substitution here-document rule and the open-construct end
+        # rule: each reports the unreadable kind itself (the shifted-amp shape was a silent None at
+        # the head this fix amends, while bash backgrounds the job; the unterminated body consumed
+        # the detach as data and returned None too).
+        check("trunc/scan-dq-subst-heredoc-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  ": \"$(cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+              "unreadable")
+        check("trunc/scan-unterminated-heredoc-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("cat <<EOF\nbody\nlong_job &"),
+              "unreadable")
+        # The note scan reads a `#` by the in-scope scan's comment rule: a `#` whose reading depends on
+        # context (at a word start inside an open ${...} or backquote substitution, right after a `)`, or
+        # after a blank inside a double-quoted "$(...)") notes as unreadable, where the deny scan denies it.
+        # Before this fix each `#` read as a comment that hid the `&` after it, so the first, second and
+        # fourth rows stayed silent, and the third noted only because the historical word-start rule read
+        # its `#` as text; each row pairs the verdict with the scan's kind, which tells that apart. The
+        # spaced row is the CONTROL: a `#` after a blank with nothing open is a comment, as in bash.
+        for check_id, command in (
+                ("trunc/oos-param-expansion-hash-notes", "echo ${x:- #} & job"),
+                ("trunc/oos-backquote-hash-notes", "echo `true #` & job"),
+                ("trunc/oos-subst-glued-hash-notes", "x=$(true)# & job"),
+                ("trunc/oos-dq-subst-hash-notes", 'echo "$(echo a # "\n)" & job # "')):
+            check(check_id, (_verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", _fg(command)))),
+                aiqt_hooks._orch_foreground_note_kind(command)), ("warn", "unreadable"))
+        check("trunc/oos-subst-spaced-hash-comment-allows", _verdict(aiqt_hooks.orch_truncation_guard(
+            ti.payload("PreToolUse", "Bash", _fg("x=$(true) # & job")))), "allow")
+        # Input this guard cannot read outside registry scope draws the note naming the unreadable
+        # field, never the silent allow it was (a detach such an input carries is never scanned, so
+        # the silent allow read ignorance as clean), and never a deny. The rows cover each unreadable
+        # field (a tool_input that is missing, null or not an object; the command and flag rows are
+        # in the table above), and the note's text is pinned to name the field and the repair.
+        _oos_bad = ti.payload("PreToolUse", "Bash")
+        _oos_bad["tool_input"] = "long_job &"
+        check("trunc/oos-malformed-input-notes", _verdict(aiqt_hooks.orch_truncation_guard(_oos_bad)),
+              "warn")
+        _oos_missing = ti.payload("PreToolUse", "Bash")
+        del _oos_missing["tool_input"]
+        check("trunc/oos-missing-tool-input-notes",
+              _verdict(aiqt_hooks.orch_truncation_guard(_oos_missing)), "warn")
+        _oos_null = ti.payload("PreToolUse", "Bash")
+        _oos_null["tool_input"] = None
+        check("trunc/oos-null-tool-input-notes",
+              _verdict(aiqt_hooks.orch_truncation_guard(_oos_null)), "warn")
+        _oos_array = ti.payload("PreToolUse", "Bash")
+        _oos_array["tool_input"] = ["long_job &"]
+        check("trunc/oos-array-tool-input-notes",
+              _verdict(aiqt_hooks.orch_truncation_guard(_oos_array)), "warn")
+        _bad_note = (aiqt_hooks.orch_truncation_guard(_oos_bad)[1] or {}).get("systemMessage", "")
+        _flag_note = (aiqt_hooks.orch_truncation_guard(ti.payload(
+            "PreToolUse", "Bash",
+            {"command": "long_job &", "run_in_background": "true"}))[1] or {}).get("systemMessage", "")
+        check("trunc/oos-unreadable-input-note-text",
+              ("input could not be read" in _bad_note,
+               "its tool_input is a string, not a JSON object" in _bad_note,
+               "this is a note, not a deny" in _bad_note,
+               "a tool_input object carrying a string command and a boolean run_in_background"
+               in _bad_note,
+               "its run_in_background is a string, not a boolean" in _flag_note),
+              (True, True, True, True, True))
         # REGISTRY-REQUIRED MODE (opt-in, AIQT_ORCH_REQUIRE_REGISTRY): an ABSENT registry DENIES instead
-        # of leaving the guard inert, with a reason naming the mode and its repair; an explicit off value
-        # keeps the default inert allow, and a PRESENT registry behaves identically in both modes.
+        # of the default no-registry outcome (no deny, a readable foreground detach draws only the note),
+        # with a reason naming the mode and its repair; an explicit off value keeps that default outcome,
+        # and a PRESENT registry behaves identically in both modes.
         _rr = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
         _rr_old = os.environ.get(_rr)
         try:
@@ -9368,14 +12750,24 @@ def _main_isolated(report_path=None):
                 "permissionDecisionReason", "")
             check("trunc/registry-required-absent-denies",
                   (_verdict(rr), _rr in rr_reason, "orchestration" in rr_reason), ("deny", True, True))
+            # The reason's default-mode wording states the posture this mode replaces (with no
+            # registry the guard denies nothing), so that sentence is pinned, not only the mode name.
+            check("trunc/registry-required-reason-pins-default-wording",
+                  "instead of the default, in which this guard denies nothing" in rr_reason, True)
+            # The repair sentence's closing clause is pinned too: it restates the default scoping
+            # that unsetting the variable restores, so a reworded reason that drops it fails here.
+            check("trunc/registry-required-reason-pins-restore-wording",
+                  "restore the default scoping (with no registry this guard denies nothing and "
+                  "allows)." in rr_reason, True)
             check("trunc/registry-required-present-plain-allows", _verdict(bg("python3 build.py")),
                   "allow")
             check("trunc/registry-required-present-detach-denies",
                   _verdict(bg("long_job &", rib=False)), "deny")
             os.environ[_rr] = "off"
-            check("trunc/registry-required-off-value-inert", _verdict(aiqt_hooks.orch_truncation_guard(
+            # an explicit off value keeps the default no-registry outcome: no deny, the detach note only
+            check("trunc/registry-required-off-value-notes", _verdict(aiqt_hooks.orch_truncation_guard(
                 ti.payload("PreToolUse", "Bash",
-                           {"command": "long_job &", "run_in_background": False}))), "allow")
+                           {"command": "long_job &", "run_in_background": False}))), "warn")
             # The off values are matched EXACTLY, nothing stripped (ASCII case-insensitive): a comparison that
             # stripped the value first would read a tab, a newline, or an off word wrapped in spaces or
             # no-break spaces as OFF and allow without a registry. Each reads as ON.
@@ -9398,13 +12790,337 @@ def _main_isolated(report_path=None):
                 os.environ.pop(_rr, None)
             else:
                 os.environ[_rr] = _rr_old
-        # The cautious scanner's disclosed over-refusal residual: a here-document body is scanned as code,
-        # so a safe body carrying an unquoted `&` is denied; the double-quoted commit-message form is read
-        # as double-quoted text and allowed.
-        check("trunc/fg-heredoc-amp-overrefusal-residual-denies",
-              _verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)), "deny")
+        # The guard reads a foreground detach through the shared lexer beside the raw scan
+        # (_orch_foreground_detach_lexed), on one of two paths; every allow row below takes one of them but
+        # the commit-template row, which takes neither. (1) In a command that is nothing but plain
+        # `cat > FILE <<'DELIM'` writes, the scan itself reads each body as data up to its delimiter line (the
+        # body skip, rows further below), so it reads no detach and, on the registry path these rows run, the
+        # lexer's narrowing is never reached: the cat-write row allows on the scan alone. Its body's apostrophe
+        # after the `&` makes it deny without the body skip: the scan then reads that `&` as a bare detach
+        # and ends inside the apostrophe's quote, so the narrowing, which needs the scan to read the whole
+        # command, cannot lift it. (2) In any other command the scan reads a here-document body as code, so
+        # it reads each `&` in the cat to standard output row, the commit-heredoc row and the three
+        # quote-shift rows as a bare detach; the lexer places that `&` in one of the three shapes that alone
+        # lift the scan's deny: a quoted here-document body (<<'EOF', <<"EOF", the commit-message form's
+        # body), a single- or double-quoted string (the scan's quote state shifted by a body quote), and a
+        # comment. Each of those rows denies with the guard reading the scan alone; the first is a cat to
+        # standard output, not a cat write, so that its body takes this path. The commit-template row's `&`
+        # lies inside the scan's double-quote state (the double-quoted "$(...)" that holds the body), so the
+        # scan reads no detach whether or not it skips bodies, the narrowing is never reached, and the row
+        # allows with either the body skip or the narrowing reverted.
+        check("trunc/fg-quoted-heredoc-amp-allows",
+              [_verdict(bg("cat <<'EOF'\nFix A & B\nEOF", rib=False)),
+               _verdict(bg('cat <<"EOF"\nFix A & B\nEOF', rib=False))], ["allow", "allow"])
+        check("trunc/fg-quoted-heredoc-cat-write-amp-is-data-allows",
+              [_verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOF", rib=False)),
+               _verdict(bg('cat > f <<"EOF"\nFix A & B\'s\nEOF', rib=False))], ["allow", "allow"])
+        check("trunc/fg-commit-heredoc-quoted-amp-allows",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\"", rib=False)), "allow")
+        check("trunc/fg-quote-shift-single-quoted-amp-allows",
+              _verdict(bg("cat <<'A'\nit's\nA\necho 'a & b'\ncat <<'B'\nit's\nB", rib=False)), "allow")
+        check("trunc/fg-quote-shift-double-quoted-amp-allows",
+              _verdict(bg("cat <<'A'\nsay \"hi\nA\necho \"a & b\"\ncat <<'B'\nsay \"bye\nB", rib=False)),
+              "allow")
+        check("trunc/fg-quote-shift-comment-amp-allows",
+              _verdict(bg("cat <<'EOF'\nit's\nEOF\necho ok # it's a & b", rib=False)), "allow")
         check("trunc/fg-commit-template-amp-allows",
               _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"", rib=False)), "allow")
+        # Every other case where the lexer and the scan disagree still denies: an `&` the lexer places in a
+        # substitution that a double-quoted string holds (even inside a quoted string there, which the
+        # lexer skips whole), one in an ANSI-C $'...' quote, and a quoted-delimiter body `&` after which
+        # the scan ends inside a quote (an apostrophe in a body whose delimiter line never comes, which the
+        # scan reads as shell text). The first two rows allow if the narrowing lifts a scan detach without
+        # the lexer's place, the first also if it reads the outermost span holding the `&`, and the third
+        # if it lifts one without the scan reading to the end.
+        check("trunc/fg-amp-in-dq-substitution-denies",
+              _verdict(bg('echo "$(echo "a & b")"', rib=False)), "deny")
+        check("trunc/fg-amp-in-ansi-c-quote-denies", _verdict(bg("echo $'it\\'s & b' \\'", rib=False)), "deny")
+        check("trunc/fg-quoted-heredoc-amp-then-open-quote-denies",
+              _verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOX", rib=False)), "deny")
+        # Where the whole command is nothing but plain `cat > FILE <<'DELIM'` writes (or `>>`, or a
+        # double-quoted delimiter), each with its body and delimiter line and separated only by newlines,
+        # the scan reads each body as literal data up to its delimiter line, as bash does, so a quote, a
+        # backquote, a '$(' or an `&` in it does not change how the command is read. Each allow row denies
+        # with the scan reading such a body as shell text (the body apostrophe, quote, or `&`).
+        check("trunc/fg-quoted-heredoc-body-apostrophe-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nLine one.\n\nThe project's own material.\nEOF",
+                  'cat > /abs/f <<"EOF"\nit\'s\nEOF', "cat > rel/f.txt <<'EOF'\nit's\nEOF\n")],
+              ["allow"] * 3)
+        check("trunc/fg-quoted-heredoc-body-dquote-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nsay \"hi\nEOF", rib=False)), "allow")
+        check("trunc/fg-quoted-heredoc-body-backquote-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nrun `date # now\nEOF", rib=False)), "allow")
+        check("trunc/fg-quoted-heredoc-body-dollar-paren-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nrun $(date # now\nEOF", rib=False)), "allow")
+        check("trunc/fg-quoted-heredoc-body-amp-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nsleep 1 &\nEOF\ncat > /abs/g <<'EOF'\nit's\nEOF",
+                  "cat > /abs/f <<'EOF'\nit's & more\nEOF")],
+              ["allow"] * 2)
+        # A real `&` after the body's delimiter line still denies, and an unquoted delimiter's body, which
+        # bash expands, is still read as shell text, so a detach in a substitution there denies (it denied
+        # before the body skip too). A body whose end the scan cannot tell keeps the scan's reading of it
+        # as shell text, so the apostrophe still denies: no delimiter line, a delimiter line that is not the
+        # whole line (indented under <<, or ending in a carriage return), and a here-document in a subshell.
+        check("trunc/fg-quoted-heredoc-then-amp-denies",
+              _verdict(bg("cat > /abs/f <<'EOF'\nThe project's own material.\nEOF\nsleep 5 &", rib=False)),
+              "deny")
+        check("trunc/fg-unquoted-heredoc-subst-amp-denies",
+              _verdict(bg("cat > /abs/f <<EOF\n$(sleep 1 &)\nEOF", rib=False)), "deny")
+        check("trunc/fg-quoted-heredoc-unread-body-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nit's\nEOFX", "cat > /abs/f <<'EOF'\nit's\n\tEOF",
+                  "cat > /abs/f <<'EOF'\nit's\nEOF\r\n", "(cat > /abs/f <<'EOF'\nit's\nEOF\n)")],
+              ["deny"] * 4)
+        # A quoted here-document body that a shell runs is code, not data: fed to a shell, sourced from
+        # stdin, or piped into one, its `&` detaches in real bash, so the scan reads it as code and the body
+        # apostrophe denies, as it did before the body skip. Each row allows if the skip ignores the consumer.
+        check("trunc/fg-quoted-heredoc-fed-to-shell-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "bash <<'EOF'\nsleep 1 &\necho it's\nEOF", "cat <<'EOF' | bash\nsleep 1 &\necho it's\nEOF",
+                  ". /dev/stdin <<'EOF'\nsleep 1 &\necho it's\nEOF", "sh <<'EOF'\nsleep 1 &\necho it's\nEOF")],
+              ["deny"] * 4)
+        check("trunc/fg-quoted-heredoc-shell-forms-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "/usr/bin/bash <<'EOF'\nsleep 1 &\necho it's\nEOF", "env bash <<'EOF'\nsleep 1 &\necho it's\nEOF",
+                  "bash -s <<'EOF'\nsleep 1 &\necho it's\nEOF", "source /dev/stdin <<'EOF'\nsleep 1 &\necho it's\nEOF",
+                  "cat <<'EOF' | sh -s\nsleep 1 &\necho it's\nEOF", "<<'EOF' bash\nsleep 1 &\necho it's\nEOF",
+                  "bash \\\n<<'EOF'\nsleep 1 &\necho it's\nEOF")],
+              ["deny"] * 7)
+        # cat's output can still reach a shell through a pipe after an enclosing group or loop, the shell's
+        # own output or a process substitution; a here-document after another on the same line, or one read
+        # inside a body the scan read as code, has a consumer or an end the scan cannot tell. Each is a real
+        # detach in bash that the body skip allowed.
+        check("trunc/fg-quoted-heredoc-shell-output-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "{\ncat <<'EOF'\nsleep 1 &\necho it's\nEOF\n} | bash",
+                  "while :; do\ncat <<'EOF'\nsleep 1 &\necho it's\nEOF\nbreak\ndone | bash",
+                  "{\ncat > /dev/stdout <<'EOF'\nsleep 1 &\necho it's\nEOF\n} | bash",
+                  "{\ncat > /proc/self/fd/1 <<'EOF'\nsleep 1 &\necho it's\nEOF\n} | bash",
+                  "cat <<'EOF' > >(bash)\nsleep 1 &\necho it's\nEOF",
+                  "cat > /abs/f <<'EOF'; bash <<'X'\nit's\nEOF\nsleep 1 &\nX",
+                  "cat <<EOF\ncat > /abs/f <<'X'\nEOF\nsleep 1 &\nX",
+                  "bash <<'A'\ncat > /abs/f <<'X'\nit's\nX\nsleep 1 &\nA")],
+              ["deny"] * 8)
+        # A consumer the scan cannot show writes the body only to a file reads the body as code (fail
+        # closed): cat to standard output, a quoted or expanded target, tee, and a target under /dev.
+        check("trunc/fg-quoted-heredoc-unknown-consumer-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF'\nit's\nEOF", "cat > \"/abs/f\" <<'EOF'\nit's\nEOF", "cat > $F <<'EOF'\nit's\nEOF",
+                  "tee /abs/f <<'EOF'\nit's\nEOF", "cat > dev/stdout <<'EOF'\nit's\nEOF")],
+              ["deny"] * 5)
+        check("trunc/fg-quoted-heredoc-cat-to-file-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat >> /abs/f <<'EOF'\nit's & more\nEOF", "cat>/abs/f<<'EOF'\nit's\nEOF",
+                  "  cat > f.txt <<\"EOF\"\t\nit's\nEOF")],
+              ["allow"] * 3)
+        check("trunc/fg-quoted-heredoc-cat-writes-only-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/a <<'EOF'\nthe user's file\nEOF\ncat >> b.txt <<\"X\"\nsay \"hi\nX",
+                  "cat > /abs/a <<'A'\nit's\nA\n\ncat > /abs/b <<'B'\n`date & $(x\nB\ncat > /abs/c <<'C'\nC\n")],
+              ["allow"] * 2)
+        # The body is data ONLY when the whole command is such writes. A write followed by a command that
+        # runs the written file ('. ./s.sh', 'bash s.sh', './s.sh', 'source s.sh') detaches in real bash,
+        # and so does one after a line that makes `cat` something else (hash -p, a function, an alias,
+        # enable, a PATH assignment); each reads every body as code, so the body `&` or apostrophe denies.
+        # Each row allows if a cat write line alone makes its body data.
+        bj = "{ /usr/bin/sleep 1; : > bgmark; } &"
+        check("trunc/fg-quoted-heredoc-written-file-run-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > s.sh <<'EOF'\n" + bj + "\nEOF\ncat > n.txt <<'EOF'\nthe user's file\nEOF\n. ./s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\nEOF\ncat > n.txt <<'EOF'\nthe user's file\nEOF\nbash s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF\n. ./s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF\n./s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF\nsource s.sh")],
+              ["deny"] * 5)
+        check("trunc/fg-quoted-heredoc-cat-renamed-denies",
+              [_verdict(bg(v + "\ncat > out.txt <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF", rib=False)) for v in (
+                  "hash -p /usr/bin/bash cat", "function cat { /usr/bin/bash; }", "alias cat=bash",
+                  "enable -f ./cat.so cat", "PATH=./bin")],
+              ["deny"] * 5)
+        # A cat write followed or preceded by any other command reads every body as code, as before the
+        # body skip, so a body apostrophe denies; so does a write outside the one plain form (the
+        # here-document first, '>|', a second redirect or here-document on the line, '<<-', a second word).
+        check("trunc/fg-quoted-heredoc-write-then-command-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nit's\nEOF\ntrue", "cat > /abs/f <<'EOF'\nit's\nEOF\necho done",
+                  "true\ncat > /abs/f <<'EOF'\nit's\nEOF", "cat > /abs/f <<'EOF'; true\nit's\nEOF")],
+              ["deny"] * 4)
+        check("trunc/fg-quoted-heredoc-outside-write-form-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF' > /abs/f\nit's\nEOF", "cat >| f.txt <<'EOF'\nit's\nEOF",
+                  "cat > /abs/f <<'A' 3<<'B'\nit's\nA\nx\nB", "cat > /abs/f <<-'EOF'\n\tit's\n\tEOF",
+                  "cat > /abs/f 2>/abs/e <<'EOF'\nit's\nEOF", "cat > /abs/f x <<'EOF'\nit's\nEOF")],
+              ["deny"] * 6)
+        # A substitution after the commit-message form's body makes the lexer lex again reading no body
+        # (_SubstHeredocRetry); that pass places the body `&` in the substitution, so the deny stands. It
+        # allows if a pass keeps the places recorded by the pass it replaced.
+        check("trunc/fg-commit-heredoc-retried-lex-amp-denies",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\" \"$(date)\"", rib=False)),
+              "deny")
+        # The lexer's bare `&` separator denies where the scan reads the `&` as quoted or commented text:
+        # the scan's QUOTE SHIFT (an apostrophe in each of two quoted here-document bodies around a real
+        # detach) and COMMENT SHIFT false allows. Each row allows with the guard reading the scan alone.
+        check("trunc/fg-quote-shift-heredoc-detach-denies",
+              _verdict(bg("cat > a <<'A'\nit's\nA\njob &\ncat > b <<'B'\nit's\nB", rib=False)), "deny")
+        check("trunc/fg-comment-shift-detach-denies",
+              _verdict(bg('echo "$(echo "a" "b # ")" & job # "', rib=False)), "deny")
+        # Where the lexer refuses the command (an unquoted here-document, an open quote, a process
+        # substitution, a here-string) the scan alone decides: its detach and open quote deny, and a
+        # command it reads with no bare `&` allows.
+        check("trunc/fg-unlexable-falls-back-denies",
+              [_verdict(bg(v, rib=False)) for v in ("cat > f <<EOF\nFix A & B\nEOF", "echo 'oops & bg",
+                                                    "cat <(job &)")], ["deny"] * 3)
+        check("trunc/fg-unlexable-no-amp-allows",
+              [_verdict(bg(v, rib=False)) for v in ("diff <(sort a) <(sort b)", 'grep x <<< "a & b"')],
+              ["allow"] * 2)
+        # The places the lexer records (_LexPlaces) change nothing it returns, and a single-quoted string, a
+        # substitution inside a double-quoted string, that string and a comment each record their span.
+        _places_vectors = ("cat > f <<'EOF'\nFix A & B\nEOF",
+                           "git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\"",
+                           "echo 'a' \"b $(c)\" # d", "x=$(true)# e\n f")
+        _places_plain = [aiqt_hooks._lex_command(v) for v in _places_vectors]
+        with aiqt_hooks._LexPlaces():
+            _places_recorded = [aiqt_hooks._lex_command(v) for v in _places_vectors]
+        check("trunc/lex-places-same-segments", _places_recorded, _places_plain)
+        with aiqt_hooks._LexPlaces() as _places_spans:
+            aiqt_hooks._lex_reading("echo 'a' \"b $(c)\" # d", False, {})
+        check("trunc/lex-places-spans", sorted(_places_spans),
+              [(5, 8, "quote"), (9, 17, "quote"), (12, 16, "code"), (18, 21, "comment")])
+        # The lexer reads a here-document delimiter word as bash does (_parse_heredoc_delim): a
+        # backslash-newline in the word, or between '<<' and the word, is a line continuation bash removes,
+        # never quoting, so the joined word is the delimiter, quoted only by a quoting character left after
+        # that removal, and the body ends at that delimiter with what follows read as commands again. Each
+        # row allows if the lexer reads the pair as an escaped newline: the delimiter then matches no line,
+        # so the real detach after the body read as body and the narrowing lifted it.
+        check("trunc/fg-heredoc-continued-delim-denies",
+              _verdict(bg("cat <<EO\\\nF\nbody\nEOF\nlong_job &", rib=False)), "deny")
+        check("trunc/fg-heredoc-quoted-continued-delim-denies",
+              _verdict(bg("cat <<\"EO\\\nF\"\nbody\nEOF\nlong_job &", rib=False)), "deny")
+        # Each delimiter shape below runs through real bash (env -i and the literal /usr/bin/bash, in this
+        # run's temporary directory, the command read by eval as a -c string is read) with `sleep 0 &` as
+        # its job, recording whether `$!` is set afterwards, and the guard's verdicts must agree: a real
+        # detach denies in registry scope and draws the note with no registry, and a shape bash reads as no
+        # detach allows in both. The shapes put a continuation inside the word, before it, between '<<' and
+        # the '-' of the <<- form, inside a double-quoted or $"..." fragment, after a quoted fragment and
+        # before one, and under <<- tab stripping, and one holds a '$(...)' span bash keeps whole, which the
+        # lexer refuses so the raw scan decides. The single-quoted row and the quoted-body row are controls
+        # (bash keeps a backslash-newline inside single quotes, so that body runs to the end of the
+        # command): they pass with the lexer's earlier reading too, and fail if the continuation is removed
+        # inside single quotes.
+        for check_id, shape, detaches in (
+            ("trunc/heredoc-delim-continued-bash-agrees", "cat <<EO\\\nF\nbody\nEOF\nsleep 0 &", True),
+            ("trunc/heredoc-delim-dq-continued-bash-agrees", "cat <<\"EO\\\nF\"\nbody\nEOF\nsleep 0 &", True),
+            ("trunc/heredoc-delim-sq-continued-bash-agrees", "cat <<'EO\\\nF'\nbody\nEOF\nsleep 0 &", False),
+            ("trunc/heredoc-delim-leading-continuation-bash-agrees", "cat <<\\\nEOF\nbody\nEOF\nsleep 0 &",
+             True),
+            ("trunc/heredoc-delim-strip-tabs-continued-bash-agrees",
+             "cat <<-EO\\\nF\n\tbody\n\tEOF\nsleep 0 &", True),
+            ("trunc/heredoc-delim-strip-tabs-mixed-continued-bash-agrees",
+             "cat <<-'EO'\\\nF\n\tbody\n\tEOF\nsleep 0 &", True),
+            ("trunc/heredoc-delim-continued-into-quote-bash-agrees", "cat <<E\\\n'OF'\nbody\nEOF\nsleep 0 &",
+             True),
+            ("trunc/heredoc-delim-continued-dash-bash-agrees", "cat <<\\\n-'EOF'\n\tbody\n\tEOF\nsleep 0 &",
+             True),
+            ("trunc/heredoc-delim-quoted-continued-tail-bash-agrees",
+             "cat <<'EOF'\\\nX\nbody\nEOFX\nsleep 0 &", True),
+            ("trunc/heredoc-delim-locale-continued-bash-agrees", "cat <<$\"EO\\\nF\"\nbody\nEOF\nsleep 0 &",
+             True),
+            ("trunc/heredoc-delim-cmdsubst-bash-agrees", "cat <<'E'$(x)\nbody\nE$(x)\nsleep 0 &", True),
+            ("trunc/heredoc-delim-quoted-body-amp-bash-agrees", "cat <<'EOF'\nA & B\nEOF", False),
+        ):
+            try:
+                _bash = subprocess.run(
+                    ["/usr/bin/env", "-i", "/usr/bin/bash", "-c", 'eval "$1"; echo "BANG=$!"', "probe", shape],
+                    cwd=str(tmp), capture_output=True, text=True, timeout=30)
+                _bang = [line for line in _bash.stdout.split("\n") if line.startswith("BANG=")]
+                _bang_set = _bang[-1] != "BANG=" if _bang else None
+            except (OSError, subprocess.SubprocessError):
+                _bang_set = None
+            check(check_id,
+                  (_bang_set, _verdict(bg(shape, rib=False)),
+                   _verdict(ti_call({"command": shape, "run_in_background": False}))),
+                  (detaches, "deny" if detaches else "allow", "warn" if detaches else "allow"))
+        # DIFFERENTIAL ORACLE against real bash over a bounded generated here-document corpus: every
+        # delimiter form the shared parsers model (unquoted, single-quoted, double-quoted,
+        # backslash-escaped, partially quoted, ANSI-C, plus the <<- strip-tabs rows appended last),
+        # opened at the top level, inside a command substitution (its close glued to the delimiter
+        # line, 'EOF)', and on its own line), inside a subshell (both close forms), inside backquotes
+        # and inside a double-quoted command substitution (the commit-message form), over bodies
+        # holding a bare '&', an apostrophe, a double-quoted '&', a '#' comment with an '&', a
+        # trailing-backslash line continuation and plain text, each followed or not by a real
+        # background job. Each case runs through real bash (env -i and the literal /usr/bin/bash, in
+        # this oracle's own temporary directory under the run fixture root; the command is read by
+        # eval from a -c string; nothing in the corpus touches the network or writes outside that
+        # directory), recording ONLY whether $! is set afterwards, and the REGISTRY-SCOPE verdict
+        # must agree with bash in both directions: a command after which bash sets $! (a real
+        # detach) must DENY, and a command bash does not background must ALLOW on the rows the
+        # three-shape narrowing lifts (expected_allow below: a top-level or commit-message-form body
+        # '&' under a quoted delimiter with an exact closing line and no trailing job; every other
+        # non-detaching row may fail closed). A bash run that yields no BANG line, or a probe error,
+        # is missing fixture evidence and FAILS its row rather than passing it. The corpus is a
+        # deterministic product of 506 cases, one short bash run each, well under the 60-second
+        # budget for the whole oracle.
+        oracle_dir = tmp / "trunc-bash-oracle"
+        oracle_dir.mkdir()
+        _oracle_specs = (("unquoted", "EOF"), ("squote", "'EOF'"), ("dquote", '"EOF"'),
+                         ("escaped", "\\EOF"), ("partial", "EO'F'"), ("ansi", "$'EOF'"))
+        _oracle_lifted_specs = frozenset(("squote", "dquote", "escaped", "partial", "ansi"))
+        _oracle_bodies = (("amp", "A & B"), ("apos", "it's"), ("dq-amp", 'say "a & b"'),
+                         ("comment-amp", "# x &"), ("cont", "x\\"), ("plain", "body"))
+        _oracle_contexts = (
+            ("top", "cat <<{s}\n{b}\nEOF{t}"),
+            ("cmdsubst-glued", "x=$(cat <<{s}\n{b}\nEOF){t}"),
+            ("cmdsubst-own-line", "x=$(cat <<{s}\n{b}\nEOF\n){t}"),
+            ("subshell-glued", "(cat <<{s}\n{b}\nEOF){t}"),
+            ("subshell-own-line", "(cat <<{s}\n{b}\nEOF\n){t}"),
+            ("backquote", "x=`cat <<{s}\n{b}\nEOF`{t}"),
+            ("dq-subst", ": \"$(cat <<{s}\n{b}\nEOF\n)\"{t}"),
+        )
+        _oracle_tails = (("alone", ""), ("job", "\nsleep 0 &"))
+        oracle_cases = []
+        for _ckey, _template in _oracle_contexts:
+            for _skey, _spec in _oracle_specs:
+                for _bkey, _body in _oracle_bodies:
+                    for _tkey, _tail in _oracle_tails:
+                        expected_allow = (
+                            _tkey == "alone"
+                            and ((_ckey == "top" and _skey in _oracle_lifted_specs
+                                  and _bkey == "amp")
+                                 # the commit-message form's exact close; its delimiter spec must
+                                 # hold no '$' (the shared close parser refuses one, fail closed)
+                                 or (_ckey == "dq-subst" and _skey in _oracle_lifted_specs
+                                     and _skey != "ansi" and _bkey in ("amp", "dq-amp"))))
+                        oracle_cases.append(
+                            ("/".join((_ckey, _skey, _bkey, _tkey)),
+                             _template.format(s=_spec, b=_body, t=_tail), expected_allow))
+        oracle_cases.append(("top/strip-tabs/amp/alone", "cat <<-'EOF'\n\tA & B\n\tEOF", True))
+        oracle_cases.append(
+            ("top/strip-tabs/amp/job", "cat <<-'EOF'\n\tA & B\n\tEOF\nsleep 0 &", False))
+        oracle_failures = []
+        for _okey, _oshape, _oexpect_allow in oracle_cases:
+            try:
+                _obash = subprocess.run(
+                    ["/usr/bin/env", "-i", "/usr/bin/bash", "-c", 'eval "$1"; echo "BANG=$!"',
+                     "probe", _oshape],
+                    cwd=str(oracle_dir), capture_output=True, text=True, timeout=30)
+                _obang = [line for line in _obash.stdout.split("\n") if line.startswith("BANG=")]
+                _obang_set = _obang[-1] != "BANG=" if _obang else None
+            except (OSError, subprocess.SubprocessError):
+                _obang_set = None
+            _overdict = _verdict(bg(_oshape, rib=False))
+            if _obang_set is None:
+                oracle_failures.append("{}: missing or malformed bash evidence".format(_okey))
+            elif _obang_set and _overdict != "deny":
+                oracle_failures.append(
+                    "{}: bash sets $! but registry scope reads {}".format(_okey, _overdict))
+            elif not _obang_set and _oexpect_allow and _overdict != "allow":
+                oracle_failures.append(
+                    "{}: bash does not background and the narrowing lifts this shape, but registry "
+                    "scope reads {}".format(_okey, _overdict))
+        check("trunc/oracle-heredoc-bash-differential",
+              (len(oracle_cases), oracle_failures), (506, []))
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
@@ -9430,11 +13146,19 @@ def _main_isolated(report_path=None):
         check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
               "deny")
         # Registry scope, the disclosed residual: BY DEFAULT (this run pops AIQT_ORCH_REQUIRE_REGISTRY) with NO
-        # registry file the guard is inert (malformed input
-        # included), while a PRESENT but unreadable or invalid registry keeps it active (fail-closed).
-        check("trunc/malformed-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+        # registry file the guard denies nothing (a readable foreground detach draws only the note,
+        # and input it cannot read draws the unreadable-input note, never a deny), while a PRESENT
+        # but unreadable or invalid registry keeps it active (fail-closed).
+        check("trunc/malformed-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
-             "tool_input": None})), "allow")
+             "tool_input": None})), "warn")
+        # The doctor's default-mode scope report for a no-registry root is pinned the same way: it
+        # says the guard denies nothing there, and reports no deny.
+        _scope_lines, _scope_denies = aiqt_hooks._orch_guard_scope_report(str(ti.root))
+        check("trunc/doctor-scope-line-pins-denies-nothing",
+              (_scope_denies,
+               any("denies nothing for a Bash call" in line for line in _scope_lines)),
+              (False, True))
         tb = Fixture(tmp, "trunc-badreg")
         (tb.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
         check("trunc/bad-registry-detach-denies", _verdict(aiqt_hooks.orch_truncation_guard(
@@ -9476,9 +13200,10 @@ def _main_isolated(report_path=None):
               _verdict(bg("x=$(true) #; python3 build.py | head")), "warn")
         # The lexer vectors of the shared comment rule, run as foreground commands: bash 5.3.9 runs the RUN
         # or RAN command in each (vectors a and b detach it with a bare `&`), and each `#` is right after a
-        # `)` or at a word start inside an open ${...}, so the foreground scan denies every one as
-        # unbalanced. At the base commit a and b denied as a detach and c to i allowed; the earlier comment
-        # rule allowed all nine.
+        # `)` or at a word start inside an open ${...}, so the foreground scan reads every one as
+        # unbalanced, and the guard denies every one (a and b as the detach a lexer reading reaches). At the
+        # base commit a and b denied as a detach and c to i allowed; the earlier comment rule allowed all
+        # nine.
         _fg_hash_vectors = (
             'case x in x)# "\n :;; esac; printf RUN & # "\nwait',
             'echo ${x:-$(true # "\n)} & printf RUN # "\nwait',
@@ -9518,7 +13243,7 @@ def _main_isolated(report_path=None):
               ["allow", "allow"])
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
         # that a bare '&' was found (before this fix it reused the bare-& detach reason).
-        uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
+        uq = bg("cat > f <<'EOF'\nthe user's file\nEOX", rib=False)
         uq_reason = (uq[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
         check("trunc/fg-unbalanced-quote-reason-names-quote",
               (_verdict(uq), "quote still open" in uq_reason, "detaches a child" in uq_reason),
@@ -9560,6 +13285,8 @@ def _main_isolated(report_path=None):
         # and git-toplevel union find no registry allows BY DEFAULT (a git FAILURE alone never denies by
         # default: the round-3 git lockout is withdrawn; the registry-required exception is pinned by
         # trunc/registry-required-git-unavailable-core-worktree-denies). The confirmed-outside CONTROL row passes before and after the fix.
+        # Each no-registry allow row below probes with the bare-& detach of nocwd, so it reads "warn": the
+        # no-registry warn allows the call with a note, where a registry in scope denies it.
         def _cwd_case(cwd):
             res = aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=cwd))
             why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -9598,7 +13325,9 @@ def _main_isolated(report_path=None):
         bare = tmp / "cwd-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True,
                        timeout=30)
-        check("trunc/cwd-bare-repo-no-registry-allows", _cwd_case(str(bare))[0], "allow")
+        # nocwd carries a detach (sleep 5 &), so each out-of-scope row below reads the out-of-scope note
+        # ("warn"): an allow, never a deny, and a note that only a no-registry read produces.
+        check("trunc/cwd-bare-repo-no-registry-allows", _cwd_case(str(bare))[0], "warn")
         barein = t.root / "inner-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(barein)], check=True, capture_output=True,
                        timeout=30)
@@ -9646,7 +13375,7 @@ def _main_isolated(report_path=None):
                                (_git_dubious, "trunc/git-dubious-ownership-no-registry-allows"),
                                (_git_badconfig, "trunc/git-broken-config-no-registry-allows")):
                 aiqt_hooks._recovery_git = _sim
-                check(_row, _cwd_case(str(norig))[0], "allow")
+                check(_row, _cwd_case(str(norig))[0], "warn")
             # the same failing git INSIDE an orchestrated tree: the registry is on the walk, so the guard
             # still applies its rules (the detach denies with the DETACH reason, a plain command allows).
             aiqt_hooks._recovery_git = _git_missing
@@ -9663,7 +13392,7 @@ def _main_isolated(report_path=None):
         cv, cw = _cwd_case(str(t.root / ".git"))
         check("trunc/cwd-inside-git-dir-with-registry-detach-denies",
               (cv, "detaches a child" in cw), ("deny", True))
-        check("trunc/cwd-inside-git-dir-no-registry-allows", _cwd_case(str(norig / ".git"))[0], "allow")
+        check("trunc/cwd-inside-git-dir-no-registry-allows", _cwd_case(str(norig / ".git"))[0], "warn")
         # the walk's own failure DENIES with an actionable fix: an ancestor directory it cannot open (the
         # openat of ".." is patched to refuse, as a root-run self-test reads every directory as readable).
         anc = tmp / "anc-noread"
@@ -9709,7 +13438,7 @@ def _main_isolated(report_path=None):
                                capture_output=True, text=True, timeout=30,
                                env=dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.realpath(str(tmp))))
         check("trunc/cwd-confirmed-outside-repo-allows",
-              (probe.returncode, _cwd_case(str(outside))[0]), (128, "allow"))
+              (probe.returncode, _cwd_case(str(outside))[0]), (128, "warn"))
         # HERMETICITY of every truncation-guard row: a registry ABOVE the fixture root never decides a
         # verdict (before this, a live registry above TMPDIR turned each out-of-scope row above into a
         # deny and let each registry-present row pass on the host's registry instead of its fixture's).
@@ -10351,7 +14080,7 @@ def _main_isolated(report_path=None):
               ((True, "warn", True, True, True), (True, "warn", True, True, True)))
         # ROUND 8, A MISSING GIT TOPLEVEL READS AS ABSENT (decided, not a fault): git names a toplevel that
         # does not exist (core.worktree naming a removed directory). It holds no registry, so the union leg
-        # returns False and the scope is ('none', None): inert by default, and DENIED in registry-required
+        # returns False and the scope is ('none', None): denies nothing by default, and DENIED in registry-required
         # mode with the absent-registry reason (fail-closed there), never the unopenable-toplevel reason.
         _mt_top = aiqt_hooks._recovery_toplevel
         _mt_old = os.environ.get(_doc_env)
@@ -10897,15 +14626,41 @@ def _main_isolated(report_path=None):
               "allow")
         check("wl/handler-allow-nested",
               _verdict(wl("while outer; do while inner; do gh api x; sleep 1; done; done &")), "allow")
-        # fail-open: non-Bash tool, non-str command, absent registry -> silent allow even on a match command.
+        # A control, not a test of the command reading: neither path here asks for that reading, so the row
+        # passes with it on or off. A poll loop behind a compound command's reserved word classifies
+        # 'indeterminate' by design: this guard emits nothing and defers to the truncation guard, which denies the
+        # foreground bare-& detach on the same event, so the wrapped loop is still refused.
+        _crd_loop = "if true; then while true; do gh run view 1; sleep 10; done & fi"
+        check("crd/waitloop-wrapped-deferred", (_verdict(wl(_crd_loop)), _verdict(tg(_crd_loop))),
+              ("allow", "deny"))
+        # fail-open: non-Bash tool and absent registry -> silent allow even on a match command; an EMPTY
+        # command is readable (it runs nothing) and also allows. In registry scope a MISSING or NON-STRING
+        # command is a cannot-evaluate input and DENIES (check-fails-closed-on-unreadable), never a clean
+        # pass.
         check("wl/failopen-nonbash", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             w.payload("PreToolUse", "Write", {"command": BASE}))), "allow")
-        check("wl/failopen-nonstr", _verdict(aiqt_hooks.orch_untracked_wait_loop(
-            w.payload("PreToolUse", "Bash", {"command": 42}))), "allow")
+        # A Bash-shaped payload whose tool_name is missing or null is malformed, not another tool: the shared
+        # missing-tool_name deny, before the registry scope is read (as the truncation guard on the same event
+        # denies it), so it denies with no registry too.
+        check("wl/failclosed-missing-tool-name", aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", extra={"tool_input": {"command": BASE}})),
+            aiqt_hooks._deny_missing_tool_name("trkasy"))
+        check("wl/failclosed-null-tool-name", aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", extra={"tool_name": None, "tool_input": {"command": BASE}})),
+            aiqt_hooks._deny_missing_tool_name("trkasy"))
+        check("wl/failclosed-nonstr", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {"command": 42}))), "deny")
+        check("wl/failclosed-missing-command", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {}))), "deny")
+        check("wl/failopen-empty", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {"command": ""}))), "allow")
         wi = Fixture(tmp, "waitloop-inert")
         (wi.root / ".aiqt" / "orchestration.local.json").unlink()
         check("wl/failopen-no-registry", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             wi.payload("PreToolUse", "Bash", {"command": BASE}))), "allow")
+        check("wl/failclosed-missing-tool-name-no-registry", aiqt_hooks.orch_untracked_wait_loop(
+            wi.payload("PreToolUse", extra={"tool_input": {"command": BASE}})),
+            aiqt_hooks._deny_missing_tool_name("trkasy"))
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time
@@ -10934,6 +14689,15 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_validate("turn_state", {"stop_denials": "x"})[1]["stop_denials"], None)
         check("vB/turn-unreadable-none",
               aiqt_hooks._orch_validate("turn_state", None)[1]["stop_denials"], None)
+        # the ask cap counter validates exactly as the schedule counter (absent fresh, malformed None)
+        check("vB/turn-ask-absent-fresh",
+              aiqt_hooks._orch_validate("turn_state", {})[1]["ask_denials"], 0)
+        check("vB/turn-ask-valid",
+              aiqt_hooks._orch_validate("turn_state", {"ask_denials": 2})[1]["ask_denials"], 2)
+        check("vB/turn-ask-malformed-none",
+              aiqt_hooks._orch_validate("turn_state", {"ask_denials": 1.0})[1]["ask_denials"], None)
+        check("vB/turn-ask-unreadable-none",
+              aiqt_hooks._orch_validate("turn_state", None)[1]["ask_denials"], None)
         check("vB/unknown-boundary-cannot-evaluate",
               aiqt_hooks._orch_validate("nope", {})[0], "cannot-evaluate")
         # D13: the registry version must be an exact int 1 (True and 1.0 do not pass)
@@ -11805,6 +15569,22 @@ def _main_isolated(report_path=None):
                 for n in (limit - 1, limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)]
                for _kind, key, limit, ctx in _core_branches],
               [["DENY"] + ["ALLOW_WITH_FINDINGS"] * 3] * len(_core_branches))
+        # the ask kind's cannot-evaluate cap relief needs an EMPTY actionable set: with an actionable
+        # item present past the cap, both cannot-evaluate shapes keep the DENY, the item-level shape
+        # naming the actionable item and the held item in one reason; with the actionable set empty
+        # the relief stands (the control that the narrowing does not over-tighten)
+        _core_ask_mixed = dict(base, kind="ask", basis_unchanged=True, schedule_denials=3,
+                               actionable=[("A", "t", "no blocker")],
+                               cannot_evaluate=[("CE", "cannot-evaluate", "held")])
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed))
+        check("core/ask-mixed-cap-still-denies",
+              (v, "A (t: no blocker)" in _r, "CE" in _r, "cannot-evaluate" in _r),
+              ("DENY", True, True, True))
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed, cannot_evaluate=[],
+                                                 enum_status="ENUMERATOR_ERROR"))
+        check("core/ask-enum-error-with-actionable-cap-still-denies", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed, actionable=[]))
+        check("core/ask-cannot-evaluate-only-cap-relieves", v, "ALLOW_WITH_FINDINGS")
 
         # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
         # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued
@@ -13551,6 +17331,8 @@ def _main_isolated(report_path=None):
         _leasehb_write_integrity_cases(tmp)
         _leasehb_status_and_parse_cases(tmp)
         _rdp_cases(tmp)
+        _rwh_cases(tmp)
+        _gitalias_oracle_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)
@@ -13586,11 +17368,15 @@ def _main_isolated(report_path=None):
           "ALLOWS-WITH-NOTE (reducer 'warn') any other shell syntax or reserved word, DENIES-and-educates a "
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
-          "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
-          "and failing a scan that ends inside an open quote toward a deny with its own reason (a quote the "
-          "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
-          "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
-          "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, denies every "
+          "foreground bare-& detach (historically an ASK for both), allows-with-note a readable foreground "
+          "command that may detach where no registry is found (one note per call naming the tracked "
+          "background mechanism, from the in-scope detector or else the note scan; redirect operands keep "
+          "their command position pending), while dropping a word-start `#` comment "
+          "and failing a scan that ends inside an open quote toward a deny with its own reason (the shared "
+          "lexer's bare '&' separator also denies where that scan misreads a quote in mid-string, and the "
+          "scan's detach is lifted only where the lexer places every '&' in a quoted here-document body, a "
+          "quoted string or a comment, the lexer reading a here-document delimiter word as bash does, its "
+          "line continuations removed), reads a '#' comment by bash's word-start rule as well, denies every "
           "Bash call that passes the pre-scope checks when the opt-in registry-required mode is set and no registry is found or the nearest registry entry cannot be evaluated (a discovery fault never satisfies that mode; by default it keeps the guard active), and fails "
           "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
           "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
