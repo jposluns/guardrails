@@ -2267,6 +2267,21 @@ class _LexFork:
         self.tails = tails
 
 
+# The skip_empty value under which a lex leaves out only a segment with no word and no redirect that repeats the
+# record before it (_empty_repeat), so a run of one separator builds one record (_lex_command).
+_SKIP_EMPTY_REPEATS = "repeats"
+
+
+def _empty_repeat(segments, sep):
+    """True when a segment with no word and no redirect, ended by sep, repeats the last record of segments: sep is a
+    separator, not '' (a newline or the end of the command), and that record has no word and no redirect and was
+    ended by the same separator (_SKIP_EMPTY_REPEATS)."""
+    if not sep or not segments:
+        return False
+    last = segments[-1]
+    return last.sep_after == sep and not last.argv and not last.redirects
+
+
 def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
@@ -2316,7 +2331,14 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     would be _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no
     record, list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only
     a caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
-    list) passes it; the default False keeps every record.
+    list) passes it; the default False keeps every record. skip_empty _SKIP_EMPTY_REPEATS leaves out, under
+    every reading, only such a segment that repeats the record before it in its reading's list (_empty_repeat:
+    that record has no word and no redirect either and was ended by the same separator, not a newline or the
+    end of the command), so a long run of one separator builds one record for the run, not one per separator;
+    every record left in, its order and the partial-mode flags are unchanged. Only a caller that reads such a
+    segment by its sep_after alone, never its raw slice or its index, and that decides a run of them as it
+    decides one, passes it (gate_weakening). A segment ended by a newline is never left out, so what a resumed
+    pass builds after its first newline (_LexFork.tails) does not depend on the record before that newline.
 
     Inside _CommandReading the command reading follows the readings above, the segments of each read from its
     command word and with its backquote substitutions read as commands (A COMMAND'S SUBJECT PAST ITS COMPOUND
@@ -2423,7 +2445,7 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
             misread = misread or body
     return _with_command_readings(
         _beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings, partial,
-        locale, skip_empty, "`" in command)
+        locale, skip_empty, "`" in command, () if first is None else first.segments)
 
 
 def _hash_reading_with(reading, at, comment):
@@ -2486,7 +2508,8 @@ def _beside_main_reading(command, partial, locale, readings, skip_empty=False):
 def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None):
     """One pass of _lex_reading, reading a quoted here-document's body inside a command substitution through
     subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None.
-    skip_empty True leaves out every segment with no word and no redirect (_lex_command). fork, when given,
+    skip_empty True leaves out every segment with no word and no redirect, and _SKIP_EMPTY_REPEATS only one that
+    repeats the record before it (_lex_command). fork, when given,
     is the _LexFork the pass resumes from (_lex_reading), with copies of its lists and nesting stack. Where
     hash_reading does not map an uncertain '#' met at a word boundary or at the start of a redirect target,
     the _UncertainHashError raised carries the _LexFork of this pass at the start of that token. Inside
@@ -2551,7 +2574,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     def end_segment(sep, op_start, next_start):
         # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde, argv_spelling
         # and opaque change only together with argv, so a skipped segment leaves them empty and False as well.
-        if argv or redirects or not skip_empty:
+        if (argv or redirects or not skip_empty
+                or (skip_empty == _SKIP_EMPTY_REPEATS and not _empty_repeat(segments, sep))):
             # words(), written out: this runs once per segment, and a long run of separators makes many.
             segments.append(_Segment(list(argv) if argv_spelling is None or not argv
                                      else _SpelledWords(argv, argv_spelling), sep, list(redirects),
@@ -2704,6 +2728,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                             empty = []
                             segments.extend([_Segment(empty, op, empty, "", False, empty, empty)
                                              for _ in range(count)])
+                        elif skip_empty == _SKIP_EMPTY_REPEATS and not _empty_repeat(segments, op):
+                            # The run's first record, as the per-character path builds it; each later one
+                            # would repeat it (_empty_repeat), so none is built.
+                            empty = []
+                            segments.append(_Segment(empty, op, empty, "", False, empty, empty))
                         seg_start[0] = run
                         i = run
                     continue
@@ -2914,8 +2943,11 @@ class _CommandReading:
     from or whose text opens the backquote substitution that holds it, and body True for a segment of such a
     substitution. depth counts the backquote bodies being lexed inside one another (_read_commands). scans and
     reads hold, for the context's lexes, each text already scanned for backquotes and each body already read
-    (COST above _COMMAND_LEAD_WORDS), and budget what is left of the body budget. It restores the previous
-    setting on exit, as _WordSpellings does."""
+    (COST above _COMMAND_LEAD_WORDS), and budget what is left of the body budget. shared holds, for the
+    context's last lex, the records its first reading built before the command's first uncertain '#', which
+    each reading that resumed there holds at its head (_shared_lead), and the context object holds it once it
+    exits, so a caller that judges each record on its own judges those once (diff_source_pretool). It
+    restores the previous setting on exit, as _WordSpellings does."""
 
     on = False
     added = 0
@@ -2924,26 +2956,29 @@ class _CommandReading:
     scans = None
     reads = None
     budget = 0
+    shared = ()
 
     def __init__(self, origins=False):
         self.want_origins = origins
 
     def __enter__(self):
         self.was = (_CommandReading.on, _CommandReading.added, _CommandReading.origins, _CommandReading.scans,
-                    _CommandReading.reads, _CommandReading.budget)
+                    _CommandReading.reads, _CommandReading.budget, _CommandReading.shared)
         _CommandReading.on = True
         _CommandReading.added = 0
         _CommandReading.origins = [] if self.want_origins else None
         _CommandReading.scans = {}
         _CommandReading.reads = {}
         _CommandReading.budget = _READ_BODY_LIMIT
+        _CommandReading.shared = ()
         return self
 
     def __exit__(self, *exc_info):
         self.added = _CommandReading.added
         self.origins = _CommandReading.origins
+        self.shared = _CommandReading.shared
         (_CommandReading.on, _CommandReading.added, _CommandReading.origins, _CommandReading.scans,
-         _CommandReading.reads, _CommandReading.budget) = self.was
+         _CommandReading.reads, _CommandReading.budget, _CommandReading.shared) = self.was
         return False
 
 
@@ -3166,7 +3201,23 @@ def _backquote_runs(text, at):
     return runs
 
 
-def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks=True):
+def _shared_lead(segments, shared):
+    """How many records at the head of segments, one reading of a command as _lex_readings returns it, are the
+    records of shared, the same objects in order: len(shared) where segments holds the last of them at its
+    index, else 0. shared is what the first reading's lex built before it stopped at the command's first
+    uncertain '#' (_lex_readings), which every reading that resumed from there holds at its head: a resumed
+    pass starts from a copy of the records of the lex it resumes and only appends to it (_lex_pass), every
+    record a pass appends is one it built or, at its first newline, one another resumed pass built after its
+    own first newline (_LexFork.tails), and a pass lexed from the start builds every record it holds. So a
+    reading holding the last record of shared at its index holds every record of shared before it as well,
+    and a reader that judges each record on its own may judge those once for every reading holding them. Only
+    the lexer's own readings are read this way: a reading the command reading added (_read_segments) holds
+    records it read anew and bodies' commands among them."""
+    count = len(shared)
+    return count if count and len(segments) >= count and segments[count - 1] is shared[count - 1] else 0
+
+
+def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks=True, shared=None):
     """The command reading of one reading of a command (A COMMAND'S SUBJECT PAST ITS COMPOUND WORDS, above
     _COMMAND_LEAD_WORDS): segments, that reading's _Segment records in order, each read from its command word
     (_read_past), with the commands of each backquote substitution the reading's text holds (_backquote_bodies,
@@ -3186,7 +3237,12 @@ def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks
     body) pair per segment returned when the reading changes something (_CommandReading). ticks False says the
     text the records were lexed from holds no backquote, so no record's raw text, a slice of that text, holds
     one, and the records are not searched for one. Past the last record that opens a body only the records
-    with a word are visited, so a long run of separators costs one pass over its records per reading."""
+    with a word are visited, so a long run of separators costs one pass over its records per reading. shared,
+    when given, is (records, positions): the records the first reading's lex built before the command's first
+    uncertain '#' and the positions among them of the records with a word before their command word, found
+    once (_with_command_readings); where segments holds those records at its head (_shared_lead) they are not
+    visited again, so a long run of separators before the readings of an uncertain '#' costs one pass over its
+    records, not one per reading."""
     bodies = ()
     if ticks and any("`" in seg.raw for seg in segments):
         text = "".join([seg.raw + (seg.sep_after or "\n") for seg in segments])
@@ -3222,7 +3278,13 @@ def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks
     # (_command_start): a record with no word, as each of a long run of separators is, is passed over, and
     # each of the readings of an uncertain '#', which share such a run, adds no call per record of it.
     rest = segments[number:] if number else segments
-    past = [at for at, seg in enumerate(rest, number) if seg.argv and _command_start(seg.argv)]
+    lead = 0 if shared is None else _shared_lead(segments, shared[0])
+    if lead > number:
+        # The records before lead are shared's (_shared_lead), whose positions to read anew were found once.
+        past = [at for at in shared[1] if at >= number] + [
+            at for at, seg in enumerate(segments[lead:], lead) if seg.argv and _command_start(seg.argv)]
+    else:
+        past = [at for at, seg in enumerate(rest, number) if seg.argv and _command_start(seg.argv)]
     if not changed and not past:
         return segments
     shift = len(out) - number
@@ -3293,7 +3355,7 @@ def _read_commands(body, locale=False, skip_empty=False):
     return out
 
 
-def _with_command_readings(readings, partial, locale=False, skip_empty=False, ticks=True):
+def _with_command_readings(readings, partial, locale=False, skip_empty=False, ticks=True, shared=()):
     """readings, the list of one lex's readings of a command as _lex_readings returns it (one entry per reading:
     its segments, or in partial mode its (segments, complete, in_progress)), followed inside _CommandReading by
     the command reading of each reading it changes (_read_segments), and readings itself outside it. An added
@@ -3304,17 +3366,24 @@ def _with_command_readings(readings, partial, locale=False, skip_empty=False, ti
     origins each added segment's (index, body) pair is put there, its index counted in the segments of the
     readings joined in order, as _lex_command returns them. ticks False says the command the readings were
     lexed from holds no backquote (_read_segments), so the readings of its uncertain '#' are not searched for
-    one each."""
+    one each. shared is what the first reading's lex built before the command's first uncertain '#' (()
+    for none, _lex_readings): the records among them with a word before their command word are found once,
+    for every reading holding them at its head (_shared_lead), and the context keeps shared
+    (_CommandReading.shared)."""
     if not _CommandReading.on:
         return readings
+    _CommandReading.shared = shared
     added = []
     origins = _CommandReading.origins
     pairs = []
     offset = 0
+    known = None  # (shared, the positions in it of the records read anew), once a reading holds shared
     for reading in readings:
         segments = reading[0] if partial else reading
         found = [] if origins is not None else None
-        read = _read_segments(segments, locale, skip_empty, found, ticks)
+        if known is None and _shared_lead(segments, shared):
+            known = (shared, [at for at, seg in enumerate(shared) if seg.argv and _command_start(seg.argv)])
+        read = _read_segments(segments, locale, skip_empty, found, ticks, known)
         if read is not segments:
             added.append((read,) + tuple(reading[1:]) if partial else read)
             if found is not None:
@@ -4335,6 +4404,32 @@ def _diff_compound_console(segments):
     return [all(console(compound) for compound in around) for around in enclosing]
 
 
+def _diff_possibles(readings, added, shared):
+    """The possible producers (_is_possible_producer) among the records of readings, a lex's readings of a
+    command as _lex_readings returns them inside _CommandReading (the command reading's, added records in all,
+    last), as (index, record) pairs, each index counted in the records of the readings joined in order, as
+    _lex_command returns them. A record with no word and no raw text (one of a run of separators) is no
+    possible producer: its argv holds no git word, its empty raw text matches no probe, and it carries no
+    opaque word. The records of shared that one of the lexer's own readings holds at its head (_shared_lead)
+    are judged once, for every reading holding them, so a long run of separators before the readings of an
+    uncertain '#' costs one pass over its records, not one per reading."""
+    own = sum(len(segs) for segs in readings) - added
+    out = []
+    offset = 0
+    known = None  # the possible producers among the records of shared, once a reading holds them
+    for segs in readings:
+        lead = _shared_lead(segs, shared) if offset < own else 0
+        if lead:
+            if known is None:
+                known = [(at, seg) for at, seg in enumerate(shared)
+                         if (seg.argv or seg.raw) and _is_possible_producer(seg)]
+            out.extend([(offset + at, seg) for at, seg in known])
+        out.extend([(at, seg) for at, seg in enumerate(segs[lead:] if lead else segs, offset + lead)
+                    if (seg.argv or seg.raw) and _is_possible_producer(seg)])
+        offset += len(segs)
+    return out
+
+
 def _diff_source_fallback(command):
     """FAIL-SAFE conservative check when _lex_command cannot parse the command (an unbalanced quote or an
     unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
@@ -4400,8 +4495,11 @@ def diff_source_pretool(data):
         # test below read every segment, while the closed proofs read the lexer's own segments alone (own), so
         # an added segment can deny or note but never earn a proof. The origins say which own segment each
         # added one was read from, for the destination of the compound around it (_diff_compound_console).
+        # The readings are kept apart until a possible producer is found (_diff_possibles), so the records
+        # every reading of an uncertain '#' shares at its head are judged once; joined, they are the
+        # segments _lex_command returns.
         with _CommandReading(origins=True) as reading:
-            segments = _lex_command(command)
+            readings = _lex_readings(command)
     except _ReadingLimitError:
         # The command reading spent its body budget: the fallback below can note or allow a dump that main's
         # reading denies, so it denies (COST above _COMMAND_LEAD_WORDS).
@@ -4423,11 +4521,10 @@ def diff_source_pretool(data):
         return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
+    possibles = _diff_possibles(readings, reading.added, reading.shared)
+    # The segments are joined only where a possible producer is judged against its neighbours and the proofs.
+    segments = [seg for segs in readings for seg in segs] if possibles else []
     own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
-    # A segment with no word and no raw text (one of a run of separators) is no possible producer: its argv
-    # holds no git word, its empty raw text matches no probe, and it carries no opaque word.
-    possibles = [(index, seg) for index, seg in enumerate(segments)
-                 if (seg.argv or seg.raw) and _is_possible_producer(seg)]
     # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
     # one of the five closed proofs. Either allows, unless main's reading of a here-document body the lex read
     # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
@@ -17155,9 +17252,14 @@ def gate_weakening(data):
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
         # below, whose canonical shape needs every earlier segment benign; every other check reads the
         # segments of all readings in turn, as _lex_command returns them. Each word's spelling is recorded for
-        # the git alias reading below (_WordSpellings).
+        # the git alias reading below (_WordSpellings). A run of segments with no word and no redirect, ended by
+        # the same separator, keeps one record (_SKIP_EMPTY_REPEATS): every check here reads such a segment by its
+        # separator alone and decides a run of them as it decides one (the loop below passes each over, the note
+        # tier stops only at one ending in a pipe, and the deny tier's _gate_benign_prefix, _gate_conditional_run
+        # and stage walk answer the same for each of a run), so a long run of separators, which every reading of
+        # an uncertain '#' after it shares, builds and is read as one record, not one per separator per reading.
         with _WordSpellings():
-            readings = _lex_readings(command)
+            readings = _lex_readings(command, skip_empty=_SKIP_EMPTY_REPEATS)
     except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;
