@@ -19636,39 +19636,58 @@ def _orch_heredoc_spec(command, i):
     return (delimiter, quoted, strip_tabs) if delimiter else None
 
 
-# The one line shape whose here-document bodies the detach scan may skip as data: a plain `cat` (not a
-# shell, eval, '.', source or any other program that can run its input), with only plain words, quoted
-# here-document operators and redirects, its standard output sent to a plain file, so neither a pipe on the
-# line nor one after an enclosing compound command, a brace group or a process substitution can carry the
-# body into a shell. Anything else (a quote, '$', backslash, '|', ';', '&', '(', ')', backquote or '#' on
-# the line, another command word, a wrapper or assignment before it) does not match and the body is code.
-_ORCH_HEREDOC_DATA_WORD = r"[A-Za-z0-9_./+,:@%=-]+"
+# The one line shape that opens a here-document the detach scan may skip as data: `cat > FILE <<'DELIM'`
+# (or `>>`, or a double-quoted delimiter), blanks allowed around the operators and nothing else on the line:
+# no other word, no wrapper or assignment before cat, no second redirect or here-document, no quote, '$',
+# backslash, '|', ';', '&', '(', ')', backquote or '#'. It is only ever read as one write of a command made
+# of nothing but such writes (_orch_heredoc_data_command), never as a line inside a longer command.
 _ORCH_HEREDOC_DATA_LINE = re.compile(
-    r"[ \t]*cat(?![A-Za-z0-9_./+,:@%=-])(?:[ \t]+" + _ORCH_HEREDOC_DATA_WORD + r"|[ \t]*[0-9]?(?:>>|>\|?)[ \t]*"
-    + _ORCH_HEREDOC_DATA_WORD + r"|[ \t]*<<-?[ \t]*(?:'[A-Za-z0-9_.+-]+'|\"[A-Za-z0-9_.+-]+\"))*[ \t]*")
-# Every output redirect on such a line, as (descriptor, target): the descriptor is a digit only where bash
-# reads it as one (a whole word before the operator), so `a2>f` redirects standard output, as it does to bash.
-_ORCH_HEREDOC_DATA_REDIRECT = re.compile(
-    r"(?:(?<=[ \t])([0-9]))?(?:>>|>\|?)[ \t]*(" + _ORCH_HEREDOC_DATA_WORD + r")")
+    r"[ \t]*cat[ \t]*>>?[ \t]*([A-Za-z0-9_./+,:@%=-]+)[ \t]*<<[ \t]*(?:'([A-Za-z0-9_.+-]+)'|\"([A-Za-z0-9_.+-]+)\")[ \t]*")
 
 
 def _orch_heredoc_data_line(line):
-    """True when line, the whole line that opens one or more quoted here-documents (from the start of a
-    command to the newline where the bodies begin), is a plain `cat` whose standard output goes to a plain
-    file (_ORCH_HEREDOC_DATA_LINE): cat copies its input to that file and executes none of it, so the bodies
-    are data wherever the command sits. There must be a standard output redirect, and every output redirect
-    must name a file outside /dev and /proc with no '..' component, so the body cannot reach the shell's own
-    output (/dev/stdout, /dev/fd/1, /proc/self/fd/1) and through it a pipe into a shell. A relative target
-    is read as written, not against the working directory, and a symlink is not followed, so a target that
-    reaches that output only through a changed directory or a symlink is not seen (disclosed)."""
-    if not _ORCH_HEREDOC_DATA_LINE.fullmatch(line):
-        return False
-    redirects = _ORCH_HEREDOC_DATA_REDIRECT.findall(line)
-    for _fd, target in redirects:
-        parts = [part for part in target.split("/") if part not in ("", ".")]
-        if not parts or ".." in parts or parts[0] in ("dev", "proc"):
+    """The delimiter of the here-document line opens when line is, whole, one plain write
+    `cat > FILE <<'DELIM'` (or `>>`, or a double-quoted delimiter; _ORCH_HEREDOC_DATA_LINE) whose FILE is a
+    plain word naming a file outside /dev and /proc with no '..' component, so cat's output cannot be the
+    shell's own (/dev/stdout, /dev/fd/1, /proc/self/fd/1); else None. A relative FILE is read as written,
+    not against the working directory, and a symlink is not followed, so a FILE that reaches that output only
+    through a changed directory or a symlink is not seen (disclosed). This line test alone proves nothing
+    about the body: a later command in the same call can run the written file, so the body is data only when
+    the whole command is such writes (_orch_heredoc_data_command)."""
+    match = _ORCH_HEREDOC_DATA_LINE.fullmatch(line)
+    if not match:
+        return None
+    parts = [part for part in match.group(1).split("/") if part not in ("", ".")]
+    if not parts or ".." in parts or parts[0] in ("dev", "proc"):
+        return None
+    return match.group(2) or match.group(3)
+
+
+def _orch_heredoc_data_command(command):
+    """True when the WHOLE command is nothing but one or more plain cat writes, each a line
+    _orch_heredoc_data_line accepts, then its body, then a line that is exactly its delimiter, the writes
+    separated only by newlines. No other command word may appear anywhere: a later '.', source, bash or
+    ./path can run a written file, and an earlier hash, alias, function, enable, builtin, command, exec,
+    eval or PATH or other assignment can make `cat` run something else, so any such line makes every body
+    code. Only then does cat copy each body into its file with nothing in the command running it, and only
+    then are the bodies data. An empty command is not such a command."""
+    lines = command.split("\n")
+    i, n, writes = 0, len(lines), 0
+    while i < n:
+        if not lines[i]:
+            i += 1
+            continue
+        delimiter = _orch_heredoc_data_line(lines[i])
+        if delimiter is None:
             return False
-    return any(fd in ("", "1") for fd, _target in redirects)
+        i += 1
+        while i < n and lines[i] != delimiter:
+            i += 1
+        if i == n:
+            return False  # no delimiter line: bash reads the rest of the command as this body
+        i += 1
+        writes += 1
+    return writes > 0
 
 
 def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True):
@@ -19688,16 +19707,15 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     the `$(...)` and backquote substitutions opened there: a `#` that is not right after a word character
     while one is open (outside a single-quoted span in it) is a comment to bash, which can hide the string's
     closing quote, so it is uncertain too. The guard runs BOTH and denies when either reports, so the bash
-    rule can only ADD denies to the historical one. A here-document body under a quoted delimiter is literal
-    data to bash, so where every here-document opened on a line has a quoted delimiter this pass parses
-    (_orch_heredoc_spec), was opened with no '(', backquote or '$[' anywhere before it and nothing open on
-    the nesting stack, and ends at a line that is, whole, its delimiter (leading tabs stripped under <<-),
-    and where the line that opens them starts a command and is a plain cat writing to a file
-    (_orch_heredoc_data_line), the pass resumes past the last delimiter line without reading the bodies. A
-    body a shell can run (fed to bash or sh, sourced from stdin, piped into a shell, or any consumer this
-    pass cannot show only writes it to a file) is code, not data. Any other body (an unquoted delimiter,
-    one this pass does not parse, one with no delimiter line, one with such a consumer), every body after
-    one read as shell text, and every body when skip_bodies is False, is read as shell text."""
+    rule can only ADD denies to the historical one. The pass skips a here-document body as data in ONE
+    case only: the WHOLE command is nothing but one or more plain `cat > FILE <<'DELIM'` writes (or `>>`, or
+    a double-quoted delimiter), each with its body and delimiter line, separated only by newlines, with no
+    other command word anywhere (_orch_heredoc_data_command); each body, whose delimiter this pass also
+    parses (_orch_heredoc_spec) with nothing open on the nesting stack, then resumes the pass past its
+    delimiter line unread. In every other command, one where a write is followed or preceded by any other
+    command (a '.', source, bash or ./path that can run the written file, a hash, alias, function, PATH or
+    other assignment that can rename cat) included, every body is read as shell text, as it is when
+    skip_bodies is False."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
@@ -19707,7 +19725,6 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
     dq_single = False  # inside a single-quoted span within such a substitution
     heredocs = []  # the here-documents opened on the current line, each a _orch_heredoc_spec or None
-    line_start = 0  # where the current line starts, just past the last newline this pass read as live text
     # Set once a here-document body is read as code: a line in it may be a nested shell's input or data
     # bash ends elsewhere, so no later here-document is skipped.
     code_body = False
@@ -19715,6 +19732,8 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     # a substitution or an arithmetic expansion, whose body bash can end elsewhere, so it is never skipped.
     grouped = min((at for at in (command.find("("), command.find("`"), command.find("$[")) if at != -1),
                   default=len(command))
+    # Whether the whole command is nothing but plain cat writes, the one case whose bodies are data.
+    data_command = skip_bodies and _orch_heredoc_data_command(command)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -19775,26 +19794,22 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
                 i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
                 continue
         if ch == "\n" and heredocs:
-            # The bodies of the here-documents opened on this line start here. Where every one has a quoted
-            # delimiter, was opened at the top level and ends at a delimiter line, and the line is a plain
-            # cat writing to a file (_orch_heredoc_data_line), the bodies are literal data that nothing runs,
-            # so the scan resumes past the last delimiter line and no quote in them shifts its quote state.
-            # Any other here-document (an unquoted delimiter, whose body bash expands, one unparsed or
-            # unterminated, or one a shell, eval, '.', a pipe or any other consumer may run) keeps the body
-            # read as shell text, as before.
+            # The bodies of the here-documents opened on this line start here. Only where the whole command
+            # is nothing but plain cat writes to files (_orch_heredoc_data_command) does nothing in it run a
+            # body, so only there is a quoted body literal data the scan resumes past, its quotes shifting
+            # nothing. In any other command (a write followed by '. ./s.sh' or 'bash s.sh', or preceded by
+            # 'hash -p /usr/bin/bash cat', included) the body is read as shell text, as before.
             specs, heredocs = heredocs, []
-            literal = (not nest and not code_body and all(spec and spec[1] for spec in specs)
-                       and _orch_heredoc_data_line(command[line_start:i]))
+            literal = (data_command and not nest and not code_body
+                       and all(spec and spec[1] for spec in specs))
             end, closed = (_orch_heredoc_bodies_end(command, i + 1, n, [(spec[0], spec[2]) for spec in specs])
                            if literal else (i, False))
             if closed:
                 prev_dup, prev, after_dollar = False, "break", False
-                i = line_start = end
+                i = end
                 continue
             code_body = True
         if ch.isspace():
-            if ch == "\n":
-                line_start = i + 1
             prev_dup, after_dollar = False, False
             prev = "break" if ch in _ORCH_BASH_WORD_BREAKS or not bash_word_starts else "word"
             i += 1

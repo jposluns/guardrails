@@ -12813,15 +12813,15 @@ def _main_isolated(report_path=None):
         check("trunc/fg-amp-in-ansi-c-quote-denies", _verdict(bg("echo $'it\\'s & b' \\'", rib=False)), "deny")
         check("trunc/fg-quoted-heredoc-amp-then-open-quote-denies",
               _verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOX", rib=False)), "deny")
-        # The scan reads the body of a here-document under a quoted delimiter, opened at the top level, as
-        # literal data up to its delimiter line, as bash does, so a quote, a backquote, a '$(' or an `&` in
-        # it does not change how the rest of the command is read. Each allow row denies with the scan
-        # reading such a body as shell text (the `&` row through the here-string the lexer refuses, or the
-        # body apostrophe).
+        # Where the whole command is nothing but plain `cat > FILE <<'DELIM'` writes (or `>>`, or a
+        # double-quoted delimiter), each with its body and delimiter line and separated only by newlines,
+        # the scan reads each body as literal data up to its delimiter line, as bash does, so a quote, a
+        # backquote, a '$(' or an `&` in it does not change how the command is read. Each allow row denies
+        # with the scan reading such a body as shell text (the body apostrophe, quote, or `&`).
         check("trunc/fg-quoted-heredoc-body-apostrophe-allows",
               [_verdict(bg(v, rib=False)) for v in (
                   "cat > /abs/f <<'EOF'\nLine one.\n\nThe project's own material.\nEOF",
-                  'cat > /abs/f <<"EOF"\nit\'s\nEOF', "cat > /abs/f <<-'EOF'\n\tit's\n\tEOF")],
+                  'cat > /abs/f <<"EOF"\nit\'s\nEOF', "cat > rel/f.txt <<'EOF'\nit's\nEOF\n")],
               ["allow"] * 3)
         check("trunc/fg-quoted-heredoc-body-dquote-allows",
               _verdict(bg("cat > /abs/f <<'EOF'\nsay \"hi\nEOF", rib=False)), "allow")
@@ -12831,7 +12831,8 @@ def _main_isolated(report_path=None):
               _verdict(bg("cat > /abs/f <<'EOF'\nrun $(date # now\nEOF", rib=False)), "allow")
         check("trunc/fg-quoted-heredoc-body-amp-allows",
               [_verdict(bg(v, rib=False)) for v in (
-                  "cat > /abs/f <<'EOF'\nsleep 1 &\nEOF\ncat <<<done", "cat > /abs/f <<'EOF'\nit's & more\nEOF")],
+                  "cat > /abs/f <<'EOF'\nsleep 1 &\nEOF\ncat > /abs/g <<'EOF'\nit's\nEOF",
+                  "cat > /abs/f <<'EOF'\nit's & more\nEOF")],
               ["allow"] * 2)
         # A real `&` after the body's delimiter line still denies, and an unquoted delimiter's body, which
         # bash expands, is still read as shell text, so a detach in a substitution there denies (it denied
@@ -12887,10 +12888,47 @@ def _main_isolated(report_path=None):
               ["deny"] * 5)
         check("trunc/fg-quoted-heredoc-cat-to-file-allows",
               [_verdict(bg(v, rib=False)) for v in (
-                  "cat >> /abs/f <<'EOF'\nit's & more\nEOF", "cat <<'EOF' > /abs/f\nit's\nEOF",
-                  "cat >| f.txt <<\"EOF\"\nit's\nEOF", "cat>/abs/f <<'EOF'\nit's\nEOF",
-                  "  cat > /abs/f <<'A' 3<<'B'\nit's\nA\nx\"y\nB")],
-              ["allow"] * 5)
+                  "cat >> /abs/f <<'EOF'\nit's & more\nEOF", "cat>/abs/f<<'EOF'\nit's\nEOF",
+                  "  cat > f.txt <<\"EOF\"\t\nit's\nEOF")],
+              ["allow"] * 3)
+        check("trunc/fg-quoted-heredoc-cat-writes-only-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/a <<'EOF'\nthe user's file\nEOF\ncat >> b.txt <<\"X\"\nsay \"hi\nX",
+                  "cat > /abs/a <<'A'\nit's\nA\n\ncat > /abs/b <<'B'\n`date & $(x\nB\ncat > /abs/c <<'C'\nC\n")],
+              ["allow"] * 2)
+        # The body is data ONLY when the whole command is such writes. A write followed by a command that
+        # runs the written file ('. ./s.sh', 'bash s.sh', './s.sh', 'source s.sh') detaches in real bash,
+        # and so does one after a line that makes `cat` something else (hash -p, a function, an alias,
+        # enable, a PATH assignment); each reads every body as code, so the body `&` or apostrophe denies.
+        # Each row allows if a cat write line alone makes its body data.
+        bj = "{ /usr/bin/sleep 1; : > bgmark; } &"
+        check("trunc/fg-quoted-heredoc-written-file-run-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > s.sh <<'EOF'\n" + bj + "\nEOF\ncat > n.txt <<'EOF'\nthe user's file\nEOF\n. ./s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\nEOF\ncat > n.txt <<'EOF'\nthe user's file\nEOF\nbash s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF\n. ./s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF\n./s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF\nsource s.sh")],
+              ["deny"] * 5)
+        check("trunc/fg-quoted-heredoc-cat-renamed-denies",
+              [_verdict(bg(v + "\ncat > out.txt <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF", rib=False)) for v in (
+                  "hash -p /usr/bin/bash cat", "function cat { /usr/bin/bash; }", "alias cat=bash",
+                  "enable -f ./cat.so cat", "PATH=./bin")],
+              ["deny"] * 5)
+        # A cat write followed or preceded by any other command reads every body as code, as before the
+        # body skip, so a body apostrophe denies; so does a write outside the one plain form (the
+        # here-document first, '>|', a second redirect or here-document on the line, '<<-', a second word).
+        check("trunc/fg-quoted-heredoc-write-then-command-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nit's\nEOF\ntrue", "cat > /abs/f <<'EOF'\nit's\nEOF\necho done",
+                  "true\ncat > /abs/f <<'EOF'\nit's\nEOF", "cat > /abs/f <<'EOF'; true\nit's\nEOF")],
+              ["deny"] * 4)
+        check("trunc/fg-quoted-heredoc-outside-write-form-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF' > /abs/f\nit's\nEOF", "cat >| f.txt <<'EOF'\nit's\nEOF",
+                  "cat > /abs/f <<'A' 3<<'B'\nit's\nA\nx\nB", "cat > /abs/f <<-'EOF'\n\tit's\n\tEOF",
+                  "cat > /abs/f 2>/abs/e <<'EOF'\nit's\nEOF", "cat > /abs/f x <<'EOF'\nit's\nEOF")],
+              ["deny"] * 6)
         # A substitution after the commit-message form's body makes the lexer lex again reading no body
         # (_SubstHeredocRetry); that pass places the body `&` in the substitution, so the deny stands. It
         # allows if a pass keeps the places recorded by the pass it replaced.
