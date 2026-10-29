@@ -4,12 +4,12 @@
 
 AIQT Guardrails holds your AI assistant to one standard: **A**ccuracy, **I**ntegrity, **Q**uality, and
 **T**rust. More than guidance: these principles outrank progress, speed, and cost. In chat, the standard
-guides your assistant. In this repository, CI gates check each pull request targeting main and each
-push to main against the rules the gates cite, a subset of the standard. Open source, and built to
-be read.
+guides your assistant. In this repository, CI gates check each batch of changes before it merges into
+main, and each push to main, against the rules the gates cite, a subset of the standard. Open source,
+and built to be read.
 
 <!-- COUNTS-PROOF:BEGIN (generated) -->
-**132 rules. 117 CI gates that check this repository. 30 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
+**132 rules. 120 CI gates that check this repository. 31 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
 <!-- COUNTS-PROOF:END -->
 
 The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
@@ -27,7 +27,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 | Piece | In one breath | Tag |
 | --- | --- | --- |
 | **The standard** | 132 clear, single-behaviour rules across the four AIQT facets, plus a security floor covering confidentiality, integrity, availability, and privacy. | Rules |
-| **Technical controls** | 117 CI gates that check this repository and 30 Claude Code hooks shipped as an opt-in plugin (22 blocking, 8 warning). Today 40 of the 132 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
+| **Technical controls** | 120 CI gates that check this repository and 31 Claude Code hooks shipped as an opt-in plugin (23 blocking, 8 warning). Today 41 of the 132 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
 | **Generated adapters** | The Claude, AGENTS.md, Gemini, Copilot, and Cursor surfaces are generated from one source and drift-checked in CI. | Generated |
 | **A standards crosswalk** | Mappings from the rules to 17 pinned external control catalogues, for teams that report against a framework. | Mappings |
 <!-- COUNTS-TABLE:END -->

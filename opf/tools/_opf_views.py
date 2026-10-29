@@ -20,12 +20,20 @@ What it renders (spec 10.1, driven by the manifest [views.*] map):
   - the 1:1 <TYPE>-INDEX.md mirrors, one per enabled baseline type where declared;
   - the root VERSION deliverable, the latest release's version as exact bytes (spec 5.8/6.1).
 
-The transform vocabulary is CLOSED and versioned (spec 10.2): filter on declared field predicates; sort
+The transform vocabulary is CLOSED and versioned (spec 10.2): filter on declared field predicates (among
+them the provenance pair `importer_authored`/`not_importer_authored` on actor.kind, through which every
+split of importer-authored history from current-state records runs, spec 8.6); sort
 on declared keys with the record ID as the final tie-breaker; group by a declared field; project declared
-columns; plus EXACTLY TWO named joins, the block-actionability join (an unqualified active block HIDES the
-records it scopes, spec 8.5) and the decision-resolution supersession-chain join (the current effective
-resolution is the head of each supersedes chain, spec 8.5). Nothing beyond this vocabulary enters a
-generator; a new composition shape is a specification version bump, not ad hoc logic here.
+columns; plus EXACTLY TWO named joins, the block-actionability join (a clean, unqualified active block
+authored by a non-importer actor HIDES the records it scopes; importer-authored records enter the join on
+neither side and a scheduling view surfaces an importer-authored item only as history, spec 8.5/8.6) and
+the decision-resolution supersession-chain join (the current effective resolution is the head of each
+supersedes chain, spec 8.5; an importer-authored decision never becomes a current effective resolution,
+its links confer and remove no authority, and DECISIONS surfaces it only as history, so a non-importer
+decision it supersedes stays current, while a chain whose `supersedes` links, a proposal's included, join
+an importer-authored decision to a non-importer one and leave more than one non-importer decision current
+is a cannot-evaluate of the whole join, spec 8.5/8.6). Nothing beyond this vocabulary enters a generator;
+a new composition shape is a specification version bump, not ad hoc logic here.
 
 Determinism (spec 10.3): UTF-8, LF, stable ordering, no locale-dependent sorting, no wall-clock content,
 no network, and no model. Every generated .md view OPENS with a do-not-edit header naming its source
@@ -37,8 +45,9 @@ VERSION file does.
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: `opf render --root DIR` resolves the store at a
 PRODUCT repository root (default: the cwd), never the pack's own tree via `_gen_common.repo_root()`. The
 `opf render` CLI requires exactly one of `--check | --write` (the dispatcher rejects a bare `render` with
-exit 2); `--check` (read-only drift detection) forwards to this engine, while `--write` is fail-closed and
-deferred (see below). A live `opf render --root . --check` in THIS repo reports NOT APPLICABLE (the pack is
+exit 2), and both modes forward to this engine: `--check` is read-only drift detection, and `--write`
+regenerates the owned deliverables behind a source-integrity gate (see below). A live
+`opf render --root . --check` in THIS repo reports NOT APPLICABLE (the pack is
 a readable non-adopter root: it exists and is readable but has no `.working/`), so the assurance rides the
 `--self-test` render leg over synthetic stores, mirroring the crosswalk/doctor legs. Fail-closed: an
 unresolvable store, a product root that disappears or becomes unreadable at the resolution boundary, or a
@@ -51,24 +60,33 @@ manifest cannot rebind a known view or deliverable off its destination, and view
 through a no-follow CONTAINED write, so a symlinked destination is refused rather than followed.
 
 Scope and disclosed deferrals: U4 renders the `inline` store layout only. A manifest declaring
-`layout = "per-record"` is a CLEAR cannot-evaluate (per-record support is deferred, F7), never
+`layout = "per-record"` is a CLEAR cannot-evaluate (per-record support is deferred), never
 mis-reported as a downstream malformed-record error, and never silently rendered as if inline. The
 `<TYPE>-INDEX.md` mirrors cover the baseline record types only; module-type mirrors are DEFERRED until
-module-type record schemas ship (F8; `_opf_schema.validate_record` knows only the baseline specs, so no
-module-type mirror can be rendered regardless). A mutating render MUST gate on the U6 `validate_store`
-store-integrity layer (cross-record uniqueness, coverage, and reconciliation), a tracked spec-11
-obligation (F2); `validate_store` is the EXISTING U6 engine INTENDED FOR the deferred `opf doctor` verb
-(doctor itself is not yet wired, so validate_store is the engine doctor WILL compose, not one it already
-uses), and it is the gate `render` will compose for `--write`, but `render` does not yet COMPOSE that
-write-gate invocation (VC-4, deferred), so WRITE mode FAILS CLOSED today and writes nothing. The public
-`opf render --write` CLI verb returns exit 2, failing closed at the dispatcher BEFORE the root is resolved.
-A direct-engine write (a `render(...)` call in write mode) is refused exit 2 ONLY once the root RESOLVES as
-an adopter; a non-adopter root returns NOT APPLICABLE (0) FIRST, because non-adopter resolution PRECEDES the
-write refusal. The module `__main__` defaults its command line to `--check`, so it never enters write mode;
-exactly `--self-test` runs `self_test()` instead.
-The `opf render` CLI requires exactly one of `--check | --write` (no default): `--check` (read-only drift
-detection) is IMPLEMENTED and keeps working, while `--write` stays fail-closed until VC-4 composes the gate.
-This is a refusal pending the real composition, never a fabricated gate.
+module-type record schemas ship (`_opf_schema.validate_record` knows only the baseline specs, so no
+module-type mirror can be rendered regardless). Every record source is read from its ACTIVE
+`<type>.index.toml` only (_source_relpath); no view reads a record rotated to the archive, whereas the
+doctor's decision-chain check reads archived records beside the active ones, so a decision supersession
+chain is evaluated here over its active decisions alone (join_resolution states what that leaves unseen).
+
+The write path (spec 5.7/5.8/11): a mutating render gates on the `_opf_check.validate_store`
+store-integrity layer (cross-record uniqueness, coverage, reconciliation, view drift, changelog/version
+integrity), the same engine `opf doctor` runs. `render --write` is SOURCE-GATED-REGENERATE, three phases,
+all after the root RESOLVES as an adopter (a non-adopter root returns NOT APPLICABLE (0) first and nothing
+is gated or written): (A) run validate_store and refuse (exit 2, nothing written) unless
+`_opf_check.source_integrity_ok` holds, a predicate that EXCLUDES the deliverable drift checks render
+itself repairs; (B) regenerate the OWNED set (the declared views and the VERSION deliverable) through the
+render-all-then-write-each path, recording the pre-write bytes of every target it rewrites; (C) run
+validate_store again and require source integrity and every OWNED drift check to pass, restoring the
+recorded bytes and exiting 2 when they do not. An AUTHORED residual left after a clean regenerate (a
+C-CHANGELOG-GATES state, or a stale VERSION the manifest does not declare as a view) never blocks the
+regenerate but forces exit 1 (a finding) or 2 (cannot-evaluate) with a manual remedy, never a
+`render --write` hint. The public `opf render --write` verb gathers the git-derived observations the gate
+consumes (`_opf_observe.gather`) and calls `render(argv, observations=obs)`; validate_store reads no git
+itself. Every write also passes the `_write_contained` backstop, which refuses a mutating write whenever
+`_WRITE_GATE_COMPOSED` is False. The module `__main__` appends `--check` to its command line, so it never
+enters write mode (a `--write` there becomes the both-modes usage error, exit 2); exactly `--self-test`
+runs `self_test()` instead.
 """
 import sys
 
@@ -115,13 +133,13 @@ EXIT_CANNOT_EVALUATE = 2
 # header included). A store holding none of the characters such a change touches renders byte-identical
 # views; the self-test pins this for the U+0085, U+2028 and U+2029 collapse.
 GENERATOR_NAME = "opf-views"
-GENERATOR_VERSION = "2"
+GENERATOR_VERSION = "3"
 SCHEMA_VERSION = _opf_schema.SUPPORTED_SCHEMA
 REGEN_COMMAND = "opf render --write"
 
 # spec 5.7/5.8/11: a mutating render composes the U6 store-integrity layer (validate_store: cross-record
-# uniqueness, coverage, reconciliation, view drift, changelog/version integrity) on the WRITE path
-# (VC-4/PR-C). render --write is now SOURCE-GATED-REGENERATE, three phases: (A) validate_store and refuse
+# uniqueness, coverage, reconciliation, view drift, changelog/version integrity) on the WRITE path.
+# render --write is SOURCE-GATED-REGENERATE, three phases: (A) validate_store and refuse
 # (exit 2, nothing written) unless _opf_check.source_integrity_ok holds, printing ONLY the source-attributed
 # messages; (B) regenerate the OWNED deliverable set (the declared views + the VERSION deliverable) through
 # the two-phase plan-everything-then-write path, capturing preimages; (C) re-validate and require every OWNED
@@ -286,7 +304,8 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, 
     _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
     contract: _opf_release.validate_worklog type-pins a PRESENT marker (a non-integer or unsupported
     version is refused) but PERMITS an absent one. A schema-less ledger authored for another schema
-    version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit (F2)."""
+    version is not caught here; grading an unsupported-schema-version ledger is the remit of the release
+    ledger validators and the doctor's validate_store."""
     got = _with_worklog_diagnostics(lambda: _opf_worklog.load_worklog_at(
         store_root_fd, relpath.rsplit("/", 1)[0], required=False, with_raw=True,
         read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict,
@@ -342,7 +361,7 @@ def _header(source_blobs):
     command. It carries NO timestamp, so a re-render of unchanged sources is byte-identical. EVERY value
     interpolated into the comment (each source path, whose machine-dir component is DISCOVERED and could
     bear `-->`, and every other field) is passed through _html_comment_safe so no value can close the
-    comment early and turn the remainder into active HTML (B2)."""
+    comment early and turn the remainder into active HTML."""
     safe = _html_comment_safe
     sources = ", ".join(safe(p) for p in sorted(source_blobs)) if source_blobs else "(none)"
     return (
@@ -392,6 +411,21 @@ def _is_proposed(record):
     return str(record.get("status", "")).endswith("/proposed")
 
 
+def _importer_authored(record):
+    """True when a record's actor kind is `importer` (spec 8.6): such a record is imported history,
+    keyed on PROVENANCE (actor.kind), not on series or import activation. An importer-authored record
+    enters no current-state join: it neither grants a stop, nor counts as actionable work, nor becomes
+    (or displaces) a current effective resolution, and a view surfaces it only as history (spec 8.5/8.6).
+    A missing or malformed actor is NOT importer-authored. That permissive reading is unreachable from a
+    store: every store record reaches a renderer through _load_records, which refuses any record
+    _opf_schema.validate_record grades invalid, and that validation requires the actor envelope (a table
+    whose kind is a registered ACTOR_KINDS string). It matters only to a direct synthetic caller, for
+    which a clean record with an odd envelope must never be silently demoted to history (the fail-closed
+    handling of a malformed record is _load_records' refusal, never a demotion here)."""
+    actor = record.get("actor")
+    return isinstance(actor, dict) and actor.get("kind") == "importer"
+
+
 def _id_key(record):
     """A numeric sort key for a record ID (namespace, number), so IDs order by number not lexically
     (BI-2 before BI-10). A malformed ID sorts last under a sentinel, but records are validated before
@@ -411,7 +445,7 @@ def _links_of(record, rel):
 
 def _sorted_ids(ids):
     """Dedup a set of record IDs and order them by the module's numeric record-id key (`_id_key`), so an
-    annotation that joins a set of ids reads BL-2 before BL-10 with no duplicate (MAJOR-1). Non-string
+    annotation that joins a set of ids reads BL-2 before BL-10 with no duplicate. Non-string
     entries are dropped. This is the SINGLE ordering used by every id-set annotation join in the module
     (block-actionability, decision supersession, done receipts), so none of them re-sorts lexically or
     appends a duplicate per scope/link occurrence."""
@@ -423,8 +457,9 @@ def _sorted_ids(ids):
 # The CLOSED, versioned transform vocabulary (spec 10.2). Every predicate, sort key, group field, and
 # projection column a renderer may name is registered here; a name outside a registry is a ViewsError
 # (a cannot-evaluate), never a silent empty group, empty projection, or "" sort key. TRANSFORM_VOCAB
-# bumps when the set changes (a new composition shape is a spec version bump, not ad hoc logic).
-TRANSFORM_VOCAB_VERSION = "3"
+# bumps when the set changes (a new composition shape is a spec version bump, not ad hoc logic); the
+# self-test pins it to _transform_vocab_fingerprint() of the registries below.
+TRANSFORM_VOCAB_VERSION = "4"
 
 # group fields resolve through an accessor so a DECLARED derived field (lifecycle state) is part of the
 # closed vocabulary rather than an ad hoc bypass; a raw field reads r.get(field).
@@ -445,7 +480,7 @@ PROJECT_COLUMNS = frozenset({
 # up is_actionable / _state at CALL time, so this dict can be defined before is_actionable below.
 # `id_in` selects by membership in a caller-supplied ID set (the decision-resolution join's `current`
 # and `superseded` sets), so render_decisions routes its effective/superseded selections through the
-# CLOSED vocabulary rather than an ad hoc in-line predicate (F5/M1).
+# CLOSED vocabulary rather than an ad hoc in-line predicate.
 _FILTER_PREDICATES = {
     "is_actionable": lambda hidden: (lambda r: is_actionable(r, hidden)),
     "state_in": lambda states: (lambda r: _state(r) in states),
@@ -456,19 +491,45 @@ _FILTER_PREDICATES = {
     # CALL time (like is_actionable/_state above), so these entries can be registered before it is needed.
     "is_proposed": lambda: (lambda r: _is_proposed(r)),
     "not_proposed": lambda: (lambda r: not _is_proposed(r)),
+    # The imported-history firewall keys on PROVENANCE, the declared actor.kind field (spec 8.5/8.6):
+    # these split a set into importer-authored history and the records that may enter a current-state
+    # join. Every such split (the actionability join's block side, is_actionable's item side, the
+    # decision-resolution join's input side and its mixed-chain test, and the BACKLOG, PIPELINE, DECISIONS
+    # and HANDOFF renderers) goes through this pair, never a direct _importer_authored call, so the
+    # firewall has one registered definition.
+    "importer_authored": lambda: (lambda r: _importer_authored(r)),
+    "not_importer_authored": lambda: (lambda r: not _importer_authored(r)),
 }
 FILTER_PREDICATES = frozenset(_FILTER_PREDICATES)
+
+
+def _transform_vocab_fingerprint():
+    """The sha256 hex digest of the registered vocabulary's NAMES: one `<registry>:<name>` LF-terminated
+    line per name, sorted within each registry, over the registries the transforms actually consult
+    (_FILTER_PREDICATES, SORT_KEYS, _GROUP_ACCESSORS, PROJECT_COLUMNS). It covers names, not predicate
+    bodies: a change to what a registered name means still needs a deliberate version bump."""
+    lines = []
+    for registry, names in (("filter", _FILTER_PREDICATES), ("sort", SORT_KEYS), ("group", _GROUP_ACCESSORS),
+                            ("project", PROJECT_COLUMNS)):
+        lines.extend("{}:{}\n".format(registry, n) for n in sorted(names))
+    return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+
+
+def _predicate(name, **kwargs):
+    """The single-record test of a DECLARED, named predicate from the closed vocabulary (spec 10.2), for
+    a per-record annotation that cannot be a set filter. An unknown predicate name is a ViewsError."""
+    factory = _FILTER_PREDICATES.get(name)
+    if factory is None:
+        raise ViewsError("unknown filter predicate {!r} (spec 10.2 closed transform vocabulary "
+                         "v{})".format(name, TRANSFORM_VOCAB_VERSION))
+    return factory(**kwargs)
 
 
 def t_filter(records, name, **kwargs):
     """Filter on a DECLARED, named predicate from the closed vocabulary (spec 10.2). `name` selects a
     registered predicate factory; `kwargs` binds its context. An unknown predicate name is a
     ViewsError, never a silent pass-through of an arbitrary callable."""
-    factory = _FILTER_PREDICATES.get(name)
-    if factory is None:
-        raise ViewsError("unknown filter predicate {!r} (spec 10.2 closed transform vocabulary "
-                         "v{})".format(name, TRANSFORM_VOCAB_VERSION))
-    predicate = factory(**kwargs)
+    predicate = _predicate(name, **kwargs)
     return [r for r in records if predicate(r)]
 
 
@@ -512,14 +573,18 @@ def t_project(record, columns):
 
 
 def join_actionability(items, blocks):
-    """The block-actionability join (spec 8.5): an UNQUALIFIED `active` block HIDES every record it scopes.
+    """The block-actionability join (spec 8.5): a clean, UNQUALIFIED `active` block authored by a
+    non-importer actor HIDES every record it scopes.
     Returns (blocked_by, hidden): blocked_by maps a scoped record ID to the block IDs that scope it, DEDUPED
-    and ordered by the numeric record-id key (BL-2 before BL-10, MAJOR-1), and hidden is the set of all
+    and ordered by the numeric record-id key (BL-2 before BL-10), and hidden is the set of all
     scoped IDs. A block that is `active/proposed` (a proposal, not a grant) or in a terminal state
     (`released`, `expired`) never hides anything, so only a ratified active block counts, exactly as the
-    actionability rule requires."""
+    actionability rule requires. An importer-authored block enters neither side of this join (spec 8.5/8.6:
+    imported history MUST NOT grant a current stop), so it hides nothing whatever its recorded state;
+    importer-authored ITEMS are excluded on the item side by is_actionable and by the renderers, which
+    surface them only as history."""
     blocked_by = {}
-    for b in blocks:
+    for b in t_filter(blocks, "not_importer_authored"):
         if _state(b) == "active" and not _is_proposed(b):
             bid = b.get("id")
             if not isinstance(bid, str):
@@ -528,14 +593,18 @@ def join_actionability(items, blocks):
                 if isinstance(sid, str):
                     blocked_by.setdefault(sid, []).append(bid)
     for sid in blocked_by:
-        blocked_by[sid] = _sorted_ids(blocked_by[sid])   # dedup + numeric id order (BL-2 before BL-10, MAJOR-1)
+        blocked_by[sid] = _sorted_ids(blocked_by[sid])   # dedup + numeric id order (BL-2 before BL-10)
     return blocked_by, set(blocked_by)
 
 
 def is_actionable(item, hidden):
-    """A backlog item is actionable when its state is `open` or `active` and no unqualified active block
-    scopes it (spec 8.5). `hidden` is the scoped-ID set from join_actionability."""
-    return _state(item) in ("open", "active") and item.get("id") not in hidden
+    """A clean backlog item authored by a non-importer actor is actionable when its state is `open` or
+    `active` and no clean unqualified active block scopes it (spec 8.5). `hidden` is the scoped-ID set
+    from join_actionability. An importer-authored item is history, never actionable work, whatever its
+    recorded state (spec 8.5/8.6), so it is never actionable here."""
+    return (_predicate("not_importer_authored")(item)
+            and _state(item) in ("open", "active")
+            and item.get("id") not in hidden)
 
 
 def _detect_resolution_cycle(supersedes_map):
@@ -569,15 +638,93 @@ def _detect_resolution_cycle(supersedes_map):
     return None
 
 
+def _mixed_provenance_chains(decisions):
+    """The supersession chains of `decisions` in which a `supersedes` link joins an importer-authored
+    decision to a non-importer one, in either direction. A chain is a connected component over EVERY
+    `supersedes` link in either direction between two decisions of the set, whatever the linking
+    decision's state or `/proposed` qualifier, importer-authored decisions and proposals included (spec
+    8.8), as the doctor's decision_chains builds it over the decisions it reads; a link to an ID outside
+    the set links nothing. Provenance is read through the registered `importer_authored` predicate, like
+    every importer split in this module. Returns each such chain as its member IDs in numeric id order,
+    the chains ordered by their first member; [] when there is none."""
+    imported = {d.get("id") for d in t_filter(decisions, "importer_authored")}
+    parent = {d.get("id"): d.get("id") for d in decisions if isinstance(d.get("id"), str)}
+
+    def find(x):
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    joining = []
+    for d in decisions:
+        did = d.get("id")
+        if not isinstance(did, str):
+            continue
+        for t in _links_of(d, "supersedes"):
+            if t not in parent:
+                continue
+            ra, rb = find(did), find(t)
+            if ra != rb:
+                parent[ra] = rb
+            if (did in imported) != (t in imported):
+                joining.append(did)
+    mixed = {find(j) for j in joining}
+    members = {}
+    for i in parent:
+        root = find(i)
+        if root in mixed:
+            members.setdefault(root, []).append(i)
+    return sorted((_sorted_ids(m) for m in members.values()), key=lambda m: _id_key({"id": m[0]}))
+
+
 def join_resolution(decisions):
     """The decision-resolution supersession-chain join (spec 8.5): a decided decision may be superseded by
     a newer one linking `supersedes`, and exactly one current effective resolution exists per chain.
-    Returns (current, superseded, supersedes_map): current is the set of decision IDs not superseded by any
-    other decision in the set (the chain heads), superseded is the complementary set, and supersedes_map
-    maps each decision ID to the sorted IDs it directly supersedes. A FORK (a decision superseded by more
-    than one other), a CYCLE, or any chain resolving to more than one head is an INVALID graph and raises
-    ViewsError (a cannot-evaluate), never returned as multiple current heads; the single-head happy path
-    returns unchanged."""
+    `decisions` is every pending decision a view reads, proposals and importer-authored ones included.
+    Returns (current, superseded, supersedes_map) over the SETTLED (unqualified) decisions NOT authored by
+    an importer: current is the set of their IDs that no decided one of them supersedes (the chain heads),
+    superseded is the complementary set, and supersedes_map maps each decided one's ID to the sorted IDs
+    among them that it directly supersedes. An importer-authored decision is imported history outside
+    every current-state join (spec 8.5/8.6): the input is filtered through the registered
+    `not_importer_authored` predicate, so such a decision never becomes a current effective resolution and
+    lands in none of the returned sets (the DECISIONS renderer surfaces it only as history), and its
+    `supersedes` links confer and remove no authority: a non-importer decision that an importer-authored
+    one supersedes stays current. A decided non-importer decision superseding an importer-authored one is
+    the spec 8.6 remedy, a new clean decision linking back: it is a current effective resolution, and its
+    link to the imported decision marks nothing superseded and is not listed in supersedes_map. A chain of
+    importer-authored decisions only is therefore neither evaluated nor refused here, a fork or a cycle
+    among them included: two importer-authored decisions superseding a third land in no set and raise
+    nothing, while the doctor's C-DECISION-CHAINS, which counts a chain's current resolutions whatever
+    their provenance, reports that chain's two current resolutions as a finding. A `/proposed` decision is
+    then filtered out through the registered `not_proposed` predicate: a proposal does not yet supersede
+    anything, so it builds no edge, never becomes a head, and lands in no returned set. Over the remaining
+    decisions the edges come from decided decisions only; a FORK (a decision superseded by more than one
+    other) or a CYCLE among those edges raises ViewsError (a cannot-evaluate), and with neither, every chain
+    those edges connect has exactly one head; a fork or a cycle that runs through an importer-authored
+    decision is neither here, since that decision builds no edge. A chain that joins imported and current
+    decisions is judged as ONE chain, built over the WHOLE input as the doctor's decision_chains builds it
+    (spec 8.8): a connected component over every `supersedes` link in either direction, whatever the
+    linking decision's state or `/proposed` qualifier, importer-authored decisions included. When such a
+    chain, one in which a link joins an importer-authored decision to a non-importer one, keeps more than
+    one current effective resolution (a decided non-importer decision in `current`), the join raises
+    ViewsError (a cannot-evaluate) naming the chain's IDs and those resolutions, since spec 8.5 allows one
+    per chain: a maintainer decision superseding an importer-authored one that supersedes another
+    maintainer decision leaves both maintainer decisions current. The refusal is of the whole join, so its
+    caller gets no sets at all: a clean chain beside a refused one is not rendered either, since a view
+    cannot render part of a graph it cannot evaluate. A chain with no such link is evaluated over its own
+    edges as before, so a chain the doctor connects only through a link from a non-decided decision or a
+    proposal is more than one chain here, each with its own head. The join sees only the decisions it is
+    given, and the views read the active pending_decision index, never the archive, while the doctor's
+    decision_chains also reads the decisions rotated to the archive. A `supersedes` link to an archived
+    decision therefore links nothing here, and an archived decision's link to an active one is not seen: a
+    chain the doctor joins through an archived decision is evaluated over its active decisions alone, so
+    two non-importer current resolutions that only an archived decision joins into one chain are NOT
+    refused, and each renders as an effective resolution."""
+    mixed = _mixed_provenance_chains(decisions)
+    decisions = t_filter(t_filter(decisions, "not_importer_authored"), "not_proposed")
     supersedes_map = {}
     superseded = set()
     ids = {d.get("id") for d in decisions if isinstance(d.get("id"), str)}
@@ -585,7 +732,7 @@ def join_resolution(decisions):
     # and this join's fork/cycle ownership: a supersedes link on a non-decided (open/withdrawn) decision
     # does not yet resolve anything, so it must not remove a decided effective resolution from `current`
     # and mislabel it "Superseded". Cross-record resolution GRADING otherwise remains U6 validate_store's
-    # remit (F2); this closes only the mislabel window. The all-decided case is unchanged.
+    # remit; this closes only the mislabel window. The all-decided case is unchanged.
     for d in decisions:
         did = d.get("id")
         if _state(d) != "decided":
@@ -593,11 +740,13 @@ def join_resolution(decisions):
         targets = _sorted_ids(t for t in _links_of(d, "supersedes") if t in ids)
         supersedes_map[did] = targets
         superseded.update(targets)
-    # Spec 8.5/10.2: exactly ONE current effective resolution per supersession chain. A FORK (one decision
-    # superseded by more than one other) forces a chain node with in-degree > 1 and leaves the chain with
-    # two heads; refusing that, together with refusing a CYCLE, is equivalent to requiring one head per
-    # connected chain, since any two-head connected chain must contain such an in-degree > 1 node. Both are
-    # cannot-evaluate: fail closed rather than render an invalid DECISIONS view with two effective heads.
+    # Spec 8.5/10.2: exactly ONE current effective resolution per supersession chain. Here a chain is a
+    # component connected by the edges built above (links from settled, decided non-importer decisions); a
+    # chain joining imported and current decisions is counted over its whole membership below. A FORK is
+    # a node with in-degree > 1. Refusing every fork and every CYCLE leaves exactly one head per such
+    # chain, since an acyclic connected chain with no in-degree > 1 node has one node no edge reaches. Both
+    # are cannot-evaluate: fail closed rather than render an invalid DECISIONS view with two effective
+    # heads.
     indegree = {}
     for _did, targets in supersedes_map.items():
         for t in targets:
@@ -612,6 +761,20 @@ def join_resolution(decisions):
         raise ViewsError("decision resolution graph has a supersedes cycle at {} (spec 8.5: a supersession "
                          "chain is acyclic); fail-closed".format(cycle_id))
     current = {d.get("id") for d in decisions if isinstance(d.get("id"), str)} - superseded
+    # Spec 8.5/8.6: an importer-authored decision's links remove no authority, so a chain joining imported
+    # and current decisions can keep more than one decided non-importer head even with no fork or cycle
+    # among the edges above (two maintainer decisions joined only through an importer-authored one). Such
+    # a chain is one chain, so its heads are counted over its whole membership and more than one refuses.
+    heads = {d.get("id") for d in decisions if _state(d) == "decided"} & current
+    split = [(m, [i for i in m if i in heads]) for m in mixed]
+    split = [(m, h) for m, h in split if len(h) > 1]
+    if split:
+        named = "; ".join("[{}] (current: {})".format(", ".join(m), ", ".join(h)) for m, h in split)
+        raise ViewsError("decision supersession {} {} {} more than one current effective resolution: an "
+                         "importer-authored decision's `supersedes` links remove no current authority (spec "
+                         "8.6), and spec 8.5 requires exactly one current effective resolution per chain; "
+                         "fail-closed".format("chain" if len(split) == 1 else "chains", named,
+                                              "has" if len(split) == 1 else "each have"))
     return current, superseded, supersedes_map
 
 
@@ -622,7 +785,7 @@ def join_resolution(decisions):
 # the driver, except for the header-exempt root VERSION deliverable). Bodies are deterministic: every
 # iteration is over an explicitly sorted or grouped sequence.
 
-# F4 class-wide probe (spec 10.3): every record/ledger field value interpolated into a rendered body
+# Class-wide sink probe (spec 10.3): every record/ledger field value interpolated into a rendered body
 # passes through _md_text, so a free-text field cannot forge a heading, a list item, an active link, an
 # HTML comment, or any other inline Markdown/HTML structure. Author-declared probe token, reconciled by
 # hand against these renderers (the file is small):
@@ -692,12 +855,12 @@ _MD_ESCAPE_RE = re.compile(r"([\\`*_{}\[\]()#+!|~])")
 # whitespace or `<` (mirroring where GFM ends a URL autolink), so a following `<tag>` is left to the
 # `<`/`>` entity escaping rather than swallowed into the span.
 # Named autolink fragments: production (_MD_AUTOLINK_TOKEN_RE) composes these three arms, and the test
-# oracle compiles the SAME www source, so the two www matchers cannot drift (round-5 QA: identity by
+# oracle compiles the SAME www source, so the two www matchers cannot drift (identity by
 # construction). Each arm is its own named constant so the self-test can FREEZE it against a reviewed
 # literal: any edit to a neutralizer arm (url/www/email, not www alone) breaks a frozen pin, closing the
-# whole matcher-edit class (round-8 QA found the url/email arms unfrozen). cmark-gfm does not autolink www
-# after an alphanumeric, so the not-after-alnum boundary matches cmark-gfm + production; [^\s<]+ accepts
-# Unicode hosts.
+# whole matcher-edit class (a frozen www arm alone would leave the url/email arms editable). cmark-gfm
+# does not autolink www after an alphanumeric, so the not-after-alnum boundary matches cmark-gfm +
+# production; [^\s<]+ accepts Unicode hosts.
 _URL_AUTOLINK_FRAGMENT = r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s<]+"        # any scheme URL (http/https/...)
 _WWW_AUTOLINK_FRAGMENT = r"(?<![A-Za-z0-9])www\.[^\s<]+"              # bare www. autolink (shared fragment)
 _EMAIL_AUTOLINK_FRAGMENT = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)+"  # bare email address
@@ -713,9 +876,9 @@ def _md_escape_inline(s):
     visible backslash), then entity-escape the HTML metacharacters `&`, `<`, `>` so an embedded `<!--`
     cannot open a comment and a `<tag>` cannot pass through as raw HTML. Order is load-bearing: the
     backslash pass never emits `&`/`<`/`>`, and the entity pass runs after it. A segment carrying none of
-    these renders byte-for-byte unchanged. This is byte-identical to the pre-F-U4AUTOLINK escape passes,
-    so every non-autolink value (every id, timestamp, SemVer, and the mixed-metacharacter goldens)
-    renders exactly as before."""
+    these renders byte-for-byte unchanged. This is byte-identical to the escape passes from before
+    autolink wrapping, so every non-autolink value (every id, timestamp, SemVer, and the
+    mixed-metacharacter goldens) renders exactly as before."""
     s = _MD_ESCAPE_RE.sub(r"\\\1", s)
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -754,7 +917,8 @@ def _md_text(value):
     autolink token (a bare URL, `www.` domain, or email) is wrapped in a CODE SPAN, which a GFM renderer
     never autolinks and never treats as raw HTML, so the address renders as inert monospace text with
     every character preserved. Every non-token segment is escaped by `_md_escape_inline`. A value with no
-    autolink trigger takes only the escape path and is byte-identical to the pre-F-U4AUTOLINK output.
+    autolink trigger takes only the escape path and is byte-identical to the output from before autolink
+    wrapping.
 
     Adjacent autolink tokens with no text between them (an email whose `+` starts the next address, say)
     are COALESCED into ONE code span over the original contiguous substring, so two abutting spans never
@@ -799,7 +963,7 @@ def _md_text(value):
 # The generated header (spec 10.3) interpolates DISCOVERED source paths (the machine-dir component is NOT
 # restricted to `toml`) into an HTML comment. A comment is closed ONLY by a `--`-led sequence (`-->`, or
 # the abrupt `--!>`), so a value bearing `-->` could close the comment early and turn the remainder into
-# active HTML (B2). Entities do NOT decode inside a comment, so `&gt;`-style escaping is inert here; the
+# active HTML. Entities do NOT decode inside a comment, so `&gt;`-style escaping is inert here; the
 # sink is made safe by ALTERING the characters themselves. Breaking every `--` run (inserting a space after
 # each hyphen that is immediately followed by another) makes both `-->` and `--!>` impossible to form, and
 # newlines/controls collapse so a value cannot inject a fake header field line. A legitimate source path
@@ -840,7 +1004,9 @@ def _toml_comment_safe(value):
 
 def render_todo(src):
     """TODO: the actionable open and active backlog items (block-actionability join, then a state filter,
-    then an ID-tie-broken sort). An item an unqualified active block scopes is hidden."""
+    then an ID-tie-broken sort). An item a clean, unqualified active block authored by a non-importer actor
+    scopes is hidden; an importer-authored block hides nothing. An importer-authored item is never
+    actionable (spec 8.5/8.6), so it never appears here; BACKLOG and PIPELINE surface it as history."""
     items, blocks = src["backlog_item"], src["block"]
     _blocked_by, hidden = join_actionability(items, blocks)
     actionable = t_filter(items, "is_actionable", hidden=hidden)
@@ -852,14 +1018,19 @@ def render_todo(src):
 
 def render_backlog(src):
     """BACKLOG: every backlog item in ID order, each annotated by the block-actionability join as
-    actionable or blocked by the naming block(s)."""
+    actionable or blocked by the naming block(s). An importer-authored item is annotated as
+    `history (importer-authored)` (spec 8.5/8.6: history, never actionable work, whatever its recorded
+    state, and never `blocked by` since it enters neither side of the join). The history test is the
+    registered `importer_authored` predicate."""
     items, blocks = src["backlog_item"], src["block"]
     blocked_by, hidden = join_actionability(items, blocks)
+    history = _predicate("importer_authored")
     lines = []
     for r in t_sort(items):
-        note = "actionable" if is_actionable(r, hidden) else (
-            "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r.get("id")])) if r.get("id") in hidden
-            else "not actionable ({})".format(_md_text(_state(r))))
+        note = "history (importer-authored)" if history(r) else (
+            "actionable" if is_actionable(r, hidden) else (
+                "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r.get("id")])) if r.get("id") in hidden
+                else "not actionable ({})".format(_md_text(_state(r)))))
         lines.append("- {} ({}) {} -- {}".format(
             _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")), note))
     return _lines("BACKLOG", lines)
@@ -870,9 +1041,14 @@ def render_pipeline(src):
     10.2/8.4) in lifecycle order, with a blocked marker from the block-actionability join. A `/proposed`
     item is NONTERMINAL (spec 8.4): it is held OUT of its effective-state group and surfaced in a trailing
     `awaiting ratification` section showing its FULL status, never mis-grouped under its proposed target
-    state. The settled/proposed split and the state grouping both run through the closed transform
+    state. An importer-authored item is history outside every current-state join (spec 8.5/8.6): whatever
+    its recorded status, it is surfaced only under a trailing `Imported history` section with that FULL
+    status (as HANDOFF does), never inside a lifecycle group and never with a blocked marker. The
+    importer split, the settled/proposed split and the state grouping all run through the closed transform
     vocabulary (registered predicates and a registered derived group field), not ad hoc generator logic."""
     items, blocks = src["backlog_item"], src["block"]
+    imported = t_filter(items, "importer_authored")
+    items = t_filter(items, "not_importer_authored")
     blocked_by, hidden = join_actionability(items, blocks)
 
     def _marker(r):
@@ -892,6 +1068,12 @@ def render_pipeline(src):
         for r in proposed:
             out.append("- {} ({}) {}{}".format(
                 _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")), _marker(r)))
+        out.append("")
+    if imported:
+        out.append("## Imported history")
+        for r in t_sort(imported):
+            out.append("- {} ({}) {}".format(
+                _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", ""))))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("PIPELINE", body)
@@ -931,16 +1113,41 @@ def render_decisions(src):
     listed under `Withdrawn decisions`, never dropped. Each maintainer_decision is a created-terminal ruling
     that may `exemplifies` the preference_pattern it instantiates (a projection of the record's OWN links,
     not a join). A preference_pattern lands under Active / Retired, and a `/proposed` distilled pattern
-    awaiting ratification is surfaced with its FULL status, never mis-listed as active. Every valid record of
-    every source thus lands in exactly one place."""
+    awaiting ratification is surfaced with its FULL status, never mis-listed as active. An importer-authored
+    record of ANY of the four sources is imported history outside every current-state join (spec 8.5/8.6):
+    whatever its recorded status, it is held OUT of every section and join result above and surfaced only
+    under a trailing `Imported history` section with that FULL status (as PIPELINE and HANDOFF surface
+    theirs), never as a pending/effective/superseded/withdrawn decision, an autonomous or maintainer ruling,
+    or an active pattern. An importer-authored decision's `supersedes` links remove no authority, so a
+    non-importer decision it supersedes is still listed as effective, and a non-importer decision
+    superseding it is effective with no `supersedes` tail naming it. A pending decision chain that joins
+    imported and current decisions through any `supersedes` link, a proposal's included, and keeps more
+    than one current effective resolution is a cannot-evaluate (join_resolution), and so is the whole
+    view: a clean chain beside it is not rendered either. A decision rotated to the archive is not read
+    (join_resolution states what that leaves unseen). When the view renders, every valid record of every
+    source thus lands in exactly one place."""
     pend, auto = src["pending_decision"], src["autonomous_decision"]
     md = src.get("maintainer_decision", [])
     pp = src.get("preference_pattern", [])
+    # The imported-history firewall (spec 8.5/8.6) keys on provenance: an importer-authored record of any
+    # decision-register source confers no current-state authority, so it is held out of every section
+    # below and surfaced only under the trailing Imported history section with its full status. The
+    # split runs through the registered predicate pair, like every importer split in this module.
+    imported = t_sort(t_filter(pend, "importer_authored") + t_filter(auto, "importer_authored")
+                      + t_filter(md, "importer_authored") + t_filter(pp, "importer_authored"))
+    pend = t_filter(pend, "not_importer_authored")
+    auto = t_filter(auto, "not_importer_authored")
+    md = t_filter(md, "not_importer_authored")
+    pp = t_filter(pp, "not_importer_authored")
     settled = t_filter(pend, "not_proposed")
     proposed = t_sort(t_filter(pend, "is_proposed"))
-    # The ratified supersession graph is over the SETTLED decisions only: a proposal does not yet supersede
-    # anything, so it neither becomes an effective head nor removes another decision from `current`.
-    current, superseded, supersedes_map = join_resolution(settled)
+    # The resolution join takes EVERY pending decision, proposals and importer-authored ones included: it
+    # builds each chain over every `supersedes` link, as the doctor does, and refuses a chain joining
+    # imported and current decisions that keeps more than one current effective resolution. Its ratified
+    # supersession graph is over the SETTLED non-importer decisions only: a proposal does not yet supersede
+    # anything, and an importer-authored decision confers nothing, so neither becomes an effective head
+    # nor removes another decision from `current`.
+    current, superseded, supersedes_map = join_resolution(src["pending_decision"])
     decided = t_filter(settled, "state_in", states=("decided",))
     open_pd = t_sort(t_filter(settled, "state_in", states=("open",)))
     effective = t_sort(t_filter(decided, "id_in", ids=current))
@@ -992,6 +1199,11 @@ def render_decisions(src):
             + ["- {} ({}) {}".format(_md_text(r.get("id")), _md_text(r.get("status", "")),
                                      _md_text(r.get("title", ""))) for r in proposed_pp]
             or [_EMPTY])
+    if imported:
+        out += ["", "## Imported history"]
+        out += ["- {} ({}) {}".format(
+            _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")))
+            for r in imported]
     return "# {}\n\n{}\n".format("DECISIONS", "\n".join(out))
 
 
@@ -1089,14 +1301,20 @@ def render_decisions_toml(src):
     Returns the TOML BODY only; the driver prepends the `#` do-not-edit header (_toml_header). Each source
     is an array of tables of its projected rows, ID-sorted; the `[derived]` table carries the
     decision-resolution join's effective/superseded output over the SETTLED pending decisions (no vocabulary
-    beyond spec 10.2). x-<vendor> tables are excluded (profile-owned). The body is emitted through
+    beyond spec 10.2). The projected rows are the faithful full-record mirror, so an importer-authored
+    record still projects as a row; the `[derived]` table is a CURRENT-STATE join, so join_resolution's own
+    provenance firewall (spec 8.5/8.6) keeps an importer-authored decision out of both derived sets, and
+    its links remove no decision from `effective`. The join is handed every pending decision, so a chain
+    joining imported and current decisions through any link, a proposal's included, that keeps more than
+    one current effective resolution is a cannot-evaluate there, and the whole projection then refuses, a
+    clean chain beside it included; a decision rotated to the archive is not read (join_resolution).
+    x-<vendor> tables are excluded (profile-owned). The body is emitted through
     _opf_emit.emit_checked, which reparses and byte-canon-proves its own output (fail-closed)."""
     sources = ("pending_decision", "autonomous_decision", "maintainer_decision", "preference_pattern")
     doc = {"projection": "decisions", "schema": PROJECTION_SCHEMA}
     for t in sources:
         doc[t] = [_projection_row(r, _PROJECTION_EXTRA[t]) for r in sorted(src.get(t, []), key=_id_key)]
-    settled = t_filter(src.get("pending_decision", []), "not_proposed")
-    current, superseded, _supersedes_map = join_resolution(settled)
+    current, superseded, _supersedes_map = join_resolution(src.get("pending_decision", []))
     doc["derived"] = {"effective": _sorted_ids(current), "superseded": _sorted_ids(superseded)}
     return _opf_emit.emit_checked(doc)
 
@@ -1120,12 +1338,8 @@ def render_handoff(src):
     handoff is history outside every current-state join (spec 8.6): whatever its recorded status, it is
     surfaced only under `Imported history` with that FULL status, never as the current handoff. Every
     valid handoff status thus lands in exactly one place."""
-    def _imported(r):
-        actor = r.get("actor")
-        return isinstance(actor, dict) and actor.get("kind") == "importer"
-
-    imported = [r for r in src["handoff"] if _imported(r)]
-    handoffs = [r for r in src["handoff"] if not _imported(r)]
+    imported = t_filter(src["handoff"], "importer_authored")
+    handoffs = t_filter(src["handoff"], "not_importer_authored")
     out = ["## Current"]
     cur = t_sort(t_filter(handoffs, "state_in", states=("current",)))
     out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
@@ -1323,16 +1537,17 @@ def _write_contained(root_fd, relpath, text, check, preimages=None, scope=None):
 
     This is the single choke point EVERY view and deliverable write passes through, so the write-gate
     refusal is the DEFENCE-IN-DEPTH layer HERE at the write boundary, overlapping render()'s composed U6
-    gate: the real store-integrity gate runs in render() (validate_store, VALID-only), and this guard is the
+    gate: the real store-integrity gate runs in render() (the three-phase SOURCE-GATED-REGENERATE
+    validate_store composition, spec 5.7/5.8/11), and this guard is the
     low-cost before-any-truncation backstop that refuses a mutating write whenever _WRITE_GATE_COMPOSED is
     somehow False, so no helper (a direct _write_contained or _render_resolved call included) can open or
     truncate a file with the gate flag cleared (defence-in-depth-default). --check is read-only and
     unaffected. With the gate composed the flag is True, so this backstop passes and render()'s validate_store
     verdict is what actually gates the write (spec 5.7/5.8/11)."""
     if not check and not _WRITE_GATE_COMPOSED:
-        raise ViewsError("refusing to write {}: store-integrity gate (U6 validate_store) not composed; a "
-                         "mutating render is refused at the write boundary as a defence-in-depth backstop "
-                         "(fail-closed, spec 5.7/5.8/11)".format(relpath))
+        raise ViewsError("refusing to write {}: the store-integrity gate (the doctor's validate_store) is not "
+                         "composed; a mutating render is refused at the write boundary as a defence-in-depth "
+                         "backstop (fail-closed, spec 5.7/5.8/11)".format(relpath))
     new_bytes = text.encode("utf-8")
     try:
         pfd, name = _journal._open_parent(root_fd, relpath)
@@ -1353,9 +1568,9 @@ def _write_contained(root_fd, relpath, text, check, preimages=None, scope=None):
         if current == new_bytes:
             return False                                  # already current: byte-stable, no rewrite
         if preimages is not None:
-            # PR-C Phase B: record the pre-write bytes of every target this render ACTUALLY rewrites (None
-            # when the target did not exist -> a rollback deletes it), keyed by (scope, relpath) so a Phase-C
-            # rollback knows which no-follow root to reopen. Recorded only for a REAL write, after the
+            # Write-path Phase B: record the pre-write bytes of every target this render ACTUALLY rewrites
+            # (None when the target did not exist -> a rollback deletes it), keyed by (scope, relpath) so a
+            # Phase-C rollback knows which no-follow root to reopen. Recorded only for a REAL write, after the
             # byte-stable early return above, so an unchanged target is never marked for rollback.
             preimages[(scope, relpath)] = current
         # Reopen-TOCTOU hardening: never open the destination NAME for truncation. O_NOFOLLOW refuses a
@@ -1443,8 +1658,8 @@ def render(argv, observations=None, accepted=None):
     """`opf render [--root DIR] (--check | --write)`: render every declared view of the store at a PRODUCT
     root. Exactly one of --check / --write is required (a bare `render` is a usage error, exit 2). --check is
     strictly read-only and returns 0 clean, 1 on drift, 2 cannot-evaluate. --write is the MUTATING half and is
-    SOURCE-GATED-REGENERATE (PR-C): after resolve_store succeeds it (A) composes the U6 gate and refuses
-    (exit 2, nothing written) unless source integrity is sound (_opf_check.source_integrity_ok), which
+    SOURCE-GATED-REGENERATE: after resolve_store succeeds it (A) composes the doctor's validate_store gate
+    and refuses (exit 2, nothing written) unless source integrity is sound (_opf_check.source_integrity_ok), which
     EXCLUDES the deliverable-drift checks render itself regenerates; (B) regenerates the owned set (the
     declared views + the VERSION deliverable); (C) re-validates and requires every OWNED drift check to now
     pass, rolling back on a render/check disagreement (exit 2). A drifted OWNED deliverable is thus render's
@@ -1466,7 +1681,7 @@ def render(argv, observations=None, accepted=None):
         tok = argv[i]
         if tok in ("--check", "--write"):
             if check is not None:
-                # Exactly one mode: both flags, or a repeated flag, is a usage error (fail-closed CLI, B3).
+                # Exactly one mode: both flags, or a repeated flag, is a usage error (fail-closed CLI).
                 print("opf render: give exactly one of --check / --write", file=sys.stderr)
                 return EXIT_CANNOT_EVALUATE
             check = tok == "--check"
@@ -1482,7 +1697,7 @@ def render(argv, observations=None, accepted=None):
             if val == "" or val.startswith("-"):
                 # A directory argument is required: an empty string (which would normalize to the cwd) or
                 # an option-looking token (a swallowed next flag, e.g. `--root --check`) is a parser-level
-                # cannot-evaluate, never a silent default-to-cwd or a consumed option (fail-closed CLI, B3).
+                # cannot-evaluate, never a silent default-to-cwd or a consumed option (fail-closed CLI).
                 print("opf render: --root requires a non-empty directory argument, not {!r}".format(val),
                       file=sys.stderr)
                 return EXIT_CANNOT_EVALUATE
@@ -1522,7 +1737,7 @@ def render(argv, observations=None, accepted=None):
     if check:
         return _render_resolved_store(product_root, res, check)
 
-    # --- the mutating --write path: SOURCE-gate, regenerate the OWNED set, WITNESS the result (PR-C) -------
+    # --- the mutating --write path: SOURCE-gate, regenerate the OWNED set, WITNESS the result -------------
     # The import is CALL-TIME: _opf_check imports _opf_views at module top, so a top-level back-import would
     # be circular; a call-time import resolves against the fully loaded module.
     import _opf_check
@@ -1607,7 +1822,7 @@ def render(argv, observations=None, accepted=None):
 
 def _render_resolved_store(product_root, res, check, capture=None):
     """render()'s post-resolution, post-gate body: open the store/product no-follow fds for a RESOLVED store
-    and render (drift-check when `check`, write otherwise). `capture`, when a dict, receives the PR-C Phase-B
+    and render (drift-check when `check`, write otherwise). `capture`, when a dict, receives the Phase-B
     witness data: capture["planned"] is set to the sorted planned view names, and capture["preimages"] (seeded
     by the caller) receives the pre-write bytes of every target actually rewritten, so render()'s Phase C can
     check ownership and roll back. Left None on the --check path and the ungated self-test write path.
@@ -1667,7 +1882,7 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
     reuses it for byte-level view-drift detection). Reads the manifest and every declared view source
     beneath store_root_fd, renders each declared target's full text, and returns the planned list of
     (view_name, scope, dest_relpath, text) WITHOUT writing anything. Raises ViewsError (a cannot-evaluate)
-    on an unreadable manifest or source, a `per-record` store (deferred, F7), a view/kind/target mismatch,
+    on an unreadable manifest or source, a `per-record` store (deferred), a view/kind/target mismatch,
     or a byte-canon-invalid render, exactly as the render path does; _render_resolved calls it and performs
     the writes. It makes no state-changing or outbound side effect (a planner is a preview)."""
     if manifest_model is None:
@@ -1758,7 +1973,7 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
                 text = _toml_header(source_blobs) + "\n" + body
             else:
                 text = _header(source_blobs) + "\n" + body
-        # Defence in depth over the whole-corpus byte-canon gate (codex-B): a schema-valid free-text field
+        # Defence in depth over the whole-corpus byte-canon gate: a schema-valid free-text field
         # may carry a zero-width or bidi-control codepoint that _md_text does NOT strip (it drops only
         # C0/DEL), which would render a view body whose bytes FAIL the authoritative byte-canon scan.
         # GUARANTEE clean output by FAILING CLOSED here, before any drift compare or write: never emit
@@ -1767,7 +1982,7 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
         # the SAME predicate check_byte_canon uses to detect a trailing-whitespace line (body != body
         # .rstrip()): a schema-valid free-text field may end in a space OR another Unicode whitespace
         # codepoint (U+00A0, U+1680, U+2000, U+202F, U+205F, U+3000, ...), which would put benign trailing
-        # whitespace at a line end and (round-2) refuse the whole render. Matching check_byte_canon's own
+        # whitespace at a line end and, unstripped, refuse the whole render. Matching check_byte_canon's own
         # predicate here normalizes out EVERY Unicode trailing-whitespace codepoint it would flag, not only
         # ASCII space/tab. Trailing line whitespace is a rendering artefact, not owner content, so
         # normalizing it is benign and deterministic; genuinely FORBIDDEN non-whitespace codepoints
@@ -1790,7 +2005,7 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check, capture
     writes."""
     planned = plan_views(store_root_fd, machine_rel)
     if capture is not None:
-        # PR-C: the OWNED set is exactly the planned targets. Record the planned view NAMES so render()'s
+        # The OWNED set is exactly the planned targets. Record the planned view NAMES so render()'s
         # Phase C can decide C-VERSION-FILE ownership (owned iff "VERSION" is a declared, planned view).
         capture["planned"] = sorted(name for name, _s, _d, _t in planned)
     preimages = capture.get("preimages") if capture is not None else None
@@ -1811,8 +2026,8 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check, capture
 
 
 def _residual_write_exit(post, planned_names):
-    """Map any residual AUTHORED-deliverable state left after a clean OWNED regenerate to render's exit code
-    (PR-C), surfacing it with a MANUAL remedy and NEVER a `render --write` hint (SETTLED policy; never-
+    """Map any residual AUTHORED-deliverable state left after a clean OWNED regenerate to render's exit code,
+    surfacing it with a MANUAL remedy and NEVER a `render --write` hint (SETTLED policy; never-
     advertise, no-concealed-failure). C-CHANGELOG-GATES is always authored content render does not generate;
     C-VERSION-FILE is authored-owned only when "VERSION" is NOT a declared/planned view. A CANNOT-EVALUATE
     (EXIT_CANNOT_EVALUATE=2) dominates a FINDING (EXIT_DRIFT=1); a fully clean residual returns EXIT_OK=0
@@ -1864,7 +2079,7 @@ def _residual_write_exit(post, planned_names):
 
 
 def _restore_contained(root_fd, relpath, old_bytes):
-    """Best-effort rollback primitive (PR-C Phase-C owned-miss): restore a target this render rewrote to its
+    """Best-effort rollback primitive (Phase-C owned-miss): restore a target this render rewrote to its
     captured preimage `old_bytes`, or DELETE it when old_bytes is None (this render created it). Atomic
     entry-replace beneath a no-follow parent fd, the SAME reopen-TOCTOU discipline _write_contained uses (an
     O_EXCL temp renamed over the entry, never an O_TRUNC of the destination name). Raises
@@ -1905,7 +2120,7 @@ def _restore_contained(root_fd, relpath, old_bytes):
 
 
 def _restore_preimages(product_root, res, preimages):
-    """Best-effort rollback of a render/check disagreement (PR-C Phase-C owned-miss): restore each target this
+    """Best-effort rollback of a render/check disagreement (Phase-C owned-miss): restore each target this
     render actually rewrote to its captured preimage bytes, or delete a target this render newly created
     (preimage None). Reopens the no-follow store/product fds and restores descriptor-relative. Returns the
     list of relpaths it could NOT restore (empty on full success). Never raises: a failed restore is REPORTED,
@@ -1920,7 +2135,7 @@ def _restore_preimages(product_root, res, preimages):
         except OSError as exc:
             # The reopen failed, so NOT ONE captured target could be restored. Return every affected relpath
             # (the relpath element of each preimage key), so the caller can NAME the paths that may be left
-            # mid-write rather than a single opaque sentinel that LOSES them (DEFECT-1c; no-concealed-failure),
+            # mid-write rather than a single opaque sentinel that LOSES them (no-concealed-failure),
             # and still convey the reopen error alongside them. Non-raising.
             affected = sorted(relpath for (_scope, relpath) in preimages)
             return affected + ["<reopen for rollback failed: {}>".format(exc)]
@@ -2121,19 +2336,23 @@ def self_test():
     """Render-leg self-test over SYNTHETIC stores. Judged on returned exit codes and rendered bytes, never
     by grepping output. Exercises: INDEPENDENT expected-bytes goldens per view (a hand-authored expected
     body pinned for EVERY view, so corrupting any renderer fails the test); drift detection; each transform
-    (predicate filter, sort with ID tie-break, group, project); the block-actionability join (an unqualified
-    active block hides an item, an active/proposed block does not) WITH deduped numeric-order block
-    annotations (MAJOR-1); the decision supersession-chain join, with a fork and a cycle refused fail-closed;
-    GFM extended-autolink neutralization in _md_text (bare http/https/www/email rendered inert, B1); the
-    generated header's HTML-comment sink refusing an interpolated `-->`/`--!>` early close (B2); every
-    NONTERMINAL `/proposed` record and the valid `withdrawn` terminal surfaced correctly in
-    PIPELINE/DECISIONS/HANDOFF (never as effective/terminal, never omitted, B3); spec-destination target
-    binding (a rebinding manifest target refused) and a no-follow contained write (a symlinked destination
-    refused, its target left untouched); per-view declared-source equality (an extra declared source
-    refused); deeply nested TOML mapped to cannot-evaluate; a free-text field that cannot forge markdown
-    structure; a per-record layout reported as a clear deferral; a missing and a malformed declared source
-    failing closed (exit 2); and an empty store rendering valid empty views. The tempdir is removed in a
-    finally. Exit 0 pass, 1 fail, 2 error."""
+    (predicate filter, sort with ID tie-break, group, project); the transform vocabulary version pinned to
+    its registered name set; the block-actionability join (an unqualified active block hides an item, an
+    active/proposed block does not, and an importer-authored block or item enters the join on neither side,
+    spec 8.5/8.6) WITH deduped numeric-order block annotations; importer-authored backlog history surfaced
+    only as history in TODO/BACKLOG/PIPELINE (literal view bytes); the decision supersession-chain join,
+    with an importer-authored decision's links removing no authority, and a fork, a cycle and a chain
+    joining imported and current decisions with more than one current resolution refused fail-closed; GFM
+    extended-autolink neutralization in _md_text (bare
+    http/https/www/email rendered inert); the generated header's HTML-comment sink refusing an interpolated
+    `-->`/`--!>` early close; every NONTERMINAL `/proposed` record and the valid `withdrawn` terminal
+    surfaced correctly in PIPELINE/DECISIONS/HANDOFF (never as effective/terminal, never omitted);
+    spec-destination target binding (a rebinding manifest target refused) and a no-follow contained write
+    (a symlinked destination refused, its target left untouched); per-view declared-source equality (an
+    extra declared source refused); deeply nested TOML mapped to cannot-evaluate; a free-text field that
+    cannot forge markdown structure; a per-record layout reported as a clear deferral; a missing and a
+    malformed declared source failing closed (exit 2); and an empty store rendering valid empty views. The
+    tempdir is removed in a finally. Exit 0 pass, 1 fail, 2 error."""
     import tempfile
     import shutil
 
@@ -2254,13 +2473,13 @@ def self_test():
         ESC = r"\[x\]\(y\)\*b\*\`z\`\|c\|\~d\~\#e\!f&lt;g&gt;&amp;h"
 
         # --- pure-unit discriminating vectors (no store, no write, gate-independent) -----------------
-        # F9(1): the source-set digest is a function of BOTH each source path and its bytes. The suite
+        # The source-set digest is a function of BOTH each source path and its bytes. The suite
         # strips the header via body_of, so no golden observes the digest; a constant-digest mutant of
         # _source_set_digest would pass every other check. These two flip to FAIL for such a mutant.
         check("digest-source-sensitive", _source_set_digest({"p": b"A"}) != _source_set_digest({"p": b"B"}))
         check("digest-path-sensitive", _source_set_digest({"p": b"A"}) != _source_set_digest({"q": b"A"}))
 
-        # F5: the closed transform vocabulary refuses an unknown filter/sort/group/project name.
+        # The closed transform vocabulary refuses an unknown filter/sort/group/project name.
         def raises_views_error(fn):
             try:
                 fn()
@@ -2316,7 +2535,7 @@ def self_test():
         finally:
             os.close(_spfd)
         check("symlinked-parent-component-maps-to-viewserror", _sp_ok)
-        # F5 (read-path fail-closed on an unreadable source): a bad store_root_fd (or fd exhaustion at
+        # Read-path fail-closed on an unreadable source: a bad store_root_fd (or fd exhaustion at
         # os.dup) makes _open_parent's terminal os.dup raise a RAW OSError that _lstat_contained does not
         # wrap; _read_raw_and_parsed must map it to a ViewsError (a cannot-evaluate), never let the OSError
         # escape the render boundary as an uncaught exit-1 traceback. A single-component relpath drives the
@@ -2330,7 +2549,7 @@ def self_test():
         except OSError:
             _f5_kind = "OSError"
         check("read-bad-fd-maps-to-viewserror", _f5_kind == "ViewsError")
-        # QA-1 (write-path sibling of the read-path check above): _write_contained's _open_parent call maps a
+        # Write-path sibling of the read-path check above: _write_contained's _open_parent call maps a
         # symlinked or non-directory intermediate component to a ViewsError, not an uncaught JournalError.
         # _open_parent signals that case as JournalError (NOT an OSError subclass), so the pre-fix
         # `except OSError` let it escape _write_contained; render()'s handler catches only
@@ -2349,7 +2568,7 @@ def self_test():
         finally:
             os.close(_wspfd)
         check("write-symlinked-parent-component-maps-to-viewserror", _wsp_ok)
-        # F4 (reopen-TOCTOU, class B): _write_contained never truncates the destination NAME in place; it
+        # Reopen-TOCTOU: _write_contained never truncates the destination NAME in place; it
         # writes a fresh O_EXCL temp and atomically renames it over the entry. So a destination raced to a
         # HARDLINK of a victim (O_NOFOLLOW refuses a symlink, NOT a hardlink) cannot have the victim's inode
         # truncated: the rename re-points only the directory entry, leaving the victim's bytes intact while
@@ -2425,12 +2644,12 @@ def self_test():
         # The positive mapping DISCRIMINATES the regex/baseline lookup: backlog_item IS a baseline type, so a
         # broken regex or baseline lookup flips it from "backlog_item" to None.
         check("mirror-type-resolves-record-type", _mirror_type("BACKLOG_ITEM-INDEX.md") == "backlog_item")
-        # ROUND-6 codex: the _LEDGER_SOURCES exclusion (line ~985) IS load-bearing and needs its own
-        # discriminating pin. "worklog" IS a key in _opf_schema.BASELINE_SPECS (a prior F12 note wrongly said
-        # neither ledger name was), so WITHOUT the exclusion _mirror_type("WORKLOG-INDEX.md") would fall
-        # through to the baseline lookup and return "worklog" (a ledger reads its own worklog.toml, it has no
-        # <type>.index.toml to mirror). The exclusion returns None; removing it flips this pin from None to
-        # "worklog". ("version" is NOT a baseline key, so a VERSION-INDEX.md pin would not discriminate.)
+        # The _LEDGER_SOURCES exclusion in _mirror_type IS load-bearing and needs its own discriminating
+        # pin. "worklog" IS a key in _opf_schema.BASELINE_SPECS, so WITHOUT the exclusion
+        # _mirror_type("WORKLOG-INDEX.md") would fall through to the baseline lookup and return "worklog" (a
+        # ledger reads its own worklog.toml, it has no <type>.index.toml to mirror). The exclusion returns
+        # None; removing it flips this pin from None to "worklog". ("version" is NOT a baseline key, so a
+        # VERSION-INDEX.md pin would not discriminate.)
         check("mirror-type-worklog-ledger-rejected", _mirror_type("WORKLOG-INDEX.md") is None)
         check("mirror-type-worklog-is-baseline-key", "worklog" in _opf_schema.BASELINE_SPECS)
         _f5_bb, _f5_hid = join_actionability([dict(id="BI-1", status="open")],
@@ -2440,12 +2659,140 @@ def self_test():
                                        block=[dict(status="active", scopes=["BI-1"])]))
         check("idless-block-no-dangling-annotation",
               "blocked by \n" not in _f5_body and _f5_body.rstrip().endswith("actionable"))
-        # QA-2 (sibling of the closed id-less-block finding): every composed record renderer indexes the
-        # record id; an id-less record from a trusted caller must render gracefully (via .get("id"), the
-        # posture render_worklog/render_mirror/_id_key already take), never raise an unmapped KeyError --
-        # which render() maps nowhere, so it would escape as exit 1, colliding with EXIT_DRIFT. The round-1
-        # fix hardened id-less BLOCKS in join_actionability; this closes the sibling record sinks across the
-        # renderers. Each case FAILS pre-fix with KeyError('id') and passes post-fix.
+        # Spec 8.5/8.6 (imported-history firewall, provenance-keyed on actor.kind): an importer-authored
+        # ACTIVE block grants no current stop, so it enters the actionability join on neither side and
+        # hides nothing; the maintainer twin still stops. Red when the join's importer filter is removed
+        # (the first) or inverted/over-broad (the second).
+        _fw_bb, _fw_hid = join_actionability(
+            [dict(id="BI-1", status="open")],
+            [dict(id="BL-1", status="active", scopes=["BI-1"], actor={"kind": "importer"})])
+        check("actionability-importer-block-grants-no-stop", (_fw_bb, _fw_hid) == ({}, set()))
+        _fw_bb2, _fw_hid2 = join_actionability(
+            [dict(id="BI-1", status="open")],
+            [dict(id="BL-1", status="active", scopes=["BI-1"], actor={"kind": "maintainer"})])
+        check("actionability-clean-block-still-stops", _fw_hid2 == {"BI-1"})
+        # An importer-authored backlog item is history, never actionable work, whatever its recorded
+        # state; the maintainer twin stays actionable. Red when the item-side importer filter is removed.
+        check("actionability-importer-item-never-actionable",
+              is_actionable(dict(id="BI-1", status="open", actor={"kind": "importer"}), set()) is False
+              and is_actionable(dict(id="BI-1", status="open", actor={"kind": "maintainer"}), set()) is True)
+        # The importer split is registered vocabulary (spec 10.2): the actionability join's block side,
+        # is_actionable's item side, the decision-resolution join's input side and its mixed-chain test, and
+        # the BACKLOG, PIPELINE, DECISIONS and HANDOFF splits all run through the
+        # `importer_authored`/`not_importer_authored` pair. Re-registering the pair to key on `assistant`
+        # must move every split with it, pinned as literal bodies and join outcomes; a split that tests
+        # _importer_authored directly keeps keying on `importer` and changes its view or its join outcome.
+        # The real pair is restored afterwards.
+        def _outcome(fn, arg):
+            try:
+                return ("ok", fn(arg))
+            except ViewsError as exc:
+                return ("refused", str(exc))
+
+        check("vocab-importer-predicates-registered",
+              {"importer_authored", "not_importer_authored"} <= FILTER_PREDICATES)
+        _sw_real = {k: _FILTER_PREDICATES[k] for k in ("importer_authored", "not_importer_authored")}
+        _FILTER_PREDICATES["importer_authored"] = lambda: (lambda r: r.get("actor", {}).get("kind") == "assistant")
+        _FILTER_PREDICATES["not_importer_authored"] = lambda: (lambda r: r.get("actor", {}).get("kind") != "assistant")
+        try:
+            _sw_src = dict(
+                backlog_item=[dict(id="BI-1", status="open", title="m", actor={"kind": "maintainer"}),
+                              dict(id="BI-2", status="open", title="i", actor={"kind": "importer"}),
+                              dict(id="BI-3", status="open", title="a", actor={"kind": "assistant"})],
+                block=[dict(id="BL-1", status="active", scopes=["BI-1"], actor={"kind": "importer"}),
+                       dict(id="BL-2", status="active", scopes=["BI-2"], actor={"kind": "assistant"})],
+                handoff=[dict(id="HO-1", status="current", title="i", actor={"kind": "importer"}),
+                         dict(id="HO-2", status="current", title="a", actor={"kind": "assistant"})],
+                pending_decision=[dict(id="PD-1", status="decided", title="m", actor={"kind": "maintainer"}),
+                                  dict(id="PD-2", status="decided", title="i", actor={"kind": "importer"}),
+                                  dict(id="PD-3", status="decided", title="a", actor={"kind": "assistant"}),
+                                  dict(id="PD-4", status="open", title="i", actor={"kind": "importer"}),
+                                  dict(id="PD-5", status="open", title="a", actor={"kind": "assistant"})],
+                autonomous_decision=[dict(id="AD-1", status="recorded", title="i", actor={"kind": "importer"}),
+                                     dict(id="AD-2", status="recorded", title="a", actor={"kind": "assistant"})],
+                maintainer_decision=[dict(id="MD-1", status="recorded", title="i", actor={"kind": "importer"}),
+                                     dict(id="MD-2", status="recorded", title="a", actor={"kind": "assistant"})],
+                preference_pattern=[dict(id="PP-1", status="active", title="i", actor={"kind": "importer"}),
+                                    dict(id="PP-2", status="active", title="a", actor={"kind": "assistant"})])
+            _sw_views = (render_todo(_sw_src), render_backlog(_sw_src), render_pipeline(_sw_src),
+                         render_handoff(_sw_src), _outcome(render_decisions, _sw_src))
+            _sw_join = _outcome(join_resolution, [
+                dict(id="PD-1", status="decided", actor={"kind": "maintainer"}),
+                dict(id="PD-2", status="decided", actor={"kind": "importer"},
+                     links=[dict(rel="supersedes", id="PD-1")]),
+                dict(id="PD-3", status="decided", actor={"kind": "assistant"})])
+            _sw_mixed = _outcome(join_resolution, [
+                dict(id="PD-1", status="decided", actor={"kind": "maintainer"}),
+                dict(id="PD-2", status="decided", actor={"kind": "assistant"},
+                     links=[dict(rel="supersedes", id="PD-1")]),
+                dict(id="PD-3", status="decided", actor={"kind": "maintainer"},
+                     links=[dict(rel="supersedes", id="PD-2")])])
+        finally:
+            _FILTER_PREDICATES.update(_sw_real)
+        check("vocab-importer-split-registered-todo", _sw_views[0] == "# TODO\n\n- BI-2 (open) i\n")
+        check("vocab-importer-split-registered-backlog", _sw_views[1] == (
+            "# BACKLOG\n\n- BI-1 (open) m -- blocked by BL-1\n- BI-2 (open) i -- actionable\n"
+            "- BI-3 (open) a -- history (importer-authored)\n"))
+        check("vocab-importer-split-registered-pipeline", _sw_views[2] == (
+            "# PIPELINE\n\n## open\n- BI-1 m [blocked by BL-1]\n- BI-2 i\n\n"
+            "## Imported history\n- BI-3 (open) a\n"))
+        check("vocab-importer-split-registered-handoff", _sw_views[3] == (
+            "# HANDOFF\n\n## Current\n- HO-1 i\n\n## Superseded\n_No records._\n\n"
+            "## Imported history\n- HO-2 (current) a\n"))
+        # Under the swapped pair every assistant-authored record of the four decision-register sources
+        # reads as imported and every importer-authored one as clean, so the pinned body lists the
+        # importer-authored PD-4 as pending, PD-2 as an effective resolution beside the maintainer PD-1, and
+        # AD-1, MD-1 and PP-1 in their own sections, with each assistant-authored record only under Imported
+        # history. No pending decision links another, so no split can make this render refuse. A pending,
+        # autonomous, maintainer or pattern split that tests _importer_authored directly keeps keying on
+        # `importer`: on its section side the source's importer-authored records leave their sections and
+        # an assistant-authored one (PD-5, AD-2, MD-2 or PP-2) appears there as well as under Imported
+        # history; on its Imported history side the importer-authored records are listed there too and the
+        # assistant-authored ones appear nowhere. The join's own importer filter tested directly drops PD-2
+        # from the effective list.
+        check("vocab-importer-split-registered-decisions", _sw_views[4] == ("ok", (
+            "# DECISIONS\n\n## Pending decisions\n- PD-4 i\n\n"
+            "## Effective resolutions\n- PD-1 m\n- PD-2 i\n\n## Superseded resolutions\n_No records._\n\n"
+            "## Autonomous decisions\n- AD-1 i\n\n## Maintainer decisions\n- MD-1 i\n\n"
+            "## Preference patterns\n- PP-1 (active) i\n\n"
+            "## Imported history\n- AD-2 (recorded) a\n- MD-2 (recorded) a\n- PD-3 (decided) a\n"
+            "- PD-5 (open) a\n- PP-2 (active) a\n")))
+        # The resolution join's two provenance tests, driven directly under the swapped pair. In the first
+        # set the importer-authored PD-2 reads as clean, so its link supersedes the maintainer PD-1 and it is
+        # the one head, while the assistant-authored PD-3 lands in no set; in the second the
+        # assistant-authored PD-2 reads as imported, so its link removes no authority and the maintainer
+        # PD-1 and PD-3, joined only through it, are two current resolutions of one chain, which the join
+        # refuses. The importer filter tested directly makes PD-1 and PD-3 the heads of the first set and
+        # PD-3 the one head of the second; the mixed-chain test tested directly finds no chain joining
+        # imported and current decisions in the second set and returns its two heads.
+        check("vocab-importer-split-registered-resolution-join",
+              _sw_join == ("ok", ({"PD-2"}, {"PD-1"}, {"PD-1": [], "PD-2": ["PD-1"]})))
+        check("vocab-importer-split-registered-resolution-chains",
+              _sw_mixed[0] == "refused"
+              and "chain [PD-1, PD-2, PD-3] (current: PD-1, PD-3) has more than one" in _sw_mixed[1])
+        # TRANSFORM_VOCAB_VERSION names the registered vocabulary (spec 10.2) and init plans record it, so
+        # the version and the registered name set are pinned together: adding, removing or renaming a
+        # predicate, sort key, group field or projection column without a version bump fails here, and so
+        # does a version change with no change to the set. On a deliberate change, bump the version and
+        # record the new fingerprint in the same edit. The fingerprint must move with the set, or a
+        # constant-fingerprint mutant would pass the pin: registering one extra name flips it.
+        check("vocab-version-pins-registered-set",
+              (TRANSFORM_VOCAB_VERSION, _transform_vocab_fingerprint()) == (
+                  "4", "6d9211ad37c5939887573d170554b85a7733c2a9731736c19dea3d4c1f6ed6ec"))
+        _vf_before = _transform_vocab_fingerprint()
+        _FILTER_PREDICATES["vocab-probe"] = lambda: (lambda r: True)
+        try:
+            _vf_probe = _transform_vocab_fingerprint()
+        finally:
+            del _FILTER_PREDICATES["vocab-probe"]
+        check("vocab-fingerprint-name-sensitive",
+              _vf_probe != _vf_before and _transform_vocab_fingerprint() == _vf_before)
+        # Every composed record renderer indexes the record id; an id-less record from a trusted caller
+        # must render gracefully (via .get("id"), the posture render_worklog/render_mirror/_id_key already
+        # take), never raise an unmapped KeyError -- which render() maps nowhere, so it would escape as exit
+        # 1, colliding with EXIT_DRIFT. join_actionability already tolerates id-less BLOCKS; this covers the
+        # sibling record sinks across the renderers. Each case raises KeyError('id') if a renderer indexes
+        # r["id"] directly.
         _idless_cases = [
             (render_todo, {"backlog_item": [{"status": "open", "title": "t"}], "block": []}),
             (render_backlog, {"backlog_item": [{"status": "open", "title": "t"}], "block": []}),
@@ -2473,21 +2820,21 @@ def self_test():
         _d02 = _opf_release.coverage_digest([dict(id="WL-1", date="2026-01-02T00:00:00Z",
             actor=dict(kind="maintainer"), kind="added", summary="first change")])
         check("coverage-digest-date-sensitive", _d01 != _d02)
-        # F13: the stale word-presence pin ("O_NONBLOCK"/"lstat-to-open" in the docstring) is removed; it
-        # asserted the presence of text, not behaviour, and pinned a docstring claim that _read_contained
-        # "does not pass O_NONBLOCK" which is FALSE (it does). The LIVE behaviour the disclosure describes,
-        # a writer-less FIFO source fails closed without hanging, is asserted by "fifo-source-fails-closed-
-        # not-hang" above (an actual FIFO under a watchdog), which discriminates the real O_NONBLOCK guard.
+        # No word-presence pin on the _read_raw_and_parsed docstring ("O_NONBLOCK"/"lstat-to-open"): such a
+        # pin asserts the presence of text, not behaviour, and _read_contained DOES pass O_NONBLOCK. The
+        # LIVE behaviour the disclosure describes, a writer-less FIFO source fails closed without hanging,
+        # is asserted by "fifo-source-fails-closed-not-hang" above (an actual FIFO under a watchdog), which
+        # discriminates the real O_NONBLOCK guard.
         check("read-ledger-schema-divergence-disclosed",
               "optional-marker" in _optlevel.source_docstring(__file__, "_load_worklog")
               and "optional-marker" in _optlevel.source_docstring(__file__, "_load_version"))
         check("entry-writes-fixed-date", 'date = "2026-01-01T00:00:00Z"' in _entry("WL-2", "fixed", "x"))
 
-        # F4 (cited sink, B2 class): a spec-VALID free-text severity renders as LITERAL text, forging no
+        # Severity sink: a spec-VALID free-text severity renders as LITERAL text, forging no
         # link, emphasis, code, table cell, strikethrough, heading, or HTML comment. The record is a valid
         # finding envelope: severity is graded at or after the fix decision, so status is terminal 'fixed'
-        # with the actor and timestamps a full envelope carries (the prior vector used status='open' with a
-        # severity, which the schema REJECTS, so it misrepresented a valid store; M3). The exact escaped
+        # with the actor and timestamps a full envelope carries (status='open' with a severity is
+        # schema-INVALID, so it would not represent a valid store). The exact escaped
         # bytes are pinned, so dropping _md_text from the severity sink flips the assertion.
         forged = {"id": "FN-9", "type": "finding", "status": "fixed", "severity": P, "title": "t",
                   "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
@@ -2505,7 +2852,7 @@ def self_test():
         check("severity-injection-no-forged-heading", "\n# FORGED" not in finj2)
         check("severity-injection-no-injected-comment", "<!-- injected -->" not in finj2)
 
-        # F4 (class width, version-summary sink): a forged/injecting changelog `covers` is neutralized.
+        # Class width, version-summary sink: a forged/injecting changelog `covers` is neutralized.
         # Exact escape pinned with P; the newline+comment forge checked separately. render_version_md is a
         # unit call, so validate_version's covers grammar does not constrain the payload here.
         vinj = render_version_md({"version": {"releases": [],
@@ -2517,7 +2864,7 @@ def self_test():
         check("covers-injection-no-forged-heading", "\n# FORGED" not in vinj2)
         check("covers-injection-no-injected-comment", "<!-- injected -->" not in vinj2)
 
-        # F4 (class width, MIRROR projection sinks): the decision / classification / action columns escape
+        # Class width, MIRROR projection sinks: the decision / classification / action columns escape
         # too. Exercised as unit render_mirror calls so no extra manifest mirror is needed; exact bytes
         # pinned, so removing _md_text from a projected column flips an assertion.
         pdm = render_mirror("pending_decision", [{
@@ -2569,13 +2916,13 @@ def self_test():
             "decision": "d", "x-aiqt": {"rule": 5}, "actor": {"kind": "maintainer", "id": "jp"}}]})
         _xp = tomllib.loads(_xrow)
         check("projection-excludes-x-vendor", "x-aiqt" not in _xp["maintainer_decision"][0])
-        # m3: the row is self-describing (`type`) and the actor is projected as a NESTED sub-table (the
+        # The row is self-describing (`type`) and the actor is projected as a NESTED sub-table (the
         # faithful full-envelope shape, spec 10.5), not a flattened actor_kind/actor_id pair.
         check("projection-includes-type",
               _xp["maintainer_decision"][0].get("type") == "maintainer_decision")
         check("projection-includes-actor-subtable",
               _xp["maintainer_decision"][0].get("actor") == {"kind": "maintainer", "id": "jp"})
-        # m3 binding verification: a TWO-row projection with a DISTINCT actor per row reparses with each
+        # Binding verification: a TWO-row projection with a DISTINCT actor per row reparses with each
         # actor bound to its OWN row (the canonical emitter's per-element array-of-tables sub-table binding).
         _tworow = render_decisions_toml({"maintainer_decision": [
             {"id": "MD-1", "type": "maintainer_decision", "status": "recorded", "title": "t",
@@ -2587,7 +2934,8 @@ def self_test():
               _tw[0].get("actor") == {"kind": "maintainer", "id": "a"}
               and _tw[1].get("actor") == {"kind": "importer", "id": "b"})
         # A source name outside the projection's declared set is impossible (the sources tuple is fixed), but a
-        # `/proposed` pending decision is EXCLUDED from the derived resolution join (settled-only, spec 8.4).
+        # `/proposed` pending decision builds no edge in the derived resolution join and lands in neither
+        # derived set (settled-only, spec 8.4). Red when the join builds edges from proposals.
         _projd = render_decisions_toml({"pending_decision": [
             {"id": "PD-1", "status": "decided", "title": "t", "decision": "x"},
             {"id": "PD-2", "status": "decided/proposed", "title": "t", "decision": "y",
@@ -2601,7 +2949,7 @@ def self_test():
               _pjd["pending_decision"][1].get("proposed_from") == "open"
               and "proposed_from" not in _pjd["pending_decision"][0])
 
-        # F6 (unit-level on join_resolution): duplicate identical supersedes links do not trip the fork
+        # Unit-level on join_resolution: duplicate identical supersedes links do not trip the fork
         # check. Both decisions are `decided`, so they source supersedes edges (per join_resolution's
         # decided-only edge rule).
         pd1 = {"id": "PD-1", "status": "decided", "links": []}
@@ -2614,7 +2962,7 @@ def self_test():
             dupok = False
         check("duplicate-supersedes-link-no-false-fork", dupok)
 
-        # FIX A (join_resolution supersedes-map ordering): a decision superseding several others lists them
+        # join_resolution supersedes-map ordering: a decision superseding several others lists them
         # DEDUPED and in numeric id order (PD-2 before PD-10), the SINGLE _sorted_ids ordering every id-set
         # annotation join uses. Reverting _sorted_ids in this sink to append/lexical order yields
         # ["PD-10", "PD-2"] (or a duplicate PD-10), flipping this; the single-link populated-store golden
@@ -2631,12 +2979,12 @@ def self_test():
             suporder_ok = False
         check("supersedes-map-dedup-numeric-order", suporder_ok)
 
-        # FIX B (supersedes-graph harden): a supersedes link on a NON-DECIDED (open/withdrawn) decision must
+        # Supersedes-graph hardening: a supersedes link on a NON-DECIDED (open/withdrawn) decision must
         # NOT supersede its target, so a decided effective resolution is never mislabeled "Superseded" by a
         # non-decided decision's link. PD-1 is a decided head; PD-2 is WITHDRAWN yet links supersedes PD-1.
         # PD-1 must stay in `current` and out of `superseded`. Sourcing edges from every decision regardless
         # of state would put PD-1 in `superseded`, flipping this. (Cross-record resolution GRADING otherwise
-        # remains U6 validate_store's remit, F2; this closes only the mislabel window.)
+        # remains the doctor's validate_store remit; this closes only the mislabel window.)
         _decd = {"id": "PD-1", "status": "decided", "links": []}
         _wdrw = {"id": "PD-2", "status": "withdrawn", "links": [{"rel": "supersedes", "id": "PD-1"}]}
         try:
@@ -2646,11 +2994,246 @@ def self_test():
             nondecided_ok = False
         check("nondecided-supersedes-does-not-mark-target", nondecided_ok)
 
-        # CLASS 1 (B1, F-U4AUTOLINK): _md_text renders GFM EXTENDED autolinks INERT by wrapping each
+        # The decision-resolution join's provenance firewall (spec 8.5/8.6), on a chain of importer-authored
+        # decisions only: the decided imported PD-3 links `supersedes` to the decided imported PD-2, beside
+        # the clean PD-1. No link joins an importer-authored decision to a non-importer one, so there is no
+        # error, the link marks nothing superseded, and neither imported decision lands in a returned set.
+        # Red when the join's input-side importer filter is removed (PD-3 becomes a head and PD-2
+        # superseded) or when the join refuses a chain of importer-authored decisions only.
+        _fw_out = _outcome(join_resolution, [
+            {"id": "PD-1", "status": "decided", "links": []},
+            {"id": "PD-2", "status": "decided", "actor": {"kind": "importer"}, "links": []},
+            {"id": "PD-3", "status": "decided", "actor": {"kind": "importer"},
+             "links": [{"rel": "supersedes", "id": "PD-2"}]}])
+        check("resolution-importer-decision-confers-no-authority",
+              _fw_out == ("ok", ({"PD-1"}, set(), {"PD-1": []})))
+
+        # A clean chain with an importer-authored decision beside it that links nothing is evaluated exactly
+        # as without it: PD-2 supersedes PD-1 and is the one head, and the imported PD-3 lands in no set.
+        # Red when the join refuses any input carrying an importer-authored decision, or when the importer
+        # filter is removed.
+        check("resolution-clean-chain-beside-unlinked-importer-unchanged",
+              _outcome(join_resolution, [
+                  {"id": "PD-1", "status": "decided", "links": []},
+                  {"id": "PD-2", "status": "decided", "links": [{"rel": "supersedes", "id": "PD-1"}]},
+                  {"id": "PD-3", "status": "decided", "actor": {"kind": "importer"}, "links": []}])
+              == ("ok", ({"PD-2"}, {"PD-1"}, {"PD-1": [], "PD-2": ["PD-1"]})))
+
+        # A chain whose `supersedes` links join an importer-authored decision to a non-importer one is one
+        # chain in which the importer-authored decision and its links confer and remove no authority (spec
+        # 8.6). Shape A: the decided imported PD-2 links `supersedes` to the maintainer PD-1, which stays the
+        # one current resolution, and PD-2 lands in no set. The spec 8.6 remedy: the maintainer PD-3
+        # supersedes the imported PD-2, which supersedes the imported PD-1, and PD-3 is the one current
+        # resolution, its link marking nothing superseded. Shape B: shape A plus the decided maintainer PD-3
+        # linking `supersedes` to PD-2, which leaves PD-1 and PD-3 two current resolutions of one chain, so
+        # the join refuses it naming the chain and both. The fourth chain joins imported and current
+        # decisions only by a link FROM a non-importer decision that is still open, and that link alone
+        # joins the decided PD-3 and PD-4 into the chain, beside an unrelated clean PD-10 the message must
+        # not name; two such chains are each named. Red when the refusal of every such chain is restored
+        # (shape A and the remedy refuse, and the others name no current resolutions), when importer links
+        # are counted as superseding (shape A makes PD-2 the head), when the head count is removed (shape
+        # B and the others return two heads), or when the chain test counts only links from
+        # importer-authored decisions or only links from decided decisions (the fourth).
+        _shape_a = [{"id": "PD-1", "status": "decided", "actor": {"kind": "maintainer"}, "links": []},
+                    {"id": "PD-2", "status": "decided", "actor": {"kind": "importer"},
+                     "links": [{"rel": "supersedes", "id": "PD-1"}]}]
+        _shape_b = _shape_a + [{"id": "PD-3", "status": "decided", "actor": {"kind": "maintainer"},
+                                "links": [{"rel": "supersedes", "id": "PD-2"}]}]
+
+        def _refused_naming(outcome, ids, heads):
+            return (outcome[0] == "refused" and "chain [{}] (current: {}) has more than one".format(
+                ", ".join(ids), ", ".join(heads)) in outcome[1])
+
+        check("resolution-shape-a-importer-link-removes-no-authority",
+              _outcome(join_resolution, _shape_a) == ("ok", ({"PD-1"}, set(), {"PD-1": []})))
+        check("resolution-clean-decision-superseding-importer-chain-is-current",
+              _outcome(join_resolution, [
+                  {"id": "PD-1", "status": "decided", "actor": {"kind": "importer"}, "links": []},
+                  {"id": "PD-2", "status": "decided", "actor": {"kind": "importer"},
+                   "links": [{"rel": "supersedes", "id": "PD-1"}]},
+                  {"id": "PD-3", "status": "decided", "actor": {"kind": "maintainer"},
+                   "links": [{"rel": "supersedes", "id": "PD-2"}]}])
+              == ("ok", ({"PD-3"}, set(), {"PD-3": []})))
+        check("resolution-shape-b-two-clean-heads-cannot-evaluate",
+              _refused_naming(_outcome(join_resolution, _shape_b), ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3")))
+        check("resolution-open-link-joins-two-clean-heads-cannot-evaluate",
+              _refused_naming(_outcome(join_resolution, [
+                  {"id": "PD-1", "status": "decided", "actor": {"kind": "importer"}, "links": []},
+                  {"id": "PD-2", "status": "open", "actor": {"kind": "maintainer"},
+                   "links": [{"rel": "supersedes", "id": "PD-1"}, {"rel": "supersedes", "id": "PD-3"},
+                             {"rel": "supersedes", "id": "PD-4"}]},
+                  {"id": "PD-3", "status": "decided", "actor": {"kind": "maintainer"}, "links": []},
+                  {"id": "PD-4", "status": "decided", "actor": {"kind": "maintainer"}, "links": []},
+                  {"id": "PD-10", "status": "decided", "actor": {"kind": "maintainer"}, "links": []}]),
+                  ("PD-1", "PD-2", "PD-3", "PD-4"), ("PD-3", "PD-4")))
+        _two_b = _outcome(join_resolution, _shape_b + [
+            {"id": "PD-4", "status": "decided", "actor": {"kind": "maintainer"}, "links": []},
+            {"id": "PD-5", "status": "decided", "actor": {"kind": "importer"},
+             "links": [{"rel": "supersedes", "id": "PD-4"}]},
+            {"id": "PD-6", "status": "decided", "actor": {"kind": "maintainer"},
+             "links": [{"rel": "supersedes", "id": "PD-5"}]}])
+        check("resolution-two-chains-two-clean-heads-each-named",
+              _two_b[0] == "refused" and "chains [PD-1, PD-2, PD-3] (current: PD-1, PD-3); [PD-4, PD-5, PD-6] "
+              "(current: PD-4, PD-6) each have more than one" in _two_b[1])
+        # Both decision renderers read such a chain alike: DECISIONS hands every pending decision,
+        # importer-authored ones included, to the join, and the DECISIONS.toml `[derived]` table is the same
+        # join. Shape A renders the maintainer PD-1 as the effective resolution and the imported PD-2 only
+        # under Imported history; the remedy chain renders the maintainer PD-3 as effective with no
+        # `supersedes` tail naming an imported decision; shape B refuses in both. Red when the refusal of
+        # every such chain is restored (shape A and the remedy refuse), or when a renderer filters
+        # importer-authored decisions out before the join (shape B then renders PD-1 and PD-3 as two
+        # effective resolutions).
+        def _pd(n, status, kind, *targets):
+            return {"id": "PD-{}".format(n), "status": status, "title": "t", "actor": {"kind": kind},
+                    "links": [{"rel": "supersedes", "id": "PD-{}".format(t)} for t in targets]}
+
+        _dec_tail = ("## Autonomous decisions\n_No records._\n\n## Maintainer decisions\n_No records._\n\n"
+                     "## Preference patterns\n_No records._\n\n## Imported history\n")
+
+        def _both_render(shape, body, derived):
+            _md = _outcome(render_decisions, dict(pending_decision=shape, autonomous_decision=[]))
+            _tm = _outcome(render_decisions_toml, {"pending_decision": shape})
+            return (_md == ("ok", "# DECISIONS\n\n## Pending decisions\n_No records._\n\n" + body)
+                    and _tm[0] == "ok" and "\n[derived]\n{}\n".format(derived) in _tm[1])
+
+        def _both_refuse(shape, ids, heads):
+            return (_refused_naming(_outcome(render_decisions, dict(pending_decision=shape,
+                                                                    autonomous_decision=[])), ids, heads)
+                    and _refused_naming(_outcome(render_decisions_toml, {"pending_decision": shape}), ids, heads))
+
+        check("decisions-shape-a-renders-clean-decision-effective", _both_render(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided", "importer", 1)],
+            "## Effective resolutions\n- PD-1 t\n\n## Superseded resolutions\n_No records._\n\n" + _dec_tail
+            + "- PD-2 (decided) t\n", 'effective = ["PD-1"]\nsuperseded = []'))
+        check("decisions-clean-decision-superseding-importer-chain-renders-effective", _both_render(
+            [_pd(1, "decided", "importer"), _pd(2, "decided", "importer", 1),
+             _pd(3, "decided", "maintainer", 2)],
+            "## Effective resolutions\n- PD-3 t\n\n## Superseded resolutions\n_No records._\n\n" + _dec_tail
+            + "- PD-1 (decided) t\n- PD-2 (decided) t\n", 'effective = ["PD-3"]\nsuperseded = []'))
+        check("decisions-shape-b-two-clean-heads-cannot-evaluate", _refused_naming(_outcome(
+            render_decisions, dict(pending_decision=_shape_b, autonomous_decision=[])),
+            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3")))
+        check("projection-derived-shape-b-two-clean-heads-cannot-evaluate", _refused_naming(_outcome(
+            render_decisions_toml, {"pending_decision": _shape_b}), ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3")))
+
+        # A chain joined through a `/proposed` decision is one chain too: the doctor's decision_chains builds
+        # every chain over all pending decisions, proposals included, so both decision renderers hand the
+        # join every pending decision, and the join builds its edges from the settled ones only. Shape R:
+        # the assistant proposal PD-2 supersedes the maintainer PD-1 and the importer-authored PD-3
+        # supersedes PD-2, so PD-1 stays effective, PD-2 awaits ratification and PD-3 is imported history.
+        # P1: the assistant proposal PD-2 supersedes the importer-authored PD-1, so nothing is effective.
+        # P2: the importer-authored proposal PD-2 supersedes the maintainer PD-1, which stays effective.
+        # P3: the assistant proposal PD-3 supersedes the maintainer PD-1 and the importer-authored PD-2,
+        # and PD-1 stays effective. Shape R plus the maintainer PD-4 superseding the imported PD-3 joins
+        # PD-1 and PD-4 into one chain only through the proposal, and both renderers refuse it naming both.
+        # Red when the refusal of every such chain is restored (R, P1, P2 and P3 refuse), or when either
+        # renderer drops the proposals before the join, or the join drops them before its chain test (the
+        # last then renders PD-1 and PD-4 as two effective resolutions).
+        check("decisions-chain-joined-through-proposal-r-renders", _both_render(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided/proposed", "assistant", 1),
+             _pd(3, "decided", "importer", 2)],
+            "## Effective resolutions\n- PD-1 t\n\n## Superseded resolutions\n_No records._\n\n"
+            "## Awaiting ratification\n- PD-2 (decided/proposed) t\n\n" + _dec_tail + "- PD-3 (decided) t\n",
+            'effective = ["PD-1"]\nsuperseded = []'))
+        check("decisions-chain-joined-through-proposal-p1-renders", _both_render(
+            [_pd(1, "decided", "importer"), _pd(2, "decided/proposed", "assistant", 1)],
+            "## Effective resolutions\n_No records._\n\n## Superseded resolutions\n_No records._\n\n"
+            "## Awaiting ratification\n- PD-2 (decided/proposed) t\n\n" + _dec_tail + "- PD-1 (decided) t\n",
+            'effective = []\nsuperseded = []'))
+        check("decisions-chain-joined-through-proposal-p2-renders", _both_render(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided/proposed", "importer", 1)],
+            "## Effective resolutions\n- PD-1 t\n\n## Superseded resolutions\n_No records._\n\n" + _dec_tail
+            + "- PD-2 (decided/proposed) t\n", 'effective = ["PD-1"]\nsuperseded = []'))
+        check("decisions-chain-joined-through-proposal-p3-renders", _both_render(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided", "importer"),
+             _pd(3, "decided/proposed", "assistant", 1, 2)],
+            "## Effective resolutions\n- PD-1 t\n\n## Superseded resolutions\n_No records._\n\n"
+            "## Awaiting ratification\n- PD-3 (decided/proposed) t\n\n" + _dec_tail + "- PD-2 (decided) t\n",
+            'effective = ["PD-1"]\nsuperseded = []'))
+        check("decisions-chain-joined-through-proposal-two-clean-heads-cannot-evaluate", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided/proposed", "assistant", 1),
+             _pd(3, "decided", "importer", 2), _pd(4, "decided", "maintainer", 3)],
+            ("PD-1", "PD-2", "PD-3", "PD-4"), ("PD-1", "PD-4")))
+        # A refused chain refuses the whole view: a clean chain (PD-2 supersedes PD-1) beside a chain with two
+        # current resolutions (the maintainer PD-5 supersedes the importer-authored PD-4, which supersedes
+        # the maintainer PD-3) renders nothing in either renderer, and the refusal names only that chain.
+        # Beside a shape A chain instead (no PD-5) both chains render: PD-2 supersedes PD-1, and PD-3 stays
+        # effective. Red when a renderer renders the clean chain alone or the message names the clean chain
+        # (the first), or when the refusal of every such chain is restored (the second).
+        check("decisions-clean-chain-beside-two-head-chain-refuses-whole-view", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer", 1),
+             _pd(3, "decided", "maintainer"), _pd(4, "decided", "importer", 3),
+             _pd(5, "decided", "maintainer", 4)], ("PD-3", "PD-4", "PD-5"), ("PD-3", "PD-5")))
+        check("decisions-clean-chain-beside-shape-a-chain-renders-both", _both_render(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer", 1),
+             _pd(3, "decided", "maintainer"), _pd(4, "decided", "importer", 3)],
+            "## Effective resolutions\n- PD-2 t (supersedes PD-1)\n- PD-3 t\n\n"
+            "## Superseded resolutions\n- PD-1 t\n\n" + _dec_tail + "- PD-4 (decided) t\n",
+            'effective = ["PD-2", "PD-3"]\nsuperseded = ["PD-1"]'))
+        # A fork among importer-authored decisions only is neither evaluated nor refused by the join: the
+        # imported PD-2 and PD-3 both supersede the imported PD-1, no link joins an importer-authored
+        # decision to a non-importer one, and none of the three lands in a returned set. (The doctor's
+        # C-DECISION-CHAINS, which ignores provenance, reports that chain's two current resolutions.)
+        # Red when the join's fork test also runs over importer-authored decisions.
+        check("resolution-importer-only-fork-not-refused", _outcome(join_resolution, [
+            _pd(1, "decided", "importer"), _pd(2, "decided", "importer", 1),
+            _pd(3, "decided", "importer", 1)]) == ("ok", (set(), set(), {})))
+
+        # The DECISIONS renderer surfaces an importer-authored record of ANY decision-register source only
+        # under a trailing Imported history section with its FULL status: never as an effective or
+        # superseded resolution (the imported PD-2's link to the imported PD-3 supersedes nothing), never
+        # under the autonomous or maintainer sections, and never as an active preference pattern. Red when
+        # the renderer's importer split is reverted, or when the join refuses this chain of importer-authored
+        # decisions only (a refusal renders nothing, so every section test below fails).
+        _dfw_out = _outcome(render_decisions, dict(
+            pending_decision=[
+                dict(id="PD-1", status="decided", title="clean head"),
+                dict(id="PD-2", status="decided", title="imported ruling", actor={"kind": "importer"},
+                     links=[dict(rel="supersedes", id="PD-3")]),
+                dict(id="PD-3", status="decided", title="imported origin", actor={"kind": "importer"})],
+            autonomous_decision=[dict(id="AD-1", status="recorded", title="imported call",
+                                      actor={"kind": "importer"})],
+            maintainer_decision=[dict(id="MD-1", status="recorded", title="imported ruling",
+                                      actor={"kind": "importer"})],
+            preference_pattern=[dict(id="PP-1", status="active", title="imported pattern",
+                                     actor={"kind": "importer"})]))
+        _dfw = _dfw_out[1] if _dfw_out[0] == "ok" else ""
+        _dfw_eff = _dfw.find("## Effective resolutions")
+        _dfw_sup = _dfw.find("## Superseded resolutions")
+        _dfw_imp = _dfw.index("## Imported history") if "## Imported history" in _dfw else len(_dfw)
+        check("decisions-importer-surfaces-only-as-history",
+              _dfw_out[0] == "ok" and "- PD-1 clean head" in _dfw[_dfw_eff:_dfw_sup]
+              and "PD-2" not in _dfw[:_dfw_imp] and "PD-3" not in _dfw[:_dfw_imp]
+              and "AD-1" not in _dfw[:_dfw_imp]
+              and "MD-1" not in _dfw[:_dfw_imp] and "PP-1" not in _dfw[:_dfw_imp]
+              and "- PD-2 (decided) imported ruling" in _dfw[_dfw_imp:]
+              and "- PD-3 (decided) imported origin" in _dfw[_dfw_imp:]
+              and "- AD-1 (recorded) imported call" in _dfw[_dfw_imp:]
+              and "- MD-1 (recorded) imported ruling" in _dfw[_dfw_imp:]
+              and "- PP-1 (active) imported pattern" in _dfw[_dfw_imp:])
+
+        # The `[derived]` table of DECISIONS.toml is the same current-state join, so an importer-authored
+        # decided decision never lands in derived.effective or derived.superseded, and its link to another
+        # imported decision supersedes nothing there, while every row still projects (the projection arrays
+        # are the faithful full-record mirror, not a join). Red when join_resolution loses its input-side
+        # provenance filter, or when it refuses this chain of importer-authored decisions only.
+        _pfw_out = _outcome(render_decisions_toml, {"pending_decision": [
+            {"id": "PD-1", "status": "decided", "title": "clean head"},
+            {"id": "PD-2", "status": "decided", "title": "imported ruling",
+             "actor": {"kind": "importer"},
+             "links": [{"rel": "supersedes", "id": "PD-3"}]},
+            {"id": "PD-3", "status": "decided", "title": "imported origin",
+             "actor": {"kind": "importer"}}]})
+        _pfw = tomllib.loads(_pfw_out[1]) if _pfw_out[0] == "ok" else {}
+        check("projection-derived-importer-confers-no-authority",
+              _pfw.get("derived") == {"effective": ["PD-1"], "superseded": []}
+              and [r["id"] for r in _pfw.get("pending_decision", [])] == ["PD-1", "PD-2", "PD-3"])
+
+        # Autolink sink: _md_text renders GFM EXTENDED autolinks INERT by wrapping each
         # trigger in a CODE SPAN, which cmark-gfm never autolinks. Judged by RENDERING each sample through
         # the minimal autolink oracle (_gfm_autolinks) and asserting NO active link -- not by source-byte
-        # matching, the prior test's flaw. The oracle decodes entities and skips code spans, so it models
-        # GitHub's post-process (GFM 6.9). Exact output bytes are also pinned (fidelity: characters
+        # matching, which cannot see a rendered link. The oracle decodes entities and skips code spans, so it
+        # models GitHub's post-process (GFM 6.9). Exact output bytes are also pinned (fidelity: characters
         # preserved, only fenced), so reverting to the entity trick or dropping the wrap flips each check.
 
         # (a) Oracle teeth: the RAW forms autolink, and -- decisively -- the OLD entity output STILL
@@ -2672,7 +3255,7 @@ def self_test():
         # `1www`/`xwww` plain and the oracle's restored www left boundary does not match them either.
         check("autolink-1www-inert", _gfm_autolinks(_md_text("1www.example.com")) == [])
         check("autolink-xwww-inert", _gfm_autolinks(_md_text("xwww.example.com")) == [])
-        # round-5: pin the www boundary on BOTH production and the oracle so a future change to either is caught.
+        # Pin the www boundary on BOTH production and the oracle so a future change to either is caught.
         # (a) production leaves an alphanumeric-prefixed www PLAIN (cmark-gfm does not autolink it):
         check("md-text-1www-plain", _md_text("1www.example.com") == "1www.example.com")
         check("md-text-xwww-plain", _md_text("xwww.example.com") == "xwww.example.com")
@@ -2686,7 +3269,7 @@ def self_test():
         check("oracle-www-unicode-host", _gfm_autolinks("www.é.com") != [])
         # (c) the oracle does NOT match an alphanumeric-prefixed www (matches production + cmark-gfm):
         check("oracle-www-no-alnum-prefix", _gfm_autolinks("1www.example.com") == [])
-        # round-8: the oracle compiles the shared www fragment with the SAME flags as production, so a future
+        # The oracle compiles the shared www fragment with the SAME flags as production, so a future
         # fragment edit (even one using verbose-sensitive chars) cannot diverge between the two. Pin EXACT flag
         # -set equality (not mere containment: an added flag such as re.ASCII changes `\s` and would diverge the
         # two while both still contain IGNORECASE|VERBOSE), AND that both carry the required IGNORECASE|VERBOSE.
@@ -2708,9 +3291,10 @@ def self_test():
         check("oracle-wwwXy-literal-dot-no-match", _gfm_autolinks("wwwXy") == [])
         check("md-text-wwwxdotcom-literal-dot-plain", _md_text("wwwx.com") == "wwwx.com")
         check("oracle-wwwxdotcom-literal-dot-no-match", _gfm_autolinks("wwwx.com") == [])
-        # round-9: round-8 froze only www; codex found the email arm unfrozen, so a digit-leading-local-part
-        # edit regressed neutralization while the suite stayed green. Freeze EVERY production arm and assert
-        # the matcher is EXACTLY their composition, closing the whole matcher-edit class (any arm edit fires).
+        # Freezing only www would leave the url and email arms editable (a digit-leading-local-part email
+        # edit would regress neutralization while the suite stayed green). Freeze EVERY production arm and
+        # assert the matcher is EXACTLY their composition, closing the whole matcher-edit class (any arm
+        # edit fires).
         check("url-arm-frozen", _URL_AUTOLINK_FRAGMENT == r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s<]+")
         check("email-arm-frozen",
               _EMAIL_AUTOLINK_FRAGMENT == r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)+")
@@ -2728,20 +3312,21 @@ def self_test():
         check("oracle-entity-re-frozen",
               _ORACLE_ENTITY_RE.pattern == r"&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]*);"
               and _ORACLE_ENTITY_RE.flags == re.UNICODE)
-        # round-9: control-strip teeth (round-8 QA: disabling _MD_CTRL_RE left the suite green, and byte-canon
-        # does not flag C0/DEL, so the strip was un-backstopped). Freeze the control class and pin the strip.
+        # Control-strip teeth: without these pins, disabling _MD_CTRL_RE leaves the suite green, and
+        # byte-canon does not flag C0/DEL, so nothing else backstops the strip. Freeze the control class and
+        # pin the strip.
         check("md-ctrl-re-frozen", _MD_CTRL_RE.pattern == "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
         check("md-text-strips-control", _md_text("a\x00b\x07c\x1bd\x7fe") == "abcde")
-        # behaviour pin for the exact codex round-8 witness: a digit-leading email local part is neutralized.
+        # Behaviour pin for the digit-leading email witness: a digit-leading email local part is neutralized.
         check("md-text-digit-email-inert", _gfm_autolinks(_md_text("1@b.example")) == [])
-        # round-10 (codex round-9 MAJOR): freeze the ORACLE www PATTERN too, not just its flags. It must
-        # compile the shared frozen fragment; an oracle-only www edit (e.g. restricting to .com) weakened
-        # detection and made the inertness invariant pass more easily while every existing pin stayed green.
+        # Freeze the ORACLE www PATTERN too, not just its flags. It must compile the shared frozen
+        # fragment; an oracle-only www edit (e.g. restricting to .com) would weaken detection and make the
+        # inertness invariant pass more easily while every other pin stayed green.
         check("oracle-www-re-frozen",
               _ORACLE_WWW_RE.pattern == _WWW_AUTOLINK_FRAGMENT
               and _ORACLE_WWW_RE.flags == (re.IGNORECASE | re.VERBOSE | re.UNICODE))
-        # round-10 (gemini round-9 7.1): freeze the inline-escape set. The golden P below omits \ _ { } +,
-        # so dropping any of those from _MD_ESCAPE_RE passed green (markdown injection in a free-text value).
+        # Freeze the inline-escape set. The golden P omits \ _ { } +, so without this pin dropping any of
+        # those from _MD_ESCAPE_RE would pass green (markdown injection in a free-text value).
         check("md-escape-re-frozen", _MD_ESCAPE_RE.pattern == r"([\\`*_{}\[\]()#+!|~])")
         # and exercise the escaping of each metacharacter the golden P omits (backslash/underscore/plus/braces),
         # so a regression in _md_escape_inline or the set is caught at the behaviour level too.
@@ -2749,19 +3334,19 @@ def self_test():
         check("md-text-escapes-underscore", _md_text("_a_") == "\\_a\\_")
         check("md-text-escapes-plus", _md_text("a+b") == "a\\+b")
         check("md-text-escapes-braces", _md_text("a{b}c") == "a\\{b\\}c")
-        # round-10 (gemini round-9 7.2, codex corroborated): the code-span fence must exceed the LONGEST
-        # backtick run in the token. The single-backtick autolink test could not distinguish a fence that is
-        # always 2 wide, so a url with a 2-backtick run broke out of the span and autolinked. Pin the exact
+        # The code-span fence must exceed the LONGEST backtick run in the token. A single-backtick autolink
+        # test cannot distinguish a fence that is always 2 wide, under which a url with a 2-backtick run
+        # breaks out of the span and autolinks. Pin the exact
         # fence width for a multi-run token AND the emitted-output inertness for 2- and 3-backtick-run urls.
         check("md-code-span-2run-exact-fence", _md_text("http://y/``z") == "```http://y/``z```")
         check("md-code-span-2run-inert", _gfm_autolinks(_md_text("http://y/``http://z.example")) == [])
         check("md-code-span-3run-inert", _gfm_autolinks(_md_text("http://y/```http://z.example")) == [])
-        # round-11 (codex round-10 MAJOR): the newline collapse is LOAD-BEARING. It guarantees the value
+        # The newline collapse is LOAD-BEARING. It guarantees the value
         # renders as a SINGLE LINE, so a line-start block marker in the value (- + * list, # heading, >
         # quote, 1. ordered, ` fence, | table, 4-space indent) can never begin a new line and forge block
-        # structure. md-text-collapses-cr tested only CR, and the no-forged-heading pin actually tests
-        # #-escaping (which survives a newline regression), so a surgical LF-only regression forged a sibling
-        # list item while the suite stayed green. Pin LF collapse directly AND the single-line-output
+        # structure. md-text-collapses-cr tests only CR, and the no-forged-heading pin actually tests
+        # #-escaping (which survives a newline regression), so a surgical LF-only regression would forge a
+        # sibling list item while those stayed green. Pin LF collapse directly AND the single-line-output
         # invariant over every CommonMark line-ending x block-marker pair (closes the whole class).
         check("md-text-collapses-lf", _md_text("a\nb") == "a b")
         check("md-text-lf-no-forged-list", _md_text("a\n- FORGED") == "a - FORGED")
@@ -2772,10 +3357,10 @@ def self_test():
         check("md-text-output-single-line",
               all("\n" not in _md_text("v)" + s) and "\r" not in _md_text("v)" + s)
                   and len(_md_text("v)" + s).splitlines()) == 1 for s in _nl_vectors))
-        # round-12 (codex round-11 BLOCKER+2 MAJOR, each confirmed via a real CommonMark parser): the
-        # round-10/11 pins exercised only SINGLE-occurrence inputs, so a bounded-count regression
-        # (.replace(...,1) / sub(...,count=1) / first-backtick-run only) left a LATER occurrence to break out
-        # (forged list item, autolink breakout, early comment close). Close the repeated-occurrence / multi-run
+        # The single-line and fence pins above exercise only SINGLE-occurrence inputs, so a bounded-count
+        # regression (.replace(...,1) / sub(...,count=1) / first-backtick-run only) would leave a LATER
+        # occurrence to break out (forged list item, autolink breakout, early comment close; each confirmed
+        # with a real CommonMark parser). Close the repeated-occurrence / multi-run
         # class: discrete multi-occurrence witnesses here, plus the seeded fuzz over the 3 invariants below.
         check("md-text-multi-newline-single-line",
               "\n" not in _md_text("minor)\nbenign\n- FORGED") and "\r" not in _md_text("a\rb\rc\r- X"))
@@ -2785,9 +3370,9 @@ def self_test():
         check("md-text-adjacent-triple-single-span",
               _md_text("a@b.com+a@c.com+a@d.com") == "`a@b.com+a@c.com+a@d.com`")
         # header sink: freeze the dash-breaking regex and pin EXACT neutralization of REPEATED -- runs plus
-        # the newline and control legs in a discovered source path (codex: a count=1 dash break left a later
-        # -->, closing the comment early around active <details> HTML; gemini: the newline/control legs had
-        # no teeth). A multi-dash render pin asserts exactly one terminator survives.
+        # the newline and control legs in a discovered source path (a count=1 dash break would leave a later
+        # -->, closing the comment early around active <details> HTML, and the newline/control legs need
+        # teeth of their own). A multi-dash render pin asserts exactly one terminator survives.
         check("md-comment-dashes-re-frozen", _MD_COMMENT_DASHES_RE.pattern == r"-(?=-)")
         check("html-comment-breaks-multi-dash", _html_comment_safe("a--b--c") == "a- -b- -c")
         check("html-comment-collapses-newlines", _html_comment_safe("a\r\nb\rc\nd") == "a b c d")
@@ -2818,7 +3403,7 @@ def self_test():
                 _al_ok = False
             # raw-`<` inert: the matcher excludes `<` from every autolink token and the segment escaper
             # entity-encodes it, so a raw `<` in output means a bounded/partial entity escape let an active
-            # tag survive (codex round-12). `>` legitimately appears inside a wrapped URL token, so only `<`
+            # tag survive. `>` legitimately appears inside a wrapped URL token, so only `<`
             # (which opens a tag/comment) is the raw-HTML-inert signal.
             if "<" in _o:
                 _rh_ok = False
@@ -2826,7 +3411,7 @@ def self_test():
         check("fuzz-md-text-autolink-inert", _al_ok)
         check("fuzz-md-text-raw-angle-inert", _rh_ok)
         # MULTIPLE source paths per header: a regression sanitizing only the first (or a subset) of the
-        # interpolated sources leaves a later path's --> to close the comment early (codex round-12).
+        # interpolated sources leaves a later path's --> to close the comment early.
         _hdr_ok = True
         _dash_atoms = ["-", "--", "---", "-->", "--!>", "a", "b", "/", "x", "."]
         for _ in range(800):
@@ -2838,7 +3423,7 @@ def self_test():
             if _h.count("-->") != 1 or "--!>" in _h:
                 _hdr_ok = False
         check("fuzz-header-comment-single-terminator", _hdr_ok)
-        # round-14 (gemini round-13): _html_comment_safe has its OWN newline/control collapse and dash break;
+        # _html_comment_safe has its OWN newline/control collapse and dash break;
         # fuzz it DIRECTLY over a RICH atom set (dashes, newlines, controls, tags) at multiple occurrences, so
         # a bounded collapse/strip/break leaves a survivor (a forged header field line, a surviving control, or
         # an active closer). Complete invariant: no -- run, no surviving newline, no control char.
@@ -2851,25 +3436,25 @@ def self_test():
         check("fuzz-html-comment-safe-complete", _hcs_ok)
         check("html-comment-multi-newline-collapsed",
               "\n" not in _html_comment_safe("dir\nX\n digest: forged") and "\r" not in _html_comment_safe("a\rb\rc"))
-        # round-15 (codex round-14 MINOR-2): a bounded CRLF .replace(...,1) is security-neutral (the following
+        # A bounded CRLF .replace(...,1) is security-neutral (the following
         # unbounded \r/\n passes strip the remnant) but yields an extra space; pin the exact single-space
         # collapse of MULTIPLE CRLF in both sinks so the redundant special-case cannot silently regress.
         check("md-text-multi-crlf-single-space", _md_text("a\r\nb\r\nc") == "a b c")
         check("html-comment-multi-crlf-single-space", _html_comment_safe("a\r\nb\r\nc") == "a b c")
-        # round-15 (codex round-14 MINOR-1): U+0009 TAB is DELIBERATELY preserved as inline whitespace (not a
+        # U+0009 TAB is DELIBERATELY preserved as inline whitespace (not a
         # stripped C0/DEL control; _MD_CTRL_RE excludes it). It is inert in every sink position: the value is
         # always emitted behind a structural prefix, never at column 0, so a TAB cannot indent a code block.
         # Pin the preservation + inertness so the tolerance is explicit and exercised.
         check("md-text-tab-preserved-inert",
               _md_text("a\tb") == "a\tb" and _gfm_autolinks(_md_text("x\t- y\t# z")) == []
               and "\n" not in _md_text("x\t- y\t# z") and "<" not in _md_text("x\t<i>y"))
-        # round-17 (codex/gemini/claude round-16): the round-16 AST check was construct-specific (defeated by a
-        # str.replace(count=) keyword, re.subn, str.split maxsplit, a method alias, or a loop break/islice) and
-        # unsound (false-positive on module-level re.sub); the fixed 300-count pins missed a realistic cap at or
-        # above the tested count. Replace both with CONSTRUCT-AGNOSTIC high-count BEHAVIOUR pins that assert the
-        # OUTPUT at N occurrences, so a pass bounded BELOW N by ANY construct leaves a survivor and trips.
+        # An AST check for bounded passes is construct-specific (defeated by a str.replace(count=) keyword,
+        # re.subn, str.split maxsplit, a method alias, or a loop break/islice) and unsound (false-positive on
+        # module-level re.sub), and a fixed low-count pin misses a realistic cap at or above the tested count.
+        # These are CONSTRUCT-AGNOSTIC high-count BEHAVIOUR pins that assert the OUTPUT at N occurrences, so a
+        # pass bounded BELOW N by ANY construct leaves a survivor and trips.
         _HC = 4096
-        _N = _HC + 1  # _HC+1 occurrences so a bound of exactly _HC leaves one survivor (off-by-one, round-17 QA)
+        _N = _HC + 1  # _HC+1 occurrences so a bound of exactly _HC leaves one survivor (off-by-one)
         check("md-text-hi-count-autolink-inert", _gfm_autolinks(_md_text(" ".join(["http://z.example"] * _N))) == [])
         check("md-text-hi-count-single-line",
               "\n" not in _md_text(("x\n- F") * _N) and "\r" not in _md_text(("a\r") * _N))
@@ -2916,7 +3501,7 @@ def self_test():
               and "\n# sources: .working/t o m l/block.index.toml\n" in _ls_hdrs[1])
         check("header-linesep-path-splitlines-equals-lf",
               all(len(_h.splitlines()) == _h.count("\n") for _h in _ls_hdrs))
-        # soup carries EVERY _MD_ESCAPE_RE metacharacter (incl. backslash -- round-18 QA: an omitted char let a
+        # soup carries EVERY _MD_ESCAPE_RE metacharacter (incl. backslash: an omitted char would let a
         # per-char bound on it, e.g. backslash, escape the escape-completeness check) plus & < >.
         _md_soup = _md_text("\\`*_{}[]()#+!|~&<>" * _N)
         check("md-text-hi-count-escape-complete",
@@ -2934,10 +3519,10 @@ def self_test():
         # the production passes are all unbounded as shipped. A regression bounding a pass AT OR ABOVE _N,
         # which fires only on a field with more than _N occurrences, is caught by the MANDATORY review of any
         # change to these security-critical sinks, not by this corpus.
-        # round-13 discrete witnesses (codex round-12 MAJORs): raw-HTML inertness (a multi-tag value keeps no
+        # Discrete witnesses: raw-HTML inertness (a multi-tag value keeps no
         # raw `<`), escape completeness (no active metacharacter survives un-escaped), and a MULTI-SOURCE header.
         check("md-text-raw-html-inert", "<" not in _md_text("benign <i> <details open>ACTIVE</details>"))
-        # round-14 (gemini round-13): escape-completeness covers ALL three entity chars (&, <, >) at multiple
+        # Escape-completeness covers ALL three entity chars (&, <, >) at multiple
         # occurrences, not just <: after the backslash pass no bare metacharacter survives, no raw < or >
         # remains, and every & begins one of the three named entities (a bounded .replace(...,1) leaves a bare
         # one). Soup carries repeated &, <, >, and every _MD_ESCAPE_RE metacharacter.
@@ -2953,7 +3538,7 @@ def self_test():
         # the exact-byte/behaviour pins + broad fuzz cover the wrapping/escaping logic on exercised shapes. An
         # edit that changes output only on an UNEXERCISED shape without touching a frozen matcher is the residual
         # the broad fuzz mitigates.
-        # (d) round-5: pin PRODUCTION (_md_text), not only the oracle, at every positive www boundary and a
+        # (d) Pin PRODUCTION (_md_text), not only the oracle, at every positive www boundary and a
         # Unicode host, so a production-side boundary/Unicode-host regression is caught. For each case,
         # production WRAPS the www token in a code span AND the emitted output is autolink-inert.
         check("md-text-wraps-www-start", "`www.example.com`" in _md_text("www.example.com"))
@@ -2994,42 +3579,42 @@ def self_test():
               _md_text("http://x/`q`") == "`` http://x/`q` ``")
         check("autolink-token-with-backtick-inert", _gfm_autolinks(_md_text("http://x/`q`")) == [])
 
-        # (d) FINDING A: the oracle is faithful to cmark-gfm's autolink DECISION. Each vector FAILS on the
-        # pre-fix oracle and holds only for the faithful one.
-        # A.1 ORDERING: INSIDE a code span a backslash is literal and a backtick closes the span, so the
+        # (e) The oracle is faithful to cmark-gfm's autolink DECISION. Each vector fails on an oracle that
+        # gets the rule below wrong and holds only for the faithful one.
+        # ORDERING: INSIDE a code span a backslash is literal and a backtick closes the span, so the
         # span closes at the 2nd backtick, leaving the URL in a TEXT run and ACTIVE.
         check("oracle-codespan-first-ordering", _gfm_autolinks("`x\\` http://e.com`") != [])
-        # A.2 PROTOCOLS: ftp:// and mailto:/xmpp: autolink; the oracle needs teeth, the wrap keeps inert.
+        # PROTOCOLS: ftp:// and mailto:/xmpp: autolink; the oracle needs teeth, the wrap keeps inert.
         check("oracle-teeth-ftp-raw", _gfm_autolinks("see ftp://x.example ok") != [])
         check("oracle-teeth-mailto-raw", _gfm_autolinks("mail mailto:a@b.example ok") != [])
         check("oracle-teeth-xmpp-raw", _gfm_autolinks("at xmpp:a@b.example ok") != [])
         check("autolink-ftp-inert", _gfm_autolinks(_md_text("ftp://x.example")) == [])
         check("autolink-mailto-inert", _gfm_autolinks(_md_text("mailto:a@b.example")) == [])
         check("autolink-xmpp-inert", _gfm_autolinks(_md_text("xmpp:a@b.example")) == [])
-        # A.3 ENTITIES: a numeric reference decodes ONLY when `;`-terminated.
+        # ENTITIES: a numeric reference decodes ONLY when `;`-terminated.
         check("oracle-entity-requires-semicolon", _gfm_autolinks("http&#58//x.example") == [])
         check("oracle-entity-with-semicolon-teeth", _gfm_autolinks("http&#58;//x.example") != [])
-        # A.4 EMAIL DOMAIN: a trailing `_` or `-` is not a valid autolink; a real one is.
+        # EMAIL DOMAIN: a trailing `_` or `-` is not a valid autolink; a real one is.
         check("oracle-email-trailing-underscore-rejected", _gfm_autolinks("mail a@b.c_ please") == [])
         check("oracle-email-trailing-hyphen-rejected", _gfm_autolinks("mail a@b.c- please") == [])
         check("oracle-email-normal-teeth", _gfm_autolinks("mail a@b.cd please") != [])
-        # round-3: the oracle is a SUPERSET (no left-boundary false-negative) - a digit/punct-prefixed URL
+        # The oracle is a SUPERSET (no left-boundary false-negative) - a digit/punct-prefixed URL
         # is detected (cmark-gfm autolinks it after the digit); production still wraps it inert.
         check("oracle-detects-digit-prefixed-url", _gfm_autolinks("1http://a.example") != [])
         check("oracle-detects-delimiter-prefixed-email", _gfm_autolinks("x:a@b.example") != [])
         check("autolink-digit-prefixed-url-inert", _gfm_autolinks(_md_text("1http://a.example")) == [])
-        # round-3: an OVERLONG numeric reference (8 decimal digits) is NOT a valid CommonMark entity, so the
+        # An OVERLONG numeric reference (8 decimal digits) is NOT a valid CommonMark entity, so the
         # oracle leaves it literal (no spurious decode -> no false autolink).
         check("oracle-overlong-entity-literal", _gfm_autolinks("http&#00000058;//x.example") == [])
-        # round-3: a free-text field with TRAILING WHITESPACE renders CLEAN (not refused) - trailing line
-        # whitespace is normalized out (by _render_resolved, not _md_text) before the byte-canon scan. The
-        # prior unit assertion here was a tautology (it compared an expression with itself); the real proof
-        # is the end-to-end `trailing-space-title-renders` / `trailing-nbsp-title-renders` cases in CLASS B,
-        # which drive a full render and read the emitted bytes.
+        # A free-text field with TRAILING WHITESPACE renders CLEAN (not refused) - trailing line
+        # whitespace is normalized out (by _render_resolved, not _md_text) before the byte-canon scan. No
+        # unit assertion stands here (one would only compare an expression with itself); the proof is the
+        # end-to-end `trailing-space-title-renders` / `trailing-nbsp-title-renders` cases in the full-render
+        # byte-canon vectors, which drive a full render and read the emitted bytes.
 
-        # FINDING C: adjacent autolink tokens (no text between) COALESCE into ONE code span over the
+        # Adjacent autolink tokens (no text between) COALESCE into ONE code span over the
         # original substring, so no touching backtick run forms and no fence leaks into the content.
-        # Pre-fix output was "`a@b.com``+a@c.com`" (visible double backtick).
+        # Wrapping each token separately would emit "`a@b.com``+a@c.com`" (visible double backtick).
         check("autolink-adjacent-single-span", _md_text("a@b.com+a@c.com") == "`a@b.com+a@c.com`")
         check("autolink-adjacent-no-double-backtick", "``" not in _md_text("a@b.com+a@c.com"))
         check("autolink-adjacent-inert", _gfm_autolinks(_md_text("a@b.com+a@c.com")) == [])
@@ -3037,7 +3622,7 @@ def self_test():
         check("autolink-nonadjacent-two-spans",
               _md_text("a@b.com a@c.com") == "`a@b.com` `a@c.com`")
 
-        # F-U4AUTOLINK byte-canon: a rendered view carrying a URL free-text field is byte-canon clean
+        # Autolink byte-canon: a rendered view carrying a URL free-text field is byte-canon clean
         # (no forbidden zero-width/bidi codepoint, no CR, single trailing newline, no trailing
         # whitespace) AND renders the URL inert. Byte-canon is judged by the AUTHORITATIVE gate's own
         # scan_bytes over the real body bytes, not a reimplementation; the whole-view CI byte-canon gate
@@ -3057,9 +3642,10 @@ def self_test():
         # renders exactly; the value carried no autolink out.
         check("autolink-view-url-preserved", "`http://ex.example/a?b=1&c=2`" in url_body)
 
-        # FINDING B teeth (fix-independent): _md_text drops only C0/DEL, so a zero-width or bidi-control
-        # codepoint in a free-text field SURVIVES into the rendered text -- the bytes the byte-canon scan
-        # forbids. These document the hole the whole-body fail-closed scan (in _render_resolved) closes.
+        # Zero-width/bidi teeth (independent of the fail-closed scan): _md_text drops only C0/DEL, so a
+        # zero-width or bidi-control codepoint in a free-text field SURVIVES into the rendered text -- the
+        # bytes the byte-canon scan forbids. These document the hole the whole-body fail-closed scan (in
+        # _render_resolved) closes.
         for _lbl, _cp in (("zwsp", 0x200B), ("zwnj", 0x200C), ("zwj", 0x200D),
                           ("wj", 0x2060), ("bom", 0xFEFF), ("rlo", 0x202E)):
             _mt = _md_text("a" + chr(_cp) + "b")
@@ -3071,7 +3657,7 @@ def self_test():
         check("md-text-collapses-cr", _md_text("a\rb") == "a b")
         check("byte-canon-cr-teeth", check_byte_canon.scan_bytes(b"a\rb\n") != [])
 
-        # CLASS 2 (B2): the generated header interpolates DISCOVERED source paths into an HTML comment; a
+        # Header sink: the generated header interpolates DISCOVERED source paths into an HTML comment; a
         # machine-dir component bearing `-->` (or the abrupt `--!>`) must NOT close the comment early. Every
         # comment closer needs `--`, which _html_comment_safe breaks, so only the header's own terminating
         # `-->` remains. Reverting the encoding leaves the injected sequence, so the count/absence flips.
@@ -3081,7 +3667,7 @@ def self_test():
         _hdr2 = _header({".working/a--!>b/x.index.toml": b"d"})
         check("header-comment-abrupt-neutralized", "--!>" not in _hdr2 and _hdr2.count("-->") == 1)
 
-        # CLASS 4 (MAJOR-1): a record scoped by more than one active block is annotated with the block IDs
+        # Block annotations: a record scoped by more than one active block is annotated with the block IDs
         # DEDUPED and ordered by the numeric record-id key (BL-2 before BL-10), never appended per scope
         # occurrence and sorted lexically. BL-2 scopes BI-5 twice (a duplicate occurrence); the annotation
         # must still read [BL-2, BL-10]. Reverting to append+lexical yields [BL-10, BL-2, BL-2].
@@ -3091,7 +3677,7 @@ def self_test():
              {"id": "BL-2", "status": "active", "scopes": ["BI-5", "BI-5"]}])
         check("block-annotation-dedup-numeric-order", _bb.get("BI-5") == ["BL-2", "BL-10"])
 
-        # FIX A (render_done receipt ordering): a done record naming several receipts lists them DEDUPED and
+        # render_done receipt ordering: a done record naming several receipts lists them DEDUPED and
         # in numeric id order (BI-2 before BI-10), the same _sorted_ids ordering. Reverting _sorted_ids in
         # render_done to append/lexical order yields "BI-10, BI-2" (or a duplicate), flipping this; the
         # single-receipt populated-store golden (DN-1 receipt_of BI-4) does not discriminate it. Exercised
@@ -3239,7 +3825,7 @@ def self_test():
         check("header-has-regen", "regenerate: opf render" in todo)
         check("header-no-timestamp", not re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d", todo.split("-->", 1)[0]))
 
-        # --- INDEPENDENT expected-bytes goldens for EVERY view (F-09) ------------------------------------
+        # --- INDEPENDENT expected-bytes goldens for EVERY view ------------------------------------------
         # Each golden is a HAND-AUTHORED constant, NOT produced by this module's renderers; it pins the
         # exact bytes AFTER the do-not-edit header (the header carries a source-set digest, so the body is
         # the byte-stable region), compared with ==, so corrupting ANY renderer flips this to FAIL. A
@@ -3359,8 +3945,8 @@ def self_test():
         check("projection-header-is-toml-comment", dtoml_text.startswith("# GENERATED by opf render"))
         check("projection-header-no-html-comment", "<!--" not in dtoml_text)
         check("projection-header-has-digest", "# source-set-digest: sha256:" in dtoml_text)
-        check("projection-header-has-generator", "generator: opf-views/2" in dtoml_text)
-        # R7: the TOML `#` header must carry the regenerate command INTACT and runnable. The HTML-comment
+        check("projection-header-has-generator", "generator: opf-views/3" in dtoml_text)
+        # The TOML `#` header must carry the regenerate command INTACT and runnable. The HTML-comment
         # dash-run scrubber would corrupt `--write` into `- -write`; the TOML-specific scrubber leaves it
         # (a `--` is inert in a `#` comment). Fails without _toml_comment_safe.
         check("projection-header-regenerate-command-runnable",
@@ -3466,8 +4052,9 @@ def self_test():
         check("empty-projection-reparses", _epe.get("projection") == "decisions"
               and _epe["pending_decision"] == [] and _epe["derived"] == {"effective": [], "superseded": []})
 
-        # --- F3: a declared VERSION with an EMPTY version ledger fails closed, never a zero-byte write ----
-        # (Runs under the scaffolded gate ON, so it reaches rendering and fails at F3, not the F1 write gate.)
+        # --- a declared VERSION with an EMPTY version ledger fails closed, never a zero-byte write --------
+        # (Driven through render_write, which bypasses the store-integrity gate, so it reaches rendering and
+        # fails at the empty ledger, not at that gate.)
         vroot = new_root()
         write_toml(vroot, "manifest.toml", manifest)
         empty_indexes(vroot)
@@ -3513,7 +4100,7 @@ def self_test():
         empty_indexes(duroot)
         check("duplicate-source-cannot-eval", render_write(duroot) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-01: a manifest target that does not match the view's spec destination fails closed --------
+        # --- a manifest target that does not match the view's spec destination fails closed --------------
         troot = new_root()
         write_toml(troot, "manifest.toml",
                    manifest.replace('target = "{}/TODO.md"'.format(WORKING_DIRNAME), 'target = "README.md"'))
@@ -3521,7 +4108,7 @@ def self_test():
         check("target-rebind-cannot-eval", render_write(troot) == EXIT_CANNOT_EVALUATE)
         check("target-rebind-not-written", not (troot / "README.md").exists())
 
-        # --- F-01: a pre-planted symlink destination is refused (no-follow), the link target untouched ---
+        # --- a pre-planted symlink destination is refused (no-follow), the link target untouched ---------
         symroot = new_root()
         write_toml(symroot, "manifest.toml", manifest)
         empty_indexes(symroot)
@@ -3538,14 +4125,14 @@ def self_test():
         check("symlink-dest-cannot-eval", render_write(symroot) == EXIT_CANNOT_EVALUATE)
         check("symlink-dest-not-followed", outside.read_text(encoding="utf-8") == "original\n")
 
-        # --- F-03: an EXTRA declared source beyond a view's required set fails closed --------------------
+        # --- an EXTRA declared source beyond a view's required set fails closed --------------------------
         xroot = new_root()
         write_toml(xroot, "manifest.toml",
                    manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
         empty_indexes(xroot)
         check("extra-source-cannot-eval", render_write(xroot) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-03: the same extra declared source, now MALFORMED, also fails closed ----------------------
+        # --- the same extra declared source, now MALFORMED, also fails closed ----------------------------
         xmroot = new_root()
         write_toml(xmroot, "manifest.toml",
                    manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
@@ -3554,7 +4141,7 @@ def self_test():
             "schema = 1", _rec("FN-1", "finding", "not-a-state", "bad status")]) + "\n")
         check("extra-source-malformed-cannot-eval", render_write(xmroot) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-04: a FORK in the decision-resolution graph (two heads for one chain) fails closed --------
+        # --- a FORK in the decision-resolution graph (two heads for one chain) fails closed --------------
         fkroot = new_root()
         write_toml(fkroot, "manifest.toml", manifest)
         empty_indexes(fkroot)
@@ -3569,7 +4156,7 @@ def self_test():
         ]) + "\n")
         check("resolution-fork-cannot-eval", render_write(fkroot) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-04: a CYCLE in the decision-resolution graph fails closed (and does not hang) ------------
+        # --- a CYCLE in the decision-resolution graph fails closed (and does not hang) ------------------
         cyroot = new_root()
         write_toml(cyroot, "manifest.toml", manifest)
         empty_indexes(cyroot)
@@ -3582,7 +4169,7 @@ def self_test():
         ]) + "\n")
         check("resolution-cycle-cannot-eval", render_write(cyroot) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-07: a tomllib parse overflow (RecursionError) is mapped to cannot-evaluate, not a crash. The
+        # --- a tomllib parse overflow (RecursionError) is mapped to cannot-evaluate, not a crash. The
         # overflow is INJECTED on an otherwise valid finding index rather than provoked by a deeply nested body:
         # the depth at which tomllib overflows is an interpreter limit, so a fixed body overflows under one
         # recursion limit and, under another, parses and is refused for an unrelated reason (its unknown key),
@@ -3739,7 +4326,7 @@ def self_test():
         check("nonutf8-machine-dir-cannot-eval",
               render(["--root", str(nuroot), "--check"]) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-08: a free-text field cannot forge markdown/HTML structure (escaped, render still clean) --
+        # --- a free-text field cannot forge markdown/HTML structure (escaped, render still clean) --------
         forgeroot = new_root()
         write_toml(forgeroot, "manifest.toml", manifest)
         empty_indexes(forgeroot)
@@ -3834,15 +4421,15 @@ def self_test():
         check("linesep-collapse-off-reaches-views",
               ls_pre and _ls_off_rc == EXIT_OK and all(ch in _ls_off_refs for ch in ls_seps))
 
-        # --- F-05: a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --
+        # --- a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --------
         prroot = new_root()
         write_toml(prroot, "manifest.toml", manifest.replace('layout = "inline"', 'layout = "per-record"'))
         empty_indexes(prroot)
         check("per-record-deferred-cannot-eval", render_write(prroot) == EXIT_CANNOT_EVALUATE)
 
-        # --- B2 class-wide: a VALID record in EVERY free-text sink carries the P payload; each view
-        # renders it as LITERAL text. This drives the FULL pipeline (validate -> render -> write ->
-        # read) under the scaffolded gate, so every record is a schema-valid envelope, not a hand-built
+        # --- Free-text sinks, class-wide: a VALID record in EVERY free-text sink carries the P payload;
+        # each view renders it as LITERAL text. This drives the FULL pipeline (validate -> render -> write
+        # -> read) through render_write, so every record is a schema-valid envelope, not a hand-built
         # dict. Each affected view is asserted to contain the EXACT escaped bytes ESC and NOT the raw
         # payload P, so removing _md_text from any sink that feeds that view flips an assertion. The
         # schema-CONSTRAINED sinks (id, status/state, scopes, link ids, timestamps) cannot carry a
@@ -3912,11 +4499,11 @@ def self_test():
             check("class-wide-esc-present-" + _vn, ESC in _body)
             check("class-wide-no-raw-payload-" + _vn, P not in _body)
 
-        # CLASS B (codex, full-render fail-closed): a SCHEMA-VALID backlog_item whose title carries a
+        # Full-render byte-canon fail-closed: a SCHEMA-VALID backlog_item whose title carries a
         # zero-width or bidi-control codepoint renders a view body whose bytes fail the authoritative
         # byte-canon scan. The generator FAILS CLOSED (cannot-evaluate) and writes NOTHING, rather than
-        # emitting an invalid view. Driven under the scaffolded write gate; pre-fix this rendered clean
-        # (exit 0) and wrote invalid bytes. A lone CR is excluded: _md_text collapses it upstream.
+        # emitting an invalid view. Driven through render_write; without the scan this would render clean
+        # (exit 0) and write invalid bytes. A lone CR is excluded: _md_text collapses it upstream.
         _bc_version = "\n".join([
             "schema = 1", "", "[[release]]",
             'version = "0.1.0"',
@@ -3940,11 +4527,12 @@ def self_test():
             check("byte-canon-wrote-nothing-" + _bcls,
                   not (_bcroot / WORKING_DIRNAME / "TODO.md").exists())
 
-        # round-3 (CLASS B positive): a SCHEMA-VALID backlog_item whose title merely ends in a SPACE
-        # renders a body line ending in whitespace; _render_resolved now normalizes trailing line
+        # Byte-canon positive case: a SCHEMA-VALID backlog_item whose title merely ends in a SPACE
+        # renders a body line ending in whitespace; _render_resolved normalizes trailing line
         # whitespace before the byte-canon scan, so the render SUCCEEDS (EXIT_OK) and writes a clean
-        # view. Pre round-3 this failed closed at exit 2 over benign trailing whitespace. Modelled on the
-        # CLASS B store construction; proves the over-fire fix end to end, not only at a unit level.
+        # view. Without that normalization it would fail closed at exit 2 over benign trailing whitespace.
+        # Modelled on the fail-closed store construction above; proves the normalization end to end, not
+        # only at a unit level.
         import _byte_canon as check_byte_canon  # authoritative byte-canon leg; pure function over bytes
         _tsroot = new_root()
         write_toml(_tsroot, "manifest.toml", manifest)
@@ -3967,10 +4555,10 @@ def self_test():
         check("trailing-space-title-byte-canon-clean",
               check_byte_canon.scan_bytes(_tstodo.encode("utf-8")) == [])
 
-        # round-3 (Unicode fix): a title ending in a NON-BREAKING SPACE (U+00A0) is ALSO normalized out
+        # Unicode trailing whitespace: a title ending in a NON-BREAKING SPACE (U+00A0) is ALSO normalized out
         # by _render_resolved's Unicode str.rstrip() (the SAME predicate check_byte_canon uses), so it
-        # renders clean (EXIT_OK) rather than over-firing the byte-canon refusal. This proves the fix
-        # covers the Unicode trailing-whitespace codepoints, not only ASCII space/tab.
+        # renders clean (EXIT_OK) rather than over-firing the byte-canon refusal. This proves the
+        # normalization covers the Unicode trailing-whitespace codepoints, not only ASCII space/tab.
         _tsnbroot = new_root()
         write_toml(_tsnbroot, "manifest.toml", manifest)
         empty_indexes(_tsnbroot)
@@ -3987,12 +4575,12 @@ def self_test():
         check("trailing-nbsp-title-byte-canon-clean",
               check_byte_canon.scan_bytes(_tsnbtodo.encode("utf-8")) == [])
 
-        # CLASS 3 (B3): /proposed is NONTERMINAL, and `withdrawn` is a valid terminal. In PIPELINE,
+        # Proposed records: /proposed is NONTERMINAL, and `withdrawn` is a valid terminal. In PIPELINE,
         # DECISIONS, and HANDOFF a proposed record is surfaced as AWAITING RATIFICATION (never under its
         # effective/terminal state, never omitted), and no valid status is dropped. This full VALID
         # store carries a done/proposed backlog item, a withdrawn and a decided/proposed decision, and a
-        # superseded/proposed handoff; reverting any Class-3 renderer flips an assertion below. Runs
-        # under the scaffolded write gate so the full validate->render->write->read pipeline exercises
+        # superseded/proposed handoff; reverting any of those renderers flips an assertion below. Runs
+        # through render_write so the full validate->render->write->read pipeline exercises
         # schema-valid envelopes (a decided/proposed carries the full resolution bundle, spec 8.5).
         proproot = new_root()
         write_toml(proproot, "manifest.toml", manifest)
@@ -4000,7 +4588,16 @@ def self_test():
         write_toml(proproot, "backlog_item.index.toml", "\n".join([
             "schema = 1",
             _rec("BI-1", "backlog_item", "open", "still open"),
+            _rec("BI-5", "backlog_item", "open", "imported history", actor="importer"),
+            _rec("BI-6", "backlog_item", "open", "six open"),
             _rec("BI-7", "backlog_item", "done/proposed", "proposed done", actor="assistant"),
+        ]) + "\n")
+        # Spec 8.5/8.6: BL-2 is an importer-authored ACTIVE block scoping the clean open BI-6. It grants
+        # no current stop, so BI-6 stays actionable and unblocked in every scheduling view, while the
+        # importer-authored open BI-5 surfaces only as history, never as actionable work.
+        write_toml(proproot, "block.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BL-2", "block", "active", "imported stop", actor="importer", scopes=["BI-6"]),
         ]) + "\n")
         write_toml(proproot, "pending_decision.index.toml", "\n".join([
             "schema = 1",
@@ -4053,8 +4650,28 @@ def self_test():
         _himp = pho.index("## Imported history") if "## Imported history" in pho else len(pho)
         check("handoff-imported-not-current", "HO-3" not in pho[:_sup] and "HO-3" in pho[_himp:])
         check("handoff-imported-shows-full-status", "- HO-3 (current) migrated history" in pho[_himp:])
+        # Spec 8.5/8.6 (imported-history firewall) over the SCHEDULING views, pinned as LITERAL view
+        # bytes (hand-authored, not renderer-echoed): the importer-authored open BI-5 never reaches TODO
+        # and surfaces in BACKLOG as `history (importer-authored)` and in PIPELINE only under a trailing
+        # `Imported history` section with its FULL status; the importer-authored active BL-2 grants no
+        # stop, so the clean open BI-6 it scopes stays actionable with no `blocked by` annotation or
+        # marker anywhere. Red when any of the item filter, the block filter, or either renderer edit is
+        # reverted (a doctor-level drift vector cannot discriminate this: C-VIEW-DRIFT compares against
+        # the same planner, so reverting the planner reverts the expectation with it).
+        check("views-importer-history-surfaces",
+              body_of(pview("TODO.md")) == ("\n# TODO\n\n- BI-1 (open) still open\n"
+                                            "- BI-6 (open) six open\n")
+              and body_of(pview("BACKLOG.md")) == (
+                  "\n# BACKLOG\n\n- BI-1 (open) still open -- actionable\n"
+                  "- BI-5 (open) imported history -- history (importer-authored)\n"
+                  "- BI-6 (open) six open -- actionable\n"
+                  "- BI-7 (done/proposed) proposed done -- not actionable (done)\n")
+              and body_of(pview("PIPELINE.md")) == (
+                  "\n# PIPELINE\n\n## open\n- BI-1 still open\n- BI-6 six open\n\n"
+                  "## awaiting ratification\n- BI-7 (done/proposed) proposed done\n\n"
+                  "## Imported history\n- BI-5 (open) imported history\n"))
 
-        # --- the composed U6 write gate (VC-4): render --write gates on validate_store == VALID ----------
+        # --- the composed write gate: render --write gates on validate_store's source integrity ---------
         # A bare `render` (neither --check nor --write) is a usage error; --write on a NOT-ADOPTED root is
         # NOT APPLICABLE (0) and writes nothing (resolution precedes the gate); the CLI parser rejects a
         # dangling/empty/option-looking --root before the mode check. The gate ITSELF is exercised over a
@@ -4072,7 +4689,7 @@ def self_test():
         check("cli-dangling-root", render(["--root", str(na), "--root"]) == EXIT_CANNOT_EVALUATE)
         check("cli-unknown-arg", render(["--root", str(na), "--bogus"]) == EXIT_CANNOT_EVALUATE)
         check("cli-misspelled-check-refused", render(["--root", str(na), "--chek"]) == EXIT_CANNOT_EVALUATE)
-        # B3: `--root` requires a non-empty, non-option-looking directory argument (an empty value would
+        # `--root` requires a non-empty, non-option-looking directory argument (an empty value would
         # normalize to the cwd, an option-looking token is a swallowed next flag); each is a parse-level 2.
         check("cli-empty-root", render(["--root", ""]) == EXIT_CANNOT_EVALUATE)
         check("cli-option-looking-root", render(["--root", "--bogus"]) == EXIT_CANNOT_EVALUATE)
@@ -4228,7 +4845,7 @@ def self_test():
         check("gate-invalid-duplicate-id-wrote-nothing",
               _dup_todo.read_text(encoding="utf-8") == _dup_before)
 
-        # --- PR-C: SOURCE-gated REGENERATE. A stale OWNED deliverable (a drifted view, a drifted VERSION, a
+        # --- SOURCE-gated REGENERATE. A stale OWNED deliverable (a drifted view, a drifted VERSION, a
         # missing view target) is render's OUTPUT, not a refusal: SOURCE integrity is sound, so --write
         # REGENERATES it and Phase C witnesses the 1->0 transition. The OLD VALID-only gate REFUSED each of
         # these (they are INVALID stores on the deliverable checks); they pass ONLY after the source-gate
@@ -4371,18 +4988,17 @@ def self_test():
               render(["--root", str(gvroot), "--write"], observations=gvobs) == EXIT_OK
               and _plain_view.read_bytes() == _plain_before)
 
-        # --- VECTOR A (change-carries-check): EXERCISE the Phase-C owned-miss ROLLBACK + corrected diagnostic.
-        # The natural PR-C vectors above never reach owned-miss (a source-sound store regenerates cleanly and
-        # Phase C witnesses 1->0), so this seam monkeypatches _opf_check.validate_store to FORCE a PRE=valid /
-        # POST=owned-miss disagreement over an ALREADY-rewritten target. Phase B is UNAFFECTED (it renders
-        # directly and calls no validate_store), so the write really happens and the preimage is really rolled
-        # back. Three variants prove: exit 2 always; the OWNED-deliverable miss is labelled and rolled back with
-        # a truthful success claim; a POST SOURCE-integrity regression is labelled a SOURCE regression printing
-        # the source reason (DEFECT 1b); and a PARTIAL rollback failure states the rollback was INCOMPLETE and
-        # names the paths in the PRIMARY line, never claiming plain success (DEFECT 1a). FAIL-TO-PASS: the
-        # pre-fix branch prints the UNCONDITIONAL "rolled back to the pre-write bytes" and only the owned
-        # C-VIEW-DRIFT / C-VERSION-FILE messages, so the source-regression and partial-failure assertions FAIL
-        # on the old wording and PASS after DEFECT 1.
+        # --- Change-carries-check: EXERCISE the Phase-C owned-miss ROLLBACK + corrected diagnostic.
+        # The natural regenerate vectors above never reach owned-miss (a source-sound store regenerates
+        # cleanly and Phase C witnesses 1->0), so this seam monkeypatches _opf_check.validate_store to FORCE
+        # a PRE=valid / POST=owned-miss disagreement over an ALREADY-rewritten target. Phase B is UNAFFECTED
+        # (it renders directly and calls no validate_store), so the write really happens and the preimage is
+        # really rolled back. Three variants prove: exit 2 always; the OWNED-deliverable miss is labelled and
+        # rolled back with a truthful success claim; a POST SOURCE-integrity regression is labelled a SOURCE
+        # regression printing the source reason; and a PARTIAL rollback failure states the rollback was
+        # INCOMPLETE and names the paths in the PRIMARY line, never claiming plain success. FAIL-TO-PASS: a
+        # branch that prints the UNCONDITIONAL "rolled back to the pre-write bytes" and only the owned
+        # C-VIEW-DRIFT / C-VERSION-FILE messages FAILS the source-regression and partial-failure assertions.
         import io
         import contextlib
         import _opf_check as _oc_seam
@@ -4428,7 +5044,7 @@ def self_test():
         check("prc-ownedmiss-owned-rollback-success", "rolled back to the pre-write bytes" in _oa_err)
 
         # Variant 2: a POST SOURCE-INTEGRITY regression (a source check FINDING) must be LABELLED a source
-        # regression and print the source reason, NOT mislabelled "OWNED deliverable" (DEFECT 1b).
+        # regression and print the source reason, NOT mislabelled "OWNED deliverable".
         _sa_root, _sa_obs = _gate_store_drifted("view")
         _sa_todo = _sa_root / WORKING_DIRNAME / "TODO.md"
         _sa_pre = _sa_todo.read_text(encoding="utf-8")
@@ -4441,7 +5057,7 @@ def self_test():
         check("prc-ownedmiss-source-reason-printed", "post-write record fault" in _sa_err)
         check("prc-ownedmiss-source-not-mislabelled-owned", "OWNED deliverable" not in _sa_err)
 
-        # Variant 3: a PARTIAL rollback failure (DEFECT 1a). Stub _restore_preimages (module-global, called
+        # Variant 3: a PARTIAL rollback failure. Stub _restore_preimages (module-global, called
         # unqualified by render) to report an unrestored target; the corrected primary statement must say the
         # rollback was INCOMPLETE and name the path, and must NOT claim plain success.
         _pa_post = _FakeResult(dict(_all_pass(), **{"C-VIEW-DRIFT": "FINDING"}),
@@ -4455,7 +5071,7 @@ def self_test():
         finally:
             globals()["_restore_preimages"] = _saved_restore
         check("prc-ownedmiss-partial-exit-2", _pa_rc == EXIT_CANNOT_EVALUATE)
-        # DEFECT 1a hardening: the INCOMPLETE label AND the unrestored path must appear in the PRIMARY
+        # Primary-line hardening: the INCOMPLETE label AND the unrestored path must appear in the PRIMARY
         # diagnostic line (the FIRST stderr line of the owned-miss message), not merely somewhere in stderr,
         # so moving the failed-paths text onto a later line would NOT pass. Parse the first line and assert on
         # it; still reject the false unconditional "rolled back" success wording anywhere in stderr.
@@ -4465,15 +5081,15 @@ def self_test():
         check("prc-ownedmiss-partial-no-false-success",
               "rolled back to the pre-write bytes" not in _pa_err)
 
-        # --- VECTOR B (change-carries-check): the unowned-VERSION residual remedy. Per the brief's sanctioned
-        # alternative, drive _residual_write_exit DIRECTLY with a synthesized POST for an UNOWNED C-VERSION-FILE
+        # --- Change-carries-check: the unowned-VERSION residual remedy. Drive
+        # _residual_write_exit DIRECTLY with a synthesized POST for an UNOWNED C-VERSION-FILE
         # FINDING (a fully-synthetic unowned-VERSION whole-store is awkward to build from the VERSION-declaring
         # gate fixtures) and capture its stdout. The version ledger HAS releases here, so C-VERSION-FILE REQUIRES
         # a root VERSION and "remove the file" would turn a stale-VERSION finding into a MISSING-VERSION one.
         # Asserts: exit 1 (EXIT_DRIFT); the finding is surfaced; the remedy does NOT carry the harmful
         # unconditional "remove the file" advice; and it still directs to declaring the view. The mapper makes
-        # NO filesystem write, so render deletes nothing. FAIL-TO-PASS: the pre-fix wording contains "remove the
-        # file", so the negative assertion FAILS now and PASSES after DEFECT 2.
+        # NO filesystem write, so render deletes nothing. FAIL-TO-PASS: a remedy worded "remove the
+        # file" FAILS the negative assertion.
         _rv_msg = "root VERSION 0.0.0 is stale; the version ledger's latest release is 1.1.0"
         _rv_post = _FakeResult({"C-VERSION-FILE": "FINDING", "C-CHANGELOG-GATES": "PASS"},
                                by_check={"C-VERSION-FILE": [_rv_msg]})
@@ -4486,7 +5102,7 @@ def self_test():
         check("prc-unowned-version-residual-no-remove-advice", "remove the file" not in _rv_out)
         check("prc-unowned-version-residual-declare-advice", "declare the VERSION view" in _rv_out)
 
-        # --- VECTOR B (END-TO-END): the unowned-VERSION residual remedy driven through the REAL caller, not a
+        # --- END-TO-END: the unowned-VERSION residual remedy driven through the REAL caller, not a
         # synthesized _residual_write_exit call. Build a gate store that does NOT declare the root VERSION as a
         # view (so C-VERSION-FILE is UNOWNED) with the version ledger carrying releases, a STALE root VERSION on
         # disk, and a drifted OWNED view (TODO). render --write with honest observations exercises ownership
@@ -4517,8 +5133,8 @@ def self_test():
               "removing the root VERSION is valid ONLY when the version ledger has no releases" in _ev_out)
         check("prc-unowned-version-e2e-declare-advice", "declare the VERSION view" in _ev_out)
 
-        # --- VECTOR C (change-carries-check): the reopen-failure path of _restore_preimages must return the
-        # AFFECTED relpaths of EVERY captured target, not a single opaque sentinel (DEFECT-1c). Force the
+        # --- Change-carries-check: the reopen-failure path of _restore_preimages must return the
+        # AFFECTED relpaths of EVERY captured target, not a single opaque sentinel. Force the
         # rollback reopen to fail by monkeypatching _opf_store._open_store_root_fd to raise OSError, then call
         # _restore_preimages with a preimages dict of 2+ entries across DIFFERENT scopes/relpaths. Assert it
         # returns WITHOUT raising and the returned list NAMES both affected relpaths. The monkeypatch is
@@ -4557,8 +5173,10 @@ def self_test():
     print("opf-views self-test: PASS ({} checks) -- independent expected-bytes goldens per view, drift "
           "detection, the closed transform vocabulary (unknown filter/sort/group/project refused), the "
           "source-set-digest sensitivity, the block-actionability join with deduped numeric-order "
-          "annotations and the decision-supersession join (fork/cycle refused, duplicate supersedes link "
-          "tolerated), GFM extended-autolink neutralization (bare http/https/www/email inert) via the "
+          "annotations and the decision-supersession join (fork/cycle refused, an importer-authored link "
+          "removing no authority, a chain joining imported and current decisions with two current "
+          "resolutions refused, duplicate supersedes link tolerated), GFM extended-autolink "
+          "neutralization (bare http/https/www/email inert) via the "
           "render-faithful autolink oracle (code-span-first ordering, http/https/ftp + mailto/xmpp, "
           "strict entity termination, email tail rule) and adjacent-token coalescing, the "
           "header HTML-comment sink (interpolated -->/--!> neutralized), NONTERMINAL /proposed and valid "
@@ -4567,7 +5185,7 @@ def self_test():
           "deep-TOML and free-text (severity and covers) fail-closed AND whole-body byte-canon "
           "fail-closed (zero-width/bidi refused, never emitted), per-record and module-type "
           "deferrals, missing-and-malformed-source fail-closed, empty-store valid-empty with a rendered "
-          "VERSION, the empty-VERSION-ledger fail-closed, the CLI fail-closed parse, and the PR-C source-"
+          "VERSION, the empty-VERSION-ledger fail-closed, the CLI fail-closed parse, and the source-"
           "gated write path (render --write refuses a SOURCE-integrity violation writing nothing, but "
           "REGENERATES a drifted OWNED deliverable -- a drifted view, a drifted VERSION, a missing target -- "
           "and witnesses the 1->0 transition; an authored CHANGELOG finding exits 1 and a changelog cannot-"
@@ -4647,11 +5265,11 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
     _argv = sys.argv[1:]
-    # Until render COMPOSES the U6 store-integrity write-gate (VC-4), this module entry runs CHECK-only
-    # (drift detection, never a write): a write requires that composition, so default the command line to
-    # --check. validate_store itself EXISTS (U6); it is render's write-gate composition that is deferred. A
-    # write invocation through any other entry still fails closed in render(). Appending
-    # --check is a deliberate default, not a parse relaxation; the F10 parser still refuses any
+    # This module entry runs CHECK-only (drift detection, never a write). It gathers none of the git-derived
+    # observations render --write's source gate consumes; the mutating path is `opf render --write`, which
+    # gathers them (_opf_observe.gather) and calls render() with them. So the command line always gets
+    # --check: a `--write` here becomes the both-modes usage error (exit 2), never a write. Appending
+    # --check is a deliberate default, not a parse relaxation; render()'s parser still refuses any
     # unrecognized token alongside it.
     if "--check" not in _argv:
         _argv = _argv + ["--check"]
