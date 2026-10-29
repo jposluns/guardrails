@@ -9989,11 +9989,12 @@ def _self_test_checks():
                   and repr(_InjectedCloseFault("{} close #1".format(where))) in str(raised) and not leaked,
                   observed="exception={!r} counted={!r} leaked={!r}".format(raised, counted, leaked))
         # 6a'''b3j: the closes INSIDE the _journal helpers the release paths call (read_lock_owner_at's,
-        # read_lock_owner's, _open_parent's, _pid_start's) never raise past an exception in flight, and the
-        # run records what its release or a failed acquire's lock read raises beside an outcome already in
-        # flight. Each injection makes the real close first, then raises. An interrupt at read_lock_owner_at's
-        # close, then a fault at read_lock_owner's, propagates the interrupt as ITSELF with the fault named, on
-        # a refusal (its reason named) and on a commit (COMMITTED named) (red against _close_fd_yielding
+        # _open_parent's, _pid_start's) never raise past an exception in flight, and the run records what its
+        # release or a failed acquire's lock read raises beside an outcome already in flight. Each injection
+        # makes the real call first, then raises. The release reads its lock beneath the journal descriptor
+        # the run holds, so read_lock_owner_at's close is the one helper close it makes: an interrupt in that
+        # read, then a fault at that close, propagates the interrupt as ITSELF with the fault named, on a
+        # refusal (its reason named) and on a commit (COMMITTED named) (red against _close_fd_yielding
         # raising a non-OSError past the interrupt). A fault at read_lock_owner_at's close beside a body
         # interrupt leaves the body interrupt propagating (red against the run raising its release's
         # exception in place of the outcome in flight). A release interrupt beside a refusal keeps the
@@ -10003,26 +10004,34 @@ def _self_test_checks():
         # kept as its context, never left only as a note on it) and closes the rest; _pid_start's close
         # fault keeps the interrupt in its read. A missing ancestor of several listed files is opened ONCE
         # (red against the missing-ancestor cache removed). No injection leaks a descriptor.
-        rlo_at_code, rlo_code = _journal.read_lock_owner_at.__code__, _journal.read_lock_owner.__code__
+        rlo_at_code = _journal.read_lock_owner_at.__code__
 
-        def _helper_close_run(root, compose, plan, under, release=None, acquire=None):
+        def _helper_close_run(root, compose, plan, under, release=None, acquire=None, read=None):
             """One transaction whose _journal propagating close called (through _close_fd_yielding) from the
             frame whose code is a key of `plan`, beneath the frame `under`, makes its real close, then raises
-            plan[code]() once. (exception, the injected exceptions in order, leaked)."""
-            real_prop, real_acquire = _journal._close_fd_propagating, _journal.acquire_lock
+            plan[code]() once; `read` likewise for _journal._read_fd called from such a frame, after the real
+            read. (exception, the injected exceptions in order, leaked)."""
+            real_prop, real_acquire, real_read = _journal._close_fd_propagating, _journal.acquire_lock, _journal._read_fd
             fired = []
 
-            def prop(fd):
-                real_prop(fd)
-                up = sys._getframe(2)
-                make = plan.get(up.f_code)
+            def fire(up, kind, table):
+                make = table.get(up.f_code)
                 frame = up
                 while frame is not None and frame.f_code is not under:
                     frame = frame.f_back
-                if make is not None and frame is not None and up.f_code not in [c for c, _ in fired]:
+                if make is not None and frame is not None and (kind, up.f_code) not in [k for k, _ in fired]:
                     exc = make()
-                    fired.append((up.f_code, exc))
+                    fired.append(((kind, up.f_code), exc))
                     raise exc
+
+            def prop(fd):
+                real_prop(fd)
+                fire(sys._getframe(2), "close", plan)
+
+            def reading(fd, *args, **kwargs):
+                data = real_read(fd, *args, **kwargs)
+                fire(sys._getframe(1), "read", read or {})
+                return data
 
             def acquiring(journal_root, session):
                 real_acquire(journal_root, session)
@@ -10031,6 +10040,7 @@ def _self_test_checks():
             raised = None
             baseline = _fds_open()
             with mock.patch.object(_journal, "_close_fd_propagating", prop), \
+                    mock.patch.object(_journal, "_read_fd", reading), \
                     mock.patch.object(_journal, "acquire_lock", acquiring), \
                     mock.patch.object(_journal, "release_lock", release or _journal.release_lock):
                 try:
@@ -10049,21 +10059,21 @@ def _self_test_checks():
             return _InjectedCloseFault("helper journal close")
 
         def helper_interrupt():
-            return _InjectedCloseInterrupt("helper lock close")
+            return _InjectedCloseInterrupt("helper lock read")
         helper_legs = (
             ("journal-helper-close-fault-keeps-the-release-interrupt-refused", compose_refused_here,
-             dict(plan={rlo_at_code: helper_interrupt, rlo_code: helper_fault}, under=outcome_code),
+             dict(read={rlo_at_code: helper_interrupt}, plan={rlo_at_code: helper_fault}, under=outcome_code),
              lambda raised, fired, text: raised is fired[0] and repr(fired[1]) in text
              and "an injected compose refusal" in text),
             ("journal-helper-close-fault-keeps-the-release-interrupt-committed", compose_committed,
-             dict(plan={rlo_at_code: helper_interrupt, rlo_code: helper_fault}, under=outcome_code),
+             dict(read={rlo_at_code: helper_interrupt}, plan={rlo_at_code: helper_fault}, under=outcome_code),
              lambda raised, fired, text: raised is fired[0] and repr(fired[1]) in text and "COMMITTED" in text),
             ("journal-helper-close-fault-keeps-the-body-interrupt", compose_interrupted,
              dict(plan={rlo_at_code: helper_fault}, under=outcome_code),
              lambda raised, fired, text: type(raised) is _InjectedCloseInterrupt and str(raised) == "body"
              and repr(fired[0]) in text),
             ("journal-helper-close-faults-beside-the-body-interrupt-all-named", compose_interrupted,
-             dict(plan={rlo_at_code: helper_interrupt, rlo_code: helper_fault}, under=outcome_code),
+             dict(read={rlo_at_code: helper_interrupt}, plan={rlo_at_code: helper_fault}, under=outcome_code),
              lambda raised, fired, text: type(raised) is _InjectedCloseInterrupt and str(raised) == "body"
              and repr(fired[0]) in text and repr(fired[1]) in text),
             ("release-interrupt-keeps-the-refusal-reason", compose_refused_here,
@@ -10083,7 +10093,8 @@ def _self_test_checks():
                 finally:
                     os.umask(saved_umask)
             text = " ".join(getattr(raised, "__notes__", []) or [])
-            check(name, len(fired) == len(how["plan"]) and holds(raised, fired, text) and not leaked,
+            check(name, len(fired) == len(how["plan"]) + len(how.get("read") or {}) and holds(raised, fired, text)
+                  and not leaked,
                   observed="exception={!r} injected={!r} note={!r} leaked={!r}".format(
                       raised, fired, text[-600:], leaked))
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -10499,29 +10510,30 @@ def _self_test_checks():
                       observed="exception={!r} injected={!r} rendering={!r} leaked={!r}".format(
                           raised, fired, full[-900:], leaked))
         # 6a'''b3n (the second-fault rule): a JournalError a CLOSE inside the release's owner read
-        # raises is never read as release_lock's unreadable-lock signal and dropped. An EIO at
-        # read_lock_owner_at's close, then a JournalError at read_lock_owner's (the EIO recorded on it), and
+        # raises is never read as release_lock's unreadable-lock signal and dropped. An EIO in
+        # read_lock_owner_at's read of the lock, then a JournalError at its close (the EIO recorded on it), and
         # that JournalError alone: on a commit and on a refusal every injected exception is named in the
         # full rendering beside COMMITTED or the refusal (red against release_lock returning on any
         # JournalError, and against a lock clause naming its exception without the notes recorded on it).
-        for name, plan in (
+        for name, read, plan in (
                 ("release-owner-read-close-eio-then-journal-error-both-named",
-                 dict(((rlo_at_code, lambda: OSError(errno.EIO, "FIRST-CLOSE-EIO")),
-                       (rlo_code, lambda: _journal.JournalError("SECOND-CLOSE"))))),
+                 {rlo_at_code: lambda: OSError(errno.EIO, "FIRST-READ-EIO")},
+                 {rlo_at_code: lambda: _journal.JournalError("SECOND-CLOSE")}),
                 ("release-owner-read-close-journal-error-named",
-                 dict(((rlo_at_code, lambda: _journal.JournalError("SINGLE-CLOSE-SENTINEL")),)))):
+                 {}, {rlo_at_code: lambda: _journal.JournalError("SINGLE-CLOSE-SENTINEL")})):
             for committed in (True, False):
                 with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
                     saved_umask = os.umask(0o022)
                     try:
                         root, files = fixture(temp)
                         raised, fired, leaked = _helper_close_run(
-                            root, compose_committed if committed else compose_refused_here, plan, outcome_code)
+                            root, compose_committed if committed else compose_refused_here, plan, outcome_code,
+                            read=read)
                     finally:
                         os.umask(saved_umask)
                 full = rendering(raised)
                 check("{}-{}".format(name, "committed" if committed else "refused"),
-                      len(fired) == len(plan) and all(exc.args[-1] in full for exc in fired)
+                      len(fired) == len(plan) + len(read) and all(exc.args[-1] in full for exc in fired)
                       and (type(raised) is AdoptCommittedLockError and "COMMITTED" in full if committed
                            else type(raised) is AdoptApplyError and "an injected compose refusal" in full)
                       and not leaked,
@@ -11099,7 +11111,12 @@ def _self_test_checks():
                     real_unlink, real_close = os.unlink, os.close
 
                     def nfs_unlink(path, *args, **kwargs):
-                        if not args and not kwargs and str(path) == lock_path:
+                        # the lock by its path, or by its name beneath a descriptor on the journal directory,
+                        # where the release removes it
+                        at = kwargs.get("dir_fd")
+                        beneath = (list(kwargs) == ["dir_fd"] and at is not None and path == "lock"
+                                   and os.path.samestat(_real_fstat(at), _real_lstat(_journal_root(root))))
+                        if not args and (beneath or not kwargs and str(path) == lock_path):
                             st = _real_lstat(lock_path)
                             if not _inode_free((st.st_dev, st.st_ino)):
                                 os.rename(lock_path, nfs_path)
@@ -12666,6 +12683,25 @@ def _self_test_checks():
             return "unnamed"
         return None
 
+    # the lock functions' own code, taken before any vector patches them (a vector's release wrapper calls the
+    # real release_lock beneath lock_dir_fsync)
+    lock_codes = (_journal.acquire_lock.__code__, _journal.release_lock.__code__)
+
+    @contextlib.contextmanager
+    def lock_dir_fsync(make):
+        """The journal lock's own directory fsync replaced by make(real), real being the function it replaces:
+        the one acquire_lock makes after its create and release_lock after its unlink (lock_codes), whether by
+        the journal path (_journal._fsync_path_dir) or beneath the descriptor a _journal.JournalAt journal root
+        carries (_journal._fsync_dir_fd). Every other caller of either reaches the real one."""
+        with contextlib.ExitStack() as stack:
+            for name in ("_fsync_path_dir", "_fsync_dir_fd"):
+                real = getattr(_journal, name)
+
+                def fsync(arg, real=real, faulty=make(real)):
+                    return (faulty if sys._getframe(1).f_code in lock_codes else real)(arg)
+                stack.enter_context(mock.patch.object(_journal, name, fsync))
+            yield
+
     # 8: a held journal lock refuses a transaction and a reconcile (never seized).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
@@ -12936,7 +12972,7 @@ def _self_test_checks():
             raise OSError(5, "injected EIO after the lock create")
         with mock.patch.object(_journal, "acquire_lock", eacces):
             no_create = finding_of(reconcile, root)
-        with mock.patch.object(_journal, "_fsync_path_dir", fsync_fault):
+        with lock_dir_fsync(lambda real: fsync_fault):
             created = finding_of(reconcile, root)
         check("reconcile-pre-lock-faults-named-no-lock-left",
               no_create == RECONCILE_PRELOCK_FAULT and created == RECONCILE_PRELOCK_FAULT and lock_free(root)
@@ -13406,7 +13442,7 @@ def _self_test_checks():
     def release_then_fsync_fails(journal_root):
         def fsync_fails(path):
             raise OSError(errno.EIO, "INJECTED-LOCK-DIR-FSYNC-EIO")
-        with mock.patch.object(_journal, "_fsync_path_dir", fsync_fails):
+        with lock_dir_fsync(lambda real: fsync_fails):
             return real_release_lock(journal_root)
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, _before = interrupted_mid(temp)
@@ -13440,17 +13476,26 @@ def _self_test_checks():
               and "recovery finished (" in said and "{}/lock stays could not be observed".format(JOURNAL_REL) in said
               and lock_present(root) and txn_state(root, rid) == "rolled-back", said)
 
-    # the journal directory made unreadable but still searchable (mode 0o300) just before the real release: the
-    # release cannot open it and returns, and the lock, read back beneath the journal descriptor this run holds,
+    # the journal directory made unreadable but still searchable (mode 0o300) just before the real release, which
+    # then cannot read the lock and returns: the lock, read back beneath the journal descriptor this run holds,
     # is observed in place, so the finished recovery is refused naming it as one that STAYS (red when the
-    # read-back re-resolves the journal path from the product root, which cannot open that directory)
+    # read-back re-resolves the journal path from the product root, which cannot open that directory). The
+    # release reads the lock beneath that descriptor too, which needs no read of the directory, so the mode alone
+    # no longer leaves the lock in place (the next vector).
     def release_journal_unlistable(journal_root):
         os.chmod(journal_root, 0o300)
         return real_release_lock(journal_root)
+
+    def release_journal_unlistable_unread(journal_root):
+        def unreadable(*_args, **_kwargs):
+            raise _journal.JournalError("INJECTED-UNREADABLE-LOCK")
+        with mock.patch.object(_journal, "read_lock_owner", unreadable), \
+                mock.patch.object(_journal, "read_lock_owner_at", unreadable):
+            return release_journal_unlistable(journal_root)
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, _before = interrupted_mid(temp)
         try:
-            with mock.patch.object(_journal, "release_lock", release_journal_unlistable):
+            with mock.patch.object(_journal, "release_lock", release_journal_unlistable_unread):
                 report, finished = outcome_of(reconcile_report, root)
         finally:
             os.chmod(_journal_root(root), 0o700)
@@ -13460,6 +13505,20 @@ def _self_test_checks():
               and "recovery finished (" in said and left_in_place in said and lock_stays in said
               and "could not be observed" not in said and lock_present(root) and txn_state(root, rid) == "rolled-back",
               said)
+
+    # the same mode before the real release, which reads its lock: it reads and removes the lock beneath the journal
+    # descriptor this run holds, so the finished recovery is reported and no lock stays (red when the release
+    # resolves the journal path, which it cannot open: the lock then stays and the recovery is refused)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        try:
+            with mock.patch.object(_journal, "release_lock", release_journal_unlistable):
+                report, why = outcome_of(reconcile_report, root)
+        finally:
+            os.chmod(_journal_root(root), 0o700)
+        check("reconcile-finished-unlistable-journal-lock-released-beneath-descriptor",
+              report == ([(rid, "rolled-back")], False, True) and why is None and not lock_present(root)
+              and txn_state(root, rid) == "rolled-back", (report, str(why)))
 
     # the release leaves a lock it cannot read (mode 0) and the journal is then renamed aside, an empty directory
     # put at its path: the journal path no longer resolves to the journal this run holds, so the finished
@@ -15151,7 +15210,6 @@ def _self_test_checks():
         os.makedirs(root / JOURNAL_REL)
         prior = _snapshot(root)
         lock_path = root / JOURNAL_REL / "lock"
-        real_fsync_dir = _journal._fsync_path_dir
         real_write_all = _journal._write_all
         faults = []
 
@@ -15162,19 +15220,19 @@ def _self_test_checks():
                     raise OSError("an injected lock fault")
                 return real(*args)
             return faulty
-        with landed(composing), mock.patch.object(_journal, "_fsync_path_dir", failing(real_fsync_dir, 1)):
+        with landed(composing), lock_dir_fsync(lambda real: failing(real, 1)):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         # its lock released durably and the journal listing as found, "nothing written" is the DERIVED claim
         check("driver-apply-lock-sync-failure-released", "cannot take the adoption journal lock" in (err or "")
               and "WAS created, then released again" in (err or "") and "may not be durable" not in (err or "")
               and (err or "").endswith("; nothing written (fail-closed)") and _snapshot(root) == prior)
         del faults[:]
-        with landed(composing), mock.patch.object(_journal, "_fsync_path_dir", failing(real_fsync_dir, 2)):
+        with landed(composing), lock_dir_fsync(lambda real: failing(real, 2)):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-lock-release-unconfirmed-named", "released again, but the release may not be "
               "durable" in (err or "") and "nothing written" not in (err or "") and _snapshot(root) == prior)
         del faults[:]
-        with landed(composing), mock.patch.object(_journal, "_fsync_path_dir", failing(real_fsync_dir, 1)), \
+        with landed(composing), lock_dir_fsync(lambda real: failing(real, 1)), \
                 mock.patch.object(_journal, "release_lock", lambda journal_root: None):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         stayed = lock_path.is_file()
@@ -15238,13 +15296,15 @@ def _self_test_checks():
             os.unlink(lock_path)
         syncs = []
 
-        def second_sync_failing(path):
-            syncs.append(path)
-            if len(syncs) == 2:
-                raise OSError("an injected release fsync fault")
-            return real_fsync_dir(path)
+        def second_sync_failing(real):
+            def sync(path):
+                syncs.append(path)
+                if len(syncs) == 2:
+                    raise OSError("an injected release fsync fault")
+                return real(path)
+            return sync
         with landed(composing), mock.patch.object(_journal, "run_transaction", unopened), \
-                mock.patch.object(_journal, "_fsync_path_dir", second_sync_failing):
+                lock_dir_fsync(second_sync_failing):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-release-unconfirmed-named", "refused before it opened" in (err or "")
               and "released, but the release may not be durable" in (err or "")
