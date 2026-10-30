@@ -210,6 +210,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
@@ -979,6 +980,40 @@ def _self_test_isolated():
                    ["0x" + format(b, "02x") for b in range(256)
                     if b != 0x0A and not 0x20 <= b <= 0x7E
                     and not _wf_refused(wf_plant + bytes([b]) + b"# || true")], [])
+
+            # The checkout step must not leave the job token in the checkout's git config, where every
+            # later step can read it. Held as its own property, not only through the exact text, so an
+            # edit that changes the template and _WORKFLOW_CANONICAL together still reds while the
+            # checkout drops persist-credentials: false. The property reads the effective text: exactly
+            # one actions/checkout step, whose with: block carries the line verbatim.
+            wf_checkout = "      - uses: actions/checkout@"
+
+            def _wf_checkout_drops_token(text):
+                lines = text.split("\n")
+                starts = [i for i, ln in enumerate(lines) if ln.startswith(wf_checkout)]
+                if len(starts) != 1:
+                    return False
+                body = []
+                for ln in lines[starts[0] + 1:]:
+                    if not ln.startswith("        "):
+                        break
+                    body.append(ln)
+                return (body[:1] == ["        with:"]
+                        and "          persist-credentials: false" in body[1:])
+
+            expect("workflow-checkout-persist-credentials-false",
+                   (_wf_checkout_drops_token(_wf_effective(workflow.read_bytes())),
+                    _wf_checkout_drops_token(_WORKFLOW_CANONICAL)), (True, True))
+            wf_persist = "\n          persist-credentials: false"
+            for wf_label, wf_mutant in (
+                    ("absent", _WORKFLOW_CANONICAL.replace(wf_persist, "")),
+                    ("true", _WORKFLOW_CANONICAL.replace(wf_persist, wf_persist[:-5] + "true")),
+                    ("on-interpreter-step", _WORKFLOW_CANONICAL.replace(wf_persist, "").replace(
+                        "\n" + wf_step, wf_persist + "\n" + wf_step)),
+                    ("second-checkout-step", _WORKFLOW_CANONICAL.replace(
+                        wf_step, "      - uses: actions/checkout@v4\n" + wf_step))):
+                expect("workflow-checkout-persist-credentials-mutant-reds-{}".format(wf_label),
+                       (wf_mutant != _WORKFLOW_CANONICAL, _wf_checkout_drops_token(wf_mutant)), (True, False))
 
             # --- The recipe end to end over a REAL drifted view (U16): a committed clean store
             # with ONE declared view, populated through the U4 engine's own public planner

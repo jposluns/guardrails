@@ -28,10 +28,13 @@ jobs:
       # fetch-depth 0 checks out the full commit history. Today's doctor observations read the
       # checked-out revision, the index, repository config, remotes, and object presence; none reads
       # history, so a shallow clone would already satisfy them. The full history is kept so a later
-      # history-reading check need not change the template.
+      # history-reading check need not change the template. persist-credentials false keeps the job
+      # token out of the checkout's git config, so no later step can read it from there; nothing after
+      # the checkout fetches or pushes.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
