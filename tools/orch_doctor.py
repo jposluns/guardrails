@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Orchestration-suite doctor (GD-112): validate the registry, the yield roster, the provider
+"""Orchestration-suite doctor: validate the registry, the yield roster, the provider
 contract, and the state directory; and re-run the resume audit to clear (or re-arm) the barrier.
   orch_doctor.py                 validate everything; exit 0 clean, 1 findings, 2 no registry
   orch_doctor.py --resume-audit  re-run the resume probes; a clean run clears the barrier
@@ -34,7 +34,7 @@ YIELD_MATCHER_TOOLS = {"ScheduleWakeup", "CronCreate"}  # keep equal to the mani
 
 
 # The truncation guard's registry-required deny reasons, and its scope decision for a Bash call from the
-# repository root, live in aiqt_hooks (round 8) so this doctor and the SessionStart resume audit, the two
+# repository root, live in aiqt_hooks so this doctor and the SessionStart resume audit, the two
 # writers of resume-barrier.json, report and arm on one scope.
 _STRICT_SCOPE_FINDINGS = aiqt_hooks._ORCH_STRICT_SCOPE_FINDINGS
 
