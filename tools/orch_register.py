@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Mistakes-register appender and AEI projection (GD-112 component 6; rules mstreg/slfgrd).
+"""Mistakes-register appender and AEI projection (rules mstreg/slfgrd).
 
   orch_register.py append --register PATH --id MR-N --mistake T --evidence R --rule CID \
                           --guardrail T [--status proposed] [--commit SHA --check-ref PATH]
                           [--prefix MR] [--klass T] [--ref R] [--bootstrap]
       Append one chained row (seq and prev computed from the file; a wrong --id fails). --prefix
-      parameterizes the id family (MR for the mistakes register, AT for an attestation register,
-      GD-127 C.2) and must agree with the registry declaration; --klass writes the optional class
+      parameterizes the id family (MR for the mistakes register, AT for an attestation register)
+      and must agree with the registry declaration; --klass writes the optional class
       field (for example systemic-lapse); --ref writes the blocker ref an attestation row covers.
       An ordinary append requires the register's append-only authority exactly as the register
       gate without --update-anchor does: an untracked register with no anchor is refused with

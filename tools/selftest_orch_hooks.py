@@ -60,6 +60,7 @@ import threading
 import time
 import datetime
 import hashlib
+import unicodedata
 from pathlib import Path
 try:
     import tomllib
@@ -1251,8 +1252,504 @@ def _rdp_cases(tmp):
     finally:
         aiqt_hooks._rdp_decide, sys.stdin = saved_decide, saved_stdin
     check("rdp/handler-crash-fails-closed", rc, 2)
+    _rdp_label_screen_cases(base)
     _rdp_draft_cases(base)
     _rdp_scope_cases(base, bare)
+
+
+def _rdp_mutant(changes, fn):
+    """fn() against a mutant of the hook: each change, a (name, value) pair, sets that attribute of
+    aiqt_hooks, and every attribute is restored after."""
+    saved = {name: getattr(aiqt_hooks, name) for name, _value in changes}
+    try:
+        for name, value in changes:
+            setattr(aiqt_hooks, name, value)
+        return fn()
+    finally:
+        for name, value in saved.items():
+            setattr(aiqt_hooks, name, value)
+
+
+def _rdp_unfenced(text):
+    """text with every line inside a fenced code block blanked, each fence line kept (a line of three
+    backticks or tildes after any spaces opens a block, and the next one closes it): the fence exemption the
+    label screen no longer makes, for the mutants that put it back."""
+    out = []
+    inside = False
+    for line in text.split("\n"):
+        fence = line.lstrip(" ")[:3] in ("```", "~~~")
+        out.append(line if fence or not inside else "")
+        inside = inside != fence
+    return "\n".join(out)
+
+
+def _rdp_screen_text(ls, extra):
+    """A brief of the label screen fixture ls: a canonical head of four lines, then the extra lines."""
+    head = ["Review the change.", "Review-target: revision", "Reviewed-revision: " + ls.pin,
+            "Review-path: src/a.py"]
+    return "".join(line + "\n" for line in head + list(extra))
+
+
+def _rdp_screen(ls, extra, given=None):
+    """withheld or passed: the label screen (_rdp_labels) over _rdp_screen_text(ls, extra)."""
+    found, _why = aiqt_hooks._rdp_labels(_rdp_screen_text(ls, extra), given or ls.binding["labels"])
+    return "withheld" if found is None else "passed"
+
+
+def _rdp_screen_reason(ls, extra):
+    """The label screen's reason for _rdp_screen_text(ls, extra), empty when the brief passes."""
+    _found, why = aiqt_hooks._rdp_labels(_rdp_screen_text(ls, extra), ls.binding["labels"])
+    return why or ""
+
+
+def _rdp_label_screen_cases(base):
+    """The label screen vectors (rdp/label-screen-*). Every line of a brief is screened, a fenced code
+    block's included, by two rules, each withholding the dispatch as UNVERIFIABLE with a reason naming the
+    first line at fault: the character rule (a control character other than a newline or a tab, or a format
+    character, anywhere) and the name test (a line, a line read as a label by its value alone, whose
+    letters and digits hold a label's name with a colon after it)."""
+    ls = RdpFixture(base, "labelscreen")
+    _rdp_hidden_character_cases(ls)
+    _rdp_name_test_cases(ls)
+    _rdp_label_screen_mutant_cases(ls)
+    _rdp_label_screen_sweep(ls)
+    _rdp_label_screen_timing(ls)
+
+
+def _rdp_hidden_character_cases(ls):
+    """The character rule: each class is withheld, as a line of its own and inside a fenced code block, and
+    its flip, the line with the refused characters removed, passes; the forms that put a label's name before
+    its colon only on screen are withheld through the whole hook, the reason naming the character; and the
+    reason names the first such line, its character and its column."""
+    def _refused(ch):
+        return ch not in "\n\t" and unicodedata.category(ch) in ("Cc", "Cf")
+    # The lines hold no label's name followed by a colon, so only the character rule refuses them.
+    hidden = (
+        ("carriage-return", "Note\rsee below"), ("escape", "Note \x1b[1mbold\x1b[0m"),
+        ("backspace", "Note x\x08y"), ("bell", "Note\x07"), ("vertical-tab", "Note\x0bbelow"),
+        ("delete", "Note\x7f"), ("c1-control-sequence", "Note \x9b1m"), ("c1-string", "Note \x90x\x9c"),
+        ("bidi-override", "Note \u202eetoN"), ("bidi-isolate", "Note \u2066x\u2069"),
+        ("zero-width-space", "No\u200bte"), ("soft-hyphen", "co\u00adoperate"),
+        ("byte-order-mark", "Note\ufeff"), ("tag-character", "Note\U000e0041"),
+        ("arabic-letter-mark", "Note\u061c"),
+    )
+    check("rdp/label-screen-hidden-characters", [
+        (cls, _rdp_screen(ls, [line]), _rdp_screen(ls, ["```", line, "```"]),
+         _rdp_screen(ls, ["".join(ch for ch in line if not _refused(ch))])) for cls, line in hidden],
+        [(cls, "withheld", "withheld", "passed") for cls, _line in hidden])
+
+    # Forms that put a label's name before its colon only on screen (a cursor movement, a backspace
+    # overstrike, a carriage return, a right-to-left override), through the whole hook, the label turning
+    # over: each is withheld, the reason naming its first refused character; the flip, the line with the
+    # refused characters removed, holds no label and is allowed.
+    tricks = (
+        ("cursor-position", lambda n, v: "\x1b[{}G: {}\x1b[1G{}".format(len(n) + 1, v, n)),
+        ("cursor-back", lambda n, v: "x" * len(n) + ": " + v + "\x1b[{}D".format(len(n) + 2 + len(v)) + n),
+        ("backspaces", lambda n, v: "x" * len(n) + ": " + v + "\x08" * (len(n) + 2 + len(v)) + n),
+        ("carriage-return", lambda n, v: "x" * len(n) + ": " + v + "\r" + n),
+        ("bidi-name", lambda n, v: "\u202e" + n[::-1] + "\u202c: " + v),
+        ("bidi-line", lambda n, v: "\u202e" + (n + ": " + v)[::-1] + "\u202c"),
+    )
+    values = (("Review-target", "working-tree"), ("Reviewed-revision", ls.seed), ("Review-path", "seed.txt"))
+
+    def _withheld(line):
+        result = ls.dispatch(ls.good(extra=[line]))
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        first = next(ch for ch in line if _refused(ch))
+        return (_rdp_kind(result), "line 7 (" in reason and "U+{:04X}".format(ord(first)) in reason)
+    rows = [(cls, make, values[k % 3]) for k, (cls, make) in enumerate(tricks)]
+    check("rdp/label-screen-hidden-dispatch", [
+        (cls, _withheld(make(n, v)),
+         _rdp_kind(ls.dispatch(ls.good(extra=["".join(ch for ch in make(n, v) if not _refused(ch))]))))
+        for cls, make, (n, v) in rows], [(cls, ("unverifiable", True), "allow") for cls, _m, _v in rows])
+
+    control = _rdp_screen_reason(ls, ["x", "ab\x1b[0m", "\u202e"])
+    fmt = _rdp_screen_reason(ls, ["Note \u202ex"])
+    check("rdp/label-screen-hidden-reason", (
+        control.startswith("has line 6 ('ab\\x1b[0m'), which holds U+001B at column 3, a control character; "),
+        fmt.startswith("has line 5 ('Note \\u202ex'), which holds U+202E RIGHT-TO-LEFT OVERRIDE at column 6, a "
+                       "format character; "),
+        fmt.endswith("a control character other than a newline or a tab, or a format character, can make what "
+                     "a reader sees of the line differ from what the hook reads, so remove it")),
+        (True, True, True))
+
+
+def _rdp_name_test_cases(ls):
+    """The name test: each hide class is withheld for each of three labels, and its flip (a semicolon for
+    its colon) passes; one row of each class is withheld through the whole hook; each over-refusal class the
+    rule keeps is withheld, and its flip passes; a name that starts a longer word passes, and its flip (the
+    word split after the name) is withheld; each form the rules disclose they do not catch passes; no
+    fenced code block is passed over; and the reason names the first line and the label."""
+    labels = ls.binding["labels"]
+
+    def look(colon, alike):
+        return alike if colon == ":" else colon
+
+    # Each row is (class, make): make(name, colon, value) gives the extra lines, the hide with colon ":" and
+    # its flip with ";". Each value would change the decision if the line were read: a second target or pin
+    # (the at-most-once refusal) or a declared path the commit does not change.
+    hides = [("invisible-prefix", lambda n, c, v, p=p: [p + n + c + " " + v])
+             for p in ("\u115f", "\u17b4", "\u2800", "\u3164", "\u00a0", " ")]
+    hides += [
+        ("after-colon", lambda n, c, v: [n + c + "\t" + v]),
+        ("after-colon", lambda n, c, v: [n + c + "\u00a0" + v]),
+        ("after-colon", lambda n, c, v: [n + c + v]),
+        ("case", lambda n, c, v: [n.upper() + c + " " + v]),
+        ("case", lambda n, c, v: [n.lower() + c + " " + v]),
+        ("markdown", lambda n, c, v: ["**" + n + c + "** " + v]),
+        ("markdown", lambda n, c, v: ["_" + n + c + "_ " + v]),
+        ("markdown", lambda n, c, v: ["> " + n + c + " " + v]),
+        ("markdown", lambda n, c, v: ["- " + n + c + " " + v]),
+        ("markdown", lambda n, c, v: ["## " + n + c + " " + v]),
+        ("markdown", lambda n, c, v: ["`" + n + c + "` `" + v + "`"]),
+        ("markup-before-colon", lambda n, c, v: ["[" + n + "]" + c + " " + v]),
+        ("markup-before-colon", lambda n, c, v: ["**" + n + "**" + c + " " + v]),
+        ("markup-before-colon", lambda n, c, v: ["`" + n + "`" + c + " " + v]),
+        ("markup-before-colon", lambda n, c, v: ["<" + n + ">" + c + " " + v]),
+        ("html", lambda n, c, v: ["<!-- " + n + c + " " + v + " -->"]),
+        ("html", lambda n, c, v: ["<b>" + n + c + "</b> " + v]),
+        ("html", lambda n, c, v: ["<span>" + n + c + " " + v]),
+        ("value-next-line", lambda n, c, v: [n + c, v]),
+        ("before-colon", lambda n, c, v: [n + " " + c + " " + v]),
+        ("before-colon", lambda n, c, v: [n + "\U00013441" + c + " " + v]),
+        ("before-colon", lambda n, c, v: [n + "\u3164" + c + " " + v]),
+        ("before-colon", lambda n, c, v: [n + "\U00013441" * 3 + c + " " + v]),
+        ("before-colon", lambda n, c, v: [n + "\u4e2d\u6587" + c + " " + v]),
+        ("letters-before-colon", lambda n, c, v: ["[" + n + "](x)" + c + " " + v]),
+        ("letters-before-colon",
+         lambda n, c, v: ["[" + n + "][r]" + c + " " + v, "", "[r]: https://example.invalid/"]),
+        ("letters-before-colon", lambda n, c, v: [n + "<span hidden>x</span>" + c + " " + v]),
+        ("letters-before-colon", lambda n, c, v: [n + "\u3164x" + c + " " + v]),
+        ("lookalike-colon", lambda n, c, v: [n + look(c, "\uff1a") + " " + v]),
+        ("lookalike-colon", lambda n, c, v: [n + look(c, "\u2236") + " " + v]),
+        ("lookalike-colon", lambda n, c, v: [n + look(c, "\ua789") + " " + v]),
+        ("mark-for-colon", lambda n, c, v: [n + look(c, "\u0903") + " " + v]),
+        ("mark-for-colon", lambda n, c, v: [n + look(c, "\u0a83") + " " + v]),
+        ("mark-for-colon", lambda n, c, v: [n + look(c, "\u0f7f") + " " + v]),
+        ("other-for-colon", lambda n, c, v: [n + look(c, "\u1680") + " " + v]),
+        ("other-for-colon", lambda n, c, v: [n + look(c, "\ue000") + " " + v]),
+        ("other-for-colon", lambda n, c, v: [n + look(c, "\ufdd0") + " " + v]),
+        ("lookalike-letter", lambda n, c, v: [n.replace("e", "\u0435", 1) + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: [n.replace("e", "\u0435").replace("i", "\u0456") + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: ["\uff32" + n[1:] + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: ["\u0154" + n[1:] + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: [n[0] + "\u0301\u0435\u0300" + n[2:] + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: [n[0] + "\u2010\u0435\u2010" + n[2:] + c + " " + v]),
+        ("prefix-letter-or-digit", lambda n, c, v: ["1. " + n + c + " " + v]),
+        ("prefix-letter-or-digit", lambda n, c, v: ["a) " + n + c + " " + v]),
+        ("prefix-letter-or-digit", lambda n, c, v: ["- [x] " + n + c + " " + v]),
+        ("prefix-letter-or-digit", lambda n, c, v: ["\u0640" + n + c + " " + v]),
+        ("escape-inside", lambda n, c, v: [n.replace("-", "\\-") + c + " " + v]),
+        ("fenced", lambda n, c, v: ["```", "  " + n + c + " " + v, "```"]),
+        ("fenced", lambda n, c, v: ["~~~~", "- `" + n + c + "` " + v, "~~~~"]),
+        ("fence-in-comment", lambda n, c, v: ["<!--", "```", "-->", "**" + n + c + "** " + v]),
+        ("indented-fence", lambda n, c, v: ["", "    ```", "", "**" + n + c + "** " + v]),
+        ("fence-in-list", lambda n, c, v: ["- item", "  ```", "**" + n + c + "** " + v]),
+    ]
+    hides += [("inside-name", lambda n, c, v, p=p: [n[0] + p + n[1:] + c + " " + v])
+              for p in ("\u034f", "\u0301", "\u0323", "\u0903", "\u3164", "\u2800", "\u0640", "\U00013441")]
+    hides += [("lookalike-hyphen", lambda n, c, v, p=p: [n.replace("-", p) + c + " " + v])
+              for p in ("\u2010", "\u2011", "\u2212")]
+    # Behind another label's value, on a line read as that label. Its flip is still read as the carrying
+    # label, so the dispatch rows below leave this class out.
+    carried = [("value-of-read-label", lambda n, c, v: ["Review-branch: main " + n + c + " " + v])]
+    values = (("Review-target", "working-tree"), ("Reviewed-revision", ls.seed), ("Review-path", "seed.txt"))
+    check("rdp/label-screen-hides-withheld", [
+        (cls, _rdp_screen(ls, make(n, ":", v)), _rdp_screen(ls, make(n, ";", v)))
+        for cls, make in hides + carried for n, v in values],
+        [(cls, "withheld", "passed") for cls, _make in hides + carried for _value in values])
+
+    # One row of each class through the whole hook, the label turning over: the dispatch is withheld with a
+    # reason naming the line (the first extra line that its flip changes) and the label, and its flip is
+    # allowed.
+    def _named(extra, flip, label):
+        result = ls.dispatch(ls.good(extra=extra))
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        number = 7 + next(k for k, (a, b) in enumerate(zip(extra, flip)) if a != b)
+        return (_rdp_kind(result), "line {} (".format(number) in reason and repr(label) in reason
+                and "reword the line" in reason)
+    picked = {}
+    for cls, make in hides:
+        picked.setdefault(cls, make)
+    rows = [(cls, make, values[k % 3]) for k, (cls, make) in enumerate(picked.items())]
+    check("rdp/label-screen-hides-dispatch", [
+        (cls, _named(make(n, ":", v), make(n, ";", v), n + ":"),
+         _rdp_kind(ls.dispatch(ls.good(extra=make(n, ";", v))))) for cls, make, (n, v) in rows],
+        [(cls, ("unverifiable", True), "allow") for cls, _m, _v in rows])
+
+    # What the rules do not catch, as the docstring, the residue and ORCHESTRATION.md disclose: an ASCII
+    # letter or digit inside a name or right after its last letter, a letter written as another ASCII letter
+    # or digit or as three look-alikes in a row, a missing colon or one written as a letter, and a label
+    # split across lines. Each is neither read nor refused.
+    missed = (
+        ("letters-in-tag-inside", ["Re<b></b>view-path: seed.txt"]),
+        ("reference-inside", ["Review&#45;path: seed.txt"]),
+        ("reference-for-letter", ["&#82;eview-path: seed.txt"]),
+        ("reference-for-colon", ["Review-path&#58; seed.txt"]),
+        ("letter-right-after-name", ["Review-pathx: seed.txt"]),
+        ("ascii-letter-replaced", ["Rev1ew-path: seed.txt"]),
+        ("three-lookalikes", ["R\u0435\u0475\u0456ew-path: seed.txt"]),
+        ("colon-missing", ["Review-path seed.txt"]),
+        ("colon-a-letter", ["Review-path\u02d0 seed.txt"]),
+        ("split-across-lines", ["Review-", "path: seed.txt"]),
+    )
+    check("rdp/label-screen-not-caught", [(cls, _rdp_screen(ls, extra)) for cls, extra in missed],
+          [(cls, "passed") for cls, _extra in missed])
+
+    # The over-refusal classes the rules keep: a label's name with a colon after it in prose is withheld, and
+    # so is a refused character in prose or a carriage return before a line's end; the flip (the colon
+    # dropped, ASCII quotes, the character removed) passes.
+    kept = (
+        ("code-span", ["`Review-path:` is repeated per file."], ["`Review-path` is repeated per file."]),
+        ("list", ["- `Review-path:` lines name the files to read."],
+         ["- `Review-path` lines name the files to read."]),
+        ("table", ["| Review-path: | one per file |"], ["| Review-path | one per file |"]),
+        ("heading", ["### Review-path: notes"], ["### Review-path notes"]),
+        ("parenthesis", ["(Review-path: lines are optional for deletions.)"],
+         ["(Review-path lines are optional for deletions.)"]),
+        ("quote", ["'Reviewed-revision:' appears once."], ["'Reviewed-revision' appears once."]),
+        ("link", ["[Review-target:](docs) explains the target."], ["[Review-target](docs) explains the target."]),
+        ("checkbox", ["- [ ] Review-path: lines verified"], ["- [ ] Review-path lines verified"]),
+        ("checkbox", ["- [x] Reviewed-revision: checked"], ["- [x] Reviewed-revision checked"]),
+        ("comment-marker", ["// Review-path: a comment"], ["// Review-path a comment"]),
+        ("sentence", ["See the Review-path: field and the Reviewed-revision: line."],
+         ["See the Review-path field and the Reviewed-revision line."]),
+        ("case", ["review-path: is case-sensitive in the hook."], ["review-path is case-sensitive in the hook."]),
+        ("punctuation-outside-ascii", ["\u201cReview-path\u201d lines name files."],
+         ['"Review-path" lines name files.']),
+        ("punctuation-outside-ascii", ["Review-path \u2192 one per file"], ["Review-path -> one per file"]),
+        ("space-for-hyphen", ["Review path: one per file"], ["Review path, one per file"]),
+        ("word-holding-name", ["preview path: build/out"], ["preview path build/out"]),
+        ("colon-later-in-line", ["The Review-path lines follow: one per file."],
+         ["The Review-path lines follow, one per file."]),
+        ("link-after-name", ["Review-path is described at https://example.invalid/docs"],
+         ["Review-path is described at example.invalid/docs"]),
+        ("mark-after-name", ["Review-path\u0301 lines"], ["Review-path lines"]),
+        ("space-outside-ascii-after-name", ["Review-path\u1680lines"], ["Review-path lines"]),
+        ("fenced", ["```", "- `Review-path:` lines name the files to read.", "```"],
+         ["```", "- `Review-path` lines name the files to read.", "```"]),
+        ("format-character-in-prose", ["co\u00adoperate"], ["cooperate"]),
+        ("carriage-return-line-end", ["Note\r"], ["Note"]),
+    )
+    check("rdp/label-screen-over-refusal-kept", [
+        (cls, _rdp_screen(ls, extra), _rdp_screen(ls, flip)) for cls, extra, flip in kept],
+        [(cls, "withheld", "passed") for cls, _extra, _flip in kept])
+
+    # A name that starts a longer word, an ASCII letter or digit right after its last letter, is not a label
+    # however a colon follows on its line, so a path or a plural holding a name passes; the flip, the word
+    # split after the name, is withheld.
+    continued = (
+        ("plural", ["Review-paths are listed below: one per file."],
+         ["Review-path entries are listed below: one per file."]),
+        ("path-holding-name", ["Add `.preview/pathfinder.py`, with a row in `hooks.toml`:"],
+         ["Add `.preview/path/finder.py`, with a row in `hooks.toml`:"]),
+    )
+    check("rdp/label-screen-name-continued", [
+        (cls, _rdp_screen(ls, extra), _rdp_screen(ls, flip)) for cls, extra, flip in continued],
+        [(cls, "passed", "withheld") for cls, _extra, _flip in continued])
+
+    # No fenced code block is passed over: a line inside one and a fence line itself are screened like any
+    # other, however the fence is written, so a label after an opener inside an HTML comment, a
+    # four-space-indented opener or an opener inside a list item is withheld too.
+    hidden = "  Review-path: seed.txt"
+    fenced = (
+        ("backticks", ["```", hidden, "```"]),
+        ("tildes", ["~~~~", "- `Review-path:` lines", "~~~~"]),
+        ("info-string-and-indent", ["- item", "    ```text", "    " + hidden, "    ```"]),
+        ("unclosed-to-end", ["```", hidden]),
+        ("fence-line-itself", ["```Review-path: x", "```"]),
+        ("opener-in-comment", ["<!--", "```", "-->", "**Review-path:** seed.txt"]),
+        ("indented-opener", ["", "    ```", "", "**Review-path:** seed.txt"]),
+        ("opener-in-list-item", ["- item", "  ```", "**Review-path:** seed.txt"]),
+    )
+    check("rdp/label-screen-every-line-screened", [(name, _rdp_screen(ls, extra)) for name, extra in fenced],
+          [(name, "withheld") for name, _extra in fenced])
+    in_fence = ls.dispatch(ls.good(extra=["```", "Review-target: working-tree", "```"]))
+    check("rdp/label-screen-fence-exact-label-read", (
+        _rdp_kind(in_fence), "has 2 'Review-target:' lines" in
+        in_fence[1]["hookSpecificOutput"].get("permissionDecisionReason", "")), ("unverifiable", True))
+
+    # The reason: the first line, its text and the label, and how to reword it; a canonical brief, a brief
+    # naming the labels without colons and one holding tabs dispatch.
+    first = _rdp_screen_reason(ls, ["x", " Review-path: a", " Reviewed-revision: b"])
+    check("rdp/label-screen-reason", (
+        first.startswith("has line 6 (' Review-path: a'), which holds the 'Review-path:' label's name followed "
+                         "by a colon outside a label the hook reads (a label is read only at column 0, followed "
+                         "by one space)"),
+        first.endswith("so write the label exactly or reword the line so no colon follows the name")),
+        (True, True))
+    check("rdp/label-screen-canonical-dispatches", [_rdp_kind(ls.dispatch(ls.good(extra=extra))) for extra in (
+        [], ["Labels: Review-target, Reviewed-revision, Review-path.", "the Review-path field"],
+        ["Note:\tsee the\ttable"])], ["allow"] * 3)
+
+
+def _rdp_label_screen_mutant_cases(ls):
+    """One mutant per element of the rules: each flips its row (the first value is the row with the hook as
+    it is, the second with the mutant)."""
+    import re
+    import string
+    import types
+    labels = ls.binding["labels"]
+    never = re.compile(r"(?!)")
+    name = aiqt_hooks._rdp_name
+    read = aiqt_hooks._rdp_read_labels
+    hidden_at = aiqt_hooks._rdp_hidden
+    screened = aiqt_hooks._rdp_screened
+    letters = aiqt_hooks._rdp_letters
+
+    def _whole_lines(lines, given):
+        return (read(lines, given)[0], list(lines))
+
+    def _values_blank(lines, given):
+        found, rest = read(lines, given)
+        return (found, ["" if cut != line else line for cut, line in zip(rest, lines)])
+
+    def _fences_passed(lines, given):
+        found, rest = read(lines, given)
+        return (found, _rdp_unfenced("\n".join(rest)).split("\n"))
+
+    def _anchored(text, names):
+        # a name read only from its line's first letter (a regex is fine here: these lines are short)
+        for number, line in enumerate(text.split("\n")):
+            for key, held in names.items():
+                if re.match("[\x00: ]*".join("[{}\x00]".format(ch) for ch in held) + "[\x00: ]*:", line):
+                    return (number, key)
+        return None
+
+    def _any_script(label):
+        held = letters(label).replace(" ", "")
+        return held.replace(":", "") if held.replace(":", "") and held.endswith(":") else None
+    shim = types.SimpleNamespace(normalize=lambda form, text: text, category=unicodedata.category,
+                                 name=unicodedata.name)
+    mutants = (
+        ("controls", [("_RDP_HIDDEN_CATEGORIES", ("Cf",))], ["Note \x1b[1mbold"], labels),
+        ("format-characters", [("_RDP_HIDDEN_CATEGORIES", ("Cc",))], ["Note \u202eetoN"], labels),
+        ("tab-shown", [("_RDP_SHOWN_CONTROLS", "\n")], ["Note:\tsee below"], labels),
+        ("newline-shown", [("_RDP_SHOWN_CONTROLS", "\t")], [], labels),
+        ("characters-in-fences-too", [("_rdp_hidden", lambda text: hidden_at(_rdp_unfenced(text)))],
+         ["```", "Note \x1b[1mbold", "```"], labels),
+        ("names-in-fences-too", [("_rdp_read_labels", _fences_passed)], ["```", "  Review-path: seed.txt", "```"],
+         labels),
+        ("read-label-not-screened", [("_rdp_read_labels", _whole_lines)], [], labels),
+        ("read-value-screened", [("_rdp_read_labels", _values_blank)],
+         ["Review-branch: main Reviewed-revision: " + ls.seed], labels),
+        ("normalization", [("unicodedata", shim)], ["\uff32\uff45\uff56\uff49\uff45\uff57-path: seed.txt"],
+         labels),
+        ("case-folding", [("_rdp_fold", lambda text: unicodedata.normalize("NFKD", text))],
+         ["REVIEW-PATH: seed.txt"], labels),
+        ("non-letters-passed-over", [("_RDP_UNLETTER", never)], ["Review/path: seed.txt"], labels),
+        ("underscore-passed-over", [("_RDP_UNLETTER", re.compile(r"[^\w:\n]+"))], ["Review_path: seed.txt"],
+         labels),
+        ("outside-ascii-a-colon", [("_RDP_NOT_WORD", never)], ["Review-path\u0903 seed.txt"], labels),
+        ("colons-between-letters",
+         [("_rdp_screened", lambda text: re.sub(r":(?=[0-9a-z\x00])", "#", screened(text)))],
+         ["Review\u2010path:"], labels),
+        ("stand-in-for-a-letter", [("_RDP_LOOKALIKE", never)], ["R\u0435view-path: seed.txt"], labels),
+        ("stand-in-through-separators", [("_RDP_LOOKALIKE", re.compile(r"[^\x00-\x7f](?=[0-9a-z])"))],
+         ["R\u2010\u0435\u2010view-path: seed.txt"], labels),
+        ("stand-in-passed-over", [("_rdp_screened", lambda text: screened(text).replace("\x00", "\x01"))],
+         ["Review-path\U00013441: seed.txt"], labels),
+        ("other-letters-removed", [("_RDP_NOT_ASCII", never)],
+         ["Re\U00013441\U00013441\U00013441view-path: seed.txt"], labels),
+        ("letters-after-name-passed-over", [("_RDP_NAME_ENDS", "")], ["[Review-path](x): seed.txt"], labels),
+        ("blank-letter-ends-name", [("_RDP_NAME_ENDS", " ")], ["Review-path\u3164x: seed.txt"], labels),
+        ("letter-continues-name", [("_RDP_NAME_ENDS", " \x00" + string.ascii_lowercase + string.digits)],
+         ["Add `.preview/pathfinder.py`, with a row in `hooks.toml`:"], labels),
+        ("contained-anywhere", [("_rdp_named", _anchored)], ["1. Review-path: seed.txt"], labels),
+        ("colon-after-name", [("_rdp_screened", lambda text: ":".join(screened(text)))],
+         ["the Review-path field"], labels),
+        ("label-without-colon", [("_rdp_name", lambda label: name(label + ":"))], ["Branch: protected"],
+         dict(labels, branch="Branch")),
+        ("label-outside-ascii", [("_rdp_name", _any_script)], ["a\u042f: x"], dict(labels, branch="\u042f:")),
+    )
+    check("rdp/label-screen-mutants", [
+        (element, _rdp_screen(ls, extra, given) != _rdp_mutant(
+            changes, lambda e=extra, g=given: _rdp_screen(ls, e, g)))
+        for element, changes, extra, given in mutants], [(element, True) for element, *_rest in mutants])
+
+
+def _rdp_label_screen_sweep(ls):
+    """The defining property, swept through _rdp_labels: every assigned code point that is not a letter or
+    digit (no letter or digit in its folded form, decided here apart from the hook), every 509th unassigned
+    or private-use one, and every 61st letter or digit, before each of three labels; each of those whose
+    folded form holds no ASCII letter or digit also after the name's first letter; and each of those whose
+    folded form does not begin with an ASCII letter or digit also between the name and its colon. Each such
+    line withholds the brief, by the character rule or the name test. A code point whose folded form holds
+    an ASCII letter or digit inside a name, or begins with one before its colon, is a disclosed hide and is
+    only counted. A newline (it splits the line) and a surrogate (it cannot occur in a UTF-8 brief) are not
+    swept."""
+    values = (("Review-target", "working-tree"), ("Reviewed-revision", ls.seed), ("Review-path", "seed.txt"))
+    tally = {}
+    for cp in range(sys.maxunicode + 1):
+        ch = chr(cp)
+        category = unicodedata.category(ch)
+        if category == "Cs" or ch == "\n" or (category in ("Cn", "Co") and cp % 509):
+            continue
+        folded = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", unicodedata.normalize(
+            "NFD", ch).casefold()).casefold())
+        letter = any(f.isalnum() for f in folded)
+        if letter and cp % 61:
+            continue
+        side = "letter-or-digit" if letter else "other"
+        inner = "ascii-letter-or-digit" if any(f.isascii() and f.isalnum() for f in folded) else side
+        after = "ascii-letter-or-digit" if folded[0].isascii() and folded[0].isalnum() else side
+        for n, v in values:
+            for spot, kind, line in (("before", side, ch + n + ": " + v),
+                                     ("inside", inner, n[0] + ch + n[1:] + ": " + v),
+                                     ("before-colon", after, n + ch + ": " + v)):
+                key = (kind, spot, _rdp_screen(ls, [line]))
+                tally[key] = tally.get(key, 0) + 1
+    check("rdp/label-screen-sweep", (
+        sorted(key for key in tally if key[2] != "withheld" and key[0] != "ascii-letter-or-digit"),
+        all(tally.get((side, spot, "withheld"), 0) > 0 for side in ("other", "letter-or-digit")
+            for spot in ("before", "inside", "before-colon")),
+        tally.get(("ascii-letter-or-digit", "inside", "passed"), 0) > 0,
+        tally.get(("ascii-letter-or-digit", "before-colon", "passed"), 0) > 0), ([], True, True, True))
+
+
+def _rdp_label_screen_timing(ls):
+    """Linear time: the label screen over seven adversarial briefs, each at 256 KiB and at 1 MiB: a line of
+    backticks that ends in a letter and a backtick (a pattern that backtracks over it takes time quadratic
+    in its length), a name's first eight letters with a look-alike and a colon, repeated (every attempt
+    reaches deep into a name), a letter and a look-alike, repeated (a NUL at every other character), a
+    short line, repeated (the most lines), a whole name and a word, repeated on one line that ends in a
+    colon (a name ended at every word), a letter and a look-alike between two marks, repeated (every mark a
+    colon the look-alike test passes over), and a mark, repeated (a colon at every character). At 1 MiB
+    each takes under a second of this process's CPU time, and each grows less than eightfold from 256 KiB
+    (about fourfold is linear, about sixteenfold quadratic). Stray work only adds time, so the 256 KiB brief
+    is timed three times and the least time kept, and the 1 MiB brief up to five times until its least time
+    passes; a 256 KiB time over a second ends the row's timing for that shape."""
+    labels = ls.binding["labels"]
+    lead = _rdp_screen_text(ls, [])
+
+    def _cpu(text):
+        started = time.process_time()
+        aiqt_hooks._rdp_labels(text, labels)
+        return time.process_time() - started
+
+    def _brief(unit, tail, size):
+        return lead + unit * ((size - len(lead) - len(tail.encode())) // len(unit.encode())) + tail + "\n"
+    shapes = (("backtick-fence-line", "`", "x`"), ("name-prefix-and-colon", "reviewpa\u0435:", ""),
+              ("lookalike-pairs", "r\u0435", ":"), ("short-lines", "a:\n", ""),
+              ("names-then-words", "reviewpath x ", ":"), ("lookalike-between-marks", "r\u0301\u0435\u0300", ":"),
+              ("marks", "\u0903", ""))
+    rows = []
+    for shape, unit, tail in shapes:
+        small = _cpu(_brief(unit, tail, 262144))
+        for _attempt in range(2):
+            if small > 1.0:
+                break
+            small = min(small, _cpu(_brief(unit, tail, 262144)))
+        big = None
+        if small <= 1.0:
+            text = _brief(unit, tail, 1048576)
+            for _attempt in range(5):
+                took = _cpu(text)
+                big = took if big is None else min(big, took)
+                if big < min(1.0, 8 * small + 0.01) or big > 8.0:
+                    break
+        rows.append((shape, big is not None and big < 1.0, big is not None and big < 8 * small + 0.01))
+    check("rdp/label-screen-linear-time", rows, [(shape, True, True) for shape, _unit, _tail in shapes])
 
 
 def _rwh_iso(hours=0):
@@ -12114,15 +12611,15 @@ def _main_isolated(report_path=None):
         # A command whose quoting or comments the detector cannot read to its end ("unbalanced": an open
         # quote, or a '#' whose comment reading depends on context) warns with a note saying so, since a
         # later `&` can be a hidden detach: in the unquoted here-document row the apostrophe leaves the scan
-        # open while bash starts `sleep 1` in the background. The quoted here-document row is the disclosed
-        # over-warn on a safe body. Each row reads ("allow", False, False, False) with the guard keeping its
+        # open while bash starts `sleep 1` in the background. The quoted here-document row, whose delimiter
+        # line never comes, is the disclosed over-warn on a safe body. Each row reads ("allow", False, False, False) with the guard keeping its
         # silent allow on "unbalanced", and the note check fails if it gives the detach note instead.
         ti_note_of = lambda res: (res[1] or {}).get("systemMessage", "")
         check("trunc/fg-unbalanced-no-registry-warns",
               [(_verdict(res), "could not read this foreground command to its end" in ti_note_of(res),
                 "trkasy" in ti_note_of(res), "run_in_background" in ti_note_of(res))
                for res in (ti_call({"command": v}) for v in (
-                   "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOF",
+                   "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOX",
                    "cat <<EOF\nuser's file\nEOF\nsleep 1 &", "[[ x =~ (a)#b ]] || echo RAN"))],
               [("warn", True, True, True)] * 4)
         # A run_in_background that is present but not a boolean gets the unreadable-input note naming the
@@ -12889,14 +13386,29 @@ def _main_isolated(report_path=None):
             else:
                 os.environ[_rr] = _rr_old
         # The guard reads a foreground detach through the shared lexer beside the raw scan
-        # (_orch_foreground_detach_lexed). The scan reads a here-document body as code, so it reads each `&`
-        # in the allow rows below as a bare detach; the lexer places that `&` in one of the three shapes that
-        # alone lift the scan's deny: a quoted here-document body (<<'EOF', <<"EOF", the commit-message
-        # form's body), a single- or double-quoted string (the scan's quote state shifted by a body quote),
-        # and a comment. Each allow row denies with the guard reading the scan alone (as it did before).
+        # (_orch_foreground_detach_lexed), on one of two paths; every allow row below takes one of them but
+        # the commit-template row, which takes neither. (1) In a command that is nothing but plain
+        # `cat > FILE <<'DELIM'` writes, the scan itself reads each body as data up to its delimiter line (the
+        # body skip, rows further below), so it reads no detach and, on the registry path these rows run, the
+        # lexer's narrowing is never reached: the cat-write row allows on the scan alone. Its body's apostrophe
+        # after the `&` makes it deny without the body skip: the scan then reads that `&` as a bare detach
+        # and ends inside the apostrophe's quote, so the narrowing, which needs the scan to read the whole
+        # command, cannot lift it. (2) In any other command the scan reads a here-document body as code, so
+        # it reads each `&` in the cat to standard output row, the commit-heredoc row and the three
+        # quote-shift rows as a bare detach; the lexer places that `&` in one of the three shapes that alone
+        # lift the scan's deny: a quoted here-document body (<<'EOF', <<"EOF", the commit-message form's
+        # body), a single- or double-quoted string (the scan's quote state shifted by a body quote), and a
+        # comment. Each of those rows denies with the guard reading the scan alone; the first is a cat to
+        # standard output, not a cat write, so that its body takes this path. The commit-template row's `&`
+        # lies inside the scan's double-quote state (the double-quoted "$(...)" that holds the body), so the
+        # scan reads no detach whether or not it skips bodies, the narrowing is never reached, and the row
+        # allows with either the body skip or the narrowing reverted.
         check("trunc/fg-quoted-heredoc-amp-allows",
-              [_verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)),
-               _verdict(bg('cat > f <<"EOF"\nFix A & B\nEOF', rib=False))], ["allow", "allow"])
+              [_verdict(bg("cat <<'EOF'\nFix A & B\nEOF", rib=False)),
+               _verdict(bg('cat <<"EOF"\nFix A & B\nEOF', rib=False))], ["allow", "allow"])
+        check("trunc/fg-quoted-heredoc-cat-write-amp-is-data-allows",
+              [_verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOF", rib=False)),
+               _verdict(bg('cat > f <<"EOF"\nFix A & B\'s\nEOF', rib=False))], ["allow", "allow"])
         check("trunc/fg-commit-heredoc-quoted-amp-allows",
               _verdict(bg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\"", rib=False)), "allow")
         check("trunc/fg-quote-shift-single-quoted-amp-allows",
@@ -12911,14 +13423,131 @@ def _main_isolated(report_path=None):
         # Every other case where the lexer and the scan disagree still denies: an `&` the lexer places in a
         # substitution that a double-quoted string holds (even inside a quoted string there, which the
         # lexer skips whole), one in an ANSI-C $'...' quote, and a quoted-delimiter body `&` after which
-        # the scan ends inside a quote (an apostrophe in the body). The first two rows allow if the
-        # narrowing lifts a scan detach without the lexer's place, the first also if it reads the outermost
-        # span holding the `&`, and the third if it lifts one without the scan reading to the end.
+        # the scan ends inside a quote (an apostrophe in a body whose delimiter line never comes, which the
+        # scan reads as shell text). The first two rows allow if the narrowing lifts a scan detach without
+        # the lexer's place, the first also if it reads the outermost span holding the `&`, and the third
+        # if it lifts one without the scan reading to the end.
         check("trunc/fg-amp-in-dq-substitution-denies",
               _verdict(bg('echo "$(echo "a & b")"', rib=False)), "deny")
         check("trunc/fg-amp-in-ansi-c-quote-denies", _verdict(bg("echo $'it\\'s & b' \\'", rib=False)), "deny")
         check("trunc/fg-quoted-heredoc-amp-then-open-quote-denies",
-              _verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOF", rib=False)), "deny")
+              _verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOX", rib=False)), "deny")
+        # Where the whole command is nothing but plain `cat > FILE <<'DELIM'` writes (or `>>`, or a
+        # double-quoted delimiter), each with its body and delimiter line and separated only by newlines,
+        # the scan reads each body as literal data up to its delimiter line, as bash does, so a quote, a
+        # backquote, a '$(' or an `&` in it does not change how the command is read. Each allow row denies
+        # with the scan reading such a body as shell text (the body apostrophe, quote, or `&`).
+        check("trunc/fg-quoted-heredoc-body-apostrophe-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nLine one.\n\nThe project's own material.\nEOF",
+                  'cat > /abs/f <<"EOF"\nit\'s\nEOF', "cat > rel/f.txt <<'EOF'\nit's\nEOF\n")],
+              ["allow"] * 3)
+        check("trunc/fg-quoted-heredoc-body-dquote-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nsay \"hi\nEOF", rib=False)), "allow")
+        check("trunc/fg-quoted-heredoc-body-backquote-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nrun `date # now\nEOF", rib=False)), "allow")
+        check("trunc/fg-quoted-heredoc-body-dollar-paren-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nrun $(date # now\nEOF", rib=False)), "allow")
+        check("trunc/fg-quoted-heredoc-body-amp-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nsleep 1 &\nEOF\ncat > /abs/g <<'EOF'\nit's\nEOF",
+                  "cat > /abs/f <<'EOF'\nit's & more\nEOF")],
+              ["allow"] * 2)
+        # A real `&` after the body's delimiter line still denies, and an unquoted delimiter's body, which
+        # bash expands, is still read as shell text, so a detach in a substitution there denies (it denied
+        # before the body skip too). A body whose end the scan cannot tell keeps the scan's reading of it
+        # as shell text, so the apostrophe still denies: no delimiter line, a delimiter line that is not the
+        # whole line (indented under <<, or ending in a carriage return), and a here-document in a subshell.
+        check("trunc/fg-quoted-heredoc-then-amp-denies",
+              _verdict(bg("cat > /abs/f <<'EOF'\nThe project's own material.\nEOF\nsleep 5 &", rib=False)),
+              "deny")
+        check("trunc/fg-unquoted-heredoc-subst-amp-denies",
+              _verdict(bg("cat > /abs/f <<EOF\n$(sleep 1 &)\nEOF", rib=False)), "deny")
+        check("trunc/fg-quoted-heredoc-unread-body-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nit's\nEOFX", "cat > /abs/f <<'EOF'\nit's\n\tEOF",
+                  "cat > /abs/f <<'EOF'\nit's\nEOF\r\n", "(cat > /abs/f <<'EOF'\nit's\nEOF\n)")],
+              ["deny"] * 4)
+        # A quoted here-document body that a shell runs is code, not data: fed to a shell, sourced from
+        # stdin, or piped into one, its `&` detaches in real bash, so the scan reads it as code and the body
+        # apostrophe denies, as it did before the body skip. Each row allows if the skip ignores the consumer.
+        check("trunc/fg-quoted-heredoc-fed-to-shell-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "bash <<'EOF'\nsleep 1 &\necho it's\nEOF", "cat <<'EOF' | bash\nsleep 1 &\necho it's\nEOF",
+                  ". /dev/stdin <<'EOF'\nsleep 1 &\necho it's\nEOF", "sh <<'EOF'\nsleep 1 &\necho it's\nEOF")],
+              ["deny"] * 4)
+        check("trunc/fg-quoted-heredoc-shell-forms-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "/usr/bin/bash <<'EOF'\nsleep 1 &\necho it's\nEOF", "env bash <<'EOF'\nsleep 1 &\necho it's\nEOF",
+                  "bash -s <<'EOF'\nsleep 1 &\necho it's\nEOF", "source /dev/stdin <<'EOF'\nsleep 1 &\necho it's\nEOF",
+                  "cat <<'EOF' | sh -s\nsleep 1 &\necho it's\nEOF", "<<'EOF' bash\nsleep 1 &\necho it's\nEOF",
+                  "bash \\\n<<'EOF'\nsleep 1 &\necho it's\nEOF")],
+              ["deny"] * 7)
+        # cat's output can still reach a shell through a pipe after an enclosing group or loop, the shell's
+        # own output or a process substitution; a here-document after another on the same line, or one read
+        # inside a body the scan read as code, has a consumer or an end the scan cannot tell. Each is a real
+        # detach in bash that the body skip allowed.
+        check("trunc/fg-quoted-heredoc-shell-output-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "{\ncat <<'EOF'\nsleep 1 &\necho it's\nEOF\n} | bash",
+                  "while :; do\ncat <<'EOF'\nsleep 1 &\necho it's\nEOF\nbreak\ndone | bash",
+                  "{\ncat > /dev/stdout <<'EOF'\nsleep 1 &\necho it's\nEOF\n} | bash",
+                  "{\ncat > /proc/self/fd/1 <<'EOF'\nsleep 1 &\necho it's\nEOF\n} | bash",
+                  "cat <<'EOF' > >(bash)\nsleep 1 &\necho it's\nEOF",
+                  "cat > /abs/f <<'EOF'; bash <<'X'\nit's\nEOF\nsleep 1 &\nX",
+                  "cat <<EOF\ncat > /abs/f <<'X'\nEOF\nsleep 1 &\nX",
+                  "bash <<'A'\ncat > /abs/f <<'X'\nit's\nX\nsleep 1 &\nA")],
+              ["deny"] * 8)
+        # A consumer the scan cannot show writes the body only to a file reads the body as code (fail
+        # closed): cat to standard output, a quoted or expanded target, tee, and a target under /dev.
+        check("trunc/fg-quoted-heredoc-unknown-consumer-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF'\nit's\nEOF", "cat > \"/abs/f\" <<'EOF'\nit's\nEOF", "cat > $F <<'EOF'\nit's\nEOF",
+                  "tee /abs/f <<'EOF'\nit's\nEOF", "cat > dev/stdout <<'EOF'\nit's\nEOF")],
+              ["deny"] * 5)
+        check("trunc/fg-quoted-heredoc-cat-to-file-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat >> /abs/f <<'EOF'\nit's & more\nEOF", "cat>/abs/f<<'EOF'\nit's\nEOF",
+                  "  cat > f.txt <<\"EOF\"\t\nit's\nEOF")],
+              ["allow"] * 3)
+        check("trunc/fg-quoted-heredoc-cat-writes-only-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/a <<'EOF'\nthe user's file\nEOF\ncat >> b.txt <<\"X\"\nsay \"hi\nX",
+                  "cat > /abs/a <<'A'\nit's\nA\n\ncat > /abs/b <<'B'\n`date & $(x\nB\ncat > /abs/c <<'C'\nC\n")],
+              ["allow"] * 2)
+        # The body is data ONLY when the whole command is such writes. A write followed by a command that
+        # runs the written file ('. ./s.sh', 'bash s.sh', './s.sh', 'source s.sh') detaches in real bash,
+        # and so does one after a line that makes `cat` something else (hash -p, a function, an alias,
+        # enable, a PATH assignment); each reads every body as code, so the body `&` or apostrophe denies.
+        # Each row allows if a cat write line alone makes its body data.
+        bj = "{ /usr/bin/sleep 1; : > bgmark; } &"
+        check("trunc/fg-quoted-heredoc-written-file-run-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > s.sh <<'EOF'\n" + bj + "\nEOF\ncat > n.txt <<'EOF'\nthe user's file\nEOF\n. ./s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\nEOF\ncat > n.txt <<'EOF'\nthe user's file\nEOF\nbash s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF\n. ./s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF\n./s.sh",
+                  "cat > s.sh <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF\nsource s.sh")],
+              ["deny"] * 5)
+        check("trunc/fg-quoted-heredoc-cat-renamed-denies",
+              [_verdict(bg(v + "\ncat > out.txt <<'EOF'\n" + bj + "\n: <<'X'\nit's\nX\nEOF", rib=False)) for v in (
+                  "hash -p /usr/bin/bash cat", "function cat { /usr/bin/bash; }", "alias cat=bash",
+                  "enable -f ./cat.so cat", "PATH=./bin")],
+              ["deny"] * 5)
+        # A cat write followed or preceded by any other command reads every body as code, as before the
+        # body skip, so a body apostrophe denies; so does a write outside the one plain form (the
+        # here-document first, '>|', a second redirect or here-document on the line, '<<-', a second word).
+        check("trunc/fg-quoted-heredoc-write-then-command-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nit's\nEOF\ntrue", "cat > /abs/f <<'EOF'\nit's\nEOF\necho done",
+                  "true\ncat > /abs/f <<'EOF'\nit's\nEOF", "cat > /abs/f <<'EOF'; true\nit's\nEOF")],
+              ["deny"] * 4)
+        check("trunc/fg-quoted-heredoc-outside-write-form-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF' > /abs/f\nit's\nEOF", "cat >| f.txt <<'EOF'\nit's\nEOF",
+                  "cat > /abs/f <<'A' 3<<'B'\nit's\nA\nx\nB", "cat > /abs/f <<-'EOF'\n\tit's\n\tEOF",
+                  "cat > /abs/f 2>/abs/e <<'EOF'\nit's\nEOF", "cat > /abs/f x <<'EOF'\nit's\nEOF")],
+              ["deny"] * 6)
         # A substitution after the commit-message form's body makes the lexer lex again reading no body
         # (_SubstHeredocRetry); that pass places the body `&` in the substitution, so the deny stands. It
         # allows if a pass keeps the places recorded by the pass it replaced.
@@ -13231,7 +13860,7 @@ def _main_isolated(report_path=None):
               ["allow", "allow"])
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
         # that a bare '&' was found (before this fix it reused the bare-& detach reason).
-        uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
+        uq = bg("cat > f <<'EOF'\nthe user's file\nEOX", rib=False)
         uq_reason = (uq[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
         check("trunc/fg-unbalanced-quote-reason-names-quote",
               (_verdict(uq), "quote still open" in uq_reason, "detaches a child" in uq_reason),
