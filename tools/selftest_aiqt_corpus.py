@@ -480,6 +480,12 @@ ATTRIBUTE_ACCESSORS = {"getattr": {None: (1,)}, "setattr": {None: (1,)}, "delatt
                        "__setattr__": {2: (0,), 3: (1,), None: (0, 1)},
                        "__delattr__": {1: (0,), 2: (1,), None: (0, 1)}}
 
+# The keyword arguments a __setattr__ or __delattr__ defined in Python accepts
+# (super().__setattr__(name='__dict__', value={})): each counts as an argument
+# when the number of arguments picks the name's position, and a literal name=
+# is checked as a positional name is.
+ACCESSOR_KEYWORDS = {"__setattr__": ("name", "value"), "__delattr__": ("name",)}
+
 # The nodes that open a scope with its own imports.
 SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
@@ -562,8 +568,9 @@ def accessor_reach(call: ast.Call) -> str | None:
     """Return the label of an ATTRIBUTE_ACCESSORS call the check cannot pass, or ``None``.
 
     The label is ``<accessor> <name>`` for a literal attribute name, in the
-    accessor's name position for its number of positional arguments, that is
-    a dunder (other than a string one) or a namespace reader, and
+    accessor's name position for its number of arguments (positional ones
+    and its ACCESSOR_KEYWORDS) or given as name=, that is a dunder (other
+    than a string one) or a namespace reader, and
     ``<accessor> *`` or ``<accessor> **``
     for a starred or double-starred argument, whose attribute name cannot be
     read statically.
@@ -577,9 +584,14 @@ def accessor_reach(call: ast.Call) -> str | None:
         return name + " *"
     if any(keyword.arg is None for keyword in call.keywords):
         return name + " **"
+    accepted = ACCESSOR_KEYWORDS.get(name, ())
+    given = [keyword for keyword in call.keywords if keyword.arg in accepted]
     positions = ATTRIBUTE_ACCESSORS[name]
-    for position in positions.get(len(call.args), positions[None]):
-        key = call.args[position] if position < len(call.args) else None
+    count = len(call.args) + len(given)
+    keys = [call.args[position] for position in positions.get(count, positions[None])
+            if position < len(call.args)]
+    keys.extend(keyword.value for keyword in given if keyword.arg == "name")
+    for key in keys:
         if isinstance(key, ast.Constant) and isinstance(key.value, str) and opaque_attribute(key.value):
             return name + " " + key.value
     return None
@@ -754,13 +766,15 @@ def binding_homes(source: str, tree: ast.Module,
     nonlocal one too) binds in the nearest enclosing scope that is not a
     class body and holds it as a local; a scope that reads its class's
     namespace (``__classdict__`` is free in it, as in a type alias in a class
-    body) reads a global name from that class body first. A class body reads
-    a name it binds itself from its own namespace and, until it binds the
-    name there, from the module's globals, so such a read, and a read
-    through ``__classdict__`` of a name the class binds, lists the class
-    scope and then the module; every other read and every import lists one
-    scope. ``None`` means symtable could not be built for ``source`` or its
-    copy, or a marker or a name was not where it was placed.
+    body) reads a name that class body binds from it as the body does. A
+    class body reads a name it binds itself from its own namespace once it
+    has bound it there and from the module's globals before that, so such a
+    read, and a read through ``__classdict__`` of a name the class binds,
+    lists the class scope and then, when the module binds the name or some
+    scope declares it global, the module; every other read and every import
+    lists one scope. ``None`` means symtable could not be built for
+    ``source`` or its copy, or a marker or a name was not where it was
+    placed.
     """
     try:
         symtable.symtable(source, "<source>", "exec")
@@ -812,6 +826,15 @@ def binding_homes(source: str, tree: ast.Module,
             parents[child.get_id()] = table
             pending.append(child)
 
+    def global_home(name: str) -> list[symtable.SymbolTable]:
+        # The module, for a name it binds or some scope declares global (the
+        # module's table lists those too); a name it never binds reads nothing
+        # from it.
+        if name not in top.get_identifiers():
+            return []
+        symbol = top.lookup(name)
+        return [top] if symbol.is_local() or symbol.is_declared_global() else []
+
     def binder(table: symtable.SymbolTable, name: str, read: bool) -> list[symtable.SymbolTable] | None:
         if name not in table.get_identifiers():
             return None
@@ -829,14 +852,14 @@ def binding_homes(source: str, tree: ast.Module,
         if symbol.is_local():
             # A class body reads its own name by LOAD_NAME: the class
             # namespace, then the module's globals until the class binds it.
-            return [table, top] if read and table.get_type() == "class" else [table]
+            return [table] + global_home(name) if read and table.get_type() == "class" else [table]
         if (table.get_type() != "class" and "__classdict__" in table.get_identifiers()
                 and table.lookup("__classdict__").is_free()):
             outer = parents.get(table.get_id())
             while outer is not None and outer.get_type() != "class":
                 outer = parents.get(outer.get_id())
             if outer is not None and name in outer.get_identifiers() and outer.lookup(name).is_local():
-                return [outer, top]
+                return [outer] + global_home(name)
         return [top]
 
     homes: dict[int, list[tuple[int, str]]] = {}
@@ -924,7 +947,10 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
         # Each path the chain may read: a name reads, in each scope it may be
         # found in, the first path imported under it there or, failing that,
         # the watched module it names; with ``held``, a chain through a class
-        # attribute in ``members`` also reads that attribute's paths.
+        # attribute in ``members`` also reads that attribute's paths. Without
+        # ``held``, when a stdin value is credited, a scope the name may be
+        # found in that has no such path binds it to something else
+        # (DEVNULL = None in a class body), so the chain reads nothing.
         attrs: list[str] = []
         while isinstance(node, ast.Attribute):
             attrs.insert(0, node.attr)
@@ -933,6 +959,8 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
         for home, name in homes.get(id(node), []) if isinstance(node, ast.Name) else []:
             paths = imported.get(home, {}).get(name)
             path = paths[0] if paths else (node.id,) if node.id in WATCHED_MODULES else None
+            if path is None and not held:
+                return []
             if path is not None and path + tuple(attrs) not in found:
                 found.append(path + tuple(attrs))
         for index, attr in enumerate(attrs if held else []):
@@ -982,7 +1010,9 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
 
     def isolates(call: ast.Call, launcher: str) -> bool:
         # A class attribute is never credited as an isolating value: another
-        # class may bind the same attribute name to something else.
+        # class may bind the same attribute name to something else. Nor is a
+        # name that any scope it may be read from binds other than by a
+        # watched import.
         keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg is not None}
         stdin = keywords.get("stdin")
         isolating = {("subprocess", name) for name in ISOLATING_STDIN_VALUES[launcher]}
@@ -1179,7 +1209,10 @@ class StdinIsolationTests(unittest.TestCase):
         ``super().__setattr__(k, v)``) and second when it is through a class
         (three or two, as in ``object.__setattr__(self, k, v)``), so a bound
         call's value is not taken for a name; with any other number of
-        arguments both positions are checked;
+        arguments both positions are checked. A name= keyword (and value=
+        to __setattr__), which a method defined in Python accepts, counts as
+        an argument, and a literal name= is checked too
+        (``super().__setattr__(name='__dict__', value={})``);
 
       ``__class__`` is allowed as a name only as super's first argument
       (``super(__class__, self).__init__()``), where it is the implicit cell
@@ -1244,13 +1277,19 @@ class StdinIsolationTests(unittest.TestCase):
     parameter or comprehension variable shadows an import around it. Each
     annotation is read in the scope it is written in (a method's in its class
     body, a function body's in that body), under the annotations future
-    import too, and a type alias in a class body reads that class's names
-    first. A class body reads a name it binds itself (by an import, a def,
-    an assignment, an annotation alone or a loop) from its own namespace and,
-    until it binds it there, from the module's globals, so such a read, and
-    one through a type alias in that body, resolves to the imports of both
-    and is flagged if either path is (``import os as p`` then ``out =
-    p.system('cat')`` before ``def p`` in a class). A class attribute that a
+    import too. A class body reads a name it binds itself (by an import, a
+    def, an assignment, an annotation alone, a loop, a walrus or a with
+    target) from its own namespace once it has bound it there and from the
+    module's globals before that, and a type alias in that body reads the
+    class's names the same way. Such a read resolves to the imports of the
+    class and, when the module binds the name, of the module: it is flagged
+    if either path is (``import os as p`` then ``out = p.system('cat')``
+    before ``def p`` in a class), and as a stdin value it is credited only
+    when every scope it may be read from holds an isolating import, so a
+    class that binds the name other than by a watched import (``DEVNULL =
+    None``, ``for PIPE in (None,)``) is never credited through the module's
+    import. The cost is that a read before such a binding, which does read
+    the module's import, is flagged as well. A class attribute that a
     plain assignment in a class body sets from a name or chain resolving to
     a watched path (``_os = _os``) holds that path: an attribute of that
     name read off any base (``self._os.system``) resolves through it, though
@@ -1268,7 +1307,8 @@ class StdinIsolationTests(unittest.TestCase):
     ``__match_args__``; a lookup by a name built at run time
     (``getattr(builtins, name)``, ``getattr(e, '__in' + 'it__')``); code
     compiled and run at run time (eval, exec, compile); a tracked name
-    rebound after its import (``DEVNULL = None``), including super, object
+    rebound after its import in the scope that imports it (``DEVNULL =
+    None``), including super, object
     or a base class rebound; an object whose ``__name__``, ``__qualname__``,
     ``__doc__`` or ``__module__`` holds something other than a string; a
     class whose DUNDER_CALLEES method returns something other than its
@@ -1281,7 +1321,10 @@ class StdinIsolationTests(unittest.TestCase):
     read as ``__p`` in class C), which the check does not resolve; a class
     attribute set other than by a plain assignment of a name or chain
     (unpacked from a tuple, wrapped as in ``staticmethod(_run)``, set through
-    setattr or from outside the class body); an input= value that is None
+    setattr or from outside the class body); an attribute name given to a
+    __setattr__ or __delattr__ defined in Python under a keyword other than
+    name= (``super().__setattr__(key='__dict__', value={})`` where the
+    method's parameter is key); an input= value that is None
     only at run time; and modules other than aiqt_corpus.py.
     """
 
@@ -1498,6 +1541,9 @@ class StdinIsolationTests(unittest.TestCase):
             "super.__init__(x)\nother.__setattr__(x, 'a', 1)\nobject.__delattr__(x, 'a')\n",
             "super().__setattr__('scope', 'locals')\nobject.__setattr__(x, 'scope', 'locals')\n"
             "object.__delattr__('globals', 'scope')\n",
+            "super().__setattr__(name='scope', value='locals')\n"
+            "super().__setattr__('scope', value='locals')\nC.__setattr__(o, 'scope', value='locals')\n"
+            "super().__delattr__(name='scope')\n",
             "class F:\n    def __set_name__(self, owner, name):\n"
             "        super().__set_name__(owner, name)\n"
             "    def __del__(self):\n        super().__del__()\n",
@@ -1541,6 +1587,12 @@ class StdinIsolationTests(unittest.TestCase):
              [("<module>", "__setattr__ locals", 1), ("<module>", "__setattr__ locals", 2),
               ("<module>", "__setattr__ locals", 3), ("<module>", "__delattr__ locals", 4),
               ("<module>", "__delattr__ locals", 5)]),
+            ("super().__setattr__(name='__dict__', value={})\nsuper().__delattr__(name='__class__')\n"
+             "C.__setattr__(o, name='globals', value=v)\nC.__delattr__(o, name='f_locals')\n"
+             "C.__setattr__(o, 'locals', value=v)\nx.__setattr__(value=v, name='__dict__')\n",
+             [("<module>", "__setattr__ __dict__", 1), ("<module>", "__delattr__ __class__", 2),
+              ("<module>", "__setattr__ globals", 3), ("<module>", "__delattr__ f_locals", 4),
+              ("<module>", "__setattr__ locals", 5), ("<module>", "__setattr__ __dict__", 6)]),
             ("print(__class__)\nsuper(__class__)\nsuper(C, __class__)\n",
              [("<module>", "__class__", 1), ("<module>", "__class__", 2), ("<module>", "__class__", 3)]),
         )
@@ -1739,10 +1791,35 @@ class StdinIsolationTests(unittest.TestCase):
         # A class body reads a name it binds itself from its own namespace
         # and, until it binds it there, from the module's globals, so a read
         # before a def, an assignment, an annotation or a loop that binds the
-        # name in the class reads the module's import. A class attribute
-        # assigned from a watched path holds it, read off any base, but is
-        # never credited as an isolating stdin value.
+        # name in the class reads the module's import. A stdin value the
+        # class binds other than by a watched import is not credited through
+        # the module's import, nor, at the stated cost, read before that
+        # binding; one the class does not bind, or binds only by an import
+        # the module lacks, is credited. A class attribute assigned from a
+        # watched path holds it, read off any base, but is never credited as
+        # an isolating stdin value.
         cases = (
+            ("from subprocess import DEVNULL, run\nclass C:\n    DEVNULL = None\n"
+             "    run(['cat'], stdin=DEVNULL)\n", [("C", "subprocess.run", 4)]),
+            ("from subprocess import PIPE, run\nclass C:\n    PIPE: int = None\n"
+             "    run(['cat'], stdin=PIPE)\n", [("C", "subprocess.run", 4)]),
+            ("from subprocess import PIPE, run\nclass C:\n    for PIPE in (None,):\n        pass\n"
+             "    run(['cat'], stdin=PIPE)\n", [("C", "subprocess.run", 5)]),
+            ("from subprocess import DEVNULL, run\nclass C:\n    (DEVNULL := None)\n"
+             "    run(['cat'], stdin=DEVNULL)\n", [("C", "subprocess.run", 4)]),
+            ("from contextlib import nullcontext\nfrom subprocess import DEVNULL, run\nclass C:\n"
+             "    with nullcontext() as DEVNULL:\n        pass\n    run(['cat'], stdin=DEVNULL)\n",
+             [("C", "subprocess.run", 6)]),
+            ("from subprocess import DEVNULL, run\nclass C:\n    DEVNULL = None\n"
+             "    type T = run(['cat'], stdin=DEVNULL)\n", [("C", "subprocess.run", 4)]),
+            ("from subprocess import DEVNULL, run\nclass C:\n    run(['cat'], stdin=DEVNULL)\n"
+             "    DEVNULL = None\n", [("C", "subprocess.run", 3)]),
+            ("from subprocess import DEVNULL, run\nclass C:\n    run(['cat'], stdin=DEVNULL)\n"
+             "    type T = run(['cat'], stdin=DEVNULL)\n", []),
+            ("from subprocess import run\nclass C:\n    from subprocess import DEVNULL\n"
+             "    run(['cat'], stdin=DEVNULL)\n    type T = run(['cat'], stdin=DEVNULL)\n", []),
+            ("from subprocess import DEVNULL, run\nclass C:\n    from subprocess import DEVNULL\n"
+             "    run(['cat'], stdin=DEVNULL)\n", []),
             ("import os as p\nclass Task:\n    out = p.system('cat')\n    def p(self):\n        pass\n",
              [("Task", "os.system", 3)]),
             ("import os as p\nclass Task:\n    out = p.system('cat')\n    p = 1\n",
