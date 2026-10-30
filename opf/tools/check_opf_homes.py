@@ -73,7 +73,8 @@ the lint reads the registry marker, not the meaning, so a requirement wrongly ma
 stays green; review of registry changes catches that.
 
 The default entry also runs the retired gate name scan (retired_gate_name_findings): no .py module
-under opf/tools may spell a transitional alias of store.HOMES or store.SPEC_VERSION. Each line is
+under opf/tools may spell a transitional alias of store.HOMES or store.SPEC_VERSION. Each file is
+decoded as Python decodes it, by its BOM or coding cookie (tokenize.open), and each line is
 NFKC-normalized before it is matched, as Python normalizes identifiers, so a fullwidth or
 mathematical-alphanumeric spelling is caught. Residual: it is a line scan, so a name built at run time
 (getattr, setattr, or a globals() key assembled from split or formatted strings) is outside it, and so
@@ -269,6 +270,7 @@ import ast
 import html
 import re
 import tempfile
+import tokenize
 import unicodedata
 from pathlib import Path
 
@@ -1591,9 +1593,11 @@ def surface_findings(texts=None):
 # may spell either name again, as a definition or as a read. Each name is built from two pieces, so
 # this module's own source never carries it and the scan covers this file like any other. Python
 # normalizes every identifier with NFKC, so a fullwidth or mathematical-alphanumeric spelling is the
-# same identifier: each line is NFKC-normalized before it is matched. What a line scan cannot see is
-# outside this gate: a name built at run time (getattr, setattr or a globals() key assembled from
-# split or formatted strings) never appears whole on any line, and only .py files are scanned.
+# same identifier: each line is NFKC-normalized before it is matched, in a file decoded by its BOM or
+# coding cookie as Python decodes it (a UTF-7 one hides a name from a UTF-8 read). What a line scan
+# cannot see is outside this gate: a name built at run time (getattr, setattr or a globals() key
+# assembled from split or formatted strings) never appears whole on any line, and only .py files are
+# scanned.
 _RETIRED_GATE_NAMES = ("SUPPORTED_" + "HOMES", "SUPPORTED_" + "SPEC_VERSION")
 _TOOLS = Path(__file__).resolve().parent
 
@@ -1602,7 +1606,10 @@ def retired_gate_name_findings(tools=None):
     tools = _TOOLS if tools is None else tools
     findings = []
     for path in sorted(tools.rglob("*.py")):
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        # Decoded as Python decodes it, by its BOM or coding cookie: a UTF-7 one hides a name from UTF-8.
+        with tokenize.open(path) as source:
+            text = source.read()
+        for number, line in enumerate(text.splitlines(), 1):
             line = unicodedata.normalize("NFKC", line)
             for name in _RETIRED_GATE_NAMES:
                 if name in line:
@@ -1667,17 +1674,33 @@ def retired_gate_name_findings(tools=None):
 #      definition, a global or nonlocal declaration, a capture, a class pattern keyword or a type parameter,
 #      and a string constant, an f-string's literal piece included, that is exactly one of the names
 #      (`getattr(builtins, "setattr")`, `builtins.__dict__["setattr"]`). The class closed is every route by
-#      which a writer the module spells reaches an attribute name the scan does not read as a literal. Any
-#      scanned module can reach the store module (by import, through sys.modules, or as an argument), so the
-#      rule holds in every one;
+#      which a writer the module spells reaches an attribute name the scan does not read as a literal. It
+#      also fails on every string constant, an f-string's literal piece included, and every keyword argument
+#      that is exactly HOMES (`getattr(_opf_store, "HOMES")`, `charged(_opf_store, "HOMES", w)`, `f"HOMES"`,
+#      `dict(HOMES=1)`), so no writer or helper the scan does not read as a writer (an excluded one, a list
+#      of pairs a writer later drains, a stub table) is handed the name as a literal; _opf_store.py is not
+#      spared, since its `HOMES = 2` spells no string. Any scanned module can reach the store module (by
+#      import, through sys.modules, or as an argument), so the rule holds in every one;
 #   5. a homes parameter or homes read in each adoption validator named in _HOMES1_FREE;
 #   6. any reference to the deleted record journal root: a string or bytes constant other than a
 #      docstring containing .aiqt/record/journal (unless a documented exclusion,
 #      _LEGACY_JOURNAL_EXCLUSIONS), the name JOURNAL_REL anywhere in _opf_record.py, or an attribute
 #      JOURNAL_REL read off the record module (`_opf_record.JOURNAL_REL`, `record.JOURNAL_REL`).
-# Rules 1 to 3 pass a site that is a documented exclusion (_HOMES_COMPARE_EXCLUSIONS, one reason each), and
-# rule 4's attribute-writer refusal passes one in _ATTRIBUTE_WRITER_EXCLUSIONS (one reason each: why the use
-# never writes HOMES and never writes to the store module).
+# Rules 1 to 3 pass a site that is a documented exclusion (_HOMES_COMPARE_EXCLUSIONS, one reason each), rule
+# 4's attribute-writer refusal passes one in _ATTRIBUTE_WRITER_EXCLUSIONS (one reason each: why the use never
+# writes HOMES and never writes to the store module), its HOMES string refusal one in _HOMES_NAME_EXCLUSIONS,
+# and rule 6 one in _LEGACY_JOURNAL_EXCLUSIONS. Every exclusion is keyed by (module, owner, exact text) and
+# admits exactly one site: one that matches two or more is red, naming each. The owner is the innermost def or
+# class enclosing the site under the qualified name Python gives it (__qualname__: `_StCloseFault.__enter__`,
+# `_watchdog_install_charges.<locals>.charged`), or <module>; a lambda belongs to its enclosing owner, and a
+# def's defaults and decorators to the def. The text is the site as ast.unparse writes it: a comparison (the
+# whole conditional expression where it is one's test), the `== 2` test before a fallthrough, a call, a
+# reference, `<parameter>=<default>`, or a string constant's site: the lone `==` or `in` comparison it is an
+# operand of (an element of a tuple, list or set display right of `in` included), else the call it is an
+# argument or keyword value of, else the constant, with an f-string's piece at its f-string's site. Each
+# module is read as Python compiles it: the AST scan parses the file's bytes, so the compiler itself applies
+# a UTF-8 BOM or a coding cookie (`# -*- coding: utf-7 -*-`), and the retired gate name scan decodes each file
+# through tokenize.open, which reads the BOM or cookie the same way; no encoding is refused.
 # RESIDUAL, outside this gate: a generation held in or passed through a differently named variable
 # (`gen = homes`, `store_control_roots(gen)`), or computed rather than written as a literal; a literal
 # bound to a homes read that is not a number (`self.homes = None`), or bound by a loop target, an
@@ -1687,14 +1710,21 @@ def retired_gate_name_findings(tools=None):
 # name and its value given as separate arguments or inside another display (`m.setdefault("homes", 1)`,
 # `setattr(m, "homes", 1)`, `dict([("homes", 1)])`, `collections.namedtuple("M", "homes", defaults=(1,))`),
 # or a call's result bound to a homes read (`homes: int = dataclasses.field(default=1)`); a binding of
-# HOMES by any route other than the three rule 4 reads (a name binding, an attribute target, an attribute
-# writer the module spells): a write through a namespace mapping (globals(), vars() or a module's
-# __dict__, by subscript, `update(HOMES=1)` or any other method), a writer looked up by a name built at
-# run time (`getattr(builtins, "set" + "attr")`), source text run by exec or eval, a change to how the
-# store module resolves an attribute (its __class__, a module __getattr__, its sys.modules entry), and
-# every write made by code the scan does not walk (self-test code, a check_*.py module, the vendored
-# tree, the standard library or another package: unittest.mock's patch.object, or its patch given a
-# dotted target string); a test that is not a comparison (`if homes:`, `not homes - 1`, a
+# HOMES by any route other than those rule 4 reads (a name binding, an attribute target, an attribute
+# writer the module spells, the name spelled as a string or keyword): the name obtained at run time (built,
+# `"HOM" + "ES"`; read from data or from a namespace's keys; handed to a __getattr__ hook by a read such as
+# `proxy.HOMES`) and given to a namespace mapping (globals(), vars() or a module's __dict__) or to a writer,
+# a writer obtained at run time by any lookup the scan does not read (a computed name, an enumeration or
+# filter of a namespace: `getattr(builtins, "set" + "attr")`,
+# `[v for k, v in vars(builtins).items() if k.startswith("seta")][0]`), source text run by exec or eval, a
+# change to how the store module resolves an attribute (its __class__, a module __getattr__, its
+# sys.modules entry), and every write made by code the scan does not walk (self-test code, a check_*.py
+# module, the vendored tree, the standard library or another package: unittest.mock's patch.object, or its
+# patch given a dotted target string); the reason of each exclusion, a data-flow claim the scan enforces
+# only through the HOMES string refusal and the one-site key, so a name obtained at run time that reaches an
+# excluded site (directly, or through a list of pairs such as _WATCHDOG_ORIGINALS that an excluded writer
+# drains) is not read; the retired gate name scan's reading of a file whose BOM or cookie tokenize.open and
+# the compiler read differently (none is known); a test that is not a comparison (`if homes:`, `not homes - 1`, a
 # mapping or index keyed by the generation), or that is a call whose callee is not named in
 # _COMPARISON_CALLS (`math.isclose(homes, 1)`, a comparison function held in a variable or a
 # functools.partial); a `== 2` test joined with any other condition, used as a while or assert
@@ -1714,8 +1744,8 @@ _HOMES1_FREE = {"_opf_adopt.py": ("validate_op", "validate_plan", "_validate_pla
                                   "_control_operand_findings")}
 # The comparisons, fallthroughs, literal arguments and defaults outside the record seam and the adoption
 # validators that may stay, with the reason each is not a homes-1 arm those paths can reach. Keyed by
-# (module, innermost function, exact text: the comparison, the `== 2` test before a fallthrough, the
-# call, or `<parameter>=<default>`), so the same text anywhere else still fails.
+# (module, owner, exact text) as the paragraph above defines them, each admitting exactly one site, so the
+# same text anywhere else, or twice there, still fails.
 _HOMES_COMPARE_EXCLUSIONS = {
     ("_opf_store.py", "_validate_base", "homes != HOMES"):
         "the manifest validator's refusal: any [opf].homes but the integer 2 is a fail-closed finding",
@@ -1742,15 +1772,22 @@ _HOMES_COMPARE_EXCLUSIONS = {
         "the doctor's partial-import substantiation roots: read-only grading, the typed homes added at 2",
     ("_opf_check.py", "_check_evidence", "homes < 2"):
         "C-EVIDENCE-ENUM is inactive below homes 2 (spec 4.2): read-only grading",
-    ("_opf_check.py", "classify_containment", "homes >= 2"):
-        "the classification's evidence roots and staged roots, which outside self-test code only the "
-        "doctor's containment walks read (_check_containment, _check_canonical_store_files). The write guard "
+    ("_opf_check.py", "classify_containment",
+     "(_opf_store.IMPORTED_REL, _opf_store.ARCHIVE_REL) if homes >= 2 else ()"):
+        "the classification's evidence roots, which outside self-test code only the doctor's containment "
+        "walks read (_check_containment, _check_canonical_store_files). The write guard "
         "(_opf_write_guard.plan_write_scope) runs the same pure classification but reads only its "
-        "malformed and colliding lists, which neither comparison feeds, so neither decides a write",
+        "malformed and colliding lists, which this comparison does not feed, so it decides no write",
+    ("_opf_check.py", "classify_containment",
+     "(imports_root, _opf_store.STAGING_REL) if homes >= 2 else (imports_root,)"):
+        "the classification's staged roots: the same readers, and the same malformed and colliding lists, "
+        "which this comparison does not feed either; the reason above",
     ("_opf_check.py", "_check_containment", "cls.homes >= 2"):
         "the doctor's containment grading of a legacy store's ordinary paths: read-only",
     ("_opf_check.py", "_validate_opened_store", "homes >= 2"):
-        "the doctor's homes-2-only checks (C-EVIDENCE-ENUM, the reservation read): read-only grading",
+        "the doctor's homes-2-only C-EVIDENCE-ENUM check: read-only grading",
+    ("_opf_check.py", "_validate_opened_store", "_reserved_numbers(root_fd, rep) if homes >= 2 else ({}, True)"):
+        "the doctor's homes-2-only reservation read: read-only grading",
     ("_opf_check.py", "_has_active_import_run", "homes=1"):
         "the partial-import substantiation default; each of its callers outside check_*.py passes the "
         "generation (_validate_archive its own, the doctor the manifest's homes_generation)",
@@ -1766,31 +1803,42 @@ _HOMES_COMPARE_EXCLUSIONS = {
         "no homes generation is read",
 }
 # String constants naming the deleted record journal root that may stay, with the reason each is not a
-# path any code builds or opens. Keyed by (module, innermost function or <module>).
+# path any code builds or opens. Keyed by (module, owner, exact text: the constant), each admitting exactly
+# one site.
 _LEGACY_JOURNAL_EXCLUSIONS = {
-    ("_opf_adopt_plan.py", "<module>"):
+    ("_opf_adopt_plan.py", "<module>",
+     "'Ancestry reads the pointers and the resolved manifest; git history and manifestless .working content, "
+     'a reserved name included, are not read as ancestry. Durable OPF history outside .working also reads as '
+     'first-adoption on its own, including: root import-promotion state (.aiqt/import, .aiqt/import/journal, '
+     ".aiqt/import-archive), the record journal (.aiqt/record/journal) and the .gitignore opf-managed block.'"):
         "the adoption plan's residual disclosure (RESIDUALS): a leftover directory an earlier build wrote "
         "is not read as ancestry; no path is built from the text",
-    ("_opf_adopt_plan.py", "_inventory"):
+    ("_opf_adopt_plan.py", "_inventory",
+     "'live pointers and the resolved manifest; git history and manifestless .working content are not "
+     'ancestry. Durable OPF history outside .working also reads as first-adoption on its own, including: root '
+     'import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive), the record journal '
+     "(.aiqt/record/journal) and the .gitignore opf-managed block'"):
         "the same disclosure in the plan's ancestry evidence text; no path is built from the text",
 }
 # The attribute-writer uses rule 4 refuses that may stay, with the reason each never writes HOMES and never
-# writes to the store module. Keyed by (module, innermost function, exact text: the call, or the reference as
-# written), so the same text anywhere else still fails.
+# writes to the store module. Keyed by (module, owner, exact text: the call, the reference, or a string
+# constant's site), each admitting exactly one site, so the same text anywhere else, or twice there, still
+# fails. Each reason is a claim about where the names reaching the site come from; the scan holds only that
+# none is the literal HOMES (rule 4's string refusal), and the residual above names what it does not read.
 _ATTRIBUTE_WRITER_EXCLUSIONS = {
-    ("_journal.py", "__enter__", "setattr(module, name, watched)"):
+    ("_journal.py", "_StCloseFault.__enter__", "setattr(module, name, watched)"):
         "_StCloseFault's stand-ins: self._watched, built once in __init__, pairs only os and the fcntl module with "
         "the call names _ST_WATCHED lists (stat, fstat, fstatvfs, lseek, get_inheritable, isatty; fcntl, flock, "
         "lockf, ioctl), and _st_watch_drop_check only swaps in a subset of those names",
-    ("_journal.py", "__exit__", "setattr(module, name, real)"):
+    ("_journal.py", "_StCloseFault.__exit__", "setattr(module, name, real)"):
         "the same pairs restored to the calls __init__ read from them; the reason above",
-    ("_opf_emit.py", "_collect_abandoned", "setattr(self, name, None)"):
+    ("_opf_emit.py", "_FixtureProcess._collect_abandoned", "setattr(self, name, None)"):
         "the fixture process clears its own descriptor slots: name runs over the literal (\"pidfd\", "
         "\"subject_pidfd\") and the receiver is the _FixtureProcess itself",
-    ("_opf_emit.py", "call", "setattr(module, name, stub)"):
+    ("_opf_emit.py", "_st_guardian_close_reuse.<locals>.drive.<locals>.call", "setattr(module, name, stub)"):
         "_st_guardian_close_reuse's stubs: the pairs are the keys of its literal calls dict, os with setpgid, "
         "fork, waitid and _exit, and signal with pthread_sigmask",
-    ("_opf_emit.py", "call", "setattr(module, name, real)"):
+    ("_opf_emit.py", "_st_guardian_close_reuse.<locals>.drive.<locals>.call", "setattr(module, name, real)"):
         "the same pairs restored from saved[1], which getattr(*seam) filled from those keys; the reason above",
     ("_opf_init_operation.py", "_child_main", "setattr(_opf_oplock, target, wrapped)"):
         "the --selftest-child kill hook: target is the literal attach_init_lease or detach_init_lease, on the "
@@ -1802,18 +1850,35 @@ _ATTRIBUTE_WRITER_EXCLUSIONS = {
         "the receiver is the fresh TypeSpec object.__new__(TypeSpec) made just above, and slot runs over "
         "TypeSpec.__slots__ (name, namespace, initial, working, terminal, transitions, proposable, gated, "
         "extra_keys, reduced, states)",
-    ("opf.py", "charged", "setattr(owner, name, wrapper)"):
+    ("opf.py", "_watchdog_install_charges.<locals>.charged", "setattr(owner, name, wrapper)"):
         "the watchdog's charge wrappers: charged is a closure of _watchdog_install_charges, which calls it only "
         "with fixed owners and literal names (_opf_emit with run_bounded and _run_fixture_process, "
         "threading.Thread.join, threading.Event.wait, threading.Condition.wait, queue.Queue.get, select.select, "
         "time.sleep)",
     ("opf.py", "_watchdog_leg_entry", "setattr(owner, name, real)"):
         "the same pairs restored from _WATCHDOG_ORIGINALS, which only charged appends to; the reason above",
-    ("opf.py", "external_import_names", "'setattr'"):
-        "an AST walker compares a call's callee name with the string; it never looks a callable up by it",
-    ("opf.py", "external_import_names", "'delattr'"):
-        "the same comparison; the reason above",
+    ("opf.py", "_watchdog_completion_case.<locals>.external_import_names", "node.func.id in ('setattr', 'delattr')"):
+        "an AST walker compares a call's callee name with the two strings; it never looks a callable up by them",
 }
+# The HOMES strings rule 4 refuses that may stay, with the reason each reaches no attribute writer and no
+# namespace mapping. Keyed by (module, owner, exact text: the string constant's site), each admitting exactly
+# one site.
+_HOMES_NAME_EXCLUSIONS = {
+    ("_opf_init_p0.py", "_compatibility",
+     "_require('homes' in base, 'HOMES', 'manifest', '{} declares no [opf].homes; this bootstrap requires the "
+     "integer {} (fail-closed)'.format(MANIFEST_PATH, store.HOMES))"):
+        "the bootstrap contract's refusal code: _require hands it to _Refusal, which keeps it as the first item "
+        "of its finding tuple, and _validation returns that tuple in a ContractValidation; outside check_*.py "
+        "no scanned module imports _opf_init_p0, so no scanned code reads the code back",
+    ("_opf_init_p0.py", "_compatibility",
+     '_require(type(homes) is int and homes == store.HOMES and (store.homes_generation(manifest) == 2), '
+     "'HOMES', 'manifest', '{} declares [opf].homes {}; this bootstrap requires the integer {} "
+     "(fail-closed)'.format(MANIFEST_PATH, store._safe_display(homes), store.HOMES))"):
+        "the same refusal code for a declared homes other than the integer 2; the reason above",
+}
+# Every exclusion table, in the order homes1_findings reports one that admits more than one site.
+_EXCLUSION_TABLES = (_HOMES_COMPARE_EXCLUSIONS, _LEGACY_JOURNAL_EXCLUSIONS, _ATTRIBUTE_WRITER_EXCLUSIONS,
+                     _HOMES_NAME_EXCLUSIONS)
 _LEGACY_RECORD_JOURNAL = ".aiqt/record/journal"
 # The parenthesized rule each kind of homes-1 finding names.
 _COMPARE_RULE = "only `== 2` may test a generation"
@@ -1834,6 +1899,7 @@ _ATTRIBUTE_WRITERS = {("setattr", 3): 1, ("delattr", 2): 1, ("__setattr__", 2): 
 _WRITER_NAMES = frozenset(name for name, _count in _ATTRIBUTE_WRITERS)
 _WRITER_RULE = ("setattr, delattr, __setattr__ and __delattr__ may only be called by name, with positional "
                 "arguments alone, none starred, and the attribute name a string literal")
+_HOMES_NAME_RULE = "no string constant, f-string piece or keyword argument may be exactly HOMES"
 
 
 def _names_legacy_journal(value):
@@ -2120,9 +2186,48 @@ def _literal_defaults(args, owner, module, findings):
 
 
 def _homes1_arm(module, owner, text, line, what, rule, findings):
-    if (module["rel"], owner, text) not in _HOMES_COMPARE_EXCLUSIONS:
+    if not _excluded(module, _HOMES_COMPARE_EXCLUSIONS, owner, text, line):
         findings.append("{}:{}: homes-1 {} `{}` in {} is reintroduced; homes 2 is the only generation and every "
                         "other one refuses ({})".format(module["rel"], line, what, text, owner, rule))
+
+
+def _qualified(owner, local, name):
+    """The __qualname__ Python gives a def or class named `name` in `owner`: <module>, a class, or a function
+    when `local` (what it defines nests under `<locals>`)."""
+    return name if owner == "<module>" else "{}.{}{}".format(owner, "<locals>." if local else "", name)
+
+
+def _excluded(module, table, owner, text, line):
+    """Whether the site (module, owner, text) is one of `table`'s exclusions; each site one admits is recorded, so
+    one that admits more than one is red (_homes1_scan)."""
+    key = (module["rel"], owner, text)
+    if key not in table:
+        return False
+    module["hits"].setdefault(key, []).append(line)
+    return True
+
+
+def _constant_sites(tree):
+    """The site each string constant or keyword reports at, by id: the lone `==` or `in` comparison it is an
+    operand of (an element of a tuple, list or set display right of `in` included), else the call it is an
+    argument or keyword value of (a keyword: the call it is passed to); an f-string's literal piece reports at
+    its f-string's site. One absent here reports at itself."""
+    sites = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], (ast.Eq, ast.In)):
+            right = node.comparators[0]
+            held = right.elts if isinstance(node.ops[0], ast.In) and isinstance(right, (ast.Tuple, ast.List,
+                                                                                        ast.Set)) else []
+            for operand in [node.left, right] + held:
+                sites[id(operand)] = node
+        elif isinstance(node, ast.Call):
+            for operand in node.args + node.keywords + [keyword.value for keyword in node.keywords]:
+                sites[id(operand)] = node
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            for piece in node.values:
+                sites[id(piece)] = sites.get(id(node), node)
+    return sites
 
 
 def _docstring_ids(tree):
@@ -2136,11 +2241,12 @@ def _docstring_ids(tree):
     return ids
 
 
-def _homes1_walk(node, owner, module, findings):
+def _homes1_walk(node, owner, local, module, findings):
     rel = module["rel"]
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         if "self_test" in node.name:
             return
+        owner, local = _qualified(owner, local, node.name), True
         args = node.args
         if node.name in module["free"]:
             named = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
@@ -2151,8 +2257,9 @@ def _homes1_walk(node, owner, module, findings):
             findings.extend("{}:{}: {} names a homes generation again; it grades every row at homes 2".format(
                 rel, line, node.name) for line in sorted(reads))
         else:
-            _literal_defaults(args, node.name, module, findings)
-        owner = node.name
+            _literal_defaults(args, owner, module, findings)
+    elif isinstance(node, ast.ClassDef):
+        owner, local = _qualified(owner, local, node.name), False
     if isinstance(node, ast.Lambda):
         _literal_defaults(node.args, owner, module, findings)
     bound = _binds_homes(node, module)
@@ -2161,25 +2268,47 @@ def _homes1_walk(node, owner, module, findings):
                         "`HOMES = 2` defines it, and every `== HOMES` test reads it as 2".format(
                             rel, node.lineno, owner))
     # An attribute writer other than as the callee of a plain call given a string literal name may set HOMES
-    # under a name the scan cannot read: refused, fail-closed (rule 4), unless the call is red as a binding.
-    unread = None
+    # under a name the scan cannot read: refused, fail-closed (rule 4), unless the call is red as a binding. A
+    # writer's name as a string reports at its site (_constant_sites), once however many the site holds.
+    unread, site = None, node
     if isinstance(node, ast.Call) and _called_name(node.func) in _WRITER_NAMES:
         module["writers"].add(id(node.func))
         named = _writer_name(node)
         if not bound and not (isinstance(named, ast.Constant) and isinstance(named.value, str)):
             unread = ast.unparse(node)
+        if bound or unread is not None:
+            module["reported"].update(id(inner) for inner in ast.walk(node))    # one finding: the call
+    elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in _WRITER_NAMES:
+        site = module["sites"].get(id(node), node)
+        if ("writer", id(site)) not in module["seen"]:
+            module["seen"].add(("writer", id(site)))
+            unread = ast.unparse(site)
     elif id(node) not in module["writers"]:
         unread = next((ast.unparse(node) if isinstance(node, (ast.expr, ast.alias)) else name
                        for name in _spelled_names(node) if name in _WRITER_NAMES), None)
-    if unread is not None and (rel, owner, unread) not in _ATTRIBUTE_WRITER_EXCLUSIONS:
+    if unread is not None and not _excluded(module, _ATTRIBUTE_WRITER_EXCLUSIONS, owner, unread, site.lineno):
         findings.append("{}:{}: attribute writer `{}` in {} may bind HOMES under a name the scan cannot read; "
-                        "it is refused ({})".format(rel, node.lineno, unread, owner, _WRITER_RULE))
+                        "it is refused ({})".format(rel, site.lineno, unread, owner, _WRITER_RULE))
+    # The name HOMES as a string or a keyword (rule 4): whatever it is handed to, an excluded writer included,
+    # may bind HOMES by it. One finding per site, none inside a writer call already red.
+    if ((isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == "HOMES")
+            or (isinstance(node, ast.keyword) and node.arg == "HOMES")) and id(node) not in module["reported"]:
+        site = module["sites"].get(id(node), node)
+        if ("homes", id(site)) not in module["seen"]:
+            module["seen"].add(("homes", id(site)))
+            text = ast.unparse(site)
+            if not _excluded(module, _HOMES_NAME_EXCLUSIONS, owner, text, site.lineno):
+                findings.append("{}:{}: `{}` in {} spells the name HOMES as data, which a writer the scan does not "
+                                "read could bind; it is refused ({})".format(rel, site.lineno, text, owner,
+                                                                            _HOMES_NAME_RULE))
     if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
         findings.append("{}:{}: star import from {} in {} may bind HOMES unseen; import each name it uses by "
                         "name".format(rel, node.lineno, "." * node.level + (node.module or ""), owner))
     if isinstance(node, ast.Compare) and _homes_reads(node) and not (
             _equals_two(node, module) or _type_guard(node)):
-        _homes1_arm(module, owner, ast.unparse(node), node.lineno, "arm", _COMPARE_RULE, findings)
+        # A conditional expression's test is reported as the whole expression, what it chooses between.
+        site = module["tests"].get(id(node), node)
+        _homes1_arm(module, owner, ast.unparse(site), site.lineno, "arm", _COMPARE_RULE, findings)
     # A number other than 2 bound to a homes read, or given as a homes key's value in a dict display (one a call
     # unpacks with ** is judged as its arguments instead).
     if (isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None and any(
@@ -2206,6 +2335,7 @@ def _homes1_walk(node, owner, module, findings):
                 _homes1_arm(module, owner, ast.unparse(stmt.test.operand if negated else stmt.test),
                             failed[0].lineno if failed else stmt.lineno, "arm after", _FALLTHROUGH_RULE, findings)
     if isinstance(node, ast.IfExp):
+        module["tests"][id(node.test)] = node
         only, negated = _generation_test(node.test, module)
         failed = node.body if negated else node.orelse
         if only and not (isinstance(failed, ast.Constant) and failed.value is None):
@@ -2259,8 +2389,8 @@ def _homes1_walk(node, owner, module, findings):
                 passed.append(arg)
         if any(_literal_generation(arg) for arg in passed):
             _homes1_arm(module, owner, ast.unparse(node), node.lineno, "argument", _LITERAL_RULE, findings)
-    if (isinstance(node, ast.Constant) and _names_legacy_journal(node.value)
-            and id(node) not in module["docstrings"] and (rel, owner) not in _LEGACY_JOURNAL_EXCLUSIONS):
+    if (isinstance(node, ast.Constant) and _names_legacy_journal(node.value) and id(node) not in module["docstrings"]
+            and not _excluded(module, _LEGACY_JOURNAL_EXCLUSIONS, owner, ast.unparse(node), node.lineno)):
         findings.append("{}:{}: the deleted record journal root {} is named in {}; the record journal lives "
                         "only in the typed capability home".format(rel, node.lineno, _LEGACY_RECORD_JOURNAL, owner))
     legacy_name = ((rel == "_opf_record.py" and isinstance(node, ast.Name) and node.id == "JOURNAL_REL")
@@ -2271,10 +2401,11 @@ def _homes1_walk(node, owner, module, findings):
         findings.append("{}:{}: the deleted record journal constant JOURNAL_REL is referenced in {}; the record "
                         "journal lives only in the typed capability home".format(rel, node.lineno, owner))
     for child in ast.iter_child_nodes(node):
-        _homes1_walk(child, owner, module, findings)
+        _homes1_walk(child, owner, local, module, findings)
 
 
-def homes1_findings(tools=None):
+def _homes1_scan(tools=None):
+    """(findings, hits): the no-homes-1 findings, and the lines of the sites each exclusion admitted."""
     tools = _TOOLS if tools is None else tools
     findings = []
     trees = []
@@ -2282,14 +2413,27 @@ def homes1_findings(tools=None):
         rel = path.relative_to(tools).as_posix()
         if "_vendor" in path.relative_to(tools).parts or path.name.startswith("check_"):
             continue
-        trees.append((rel, ast.parse(path.read_text(encoding="utf-8"), filename=rel)))
+        # The bytes, as import compiles them: the compiler applies the BOM or coding cookie itself.
+        trees.append((rel, ast.parse(path.read_bytes(), filename=rel)))
     params = _homes_parameters(tree for _rel, tree in trees)
+    hits = {}
     for rel, tree in trees:
         module = {"rel": rel, "free": _HOMES1_FREE.get(rel, ()), "docstrings": _docstring_ids(tree),
                   "store": _store_names(tree), "constant": _homes_definition(rel, tree), "params": params,
-                  "caught": _caught_raises(tree), "unpacked": set(), "writers": set()}
-        _homes1_walk(tree, "<module>", module, findings)
-    return findings
+                  "caught": _caught_raises(tree), "sites": _constant_sites(tree), "unpacked": set(),
+                  "writers": set(), "reported": set(), "seen": set(), "tests": {}, "hits": hits}
+        _homes1_walk(tree, "<module>", False, module, findings)
+    for table in _EXCLUSION_TABLES:
+        for (rel, owner, text), lines in ((key, hits.get(key, ())) for key in table):
+            if len(lines) > 1:
+                findings.append("{}:{}: the exclusion for `{}` in {} matches {} sites (lines {}); an exclusion admits "
+                                "exactly one site, so each is refused".format(
+                                    rel, lines[0], text, owner, len(lines), ", ".join(map(str, lines))))
+    return findings, hits
+
+
+def homes1_findings(tools=None):
+    return _homes1_scan(tools)[0]
 
 
 def _section_spans(text):
@@ -6198,6 +6342,16 @@ def _self_test_vectors():
                   retired_gate_name_findings(tree) == ["nested/reader.py:2: retired gate name {}; read store.{} "
                                                        "instead".format(n, c)])
             (tree / "nested" / "reader.py").unlink()
+            # A file is read by its coding cookie, as Python reads it: in UTF-7, `+AFM-` is the S the raw
+            # bytes lack (red when the scan decodes UTF-8), and under a UTF-8 cookie the same bytes name nothing.
+            for cookie, expected in (("utf-7", ["encoded.py:2: retired gate name {}; read store.{} instead".format(
+                    name, current)]), ("utf-8", [])):
+                (tree / "encoded.py").write_text("# -*- coding: {} -*-\nvalue = store.+AFM-{}\n".format(
+                    cookie, name[1:]), encoding="utf-8")
+                check("retired-gate-names-cookie-" + cookie + "-" + name, lambda n=name, e=expected:
+                      n not in (tree / "encoded.py").read_text(encoding="utf-8")
+                      and retired_gate_name_findings(tree) == e)
+            (tree / "encoded.py").unlink()
             # A fullwidth or math-bold spelling of the prefix is the same Python identifier (NFKC), so
             # an alias assignment spelled either way is refused at its line like the plain one (red
             # when the scan matches the raw line).
@@ -6213,8 +6367,9 @@ def _self_test_vectors():
                 (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
     # No homes-1 path: outside self-test code the live tools tree tests a homes generation only by `== 2`
     # with no fallthrough, passes and defaults no literal generation but 2, binds no number but 2 to one,
-    # binds HOMES only where it is defined, holds no star import, and uses an attribute writer only as a plain
-    # call given a string literal name (each with its documented exclusions); the adoption validators
+    # binds HOMES only where it is defined, holds no star import, uses an attribute writer only as a plain call
+    # given a string literal name, and spells HOMES as no string or keyword (each with its documented
+    # exclusions); the adoption validators
     # name no generation, and nothing names the deleted record journal root. In a fixture tree holding the
     # record and adoption modules, restoring one deleted line (the homes-1 arm of _record_journal_rel or of
     # claim_ids, or the homes-1 default of validate_op) is red at that line, as is every non-equality form of
@@ -6222,51 +6377,51 @@ def _self_test_vectors():
     # are still built there).
     check("homes1-free-registry", lambda: _HOMES1_FREE == {"_opf_adopt.py": (
         "validate_op", "validate_plan", "_validate_plan_sources", "_control_operand_findings")})
-    check("no-homes1-paths", lambda: homes1_findings() == [])
-    # Every documented exclusion carries a reason and still names a live site (a comparison, a test, a call,
-    # a parameter default, or an attribute writer's name or attribute, import alias or string constant), so a
-    # stale one is red.
-    live_sites, live_strings = set(), set()
+    live_findings, live_hits = _homes1_scan()
+    check("no-homes1-paths", lambda: live_findings == [])
+    # Every documented exclusion carries a reason and admitted exactly one site in the scan just run (a
+    # comparison, a test, a call, a parameter default, a string constant's site, or an attribute writer's name
+    # or attribute or import alias), so a stale one, or one matching a second site, is red; the scan reads every
+    # table.
+    check("homes1-exclusion-tables", lambda: len(_EXCLUSION_TABLES) == 4 and all(a is b for a, b in zip(
+        _EXCLUSION_TABLES, (_HOMES_COMPARE_EXCLUSIONS, _LEGACY_JOURNAL_EXCLUSIONS, _ATTRIBUTE_WRITER_EXCLUSIONS,
+                            _HOMES_NAME_EXCLUSIONS)))
+          and len(set().union(*_EXCLUSION_TABLES)) == sum(map(len, _EXCLUSION_TABLES)))
+    check("homes1-exclusions-reasoned", lambda: all(
+        isinstance(r, str) and r.strip() for table in _EXCLUSION_TABLES for r in table.values()))
+    check("homes1-exclusions-live", lambda: [
+        k for table in _EXCLUSION_TABLES for k in table if len(live_hits.get(k, ())) != 1] == [])
+    check("homes1-exclusions-outside-record-seam", lambda: not [
+        k for table in _EXCLUSION_TABLES for k in table if k[0] in ("_opf_record.py", "_opf_adopt.py")])
     # The premises the store_control_roots and classify_containment reasons rest on: outside self-test code
     # opf record's _run_operation is the write guard's one caller, and the guard reads only the
-    # classification's malformed and colliding lists.
-    guard_callers, guard_reads = set(), set()
+    # classification's malformed and colliding lists. And the one the _opf_init_p0 HOMES strings rest on: no
+    # other scanned module, self-test code included, spells _opf_init_p0 (an import, an alias or a string).
+    guard_callers, guard_reads, p0_readers = set(), set(), set()
     for path in sorted(_TOOLS.rglob("*.py")):
         if "_vendor" in path.relative_to(_TOOLS).parts or path.name.startswith("check_"):
             continue
         rel = path.relative_to(_TOOLS).as_posix()
-        stack = [(ast.parse(path.read_text(encoding="utf-8")), "<module>", False)]
+        stack = [(ast.parse(path.read_bytes()), "<module>", False, False)]
         while stack:
-            node, owner, exempt = stack.pop()
+            node, owner, local, exempt = stack.pop()
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                owner, exempt = node.name, exempt or "self_test" in node.name
-                args = node.args
-                positional = args.posonlyargs + args.args
-                live_sites.update((rel, owner, "{}={}".format(a.arg, ast.unparse(d))) for a, d in list(
-                    zip(positional[len(positional) - len(args.defaults):], args.defaults))
-                    + [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None])
-            if isinstance(node, (ast.Compare, ast.BoolOp, ast.Call)) or (
-                    isinstance(node, (ast.expr, ast.alias)) and _WRITER_NAMES.intersection(_spelled_names(node))):
-                live_sites.add((rel, owner, ast.unparse(node)))
-            if isinstance(node, ast.Constant) and _names_legacy_journal(node.value):
-                live_strings.add((rel, owner))
+                owner, local, exempt = _qualified(owner, local, node.name), True, exempt or "self_test" in node.name
+            elif isinstance(node, ast.ClassDef):
+                owner, local = _qualified(owner, local, node.name), False
             if (isinstance(node, ast.Call) and not exempt
                     and getattr(node.func, "attr", getattr(node.func, "id", None)) == "plan_write_scope"):
                 guard_callers.add((rel, owner))
             if (rel, owner) == ("_opf_write_guard.py", "plan_write_scope") and isinstance(node, ast.Attribute) \
                     and isinstance(node.value, ast.Name) and node.value.id == "classification":
                 guard_reads.add(node.attr)
-            stack.extend((child, owner, exempt) for child in ast.iter_child_nodes(node))
+            if rel != "_opf_init_p0.py" and ("_opf_init_p0" in _spelled_names(node) or (
+                    isinstance(node, ast.ImportFrom) and node.module == "_opf_init_p0")):
+                p0_readers.add(rel)
+            stack.extend((child, owner, local, exempt) for child in ast.iter_child_nodes(node))
     check("homes1-write-guard-callers", lambda: guard_callers == {("_opf_record.py", "_run_operation")})
     check("homes1-write-guard-reads", lambda: guard_reads == {"malformed", "colliding"})
-    check("homes1-exclusions-reasoned", lambda: all(
-        isinstance(r, str) and r.strip() for r in list(_HOMES_COMPARE_EXCLUSIONS.values())
-        + list(_LEGACY_JOURNAL_EXCLUSIONS.values()) + list(_ATTRIBUTE_WRITER_EXCLUSIONS.values())))
-    check("homes1-exclusions-live", lambda: set(_HOMES_COMPARE_EXCLUSIONS) <= live_sites
-          and set(_LEGACY_JOURNAL_EXCLUSIONS) <= live_strings and set(_ATTRIBUTE_WRITER_EXCLUSIONS) <= live_sites)
-    check("homes1-exclusions-outside-record-seam", lambda: not [
-        k for k in list(_HOMES_COMPARE_EXCLUSIONS) + list(_LEGACY_JOURNAL_EXCLUSIONS)
-        + list(_ATTRIBUTE_WRITER_EXCLUSIONS) if k[0] in ("_opf_record.py", "_opf_adopt.py")])
+    check("homes1-init-p0-unread", lambda: p0_readers == set())
     record_source = (_TOOLS / "_opf_record.py").read_text(encoding="utf-8")
     adopt_source = (_TOOLS / "_opf_adopt.py").read_text(encoding="utf-8")
     journal_home = '    if type(homes) is int and homes == 2:\n        return _opf_store.journal_root("record")\n'
@@ -6373,7 +6528,8 @@ def _self_test_vectors():
         (tree / "_opf_check.py").unlink()
         (tree / "_opf_store.py").unlink()
     # Each further form the scan closes, as a red module and its clean flip one edit away: the red module is
-    # red with exactly its finding (module, line, kind, text, function, rule) and the clean one is not.
+    # red with exactly its findings (module, line, kind, text, function, rule; a list where two rules refuse
+    # it) and the clean one is not.
     arm_after, arm, argument, default, binding = "arm after", "arm", "argument", "default", "binding"
     raises = "        raise ValueError(homes)\n"
     match_clean = ("def home(homes):\n    match homes:\n        case 2:\n            return 'typed'\n"
@@ -6384,6 +6540,10 @@ def _self_test_vectors():
     names_generation = "{} names a homes generation again; it grades every row at homes 2"
     writer = "attribute writer `{}` in {} may bind HOMES under a name the scan cannot read; it is refused (" \
              + _WRITER_RULE + ")"
+    homes_name = "`{}` in {} spells the name HOMES as data, which a writer the scan does not read could bind; " \
+                 "it is refused (" + _HOMES_NAME_RULE + ")"
+    two_sites = "the exclusion for `{}` in {} matches {} sites (lines {}); an exclusion admits exactly one site, " \
+                "so each is refused"
     # The clean flip of every attribute-writer vector: each plain call shape on an unrelated object, given an
     # unrelated literal name.
     plain = ("class Box:\n    pass\n\n\nBOX = Box()\nsetattr(BOX, 'size', 1)\ndelattr(BOX, 'size')\n"
@@ -6500,7 +6660,7 @@ def _self_test_vectors():
         ("attribute-assignment", "planted.py", "import _opf_store\n\n_opf_store.HOMES = 1\n",
          "import _opf_store\n\nGENERATION = _opf_store.HOMES\n", (3, rebound)),
         ("setattr-literal", "planted.py", "import _opf_store\n\nsetattr(_opf_store, 'HOMES', 1)\n",
-         "import _opf_store\n\nGENERATION = getattr(_opf_store, 'HOMES')\n", (3, rebound)),
+         "import _opf_store\n\nsetattr(_opf_store, 'HOMES_SEEN', 1)\n", (3, rebound)),
         ("setattr-dunder", "planted.py", "import _opf_store as store\n\nstore.__setattr__('HOMES', 1)\n",
          "import _opf_store as store\n\nstore.__setattr__('HOMES_SEEN', 1)\n", (3, rebound)),
         ("setattr-unbound-dunder", "planted.py", "import _opf_store\n\nobject.__setattr__(_opf_store, 'HOMES', 1)\n",
@@ -6508,45 +6668,124 @@ def _self_test_vectors():
         ("delattr-literal", "planted.py", "import _opf_store\n\ndelattr(_opf_store, 'HOMES')\n",
          "import _opf_store\n\ndelattr(_opf_store, 'HOMES_SEEN')\n", (3, rebound)),
         # Rule 4's bounded refusal: a writer used other than as a plain call given a literal name is red,
-        # whatever the spelling (QA round 6's ten forms, then other members of the class).
+        # whatever the spelling (QA round 6's ten forms, then other members of the class). The HOMES string
+        # each passes outside a red writer call is red too, at its own site.
         ("writer-starred-name", "planted.py", importing + "setattr(_opf_store, *('HOMES', 1))\n", plain,
          (3, writer.format("setattr(_opf_store, *('HOMES', 1))", "<module>"))),
         ("writer-starred-all", "planted.py", importing + "setattr(*(_opf_store, 'HOMES', 1))\n", plain,
          (3, writer.format("setattr(*(_opf_store, 'HOMES', 1))", "<module>"))),
         ("writer-alias", "planted.py", importing + "put = setattr\nput(_opf_store, 'HOMES', 1)\n", plain,
-         (3, writer.format("setattr", "<module>"))),
+         [(3, writer.format("setattr", "<module>")),
+          (4, homes_name.format("put(_opf_store, 'HOMES', 1)", "<module>"))]),
         ("writer-import-alias", "planted.py",
          "from builtins import setattr as put\n" + importing + "put(_opf_store, 'HOMES', 1)\n", plain,
-         (1, writer.format("setattr as put", "<module>"))),
+         [(1, writer.format("setattr as put", "<module>")),
+          (4, homes_name.format("put(_opf_store, 'HOMES', 1)", "<module>"))]),
         ("writer-partial", "planted.py",
          "import functools\n" + importing + "functools.partial(setattr, _opf_store, 'HOMES')(1)\n", plain,
-         (4, writer.format("setattr", "<module>"))),
+         [(4, writer.format("setattr", "<module>")),
+          (4, homes_name.format("functools.partial(setattr, _opf_store, 'HOMES')", "<module>"))]),
         ("writer-partial-name", "planted.py",
          "import functools\n" + importing + "functools.partial(setattr, _opf_store)('HOMES', 1)\n", plain,
-         (4, writer.format("setattr", "<module>"))),
+         [(4, writer.format("setattr", "<module>")),
+          (4, homes_name.format("functools.partial(setattr, _opf_store)('HOMES', 1)", "<module>"))]),
         ("writer-getattr", "planted.py",
          "import builtins\n" + importing + "getattr(builtins, 'setattr')(_opf_store, 'HOMES', 1)\n", plain,
-         (4, writer.format("'setattr'", "<module>"))),
+         [(4, writer.format("getattr(builtins, 'setattr')", "<module>")),
+          (4, homes_name.format("getattr(builtins, 'setattr')(_opf_store, 'HOMES', 1)", "<module>"))]),
         ("writer-namespace", "planted.py",
          "import builtins\n" + importing + "builtins.__dict__['setattr'](_opf_store, 'HOMES', 1)\n", plain,
-         (4, writer.format("'setattr'", "<module>"))),
+         [(4, writer.format("'setattr'", "<module>")),
+          (4, homes_name.format("builtins.__dict__['setattr'](_opf_store, 'HOMES', 1)", "<module>"))]),
         ("writer-map", "planted.py", importing + "list(map(setattr, [_opf_store], ['HOMES'], [1]))\n", plain,
-         (3, writer.format("setattr", "<module>"))),
+         [(3, writer.format("setattr", "<module>")), (3, homes_name.format("'HOMES'", "<module>"))]),
         ("writer-getattr-dunder", "planted.py", importing + "getattr(object, '__setattr__')(_opf_store, 'HOMES', 1)\n",
-         plain, (3, writer.format("'__setattr__'", "<module>"))),
+         plain, [(3, writer.format("getattr(object, '__setattr__')", "<module>")),
+                 (3, homes_name.format("getattr(object, '__setattr__')(_opf_store, 'HOMES', 1)", "<module>"))]),
         ("writer-fstring", "planted.py", importing + "setattr(_opf_store, f'HOMES', 1)\n", plain,
          (3, writer.format("setattr(_opf_store, f'HOMES', 1)", "<module>"))),
         ("writer-variable-name", "planted.py", importing + "NAME = 'HOMES'\nsetattr(_opf_store, NAME, 1)\n",
-         plain, (4, writer.format("setattr(_opf_store, NAME, 1)", "<module>"))),
+         plain, [(3, homes_name.format("'HOMES'", "<module>")),
+                 (4, writer.format("setattr(_opf_store, NAME, 1)", "<module>"))]),
         ("writer-bound-dunder-variable", "planted.py",
          importing + "NAME = 'HOMES'\n_opf_store.__setattr__(NAME, 1)\n", plain,
-         (4, writer.format("_opf_store.__setattr__(NAME, 1)", "<module>"))),
+         [(3, homes_name.format("'HOMES'", "<module>")),
+          (4, writer.format("_opf_store.__setattr__(NAME, 1)", "<module>"))]),
         ("writer-keyword", "planted.py",
          "import _opf_store\n\n\ndef patch(monkeypatch):\n    monkeypatch.setattr(_opf_store, name='HOMES', value=1)\n",
          plain, (5, writer.format("monkeypatch.setattr(_opf_store, name='HOMES', value=1)", "patch"))),
         ("writer-class-pattern", "planted.py",
          importing + "match _opf_store:\n    case object(__setattr__=put):\n        put('HOMES', 1)\n", plain,
-         (4, writer.format("__setattr__", "<module>"))),
+         [(4, writer.format("__setattr__", "<module>")), (5, homes_name.format("put('HOMES', 1)", "<module>"))]),
+        # QA round 7's x1 to x4: an exclusion admits only its own site, by its fully qualified function (not
+        # a same-named one elsewhere) and the exact comparison a string constant is an operand of (not any use
+        # of the string in that function); a name handed to the real excluded writer is never the literal HOMES.
+        ("x1-excluded-string-other-use", "opf.py",
+         "import builtins\n\n\ndef _watchdog_completion_case():\n\n    def external_import_names(node):\n"
+         "        put = getattr(builtins, 'setattr')\n        return node.func.id in ('setattr', 'delattr')\n",
+         "import builtins\n\n\ndef _watchdog_completion_case():\n\n    def external_import_names(node):\n"
+         "        put = None\n        return node.func.id in ('setattr', 'delattr')\n",
+         (7, writer.format("getattr(builtins, 'setattr')",
+                           "_watchdog_completion_case.<locals>.external_import_names"))),
+        ("x2-excluded-writer-other-class", "_journal.py",
+         "class _StOtherFault:\n\n    def __enter__(self):\n        for module, name, watched in self._watched:\n"
+         "            setattr(module, name, watched)\n",
+         "class _StCloseFault:\n\n    def __enter__(self):\n        for module, name, watched in self._watched:\n"
+         "            setattr(module, name, watched)\n",
+         (5, writer.format("setattr(module, name, watched)", "_StOtherFault.__enter__"))),
+        ("x3-excluded-writer-other-call", "_opf_emit.py",
+         "def _st_guardian_other_reuse():\n\n    def drive():\n\n        def call(module, name, stub):\n"
+         "            setattr(module, name, stub)\n",
+         "def _st_guardian_close_reuse():\n\n    def drive():\n\n        def call(module, name, stub):\n"
+         "            setattr(module, name, stub)\n",
+         (6, writer.format("setattr(module, name, stub)", "_st_guardian_other_reuse.<locals>.drive.<locals>.call"))),
+        ("x4-excluded-writer-other-charged", "opf.py",
+         "def _watchdog_other_charges():\n\n    def charged(owner, name, wrapper):\n"
+         "        setattr(owner, name, wrapper)\n",
+         "def _watchdog_install_charges():\n\n    def charged(owner, name, wrapper):\n"
+         "        setattr(owner, name, wrapper)\n",
+         (4, writer.format("setattr(owner, name, wrapper)", "_watchdog_other_charges.<locals>.charged"))),
+        ("x4-excluded-writer-handed-homes", "opf.py",
+         "import _opf_store\nimport time\n\n\ndef _watchdog_install_charges():\n\n"
+         "    def charged(owner, name, wrapper):\n        setattr(owner, name, wrapper)\n"
+         "    charged(_opf_store, 'HOMES', None)\n",
+         "import _opf_store\nimport time\n\n\ndef _watchdog_install_charges():\n\n"
+         "    def charged(owner, name, wrapper):\n        setattr(owner, name, wrapper)\n"
+         "    charged(time, 'sleep', None)\n",
+         (9, homes_name.format("charged(_opf_store, 'HOMES', None)", "_watchdog_install_charges"))),
+        # The HOMES string or keyword at any site (rule 4): a pair list a writer later drains, an f-string's
+        # piece, a keyword, a comparison operand, a getattr name, and the store module itself.
+        ("homes-string-pairs", "opf.py", importing + "_WATCHDOG_ORIGINALS.append((_opf_store, 'HOMES', 1))\n",
+         importing + "_WATCHDOG_ORIGINALS.append((_opf_store, 'HOMES_SEEN', 1))\n",
+         (3, homes_name.format("'HOMES'", "<module>"))),
+        ("homes-string-fstring", "planted.py", "NAME = f'HOMES'\n", "NAME = f'HOMES_SEEN'\n",
+         (1, homes_name.format("f'HOMES'", "<module>"))),
+        ("homes-string-keyword", "planted.py", "PAIRS = dict(HOMES=1)\n", "PAIRS = dict(SIZE=1)\n",
+         (1, homes_name.format("dict(HOMES=1)", "<module>"))),
+        ("homes-string-comparison", "planted.py", "def pick(name):\n    return name == 'HOMES'\n",
+         "def pick(name):\n    return name == 'SIZE'\n", (2, homes_name.format("name == 'HOMES'", "pick"))),
+        ("homes-string-getattr", "planted.py", importing + "GENERATION = getattr(_opf_store, 'HOMES')\n",
+         importing + "GENERATION = _opf_store.HOMES\n",
+         (3, homes_name.format("getattr(_opf_store, 'HOMES')", "<module>"))),
+        ("homes-string-store-module", "_opf_store.py", "HOMES = 2\nNAMES = ('HOMES',)\n",
+         "HOMES = 2\nNAMES = ('SPEC_VERSION',)\n", (2, homes_name.format("'HOMES'", "<module>"))),
+        # An exclusion that matches two sites admits neither: a writer's, and a comparison's.
+        ("exclusion-two-sites-writer", "_opf_emit.py",
+         "def _st_guardian_close_reuse():\n\n    def drive():\n\n        def call(module, name, stub):\n"
+         "            setattr(module, name, stub)\n            setattr(module, name, stub)\n",
+         "def _st_guardian_close_reuse():\n\n    def drive():\n\n        def call(module, name, stub):\n"
+         "            setattr(module, name, stub)\n            return stub\n",
+         (6, two_sites.format("setattr(module, name, stub)", "_st_guardian_close_reuse.<locals>.drive.<locals>.call",
+                              2, "6, 7"))),
+        ("exclusion-two-sites-comparison", "_opf_check.py",
+         "def required_checks(homes):\n    if homes < 2:\n        return 1\n    return homes < 2\n",
+         "def required_checks(homes):\n    if homes < 2:\n        return 1\n    return 0\n",
+         (2, two_sites.format("homes < 2", "required_checks", 2, "2, 4"))),
+        # QA round 7's e1: a module is read as Python compiles it, by its coding cookie.
+        ("e1-source-encoding", "planted.py",
+         "# -*- coding: utf-7 -*-\nimport _opf_store\n# +AAo-_opf_store.HOMES = 1\n",
+         "# -*- coding: utf-8 -*-\nimport _opf_store\n# +AAo-_opf_store.HOMES = 1\n",
+         (4, rebound)),
         # A star import binds names the module never spells, HOMES possibly among them.
         ("star-import", "planted.py",
          "from check_shim import *\n\n\ndef home(homes):\n    if homes == HOMES:\n        return 'typed'\n"
@@ -6575,10 +6814,10 @@ def _self_test_vectors():
          "ROOTS = lambda homes=2: (homes,)\n", (1, default, "homes=1", "<module>", _LITERAL_RULE)),
         # A number other than 2 bound to a homes read, or written under a homes key.
         ("binding-class-attribute", "planted.py", "class Store:\n    homes: int = 1\n",
-         "class Store:\n    homes: int = 2\n", (2, binding, "homes: int = 1", "<module>", _BINDING_RULE)),
+         "class Store:\n    homes: int = 2\n", (2, binding, "homes: int = 1", "Store", _BINDING_RULE)),
         ("binding-instance", "planted.py", "class Store:\n\n    def __init__(self):\n        self.homes = 1\n",
          "class Store:\n\n    def __init__(self):\n        self.homes = 2\n",
-         (4, binding, "self.homes = 1", "__init__", _BINDING_RULE)),
+         (4, binding, "self.homes = 1", "Store.__init__", _BINDING_RULE)),
         ("binding-dict", "planted.py", "MANIFEST = {'opf': {'homes': 1}}\n", "MANIFEST = {'opf': {'homes': 2}}\n",
          (1, binding, "{'homes': 1}", "<module>", _BINDING_RULE)),
         # The deleted journal root as bytes.
@@ -6589,10 +6828,10 @@ def _self_test_vectors():
     with tempfile.TemporaryDirectory(prefix="opf-homes-gap-") as tmp:
         tree = Path(tmp)
         for label, name, red, clean, finding in gap_forms:
-            expect = "{}:{}: ".format(name, finding[0]) + (finding[1] if len(finding) == 2 else (
+            expect = ["{}:{}: ".format(name, f[0]) + (f[1] if len(f) == 2 else (
                 "homes-1 {} `{}` in {} is reintroduced; homes 2 is the only generation and every other one "
-                "refuses ({})".format(*finding[1:])))
-            for source, expected in ((red, [expect]), (clean, [])):
+                "refuses ({})".format(*f[1:]))) for f in (finding if isinstance(finding, list) else [finding])]
+            for source, expected in ((red, expect), (clean, [])):
                 (tree / name).write_text(source, encoding="utf-8")
                 check("homes1-gap-" + ("red-" if expected else "clean-") + label,
                       lambda e=expected: homes1_findings(tree) == e)
