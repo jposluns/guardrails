@@ -37,9 +37,9 @@ uninstalling the hook for that repository, a visible act).
 DISCLOSED LIMITS: this layer works ONLY where it is installed (see the README beside this file). git runs
 commit-msg for git commit and for a git merge that records a merge commit (with or without --no-edit); it
 does NOT run for git commit --no-verify or git merge --no-verify, for plumbing such as git commit-tree, for
-git notes or tags, for git am (which runs applypatch-msg instead), for git cherry-pick or git rebase when
-they replay a message without an editor, or for forge-side edits (a PR body); those surfaces are covered,
-best-effort, by the PreToolUse layers, and --no-verify inside the assistant's own calls by the
+git notes or tags, for git am (which runs applypatch-msg instead), for git cherry-pick, git revert or git
+rebase when they replay a message without an editor, or for forge-side edits (a PR body); those surfaces are
+covered, best-effort, by the PreToolUse layers, and --no-verify inside the assistant's own calls by the
 gate-weakening hook. A trailer spelled with a separator other than a colon (a trailer.separators setting
 lets git parse one) is not counted.
 """

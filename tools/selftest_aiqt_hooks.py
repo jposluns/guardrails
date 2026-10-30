@@ -2712,6 +2712,71 @@ def _test_coauthor_children(failures, base, script):
     bpair("cab-c74 git apply is write-class, so its patch is read", "git apply " + diff_dirty, "git apply " + diff_clean)
     bpair("cab-c77 past the read bound a quoted command word is read de-quoted", "c''p " + clean + " " + new + " #"
           + long_text, "c''t x #" + long_text)
+
+    # --- the Bash layer: how a mailbox reader is fed, and the mailbox as git itself decodes it ------------
+    bpair("cab-c78 a value git am takes from the next word is no operand, so git am still reads standard input",
+          "git am -q --exclude " + clean, "git am -q --exclude " + clean + " " + mbox_clean)
+    bpair("cab-c79 a pipe into git am denies whatever its operands; the same operand alone is read",
+          "cat " + clean + " | git am -q " + mbox_clean, "git am -q " + mbox_clean)
+    bpair("cab-c80 a redirect on descriptor 3 feeds no standard input; one on descriptor 0 does",
+          "git mailinfo m p 3< " + mbox_clean, "git mailinfo m p 0< " + mbox_clean)
+    bpair("cab-c81 a here-string feeding a mailbox reader denies; a file redirect is read",
+          "git mailinfo m p <<< x", "git mailinfo m p < " + mbox_clean)
+    bpair("cab-c82 a process substitution feeding a mailbox reader denies",
+          "git mailinfo m p < <(cat " + mbox_clean + ")", "git mailinfo m p < " + mbox_clean)
+
+    def xb64(text):
+        return ("From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\nMIME-Version: 1.0\nContent-Type: text/plain; "
+                "charset=UTF-8\nContent-Transfer-Encoding: x-base64\n\n"
+                + base64.encodebytes(("\n" + text + "\n---\n").encode("utf-8")).decode("ascii"))
+
+    bpair("cab-c83 a mailbox is decoded by git mailinfo: the token under x-base64 denies, a clean body allows",
+          "git am " + fixture("xb64-dirty.mbox", xb64(cab)), "git am " + fixture("xb64-clean.mbox", xb64("fix")))
+    bpair("cab-c84 git format-patch writes numbered patch files where it runs: git am of one denies, a commit "
+          "allows", "git format-patch -1 HEAD && git am 0001-x.patch", "git format-patch -1 HEAD && git commit -m x")
+    bpair("cab-c85 a quoted here-document body naming git am after another word allows; a line starting with it "
+          "denies", "gh pr create --title x --body \"$(cat <<'EOF'\ngit am now reads Maildirs\nEOF\n)\"",
+          "gh pr create --title x --body \"$(cat <<'EOF'\n- git am now reads Maildirs\nEOF\n)\"")
+    bpair("cab-c86 a git config name built at run time beside a commit denies; a literal other name allows",
+          "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=$K GIT_CONFIG_VALUE_0=/x git commit -m fix",
+          "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=$NAME git commit -m fix")
+    units, _grouped = aiqt_hooks._cab_parse(["git", "am", "3", "<", "x"], frozenset(("/",)), None)
+    if units[0][0].fed or units[0][0].words[-1:] != ["3"]:
+        failures.append("(cab-c87) where shlex cannot tell a joined digit word, it must be read as a descriptor that "
+                        "feeds no standard input and kept as a word")
+
+    # --- the Bash layer: replays of git revert, --stdin, the previous branch and todo-list editors -------
+    got = decide("coauthor_bash", "Bash", {"command": "git cherry-pick -"}, str(replay))
+    if got != "allow":
+        failures.append("(cab-c88-allow) git cherry-pick - with a clean previous branch: expected allow, got {}"
+                        .format(got))
+    _git(replay, "checkout", "-q", "-b", "side-subject", "main")
+    (replay / "s.txt").write_text("s\n", encoding="utf-8")
+    _git(replay, "add", "s.txt")
+    _git(replay, "commit", "-q", "-m", cab, env_identity=True)
+    _git(replay, "checkout", "-q", "-b", "side-body", "main")
+    (replay / "b.txt").write_text("b\n", encoding="utf-8")
+    _git(replay, "add", "b.txt")
+    _git(replay, "commit", "-q", "-m", "add b\n\n" + cab, env_identity=True)
+    _git(replay, "checkout", "-q", "side-dirty")
+    _git(replay, "checkout", "-q", "main")
+    got = decide("coauthor_bash", "Bash", {"command": "git cherry-pick -"}, str(replay))
+    if got != "deny":
+        failures.append("(cab-c88-deny) git cherry-pick - with the token commit on the previous branch: expected "
+                        "deny, got {}".format(got))
+    bpair("cab-c89 git revert reads the subject of each commit it reverts: a token subject denies, a token body "
+          "allows", "git revert --no-edit side-subject", "git revert --no-edit side-body", cwd=str(replay))
+    bpair("cab-c90 git cherry-pick --stdin reads its here-string as revisions", "git cherry-pick --stdin <<< side-dirty",
+          "git cherry-pick --stdin <<< side-clean", cwd=str(replay))
+    bpair("cab-c91 git cherry-pick --stdin fed by anything but a here-document or here-string denies",
+          "echo side-clean | git cherry-pick --stdin", "git cherry-pick --stdin <<EOF\nside-clean\nEOF", cwd=str(replay))
+    bpair("cab-c92 git rebase -i beside a setting of an editor of its todo list denies",
+          "GIT_SEQUENCE_EDITOR=true git rebase -i main", "git rebase -i main", cwd=str(replay))
+    bpair("cab-c93 a git cherry-pick inside a quoted command substitution is read",
+          'echo "$(git cherry-pick side-dirty)"', 'echo "$(git cherry-pick side-clean)"', cwd=str(replay))
+    many = ["git cherry-pick no-such-{}".format(k) for k in range(aiqt_hooks._CAB_MAX_REPLAY_CALLS + 1)]
+    bpair("cab-c94 more distinct replay reads than the bound deny; as many as the bound allow", "; ".join(many),
+          "; ".join(many[:-1]), cwd=str(replay))
     pair("cab-c14 a JSON Lines record whose escaped hyphen decodes to the token denies; without it allows", "Write",
          {"file_path": str(root / "log.jsonl"), "content": '{"m": "Co\\u002d' + _CAB_UC[3:] + ': AI"}\n{"n": 1}\n'},
          {"file_path": str(root / "log.jsonl"), "content": '{"m": "Co\\u002dReviewed: AI"}\n{"n": 1}\n'})
@@ -2930,7 +2995,7 @@ def _test_coauthor_children(failures, base, script):
                         "hook (exit 1, HEAD unchanged), got exit {}".format(proc.returncode))
 
 
-def _test_coauthor_oracle(failures, base, script, cab_hook=None):
+def _test_coauthor_oracle(failures, base, script, cab_hook=None, only=None):
     """(cab-o*, cab-k*) The real-git oracle of the co-author layers, run with bash and git 2.x in throwaway
     repositories. Each PROBE row (cab-o*) is a command, or a Write, that lands the trailer when nothing gates
     it. UNGATED, in a repository WITHOUT the commit-msg hook and with no layer consulted, it must land the
@@ -2943,7 +3008,8 @@ def _test_coauthor_oracle(failures, base, script, cab_hook=None):
     allowed twin: every layer must allow it, it must run to exit 0 with the hook installed, and it must land
     nothing. The editors build the token at run time, so no layer reads it in a command. cab_hook (default:
     the dispatcher under test) is the dispatcher the co-author modes run from, so a mutated copy can be
-    judged by the same rows."""
+    judged by the same rows, and only (default: every row) names the rows to run by their cab-o or cab-k
+    label, so a mutant can be judged on the rows it targets."""
     hook = os.path.abspath(aiqt_hooks.__file__)
     cab_hook = cab_hook or hook
     child_env = dict((k, v) for k, v in os.environ.items() if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_")))
@@ -3063,6 +3129,8 @@ def _test_coauthor_oracle(failures, base, script, cab_hook=None):
         return {"command": spec.replace("@REPO@", str(repo))}
 
     def probe(label, spec, prepare=lambda repo: None, landed=landed_commit, tool="Bash", hook_only=False):
+        if only is not None and label.split(" ", 1)[0] not in only:
+            return
         repo = fresh("ungated", prepare, False)
         before = commits(repo)
         run(tool, payload_for(tool, spec, repo), repo)
@@ -3088,6 +3156,8 @@ def _test_coauthor_oracle(failures, base, script, cab_hook=None):
                                 .format(label, stderr[-300:]))
 
     def control(label, spec, prepare=lambda repo: None, landed=landed_commit, tool="Bash"):
+        if only is not None and label.split(" ", 1)[0] not in only:
+            return
         repo = fresh("control", prepare, True)
         before = commits(repo)
         payload = payload_for(tool, spec, repo)
@@ -3137,14 +3207,34 @@ def _test_coauthor_oracle(failures, base, script, cab_hook=None):
             (repo / name / "new" / "1").write_text((repo / mbox).read_text(encoding="utf-8"), encoding="utf-8")
         return prepare
 
-    def encoded(name):
+    def mailbox(name, body, content_type, encoding=None):
+        """A mailbox of side-mime's patch whose message body is body, under content_type and, when given, the
+        transfer encoding (one naming base64 encodes the whole body), each header replacing the patch's own."""
         def prepare(repo):
             head, _sep, rest = git(repo, "format-patch", "-1", "--stdout", "side-mime").stdout.partition("\n\n")
             head = "\n".join(line for line in head.split("\n")
                              if not line.lower().startswith(("content-transfer-encoding", "mime-version", "content-type")))
-            body = base64.encodebytes(("\n" + ai + "\n" + rest).encode("utf-8")).decode("ascii")
-            (repo / name).write_text(head + "\nMIME-Version: 1.0\nContent-Type: text/plain; charset=UTF-8\n"
-                                     "Content-Transfer-Encoding: base64\n\n" + body, encoding="utf-8")
+            text = body + rest
+            if encoding and "base64" in encoding:
+                text = base64.encodebytes(text.encode("utf-8")).decode("ascii")
+            (repo / name).write_text(head + "\nMIME-Version: 1.0\nContent-Type: " + content_type + "\n"
+                                     + ("Content-Transfer-Encoding: " + encoding + "\n" if encoding else "")
+                                     + "\n" + text, encoding="utf-8")
+        return prepare
+
+    def encoded(name):
+        return mailbox(name, "\n" + ai + "\n", "text/plain; charset=UTF-8", "base64")
+
+    def previous(branch):
+        """Leave branch as the previous branch (@{-1}) of main."""
+        return lambda repo: (_git(repo, "checkout", "-q", branch), _git(repo, "checkout", "-q", "main"))
+
+    def change(message):
+        """A commit on main that adds a file, with message."""
+        def prepare(repo):
+            (repo / "n.txt").write_text("n\n", encoding="utf-8")
+            _git(repo, "add", "n.txt")
+            _git(repo, "commit", "-q", "-m", message, env_identity=True)
         return prepare
 
     def removal(repo):
@@ -3253,6 +3343,80 @@ def _test_coauthor_oracle(failures, base, script, cab_hook=None):
     control("cab-k15 git interpret-trailers under trailer.separators on a clean file",
             "git -c trailer.separators=:# interpret-trailers --in-place --trailer 'Reviewed-by: X' msg.txt",
             put("msg.txt", "subject\n"), landed_file("msg.txt"))
+
+    # --- mailbox readers: a pipe, a descriptor other than 0, and a mailbox decoded by git itself ----------
+    mime = steps(sides, side("side-mime", "add mime"))
+    probe("cab-o29 a pipe into git am whose --exclude value names an existing file",
+          "git format-patch -1 --stdout side-dirty | git am -q --exclude clean.txt", sides)
+    probe("cab-o30 a pipe into git am beside a here-string on descriptor 3",
+          "git format-patch -1 --stdout side-dirty | git am -q 3<<<x", sides)
+    probe("cab-o31 a pipe into git mailinfo beside a here-string on descriptor 3",
+          "git format-patch -1 --stdout side-dirty | git mailinfo msg.txt patch.txt 3<<<x", sides, landed_file("msg.txt"))
+    probe("cab-o32 git am of a mailbox under an x-base64 transfer encoding", "git am -q xb64.mbox",
+          steps(mime, mailbox("xb64.mbox", "\n" + ai + "\n", "text/plain; charset=UTF-8", "x-base64")))
+    probe("cab-o33 git am of a mailbox whose UTF-7 charset spells the token", "git am -q u7.mbox",
+          steps(mime, mailbox("u7.mbox", "\nC+AG8-" + ai[2:] + "\n", "text/plain; charset=UTF-7")))
+    probe("cab-o34 git am of a format=flowed delsp=yes mailbox splitting the token at a soft line break",
+          "git am -q fl.mbox", steps(mime, mailbox("fl.mbox", "\n" + ai[:9] + " \n" + ai[9:] + "\n",
+                                                   "text/plain; charset=UTF-8; format=flowed; delsp=yes")))
+    enc_doc = ("From 0 Mon Sep 17 00:00:00 2001\nFrom: T <t@example.invalid>\nSubject: [PATCH] x\nMIME-Version: 1.0\n"
+               "Content-Type: text/plain; charset=UTF-8\nContent-Transfer-Encoding: base64\n\n"
+               + base64.encodebytes(("\n" + ai + "\n").encode("utf-8")).decode("ascii"))
+    probe("cab-o35 a here-document of a base64 mailbox into git mailinfo",
+          "git mailinfo msg.txt patch.txt <<'EOF'\n" + enc_doc + "EOF\n", landed=landed_file("msg.txt"))
+    probe("cab-o36 a process substitution redirected into git mailinfo",
+          "git mailinfo msg.txt patch.txt < <(git format-patch -1 --stdout side-dirty)", sides, landed_file("msg.txt"))
+    probe("cab-o37 a here-string of a command substitution into git mailinfo",
+          "git mailinfo msg.txt patch.txt <<< \"$(git format-patch -1 --stdout side-dirty)\"", sides,
+          landed_file("msg.txt"))
+    probe("cab-o38 a group redirect into git mailinfo past a redirect on descriptor 3",
+          "{ git mailinfo msg.txt patch.txt 3<clean.txt; } < enc.mbox", steps(mime, encoded("enc.mbox")),
+          landed_file("msg.txt"))
+    probe("cab-o39 a group redirect into git am whose --exclude value names an existing file",
+          "{ git am -q --exclude clean.txt; } < enc.mbox", steps(mime, encoded("enc.mbox")))
+    probe("cab-o40 a pipe into git am inside a quoted command substitution",
+          "echo \"$(git format-patch -1 --stdout side-dirty | git am -q)\"", sides)
+    probe("cab-o41 a group redirect into git am inside a quoted command substitution",
+          "{ echo \"$(git am -q)\"; } < dirty.mbox", patches)
+    control("cab-k5 a quoted here-document body that names git am after another word",
+            "printf '%s\\n' \"$(cat <<'EOF'\nNotes\n\n- git am now reads Maildirs\nEOF\n)\" > pr-body.md",
+            landed=landed_file("pr-body.md"))
+    control("cab-k16 git am of a clean mailbox under an x-base64 transfer encoding", "git am -q xc.mbox",
+            steps(mime, mailbox("xc.mbox", "\nReviewed-by: X\n", "text/plain; charset=UTF-8", "x-base64")))
+
+    # --- replays: cherry-pick and revert operands, --stdin, the previous branch, todo-list editors -------
+    probe("cab-o42 git cherry-pick of a commit whose message holds the token", "git cherry-pick side-dirty", sides)
+    probe("cab-o43 git cherry-pick - with the token commit on the previous branch", "git cherry-pick -",
+          steps(sides, previous("side-dirty")))
+    probe("cab-o44 a pipe into git cherry-pick --stdin", "echo side-dirty | git cherry-pick --stdin", sides)
+    probe("cab-o45 a here-string into git cherry-pick --stdin naming the token commit",
+          "git cherry-pick --stdin <<< side-dirty", sides)
+    probe("cab-o46 a git cherry-pick inside a quoted command substitution", "echo \"$(git cherry-pick side-dirty)\"",
+          sides)
+    probe("cab-o47 git revert --no-edit of a commit whose subject is the token", "git revert --no-edit HEAD",
+          change(ai))
+    probe("cab-o48 a sequence.editor that adds a pick to git rebase -i",
+          "git -c \"sequence.editor=sed -i '1ipick side-dirty'\" rebase -q -i HEAD", sides)
+    probe("cab-o49 a GIT_EDITOR that adds a pick to git rebase -i",
+          "GIT_EDITOR=\"sed -i '1ipick side-dirty'\" git rebase -q -i HEAD", sides)
+    probe("cab-o50 git format-patch writing its numbered patch file over an older clean copy, then git am of it",
+          "git format-patch -q -1 side-dirty && git am -q 0001-dirty-side.patch",
+          steps(sides, patch_of("side-clean", "0001-dirty-side.patch")))
+    probe("cab-o51 a GIT_CONFIG_KEY_0 built from a variable switching the hook off for text xargs reads",
+          "K=core.hooksPath; " + generated.replace("| xargs", "| GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=$K "
+                                                   "GIT_CONFIG_VALUE_0=@REPO@/no-hooks xargs")
+          + "commit -q --allow-empty -m")
+    control("cab-k17 git cherry-pick - with a clean commit on the previous branch", "git cherry-pick -",
+            steps(sides, previous("side-clean")))
+    control("cab-k18 a here-string into git cherry-pick --stdin naming a clean commit",
+            "git cherry-pick --stdin <<< side-clean", sides)
+    control("cab-k19 git revert --no-edit of a commit whose body, not its subject, holds the token",
+            "git revert --no-edit HEAD", change("add n\n\n" + ai))
+    control("cab-k20 git format-patch writing its numbered patch file, then a commit naming no such file",
+            "git format-patch -q -1 side-clean && git commit -q --allow-empty -m 'add notes'", sides)
+    control("cab-k21 a UTF-7 message under i18n.commitEncoding=UTF-7, which git records undecoded",
+            "git -c i18n.commitEncoding=UTF-7 commit -q --allow-empty -F utf7.msg",
+            put("utf7.msg", "fix\n\nC+AG8-" + ai[2:].replace("-", "+AC0-") + "\n"))
 
 
 def _test_stop_dispatch_note_sites(failures, tmp):

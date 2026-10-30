@@ -55,10 +55,11 @@ at a directory that chains to them.
   assistant's own calls the gate-weakening hook denies `--no-verify`, but a process outside the
   assistant can still pass it.
 - Plumbing (`git commit-tree`), `git notes`, tag messages and forge-side bodies (a PR description)
-  do not run commit-msg. Neither do `git am` (it runs `applypatch-msg` instead) and `git cherry-pick`
-  or `git rebase` replaying a recorded message without an editor. The PreToolUse layers cover those
-  surfaces best-effort at the tool-call boundary instead: the Bash layer reads the message files and
-  patches such a command names, and the recorded messages of the commits it replays.
+  do not run commit-msg. Neither do `git am` (it runs `applypatch-msg` instead) and `git cherry-pick`,
+  `git revert` or `git rebase` replaying a recorded message without an editor. The PreToolUse layers
+  cover those surfaces best-effort at the tool-call boundary instead: the Bash layer reads the message
+  files and patches such a command names (a mailbox also as `git mailinfo` decodes it), and the recorded
+  messages of the commits it replays.
 - The hook is switched off by anything that changes which hooks git runs: `-c core.hooksPath=...` on
   the command line (the Bash layer refuses this beside a commit-creating git command in the same
   command), a `core.hooksPath` set in a configuration file, a `GIT_CONFIG_PARAMETERS` or

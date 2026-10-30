@@ -5386,8 +5386,8 @@ def commit_identity(data):
 # the TOKEN ITSELF out of files, whatever identity its value names. The token is TRAILER-SHAPED (_CAB_RE):
 # the co-author trailer NAME, its three words joined by one '-' or one space in any case, then optional
 # blanks and a colon (git reads blanks between a trailer name and its separator). Prose that names the
-# words with no colon after them, and an identifier that runs them together, is not counted; the first
-# version of these layers counted every mention, which refused ordinary prose and code. The pack's own
+# words with no colon after them, and an identifier that runs them together, is not counted, since counting
+# every mention refuses ordinary prose and code. The pack's own
 # sources, tests and documentation never spell the token (it is built at run time, _CAB_TOKEN), so editing
 # them does not trip these layers.
 #
@@ -5703,8 +5703,9 @@ def coauthor_file(data):
 # a redirect or tee, git mv, ln, install) is judged with cp as one class. Relative paths resolve against
 # every directory the command may run in (the payload cwd, each cd or pushd before the unit, and a git
 # -C), and a relative path where that directory cannot be determined is refused. A name another stage of
-# the command writes (a redirect target, an operand of a write-class command, a git output option value)
-# is refused in a sink unit whether or not it exists, since what it holds when read cannot be read there.
+# the command writes (a redirect target, an operand of a write-class command, a git output option value, a
+# numbered patch file git format-patch writes) is refused in a sink unit whether or not it exists, since
+# what it holds when read cannot be read there.
 _CAB_GIT_MSG_VERBS = frozenset((
     "commit", "commit-tree", "merge", "tag", "notes", "am", "revert", "cherry-pick", "rebase", "pull",
     "stash", "fast-import", "hash-object", "mktag", "replace", "filter-branch", "filter-repo",
@@ -5712,24 +5713,51 @@ _CAB_GIT_MSG_VERBS = frozenset((
 # The git verbs whose commit runs the commit-msg hook (a core.hooksPath set in the same command would switch
 # that layer off), and those that replay a recorded message, whose commits _cab_replay_revs names.
 _CAB_GIT_HOOKED_VERBS = frozenset(("commit", "merge", "am", "cherry-pick", "rebase", "revert", "pull"))
-_CAB_GIT_REPLAY_VERBS = frozenset(("commit", "cherry-pick", "rebase"))
+_CAB_GIT_REPLAY_VERBS = frozenset(("commit", "cherry-pick", "rebase", "revert"))
+# The git verbs that read a '-' operand as the previous branch (@{-1}), not as standard input.
+_CAB_GIT_DASH_VERBS = frozenset(("merge", "cherry-pick", "rebase", "revert"))
+# The editors git edits a rebase todo list with: the settings, and the environment variables, in git's order.
+_CAB_TODO_EDITOR_KEYS = ("sequence.editor", "core.editor")
+_CAB_TODO_EDITOR_VARS = ("GIT_SEQUENCE_EDITOR", "GIT_EDITOR", "VISUAL", "EDITOR")
 # The git verbs that read a mailbox (an mbox file, a Maildir directory, or standard input), and the git am
 # modes that resume or stop a session in progress, which read no new patch.
 _CAB_GIT_MAILBOX_VERBS = frozenset(("am", "mailsplit", "mailinfo"))
 _CAB_AM_RESUME = ("--continue", "--skip", "--abort", "--quit", "--resolved", "--show-current-patch", "--retry",
                   "--allow-empty")
+# The long options of git am (git am -h), each mapped to whether it takes the next word as its value, and its
+# short options that do (-C <n>, -p <num>), so an option value is never read as a mailbox operand.
+_CAB_AM_LONG = {
+    "interactive": False, "no-verify": False, "verify": False, "3way": False, "quiet": False, "signoff": False,
+    "utf8": False, "keep": False, "keep-non-patch": False, "message-id": False, "keep-cr": False,
+    "scissors": False, "quoted-cr": True, "whitespace": True, "ignore-space-change": False,
+    "ignore-whitespace": False, "directory": True, "exclude": True, "include": True, "patch-format": True,
+    "reject": False, "resolvemsg": True, "continue": False, "resolved": False, "skip": False, "abort": False,
+    "quit": False, "show-current-patch": False, "retry": False, "allow-empty": False,
+    "committer-date-is-author-date": False, "ignore-date": False, "rerere-autoupdate": False, "gpg-sign": False,
+    "empty": True}
+_CAB_AM_SHORT_VALUE = "Cp"
 # A mailbox part git mailinfo decodes before it records the message (a base64 or quoted-printable transfer
 # encoding, or an RFC 2047 encoded word), and the first line of an StGit series, which names further patch
-# files git am reads.
+# files git am reads. Each mailbox file is also decoded by git itself (_CabReader.decode): split by git
+# mailsplit into its messages, each run through git mailinfo, at most _CAB_MAX_MAILS messages per command.
 _CAB_MIME_RE = re.compile(r"(?im)^content-transfer-encoding:\s*+(?:base64|quoted-printable)|=\?[^?\s]++\?[bq]\?")
 _CAB_STGIT_SERIES = "# This series applies on GIT commit"
+_CAB_MAX_MAILS = 256
+# The names git format-patch gives the patch files it writes: NNNN-<subject><suffix>, or a bare number under
+# --numbered-files.
+_CAB_PATCH_NAME_RE = re.compile(r"\d++(?:-.*+)?+", re.S)
 _CAB_WRITE_WORDS = frozenset(("cp", "mv", "ln", "link", "install", "tee", "rsync", "dd", "patch"))
 _CAB_PUNCT = "();<>|&\n"
 # The fallback reading, read beside the shlex one: the de-quoted text split at blanks, the shell operators,
 # parentheses and braces, so a command shlex cannot tokenize (an apostrophe in a here-document body) and
-# the words of a command substitution are still read; parentheses end no unit here.
+# the words of a command substitution are still read; parentheses end no unit here. Each '$(' and backquote
+# is marked first (_CAB_HEAD, a private-use character), so the word after it is read as the word a command
+# starts with (_cab_command_word); a NAME=value word before a command word is an assignment (_CAB_ASSIGN_RE).
 _CAB_CRUDE_RE = re.compile(r"\n|[;&|]+|[<>]+[&|]?|[^\s;&|<>(){}]+")
 _CAB_LOCALE_QUOTE_RE = re.compile(r"\$(?=\")")
+_CAB_SUBST_OPEN_RE = re.compile(r"\$\(|`")
+_CAB_HEAD = ""
+_CAB_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*+=")
 _CAB_CLUSTER = 64
 _CAB_MAX_DIRS = 16
 _CAB_MAX_PATHS = 65_536
@@ -5906,26 +5934,32 @@ def _cab_text_hit(readings):
 
 
 class _CabStage:
-    """One command of a unit: its words, its redirect sources and targets, whether its own input comes
-    from a redirect, a here-document or a here-string (fed), the directories it runs in, whether it opens
-    its unit (first), and (set by _cab_classify) the git verb it runs, whether it defines a git alias, and
-    whether it is a message-creating or write-class command."""
-    __slots__ = ("words", "sources", "targets", "fed", "dirs", "first", "verb", "alias", "msg", "write")
+    """One command of a unit: its words, its redirect sources and targets, whether its own standard input
+    comes from a redirect, a here-document or a here-string (fed) and whether from a here-document or a
+    here-string (text), the words of its here-strings (texts) and the token index its here-document body may
+    start after (doc), whether a process substitution feeds it or is one of its words (subst), the indices of
+    its words that start a command in the fallback reading (heads), the directories it runs in, whether it
+    opens its unit (first), and (set by _cab_classify) the git verb it runs, whether it defines a git alias,
+    and whether it is a message-creating or write-class command."""
+    __slots__ = ("words", "sources", "targets", "fed", "text", "texts", "doc", "subst", "heads", "dirs", "first",
+                 "verb", "alias", "msg", "write")
 
     def __init__(self, dirs, first):
         self.words, self.sources, self.targets, self.fed, self.dirs = [], [], [], False, dirs
+        self.text, self.texts, self.doc, self.subst, self.heads = False, [], None, False, set()
         self.first, self.verb, self.alias, self.msg, self.write = first, None, False, False, False
 
 
 def _cab_ops(tok):
-    """The shell operators one operator token holds, in order (_cab_parse): 'unit' (; & && || newline),
-    'pipe', 'open' and 'close' (a parenthesis), 'procsub' (<( or >(), 'out' (a write redirect), 'in' (a
-    read redirect), 'rw' (<>), 'text' (a here-document or here-string), 'dupout' and 'dupin' (>& and <&)."""
+    """The shell operators one operator token holds, in order (_cab_parse): 'unit' (; & && ||), 'line' (a
+    newline), 'pipe', 'open' and 'close' (a parenthesis), 'procsub' and 'procout' (<( and >(), 'out' (a write
+    redirect), 'in' (a read redirect), 'rw' (<>), 'doc' (a here-document), 'text' (a here-string), 'dupout'
+    and 'dupin' (>& and <&)."""
     ops, i, n = [], 0, len(tok)
     while i < n:
         c, two = tok[i], tok[i:i + 2]
         if c in ";\n":
-            ops.append("unit")
+            ops.append("unit" if c == ";" else "line")
             i += 1
         elif two in ("&&", "||"):
             ops.append("unit")
@@ -5939,9 +5973,12 @@ def _cab_ops(tok):
         elif c in "&|()":
             ops.append({"&": "unit", "|": "pipe", "(": "open", ")": "close"}[c])
             i += 1
-        elif tok.startswith("<<", i):
+        elif tok.startswith("<<<", i):
             ops.append("text")
-            i += 3 if tok[i + 2:i + 3] == "<" else 2
+            i += 3
+        elif tok.startswith("<<", i):
+            ops.append("doc")
+            i += 2
         elif two == "<>":
             ops.append("rw")
             i += 2
@@ -5949,7 +5986,7 @@ def _cab_ops(tok):
             ops.append("dupin")
             i += 2
         elif tok[i + 1:i + 2] == "(":
-            ops.append("procsub")
+            ops.append("procsub" if c == "<" else "procout")
             i += 2
         elif c == "<":
             ops.append("in")
@@ -6001,16 +6038,21 @@ def _cab_after_cd(words, dirs):
     return _cab_chdir(dirs, home if home and posixpath.isabs(home) else None, True)
 
 
-def _cab_parse(tokens, dirs):
+def _cab_parse(tokens, dirs, joined=None, mark=None):
     """(units, grouped) for a token list (shlex's, or the fallback's, where a token made only of
     _CAB_PUNCT characters is an operator token): each unit a list of _CabStage. grouped is True when the
     command holds a subshell or a { } group, which may feed a pipeline from inside another unit. A '(' right
     after a word ending in '$' opens a command substitution and a '<(' or '>(' a process substitution:
-    their words join the stage around them, and their ')' ends no unit."""
+    their words join the stage around them, and their ')' ends no unit. A word of digits right before a
+    redirect operator, with no blank between (joined, the indices of the word tokens an operator follows
+    directly), is the file descriptor the redirect opens (3<file) and not a word; where joined is None that
+    cannot be told, so such a word stays a word and is still read as a descriptor. Only a redirect, here-
+    document or here-string on descriptor 0, or with no number, feeds the stage's standard input. mark (the
+    fallback reading's _CAB_HEAD) records the word after it as one a command starts with (heads)."""
     units, scopes, grouped = [], [], False
     stage = _CabStage(dirs, True)
     unit = [stage]
-    pending, prev = None, ""
+    pending, prev, last = None, "", -1
 
     def end_unit(new_dirs):
         stages = [s for s in unit if s.words or s.sources or s.targets]
@@ -6021,16 +6063,23 @@ def _cab_parse(tokens, dirs):
         first = _CabStage(new_dirs, True)
         return [first], first, new_dirs
 
-    for tok in tokens:
+    for i, tok in enumerate(tokens):
+        if mark is not None and tok == mark:
+            stage.heads.add(len(stage.words))
+            continue
         if tok and all(ch in _CAB_PUNCT for ch in tok):
-            for op in _cab_ops(tok):
-                if op == "unit":
+            for k, op in enumerate(_cab_ops(tok)):
+                if op in ("unit", "line"):
                     unit, stage, dirs = end_unit(dirs)
                 elif op == "pipe":
                     stage = _CabStage(dirs, False)
                     unit.append(stage)
-                elif op == "open" and prev.endswith("$") or op == "procsub":
+                elif op == "open" and prev.endswith("$") or op in ("procsub", "procout"):
                     scopes.append(None)
+                    if op == "procsub":
+                        stage.subst = True  # a program's output, read as a file or redirected into the stage
+                        if pending is not None and pending[0] in ("in", "rw"):
+                            pending, stage.fed = None, stage.fed or pending[1] in (None, "0")
                 elif op == "open":
                     unit, stage, dirs = end_unit(dirs)
                     scopes.append(dirs)
@@ -6044,29 +6093,43 @@ def _cab_parse(tokens, dirs):
                     dirs = stage.dirs = outer
                     grouped = True
                 else:
-                    pending = op
+                    fd = None
+                    if k == 0 and last == i - 1 and prev.isdigit() and stage.words and stage.words[-1] == prev:
+                        fd = prev
+                        if joined is not None:
+                            if i - 1 not in joined:
+                                fd = None
+                            else:
+                                stage.words.pop()  # 3<file: the descriptor, not a word
+                    pending = (op, fd)
             prev = ""
             continue
         prev = tok
         if pending is not None:
-            kind, pending = pending, None
-            fd = tok.isdigit() or tok == "-"
-            if kind == "out" or kind == "dupout" and not fd:
+            (kind, fd), pending = pending, None
+            stdin = fd in (None, "0")
+            target_fd = tok.isdigit() or tok == "-"
+            if kind == "out" or kind == "dupout" and not target_fd:
                 stage.targets.append(tok)
-            elif kind == "in" or kind == "dupin" and not fd:
+            elif kind == "in" or kind == "dupin" and not target_fd:
                 stage.sources.append(tok)
-                stage.fed = True
+                stage.fed = stage.fed or stdin
             elif kind == "rw":
                 stage.targets.append(tok)
                 stage.sources.append(tok)
-                stage.fed = True
-            elif kind == "text":
-                stage.fed = True  # a here-document or here-string: text the token scan reads
+                stage.fed = stage.fed or stdin
+            elif kind in ("text", "doc") and stdin:
+                stage.fed = stage.text = True  # a here-document or here-string: text the token scan reads
+                if kind == "text":
+                    stage.texts.append(tok)
+                elif stage.doc is None:
+                    stage.doc = i
             continue
         if tok in ("{", "}"):
             grouped = True
             continue
         stage.words.append(tok)
+        last = i
     end_unit(dirs)
     return units, grouped
 
@@ -6136,11 +6199,20 @@ class _CabReader:
     """The file reads of one coauthor_bash call: each resolved path examined once in each mode, within the
     path and byte bounds, and the first reason found to refuse the command (why). writes and dir_writes map
     each path the commands of the reading being read write (_cab_writes), and each directory a git output
-    option fills, to the stages that write it."""
+    option fills, to the stages that write it; patch_writes each directory git format-patch writes its
+    numbered patch files into. scratch is the private directory the mailbox decoding writes into, splits
+    and mails count the files split and the messages decoded."""
 
     def __init__(self):
         self.seen, self.read, self.why = set(), 0, None
-        self.writes, self.dir_writes, self.loose = {}, {}, {}
+        self.writes, self.dir_writes, self.loose, self.patch_writes = {}, {}, {}, {}
+        self.scratch, self.splits, self.mails = None, 0, 0
+
+    def close(self):
+        """Remove the directory the mailbox decoding wrote into (decode)."""
+        if self.scratch is not None:
+            shutil.rmtree(self.scratch, ignore_errors=True)
+            self.scratch = None
 
     def check(self, word, dirs, strict, fed, what, owner=None, mailbox=False, words=False):
         """Examine every file word may name, a relative one from each of dirs. strict (a message-creating
@@ -6178,9 +6250,14 @@ class _CabReader:
                 self.examine(path, strict, what, mailbox, words)
 
     def written(self, path, owner):
-        """Whether a stage other than owner writes path, fills a directory path lies in, or writes a relative
-        name with path's base name where its directory cannot be determined."""
+        """Whether a stage other than owner writes path, fills a directory path lies in, writes a relative
+        name with path's base name where its directory cannot be determined, or is a git format-patch that may
+        write path as one of its numbered patch files (_CAB_PATCH_NAME_RE)."""
         if self.writes.get(path, {owner}) - {owner} or self.loose.get(posixpath.basename(path), {owner}) - {owner}:
+            return True
+        if self.patch_writes and _CAB_PATCH_NAME_RE.fullmatch(posixpath.basename(path)) and (
+                self.patch_writes.get(posixpath.dirname(path), {owner}) - {owner}
+                or self.patch_writes.get(None, {owner}) - {owner}):
             return True
         parent = posixpath.dirname(path)
         while self.dir_writes and parent and parent != path:
@@ -6192,9 +6269,9 @@ class _CabReader:
     def examine(self, path, strict, what, mailbox=False, words=False, nested=False):
         """Read one resolved path (see check). mailbox (a stage that reads a mailbox, or any stage of its unit)
         reads a directory as a Maildir (the files in its cur and new directories, as git reads one; nested,
-        a file of one, is not read as a Maildir again) and refuses a file that holds a part git mailinfo
-        decodes or is an StGit series; words (a stage that writes trailers) counts the token's words with any
-        separator after them."""
+        a file of one, is not read as a Maildir again), refuses a file that holds a part git mailinfo
+        decodes or is an StGit series, and reads each file again as git decodes it (decode); words (a stage
+        that writes trailers) counts the token's words with any separator after them."""
         key = (path, mailbox, words, nested)
         if key in self.seen or self.why is not None:
             return
@@ -6243,6 +6320,50 @@ class _CabReader:
         elif mailbox and text.lstrip().startswith(_CAB_STGIT_SERIES):
             self.why = ("{} names {!r}, an StGit series, which names further patch files git am reads"
                         .format(what, path))
+        elif mailbox:
+            self.decode(path, what, words)
+
+    def decode(self, path, what, words):
+        """Read the mailbox file at path as git am reads it, by git itself: git mailsplit splits it into its
+        messages, and git mailinfo decodes each (its transfer encoding, its charset recoded to UTF-8 as git am
+        does, format=flowed, encoded header words) into the subject, the message and the patch, with the whole
+        subject and the Message-ID kept and no scissors line honoured, so the reading holds at least what git
+        am records. The token in
+        any of them refuses the command, and so does a split or decode that cannot run, fails, or does not
+        finish within _CAB_GIT_TIMEOUT, and more than _CAB_MAX_MAILS messages in all (fail closed). Each git
+        runs with the scrubbed environment of the replay reads (_cab_git_env) in a private directory that
+        close removes."""
+        env = _cab_git_env()
+        try:
+            if self.scratch is None:
+                self.scratch = tempfile.mkdtemp(prefix="aiqt-cab-")
+            self.splits += 1
+            out = posixpath.join(self.scratch, "split-{}".format(self.splits))
+            os.mkdir(out)
+            subprocess.run(["git", "mailsplit", "-b", "-o" + out, "--", path], cwd=self.scratch, env=env,
+                           capture_output=True, stdin=subprocess.DEVNULL, timeout=_CAB_GIT_TIMEOUT, check=True)
+            pieces = sorted(os.listdir(out))
+            msg, patch = posixpath.join(self.scratch, "msg"), posixpath.join(self.scratch, "patch")
+            for piece in pieces:
+                self.mails += 1
+                if self.mails > _CAB_MAX_MAILS:
+                    self.why = ("{} reads mailboxes holding more than {} messages in all, past the bound on the "
+                                "messages git mailinfo decodes for this layer".format(what, _CAB_MAX_MAILS))
+                    return
+                with open(posixpath.join(out, piece), "rb") as mail:
+                    proc = subprocess.run(["git", "-c", "i18n.commitEncoding=UTF-8", "mailinfo", "-k", "-m",
+                                           "--no-scissors", "-u", msg, patch], cwd=self.scratch, env=env,
+                                          stdin=mail, capture_output=True, timeout=_CAB_GIT_TIMEOUT, check=True)
+                decoded = (proc.stdout + b"\n" + pathlib.Path(msg).read_bytes() + b"\n"
+                           + pathlib.Path(patch).read_bytes()).decode("utf-8", "surrogateescape")
+                if _cab_text_count(decoded) or words and _CAB_WORDS_RE.search(decoded):
+                    self.why = ("{} names {!r}, a mailbox whose message, as git mailinfo decodes it, holds the "
+                                "trailer token".format(what, path))
+                    return
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            self.why = ("{} names {!r}, a mailbox git mailsplit and git mailinfo could not decode for this "
+                        "layer ({}), so the message git am records cannot be read".format(
+                            what, path, type(exc).__name__))
 
     def maildir(self, path, strict, what, words):
         """Examine each file in the cur and new directories of the Maildir at path (a missing one is passed
@@ -6304,12 +6425,13 @@ def _cab_commit_option(word):
     return None, None, None
 
 
-def _cab_replay_revs(verb, args):
+def _cab_replay_revs(verb, args, extra=()):
     """(revs, walk) naming the commits whose recorded message a git verb replays, read from the words
     after it: git commit's -C, -c, --reuse-message, --reedit-message, --fixup and --squash values (--amend
-    with no message option reuses HEAD's); every non-option word of git cherry-pick; and the range git
-    rebase replays (<upstream>..<branch>, the configured upstream when none is named; with --root all of
-    the branch). walk is False where each rev names one commit (--no-walk)."""
+    with no message option reuses HEAD's); every non-option word of git cherry-pick and git revert, with
+    the words of their --stdin (extra); and the range git rebase replays (<upstream>..<branch>, the
+    configured upstream when none is named; with --root all of the branch). A '-' operand is the previous
+    branch (@{-1}). walk is False where each rev names one commit (--no-walk)."""
     revs = []
     if verb == "commit":
         message, amend, j = False, False, 0
@@ -6332,8 +6454,10 @@ def _cab_replay_revs(verb, args):
         if amend and not message and not revs:
             revs.append("HEAD")
         return revs, False
-    takes = (("-m", "--mainline", "-X", "--strategy-option", "--strategy") if verb == "cherry-pick" else
-             ("--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec", "-C"))
+    picks = verb in ("cherry-pick", "revert")
+    takes = (("-m", "--mainline", "-X", "--strategy-option", "--strategy", "--cleanup", "--empty") if picks else
+             ("--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec", "-C", "--whitespace",
+              "--empty"))
     words, j, root = [], 0, False
     while j < len(args):
         word = args[j]
@@ -6344,30 +6468,43 @@ def _cab_replay_revs(verb, args):
             return [], False
         elif word == "--root":
             root = True
+        elif word == "-":
+            words.append("@{-1}")
         elif not word.startswith("-"):
             words.append(word)
-    if verb == "cherry-pick":
-        return words, False
+    if picks:
+        return words + list(extra), False
     branch = words[1] if len(words) > 1 else "HEAD"
     if root:
         return [branch], True
     return ["{}..{}".format(words[0] if words else "@{upstream}", branch)], True
 
 
-def _cab_replay_hit(stage, args):
-    """Why the commits a replaying git stage names block it, or None: their messages are read with git log
-    in each directory the stage runs in, and one holding the token refuses it. A message the hook cannot
-    read (no repository, an unknown revision, a git failure or timeout) is passed over (disclosed)."""
-    revs, walk = _cab_replay_revs(stage.verb, args)
-    revs = [rev for rev in revs if rev and len(rev) <= 1024 and not rev.startswith("-")
-            and not any(ch.isspace() for ch in rev)]
-    if not revs:
-        return None
+def _cab_git_env():
+    """The scrubbed environment the layer's own git reads run with (_isolate_git_env, no optional locks, the
+    C locale)."""
     env = _isolate_git_env(dict(os.environ))
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["LC_ALL"] = "C"
+    return env
+
+
+def _cab_replay_names(stage, args, extra=()):
+    """(revs, walk) a replaying git stage names (_cab_replay_revs), each rev a word git log can take as one."""
+    revs, walk = _cab_replay_revs(stage.verb, args, extra)
+    return [rev for rev in revs if rev and len(rev) <= 1024 and not rev.startswith("-")
+            and not any(ch.isspace() for ch in rev)], walk
+
+
+def _cab_replay_hit(stage, revs, walk):
+    """Why the commits revs name block a replaying git stage, or None: their messages are read with git log in
+    each directory the stage runs in (git revert records only the subject of each, so only that is read for
+    it), and one holding the token refuses it. A message the hook cannot read (no repository, an unknown
+    revision, a git failure or timeout) is passed over (disclosed)."""
+    env = _cab_git_env()
     for d in sorted(x for x in stage.dirs if x is not None):
-        argv = ["git", "-C", d, "-c", "core.fsmonitor=false", "log", "--format=%B", "--no-show-signature",
+        argv = ["git", "-C", d, "-c", "core.fsmonitor=false", "log",
+                "--format=%s" if stage.verb == "revert" else "--format=%B", "--no-show-signature",
                 "--ignore-missing", "--max-count={}".format(_CAB_MAX_REPLAY)]
         if not walk:
             argv.append("--no-walk=unsorted")
@@ -6382,21 +6519,57 @@ def _cab_replay_hit(stage, args):
     return None
 
 
-def _cab_hooks_setting(stage):
-    """Whether stage's words SET core.hooksPath: the value of a -c or --config-env option naming the key, a
-    GIT_CONFIG_* assignment whose value names it, or a git config command naming the key as a word of its
-    own. A word that only mentions the key (a message, a core.hooksPath=<dir> in prose) is none of these."""
+def _cab_config_set(stage, keys):
+    """Whether stage's words SET one of the git settings keys names (lower case): the value of a -c or
+    --config-env option naming it, a GIT_CONFIG_* assignment whose value names it, or a git config command
+    naming it as a word of its own. A setting name built at run time (a -c or --config-env name, a
+    GIT_CONFIG_KEY_<n> or a GIT_CONFIG_PARAMETERS value holding '$' or a backquote) may name any of them, so
+    it counts. A word that only mentions a key (a message, a core.hooksPath=<dir> in prose) is none of these."""
     words = stage.words
+
+    def named(name):
+        return name in keys or "$" in name or "`" in name
+
     for j, word in enumerate(words):
         low = word.lower()
-        if low in ("-c", "--config-env") and j + 1 < len(words) and \
-                words[j + 1].lower().partition("=")[0] == "core.hookspath":
+        if low in ("-c", "--config-env") and j + 1 < len(words) and named(words[j + 1].lower().partition("=")[0]):
             return True
-        if low.startswith("--config-env=") and low[13:].partition("=")[0] == "core.hookspath":
+        if low.startswith("--config-env=") and named(low[13:].partition("=")[0]):
             return True
-        if low.startswith("git_config") and "core.hookspath" in low.partition("=")[2]:
+        if low.startswith("git_config"):
+            name, _eq, value = low.partition("=")
+            if any(key in value for key in keys) or (name.startswith("git_config_key_") or
+                                                     name == "git_config_parameters") and named(value):
+                return True
+    return stage.verb == "config" and any(word.lower() in keys for word in words)
+
+
+def _cab_hooks_setting(stage):
+    """Whether stage's words SET core.hooksPath (_cab_config_set)."""
+    return _cab_config_set(stage, ("core.hookspath",))
+
+
+def _cab_editor_setting(stage):
+    """Whether stage's words set an editor git edits a rebase todo list with: a sequence.editor or
+    core.editor setting (_cab_config_set), or a GIT_SEQUENCE_EDITOR, GIT_EDITOR, VISUAL or EDITOR
+    assignment."""
+    return _cab_config_set(stage, _CAB_TODO_EDITOR_KEYS) or any(
+        "=" in word and word.partition("=")[0] in _CAB_TODO_EDITOR_VARS for word in stage.words)
+
+
+def _cab_todo_edit(rest):
+    """Whether the words after git rebase ask for its todo list to be edited: -i in a short cluster, or
+    --interactive or --edit-todo in an abbreviation of two letters or more."""
+    for word in rest:
+        if word == "--":
+            break
+        if word.startswith("--"):
+            name = word[2:].partition("=")[0]
+            if len(name) >= 2 and ("interactive".startswith(name) or "edit-todo".startswith(name)):
+                return True
+        elif word.startswith("-") and "i" in word[1:]:
             return True
-    return stage.verb == "config" and any(word.lower() == "core.hookspath" for word in words)
+    return False
 
 
 def _cab_trailer_stage(stage):
@@ -6413,42 +6586,68 @@ def _cab_git_rest(stage):
     return _cab_git_verb(stage.words, idx, stage.dirs)[2]
 
 
+def _cab_command_word(stage):
+    """Whether the git word of stage is the word its command starts with: the first word of the stage, or
+    the first word of a command substitution in it (heads, marked in the fallback reading), NAME=value
+    assignments before it aside."""
+    k = next(i for i, w in enumerate(stage.words) if w.rsplit("/", 1)[-1] == "git")
+    while k > 0 and k not in stage.heads and _CAB_ASSIGN_RE.match(stage.words[k - 1]):
+        k -= 1
+    return k == 0 or k in stage.heads
+
+
 def _cab_stage_writes(stage):
-    """(names, dir_names) stage may write: its redirect targets; for a write-class stage every word after
-    its command word in each spelling _cab_candidates reads, an option word itself aside; for a git stage
-    the value of an output option (-o, -oVALUE, or --output or --output-directory in an abbreviation of five
-    characters or more, with '=' or as the next word), whose directory a git command may fill (dir_names),
-    and each operand of git interpret-trailers and git mailinfo, which write their operands."""
-    names, dir_names = list(stage.targets), []
+    """(names, dir_names, patch_dirs) stage may write: its redirect targets; for a write-class stage every
+    word after its command word in each spelling _cab_candidates reads, an option word itself aside; for a
+    git stage the value of an output option (-o, -oVALUE, or --output or --output-directory in an
+    abbreviation of five characters or more, with '=' or as the next word), whose directory a git command
+    may fill (dir_names); for a git format-patch with no such option and no --stdout, the directory it runs
+    in, where it writes its numbered patch files (patch_dirs, _CAB_PATCH_NAME_RE), and the value of a -c
+    format.outputDirectory setting (dir_names); and each operand of git interpret-trailers and git mailinfo,
+    which write their operands."""
+    names, dir_names, patch_dirs = list(stage.targets), [], []
     if stage.write:
         for word in stage.words[1:]:
             found = _cab_candidates(word)
             names += found[1:] if word.startswith("-") else found
     if stage.verb:
         rest = _cab_git_rest(stage)
+        output = "--stdout" in rest
         for j, word in enumerate(rest):
             name, eq, value = word.partition("=")
             if name == "-o" or len(name) >= 5 and "--output-directory".startswith(name):
+                output = True
                 if eq:
                     dir_names.append(value)
                 elif j + 1 < len(rest):
                     dir_names.append(rest[j + 1])
             elif name.startswith("-o") and not name.startswith("--"):
+                output = True
                 dir_names.append(word[2:])
             elif stage.verb in ("interpret-trailers", "mailinfo") and not word.startswith("-"):
                 names.append(word)
-    return names + dir_names, dir_names
+        if stage.verb == "format-patch" and not output:
+            patch_dirs.append(".")
+            words = stage.words
+            dir_names += [words[j + 1].partition("=")[2] for j in range(len(words) - 1) if words[j] == "-c"
+                          and words[j + 1].lower().partition("=")[0] == "format.outputdirectory"]
+    return names + dir_names, dir_names, patch_dirs
 
 
 def _cab_writes(units):
-    """(writes, dir_writes, loose) for one reading: each normalized path a stage may write
-    (_cab_stage_writes), each directory a git output option names, and the base name of each relative name
-    written where a directory the stage runs in cannot be determined, mapped to the ids of the stages that
-    write it. A relative name is resolved from each directory the stage runs in that can be determined."""
-    writes, dir_writes, loose = {}, {}, {}
+    """(writes, dir_writes, loose, patch_writes) for one reading: each normalized path a stage may write
+    (_cab_stage_writes), each directory a git output option names, the base name of each relative name
+    written where a directory the stage runs in cannot be determined, and each directory a git format-patch
+    writes its numbered patch files into (None for one that cannot be determined), mapped to the ids of the
+    stages that write it. A relative name is resolved from each directory the stage runs in that can be
+    determined."""
+    writes, dir_writes, loose, patch_writes = {}, {}, {}, {}
     for unit in units:
         for stage in unit:
-            names, dir_names = _cab_stage_writes(stage)
+            names, dir_names, patch_dirs = _cab_stage_writes(stage)
+            if patch_dirs:
+                for d in stage.dirs:
+                    patch_writes.setdefault(d, set()).add(id(stage))
             for name in names:
                 is_dir = name in dir_names
                 if not name or name == "-":
@@ -6463,22 +6662,54 @@ def _cab_writes(units):
                     writes.setdefault(path, set()).add(id(stage))
                     if is_dir:
                         dir_writes.setdefault(path, set()).add(id(stage))
-    return writes, dir_writes, loose
+    return writes, dir_writes, loose, patch_writes
+
+
+def _cab_am_operands(rest):
+    """The operands of git am among the words after it, or None when it resumes or stops a session
+    (_CAB_AM_RESUME, -r), reading no new patch. An option word is no operand, and neither is the value a
+    value-taking option takes from the next word (_CAB_AM_LONG, _CAB_AM_SHORT_VALUE; a long option in an
+    abbreviation that could name one is read as one, the safe direction)."""
+    operands, j = [], 0
+    while j < len(rest):
+        word = rest[j]
+        j += 1
+        if word == "--":
+            return operands + rest[j:]
+        if word.startswith("--"):
+            name, eq, _value = word[2:].partition("=")
+            if len(name) > 0 and any(opt.startswith("--" + name) for opt in _CAB_AM_RESUME):
+                return None
+            matches = [opt for opt in _CAB_AM_LONG if opt.startswith(name)] if not name.startswith("no-") else []
+            if not eq and (_CAB_AM_LONG.get(name) or name not in _CAB_AM_LONG and any(
+                    _CAB_AM_LONG[opt] for opt in matches)):
+                j += 1
+        elif word.startswith("-") and len(word) > 1:
+            for k, letter in enumerate(word[1:], 1):
+                if letter == "r":
+                    return None
+                if letter in _CAB_AM_SHORT_VALUE:
+                    j += 0 if word[k + 1:] else 1
+                    break
+                if letter == "S":
+                    break
+        elif word:
+            operands.append(word)
+    return operands
 
 
 def _cab_reads_stdin(stage):
     """Whether a mailbox-reading git stage reads its mailbox from standard input: git mailinfo always does,
-    and git am or git mailsplit does when no word after its subcommand (an option word aside) names an
-    existing path, git am unless it resumes or stops a session (_CAB_AM_RESUME). A word that cannot be
-    resolved counts as naming none, so an option value read as an operand fails closed."""
+    and git am or git mailsplit does when none of its operands (_cab_am_operands for git am; for git
+    mailsplit each word that is not an option) names an existing path, git am unless it resumes or stops a
+    session. An operand that cannot be resolved counts as naming none (fail closed)."""
     if stage.verb == "mailinfo":
         return True
     rest = _cab_git_rest(stage)
     if stage.verb == "am":
-        for word in rest:
-            name = word.partition("=")[0]
-            if name == "-r" or len(name) > 2 and any(opt.startswith(name) for opt in _CAB_AM_RESUME):
-                return False
+        rest = _cab_am_operands(rest)
+        if rest is None:
+            return False
     for word in rest:
         if word.startswith("-") or not word:
             continue
@@ -6490,21 +6721,103 @@ def _cab_reads_stdin(stage):
     return True
 
 
+def _cab_lex(prepared):
+    """(tokens, joined) of the exact reading: shlex's tokens (posix, the shell operators and a newline split
+    off, no comment reading), and the indices of the word tokens an operator follows with no blank between,
+    read from the character shlex holds back after such a word (None when this Python's shlex keeps no such
+    record, so that cannot be told). Raises ValueError where shlex cannot tokenize the text."""
+    lex = shlex.shlex(prepared, posix=True, punctuation_chars=_CAB_PUNCT)
+    lex.whitespace, lex.commenters, lex.whitespace_split = " \t\r", "", True
+    held = getattr(lex, "_pushback_chars", None)
+    tokens, joined = [], (set() if held is not None else None)
+    while True:
+        tok = lex.get_token()
+        if tok == lex.eof:
+            return tokens, joined
+        if joined is not None and held and held[0] in _CAB_PUNCT:
+            joined.add(len(tokens))
+        tokens.append(tok)
+
+
+def _cab_crude(prepared):
+    """(tokens, joined) of the fallback reading (_CAB_CRUDE_RE over the de-quoted text, each '$(' and
+    backquote marked _CAB_HEAD first), joined as in _cab_lex."""
+    text = _CAB_DEQUOTE_RE.sub("", _CAB_SUBST_OPEN_RE.sub(" " + _CAB_HEAD + " ", prepared))
+    found = list(_CAB_CRUDE_RE.finditer(text))
+    return ([m.group(0) for m in found],
+            {i for i in range(len(found) - 1) if found[i].end() == found[i + 1].start()})
+
+
+def _cab_previous_branch(stage):
+    """The indices of stage's words git reads as the previous branch (@{-1}): each '-' after the subcommand
+    of git merge, cherry-pick, rebase or revert, but a value of git merge's -F or --file, which is standard
+    input."""
+    if stage.verb not in _CAB_GIT_DASH_VERBS:
+        return set()
+    words = stage.words
+    found = set()
+    for k in range(len(words) - len(_cab_git_rest(stage)), len(words)):
+        prev = words[k - 1]
+        if words[k] == "-" and not (stage.verb == "merge" and (
+                prev[:1] == "-" and prev[1:2] != "-" and prev.endswith("F")
+                or len(prev) >= 4 and "--file".startswith(prev))):
+            found.add(k)
+    return found
+
+
+def _cab_stdin_revs(stage):
+    """Whether stage is a git cherry-pick or revert that reads the commits it replays from standard input
+    (--stdin before any '--')."""
+    if stage.verb not in ("cherry-pick", "revert"):
+        return False
+    rest = _cab_git_rest(stage)
+    return "--stdin" in (rest[:rest.index("--")] if "--" in rest else rest)
+
+
+def _cab_stage_problem(stage, active, what):
+    """Why how stage is fed refuses the command, or None: a mailbox-reading git stage fed by a pipe, a
+    process substitution, a here-document or a here-string (whatever produces it, since this layer does not
+    decode it as git does), or, where active (the exact reading, a fallback reading where shlex fails, or one
+    whose git word is the command word, _cab_command_word), one that reads standard input no redirect of its
+    own feeds (_cab_reads_stdin); an StGit series; and a git cherry-pick or revert --stdin that no
+    here-document or here-string of its own feeds."""
+    if stage.verb in _CAB_GIT_MAILBOX_VERBS:
+        if not stage.first:
+            return ("{} reads a mailbox a pipe feeds it, whatever produces it, so the patches or message it reads "
+                    "cannot be read".format(what))
+        if stage.subst or stage.text:
+            return ("{} reads a mailbox from a process substitution, a here-document or a here-string, which this "
+                    "layer does not decode as git does, so the patches or message it reads cannot be read"
+                    .format(what))
+        if active and not stage.fed and _cab_reads_stdin(stage):
+            return ("{} {} its mailbox from standard input, which no redirect of its own feeds, so the patches or "
+                    "message it reads cannot be read".format(what, "reads" if stage.verb == "mailinfo" else
+                                                             "names no existing patch file or Maildir, so it reads"))
+        if any("stgit-series" in word for word in stage.words):
+            return "{} reads an StGit series, which names further patch files git am reads".format(what)
+    if active and not stage.text and _cab_stdin_revs(stage):
+        return ("{} reads the commits it replays from standard input (--stdin), which no here-document or "
+                "here-string of its own feeds, so they cannot be read".format(what))
+    return None
+
+
 def _cab_reference_problem(joined, cwd):
     """Why the file references of a command (its joined text, backslash-newlines removed) block it, or
-    None. Read twice: by shlex (posix, the shell operators and a newline split off, no comment reading; an
-    ANSI-C quote decoded and a locale quote read as a double-quoted string first), the exact reading, and
-    by the fallback reading (_CAB_CRUDE_RE), an over-read that refuses standard input ('-') or a
-    non-regular file on its own only when the exact reading fails. A commit-creating git command in a
-    command one of whose stages, in either reading, sets core.hooksPath (_cab_hooks_setting) is refused.
-    In each reading, a sink unit's words, redirect sources and targets are read (_CabReader); in a command
-    holding a subshell or { } group, every word of the whole command is read for a sink, since the group
-    may feed it. A word or redirect source naming a path another stage of the command writes
-    (_cab_writes) is refused; a file of a unit holding a mailbox-reading git stage is read as a mailbox,
-    and one a trailer-writing stage reads by the token's words; and a mailbox-reading git stage that reads
-    standard input no redirect, here-document or here-string of its own feeds (_cab_reads_stdin) is
-    refused, in either reading. The exact reading also reads the messages a replaying git stage names
-    (_cab_replay_hit)."""
+    None. Read twice: by shlex (_cab_lex, an ANSI-C quote decoded and a locale quote read as a double-quoted
+    string first), the exact reading, and by the fallback reading (_cab_crude), an over-read that refuses
+    standard input ('-') or a non-regular file on its own only when the exact reading fails. A
+    commit-creating git command in a command one of whose stages, in either reading, sets core.hooksPath
+    (_cab_hooks_setting) is refused, and so is a git rebase that edits its todo list in a command that sets
+    an editor it edits it with (_cab_editor_setting). In each reading, a sink unit's words, redirect sources
+    and targets are read (_CabReader); in a command holding a subshell or { } group, every word of the whole
+    command is read for a sink, since the group may feed it. A word or redirect source naming a path another
+    stage of the command writes (_cab_writes) is refused; a file of a unit holding a mailbox-reading git
+    stage is read as a mailbox, and one a trailer-writing stage reads by the token's words; how a stage is
+    fed is judged by _cab_stage_problem; and the messages a replaying git stage names are read
+    (_cab_replay_hit), each set once, at most _CAB_MAX_REPLAY_CALLS sets, past which the command is refused.
+    In the fallback reading, where shlex can tokenize the command, the standard-input rule of a mailbox
+    reader, the --stdin rule, the todo-list rule and the replay reads apply only to a stage whose git word is
+    the command word (_cab_command_word), so a here-document body that mentions such a command passes."""
     dirs = frozenset((posixpath.normpath(cwd),)) if isinstance(cwd, str) and posixpath.isabs(cwd) else \
         frozenset((None,))
     prepared = joined
@@ -6513,60 +6826,83 @@ def _cab_reference_problem(joined, cwd):
     prepared = _CAB_LOCALE_QUOTE_RE.sub("", prepared)
     readings = []
     try:
-        lex = shlex.shlex(prepared, posix=True, punctuation_chars=_CAB_PUNCT)
-        lex.whitespace, lex.commenters, lex.whitespace_split = " \t\r", "", True
-        readings.append((True, list(lex)))
+        readings.append((True, None) + _cab_lex(prepared))
     except ValueError:
         pass
     lexed = bool(readings)
-    readings.append((False, _CAB_CRUDE_RE.findall(_CAB_DEQUOTE_RE.sub("", prepared))))
+    readings.append((False, _CAB_HEAD) + _cab_crude(prepared))
     parsed = []
-    for exact, tokens in readings:
-        units, grouped = _cab_parse(tokens, dirs)
+    for exact, mark, tokens, joined_at in readings:
+        units, grouped = _cab_parse(tokens, dirs, joined_at, mark)
         for unit in units:
             for stage in unit:
                 _cab_classify(stage)
-        parsed.append((exact, units, grouped))
-    stages = [stage for _exact, units, _grouped in parsed for unit in units for stage in unit]
+        parsed.append((exact, tokens, units, grouped))
+    stages = [stage for _exact, _tokens, units, _grouped in parsed for unit in units for stage in unit]
     if any(_cab_hooks_setting(stage) for stage in stages) and any(
             stage.verb in _CAB_GIT_HOOKED_VERBS or stage.alias for stage in stages):
         return ("a commit-creating git command runs in a command that sets core.hooksPath, which can switch "
                 "the commit-msg layer off")
-    reader, replays = _CabReader(), 0
-    for exact, units, grouped in parsed:
-        sinks = [unit for unit in units if any(_cab_stage_sink(stage) for stage in unit)]
-        if not sinks:
-            continue
-        reader.writes, reader.dir_writes, reader.loose = _cab_writes(units)
-        for unit in (units if grouped else sinks):
-            mailbox = any(stage.verb in _CAB_GIT_MAILBOX_VERBS for stage in unit)
-            for stage in unit:
-                strict = (exact or not lexed) and stage.msg
-                words = _cab_trailer_stage(stage)
-                what = "the {} command".format("git " + stage.verb if stage.verb else
-                                               stage.words[0][:60] if stage.words else "redirect")
-                if stage.verb in _CAB_GIT_MAILBOX_VERBS and not stage.fed and _cab_reads_stdin(stage):
-                    return ("{} {} its mailbox from standard input, which no redirect, here-document or here-string "
-                            "of its own feeds (a pipe into it included), so the patches or message it reads cannot "
-                            "be read".format(what, "reads" if stage.verb == "mailinfo" else
-                                             "names no existing patch file or Maildir, so it reads"))
-                if stage.verb in _CAB_GIT_MAILBOX_VERBS and any("stgit-series" in word for word in stage.words):
-                    return "{} reads an StGit series, which names further patch files git am reads".format(what)
-                for k, word in enumerate(stage.words):
-                    if k or "/" in word:  # a command word with no '/' is found on PATH, not in the run directory
-                        reader.check(word, stage.dirs, strict, stage.fed, what, id(stage), mailbox, words)
-                for source in stage.sources:
-                    reader.check(source, stage.dirs, strict, True, what + " (a redirect source)", id(stage),
-                                 mailbox, words)
-                for target in stage.targets:
-                    reader.check(target, stage.dirs, False, True, what + " (a redirect target)")
-                if reader.why is not None:
-                    return reader.why
-                if exact and stage.verb in _CAB_GIT_REPLAY_VERBS and replays < _CAB_MAX_REPLAY_CALLS:
-                    replays += 1
-                    hit = _cab_replay_hit(stage, _cab_git_rest(stage))
-                    if hit is not None:
-                        return hit
+
+    def active(exact, stage):
+        return exact or not lexed or stage.verb is not None and _cab_command_word(stage)
+
+    if any(_cab_editor_setting(stage) for stage in stages) and any(
+            stage.verb == "rebase" and active(exact, stage) and _cab_todo_edit(_cab_git_rest(stage))
+            for exact, _tokens, units, _grouped in parsed for unit in units for stage in unit):
+        return ("git rebase edits its todo list in a command that sets an editor git edits it with "
+                "(sequence.editor, core.editor, GIT_SEQUENCE_EDITOR, GIT_EDITOR, VISUAL or EDITOR), which can "
+                "add commits whose recorded messages this layer does not read")
+    reader, replayed = _CabReader(), {}
+    try:
+        for exact, tokens, units, grouped in parsed:
+            sinks = [unit for unit in units if any(_cab_stage_sink(stage) for stage in unit)]
+            if not sinks:
+                continue
+            reader.writes, reader.dir_writes, reader.loose, reader.patch_writes = _cab_writes(units)
+            for unit in (units if grouped else sinks):
+                mailbox = any(stage.verb in _CAB_GIT_MAILBOX_VERBS for stage in unit)
+                for stage in unit:
+                    strict = (exact or not lexed) and stage.msg
+                    words = _cab_trailer_stage(stage)
+                    what = "the {} command".format("git " + stage.verb if stage.verb else
+                                                   stage.words[0][:60] if stage.words else "redirect")
+                    live = active(exact, stage)
+                    why = _cab_stage_problem(stage, live, what)
+                    if why is not None:
+                        return why
+                    dash = _cab_previous_branch(stage)
+                    for k, word in enumerate(stage.words):
+                        if (k or "/" in word) and k not in dash:  # a bare command word is found on PATH
+                            reader.check(word, stage.dirs, strict, stage.fed, what, id(stage), mailbox, words)
+                    for source in stage.sources:
+                        reader.check(source, stage.dirs, strict, True, what + " (a redirect source)", id(stage),
+                                     mailbox, words)
+                    for target in stage.targets:
+                        reader.check(target, stage.dirs, False, True, what + " (a redirect target)")
+                    if reader.why is not None:
+                        return reader.why
+                    if not live or stage.verb not in _CAB_GIT_REPLAY_VERBS:
+                        continue
+                    extra = []
+                    if stage.text and _cab_stdin_revs(stage):
+                        extra = [word for text in stage.texts for word in text.split()]
+                        if stage.doc is not None:  # every word after the here-document opens: its body and more
+                            extra += [tok for tok in tokens[stage.doc + 1:] if tok and tok != _CAB_HEAD
+                                      and not all(ch in _CAB_PUNCT for ch in tok)]
+                    revs, walk = _cab_replay_names(stage, _cab_git_rest(stage), extra)
+                    key = (stage.verb, tuple(revs), walk, stage.dirs)
+                    if not revs or key in replayed and replayed[key] is None:
+                        continue
+                    if key not in replayed:
+                        if len(replayed) >= _CAB_MAX_REPLAY_CALLS:
+                            return ("the command replays the recorded messages of more than {} sets of commits, "
+                                    "past the bound on the reads of them".format(_CAB_MAX_REPLAY_CALLS))
+                        replayed[key] = _cab_replay_hit(stage, revs, walk)
+                    if replayed[key] is not None:
+                        return replayed[key]
+    finally:
+        reader.close()
     return None
 
 
@@ -6577,10 +6913,13 @@ def coauthor_bash(data):
     setting, a --trailer option or git interpret-trailers beside the token's words; deny one whose brace
     expansion is too large to expand when it could form the token; and deny one whose file references, read
     by construction (the roster comment above _CAB_GIT_MSG_VERBS, and _cab_reference_problem), name a file
-    holding the token, a file that cannot be read, a path another stage of the command writes, or a relative
-    path where the run directory cannot be determined, or that feeds a mailbox-reading git command from
-    standard input it cannot read, or replays a commit message holding the token, or sets core.hooksPath
-    beside a commit. A command past _CAB_MAX_COMMAND is refused when any of its readings holds a word that
+    holding the token (a mailbox also as git mailinfo decodes it), a file that cannot be read, a path another
+    stage of the command writes, or a relative path where the run directory cannot be determined, or that
+    feeds a mailbox-reading git command from a pipe, a process substitution, a here-document, a here-string
+    or standard input it cannot read, or feeds git cherry-pick or revert --stdin other than by a
+    here-document or here-string, or replays a commit message holding the token, or sets core.hooksPath
+    beside a commit, or an editor beside a git rebase that edits its todo list. A command past
+    _CAB_MAX_COMMAND is refused when any of its readings holds a word that
     could redirect, write or commit. Removal goes through the Write/Edit layer
     (coauthor_file), which can PROVE the count fell; this layer cannot prove a Bash removal, so it never
     allows one."""

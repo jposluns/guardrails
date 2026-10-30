@@ -265,8 +265,9 @@ TEXT_SUFFIXES = {".md", ".mdc", ".py", ".sh", ".yml", ".yaml", ".toml", ".json",
                  ".html", ".css", ".js", ".cfg", ".ini", ".conf", ".svg", ".csv"}
 
 # Shipped text files whose NAME is fixed by an outside convention and so carries no text suffix: git runs a
-# hook only under its exact name, so the enforcement pack's pre-commit hook is named pre-commit. Each is an
-# exact path, scanned as text like any TEXT_SUFFIXES file.
+# hook only under its exact name, so the enforcement pack's pre-commit hook is named pre-commit and the
+# co-author commit-msg hook is named commit-msg. Each is an exact path, scanned as text like any
+# TEXT_SUFFIXES file.
 TEXT_PATHS = frozenset(("opf/enforcement/precommit/pre-commit", ".aiqt/core/hooks/githooks/commit-msg"))
 
 
