@@ -73,9 +73,11 @@ the lint reads the registry marker, not the meaning, so a requirement wrongly ma
 stays green; review of registry changes catches that.
 
 The default entry also runs the retired gate name scan (retired_gate_name_findings): no .py module
-under opf/tools may spell a transitional alias of store.HOMES or store.SPEC_VERSION. Each file is
-decoded as Python decodes it, by its BOM or coding cookie (tokenize.open), and each line is
-NFKC-normalized before it is matched, as Python normalizes identifiers, so a fullwidth or
+under opf/tools may spell a transitional alias of store.HOMES or store.SPEC_VERSION. Each file must
+have one reading: strict UTF-8 (a UTF-8 BOM allowed), no CR that is not followed by LF, and no coding
+cookie but utf-8 or utf-8-sig on lines 1 and 2, so the scan and the compiler both read it as UTF-8;
+any other file is a finding naming it, never a traceback. Each line is NFKC-normalized before it is
+matched, as Python normalizes identifiers, so a fullwidth or
 mathematical-alphanumeric spelling is caught. Residual: it is a line scan, so a name built at run time
 (getattr, setattr, or a globals() key assembled from split or formatted strings) is outside it, and so
 is every file that is not a .py file.
@@ -270,7 +272,6 @@ import ast
 import html
 import re
 import tempfile
-import tokenize
 import unicodedata
 from pathlib import Path
 
@@ -1593,23 +1594,61 @@ def surface_findings(texts=None):
 # may spell either name again, as a definition or as a read. Each name is built from two pieces, so
 # this module's own source never carries it and the scan covers this file like any other. Python
 # normalizes every identifier with NFKC, so a fullwidth or mathematical-alphanumeric spelling is the
-# same identifier: each line is NFKC-normalized before it is matched, in a file decoded by its BOM or
-# coding cookie as Python decodes it (a UTF-7 one hides a name from a UTF-8 read). What a line scan
-# cannot see is outside this gate: a name built at run time (getattr, setattr or a globals() key
-# assembled from split or formatted strings) never appears whole on any line, and only .py files are
-# scanned.
+# same identifier: each line is NFKC-normalized before it is matched, in a file that has one reading
+# (_module_source: a cookie such as UTF-7 would hide a name from a UTF-8 read, so it is refused rather
+# than interpreted). What a line scan cannot see is outside this gate: a name built at run time
+# (getattr, setattr or a globals() key assembled from split or formatted strings) never appears whole
+# on any line, and only .py files are scanned.
 _RETIRED_GATE_NAMES = ("SUPPORTED_" + "HOMES", "SUPPORTED_" + "SPEC_VERSION")
 _TOOLS = Path(__file__).resolve().parent
+# A scanned module has one reading, so no decoder can read it differently from the compiler: strict UTF-8
+# after an optional UTF-8 BOM, no CR that is not followed by LF (the compiler ends a line there, a reader
+# that splits at LF alone does not, and the two then look for a coding cookie on different lines), and no
+# coding cookie but utf-8 or utf-8-sig on lines 1 and 2. A cookie is every `coding:` or `coding=` and the
+# name after it, in a comment or not (Python reads one only in a comment, an over-refusal), its letter case
+# and underscores read as Python reads them. Anything else is refused as a finding naming the file, as is a
+# module the no-homes-1 scan cannot compile; none is a traceback.
+_BOM = b"\xef\xbb\xbf"
+_CODING = re.compile(r"coding[:=][ \t]*([-\w.]+)")
+_SOURCE_RULE = ("a scanned module must be strict UTF-8, a UTF-8 BOM allowed, with no CR not followed by LF and "
+                "no coding cookie but utf-8 or utf-8-sig on lines 1 and 2, and must compile")
+
+
+def _source_finding(rel, line, scan, reason):
+    return "{}:{}: {}, so the {} scan refuses this module ({})".format(rel, line, reason, scan, _SOURCE_RULE)
+
+
+def _module_source(path, rel, scan):
+    """(bytes, text, None) for a module with one reading (above), else (None, None, the finding)."""
+    raw = path.read_bytes()
+    body = raw[len(_BOM):] if raw.startswith(_BOM) else raw
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return None, None, _source_finding(rel, body.count(b"\n", 0, exc.start) + 1, scan,
+                                           "byte 0x{:02x} is not strict UTF-8".format(body[exc.start]))
+    lone = re.search("\r(?!\n)", text)
+    if lone:
+        return None, None, _source_finding(rel, text.count("\n", 0, lone.start()) + 1, scan,
+                                           "a CR that is not followed by LF ends a line")
+    for number, line in enumerate(text.split("\n", 2)[:2], 1):
+        for cookie in _CODING.finditer(line):
+            if cookie.group(1).lower().replace("_", "-") not in ("utf-8", "utf-8-sig"):
+                return None, None, _source_finding(rel, number, scan, "the coding cookie {!r} is not utf-8 or "
+                                                   "utf-8-sig".format(cookie.group(1)))
+    return raw, text, None
 
 
 def retired_gate_name_findings(tools=None):
     tools = _TOOLS if tools is None else tools
     findings = []
     for path in sorted(tools.rglob("*.py")):
-        # Decoded as Python decodes it, by its BOM or coding cookie: a UTF-7 one hides a name from UTF-8.
-        with tokenize.open(path) as source:
-            text = source.read()
-        for number, line in enumerate(text.splitlines(), 1):
+        _raw, text, refused = _module_source(path, path.relative_to(tools).as_posix(), "retired gate name")
+        if refused is not None:
+            findings.append(refused)
+            continue
+        # Lines end at LF, as the compiler counts them once no CR stands alone.
+        for number, line in enumerate(text.split("\n"), 1):
             line = unicodedata.normalize("NFKC", line)
             for name in _RETIRED_GATE_NAMES:
                 if name in line:
@@ -1623,8 +1662,20 @@ def retired_gate_name_findings(tools=None):
 # `homes`, a subscript, `.get(...)` or getattr(...) keyed by a string ending in `homes`, or a
 # homes_generation(...) call; a called name (`_directory_homes(plan)`) is not one. The HOMES constant is
 # the bare name HOMES, or HOMES read off a name the module binds only by importing _opf_store. Outside
-# self-test code (a function whose name contains `self_test`, and every check_*.py module, which still
-# build refused homes-1 inputs) and the vendored tree, this AST scan of opf/tools fails on:
+# self-test code and the vendored tree, this AST scan of opf/tools fails on the rules below. Self-test code,
+# which still builds refused homes-1 inputs, is every check_*.py module and the body of each self-test
+# function: a module-level def whose name holds `self_test` or `self_tests` as whole words between
+# underscores (`self_test`, `_self_test_units`, `_cli_self_test`, `run_self_tests`; _SELF_TEST_NAME), the
+# convention every such function in the tree follows. A def's decorators, defaults, annotations and type
+# parameters run when its module is imported, so they are scanned; a nested def, a method, a lambda and a
+# name holding the words inside a longer one (`myself_test`) are not self-test code. A self-test function is
+# scanned like any other where production code spells its name, as a name, an attribute or an import alias,
+# in any module (names are matched across modules, so every self-test function of that name is scanned, and
+# what its body spells is then production code too). Production code is all the scan walks outside the bodies
+# of self-test functions, of each module's `if __name__ == "__main__":` block and module-level `main` def (the
+# self-test entries), and of the helpers only self-test code names (a module-level def without decorators that
+# self-test code or another such helper spells, as a name, an attribute or inside a string, and nothing else
+# spells: opf.py's two watchdog fixtures, which the self-test pins). The scan then fails on:
 #   1. any comparison or membership test with a homes read anywhere in an operand (`homes - 1 == 0`,
 #      `int(homes) == 1`, `m["opf"]["homes"] == 1`) other than ONE `==` between a bare homes read and
 #      the integer 2 or the HOMES constant (element by element in a tuple `==`), or the type guard
@@ -1654,7 +1705,10 @@ def retired_gate_name_findings(tools=None):
 #      element by element where a tuple or list target meets a display of the same length), or given as
 #      the value of a dict display key ending in `homes` (`{"opf": {"homes": 1}}`);
 #   4. a binding or deletion of the name HOMES other than _opf_store.py's module-level `HOMES = 2` and
-#      `from _opf_store import HOMES`; every star import, since `from m import *` binds names the module
+#      `from _opf_store import HOMES`, a type parameter of any kind included (`def f[HOMES]()`,
+#      `class C[*HOMES]`, `type A[**HOMES] = ...`: no scope may read a TypeVar as the constant 2, and a type
+#      parameter named like the store module's alias keeps `alias.HOMES` from reading as it); every star
+#      import, since `from m import *` binds names the module
 #      never spells, HOMES possibly among them (refused even where m is a scanned module, which this rule
 #      holds too, or the importer never reads HOMES: an over-refusal); an assignment or deletion of an
 #      attribute HOMES on any object (`x.HOMES = 1`, `del x.HOMES`); a call of an attribute writer
@@ -1678,8 +1732,9 @@ def retired_gate_name_findings(tools=None):
 #      also fails on every string constant, an f-string's literal piece included, and every keyword argument
 #      that is exactly HOMES (`getattr(_opf_store, "HOMES")`, `charged(_opf_store, "HOMES", w)`, `f"HOMES"`,
 #      `dict(HOMES=1)`), so no writer or helper the scan does not read as a writer (an excluded one, a list
-#      of pairs a writer later drains, a stub table) is handed the name as a literal; _opf_store.py is not
-#      spared, since its `HOMES = 2` spells no string. Any scanned module can reach the store module (by
+#      of pairs a writer later drains, a stub table) is handed the name as a literal; this refusal has no
+#      exclusion, and _opf_store.py is not spared, since its `HOMES = 2` spells no string (_opf_init_p0's
+#      refusal code is HOMES_DECLARATION, not the name). Any scanned module can reach the store module (by
 #      import, through sys.modules, or as an argument), so the rule holds in every one;
 #   5. a homes parameter or homes read in each adoption validator named in _HOMES1_FREE;
 #   6. any reference to the deleted record journal root: a string or bytes constant other than a
@@ -1688,8 +1743,8 @@ def retired_gate_name_findings(tools=None):
 #      JOURNAL_REL read off the record module (`_opf_record.JOURNAL_REL`, `record.JOURNAL_REL`).
 # Rules 1 to 3 pass a site that is a documented exclusion (_HOMES_COMPARE_EXCLUSIONS, one reason each), rule
 # 4's attribute-writer refusal passes one in _ATTRIBUTE_WRITER_EXCLUSIONS (one reason each: why the use never
-# writes HOMES and never writes to the store module), its HOMES string refusal one in _HOMES_NAME_EXCLUSIONS,
-# and rule 6 one in _LEGACY_JOURNAL_EXCLUSIONS. Every exclusion is keyed by (module, owner, exact text) and
+# writes HOMES and never writes to the store module), and rule 6 one in _LEGACY_JOURNAL_EXCLUSIONS; rule 4's
+# binding and HOMES string refusals pass none. Every exclusion is keyed by (module, owner, exact text) and
 # admits exactly one site: one that matches two or more is red, naming each. The owner is the innermost def or
 # class enclosing the site under the qualified name Python gives it (__qualname__: `_StCloseFault.__enter__`,
 # `_watchdog_install_charges.<locals>.charged`), or <module>; a lambda belongs to its enclosing owner, and a
@@ -1698,9 +1753,11 @@ def retired_gate_name_findings(tools=None):
 # reference, `<parameter>=<default>`, or a string constant's site: the lone `==` or `in` comparison it is an
 # operand of (an element of a tuple, list or set display right of `in` included), else the call it is an
 # argument or keyword value of, else the constant, with an f-string's piece at its f-string's site. Each
-# module is read as Python compiles it: the AST scan parses the file's bytes, so the compiler itself applies
-# a UTF-8 BOM or a coding cookie (`# -*- coding: utf-7 -*-`), and the retired gate name scan decodes each file
-# through tokenize.open, which reads the BOM or cookie the same way; no encoding is refused.
+# module must have one reading (_module_source): strict UTF-8 after an optional BOM, no CR that is not
+# followed by LF, and no coding cookie but utf-8 or utf-8-sig on lines 1 and 2, so the compiler and every
+# scan here read the same UTF-8 text; any other module (`# -*- coding: utf-7 -*-`, a latin-1 byte, CR-only
+# line ends), and one the AST scan cannot compile (a SyntaxError or UnicodeError), is a finding naming it,
+# never a traceback. The AST scan parses the file's bytes, so the compiler applies the same reading.
 # RESIDUAL, outside this gate: a generation held in or passed through a differently named variable
 # (`gen = homes`, `store_control_roots(gen)`), or computed rather than written as a literal; a literal
 # bound to a homes read that is not a number (`self.homes = None`), or bound by a loop target, an
@@ -1720,12 +1777,16 @@ def retired_gate_name_findings(tools=None):
 # change to how the store module resolves an attribute (its __class__, a module __getattr__, its
 # sys.modules entry), and every write made by code the scan does not walk (self-test code, a check_*.py
 # module, the vendored tree, the standard library or another package: unittest.mock's patch.object, or its
-# patch given a dotted target string); the reason of each exclusion, a data-flow claim the scan enforces
-# only through the HOMES string refusal and the one-site key, so a name obtained at run time that reaches an
-# excluded site (directly, or through a list of pairs such as _WATCHDOG_ORIGINALS that an excluded writer
-# drains) is not read; the retired gate name scan's reading of a file whose BOM or cookie tokenize.open and
-# the compiler read differently (none is known); a test that is not a comparison (`if homes:`, `not homes - 1`, a
-# mapping or index keyed by the generation), or that is a call whose callee is not named in
+# patch given a dotted target string); a self-test function production code reaches with no spelling the
+# scan reads (its name held as data, a string given to getattr or a namespace key, or a helper reached that
+# way), or through a self-test entry, which also dispatches production verbs (a call in the `__main__` block
+# or in `main` outside its self-test branch, which review catches), or run at import by the decorator of a
+# self-test function (the scan reads the decorator expression, not what it does with the function); the
+# reason of each exclusion, a data-flow claim the scan enforces only through the HOMES string refusal and the
+# one-site key, so a name obtained at run time that reaches an excluded site (directly, or through a list of
+# pairs such as _WATCHDOG_ORIGINALS that an excluded writer drains) is not read; a test that is not a
+# comparison (`if homes:`, `not homes - 1`, a mapping or index keyed by the generation), or that is a call
+# whose callee is not named in
 # _COMPARISON_CALLS (`math.isclose(homes, 1)`, a comparison function held in a variable or a
 # functools.partial); a `== 2` test joined with any other condition, used as a while or assert
 # condition, or kept as a flag (`is2 = homes == 2`) and branched on later; an `if` with no `else` whose
@@ -1860,25 +1921,10 @@ _ATTRIBUTE_WRITER_EXCLUSIONS = {
     ("opf.py", "_watchdog_completion_case.<locals>.external_import_names", "node.func.id in ('setattr', 'delattr')"):
         "an AST walker compares a call's callee name with the two strings; it never looks a callable up by them",
 }
-# The HOMES strings rule 4 refuses that may stay, with the reason each reaches no attribute writer and no
-# namespace mapping. Keyed by (module, owner, exact text: the string constant's site), each admitting exactly
-# one site.
-_HOMES_NAME_EXCLUSIONS = {
-    ("_opf_init_p0.py", "_compatibility",
-     "_require('homes' in base, 'HOMES', 'manifest', '{} declares no [opf].homes; this bootstrap requires the "
-     "integer {} (fail-closed)'.format(MANIFEST_PATH, store.HOMES))"):
-        "the bootstrap contract's refusal code: _require hands it to _Refusal, which keeps it as the first item "
-        "of its finding tuple, and _validation returns that tuple in a ContractValidation; outside check_*.py "
-        "no scanned module imports _opf_init_p0, so no scanned code reads the code back",
-    ("_opf_init_p0.py", "_compatibility",
-     '_require(type(homes) is int and homes == store.HOMES and (store.homes_generation(manifest) == 2), '
-     "'HOMES', 'manifest', '{} declares [opf].homes {}; this bootstrap requires the integer {} "
-     "(fail-closed)'.format(MANIFEST_PATH, store._safe_display(homes), store.HOMES))"):
-        "the same refusal code for a declared homes other than the integer 2; the reason above",
-}
 # Every exclusion table, in the order homes1_findings reports one that admits more than one site.
-_EXCLUSION_TABLES = (_HOMES_COMPARE_EXCLUSIONS, _LEGACY_JOURNAL_EXCLUSIONS, _ATTRIBUTE_WRITER_EXCLUSIONS,
-                     _HOMES_NAME_EXCLUSIONS)
+_EXCLUSION_TABLES = (_HOMES_COMPARE_EXCLUSIONS, _LEGACY_JOURNAL_EXCLUSIONS, _ATTRIBUTE_WRITER_EXCLUSIONS)
+# A self-test function's name: `self_test` or `self_tests` as whole words between underscores.
+_SELF_TEST_NAME = re.compile(r"(?:^|_)self_tests?(?:_|$)")
 _LEGACY_RECORD_JOURNAL = ".aiqt/record/journal"
 # The parenthesized rule each kind of homes-1 finding names.
 _COMPARE_RULE = "only `== 2` may test a generation"
@@ -2085,8 +2131,9 @@ def _spelled_names(node):
 
 
 def _binds_homes(node, module):
-    """Whether `node` binds the name HOMES, or assigns an attribute HOMES (by a literal-name setattr too), other
-    than by _opf_store.py's module-level `HOMES = 2` or `from _opf_store import HOMES`."""
+    """Whether `node` binds the name HOMES (a type parameter of any kind included), or assigns an attribute HOMES
+    (by a literal-name setattr too), other than by _opf_store.py's module-level `HOMES = 2` or
+    `from _opf_store import HOMES`."""
     if isinstance(node, ast.Call):
         name = _called_name(node.func)
         named = (node.args[1:2] if name in ("setattr", "delattr")
@@ -2105,11 +2152,13 @@ def _binds_homes(node, module):
     if isinstance(node, ast.MatchMapping):
         return node.rest == "HOMES"
     return (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
-                              ast.MatchAs, ast.MatchStar)) and node.name == "HOMES")
+                              ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple))
+            and node.name == "HOMES")
 
 
 def _store_names(tree):
-    """The names a module binds only by importing _opf_store (`import _opf_store`, `... as store`)."""
+    """The names a module binds only by importing _opf_store (`import _opf_store`, `... as store`); any other
+    binding of the name, a type parameter included, removes it."""
     imported, other = set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -2124,7 +2173,7 @@ def _store_names(tree):
         elif isinstance(node, ast.MatchMapping) and node.rest:
             other.add(node.rest)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
-                               ast.MatchAs, ast.MatchStar)) and node.name:
+                               ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)) and node.name:
             other.add(node.name)
     return imported - other
 
@@ -2197,6 +2246,101 @@ def _qualified(owner, local, name):
     return name if owner == "<module>" else "{}.{}{}".format(owner, "<locals>." if local else "", name)
 
 
+def _self_test_entry(stmt):
+    """Whether a module-level statement is a self-test entry: the `if __name__ == "__main__":` block or the def of
+    main."""
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return stmt.name == "main"
+    test = stmt.test if isinstance(stmt, ast.If) else None
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)):
+        return False
+    sides = (test.left, test.comparators[0])
+    return (any(isinstance(side, ast.Name) and side.id == "__name__" for side in sides)
+            and any(isinstance(side, ast.Constant) and side.value == "__main__" for side in sides))
+
+
+def _spellings(node):
+    """The identifiers `node` spells as a name, an attribute, an import alias (each dotted part) or a global or
+    nonlocal declaration."""
+    if isinstance(node, ast.Name):
+        return (node.id,)
+    if isinstance(node, ast.Attribute):
+        return (node.attr,)
+    if isinstance(node, ast.alias):
+        return tuple(node.name.split(".")) + ((node.asname,) if node.asname else ())
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return tuple(node.names)
+    return ()
+
+
+def _self_test_functions(trees):
+    """(unread, helpers): the ids of the self-test function defs whose bodies the scan does not read, and the names
+    of the helpers only self-test code names (the paragraph above rule 1). A name is matched across modules, so one
+    production code spells in any module is production's in every one, and a self-test function production spells
+    is production code itself, so what its body spells is production's too."""
+    regions, tests, defs = [], [], set()    # a region: (kind, def name, identifiers, its strings joined by NUL)
+
+    def region(kind, name, nodes):
+        names, strings = set(), []
+        for inner in (n for node in nodes for n in ast.walk(node)):
+            names.update(_spellings(inner))
+            if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                strings.append(inner.value)
+        regions.append((kind, name, names, "\0".join(strings)))
+
+    for _rel, tree in trees:
+        for stmt in tree.body:
+            # A def's body is its own region; its decorators, defaults, annotations and type parameters run at
+            # import. A decorated def other than a self-test function or main is production code: its decorator
+            # may run it.
+            kind, inner = "production", []
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                kind = ("entry" if stmt.name == "main" else "test" if _SELF_TEST_NAME.search(stmt.name)
+                        else "def" if not stmt.decorator_list else "production")
+                inner = stmt.body if kind != "production" else []
+            elif _self_test_entry(stmt):
+                kind, inner = "entry", stmt.body + stmt.orelse
+            if kind == "test":
+                tests.append(stmt)
+            elif kind == "def":
+                defs.add(stmt.name)
+            if inner:
+                held = {id(s) for s in inner}
+                region(kind, getattr(stmt, "name", None), inner)
+                region("production", None, [child for child in ast.iter_child_nodes(stmt) if id(child) not in held])
+            else:
+                region("production", None, [stmt])
+
+    def holders(name, strings):
+        return [(kind, owner) for kind, owner, names, text in regions if name in names or (strings and name in text)]
+
+    production, memo, visiting = set(), {}, set()
+
+    def helper(name):
+        # Least fixed point: a helper is spelled at least once, as a name, an attribute or inside a string, and
+        # only by self-test code or other helpers; a cycle that reaches no self-test code is no helper.
+        if name not in memo:
+            if name in visiting or name not in defs:
+                return False
+            visiting.add(name)
+            found = holders(name, True)
+            memo[name] = bool(found) and all((kind == "test" and owner not in production)
+                                             or (kind == "def" and helper(owner)) for kind, owner in found)
+            visiting.discard(name)
+        return memo[name]
+
+    while True:
+        memo.clear()
+        added = {stmt.name for stmt in tests if stmt.name not in production and any(
+            kind == "production" or (kind == "test" and owner in production) or (kind == "def" and not helper(owner))
+            for kind, owner in holders(stmt.name, False))}
+        if not added:
+            break
+        production |= added
+    return ({id(stmt) for stmt in tests if stmt.name not in production},
+            {name for name, is_helper in memo.items() if is_helper})
+
+
 def _excluded(module, table, owner, text, line):
     """Whether the site (module, owner, text) is one of `table`'s exclusions; each site one admits is recorded, so
     one that admits more than one is red (_homes1_scan)."""
@@ -2243,9 +2387,10 @@ def _docstring_ids(tree):
 
 def _homes1_walk(node, owner, local, module, findings):
     rel = module["rel"]
+    skipped = ()
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        if "self_test" in node.name:
-            return
+        if id(node) in module["self_tests"]:
+            skipped = {id(stmt) for stmt in node.body}    # self-test code: the body alone; what runs at import is read
         owner, local = _qualified(owner, local, node.name), True
         args = node.args
         if node.name in module["free"]:
@@ -2290,17 +2435,15 @@ def _homes1_walk(node, owner, local, module, findings):
         findings.append("{}:{}: attribute writer `{}` in {} may bind HOMES under a name the scan cannot read; "
                         "it is refused ({})".format(rel, site.lineno, unread, owner, _WRITER_RULE))
     # The name HOMES as a string or a keyword (rule 4): whatever it is handed to, an excluded writer included,
-    # may bind HOMES by it. One finding per site, none inside a writer call already red.
+    # may bind HOMES by it. One finding per site, none inside a writer call already red, and no exclusion.
     if ((isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == "HOMES")
             or (isinstance(node, ast.keyword) and node.arg == "HOMES")) and id(node) not in module["reported"]:
         site = module["sites"].get(id(node), node)
         if ("homes", id(site)) not in module["seen"]:
             module["seen"].add(("homes", id(site)))
-            text = ast.unparse(site)
-            if not _excluded(module, _HOMES_NAME_EXCLUSIONS, owner, text, site.lineno):
-                findings.append("{}:{}: `{}` in {} spells the name HOMES as data, which a writer the scan does not "
-                                "read could bind; it is refused ({})".format(rel, site.lineno, text, owner,
-                                                                            _HOMES_NAME_RULE))
+            findings.append("{}:{}: `{}` in {} spells the name HOMES as data, which a writer the scan does not read "
+                            "could bind; it is refused ({})".format(rel, site.lineno, ast.unparse(site), owner,
+                                                                    _HOMES_NAME_RULE))
     if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
         findings.append("{}:{}: star import from {} in {} may bind HOMES unseen; import each name it uses by "
                         "name".format(rel, node.lineno, "." * node.level + (node.module or ""), owner))
@@ -2401,27 +2544,45 @@ def _homes1_walk(node, owner, local, module, findings):
         findings.append("{}:{}: the deleted record journal constant JOURNAL_REL is referenced in {}; the record "
                         "journal lives only in the typed capability home".format(rel, node.lineno, owner))
     for child in ast.iter_child_nodes(node):
-        _homes1_walk(child, owner, local, module, findings)
+        if id(child) not in skipped:
+            _homes1_walk(child, owner, local, module, findings)
+
+
+def _scanned_trees(tools):
+    """(trees, findings): each scanned module's (path relative to tools, AST), outside check_*.py and the vendored
+    tree, and a finding for each module that has no one reading or does not compile (_module_source)."""
+    trees, findings = [], []
+    for path in sorted(tools.rglob("*.py")):
+        rel = path.relative_to(tools).as_posix()
+        if "_vendor" in path.relative_to(tools).parts or path.name.startswith("check_"):
+            continue
+        raw, _text, refused = _module_source(path, rel, "no-homes-1")
+        if refused is None:
+            try:
+                # The bytes, as import compiles them: the compiler applies the BOM itself.
+                trees.append((rel, ast.parse(raw, filename=rel)))
+                continue
+            except (SyntaxError, UnicodeError) as exc:
+                refused = _source_finding(rel, getattr(exc, "lineno", None) or 1, "no-homes-1",
+                                          "it does not compile: {}".format(
+                                              exc.msg if isinstance(exc, SyntaxError) else exc))
+        findings.append(refused)
+    return trees, findings
 
 
 def _homes1_scan(tools=None):
     """(findings, hits): the no-homes-1 findings, and the lines of the sites each exclusion admitted."""
     tools = _TOOLS if tools is None else tools
-    findings = []
-    trees = []
-    for path in sorted(tools.rglob("*.py")):
-        rel = path.relative_to(tools).as_posix()
-        if "_vendor" in path.relative_to(tools).parts or path.name.startswith("check_"):
-            continue
-        # The bytes, as import compiles them: the compiler applies the BOM or coding cookie itself.
-        trees.append((rel, ast.parse(path.read_bytes(), filename=rel)))
+    trees, findings = _scanned_trees(tools)
     params = _homes_parameters(tree for _rel, tree in trees)
+    self_tests, _helpers = _self_test_functions(trees)
     hits = {}
     for rel, tree in trees:
         module = {"rel": rel, "free": _HOMES1_FREE.get(rel, ()), "docstrings": _docstring_ids(tree),
                   "store": _store_names(tree), "constant": _homes_definition(rel, tree), "params": params,
                   "caught": _caught_raises(tree), "sites": _constant_sites(tree), "unpacked": set(),
-                  "writers": set(), "reported": set(), "seen": set(), "tests": {}, "hits": hits}
+                  "writers": set(), "reported": set(), "seen": set(), "tests": {}, "hits": hits,
+                  "self_tests": self_tests}
         _homes1_walk(tree, "<module>", False, module, findings)
     for table in _EXCLUSION_TABLES:
         for (rel, owner, text), lines in ((key, hits.get(key, ())) for key in table):
@@ -6342,10 +6503,12 @@ def _self_test_vectors():
                   retired_gate_name_findings(tree) == ["nested/reader.py:2: retired gate name {}; read store.{} "
                                                        "instead".format(n, c)])
             (tree / "nested" / "reader.py").unlink()
-            # A file is read by its coding cookie, as Python reads it: in UTF-7, `+AFM-` is the S the raw
-            # bytes lack (red when the scan decodes UTF-8), and under a UTF-8 cookie the same bytes name nothing.
-            for cookie, expected in (("utf-7", ["encoded.py:2: retired gate name {}; read store.{} instead".format(
-                    name, current)]), ("utf-8", [])):
+            # A file has one reading: in UTF-7, `+AFM-` is the S the raw bytes lack, so a UTF-7 cookie is refused
+            # as a finding naming the file rather than decoded (red where the scan decoded it, which found the name
+            # Python reads), and under a UTF-8 cookie the same bytes name nothing.
+            for cookie, expected in (("utf-7", [_source_finding("encoded.py", 1, "retired gate name",
+                                                                "the coding cookie 'utf-7' is not utf-8 or utf-8-sig")]),
+                                     ("utf-8", [])):
                 (tree / "encoded.py").write_text("# -*- coding: {} -*-\nvalue = store.+AFM-{}\n".format(
                     cookie, name[1:]), encoding="utf-8")
                 check("retired-gate-names-cookie-" + cookie + "-" + name, lambda n=name, e=expected:
@@ -6368,8 +6531,8 @@ def _self_test_vectors():
     # No homes-1 path: outside self-test code the live tools tree tests a homes generation only by `== 2`
     # with no fallthrough, passes and defaults no literal generation but 2, binds no number but 2 to one,
     # binds HOMES only where it is defined, holds no star import, uses an attribute writer only as a plain call
-    # given a string literal name, and spells HOMES as no string or keyword (each with its documented
-    # exclusions); the adoption validators
+    # given a string literal name (the comparison, writer and journal refusals each with its documented
+    # exclusions), and spells HOMES as no string or keyword, with no exclusion; the adoption validators
     # name no generation, and nothing names the deleted record journal root. In a fixture tree holding the
     # record and adoption modules, restoring one deleted line (the homes-1 arm of _record_journal_rel or of
     # claim_ids, or the homes-1 default of validate_op) is red at that line, as is every non-equality form of
@@ -6383,9 +6546,8 @@ def _self_test_vectors():
     # comparison, a test, a call, a parameter default, a string constant's site, or an attribute writer's name
     # or attribute or import alias), so a stale one, or one matching a second site, is red; the scan reads every
     # table.
-    check("homes1-exclusion-tables", lambda: len(_EXCLUSION_TABLES) == 4 and all(a is b for a, b in zip(
-        _EXCLUSION_TABLES, (_HOMES_COMPARE_EXCLUSIONS, _LEGACY_JOURNAL_EXCLUSIONS, _ATTRIBUTE_WRITER_EXCLUSIONS,
-                            _HOMES_NAME_EXCLUSIONS)))
+    check("homes1-exclusion-tables", lambda: len(_EXCLUSION_TABLES) == 3 and all(a is b for a, b in zip(
+        _EXCLUSION_TABLES, (_HOMES_COMPARE_EXCLUSIONS, _LEGACY_JOURNAL_EXCLUSIONS, _ATTRIBUTE_WRITER_EXCLUSIONS)))
           and len(set().union(*_EXCLUSION_TABLES)) == sum(map(len, _EXCLUSION_TABLES)))
     check("homes1-exclusions-reasoned", lambda: all(
         isinstance(r, str) and r.strip() for table in _EXCLUSION_TABLES for r in table.values()))
@@ -6393,20 +6555,31 @@ def _self_test_vectors():
         k for table in _EXCLUSION_TABLES for k in table if len(live_hits.get(k, ())) != 1] == [])
     check("homes1-exclusions-outside-record-seam", lambda: not [
         k for table in _EXCLUSION_TABLES for k in table if k[0] in ("_opf_record.py", "_opf_adopt.py")])
+    # The self-test convention the scan states holds for the tree: every def in a scanned module whose name holds
+    # `self_test` is a module-level def that _SELF_TEST_NAME matches (narrowing the old substring test left none of
+    # them scanned), and no production code spells one, so each body stays unread; a production caller added
+    # later turns this red even where the function it reaches scans clean. The helpers only self-test code names
+    # are opf.py's two watchdog fixtures, which only its watchdog self-tests reach.
+    trees, refused = _scanned_trees(_TOOLS)
+    self_tests, helpers = _self_test_functions(trees)
+    named = [(node, tree) for _rel, tree in trees for node in ast.walk(tree)
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and "self_test" in node.name]
+    check("homes1-self-test-convention", lambda: refused == [] and named and all(
+        any(node is stmt for stmt in tree.body) and _SELF_TEST_NAME.search(node.name) for node, tree in named))
+    check("homes1-self-test-unread", lambda: {id(node) for node, _tree in named} == self_tests)
+    check("homes1-self-test-helpers", lambda: helpers == {"_watchdog_timer_case", "_watchdog_launcher_case"})
     # The premises the store_control_roots and classify_containment reasons rest on: outside self-test code
     # opf record's _run_operation is the write guard's one caller, and the guard reads only the
-    # classification's malformed and colliding lists. And the one the _opf_init_p0 HOMES strings rest on: no
-    # other scanned module, self-test code included, spells _opf_init_p0 (an import, an alias or a string).
-    guard_callers, guard_reads, p0_readers = set(), set(), set()
-    for path in sorted(_TOOLS.rglob("*.py")):
-        if "_vendor" in path.relative_to(_TOOLS).parts or path.name.startswith("check_"):
-            continue
-        rel = path.relative_to(_TOOLS).as_posix()
-        stack = [(ast.parse(path.read_bytes()), "<module>", False, False)]
+    # classification's malformed and colliding lists.
+    guard_callers, guard_reads = set(), set()
+    for rel, tree in trees:
+        stack = [(tree, "<module>", False, False)]
         while stack:
             node, owner, local, exempt = stack.pop()
+            body = ()
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                owner, local, exempt = _qualified(owner, local, node.name), True, exempt or "self_test" in node.name
+                owner, local = _qualified(owner, local, node.name), True
+                body = {id(stmt) for stmt in node.body} if id(node) in self_tests else ()
             elif isinstance(node, ast.ClassDef):
                 owner, local = _qualified(owner, local, node.name), False
             if (isinstance(node, ast.Call) and not exempt
@@ -6415,13 +6588,9 @@ def _self_test_vectors():
             if (rel, owner) == ("_opf_write_guard.py", "plan_write_scope") and isinstance(node, ast.Attribute) \
                     and isinstance(node.value, ast.Name) and node.value.id == "classification":
                 guard_reads.add(node.attr)
-            if rel != "_opf_init_p0.py" and ("_opf_init_p0" in _spelled_names(node) or (
-                    isinstance(node, ast.ImportFrom) and node.module == "_opf_init_p0")):
-                p0_readers.add(rel)
-            stack.extend((child, owner, local, exempt) for child in ast.iter_child_nodes(node))
+            stack.extend((child, owner, local, exempt or id(child) in body) for child in ast.iter_child_nodes(node))
     check("homes1-write-guard-callers", lambda: guard_callers == {("_opf_record.py", "_run_operation")})
     check("homes1-write-guard-reads", lambda: guard_reads == {"malformed", "colliding"})
-    check("homes1-init-p0-unread", lambda: p0_readers == set())
     record_source = (_TOOLS / "_opf_record.py").read_text(encoding="utf-8")
     adopt_source = (_TOOLS / "_opf_adopt.py").read_text(encoding="utf-8")
     journal_home = '    if type(homes) is int and homes == 2:\n        return _opf_store.journal_root("record")\n'
@@ -6535,8 +6704,18 @@ def _self_test_vectors():
     match_clean = ("def home(homes):\n    match homes:\n        case 2:\n            return 'typed'\n"
                    "        case _:\n            raise ValueError(homes)\n")
     roots = "def roots(homes):\n    return (homes,)\n\n\nIMPORTS = roots({})[0]\n"
-    rebound = "the HOMES constant is bound again in <module>; only _opf_store.py's module-level `HOMES = 2` " \
-              "defines it, and every `== HOMES` test reads it as 2"
+    rebound_in = "the HOMES constant is bound again in {}; only _opf_store.py's module-level `HOMES = 2` " \
+                 "defines it, and every `== HOMES` test reads it as 2"
+    rebound = rebound_in.format("<module>")
+    source_refused = "{}, so the no-homes-1 scan refuses this module (" + _SOURCE_RULE + ")"
+    # a module whose helper writes the store by the refusal code _compatibility hands it, the
+    # code spelled HOMES (the former exclusion's exact text), or HOMES_DECLARATION.
+    init_p0 = ("import _opf_store as store\n\nMANIFEST_PATH = '.aiqt/manifest.toml'\n\n\n"
+               "def _require(condition, code, location, detail):\n"
+               "    if location == 'manifest' and code in vars(store):\n        vars(store)[code] = 1\n\n\n"
+               "def _compatibility(manifest, provenance):\n    base = manifest.get('opf')\n"
+               "    _require('homes' in base, '{}', 'manifest', '{{}} declares no [opf].homes; this bootstrap "
+               "requires the integer {{}} (fail-closed)'.format(MANIFEST_PATH, store.HOMES))\n")
     names_generation = "{} names a homes generation again; it grades every row at homes 2"
     writer = "attribute writer `{}` in {} may bind HOMES under a name the scan cannot read; it is refused (" \
              + _WRITER_RULE + ")"
@@ -6781,11 +6960,70 @@ def _self_test_vectors():
          "def required_checks(homes):\n    if homes < 2:\n        return 1\n    return homes < 2\n",
          "def required_checks(homes):\n    if homes < 2:\n        return 1\n    return 0\n",
          (2, two_sites.format("homes < 2", "required_checks", 2, "2, 4"))),
-        # QA round 7's e1: a module is read as Python compiles it, by its coding cookie.
+        # a module has one reading, so a UTF-7 cookie, which would hide a write from a UTF-8 read,
+        # is refused as a finding naming the module rather than decoded (the byte-level vectors below hold the
+        # rest of the reading rule against both scans).
         ("e1-source-encoding", "planted.py",
          "# -*- coding: utf-7 -*-\nimport _opf_store\n# +AAo-_opf_store.HOMES = 1\n",
          "# -*- coding: utf-8 -*-\nimport _opf_store\n# +AAo-_opf_store.HOMES = 1\n",
-         (4, rebound)),
+         (1, source_refused.format("the coding cookie 'utf-7' is not utf-8 or utf-8-sig"))),
+        # no HOMES string is excluded, so _opf_init_p0's old refusal code is red at its call
+        # (where the former exclusion admitted it, and the helper wrote the store by it); HOMES_DECLARATION is not.
+        ("p1-init-p0-homes-code", "_opf_init_p0.py", init_p0.format("HOMES"), init_p0.format("HOMES_DECLARATION"),
+         (13, homes_name.format("_require('homes' in base, 'HOMES', 'manifest', '{} declares no [opf].homes; this "
+                                "bootstrap requires the integer {} (fail-closed)'.format(MANIFEST_PATH, store.HOMES))",
+                                "_compatibility"))),
+        # a type parameter of any kind named HOMES binds it (a TypeVar is no 2, though
+        # `homes == HOMES` reads as `== 2`), in a def, a class or a type alias; and a type parameter that shadows
+        # the store module's name keeps `store.HOMES` from reading as the constant.
+        ("p2-type-parameter", "planted.py",
+         importing + "def carrier[HOMES]():\n    pass\n\n\nvars(_opf_store)[carrier.__type_params__[0].__name__] = 1\n",
+         importing + "def carrier[T]():\n    pass\n\n\nvars(_opf_store)[carrier.__type_params__[0].__name__] = 1\n",
+         (3, rebound_in.format("carrier"))),
+        ("p2b-type-parameter-scopes", "planted.py",
+         "from _opf_store import HOMES\n\n\ndef home[HOMES](homes):\n    if homes == HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n\n\nclass Box[HOMES]:\n    pass\n\n\ntype Alias[HOMES] = HOMES\n",
+         "from _opf_store import HOMES\n\n\ndef home[T](homes):\n    if homes == HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n\n\nclass Box[T]:\n    pass\n\n\ntype Alias[T] = T\n",
+         [(4, rebound_in.format("home")), (10, rebound_in.format("Box")), (14, rebound)]),
+        ("type-parameter-kinds", "planted.py", "def spread[*HOMES]():\n    pass\n\n\ndef call[**HOMES]():\n    pass\n",
+         "def spread[*Ts]():\n    pass\n\n\ndef call[**P]():\n    pass\n",
+         [(1, rebound_in.format("spread")), (5, rebound_in.format("call"))]),
+        ("type-parameter-store-alias", "planted.py",
+         "import _opf_store as store\n\n\ndef home[store](homes):\n    if homes == store.HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n",
+         "import _opf_store as store\n\n\ndef home[T](homes):\n    if homes == store.HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n", (5, arm, "homes == store.HOMES", "home", _COMPARE_RULE)),
+        # a self-test function production code spells (called at import here, or aliased) is
+        # scanned like production code; what runs at import (its defaults and decorators) is read; and self-test
+        # code is the body of a module-level def whose name holds self_test or self_tests as whole words, so a
+        # nested def or a longer word (myself_test) is scanned. Each clean flip is self-test code no production
+        # code spells: reached from the `__main__` block or main, or through a helper only self-test code names.
+        ("p3-self-test-called", "planted.py",
+         importing + "def helper_self_test(store=_opf_store):\n    setattr(store, 'HOMES', 1)\n\n\nhelper_self_test()\n",
+         importing + "def helper_self_test(store=_opf_store):\n    setattr(store, 'HOMES', 1)\n\n\n"
+         "if __name__ == '__main__':\n    helper_self_test()\n", (4, rebound_in.format("helper_self_test"))),
+        ("self-test-aliased", "planted.py",
+         importing + "def helper_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n\n\nRUN = helper_self_test\n",
+         importing + "def helper_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n\n\ndef main():\n"
+         "    return helper_self_test\n", (4, rebound_in.format("helper_self_test"))),
+        ("self-test-default", "planted.py",
+         importing + "def self_test(done=setattr(_opf_store, 'HOMES', 1)):\n    return done\n",
+         importing + "def self_test(done=None):\n    return done\n", (3, rebound_in.format("self_test"))),
+        ("self-test-decorator", "planted.py",
+         importing + "@(lambda test: setattr(_opf_store, 'HOMES', 1) or test)\ndef self_test():\n    return 0\n",
+         importing + "@(lambda test: test)\ndef self_test():\n    return 0\n", (3, rebound_in.format("self_test"))),
+        ("self-test-nested", "planted.py",
+         importing + "def run():\n\n    def self_test():\n        setattr(_opf_store, 'HOMES', 1)\n    return self_test()\n",
+         importing + "def run():\n    return 0\n\n\ndef self_test():\n    setattr(_opf_store, 'HOMES', 1)\n",
+         (6, rebound_in.format("run.<locals>.self_test"))),
+        ("self-test-longer-word", "planted.py", importing + "def myself_test():\n    setattr(_opf_store, 'HOMES', 1)\n",
+         importing + "def my_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n", (4, rebound_in.format("myself_test"))),
+        ("self-test-helper", "planted.py",
+         importing + "def _fixture():\n    return helper_self_test\n\n\ndef helper_self_test():\n"
+         "    setattr(_opf_store, 'HOMES', 1)\n    return _fixture\n\n\nFIXTURE = _fixture\n",
+         importing + "def _fixture():\n    return helper_self_test\n\n\ndef helper_self_test():\n"
+         "    setattr(_opf_store, 'HOMES', 1)\n    return _fixture\n", (8, rebound_in.format("helper_self_test"))),
         # A star import binds names the module never spells, HOMES possibly among them.
         ("star-import", "planted.py",
          "from check_shim import *\n\n\ndef home(homes):\n    if homes == HOMES:\n        return 'typed'\n"
@@ -6836,6 +7074,59 @@ def _self_test_vectors():
                 check("homes1-gap-" + ("red-" if expected else "clean-") + label,
                       lambda e=expected: homes1_findings(tree) == e)
             (tree / name).unlink()
+    # a module with no one reading, or one the AST scan cannot compile, is refused by each
+    # scan as a finding naming it (red where the retired gate name scan decoded through tokenize.open, where the
+    # AST scan read the compiler's reading, and where either raised), and the flip one edit away is read as UTF-8:
+    # (label, red bytes, clean bytes, line, reason or None for the compiler's own message, whether the retired gate
+    # name scan refuses it too, and the clean module's retired gate name and no-homes-1 findings).
+    bom, retired_name = _BOM, "SUPPORTED_" + "HOMES"
+    retired_line4 = ["encoded.py:4: retired gate name {}; read store.HOMES instead".format(retired_name)]
+    readings = (
+        # CR-only line ends: the compiler found no cookie on lines 1 and 2, tokenize read one on "line" 3 (the
+        # whole file) and decoded cp037; with LF ends both read UTF-8, and the retired name on line 4 is read.
+        ("cr-only-cookie-line3-cp037",
+         "# a\rimport _opf_store\r# -*- coding: cp037 -*-\r{} = _opf_store.HOMES\r".format(retired_name).encode(),
+         "# a\nimport _opf_store\n# -*- coding: cp037 -*-\n{} = _opf_store.HOMES\n".format(retired_name).encode(),
+         1, "a CR that is not followed by LF ends a line", True, retired_line4, []),
+        ("lone-cr", b"import _opf_store\r_opf_store.HOMES = 1\r", b"import _opf_store\r\n_opf_store.HOMES = 1\r\n",
+         1, "a CR that is not followed by LF ends a line", True, [], ["encoded.py:2: " + rebound]),
+        ("latin-1-byte", b"# -*- coding: latin-1 -*-\nimport _opf_store\nNAME = '\xe9'\n",
+         b"# -*- coding: utf-8 -*-\nimport _opf_store\nNAME = '\xc3\xa9'\n",
+         3, "byte 0xe9 is not strict UTF-8", True, [], []),
+        ("latin-1-cookie", b"# -*- coding: latin-1 -*-\nimport _opf_store\n",
+         b"# -*- coding: utf-8 -*-\nimport _opf_store\n", 1, "the coding cookie 'latin-1' is not utf-8 or utf-8-sig",
+         True, [], []),
+        ("utf-7-cookie-line2", b"# a\n# -*- coding: utf-7 -*-\nimport _opf_store\n",
+         b"# a\n# -*- coding: utf-8-sig -*-\nimport _opf_store\n", 2,
+         "the coding cookie 'utf-7' is not utf-8 or utf-8-sig", True, [], []),
+        ("unknown-codec", b"# -*- coding: no-such-codec -*-\nimport _opf_store\n",
+         b"# -*- coding: UTF_8 -*-\nimport _opf_store\n", 1,
+         "the coding cookie 'no-such-codec' is not utf-8 or utf-8-sig", True, [], []),
+        ("bom-latin-1-cookie", bom + b"# coding: latin-1\nimport _opf_store\n", bom + b"# coding: utf-8\nimport _opf_store\n",
+         1, "the coding cookie 'latin-1' is not utf-8 or utf-8-sig", True, [], []),
+        ("syntax-error", b"def broken(:\n    pass\n", b"def fixed():\n    pass\n", 1, None, False, [], []),
+        ("null-byte", b"VALUE = 1\x00\n", b"VALUE = 1\n", 1, None, False, [], []))
+
+    def compiled(raw):
+        try:
+            ast.parse(raw)
+        except SyntaxError as exc:
+            return "it does not compile: " + exc.msg
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="opf-homes-reading-") as tmp:
+        tree = Path(tmp)
+        for label, red, clean, line, reason, both, clean_retired, clean_homes1 in readings:
+            reason = reason or compiled(red)
+            (tree / "encoded.py").write_bytes(red)
+            check("source-reading-red-" + label, lambda r=reason, n=line, b=both: r is not None
+                  and retired_gate_name_findings(tree) == ([_source_finding("encoded.py", n, "retired gate name", r)]
+                                                           if b else [])
+                  and homes1_findings(tree) == ["encoded.py:{}: ".format(n) + source_refused.format(r)])
+            (tree / "encoded.py").write_bytes(clean)
+            check("source-reading-clean-" + label, lambda e=clean_retired, h=clean_homes1:
+                  retired_gate_name_findings(tree) == e and homes1_findings(tree) == h)
+        (tree / "encoded.py").unlink()
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)
@@ -9146,6 +9437,17 @@ def _self_test_vectors():
               r == 1 and out == "check_opf_homes: reader.py:2: homes-1 arm `ctx.homes == 1` in arm is "
               "reintroduced; homes 2 is the only generation and every other one refuses (only `== 2` may "
               "test a generation)\n")
+    # The default entry reports a module with no one reading as a finding from each scan, never a traceback or a
+    # cannot-evaluate exit: CR-only line ends here (red where the scans read the compiler's reading or raised).
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-reading-") as tmp:
+        (Path(tmp) / "reader.py").write_bytes(b"import _opf_store\r_opf_store.HOMES = 1\r")
+        with patch.object(module, "_TOOLS", Path(tmp)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                planted_rc = main([])
+        check("main-default-entry-refuses-source", lambda r=planted_rc, out=buf.getvalue(): r == 1 and out == "".join(
+            "check_opf_homes: {}\n".format(_source_finding("reader.py", 1, scan, "a CR that is not followed by LF ends a "
+                                                           "line")) for scan in ("retired gate name", "no-homes-1")))
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())

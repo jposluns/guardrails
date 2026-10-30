@@ -219,7 +219,7 @@ def _compatibility(manifest, provenance):
     # gets the hand step spec 9.2 gives a tree under a refused manifest (moved aside by hand, never
     # by OPF). A declaration above 2.0.0 marks a store at a later version, never foreign content
     # (spec 9.2), and a missing or malformed declaration proves nothing about the store: neither is
-    # offered the hand step. At 2.0.0, a missing or other [opf].homes is the HOMES refusal.
+    # offered the hand step. At 2.0.0, a missing or other [opf].homes is the HOMES_DECLARATION refusal.
     base = manifest.get("opf")
     raw_version = base.get("spec_version") if type(base) is dict else None
     declared = store._safe_display(raw_version)
@@ -250,11 +250,11 @@ def _compatibility(manifest, provenance):
              "move {} aside by hand: its files are then ordinary foreign content for a first "
              "adoption".format(MANIFEST_PATH, declared, required, MANIFEST_PATH))
     homes = base.get("homes")
-    _require("homes" in base, "HOMES", "manifest", "{} declares no [opf].homes; this bootstrap "
-             "requires the integer {} (fail-closed)".format(MANIFEST_PATH, store.HOMES))
+    _require("homes" in base, "HOMES_DECLARATION", "manifest", "{} declares no [opf].homes; this "
+             "bootstrap requires the integer {} (fail-closed)".format(MANIFEST_PATH, store.HOMES))
     _require(type(homes) is int and homes == store.HOMES and store.homes_generation(manifest) == 2,
-             "HOMES", "manifest", "{} declares [opf].homes {}; this bootstrap requires the integer "
-             "{} (fail-closed)".format(MANIFEST_PATH, store._safe_display(homes), store.HOMES))
+             "HOMES_DECLARATION", "manifest", "{} declares [opf].homes {}; this bootstrap requires the "
+             "integer {} (fail-closed)".format(MANIFEST_PATH, store._safe_display(homes), store.HOMES))
     checked = store.validate_manifest(manifest)
     _require(checked.status == store.VALID and not checked.findings,
              "COMPATIBILITY", "manifest", str(checked.findings))

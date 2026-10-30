@@ -238,16 +238,18 @@ def vectors(f):
                    "{} has no [opf] table; this bootstrap requires spec_version 2.0.0 "
                    "(fail-closed)".format(p0.MANIFEST_PATH))
     # At 2.0.0 the [opf].homes declaration must be exactly the integer 2 (a missing key, another
-    # integer, a string or a boolean is the HOMES refusal), whatever homes_generation would grade.
-    pinned_refusal("homes-missing", manifest.replace(b'\nhomes = 2\n', b'\n'), "HOMES",
+    # integer, a string or a boolean is the HOMES_DECLARATION refusal), whatever homes_generation
+    # would grade.
+    pinned_refusal("homes-missing", manifest.replace(b'\nhomes = 2\n', b'\n'), "HOMES_DECLARATION",
                    "{} declares no [opf].homes; this bootstrap requires the integer 2 "
                    "(fail-closed)".format(p0.MANIFEST_PATH))
-    pinned_refusal("homes-fence", manifest.replace(b'\nhomes = 2\n', b'\nhomes = 1\n'), "HOMES",
-                   "{} declares [opf].homes 1; this bootstrap requires the integer 2 "
-                   "(fail-closed)".format(p0.MANIFEST_PATH))
+    pinned_refusal("homes-fence", manifest.replace(b'\nhomes = 2\n', b'\nhomes = 1\n'),
+                   "HOMES_DECLARATION", "{} declares [opf].homes 1; this bootstrap requires the "
+                   "integer 2 (fail-closed)".format(p0.MANIFEST_PATH))
     for name, value in (("three", b"3"), ("string", b'"2"'), ("bool", b"true")):
         add("compat/homes-" + name, lambda m, v=value: m.validate_compatibility(
-            manifest.replace(b'\nhomes = 2\n', b'\nhomes = ' + v + b'\n')), "REFUSED", "HOMES")
+            manifest.replace(b'\nhomes = 2\n', b'\nhomes = ' + v + b'\n')), "REFUSED",
+            "HOMES_DECLARATION")
     # The default plan is the spec_version 2.0.0, homes 2 plan: it creates .working/.gitignore
     # first and the empty imported leaves, so a plan without the managed block, or with a leaf
     # outside the roster, is unclassified.
