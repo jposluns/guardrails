@@ -706,13 +706,13 @@ keeps a borrower's restore from silently moving or losing the deadline the calle
 
 ## A verification finding is fixed, not argued away
 
-A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
-finding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer
-explicitly reclassifies it with a recorded rationale. A blocker or major finding closes only by a fix or
-the maintainer's recorded reclassification: a refutation, an argument against the finding, is evidence
-offered to the maintainer for that reclassification, never itself a closure, whoever wrote or accepted it;
-it names each cause it ruled out with the reading or observation that ruled it out, and the finding stays
-open for every other cause of the named condition.
+A finding raised by an adversarial verification pass is fixed, not argued away. A blocker or major finding
+from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer
+explicitly reclassifies it with a recorded rationale. Such a finding closes only by a fix or the
+maintainer's recorded reclassification: a refutation, an argument against the finding, is evidence offered
+to the maintainer for that reclassification, never itself a closure, whoever wrote or accepted it; it
+names each cause it ruled out with the path and lines read or the command run that ruled it out, and,
+until closed, the finding stays open for every other cause of the named condition.
 
 ## Goal fidelity across a long trajectory
 

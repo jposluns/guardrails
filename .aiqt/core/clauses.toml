@@ -2057,7 +2057,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 18
 canonical-text = "A finding raised by an adversarial verification pass is fixed, not argued away."
-source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
+source-digest = "8905ab6e465c04939ee9a8a3400776eb5c583e4db6c74d6504df00cdf6848987"
 
 [[clause]]
 clause-id = "fndfix.2"
@@ -2065,8 +2065,8 @@ corpus-id = "fndfix"
 source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
-canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
+canonical-text = "A blocker or major finding\nfrom any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
+source-digest = "8905ab6e465c04939ee9a8a3400776eb5c583e4db6c74d6504df00cdf6848987"
 
 [[clause]]
 clause-id = "fndfix.3"
@@ -2074,8 +2074,8 @@ corpus-id = "fndfix"
 source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
-canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
+canonical-text = "A blocker or major finding\nfrom any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
+source-digest = "8905ab6e465c04939ee9a8a3400776eb5c583e4db6c74d6504df00cdf6848987"
 
 [[clause]]
 clause-id = "fndfix.4"
@@ -2083,8 +2083,8 @@ corpus-id = "fndfix"
 source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
-canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
+canonical-text = "A blocker or major finding\nfrom any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
+source-digest = "8905ab6e465c04939ee9a8a3400776eb5c583e4db6c74d6504df00cdf6848987"
 
 [[clause]]
 clause-id = "fndfix.5"
@@ -2092,8 +2092,8 @@ corpus-id = "fndfix"
 source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 20
 end-line = 24
-canonical-text = "A blocker or major finding closes only by a fix or\nthe maintainer's recorded reclassification: a refutation, an argument against the finding, is evidence\noffered to the maintainer for that reclassification, never itself a closure, whoever wrote or accepted it;\nit names each cause it ruled out with the reading or observation that ruled it out, and the finding stays\nopen for every other cause of the named condition."
-source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
+canonical-text = "Such a finding closes only by a fix or the\nmaintainer's recorded reclassification: a refutation, an argument against the finding, is evidence offered\nto the maintainer for that reclassification, never itself a closure, whoever wrote or accepted it; it\nnames each cause it ruled out with the path and lines read or the command run that ruled it out, and,\nuntil closed, the finding stays open for every other cause of the named condition."
+source-digest = "8905ab6e465c04939ee9a8a3400776eb5c583e4db6c74d6504df00cdf6848987"
 
 [[clause]]
 clause-id = "goalfd.1"
