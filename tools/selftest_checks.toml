@@ -1439,6 +1439,7 @@ expected-check-ids = [
   # ---------- the checked open of paths the guarded actor can create or replace ----------
   "plainopen/source-probe-no-plain-open-outside-the-allowlist",
   "plainopen/source-probe-red-on-a-reverted-site-and-a-changed-allowlisted-open",
+  "plainopen/source-probe-red-on-an-open-reached-without-calling-it-by-name",
   "plainopen/helper-refuses-each-non-regular-node-promptly-and-reads-as-text-mode-open",
   "plainopen/declared-record-pending-decisions-fifo-and-directory-never-block",
   "plainopen/declared-record-handoff-fifo-and-directory-never-block",
@@ -1455,6 +1456,7 @@ expected-check-ids = [
   "plainopen/state-escape-spoof-read-fifo-and-directory-never-block",
   "plainopen/recovery-ledger-append-fifo-and-directory-never-block",
   "plainopen/recovery-real-index-copy-swapped-fifo-and-directory-never-block",
+  "plainopen/recovery-real-index-already-fifo-directory-or-symlink-to-fifo-refused-through-main",
   "plainopen/gensrc-registry-read-swapped-fifo-directory-and-symlink-refused",
   "plainopen/gensrc-authoring-marker-read-swapped-fifo-directory-and-symlink-refused",
   "plainopen/write-scope-frozen-floor-read-swapped-fifo-directory-and-symlink-refused",

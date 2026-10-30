@@ -10926,13 +10926,16 @@ def _gitalias_oracle_cases(tmp):
 # aiqt_hooks._orch_open_checked, with O_NOFOLLOW added for the four readers that lstat before they open (a swap after
 # the lstat had reached the plain open). The source probe walks the WHOLE hooks script and refuses every call of an
 # open form in it (open by its bare name or as builtins, io or codecs.open, io.FileIO, os.open, os.fdopen, a .open,
-# .read_text, .write_text, .read_bytes or .write_bytes method call, the shutil copy family and the tempfile file
-# creators) outside the exact allowlist below, which names each remaining site by its innermost function, its form and
-# its mode literal or os.open flag names, with the reason it cannot block on, or read, a node that is not a regular
-# file; an allowlisted site that is gone, repeated or changed is refused too. os.listdir and tempfile.mkdtemp are not
-# open forms here: each opens or makes a directory only. The vectors put a regular file, a FIFO and a directory (and,
-# for a no-follow read, a symlink) at one path of each class and run the hook that opens it in a child process, so a
-# hook that blocks reads as a timed-out row, never a hung suite.
+# .read_text, .write_text, .read_bytes, .write_bytes or .touch method call, a getattr naming open, the shutil copy
+# family and the tempfile file creators), and every spelling that reaches open without calling it by that name (a
+# reference to open, or to os, io, builtins or codecs .open, that is not the function of a call, and a from-import of
+# open under any name), outside the exact allowlist below, which names each remaining site by its innermost function,
+# its form and its mode literal or os.open flag names, with the reason it cannot block on, or read, a node that is not
+# a regular file; an allowlisted site that is gone, repeated or changed is refused too. A bare open whose first
+# argument is a call of _orch_open_checked is a form of its own, so the same open of a path is not that site.
+# os.listdir and tempfile.mkdtemp are not open forms here: each opens or makes a directory only. The vectors put a
+# regular file, a FIFO and a directory (and, for a no-follow read, a symlink) at one path of each class and run the
+# hook that opens it in a child process, so a hook that blocks reads as a timed-out row, never a hung suite.
 _OPEN_DIRECTORY = ("a directory open (O_DIRECTORY, O_PATH where the platform has it): a FIFO, a device or a regular "
                    "file there fails ENOTDIR before any open of that node runs, so nothing there can block it or be "
                    "read")
@@ -10944,7 +10947,7 @@ _OPEN_NOFOLLOW_READER = ("a no-follow, non-blocking read open whose descriptor i
                          "regular file before any read")
 _PLAIN_OPEN_ALLOWED = {
     # (innermost function, open form, mode literal or the sorted flag names of an os.open): (count, reason)
-    ("_take_snapshot", "open", "rb"): (
+    ("_take_snapshot", "open(_orch_open_checked)", "rb"): (
         1, "wraps the descriptor _orch_open_checked returned for the real git index (an int, never a path), so the "
            "node was refused before this unless a regular file"),
     ("_take_snapshot", "open", "xb"): (
@@ -11011,14 +11014,17 @@ _PLAIN_OPEN_ALLOWED = {
 }
 _SHUTIL_OPENS = ("copy", "copy2", "copyfile", "copytree", "move")
 _TEMPFILE_OPENS = ("mkstemp", "NamedTemporaryFile", "TemporaryFile", "SpooledTemporaryFile")
-_PATH_METHOD_OPENS = ("open", "read_text", "write_text", "read_bytes", "write_bytes")
+_PATH_METHOD_OPENS = ("open", "read_text", "write_text", "read_bytes", "write_bytes", "touch")
+_OPEN_OWNERS = ("os", "io", "builtins", "codecs")
 
 
 def _open_site(call):
     """(form, detail) for a call of an open form (see the section comment above _PLAIN_OPEN_ALLOWED), else None. The
     detail is the mode literal of an open, os.fdopen, io.FileIO or .open call ('r' where none is given, '?' where it
     is not a literal), the sorted names in an os.open flags expression (each O_ constant, attribute or getattr string,
-    and each other variable), and '' for the rest. A module reached as __import__('name') counts as that name."""
+    and each other variable), and '' for the rest. A module reached as __import__('name') counts as that name. A bare
+    open whose first argument is a call of _orch_open_checked has the form 'open(_orch_open_checked)', and a getattr
+    whose second argument is the string 'open' has the form 'getattr(<its first argument>, "open")'."""
     import ast
 
     def mode():
@@ -11027,7 +11033,16 @@ def _open_site(call):
         return "r" if given is None else given.value if isinstance(given, ast.Constant) else "?"
     func = call.func
     if isinstance(func, ast.Name):
-        return ("open", mode()) if func.id == "open" else None
+        if func.id == "getattr" and len(call.args) > 1 and isinstance(call.args[1], ast.Constant) \
+                and call.args[1].value == "open":
+            target = call.args[0].id if isinstance(call.args[0], ast.Name) else "?"
+            return ('getattr({}, "open")'.format(target), "")
+        if func.id != "open":
+            return None
+        first = call.args[0] if call.args else None
+        checked = isinstance(first, ast.Call) and isinstance(first.func, ast.Name) \
+            and first.func.id == "_orch_open_checked"
+        return ("open(_orch_open_checked)" if checked else "open", mode())
     if not isinstance(func, ast.Attribute):
         return None
     base = func.value
@@ -11061,18 +11076,39 @@ def _open_site(call):
     return None
 
 
+def _open_reference(node, called):
+    """(form, detail) for a spelling that reaches open without calling it by that name, else None: a reference to
+    open, or to os, io, builtins or codecs .open, that is not the function of a call (called holds the id of every
+    call's function node), with the form '<that spelling> (not called)' and the detail '', and a from-import of open
+    under any name, with the form 'from <module> import open' and the detail the name it binds."""
+    import ast
+    if isinstance(node, ast.Name) and node.id == "open" and id(node) not in called:
+        return ("open (not called)", "")
+    if isinstance(node, ast.Attribute) and node.attr == "open" and isinstance(node.value, ast.Name) \
+            and node.value.id in _OPEN_OWNERS and id(node) not in called:
+        return ("{}.open (not called)".format(node.value.id), "")
+    if isinstance(node, ast.ImportFrom):
+        bound = [alias.asname or alias.name for alias in node.names if alias.name == "open"]
+        if bound:
+            return ("from {} import open".format("." * node.level + (node.module or "")), bound[0])
+    return None
+
+
 def _plain_open_findings(source):
     """The open sites the source probe refuses in the hooks source text, as sorted (function, line, form, detail)
-    rows: every call of an open form (_open_site) anywhere in the file, a nested function, a lambda and a
-    comprehension included, keyed by the innermost enclosing function ('<module>' at module level), the form and its
-    detail. A key in _PLAIN_OPEN_ALLOWED passes only when it occurs exactly its allowed number of times; any other
-    count is one ('allowlist count', function, form, detail, count) row, so the allowlist stays exact."""
+    rows: every call of an open form (_open_site) and every spelling that reaches open without calling it by that
+    name (_open_reference) anywhere in the file, a nested function, a lambda and a comprehension included, keyed by
+    the innermost enclosing function ('<module>' at module level), the form and its detail. A key in
+    _PLAIN_OPEN_ALLOWED passes only when it occurs exactly its allowed number of times; any other count is one
+    ('allowlist count', function, form, detail, count) row, so the allowlist stays exact."""
     import ast
     found, allowed = [], {}
+    tree = ast.parse(source)
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
 
     def visit(node, chain):
         for child in ast.iter_child_nodes(node):
-            site = _open_site(child) if isinstance(child, ast.Call) else None
+            site = _open_site(child) if isinstance(child, ast.Call) else _open_reference(child, called)
             if site is not None:
                 key = (chain[-1] if chain else "<module>",) + site
                 if key in _PLAIN_OPEN_ALLOWED:
@@ -11081,7 +11117,7 @@ def _plain_open_findings(source):
                     found.append((key[0], child.lineno) + site)
             named = isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
             visit(child, chain + [child.name] if named else chain)
-    visit(ast.parse(source), [])
+    visit(tree, [])
     found.sort()
     for key, (count, _reason) in sorted(_PLAIN_OPEN_ALLOWED.items()):
         if allowed.get(key, 0) != count:
@@ -11145,8 +11181,9 @@ _PLAIN_OPEN_HELPER_CHILD = (
 # One hook call per row, as _PLAIN_OPEN_HOOK_CHILD, with three seams per row: env entries set first; a stat or lstat
 # of any of the names reporting the stand-in regular file instead, so the planted node reads as regular at a check
 # made before the open (the swap of an lstat-then-open reader, landed right after its lstat); and swap, a (path,
-# kind) pair that replaces the node at path by a FIFO or a directory right after the hook asks git for the index
-# path, so git status has read the real index before the snapshot copies it.
+# kind) pair that replaces the node at path by a FIFO or a directory right after the snapshot's status probe (the
+# git status run through aiqt_hooks._recovery_git), so git status has read the real index before the snapshot copies
+# it.
 _PLAIN_OPEN_SWAP_CHILD = (
     "import json, os, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
@@ -11157,7 +11194,7 @@ _PLAIN_OPEN_SWAP_CHILD = (
     "def swapper(path, kind):\n"
     "    def git(repo, args, *a, **k):\n"
     "        out = real_git(repo, args, *a, **k)\n"
-    "        if '--git-path' in args:\n"
+    "        if 'status' in args:\n"
     "            os.unlink(path)\n"
     "            (os.mkfifo if kind == 'fifo' else os.mkdir)(path)\n"
     "        return out\n"
@@ -11172,15 +11209,34 @@ _PLAIN_OPEN_SWAP_CHILD = (
     "        os.stat, os.lstat = real_stat, real_lstat\n"
     "    print(json.dumps(result), flush=True)\n")
 
+# One dispatcher run per row: aiqt_hooks.main() with the mode and the payload on stdin, as the platform runs a hook,
+# so a PreToolUse mode runs under its deadline and a row that blocks reads as exit 2; env entries are set first, and
+# each row prints [exit status, the stdout decision object or None, the stderr text], the shape of a handler result.
+_PLAIN_OPEN_MAIN_CHILD = (
+    "import io, json, os, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks\n"
+    "for mode, payload, env in json.loads(sys.argv[2]):\n"
+    "    os.environ.update(env)\n"
+    "    out, err = io.StringIO(), io.StringIO()\n"
+    "    sys.stdin, sys.stdout, sys.stderr = io.StringIO(json.dumps(payload)), out, err\n"
+    "    try:\n"
+    "        code = aiqt_hooks.main([mode])\n"
+    "    finally:\n"
+    "        sys.stdin, sys.stdout, sys.stderr = sys.__stdin__, sys.__stdout__, sys.__stderr__\n"
+    "    decision = json.loads(out.getvalue()) if out.getvalue().strip() else None\n"
+    "    print(json.dumps([code, decision, err.getvalue()]), flush=True)\n")
 
-def _plain_open_child(source, argv_tail, rows):
+
+def _plain_open_child(source, argv_tail, rows, env=None):
     """Run source in a child interpreter (-I -B) with the hooks directory as its first argument and return its first
     rows stdout lines parsed as JSON, padded for each row it never printed with 'child timed out' (after 30 seconds)
-    or its exit status and stderr tail, so a call that blocks fails its row instead of hanging the suite."""
+    or its exit status and stderr tail, so a call that blocks fails its row instead of hanging the suite. env, when
+    given, is the child's whole environment (else it inherits this one)."""
     hooks = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
     try:
         p = subprocess.run([sys.executable, "-I", "-B", "-c", source, hooks] + argv_tail,
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=30, env=env)
         out, missing = p.stdout, "child exit {}: {}".format(p.returncode, p.stderr.strip()[-200:])
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -11221,27 +11277,48 @@ def _plainopen_cases(tmp):
             return "the substitution does not apply exactly once"
         return [row if row[0] == "allowlist count" else (row[0],) + row[2:]
                 for row in _plain_open_findings(hooks_src.replace(old, new))]
+    ledger_write = "        _orch_write_checked(path, (json.dumps(record) + \"\\n\").encode(\"utf-8\"), append=True)\n"
     # the flips: two converted sites reverted to their plain open (the turn-state read inside an orchestration
-    # function, the recovery-ledger append outside one), the allowlisted create's mode changed, and O_NONBLOCK dropped
-    # from an allowlisted descriptor reader, so each reverted site is named and each changed site is named with the
-    # allowlist's exact count short
+    # function, the recovery-ledger append outside one), the allowlisted create's mode changed, O_NONBLOCK dropped
+    # from an allowlisted descriptor reader, and the index copy's open given the index path in place of the checked
+    # descriptor, so each reverted site is named and each changed site is named with the allowlist's exact count short
     check("plainopen/source-probe-red-on-a-reverted-site-and-a-changed-allowlisted-open",
           (_mutant("        data = json.loads(_orch_read_checked(path))\n"
                    "        return data if isinstance(data, dict) else None\n",
                    "        with open(path, \"r\", encoding=\"utf-8\") as fh:\n"
                    "            data = json.load(fh)\n"
                    "        return data if isinstance(data, dict) else None\n"),
-           _mutant("        _orch_write_checked(path, (json.dumps(record) + \"\\n\").encode(\"utf-8\"), append=True)\n",
+           _mutant(ledger_write,
                    "        with open(path, \"a\", encoding=\"utf-8\") as fh:\n"
                    "            fh.write(json.dumps(record) + \"\\n\")\n"),
            _mutant('with open(tmp, "x", encoding="utf-8") as fh:', 'with open(tmp, "w", encoding="utf-8") as fh:'),
            _mutant('fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))',
-                   'fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))')),
+                   'fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))'),
+           _mutant('with open(_orch_open_checked(real_index, os.O_RDONLY), "rb") as src',
+                   'with open(real_index, "rb") as src')),
           ([("_orch_turn_state", "open", "r")],
            [("_write_recovery_ledger", "open", "a")],
            [("_orch_barrier_write", "open", "w"), ("allowlist count", "_orch_barrier_write", "open", "x", 0)],
            [("_orch_barrier_read", "os.open", "O_CLOEXEC|O_RDONLY"),
-            ("allowlist count", "_orch_barrier_read", "os.open", "O_CLOEXEC|O_NONBLOCK|O_RDONLY", 0)]))
+            ("allowlist count", "_orch_barrier_read", "os.open", "O_CLOEXEC|O_NONBLOCK|O_RDONLY", 0)],
+           [("_take_snapshot", "open", "rb"),
+            ("allowlist count", "_take_snapshot", "open(_orch_open_checked)", "rb", 0)]))
+    # each spelling that reaches open without calling it by that name, added once: a module-level alias of open, a
+    # reference to os.open and to io.open, a from-import of open under another name, a getattr naming open, and a
+    # Path.touch, each named where it stands
+    check("plainopen/source-probe-red-on-an-open-reached-without-calling-it-by-name",
+          (_mutant("_ORCH_STATE_MAX_BYTES = 64 << 20  #", "_fopen = open\n_ORCH_STATE_MAX_BYTES = 64 << 20  #"),
+           _mutant(ledger_write, "        _osopen = os.open\n" + ledger_write),
+           _mutant(ledger_write, "        _ioopen = io.open\n" + ledger_write),
+           _mutant(ledger_write, "        from os import open as _osopen\n" + ledger_write),
+           _mutant(ledger_write, "        getattr(os, \"open\")(path, os.O_WRONLY | os.O_APPEND)\n" + ledger_write),
+           _mutant(ledger_write, "        pathlib.Path(path).touch()\n" + ledger_write)),
+          ([("<module>", "open (not called)", "")],
+           [("_write_recovery_ledger", "os.open (not called)", "")],
+           [("_write_recovery_ledger", "io.open (not called)", "")],
+           [("_write_recovery_ledger", "from os import open", "_osopen")],
+           [("_write_recovery_ledger", 'getattr(os, "open")', "")],
+           [("_write_recovery_ledger", ".touch", "")]))
     helper = tmp / "plainopen-helper"
     helper.mkdir()
     check("plainopen/helper-refuses-each-non-regular-node-promptly-and-reads-as-text-mode-open",
@@ -11465,6 +11542,36 @@ def _plainopen_cases(tmp):
         rows = _plain_open_child(_PLAIN_OPEN_SWAP_CHILD, [json.dumps(calls)], len(kinds))
         check(check_id, tuple(_row(raw, channel, needle) if after is None or not isinstance(raw, list)
                               else (_verdict(tuple(raw)), after()) for raw, after in zip(rows, afters)), want)
+
+    # The real index already a FIFO, a directory, a symlink to a FIFO or a symlink to a copy of it before the hook
+    # runs, each row through main() (_PLAIN_OPEN_MAIN_CHILD), so the PreToolUse deadline is armed. git status opens
+    # the index in its own process with a blocking open, so only the lstat of the index before the clean probe and
+    # before the snapshot's status probe keeps a FIFO there from holding the call to that deadline (exit 2). git
+    # reports the index path with its symlinks resolved, so a symlink is judged by the node it reaches; the regular
+    # row and the symlink to a regular copy are the flips. The rows run twice, once with no GIT_* variable in the
+    # environment (the plain decision path) and once under this suite's pinned GIT_CONFIG_* variables, which the guard
+    # reads as a non-cosmetic ambient override (its ambient path); each path reaches the clean probe and the snapshot.
+    calls = []
+    for kind in ("regular", "fifo", "dir", "symlink-fifo", "symlink-regular"):
+        fx = Fixture(tmp, "plainopen-index-in-place-{}".format(kind))
+        path = fx.root / ".git" / "index"
+        if kind.startswith("symlink"):
+            target = Path(str(fx.root) + "-index.target")
+            if kind == "symlink-fifo":
+                os.mkfifo(str(target))
+            else:
+                target.write_bytes(path.read_bytes())
+            path.unlink()
+            os.symlink(str(target), str(path))
+        elif kind != "regular":
+            _plain_open_place(path, kind, "")
+        calls.append(["git_discard", discard(fx), dict(XDG_STATE_HOME=str(fx.root) + "-xdg")])
+    runs = [_plain_open_child(_PLAIN_OPEN_MAIN_CHILD, [json.dumps(calls)], len(calls), env=env)
+            for env in ({k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, None)]
+    want = (("warn", False), ("deny", True), ("deny", True), ("deny", True), ("warn", False))
+    check("plainopen/recovery-real-index-already-fifo-directory-or-symlink-to-fifo-refused-through-main",
+          tuple(tuple(_row(raw, 1, "the repository index is not a regular file") for raw in rows) for rows in runs),
+          (want, want))
 
 
 def main(report_path=None):

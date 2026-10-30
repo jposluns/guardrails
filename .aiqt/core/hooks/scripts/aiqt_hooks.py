@@ -8514,8 +8514,12 @@ def _tree_is_clean(repo):
     from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
     _isolate_git_env (the allowlist posture, re-applying only GIT_OPTIONAL_LOCKS after the scrub) so the
     probe reads the REAL repo at `-C <repo>` rather than a foreign preset that could redirect it to a decoy
-    clean repo and win a false ALLOW, and writes no ambient GIT_TRACE file."""
+    clean repo and win a false ALLOW, and writes no ambient GIT_TRACE file. The real index is checked first
+    (_recovery_index_fault): one that is not a regular file reads as None before git status runs, since git
+    opens the index with a blocking open and a FIFO there had held this probe to its timeout."""
     try:
+        if _recovery_index_fault(repo):
+            return None  # a non-regular real index: git status would open it, so the probe cannot evaluate
         env = _isolate_git_env(dict(os.environ))
         env["GIT_OPTIONAL_LOCKS"] = "0"
         result = subprocess.run(
@@ -9427,6 +9431,34 @@ def _recovery_toplevel(repo):
     return top
 
 
+def _recovery_index_fault(repo):
+    """None when the real index of repo (`git rev-parse --path-format=absolute --git-path index`, run through
+    _recovery_git, so every ambient GIT_* is scrubbed as for the status probes) is a regular file or is
+    absent, else the reason it is not. The check is one os.lstat, which neither opens the node nor follows
+    a symlink, made before a git child that reads the index: git opens the index with a blocking open in
+    its own process, so a FIFO there held the clean probe to its 5s timeout and then the snapshot's status
+    probe until the PreToolUse deadline failed the guard closed. A FIFO, a device or a directory there is
+    refused at once. The path git reports has its symlinks resolved (git 2.53.0 resolves the final one too,
+    a dangling one included), so a symlink at the index is judged by the node it reaches: one to a FIFO is
+    refused, one to a regular file is not, and a git that reported the link itself would have it refused,
+    the safe direction. A node swapped in after this lstat is not judged here: the checked open of the
+    snapshot copy (_take_snapshot) refuses one swapped in after the status probe read the index, and one
+    swapped in before that is opened by git itself. Raises what _recovery_git raises."""
+    ri = _recovery_git(repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], timeout=5)
+    if ri.returncode != 0:
+        return "the repository index path could not be resolved (git rev-parse --git-path index failed)"
+    try:
+        st = os.lstat(ri.stdout.strip())
+    except FileNotFoundError:
+        return None  # no index yet: git reads none, so nothing there can block it
+    except (OSError, ValueError) as exc:
+        return "the repository index could not be examined ({})".format(exc)
+    if not stat.S_ISREG(st.st_mode):
+        return ("the repository index is not a regular file (a FIFO, a device, a directory or a symlink), so "
+                "it is refused before any git child opens it")
+    return None
+
+
 def _recovery_status_entries(repo, top):
     """(classes, total_bytes) from a read-only, config-forced porcelain probe of repo: `classes` is the
     set of covered classes among {'staged','tracked','untracked'} across every changed/untracked entry,
@@ -9493,8 +9525,15 @@ def _take_snapshot(repo, top, verb):
     refs/aiqt-recovery/<utc-ts>-<pid> ref. `top` is the resolved repo TOPLEVEL (the containment anchor and
     the size-estimate root; the session cwd may be a subdir). In a NORMAL repo writes only git objects and
     that one ref; the real index, worktree, HEAD, and every branch are untouched (see the block comment above
-    _SNAPSHOTTABLE_VERBS for the repo-config residual). Returns ('ok', info) with info =
-    {ref, sha, classes, restore}, or ('fail', reason)."""
+    _SNAPSHOTTABLE_VERBS for the repo-config residual). The real index is checked first
+    (_recovery_index_fault), so one that is not a regular file fails the snapshot before the status probe
+    runs git on it. Returns ('ok', info) with info = {ref, sha, classes, restore}, or ('fail', reason)."""
+    try:
+        index_fault = _recovery_index_fault(repo)
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        return ("fail", "the repository index could not be examined ({})".format(exc))
+    if index_fault:
+        return ("fail", index_fault)
     try:
         classes, total = _recovery_status_entries(repo, top)
     except (subprocess.SubprocessError, OSError) as exc:
@@ -9530,10 +9569,12 @@ def _take_snapshot(repo, top, verb):
                             "(git rev-parse --git-path index failed)")
         real_index = ri.stdout.strip()
         if real_index and os.path.exists(real_index):  # else: git creates a fresh temp index on add --all
-            # The real index is a path the guarded actor can replace, so it is opened by _orch_open_checked:
-            # a FIFO, a device or a directory there fails the snapshot at once. shutil.copyfile refused a FIFO
-            # only at its own stat, so one swapped in after that stat blocked its open until the PreToolUse
-            # deadline failed the guard closed. The temp index is an exclusive create in the fresh tmpdir.
+            # The real index is a path the guarded actor can replace. The lstat at the top refused one that
+            # was not a regular file before the status probe; this open, by _orch_open_checked, refuses a
+            # FIFO, a device or a directory swapped in since, after the status probe read the index, at once.
+            # shutil.copyfile refused a FIFO only at its own stat, so one swapped in after that stat blocked
+            # its open until the PreToolUse deadline failed the guard closed. The temp index is an exclusive
+            # create in the fresh tmpdir.
             with open(_orch_open_checked(real_index, os.O_RDONLY), "rb") as src, open(tmp_index, "xb") as dst:
                 shutil.copyfileobj(src, dst)
         env = {"GIT_INDEX_FILE": tmp_index}
@@ -18824,7 +18865,8 @@ def _orch_registry(root, nofollow=False, files=_ORCH_REGISTRY_FILES):
     bad, never absent: an lstat FAULT (a permission or I/O error), a read/parse error, a file that is not a
     regular file, or a non-version-1 object all fail closed rather than silently disarming a caller that
     locates confinement through it. The file is opened non-blocking and its type is checked on the open
-    descriptor, so a FIFO or device registry is bad at once rather than blocking the hook; with nofollow a
+    descriptor, so a FIFO or device registry is bad at once rather than blocking the hook. Without nofollow
+    the open follows a final symlink, the fstat judging the node the link reaches; with nofollow a
     symlinked registry is bad too (the review dispatch pin reads it that way). The
     machine-local .aiqt/orchestration.local.json takes WHOLE-FILE precedence over the committed
     .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous. files narrows the read
@@ -18922,7 +18964,12 @@ def _orch_open_checked(path, flags, mode=0o666):
     own: a declared or state path in the orchestration hooks (a registry-declared record, register or
     lease, or a file in the state directory), the generated-artefact registry and the authoring marker,
     the write-scope declaration and the frozen floor (those four read with O_NOFOLLOW added), the
-    recovery ledger and the real git index a recovery snapshot copies. For a read (O_RDONLY) or a write
+    recovery ledger and the real git index a recovery snapshot copies. It is also the open of every
+    _orch_write_checked write and append (the state files, the guard-events rows and the recovery ledger
+    among them). Without O_NOFOLLOW in flags the open follows a final symlink, the fstat judging the node
+    the link reaches, so a write through _orch_write_checked, which passes O_CREAT and no O_NOFOLLOW, at a
+    dangling symlink creates the link's target and writes there, as the plain open() it replaced did; that
+    behaviour is kept, not changed here. For a read (O_RDONLY) or a write
     (O_WRONLY | O_CREAT, with O_APPEND for an append), in the _orch_mode_read pattern: os.open(path, flags |
     O_NONBLOCK | O_NOCTTY | O_CLOEXEC, mode), so a FIFO with no writer opens for a read at once instead of
     waiting for one and a FIFO with no reader fails a write open at once (ENXIO); the descriptor is then
@@ -19252,11 +19299,12 @@ def _orch_mode_read(path):
     The path must encode as strict UTF-8, before any open: a path that is not (a lone surrogate, which is
     also how a surrogate-escaped non-UTF-8 name arrives) is refused as bad, fail-closed, even where the OS
     could open it, and so is a path with a NUL character. The open is os.open(O_RDONLY | O_NONBLOCK |
-    O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting. A socket is refused
-    at that open (it reports ENXIO on Linux, so the reason is the open's OSError), and so is any node the
-    open itself fails on (a regular file without read permission, /dev/tty with no controlling terminal);
-    after a successful open the descriptor is fstat'ed and anything not a regular file (a FIFO, a device such
-    as /dev/zero, a directory) is bad without a read. The read asks for at most
+    O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting; it carries no
+    O_NOFOLLOW, so it follows a final symlink, the fstat below judging the node the link reaches. A socket
+    is refused at that open (it reports ENXIO on Linux, so the reason is the open's OSError), and so is any
+    node the open itself fails on (a regular file without read permission, /dev/tty with no controlling
+    terminal); after a successful open the descriptor is fstat'ed and anything not a regular file (a FIFO,
+    a device such as /dev/zero, a directory) is bad without a read. The read asks for at most
     _ORCH_MODE_MAX_BYTES + 1 bytes in all and a longer file is bad. Any exception on the way (an OSError,
     a decode error, any other) is bad, named by its type, and the descriptor is closed exactly once. Not
     bounded here: the path lookup can stall on a hung mount, a regular file on a stalled filesystem can
