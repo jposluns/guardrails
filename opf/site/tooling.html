@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reference tooling | OPFiles</title>
-<meta name="description" content="Nine of the ten OPFiles verbs: init, import, doctor, render, migrate, sync, upgrade, absorb, and record; adopt is on the adoption page. Migration and synchronization are planned in the reference CLI.">
+<meta name="description" content="Nine of the ten OPFiles verbs: init, import, doctor, render, migrate, sync, upgrade, absorb, and record; adopt is on the adoption page. Migration is planned in the reference CLI.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Reference tooling | OPFiles">
-<meta property="og:description" content="Nine of the ten OPFiles verbs: init, import, doctor, render, migrate, sync, upgrade, absorb, and record; adopt is on the adoption page. Migration and synchronization are planned in the reference CLI.">
+<meta property="og:description" content="Nine of the ten OPFiles verbs: init, import, doctor, render, migrate, sync, upgrade, absorb, and record; adopt is on the adoption page. Migration is planned in the reference CLI.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -50,7 +50,7 @@
 <div class="wrap pagehead">
   <p class="eyebrow">Reference tooling</p>
   <h1>Reference tooling</h1>
-  <p class="lead">OPFiles names ten command verbs. This page documents nine: <code>init</code>, <code>import</code>, <code>doctor</code>, <code>render</code>, <code>migrate</code>, <code>sync</code>, <code>upgrade</code>, <code>absorb</code>, and <code>record</code>; the tenth, <code>adopt</code>, is documented in the <a href="./adopt#cmd-adopt">adoption command reference</a>. Of these nine, the reference CLI implements five. The ordinary <code>import</code> modes are retired and refuse with exit 2; <code>upgrade</code> refuses with exit 2, since the reference tooling defines no store upgrade; <code>migrate</code> and <code>sync</code> are planned and currently exit 2 (not yet implemented).</p>
+  <p class="lead">OPFiles names ten command verbs. This page documents nine: <code>init</code>, <code>import</code>, <code>doctor</code>, <code>render</code>, <code>migrate</code>, <code>sync</code>, <code>upgrade</code>, <code>absorb</code>, and <code>record</code>; the tenth, <code>adopt</code>, is documented in the <a href="./adopt#cmd-adopt">adoption command reference</a>. Of these nine, the reference CLI implements six. The ordinary <code>import</code> modes are retired and refuse with exit 2; <code>upgrade</code> refuses with exit 2, since the reference tooling defines no store upgrade; <code>migrate</code> is planned and currently exits 2 (not yet implemented).</p>
 </div>
 
 <section>
@@ -104,7 +104,7 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 9a7.5 7.5 0 0 1 12.8-2.3"/><path d="M17 4v3h-3"/><path d="M19.5 15a7.5 7.5 0 0 1-12.8 2.3"/><path d="M7 20v-3h3"/></svg></span>
         <h3><code>opf sync</code></h3>
-        <p>Planned: the surfaced pull and push step of the store consistency contract. Not yet implemented in the reference CLI (exit 2).</p>      </div>
+        <p>The surfaced pull and push step of the store consistency contract, for a store with a dedicated sync target. Bare <code>opf sync</code> is a read-only report (equal exits 0; behind, ahead, or divergent exits 2); <code>--pull</code> fast-forwards a behind store and <code>--push</code> pushes an ahead store's pending commits, each as its own explicit step. A divergence always halts for the human; a store with no dedicated sync target refuses with exit 2.</p>      </div>
     </div>
   </div>
 </section>

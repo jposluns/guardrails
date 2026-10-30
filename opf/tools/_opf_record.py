@@ -184,8 +184,10 @@ publication and the change is left for review the same way; where the moved HEAD
 at all, the doctor's history check, which walks only the records the prior commit holds, never reaches
 it, so the final doctor passes and the run reports the receipt recorded (exit 0) over an item HEAD does
 not hold; a completed transaction's journal directory
-is retained under the generation's record journal home as local recovery evidence; the lease is not made observable at a sync target (no
-sync runtime in this build, so the guarantee is single-host single-writer); a signal
+is retained under the generation's record journal home as local recovery evidence; the lease is not made observable at a sync target
+(`opf sync` ships the surfaced reconciliation step, but the lease stays local to this host until the
+planned target lock ref lands, so the spec 17 propagation window stands and the divergence check
+`opf sync` surfaces is the overlapping control); a signal
 delivered at any point may leave a lease, an operation capability record or a journal lock in place,
 which the next run's recovery handles (an asynchronous interrupt makes any narrower promise
 unkeepable, so release is described in this module for ordinary exceptions and clean exits only); an

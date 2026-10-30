@@ -51,6 +51,13 @@ report only its cannot-evaluate for exactly that record and from/to pair, never 
 reporting that cannot-evaluate until the change is committed.
 A contribution's `transition ID sent` from `proposed` takes `--channel S --delivery-ref S` and writes the
 delivery bundle; `transition ID acknowledged` from `sent` takes an optional `--receipt-ref S`.
+`sync` HAS landed (spec 5.7): `opf sync [--pull | --push] [--root DIR]` is the surfaced reconciliation
+step of the store consistency contract over a store with a dedicated sync target. Bare `opf sync` is
+read-only: it fetches the recorded target by explicit URL and reports EQUAL (exit 0), BEHIND, AHEAD or
+DIVERGENT (each exit 2); `--pull` fast-forwards a BEHIND store (then requires doctor-VALID, leaving a
+failing fast-forward in place for review) and `--push` pushes an AHEAD store's pending commits, each
+under the single-writer claim and only to a destination that agrees with the recorded sync target. A
+divergence halts in every mode; a store with no dedicated sync target refuses with a named reason.
 `adopt` HAS landed (OPF-ADOPT K9a, the read-only half): `opf adopt plan --inputs FILE [--root DIR]`
 freezes and PRINTS the inert adoption proposal through the adoption planner (_opf_adopt_plan), writing
 nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readiness to apply -- and
@@ -172,7 +179,7 @@ def _bootstrap():
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
-    global _opf_adopt_state
+    global _opf_adopt_state, _opf_sync
     try:
         import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
@@ -190,6 +197,7 @@ def _bootstrap():
         import _opf_adopt_apply  # OPF-ADOPT U1+U2+U3+U4+U5+U7: the apply shell (the three file ops, init-store, the registration ops, enable-hook and the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
+        import _opf_sync         # OPF-SYNC: the surfaced store/sync-target reconciliation step (spec 5.7)
     except ImportError as exc:
         try:
             line = "opf: cannot bootstrap: {} (cannot evaluate)".format(_init_inert(exc.name or str(exc)))
@@ -19356,6 +19364,24 @@ def _cmd_record(rest):
         return EXIT_MALFORMED
 
 
+def _cmd_sync(rest):
+    """`opf sync [--pull | --push] [--root DIR]` (spec 5.7): the surfaced reconciliation step of the
+    store consistency contract. Bare `opf sync` is READ-ONLY: it fetches the recorded sync target by
+    explicit URL and reports EQUAL, BEHIND, AHEAD or DIVERGENT; `--pull` fast-forwards a BEHIND store
+    and `--push` pushes an AHEAD store's pending commits, each its own explicit step, never folded into
+    the report. Exit 0 equal or reconciled (a pull also doctor-VALID); exit 2 every refusal, surfaced
+    non-equal state, divergence, or cannot-evaluate; exit 1 is not used. Like `record` and `import`, a
+    NOT-ADOPTED root is a cannot-evaluate (a requested operation), and a store with no dedicated sync
+    target ([store].sync_target empty: the in-repo default, or a relocated local-only store) refuses
+    with a named reason."""
+    try:
+        return _opf_sync.cli(rest)
+    except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success
+        print("opf sync: cannot evaluate: unexpected error ({!r}); failing closed to exit 2".format(exc),
+              file=sys.stderr)
+        return EXIT_MALFORMED
+
+
 def _adopt_exit(status):
     """Map a planning-layer status (an _opf_adopt_plan.AdoptResult or _opf_adopt.AdoptValidation carries
     the _opf_store VALID / INVALID / CANNOT-EVALUATE vocabulary) to the CLI 0/1/2 exit contract,
@@ -19951,7 +19977,8 @@ def _upgrade_self_test():
 
 
 def _cli_self_test():
-    """Guard the dispatcher's render, doctor, import, upgrade, record, adopt, and source-only init routes.
+    """Guard the dispatcher's render, doctor, import, upgrade, record, sync, adopt, and source-only init
+    routes.
     Render/doctor cases below judge return codes; init also checks payload validation, refusal reasons,
     and preservation through check_opf_init._suite(main). Each case captures stdout and stderr.
     Cases: an unknown verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`,
@@ -19998,7 +20025,8 @@ def _cli_self_test():
         expect([], EXIT_MALFORMED)
         expect(["frobnicate"], EXIT_MALFORMED)
         for verb in KNOWN_VERBS:
-            if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb", "record", "adopt"):
+            if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb", "record", "adopt",
+                            "sync"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
         expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
         expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
@@ -20057,6 +20085,26 @@ def _cli_self_test():
         expect(["record", "create", "--root"], EXIT_MALFORMED)   # --root needs a value
         expect(["record", "worklog-append", "--kind", "added", "--summary", "s", "--actor", "importer"],
                EXIT_MALFORMED)                                   # an importer never authors through record
+
+        # sync verb ROUTING (OPF-SYNC), judged on exit code AND, where the code alone would not
+        # discriminate, the located message: a bad-flag case exits 2 whether or not the route is wired
+        # (the fail-closed KNOWN_VERBS branch also returns 2), so the usage case asserts the verb's OWN
+        # usage text, which only the wired _cmd_sync emits, and the absence of the not-yet-implemented
+        # line (reverting the dispatch flips it red on the message, not the code). The grammar cases
+        # fail closed in the parser BEFORE any store resolution, so they need no store on disk; the
+        # state classification, pull and push discrimination over real stores rides
+        # _opf_sync.self_test.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            rc = main(["sync", "--bogus"])
+        if (rc != EXIT_MALFORMED or "usage: opf sync" not in buf.getvalue()
+                or "not yet implemented" in buf.getvalue()):
+            failures.append("sync --bogus: rc={!r} (expected 2 + the located `usage: opf sync` text, "
+                            "never not-yet-implemented; {})".format(rc, buf.getvalue().strip()))
+        expect(["sync", "--root"], EXIT_MALFORMED)               # --root needs a value
+        expect(["sync", "--root", ""], EXIT_MALFORMED)           # empty root refused
+        expect(["sync", "--root", ".", "--root", "."], EXIT_MALFORMED)   # duplicate --root
+        expect(["sync", "--pull", "--push"], EXIT_MALFORMED)     # one surfaced step at a time
 
         # adopt verb ROUTING (OPF-ADOPT K9a), judged on exit code AND, where the code alone would not
         # discriminate, the located message: a bare `adopt` was an UNKNOWN verb before this PR, so it
@@ -20202,6 +20250,18 @@ def _cli_self_test():
                 # to end (it builds its own valid synthetic stores).
                 expect(["absorb", "--root", not_adopted], EXIT_OK)
                 expect(["absorb", "--root", broken], EXIT_MALFORMED)
+                # sync over the same synthetic roots: unlike the applicability-probe siblings a
+                # NOT-ADOPTED root is a cannot-evaluate (exit 2, a requested operation, like record and
+                # import), asserted with the verb's own located message, because the unrouted
+                # fail-closed KNOWN_VERBS branch also exits 2; a garbage store fails closed too (exit
+                # 2). The reconcile discrimination over real stores rides _opf_sync.self_test.
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    rc = main(["sync", "--root", not_adopted])
+                if rc != EXIT_MALFORMED or "no OPF store" not in buf.getvalue():
+                    failures.append("sync over a NOT-ADOPTED root: rc={!r} (expected 2 + the located "
+                                    "no-store message)".format(rc))
+                expect(["sync", "--root", broken], EXIT_MALFORMED)
             finally:
                 shutil.rmtree(base, ignore_errors=True)
             return None
@@ -23362,6 +23422,7 @@ def _self_tests():
     ("opf-observe", _opf_observe.self_test),
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-record", _opf_record.self_test),
+    ("opf-sync", _opf_sync.self_test),
     ("opf-write-guard", _opf_write_guard.self_test),
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
     ("opf-adopt-state", _opf_adopt_state.self_test),
@@ -23386,8 +23447,9 @@ def _self_tests():
 # still run it), so those lanes run each leg once and no group command a second time.
 SELF_TEST_GROUPS = (
     ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
-              "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
-              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli")),
+              "opf-observe", "opf-absorb", "opf-record", "opf-sync", "opf-write-guard", "opf-fuzz", "opf-check",
+              "opf-journal", "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors",
+              "opf-cli")),
     ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
     ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
 )
@@ -23539,6 +23601,8 @@ def main(argv=None):
         return _cmd_absorb(rest)
     if verb == "record":
         return _cmd_record(rest)
+    if verb == "sync":
+        return _cmd_sync(rest)
     if verb == "adopt":
         return _cmd_adopt(rest)
     if verb in KNOWN_VERBS:

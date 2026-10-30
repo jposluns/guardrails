@@ -265,9 +265,9 @@
       <span class="chip ok"><code>opf absorb</code></span>
       <span class="chip ok"><code>opf record</code></span>
       <span class="chip"><code>opf migrate</code> (planned)</span>
-      <span class="chip"><code>opf sync</code> (planned)</span>
+      <span class="chip"><code>opf sync</code></span>
     </p>
-    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>absorb</code> drafts changelog entries for human curation, and <code>record</code> authors one record change at a time. <code>upgrade</code> refuses with exit 2, since the reference tooling defines no store upgrade. The ordinary <code>import</code> modes are retired and refuse with exit 2: clean-start adoption is the intake, and post-adoption import will use the approved prompt pack. <code>migrate</code> and <code>sync</code> are specified but not yet implemented in the reference CLI.</p>
+    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>absorb</code> drafts changelog entries for human curation, and <code>record</code> authors one record change at a time. <code>sync</code> reconciles a store with its dedicated sync target: a read-only report by default, with <code>--pull</code> and <code>--push</code> as explicit surfaced steps. <code>upgrade</code> refuses with exit 2, since the reference tooling defines no store upgrade. The ordinary <code>import</code> modes are retired and refuse with exit 2: clean-start adoption is the intake, and post-adoption import will use the approved prompt pack. <code>migrate</code> is specified but not yet implemented in the reference CLI.</p>
   </div>
 </section>
 

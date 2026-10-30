@@ -395,23 +395,29 @@
     <p class="refchips"><code>opf migrate --store dir:../product-ops-store</code> <code>opf migrate --store github:acme/product-ops</code></p>
 
     <h3 id="cmd-sync"><code>opf sync</code></h3>
-    <p><b style="color:var(--ink)">Status.</b> Planned; the reference CLI currently exits 2
-      (not yet implemented). The following describes the standard's intended operation.</p>
-    <p><b style="color:var(--ink)">Purpose.</b> Reconcile the store with its sync target, the surfaced
-      pull-and-push step of the store consistency contract.</p>
+    <p><b style="color:var(--ink)">Purpose.</b> Reconcile the store with its recorded sync target, the
+      surfaced pull-and-push step of the store consistency contract. It operates only on a store whose
+      manifest records a dedicated sync target; the in-repo default and a relocated local-only store
+      refuse with exit 2 and a named reason.</p>
     <p><b style="color:var(--ink)">How it works.</b> The consistency contract holds the store
-      nothing-stale, nothing-ahead against its target. Where the local store is behind the target,
-      <code>opf sync</code> fast-forwards it to current; where it is ahead (local commits not yet pushed,
-      the lease still held by the resuming holder, and no divergent remote side), it pushes the pending
-      commits as an authorized reconciliation. It runs as its own surfaced step and is not folded silently
-      into another operation, so a pull or a push is a deliberate act you can see. A divergence (unsynced
-      commits on two systems) is not auto-merged: <code>opf sync</code> surfaces it and halts for you,
-      because a textual merge of the store's TOML records could mangle the very records the standard
-      protects.</p>
+      nothing-stale, nothing-ahead against its target. Bare <code>opf sync</code> is read-only: it
+      fetches the recorded target by its explicit URL (after confirming the pointer, the manifest's
+      recorded sync target, and the repository's own remote agree) and reports equal (exit 0), behind,
+      ahead, or divergent (each exit 2). Where the local store is behind the target,
+      <code>opf sync --pull</code> fast-forwards it to current, admitting the fetched manifest first so
+      a fast-forward never lands a refused store state, and then requires a doctor-VALID result, leaving
+      a failing fast-forward in place for review. Where it is ahead (local commits not yet pushed and no
+      divergent remote side), <code>opf sync --push</code> pushes the pending commits as an authorized
+      reconciliation, only while no lease is held. Each runs as its own surfaced step and is not folded
+      silently into another operation, so a pull or a push is a deliberate act you can see. A divergence
+      (unsynced commits on two systems) is not auto-merged: <code>opf sync</code> surfaces it and halts
+      for you in every mode, because a textual merge of the store's TOML records could mangle the very
+      records the standard protects.</p>
     <p><b style="color:var(--ink)">Result.</b> The store reconciled to a known-consistent state with its
       target, fast-forwarded to current or with its pending local commits pushed, or a surfaced halt on a
       divergence for you to resolve by hand.</p>
-    <p class="refchips"><code>opf sync</code> <code>opf sync --root .</code></p>
+    <p class="refchips"><code>opf sync</code> <code>opf sync --pull</code> <code>opf sync --push</code>
+      <code>opf sync --root .</code></p>
   </div>
 </section>
 

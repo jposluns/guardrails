@@ -583,6 +583,7 @@ opf/tools/_opf_record.py text eol=lf
 opf/tools/_opf_release.py text eol=lf
 opf/tools/_opf_schema.py text eol=lf
 opf/tools/_opf_store.py text eol=lf
+opf/tools/_opf_sync.py text eol=lf
 opf/tools/_opf_views.py text eol=lf
 opf/tools/_opf_worklog.py text eol=lf
 opf/tools/_opf_worklog_regressions.py text eol=lf
