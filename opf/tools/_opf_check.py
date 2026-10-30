@@ -1747,13 +1747,15 @@ def _moved_row_types(mid, mtype, enabled_types):
 
 def _dest_index_has_id(root_fd, machine_rel, dest, target_id, rep):
     """True when the store-relative index `dest` (an `archive.toml` moved destination the caller has
-    already required to equal the declaring bucket's own type index, so always a contained path) actually
-    carries a row for `target_id`; False when it was read, or is absent, and carries none; None when it
-    could not be read. An absent destination records a finding and returns False (an absent file holds no
-    row); an unreadable or malformed one is fail-closed to None, so an enumerated id whose destination
-    cannot be confirmed is never read as present. The caller tells the two apart: a destination read (or
-    absent) without the row leaves its type unconfirmed, while one never read leaves a record source
-    unread."""
+    already required to be a contained path equal to the declaring bucket's own type index, probed only
+    where that bucket's scan counted nothing at the path) actually carries a row for `target_id`; False
+    when it was read, or is absent, and carries none; None when it could not be read. An absent
+    destination records a finding and returns False (an absent file holds no row); an unreadable or
+    malformed one is fail-closed to None, so an enumerated id whose destination cannot be confirmed is
+    never read as present. The caller tells the returns apart: a destination the probe confirmed absent
+    (or read whole) without the row leaves its type unconfirmed, one never read leaves a record source
+    unread, and a probe HIT is a record the walk counted nowhere (the tree changed between the listing
+    and the probe), likewise a record source unread, never a seat."""
     full = _rel(machine_rel, dest)
     data, st = _read_toml(root_fd, full, rep)
     if st == "error":
@@ -1907,7 +1909,7 @@ def _archive_triaged_dir(archive_rel, path):
 
 
 def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1,
-                      unread=None, unconfirmed=None):
+                      unread=None, unconfirmed=None, active_counted=None):
     """Walk the archive tree, validating each bucket's archive.toml, its archived non-worklog records, and
     its archived worklog, and reconciling the enumeration BIDIRECTIONALLY against what is actually present
     (OPF-SPEC 12/13). Enumeration and record-schema faults attribute to the caller's C-ARCHIVE-ENUM focus;
@@ -1916,29 +1918,56 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     map. Archive absent means no rotation (clean); a present bucket with no archive.toml is CANNOT-EVALUATE,
     never 'no rotation happened'. No loop is sized by a declared span endpoint. The walk sorts every type
     it cannot vouch for into `unread` or `unconfirmed` (each when given; `unconfirmed` falls back to
-    `unread`) by ONE principle: a type joins the graded `unconfirmed` set only when the moved row's
-    declared destination was opened at its expected path AND read in full by the scan that counts its ids
-    toward the type's population, so the walk knows definitively whether the id is there (the row present,
-    or the destination read, or absent, without it). Every branch where the declared location was not
-    opened (a wrong or uncontained destination, a row dropped as malformed), was opened but its ids were
-    not counted (a destination index whose declared type is not on the enabled roster, which the bucket
-    scan skips), or could not be read in full, puts the types _moved_row_types names into `unread`
-    instead: the record may exist exactly where nothing was counted, so only the `unread` types leave an
-    id's presence unknown and the presence scans over the ids that were read stand for every other type.
-    Beyond the moved rows, `unread` also takes the type of an archived index that is unreadable or
-    malformed or whose row is skipped, every enabled type for a bucket or archive tree that cannot be
-    walked, and "worklog" when the bucket's worklog.toml is listed but cannot be read or an entry is left
-    out of its map. `unconfirmed` also takes the types of a row whose declared type disagrees with its
-    id's namespace even where the (read, counted) destination carries the id: the id's presence is known,
-    but which of the two types the record is cannot be told, so both typed populations stay incomplete for
-    the current-state joins. The archived worklog follows the same principle: a worklog_moved span that is
-    malformed or enumerates an entry the bucket's worklog lacks adds "worklog" to `unconfirmed` when its
-    declared destination is this bucket's own (read or absent) worklog, and to `unread` when it names any
-    other, never-opened destination the entries could be held at."""
+    `unread`) by ONE principle: a moved row's types stay in the graded `unconfirmed` set only when its
+    declared destination is a location that was opened at that path and read in full by a scan that
+    counts its ids toward a type's population, so the walk knows definitively whether the id is there.
+    The walk records those locations as it goes (each bucket's enabled type indexes and its worklog, plus
+    the active ones `active_counted` supplies) and classifies each row only after the whole tree is
+    walked, since a counted location can be a bucket walked later; the declaring bucket's own expected
+    location, settled by the time its rows are reached, is additionally probed where the bucket's listing
+    counted nothing at the path, a destination the probe confirms absent being likewise known to hold no
+    row. Every declared location outside the counted set (never opened, an uncontained path, one whose
+    ids were not counted toward a record population - a worklog named by a moved row, an index whose
+    declared type the bucket scan skips, or a probe hit where the listing counted nothing - or one that
+    could not be read in full) puts the types _moved_row_types names into `unread` instead: the record
+    may exist exactly where nothing was counted, so only the `unread` types leave an id's presence
+    unknown and the presence scans over the ids that were read stand for every other type. A row dropped
+    as malformed, or one with no usable destination, names no readable location, so it adds the types it
+    could stand for to `unconfirmed` alone, never to `unread`: wherever every location a record of such a
+    type can live was counted, the id's presence is still known (a location that failed to read already
+    put its type in `unread` itself), so one junk field never turns a namespace's presence gates into
+    CANNOT-EVALUATE. Beyond the rows, `unread` also takes the type of an archived index that is
+    unreadable or malformed or whose row is skipped, every enabled type for a bucket or archive tree that
+    cannot be walked, and "worklog" when the bucket's worklog.toml is listed but cannot be read or an
+    entry is left out of its map. `unconfirmed` also takes the types of a row whose declared type
+    disagrees with its id's namespace even where the counted destination carries the id: the id's
+    presence is known, but which of the two types the record is cannot be told, so both typed populations
+    stay incomplete for the current-state joins. The archived worklog follows the same principle: a
+    worklog_moved span that is malformed or enumerates an entry the bucket's worklog lacks adds "worklog"
+    to `unconfirmed` when its declared destination is a counted ledger (one read in full, or one a listed
+    bucket does not carry, which holds no entries), and to `unread` when it names any other destination
+    the entries could be held at. `active_counted` (when given) maps each active location the caller's
+    collectors read in full to the ids counted there, keyed store-relative exactly as an archive.toml
+    destination names it (`<type>.index.toml`, `worklog.toml`); only membership is read for a ledger.
+    Without it no active location is counted, so a destination naming one stays in `unread`."""
     if unread is None:
         unread = set()
     if unconfirmed is None:
         unconfirmed = unread
+    # The locations whose ids a full read counted toward a population: `counted_ids` maps each counted
+    # type index to the well-formed ids it seats, and `counted_wl` holds each counted worklog ledger.
+    # Both are keyed store-relative, exactly as a destination names them; a declared destination is
+    # graded against the matching set only, since an index's ids are never counted as worklog entries nor
+    # a ledger's as records.
+    counted_ids = {}
+    counted_wl = set()
+    for loc in (active_counted or {}):
+        if loc == WORKLOG_NAME or loc.endswith("/" + WORKLOG_NAME):
+            counted_wl.add(loc)
+        else:
+            counted_ids[loc] = active_counted[loc]
+    pending_moved = []      # (types the row could stand for, declared destination), classified after the walk
+    pending_wl = []         # declared worklog_moved destinations, classified after the walk
     archive_recs = []
     archive_worklogs = {}
     rotatable = []
@@ -1988,10 +2017,12 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             unread.update(enabled_types)
             continue
         for mid, mtype in dropped:
-            # A row dropped as malformed names a rotation whose declared destination is never opened, so
-            # each type the row could stand for has a record source not read: the record may be held
-            # exactly where nothing was counted.
-            unread.update(_moved_row_types(mid, mtype, enabled_types))
+            # A row dropped as malformed (its id, type or destination) names no readable location, so it
+            # cannot leave a counted source unread: each type it could stand for stays graded wherever
+            # every location a record of that type can live was read in full and counted (a location that
+            # failed to read already put its type in `unread` itself), while the rotation it names is
+            # unreconciled, so those types' populations are incomplete for the current-state joins.
+            unconfirmed.update(_moved_row_types(mid, mtype, enabled_types))
         if moved and not wl_moved:
             # Per-bucket rotation binding: a bucket that rotates non-worklog records MUST carry an archived
             # worklog span to bind them to a released period (spec 12). archive_wl_ids aggregates GLOBALLY,
@@ -2038,17 +2069,20 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 # than the baseline validator's false "not a supported type".
                 rep.cant("{}: {} archived schema-deferred record(s) of type {!r}; {}".format(
                     idx_rel, len(rows), tname, _SCHEMA_DEFERRAL))
+            idx_ids, idx_counted = set(), True
             for i, row in enumerate(rows):
                 rw = "{}#{}".format(idx_rel, i + 1)
                 if not isinstance(row, dict):
                     rep.cant("{}: archived record row is not a table".format(rw))
                     unread.add(tname)
+                    idx_counted = False
                     continue
                 if not deferred:
                     rv = validate_record(row, expected_type=tname, registered_vendors=registered_vendors)
                     if rv.status == CANNOT_EVALUATE:
                         rep.cant("{}: {}".format(rw, "; ".join(rv.findings)))
                         unread.add(tname)
+                        idx_counted = False
                         continue
                     if rv.status != VALID:
                         for f in rv.findings:
@@ -2057,6 +2091,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 archive_recs.append(rec)
                 if isinstance(rec.id, str) and _valid_id_shape(rec.id) is not None:
                     present_types[rec.id] = tname
+                    idx_ids.add(rec.id)
                     elig = _archived_rotatable(rec)
                     if elig is None:
                         pass     # module-tier: rotation eligibility deferred to U2M (F4), never graded here
@@ -2064,16 +2099,28 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                         rotatable.append("C-ROTATION: archived record {!r} ({}) is not in an unqualified "
                                          "terminal state and must never rotate (spec 12:972-979)".format(
                                              rec.id, tname))
+            if idx_counted:
+                # Read in full, every row's id counted toward the type's population: a moved destination
+                # naming this index is graded against the ids counted here.
+                counted_ids[_rel(bucket_rel, fn_)] = idx_ids
         # Archived worklog (release-based rotation).
         wl_map = {}
         if WORKLOG_NAME in bfiles:
+            wl_track = set()
             wl_map = _gather_worklog(root_fd, _rel(bucket, WORKLOG_NAME), registered_vendors, rep,
-                                     required=False, unread=unread)
+                                     required=False, unread=wl_track)
+            unread.update(wl_track)
             if wl_map is None:
                 # A listed bucket worklog that is unreadable, invalid or gone at read: its entries were
                 # not read.
                 unread.add("worklog")
                 wl_map = {}
+            elif not wl_track:
+                counted_wl.add(_rel(bucket_rel, WORKLOG_NAME))
+        else:
+            # A listed bucket with no worklog.toml: the location holds no entries, so a span naming it is
+            # classified over a counted (empty) ledger.
+            counted_wl.add(_rel(bucket_rel, WORKLOG_NAME))
         archive_worklogs[year] = wl_map
 
         # F5 / F12 non-worklog reconciliation, BOTH directions.
@@ -2093,38 +2140,58 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 mislabelled = True
             want_base = "{}{}".format(mtype, INDEX_SUFFIX)
             expected_dest = _rel(bucket_rel, want_base)
-            # The row's types join the graded `unconfirmed` set ONLY when the declared destination was
-            # opened at its expected path AND read in full by the scan that counts its ids, so the walk
-            # knows definitively whether the id is there (the row present, or the destination read, or
-            # absent, without it). Every branch where the declared location was not opened, was opened
-            # but its ids were not counted toward the type's population, or could not be read in full,
-            # puts the types in `unread` instead: the record may exist exactly where nothing was counted,
-            # so a graded presence scan over the ids that were read could report a false deletion.
-            if dest != expected_dest:
-                # A rotation lands in its DECLARING bucket's own type index, never in the active tree
-                # or another bucket. Exact-path equality subsumes the basename and containment checks
-                # and confines the destination to archive/<year>/ (spec 12); the wrong destination is
-                # not then opened.
+            # The row's types stay in the graded `unconfirmed` set ONLY when the declared destination is a
+            # location a scan read in full while counting its ids toward a type's population (or one the
+            # probe below confirms holds no row), so the walk knows definitively whether the id is there.
+            # Every other declared location (never opened, opened but its ids not counted, or not readable
+            # in full) puts the types in `unread` instead: the record may exist exactly where nothing was
+            # counted, so a graded presence scan over the ids that were read could report a false deletion.
+            if not _is_contained_relpath(dest):
+                # An uncontained destination, including one that compares equal to an expected path built
+                # from a declared type carrying path segments, is refused before any path is built from
+                # it: it is never opened and can never be a counted location.
+                rep.finding("C-ARCHIVE-ENUM: archive destination {!r} is not a contained store-relative "
+                            "path (spec 14.2); never opened".format(dest))
+                unread.update(row_types)
+            elif dest != expected_dest:
+                # A rotation lands in its DECLARING bucket's own type index, never in the active tree or
+                # another bucket (spec 12), so the wrong destination is a finding either way; whether the
+                # row stays graded depends on whether some scan counted that location, which can be a
+                # bucket walked later, so the row is classified after the whole walk.
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} destination {!r} is not this bucket's type index "
                             "{!r} (a rotation lands in its declaring bucket; spec 12)".format(
                                 mid, dest, expected_dest))
-                unread.update(row_types)
+                pending_moved.append((row_types, dest))
+            elif dest in counted_ids:
+                # This bucket's scan read the declared destination in full and counted its ids, so the
+                # id's presence there is known without a second read.
+                if mid not in counted_ids[dest]:
+                    rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination "
+                                "{!r} (a rotation must land where it says; spec 12:981-982)".format(
+                                    mid, dest))
+                    unconfirmed.update(row_types)
+                elif mislabelled:
+                    # The counted destination carries the id, but under a type its id's namespace does not
+                    # bind: the id's presence is known, while which of the two types the record is cannot
+                    # be told, so both typed populations stay incomplete for the current-state joins.
+                    unconfirmed.update(row_types)
             else:
                 seated = _dest_index_has_id(root_fd, machine_rel, dest, mid, rep)
                 if not seated:
                     rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination {!r} "
                                 "(a rotation must land where it says; spec 12:981-982)".format(mid, dest))
-                if seated is None or mtype not in enabled_types:
-                    # Not read in full, or opened only by the probe above while the bucket scan skipped
-                    # the index (a declared type outside the enabled roster): nothing counted the
-                    # destination's ids, so the id's presence stays unknown even where the probe saw it.
+                if mtype not in enabled_types or seated is not False:
+                    # Nothing counted this location's ids: a declared type outside the enabled roster
+                    # (whose index the bucket scan skips even when present), a destination that cannot be
+                    # read, or a probe HIT at a path the listing counted nothing at (the tree changed
+                    # under the walk, so the record the probe saw was counted nowhere). The id's presence
+                    # stays unknown.
                     unread.update(row_types)
-                elif not seated or mislabelled:
-                    # The destination was read in full (or is absent), by the scan that counts its ids:
-                    # the id's presence is known, so the presence scans stay graded, while the typed
-                    # populations are incomplete for the current-state joins (a record confirmed seated
-                    # nowhere, or one seated under a type its id's namespace does not bind, which of the
-                    # two types it is untellable).
+                else:
+                    # The probe confirmed the destination absent (or read it whole) without the row where
+                    # the scan counted nothing: the id is known to be held nowhere counted, so the
+                    # presence scans stay graded while the type's population is incomplete for the
+                    # current-state joins.
                     unconfirmed.update(row_types)
             found_type = present_types.get(mid)
             if found_type is not None and found_type != mtype:
@@ -2156,14 +2223,12 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             if a is None or b is None or a > b:
                 rep.finding("C-ARCHIVE-ENUM: worklog_moved span {} in {} is not a well-formed [WL-a, WL-b] "
                             "range (spec 8.2/12)".format(_safe_display(span), bucket))
-                # The entries it names cannot be reconciled. The moved-row principle decides the set: a
-                # span landing in this bucket's own worklog names entries only a read (or absent)
-                # location could hold, so the worklog stays graded; one landing anywhere else names
-                # entries that may be held at a destination this walk never opens.
-                if dest == expected_wl_dest:
-                    unconfirmed.add("worklog")
-                else:
-                    unread.add("worklog")
+                # The entries it names cannot be reconciled. The moved-row principle decides the set,
+                # against the counted ledgers once the whole walk is done: a span landing in a counted
+                # ledger names entries only read (or absent) locations could hold, so the worklog stays
+                # graded; one landing anywhere else names entries that may be held at a destination this
+                # walk never opens.
+                pending_wl.append(dest)
                 continue
             spans.append((a, b, dest))
         spans.sort()
@@ -2197,14 +2262,27 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                             "present in {!r}; the first missing is WL-{} (spec 12:981-982)".format(
                                 a, b, bucket, width - len(in_range), dest, first_missing))
                 # The store says those entries were rotated here, yet the bucket's worklog does not hold
-                # them. The moved-row principle decides the set: a span landing in this bucket's own
-                # worklog had its declared destination read (or absent), so the missing entries are
-                # confirmed held nowhere and the worklog stays graded; one landing anywhere else names a
-                # destination this walk never opens, where the entries may still be held.
-                if dest == expected_wl_dest:
-                    unconfirmed.add("worklog")
-                else:
-                    unread.add("worklog")
+                # them. The moved-row principle decides the set, against the counted ledgers once the
+                # whole walk is done: a span landing in a counted ledger had its declared destination read
+                # in full (or holds no entries), so an entry absent from every counted ledger is absent
+                # and the worklog stays graded; one landing anywhere else names a destination this walk
+                # never opens, where the entries may still be held.
+                pending_wl.append(dest)
+    # Classified only now, after the whole walk: a declared destination can be a location a later bucket's
+    # scan counted (or an active one the caller's collectors did). A declared location in the counted set
+    # leaves the id's (or the entries') presence known, so the presence scans stay graded while the
+    # unreconciled rotation keeps the row's populations incomplete for the current-state joins; any other
+    # declared location was counted by nothing, so the record may exist exactly where nothing was read.
+    for row_types, dest in pending_moved:
+        if dest in counted_ids:
+            unconfirmed.update(row_types)
+        else:
+            unread.update(row_types)
+    for dest in pending_wl:
+        if dest in counted_wl:
+            unconfirmed.add("worklog")
+        else:
+            unread.add("worklog")
     return archive_recs, archive_worklogs, rotatable
 
 
@@ -4749,10 +4827,22 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # worklog alone, can tell an archived worklog left unread or unconfirmed from an active ledger that was
     # not read.
     archive_unread, archive_unconfirmed = set(), set()
+    # The active locations the collectors above read in full and counted, keyed store-relative exactly as
+    # an archive.toml destination names them, so the walk can grade a moved row or span whose declared
+    # destination is an active index or the active ledger: a type's index when its population was read and
+    # confirmed whole, and the active ledger when every entry was read into its map.
+    active_counted = {}
+    for _tname in enabled_types:
+        if _tname != "worklog" and _tname not in unread:
+            active_counted["{}{}".format(_tname, INDEX_SUFFIX)] = {
+                r.id for r in active_recs if r.rtype == _tname and isinstance(r.id, str)}
+    if "worklog" not in unread:
+        active_counted[WORKLOG_NAME] = set(active_worklog)
     archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, enabled_types,
                                                                   registered_vendors, import_status, rep,
                                                                   homes=homes, unread=archive_unread,
-                                                                  unconfirmed=archive_unconfirmed)
+                                                                  unconfirmed=archive_unconfirmed,
+                                                                  active_counted=active_counted)
     # The record types with a record source (an index, a worklog, a bucket or a destination) that could not
     # be read: an id of one may be held where nothing was read. `unread` also holds the types a rotation
     # leaves unconfirmed though every source was read, so a current-state join over one is not a pass,
@@ -9923,14 +10013,14 @@ def self_test():
                           for cid in ("C-NO-DELETION", "C-HISTORY-RESURRECTION")))
         # A moved row that cannot be reconciled leaves the population of every type it could stand for
         # incomplete, for each check that joins through moved rows (red when its branch alone stops
-        # recording that population unread). A row dropped as malformed still names a record through its
-        # id's namespace or its declared type: a missing type (handoff, then pending_decision), a type
-        # that is not a string (done), a malformed id and a destination that is not a string. A row with
-        # neither a usable id nor a usable type could stand for any record, so every join is
-        # CANNOT-EVALUATE. A row whose declared type is not a roster type, or names a type its id's
-        # namespace does not bind, leaves the type its id binds incomplete even where the destination
-        # holds the id; and a mislabelled row whose destination is absent adds that type beside the
-        # declared one.
+        # recording that population unconfirmed or unread). A row dropped as malformed still names a
+        # record through its id's namespace or its declared type: a missing type (handoff, then
+        # pending_decision), a type that is not a string (done), a malformed id and a destination that is
+        # not a string. A row with neither a usable id nor a usable type could stand for any record, so
+        # every join is CANNOT-EVALUATE. A row whose declared type is not a roster type, or names a type
+        # its id's namespace does not bind, leaves the type its id binds incomplete even where the
+        # destination holds the id; and a mislabelled row whose destination is absent adds that type
+        # beside the declared one.
         def _moved_rows_run(rows, extra=None, **cnt):
             m = clean_machine()
             m["archive/2026/archive.toml"]["moved"] = rows
@@ -9990,11 +10080,18 @@ def self_test():
         # location cannot exist or cannot be read) and once genuinely held nowhere, beside counters that
         # allocate it and a prior that names it. The expected states follow _validate_archive's
         # classification principle: the absence FINDING exactly where the record is provably missing (its
-        # declared destination read in full, or absent, by the scan that counts the type's ids),
-        # CANNOT-EVALUATE where its presence cannot be known (the declared location never opened, never
-        # counted, or unreadable), and never an absence finding for a record that exists. Each gate is
-        # read through its own absence finding and its own partial-set CANNOT-EVALUATE alone, so moving
-        # any one branch between the graded and the source-unread sets turns at least one vector red.
+        # declared destination in the counted set - this bucket's own index, a sibling's or another
+        # bucket's enabled index, or an active one, each read in full by the scan that counts its ids, or
+        # confirmed absent by the probe where the listing counted nothing - and a dropped row, which
+        # names no location, wherever the type's counted locations were all read), CANNOT-EVALUATE where
+        # its presence cannot be known (the declared location never opened, never counted, or unreadable),
+        # and never an absence finding for a record that exists. Each gate is read through its own absence
+        # finding and its own partial-set CANNOT-EVALUATE alone, so moving any one branch between the
+        # graded and the source-unread sets turns at least one vector red; in particular, classifying a
+        # wrong destination by path equality instead of by the counted set turns the four
+        # wrong-destination-*-counted vectors red, classifying it during the walk instead of after turns
+        # the later-bucket vectors red, and dropping the dropped-row rule turns the two dropped-row
+        # vectors red.
         def _gate_state(res, cid, absent_needle, cant_needle):
             msgs = res.by_check.get(cid, [])
             if any(absent_needle in m for m in msgs if m in res.findings):
@@ -10022,6 +10119,7 @@ def self_test():
 
         _mv_own = "archive/2026/backlog_item.index.toml"
         _mv_held = idx([bi(1, "done")])
+        _mv_b25 = {"schema": 1, "moved": [], "worklog_moved": []}
         for _name, _row, _held, _held_exp, _miss, _miss_exp in (
                 ("destination-read",
                  {"id": "BI-1", "type": "backlog_item", "destination": _mv_own},
@@ -10040,9 +10138,37 @@ def self_test():
                   "destination": "archive/2026/old/backlog_item.index.toml"},
                  {"extra": {"archive/2026/old/backlog_item.index.toml": _mv_held}}, ("cant", "cant"),
                  {}, ("cant", "cant")),
+                ("wrong-destination-active-counted",
+                 {"id": "BI-1", "type": "backlog_item", "destination": "backlog_item.index.toml"},
+                 {"bi1_active": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("wrong-destination-sibling-counted",
+                 {"id": "BI-1", "type": "backlog_item", "destination": "archive/2026/reference.index.toml"},
+                 {"extra": {"archive/2026/reference.index.toml": idx([envelope(
+                     "BI-1", "reference", "done")])}}, ("pass", "pass"),
+                 {"extra": {"archive/2026/reference.index.toml": idx([])}}, ("finding", "finding")),
+                ("wrong-destination-other-bucket-counted",
+                 {"id": "BI-1", "type": "backlog_item",
+                  "destination": "archive/2025/backlog_item.index.toml"},
+                 {"extra": {"archive/2025/archive.toml": _mv_b25,
+                            "archive/2025/backlog_item.index.toml": _mv_held}}, ("pass", "pass"),
+                 {"extra": {"archive/2025/archive.toml": _mv_b25,
+                            "archive/2025/backlog_item.index.toml": idx([])}}, ("finding", "finding")),
+                ("wrong-destination-later-bucket-counted",
+                 {"id": "BI-1", "type": "backlog_item",
+                  "destination": "archive/2027/backlog_item.index.toml"},
+                 {"extra": {"archive/2027/archive.toml": _mv_b25,
+                            "archive/2027/backlog_item.index.toml": _mv_held}}, ("pass", "pass"),
+                 {"extra": {"archive/2027/archive.toml": _mv_b25,
+                            "archive/2027/backlog_item.index.toml": idx([])}}, ("finding", "finding")),
                 ("uncontained-destination",
                  {"id": "BI-1", "type": "backlog_item", "destination": "../escape.toml"},
                  {"working": {"escape.toml": _mv_held}}, ("cant", "cant"),
+                 {}, ("cant", "cant")),
+                ("uncontained-traversal-type",
+                 {"id": "BI-1", "type": "../../../escape",
+                  "destination": "archive/2026/../../../escape.index.toml"},
+                 {"bi1_active": True}, ("cant", "pass"),
                  {}, ("cant", "cant")),
                 ("non-roster-type",
                  {"id": "BI-1", "type": "bogus", "destination": "archive/2026/bogus.index.toml"},
@@ -10060,29 +10186,84 @@ def self_test():
                  {"extra": {"archive/2026/reference.index.toml": idx([])}}, ("finding", "finding")),
                 ("malformed-row",
                  {"id": "BI-1", "type": 7, "destination": _mv_own},
-                 {"extra": {_mv_own: _mv_held}}, ("cant", "pass"),
-                 {}, ("cant", "cant"))):
+                 {"extra": {_mv_own: _mv_held}}, ("pass", "pass"),
+                 {"extra": {_mv_own: idx([])}}, ("finding", "finding")),
+                ("dropped-row-no-destination",
+                 {"id": "BI-1", "type": "backlog_item"},
+                 {"bi1_active": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("dropped-row-unidentifiable",
+                 {"id": 7, "type": 7, "destination": 7},
+                 {"bi1_active": True}, ("pass", "pass"),
+                 {}, ("finding", "finding"))):
             check("presence-gates-moved-row-{}-held".format(_name),
                   _presence_moved(_row, **_held) == _held_exp)
             check("presence-gates-moved-row-{}-missing".format(_name),
                   _presence_moved(_row, **_miss) == _miss_exp)
-        # Unreadable at the probe alone: the destination index reads clean for the bucket scan but can no
-        # longer be read when the moved-row probe returns to it (as a removal or corruption between the
-        # two reads would present). The probe's None is a record source not read, never a graded absence,
-        # whatever the scan managed to count before.
+        # The restored containment refusal is read through its own finding: the expected path built from
+        # the traversal-carrying declared type compares equal to the declared destination, yet the
+        # destination is refused before any path is built from it, so C-ARCHIVE-ENUM is a FINDING (red
+        # when the walk builds and probes the uncontained path instead, which turns the finding into the
+        # contained reader's CANNOT-EVALUATE).
+        f = clean_machine()
+        f["archive/2026/archive.toml"]["moved"] = [
+            {"id": "BI-1", "type": "../../../escape",
+             "destination": "archive/2026/../../../escape.index.toml"}]
+        _mv_esc = run(f)
+        check("archive-enum-finding-for-uncontained-traversal-destination",
+              _mv_esc is not None and _mv_esc.checks.get("C-ARCHIVE-ENUM") == "FINDING"
+              and any("is not a contained store-relative path" in m for m in _mv_esc.findings))
+        # A wrong destination the walk counted must not spread: a row for BI-1 naming the ACTIVE index
+        # leaves an unrelated BI-2, deleted outright, a graded finding under both gates (red when the
+        # wrong-destination branch records the row's types unread instead of reading the counted set).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([bi(1, "done")])
+        f["archive/2026/archive.toml"]["moved"] = [
+            {"id": "BI-1", "type": "backlog_item", "destination": "backlog_item.index.toml"}]
+        _mv_coll = run(f)
+        check("no-deletion-and-resurrection-graded-beside-wrong-destination-counted",
+              _mv_coll is not None
+              and any("is not this bucket's type index" in m for m in _mv_coll.findings)
+              and any(m.startswith("C-NO-DELETION: 1 allocated BI-<n> id(s) above BI-1")
+                      for m in _mv_coll.findings)
+              and any(m.startswith("C-HISTORY-RESURRECTION: prior record 'BI-2' is absent")
+                      for m in _mv_coll.findings)
+              and not any(m.startswith(cid + ": the records of") for m in _mv_coll.cannot_evaluate
+                          for cid in ("C-NO-DELETION", "C-HISTORY-RESURRECTION")))
+        # One junk row leaves no namespace's presence gate unread: it names no location, so every enabled
+        # type and the worklog stay graded (red when a dropped row's types join the source-unread set),
+        # while the rotation it names is unreconciled, so the current-state joins stay CANNOT-EVALUATE.
+        f = clean_machine()
+        f["archive/2026/archive.toml"]["moved"] = [{"id": 7, "type": 7, "destination": 7}]
+        _mv_junk = run(f)
+        check("presence-gates-graded-for-every-namespace-beside-junk-row",
+              _mv_junk is not None
+              and not any(m.startswith(("C-NO-DELETION", "C-HISTORY-RESURRECTION"))
+                          for m in _mv_junk.cannot_evaluate)
+              and _mv_junk.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE")
+        # The probe runs only where the bucket's listing counted nothing at the expected path. Unreadable
+        # there, its None is a record source not read, never a graded absence; and a probe HIT there is a
+        # record the walk counted nowhere (the tree changed between the listing and the probe), so its
+        # types join the source-unread set too: a record the probe saw never takes an absence finding.
         _real_dest_probe = _dest_index_has_id
+        _mv_own_row = {"id": "BI-1", "type": "backlog_item", "destination": _mv_own}
         globals()["_dest_index_has_id"] = lambda *a, **k: None
         try:
-            _probe_gone_held = _presence_moved(
-                {"id": "BI-1", "type": "backlog_item", "destination": _mv_own}, extra={_mv_own: _mv_held})
-            _probe_gone_miss = _presence_moved(
-                {"id": "BI-1", "type": "backlog_item", "destination": _mv_own}, extra={_mv_own: idx([])})
+            _probe_gone_held = _presence_moved(_mv_own_row, bi1_active=True)
+            _probe_gone_miss = _presence_moved(_mv_own_row)
         finally:
             globals()["_dest_index_has_id"] = _real_dest_probe
         check("presence-gates-moved-row-unreadable-at-probe-held", _probe_gone_held == ("cant", "pass"))
         check("presence-gates-moved-row-unreadable-at-probe-missing", _probe_gone_miss == ("cant", "cant"))
+        globals()["_dest_index_has_id"] = lambda *a, **k: True
+        try:
+            _probe_hit_uncounted = _presence_moved(_mv_own_row)
+        finally:
+            globals()["_dest_index_has_id"] = _real_dest_probe
+        check("presence-gates-moved-row-probe-hit-uncounted-cannot-evaluate",
+              _probe_hit_uncounted == ("cant", "cant"))
 
-        def _presence_worklog(wl_rows, wl2_in_bucket, extra=None):
+        def _presence_worklog(wl_rows, wl2_in_bucket=False, extra=None):
             f = clean_machine()
             f["archive/2026/archive.toml"]["worklog_moved"] = wl_rows
             f["archive/2026/worklog.toml"] = {"schema": 1,
@@ -10092,21 +10273,57 @@ def self_test():
             o["prior"]["records"]["WL-2"] = ("worklog", "added")
             return _presence_states(run(f, obs=o), "WL-2", "worklog", wl=True)
 
+        # A span (well-formed, or malformed down to a reversed range) stays graded exactly when its
+        # declared destination is a counted ledger: this bucket's own, another read bucket's, or the
+        # active one, so an entry absent from every counted ledger is a graded absence while one held in
+        # any of them never takes a finding (red when the span classification reads the declaring
+        # bucket's own path instead of the counted set).
         _wl_own_dest = "archive/2026/worklog.toml"
-        for _name, _rows, _held_exp, _miss_exp in (
+        _wl_b25 = {"schema": 1, "moved": [], "worklog_moved": []}
+        _wl_b25_held = {"archive/2025/archive.toml": _wl_b25,
+                        "archive/2025/worklog.toml": {"schema": 1, "entry": [wl(2)]}}
+        _wl_b25_empty = {"archive/2025/archive.toml": _wl_b25,
+                         "archive/2025/worklog.toml": {"schema": 1, "entry": []}}
+        for _name, _rows, _held, _held_exp, _miss, _miss_exp in (
                 ("malformed-span",
                  [{"span": ["WL-1", "WL-x"], "destination": _wl_own_dest}],
-                 ("pass", "pass"), ("finding", "finding")),
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
                 ("span-entry-absent",
                  [{"span": ["WL-1", "WL-2"], "destination": _wl_own_dest}],
-                 ("pass", "pass"), ("finding", "finding"))):
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("span-into-other-bucket-ledger",
+                 [{"span": ["WL-1", "WL-2"], "destination": "archive/2025/worklog.toml"}],
+                 {"extra": _wl_b25_held}, ("pass", "pass"),
+                 {"extra": _wl_b25_empty}, ("finding", "finding")),
+                ("span-into-later-bucket-ledger",
+                 [{"span": ["WL-1", "WL-2"], "destination": "archive/2027/worklog.toml"}],
+                 {"extra": {"archive/2027/archive.toml": _wl_b25,
+                            "archive/2027/worklog.toml": {"schema": 1, "entry": [wl(2)]}}}, ("pass", "pass"),
+                 {"extra": {"archive/2027/archive.toml": _wl_b25,
+                            "archive/2027/worklog.toml": {"schema": 1, "entry": []}}},
+                 ("finding", "finding")),
+                ("reversed-span-other-bucket-ledger",
+                 [{"span": ["WL-2", "WL-1"], "destination": "archive/2025/worklog.toml"}],
+                 {"extra": _wl_b25_held}, ("pass", "pass"),
+                 {"extra": _wl_b25_empty}, ("finding", "finding")),
+                ("span-into-active-ledger",
+                 [{"span": ["WL-1", "WL-2"], "destination": "worklog.toml"}],
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("reversed-span-active-ledger",
+                 [{"span": ["WL-2", "WL-1"], "destination": "worklog.toml"}],
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding"))):
             check("presence-gates-worklog-{}-held".format(_name),
-                  _presence_worklog(_rows, True) == _held_exp)
+                  _presence_worklog(_rows, **_held) == _held_exp)
             check("presence-gates-worklog-{}-missing".format(_name),
-                  _presence_worklog(_rows, False) == _miss_exp)
-        # ... and a span whose declared destination is not the bucket's own worklog names entries that
-        # may be held at a file this walk never opens: held there or held nowhere, the presence gates
-        # are CANNOT-EVALUATE, never a false absence finding over the entries that were read.
+                  _presence_worklog(_rows, **_miss) == _miss_exp)
+        # ... and a span whose declared destination no scan counted (a file under a bucket subdirectory
+        # is never opened) names entries that may be held at a file this walk never reads: held there or
+        # held nowhere, the presence gates are CANNOT-EVALUATE, never a false absence finding over the
+        # entries that were read.
         _wl_stray_doc = {"schema": 1, "entry": [wl(2)]}
         for _name, _rows in (
                 ("wrong-destination-span",
