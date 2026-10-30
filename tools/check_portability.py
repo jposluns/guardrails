@@ -267,7 +267,7 @@ TEXT_SUFFIXES = {".md", ".mdc", ".py", ".sh", ".yml", ".yaml", ".toml", ".json",
 # Shipped text files whose NAME is fixed by an outside convention and so carries no text suffix: git runs a
 # hook only under its exact name, so the enforcement pack's pre-commit hook is named pre-commit. Each is an
 # exact path, scanned as text like any TEXT_SUFFIXES file.
-TEXT_PATHS = frozenset(("opf/enforcement/precommit/pre-commit",))
+TEXT_PATHS = frozenset(("opf/enforcement/precommit/pre-commit", ".aiqt/core/hooks/githooks/commit-msg"))
 
 
 # --- pure logic (always run in --self-test) ---------------------------------------------------------
