@@ -246,7 +246,7 @@ PYSOURCE_ISOLATION_REL = ("tools/_qa_adapter.py", "tools/audit_reference.py", "t
 # form for the sources above is sys.path.append, which preserves stdlib precedence.
 SYS_PATH_FRONT_INSERT_RE = re.compile(r"sys\.path\.insert\(\s*0\b")
 
-PY_WORD_RE = re.compile(r"^python(3(\.\d+)?)?$", re.ASCII)     # a whole token that is a python interpreter name
+PY_WORD_RE = re.compile(r"^python(3(\.\d+)?)?$")     # a whole token that is a python interpreter name
 PY_TOKEN_RE = re.compile(r"\bpython3?\b")            # a python word anywhere in a line (a fast pre-filter)
 QUOTE_OR_ESCAPE_RE = re.compile(r"""['"\\]""")       # a quote or backslash that could obfuscate a launcher name
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # a shell VAR=val inline assignment
@@ -1850,12 +1850,17 @@ def self_test_main():
             failures.append("mechanism: -I should have used the real json (got rc={}, out={!r})"
                             .format(iso.returncode, iso.stdout))
 
-        # A python interpreter name is ASCII: a version written in Arabic-Indic or fullwidth digits
-        # names no interpreter.
+        # A version written in Arabic-Indic or fullwidth digits is still read as a python word: for a
+        # launch detector the wider match is the safe side, so such a launcher is judged, never out of
+        # scope.
         for word, want in (("python3.12", True), ("/usr/bin/python3", True),
-                           ("python3.١٢", False), ("python3.１２", False)):
+                           ("python3.١٢", True), ("python3.１２", True), ("python3.x", False)):
             if _is_py_word(word) != want:
                 failures.append("the token {} expected python word {}".format(ascii(word), want))
+        for argv, want in ((["python3.١٢", "x.py"], False), (["python3.１２", "-I", "x.py"], True)):
+            if check_argv(argv) is not want:
+                failures.append("check_argv({}) expected {}, got {}".format(
+                    ascii(argv), want, check_argv(argv)))
 
         # 2. A fully-isolated tree passes.
         if run_quiet(_build(tmp / "iso")) != 0:

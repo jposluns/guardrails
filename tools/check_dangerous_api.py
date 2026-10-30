@@ -65,15 +65,23 @@ never importing or running the file, and reports:
   regex        a str regular expression whose pattern holds \\d or \\w (without re.ASCII they match
                every Unicode digit and word character, so an id validator admits Arabic-Indic or
                fullwidth digits) and is anchored (starts with ^ or \\A and ends with $ or \\Z, after
-               any leading inline flag group, and past whitespace at either end when verbose) or is
-               matched from its start (re.match, re.fullmatch, or the match or fullmatch method of
-               an re.compile call or of a name bound to one), with neither re.ASCII nor re.A in its
-               flags (a | of flags, or a name every binding of which is one) nor an inline (?a). An
-               anchored pattern is reported where it is compiled or called; an unanchored compiled
-               one, at each match or fullmatch. Patterns resolve as literals do: a string literal, a
-               + of resolved parts, or a name every binding of which, in every scope Python may read
-               it from, is an assignment of one. Unanchored patterns used with search, findall,
-               finditer, sub, subn or split are out of scope.
+               any leading inline flag group, inside any group that holds the whole pattern ((...),
+               (?:...) or (?P<name>...)), and, when verbose, past whitespace and # comments outside
+               a character class) or is matched from its start (re.match, re.fullmatch, or the
+               match or fullmatch method of a compiled pattern) or starts with ^ or \\A and is
+               searched (re.search, or the search method of a compiled pattern), with neither
+               re.ASCII nor re.A in its flags (a | of flags, or a name every binding of which is
+               one) nor an inline (?a). A compiled pattern is an re.compile call, the value of a
+               walrus, either branch of a conditional expression, or a name every binding of which
+               is one of these or a copy of another such name; its method is judged where it is
+               called, where it is referenced uncalled (a bound method held for later, alone or in
+               functools.partial), and as re.Pattern.match, fullmatch or search given the pattern
+               as its first argument. An anchored pattern is reported where it is compiled or
+               called; an unanchored compiled one, at each use. Patterns resolve as literals do: a
+               string literal, a + of resolved parts, a conditional expression whose branches both
+               resolve, or a name every binding of which, in every scope Python may read it from,
+               is an assignment of one. Patterns not anchored at their start used with search, and
+               any pattern used with findall, finditer, sub, subn or split, are out of scope.
 
 A method judged by its name alone (starttls, stls, subprocess_shell, exec_module, load_module)
 is called as x.name(...) or getattr(x, "name")(...) with a literal name; x.name or that getattr
@@ -174,12 +182,18 @@ import, a call, an f-string, % or format, a name read again while it is being re
 than 64 candidate texts) is not judged, and so is a pattern held in data (the standards
 manifests' id-patterns, which tools/_standards.py compiles with re.ASCII by hand, are the one
 data-built family fixed; any other is not seen); a compiled pattern reached through an
-attribute (self.PAT.match, mod.PAT.fullmatch), a parameter or a container, or a pattern passed
-to a non-re matcher; flags held in anything but a | of flags or a name bound only to one are
-read as not ASCII; unanchored \\d and \\w detectors (search, findall, finditer, sub, subn,
-split); \\D, \\W, \\s, \\S and \\b, which change meaning with re.ASCII too, are not judged, so the
-\\b detector false negatives in tools/check_secrets.py and tools/check_leaks.py are not
-addressed here; and the regex module and bytes patterns (where \\d and \\w are ASCII already).
+attribute (self.PAT.match, mod.PAT.fullmatch), an import, a parameter, a call or a container,
+or a pattern passed to a non-re matcher; an re function itself held for later (f = re.fullmatch,
+functools.partial(re.fullmatch, pattern), re.Pattern.fullmatch referenced uncalled) and a
+method named through getattr but not called (getattr(PAT, "fullmatch")); flags held in
+anything but a | of flags or a name bound only to one are read as not ASCII, and a scoped
+(?a:...) group is read as not ASCII; \\d and \\w detectors with no start anchor used with
+search, and any used with findall, finditer, sub, subn or split; a top-level alternation is
+read by its first and last tokens only (^a|b$ reads as anchored, a|^\\d+$ does not); \\D, \\W,
+\\s, \\S and \\b, which change meaning with re.ASCII too, are not judged, so the \\b detector
+false negatives in tools/check_secrets.py and tools/check_leaks.py are not addressed here (a
+site given re.ASCII for its \\d or \\w also narrows its \\s, which then misses U+001C to
+U+001F); and the regex module and bytes patterns (where \\d and \\w are ASCII already).
 """
 import sys
 
@@ -287,9 +301,11 @@ METHOD_SINKS = {"starttls": ("tls", "tls-context"), "stls": ("tls", "tls-context
 # a validator that matches a whole identifier admits Arabic-Indic or fullwidth digits.
 REGEX_FUNCS = {"re.compile": 1, "re.match": 2, "re.fullmatch": 2, "re.search": 2,
                "re.findall": 2, "re.finditer": 2, "re.sub": 4, "re.subn": 4, "re.split": 3}
-# The functions, and the methods of a compiled pattern, that match from the start of the text.
+# The functions that match from the start of the text, and the methods of a compiled pattern
+# judged at their use (match and fullmatch match from the start; search, of a pattern anchored
+# at its start, does too).
 REGEX_WHOLE = frozenset({"re.match", "re.fullmatch"})
-REGEX_METHODS = frozenset({"match", "fullmatch"})
+REGEX_METHODS = frozenset({"match", "fullmatch", "search"})
 REGEX_ASCII = frozenset({"re.ASCII", "re.A", "re.RegexFlag.ASCII", "re.RegexFlag.A"})
 REGEX_VERBOSE = frozenset({"re.VERBOSE", "re.X", "re.RegexFlag.VERBOSE", "re.RegexFlag.X"})
 # Bounds on resolving a pattern: name hops, and the texts a pattern may hold (each binding of
@@ -364,6 +380,8 @@ _AI_WORD = (_WORD + " (_WORD_CHAR_RE tests the character before a value as AI_ID
             " Unicode \\b does, so the bounded scan finds what the plain scan finds)")
 _GIT_WORD = (_WORD + " (_GIT_WORD_RE reads git as a word with the same Unicode \\w test as its"
              " search twin _CMTIDN_GIT_WORD_RE; a letter of any script beside it makes another word)")
+_LIST_DIGIT = ("Unicode on purpose: the list-marker \\d is read as a renderer that takes a non-ASCII"
+               " digit for a list number reads it, and the wider read is the fail-closed side")
 ALLOWLIST = (
     ("tools/check_footer.py", "_close_vectors", "code", 1,
      _MUTANT + " (the _read_regular_page close revert)"),
@@ -651,9 +669,16 @@ ALLOWLIST = (
     ("tools/check_brief_capability.py", "rule_r1", "regex", 1,
      _WORD + " (a word character after the verb, or after a dot or slash, keeps it one word or a"
      " dotted name rather than an imperative)"),
-    ("tools/check_brief_capability.py", "rule_s1", "regex", 1,
-     _WORD + " (a directory name or assignment name of any script before a command word is read"
-     " as part of the shell line)"),
+    ("tools/check_brief_capability.py", "rule_s1", "regex", 2,
+     "Unicode on purpose: rule_s1 decides whether a fence is executable, and an executable fence"
+     " is a finding, so the wider read is the fail-closed side: RUN_PROMPT_RE reads an In [n]:"
+     " prompt numbered in any script's digits, and SHELL_FIRST_LINE_RE reads an assignment name"
+     " or directory segment continued in any script, and a python3.N version in any script's"
+     " digits, as a shell line"),
+    ("tools/check_brief_capability.py", "option_commands", "regex", 1,
+     _WORD + " (GIT_SUBCOMMAND_RE ends a git subcommand only where no letter of any script"
+     " continues it, and PYTHON_TARGET_RE reads a .py path whose segments may be named in any"
+     " script)"),
     ("tools/check_brief_capability.py", "sentence_asks", "regex", 1,
      _WORD + " (a letter after test or fix continues that word)"),
     ("tools/check_brief_capability.py", "unplaced", "regex", 1,
@@ -668,13 +693,31 @@ ALLOWLIST = (
      _WORD + " (a letter after workdir or directory continues that word)"),
     ("tools/check_cited_standards.py", "parse_designator", "regex", 1,
      "Unicode on purpose: parse_designator reads one token with the same _PATTERN designators()"
-     " scans prose with, whose \\d and \\w match any script so a designator written with non-ASCII"
-     " digits or glued to a letter of any script is still found; the token is read as the scan"
-     " prints it"),
+     " scans prose with, so a token is read as a finding prints it; the pattern's \\d groups"
+     " match any script's digits and _num reads them with int(), so a designator written in"
+     " Arabic-Indic or fullwidth digits names the same identity as its ASCII spelling, and its"
+     " letter tests ([^\\W_] and [^\\W\\d_]; the pattern holds no \\w) are Unicode through \\W,"
+     " so a letter of any script glued to a designator makes it a token"),
     ("tools/check_clauses.py", "rule_units", "regex", 1,
      "Unicode on purpose: _UNCLASSIFIABLE_FIRST_LINE_RE refuses a paragraph whose first line opens"
      " with a list marker numbered in any script's digits, which a renderer may read as a list; its"
      " self-test pins the Arabic-Indic and Devanagari forms"),
+    ("tools/check_instruction_budget.py", "comment_spans", "regex", 1,
+     _LIST_DIGIT + " (UNPLACED_RE: a line under such a marker stops the comment scan, so more"
+     " comments are counted)"),
+    ("tools/check_overclaim.py", "<module>", "regex", 1,
+     _WORD + " (NEG_AUX_TAIL reads the words between a negator and the guarantee it denies; a"
+     " no-break space separates them and an accented adjective such as naive or cafe-grade is"
+     " one word, so re.ASCII there flagged honest denials)"),
+    ("tools/check_python_launcher_isolation.py", "<module>", "regex", 1,
+     "Unicode on purpose: PY_WORD_RE decides whether a token is a python launcher, and for a"
+     " launch detector the wider match is the safe side: python3. followed by non-ASCII digits"
+     " is judged as a launcher, never left out of scope"),
+    ("tools/check_reference_facts.py", "_refuse_unbounded", "regex", 1,
+     _LIST_DIGIT + " (LIST_HTML: a list item opening with '<' under such a marker is refused)"),
+    ("tools/check_reference_facts.py", "_require_section_grammar", "regex", 4,
+     _LIST_DIGIT + " (FLAT_LIST_ITEM and LIST_MARKER_LEAD: such a marker is read as a list item, so"
+     " a nested marker or an opening '<' after it is refused rather than read as paragraph text)"),
     ("tools/check_verifier_delivery.py", "_marker_scan", "regex", 1,
      "Unicode on purpose: MARKER_RE detects disguised answer markers, and a marker written with"
      " non-ASCII digits is one of the forms it must find and refuse"),
@@ -988,28 +1031,69 @@ def _first(*nodes):
 _INLINE_FLAGS = re.compile(r"\(\?([aiLmsux]+)\)", re.ASCII)
 
 
+# The whitespace a verbose pattern skips outside a character class (re reads only these).
+_VERBOSE_SPACE = frozenset(" \t\n\r\v\f")
+
+
+def _group_end(tokens):
+    """The index of the token that closes the group tokens[0] opens, or None."""
+    depth = 0
+    for index, token in enumerate(tokens):
+        depth += (token == "(") - (token == ")")
+        if depth == 0:
+            return index
+    return None
+
+
 def _regex_shape(text, verbose):
-    """(classes, anchored, ascii) of a str pattern: whether it holds \\d or \\w (a backslash
-    escaped by another is a literal backslash, so \\\\d is not one), whether it starts with ^ or
-    \\A and ends with $ or \\Z once any leading inline flag group is passed (and, verbose, any
-    whitespace at either end), and whether that group sets a (ASCII)."""
+    """(classes, anchored, start, ascii) of a str pattern: whether it holds \\d or \\w (a
+    backslash escaped by another is a literal backslash, so \\\\d is not one), whether it starts
+    with ^ or \\A and ends with $ or \\Z, whether it starts with ^ or \\A at all, and whether a
+    leading inline flag group sets a (ASCII). The ends are read once any leading inline flag
+    group is passed, verbose (the flag or an inline x) skipping whitespace and a # comment to the
+    end of its line outside a character class, and inside any group that holds the whole
+    pattern ((...), (?:...) or (?P<name>...)), whose anchors anchor the whole match."""
     pos, flags = 0, ""
     while (m := _INLINE_FLAGS.match(text, pos)):
         flags += m.group(1)
         pos = m.end()
-    tokens = []
+    verbose = verbose or "x" in flags
+    tokens, classes = [], False
     while pos < len(text):
-        step = 2 if text[pos] == "\\" else 1
-        tokens.append(text[pos:pos + step])
-        pos += step
-    if verbose or "x" in flags:
-        while tokens and tokens[0].isspace():
-            tokens.pop(0)
-        while tokens and tokens[-1].isspace():
-            tokens.pop()
-    classes = any(t in ("\\d", "\\w") for t in tokens)
-    anchored = len(tokens) > 1 and tokens[0] in ("^", "\\A") and tokens[-1] in ("$", "\\Z")
-    return classes, anchored, "a" in flags
+        char = text[pos]
+        if char == "\\":
+            classes = classes or text[pos:pos + 2] in ("\\d", "\\w")
+            tokens.append(text[pos:pos + 2])
+            pos += 2
+        elif verbose and char in _VERBOSE_SPACE:
+            pos += 1
+        elif verbose and char == "#":
+            end = text.find("\n", pos)
+            pos = len(text) if end == -1 else end
+        elif char == "[":
+            # A character class is one token; a ] first in it (after any ^) is a literal.
+            end = pos + 1 + (text[pos + 1:pos + 2] == "^")
+            end += text[end:end + 1] == "]"
+            while end < len(text) and text[end] != "]":
+                classes = classes or text[end:end + 2] in ("\\d", "\\w")
+                end += 2 if text[end] == "\\" else 1
+            tokens.append(text[pos:end + 1])
+            pos = end + 1
+        else:
+            tokens.append(char)
+            pos += 1
+    while len(tokens) > 2 and tokens[0] == "(" and _group_end(tokens) == len(tokens) - 1:
+        head = 1
+        if tokens[1] == "?" and tokens[2] == ":":
+            head = 3
+        elif tokens[1:4] == ["?", "P", "<"] and ">" in tokens[4:]:
+            head = tokens.index(">", 4) + 1
+        elif tokens[1] == "?":
+            break
+        tokens = tokens[head:-1]
+    start = bool(tokens) and tokens[0] in ("^", "\\A")
+    anchored = len(tokens) > 1 and start and tokens[-1] in ("$", "\\Z")
+    return classes, anchored, start, "a" in flags
 
 
 class _Scanner(ast.NodeVisitor):
@@ -1118,11 +1202,11 @@ class _Scanner(ast.NodeVisitor):
 
     def _regex_texts(self, node, seen=frozenset()):
         """Every text a pattern may hold, resolved as literals are: a string literal, a + of
-        resolved parts, or a name every binding of which, in every scope Python may read it
-        from, is an assignment of one (each judged where it is evaluated). None when any part is
-        unresolved (a parameter, an import, a call, an f-string, a name read again while it is
-        being resolved), so the pattern is not judged. A bytes pattern yields no text: there \\d
-        and \\w match ASCII only."""
+        resolved parts, a conditional expression whose branches both resolve, or a name every
+        binding of which, in every scope Python may read it from, is an assignment of one (each
+        judged where it is evaluated). None when any part is unresolved (a parameter, an import,
+        a call, an f-string, a name read again while it is being resolved), so the pattern is not
+        judged. A bytes pattern yields no text: there \\d and \\w match ASCII only."""
         if isinstance(node, ast.Constant):
             if isinstance(node.value, bytes):
                 return set()
@@ -1133,6 +1217,12 @@ class _Scanner(ast.NodeVisitor):
             if right is None or len(left) * len(right) > _REGEX_TEXTS:
                 return None
             return {a + b for a in left for b in right}
+        if isinstance(node, ast.IfExp):
+            body = self._regex_texts(node.body, seen)
+            orelse = None if body is None else self._regex_texts(node.orelse, seen)
+            if orelse is None or len(body | orelse) > _REGEX_TEXTS:
+                return None
+            return body | orelse
         if not isinstance(node, ast.Name) or len(seen) >= _REGEX_DEPTH:
             return None
         key = (id(self.scope), node.id)
@@ -1166,10 +1256,11 @@ class _Scanner(ast.NodeVisitor):
                 source[1], lambda v: self._regex_flag(v, allowed, seen | {key}), source[0])
             for source in sources)
 
-    def _regex_finding(self, call, func, whole):
+    def _regex_finding(self, call, func, whole, search=False):
         """The detail of an re call (func its dotted name) whose resolved str pattern holds \\d
-        or \\w and is anchored, or is matched from its start (whole), with neither re.ASCII (or
-        re.A) in its flags nor an inline (?a); None otherwise, or when the pattern is unresolved."""
+        or \\w and is anchored, or is matched from its start (whole), or is searched (search) and
+        starts with ^ or \\A, with neither re.ASCII (or re.A) in its flags nor an inline (?a);
+        None otherwise, or when the pattern is unresolved."""
         pairs = _effective_keywords(call, self.candidates("dict") == {"dict"})
         pattern = _first(_positional(call, 0), _kw(pairs, "pattern"))
         texts = None if pattern is None else self._regex_texts(pattern)
@@ -1180,23 +1271,51 @@ class _Scanner(ast.NodeVisitor):
             return None
         verbose = self._regex_flag(flags, REGEX_VERBOSE)
         for text in sorted(texts):
-            classes, anchored, inline = _regex_shape(text, verbose)
-            if classes and not inline and (anchored or whole):
-                return ("a pattern with \\d or \\w " + ("anchored" if anchored else "matched whole")
+            classes, anchored, start, inline = _regex_shape(text, verbose)
+            if classes and not inline and (anchored or whole or (search and start)):
+                how = "anchored" if anchored else "matched whole" if whole else \
+                    "anchored at its start and searched"
+                return ("a pattern with \\d or \\w " + how
                         + " without re.ASCII (it admits non-ASCII digits and word characters)")
         return None
 
-    def _compiled(self, receiver):
-        """Every re.compile call the receiver of a match or fullmatch may be: the call itself,
-        or an assignment of one to a name it may hold, each with the scope that evaluates it."""
+    def _compiled(self, receiver, seen=frozenset()):
+        """Every re.compile call the receiver of a match, fullmatch or search may be, each with
+        the scope that evaluates it: the call itself, the value of a walrus, both branches of a
+        conditional expression, or what a name may hold (an assignment of any of these, a copy
+        of another name included)."""
+        if isinstance(receiver, ast.NamedExpr):
+            return self._compiled(receiver.value, seen)
+        if isinstance(receiver, ast.IfExp):
+            return self._compiled(receiver.body, seen) + self._compiled(receiver.orelse, seen)
         if isinstance(receiver, ast.Call):
-            candidates = [(receiver, self.scope)]
-        elif isinstance(receiver, ast.Name):
-            candidates = [source for source in self._sources(receiver.id) if source is not None]
-        else:
+            return [(receiver, self.scope)] if "re.compile" in self.resolve(receiver.func) else []
+        if not isinstance(receiver, ast.Name) or len(seen) >= _REGEX_DEPTH:
             return []
-        return [(value, scope) for value, scope in candidates if isinstance(value, ast.Call)
-                and "re.compile" in self._judged_in(scope, self.resolve, value.func)]
+        key = (id(self.scope), receiver.id)
+        if key in seen:
+            return []
+        out = []
+        for source in self._sources(receiver.id):
+            if source is not None:
+                out += self._judged_in(source[1], lambda v: self._compiled(v, seen | {key}),
+                                       source[0])
+        return out
+
+    def _regex_method(self, node, method, receiver):
+        """A match, fullmatch or search of a compiled pattern, called or referenced (a bound
+        method held for later is matched as it would be called): one anchored is reported where
+        it is compiled, so it is not reported again at each use."""
+        search = method == "search"
+        for compiled, scope in self._compiled(receiver):
+            if self._judged_in(scope, lambda c: self._regex_finding(c, "re.compile", False),
+                               compiled) is None:
+                detail = self._judged_in(
+                    scope, lambda c: self._regex_finding(c, "re.compile", not search, search),
+                    compiled)
+                if detail is not None:
+                    self.add(node, "regex", "regex-ascii", "." + method + " of " + detail)
+                    break
 
     def _judged_in(self, scope, judge, node):
         saved, self.scope = self.scope, scope
@@ -1326,22 +1445,16 @@ class _Scanner(ast.NodeVisitor):
                 self.add(node, "shell", "shell-always",
                          "subprocess_shell over a non-literal command")
         if method in REGEX_METHODS and self.on("regex-ascii"):
-            # A compiled pattern matched from its start; one anchored is reported where it is
-            # compiled, so it is not reported again at each use.
-            for compiled, scope in self._compiled(receiver):
-                if self._judged_in(scope, lambda c: self._regex_finding(c, "re.compile", False),
-                                   compiled) is None:
-                    detail = self._judged_in(
-                        scope, lambda c: self._regex_finding(c, "re.compile", True), compiled)
-                    if detail is not None:
-                        self.add(node, "regex", "regex-ascii", "." + method + " of " + detail)
-                        break
+            # re.Pattern.fullmatch(pattern, text) takes the compiled pattern as its first argument.
+            if "re.Pattern" in self.resolve(receiver):
+                receiver = _positional(node, 0)
+            self._regex_method(node, method, receiver)
         self._judge_keywords(node, pairs)
         self.generic_visit(node)
 
     def _judge_call(self, node, name, pairs):
         if name in REGEX_FUNCS and self.on("regex-ascii"):
-            detail = self._regex_finding(node, name, name in REGEX_WHOLE)
+            detail = self._regex_finding(node, name, name in REGEX_WHOLE, name == "re.search")
             if detail is not None:
                 self.add(node, "regex", "regex-ascii", name + " of " + detail)
         if name in YAML_LOAD and self.on("dsz-yaml"):
@@ -1499,6 +1612,8 @@ class _Scanner(ast.NodeVisitor):
             self._escape(node, names)
             if id(node) not in self.called:
                 self._method_alias(node, node.attr)
+                if node.attr in REGEX_METHODS and self.on("regex-ascii"):
+                    self._regex_method(node, node.attr, node.value)
         self._store(node, node.attr, True)
         self.generic_visit(node)
 
@@ -2071,6 +2186,31 @@ POSITIVE_VECTORS = (
     ("import re\nDIGITS = r'\\d+'\nre.compile('^' + DIGITS + '$')\n", ("regex-ascii",)),
     ("import re\nre.compile(r'''\n    ^ \\d+ $\n''', re.X)\n", ("regex-ascii",)),
     ("from re import compile as c\nc(r'^\\d+$')\n", ("alias", "regex-ascii")),
+    # A verbose pattern whose anchored line ends in a comment, by the flag or an inline (?x).
+    ("import re\nre.compile(r'''\n    ^ \\d+ $  # digits only\n''', re.X)\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'(?x) ^ \\w+ $  # a word')\n", ("regex-ascii",)),
+    # Anchors inside a group that holds the whole pattern, used with search.
+    ("import re\nok = re.search(r'(^\\d+$)', text)\n", ("regex-ascii",)),
+    ("import re\nok = re.search(r'(?:^\\d+$)', text)\n", ("regex-ascii",)),
+    ("import re\nok = re.search(r'(?P<n>\\A\\w+\\Z)', text)\n", ("regex-ascii",)),
+    # A start-only anchor with search, called or on a compiled pattern.
+    ("import re\nok = re.search(r'^\\d+', text)\n", ("regex-ascii",)),
+    ("import re\nPAT = re.compile(r'\\A\\w+')\ndef f(text):\n    return PAT.search(text)\n",
+     ("regex-ascii",)),
+    # A compiled pattern copied to another name, and a walrus receiver.
+    ("import re\nPAT = re.compile(r'\\d+')\nCOPY = PAT\nCOPY.fullmatch(text)\n", ("regex-ascii",)),
+    ("import re\nok = (p := re.compile(r'\\d+')).fullmatch(text)\n", ("regex-ascii",)),
+    # A bound method held for later, alone or under functools.partial.
+    ("import re\nm = re.compile(r'\\d+').fullmatch\nok = m(text)\n", ("regex-ascii",)),
+    ("import functools, re\nPAT = re.compile(r'\\w+')\ncheck = functools.partial(PAT.match)\n",
+     ("regex-ascii",)),
+    # The compiled pattern given to re.Pattern's method as its first argument.
+    ("import re\nPAT = re.compile(r'\\d+')\nok = re.Pattern.fullmatch(PAT, text)\n",
+     ("regex-ascii",)),
+    # A pattern, or a compiled receiver, chosen by a conditional expression.
+    ("import re\nok = re.fullmatch(r'[0-9]+' if strict else r'\\d+', text)\n", ("regex-ascii",)),
+    ("import re\nA = re.compile(r'[0-9]+')\nB = re.compile(r'\\w+')\n"
+     "ok = (A if strict else B).match(text)\n", ("regex-ascii",)),
 )
 
 # Negative vectors: the safe spellings each check must leave alone.
@@ -2165,6 +2305,21 @@ NEGATIVE_VECTORS = (
     "import re\nre.fullmatch(rb'\\d+', data)\nre.compile(r'^\\\\d$')\nre.match(r'^[a-z]+$', text)\n"
     "def f(pattern, text):\n    return re.fullmatch(pattern, text)\n"
     "re.fullmatch(f'{prefix}\\\\d+', text)\n",
+    # The widened forms in their clean spellings: a verbose comment with re.A, a # that is a
+    # literal outside verbose or inside a class, a search anchored only at its end or not at all,
+    # a start anchor under findall or sub, a group that is a lookahead or does not hold the whole
+    # pattern, and copies, walruses, bound methods and conditionals of ASCII or unanchored
+    # patterns.
+    "import re\nre.compile(r'''\n    ^ \\d+ $  # digits\n''', re.X | re.A)\n"
+    "re.compile(r'^\\d+$ # not a comment')\nre.compile(r'(?x) ^ [#] \\d+')\n"
+    "re.search(r'\\d+$', text)\nre.search(r'\\w+', text)\nre.search(r'^[0-9]+', text)\n"
+    "re.findall(r'^\\d+', text)\nre.sub(r'^\\w+', '', text)\nre.search(r'(?=^\\d+$)x', text)\n"
+    "re.search(r'(^\\d+)|x$', text)\n",
+    "import functools, re\nPAT = re.compile(r'^\\d+', re.ASCII)\nCOPY = PAT\nCOPY.search(text)\n"
+    "(p := re.compile(r'\\d+', re.A)).fullmatch(text)\nm = re.compile(r'\\d+').search\n"
+    "re.Pattern.search(re.compile(r'\\w+'), text)\nfunctools.partial(re.compile(r'\\d+').findall)\n"
+    "re.fullmatch(r'[0-9]+' if strict else r'[a-z]+', text)\n"
+    "(re.compile(r'\\d+') if strict else re.compile(r'\\w+')).search(text)\n",
 )
 
 

@@ -1176,10 +1176,10 @@ SHELL_TAGS = frozenset(("bash", "sh", "shell", "console", "zsh", "fish", "ksh", 
                         "batch"))
 EXEC_FENCE_TAGS = SHELL_TAGS | frozenset(("pycon", "python-console", "python-repl", "ipython", "repl"))
 PYTHON_TAGS = frozenset(("python", "python3", "py", "py3"))
-RUN_PROMPT_RE = re.compile(r"\s*(?:>>>|\$|In\s*\[[0-9]*\]:)(?:\s|\Z)")
+RUN_PROMPT_RE = re.compile(r"\s*(?:>>>|\$|In\s*\[\d*\]:)(?:\s|\Z)")
 PLAIN_TAGS = frozenset(("", "text", "txt", "plain", "plaintext", "none", "code"))
 SHELL_FIRST_LINE_RE = re.compile(r"\s*(?:\$\s|(?:sudo\s+)?(?:[A-Za-z_]\w*=\S*\s+)*+(?:(?:[\w.~-]*/)*+(?:git|"
-                                 r"python(?:3(?:\.[0-9]+)?)?|pytest|cd|bash|sh|zsh|npm|npx|pip3?|uv|cargo|tox|nox|"
+                                 r"python(?:3(?:\.\d+)?)?|pytest|cd|bash|sh|zsh|npm|npx|pip3?|uv|cargo|tox|nox|"
                                  r"docker|curl|wget|chmod|mkdir|rm|ls|grep|make|go)(?=\s|\Z)|(?:\./|tools/)\S))")
 REFERENCE_INTRO_RE = re.compile(r"\b(?:(?:do\s+not|don['’]t|never)\s+(?:run|execute)\s+(?:this|it|these|them|"
                                 r"the\s+following|(?:the\s+)?(?:block|fence|commands?|snippet)\s+below)\b"

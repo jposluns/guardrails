@@ -316,9 +316,11 @@ COMMENT_LINE_RE = re.compile(r"<!--(?:(?!-->)[^\n])*-->")
 COMMENT_AFTER_AT_RE = re.compile(r"@[ \t\r\n]*<!--")
 FENCE_OPEN_RE = re.compile(r"(`{3,})[^`]*$|(~{3,})")
 FENCE_ANY_RE = re.compile(r"[ \t]*(?:`{3,}|~{3,})")
-_CONTAINER = r"[ \t>]*(?:(?:[*+-]|[0-9]{1,9}[.)])[ \t>]*)*"
+_CONTAINER = r"[ \t>]*(?:(?:[*+-]|\d{1,9}[.)])[ \t>]*)*"
 # A line the comment scan cannot place: a fence opener that is not at column 0, or any line opening with
-# `<` (an HTML block may run past blank lines), at any indent or container depth.
+# `<` (an HTML block may run past blank lines), at any indent or container depth. The list-marker \d in
+# _CONTAINER is Unicode on purpose: a renderer that reads a non-ASCII digit as a list number nests there,
+# and the wider read only stops the scan sooner, so more comments are counted.
 UNPLACED_RE = re.compile(_CONTAINER + r"(?:```|~~~|<)")
 ESCAPED_SPACE = "\x5c\x20"
 # An import candidate: the run of non-whitespace characters after an `@` (a backslash-escaped space stays
