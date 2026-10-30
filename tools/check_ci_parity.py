@@ -269,27 +269,38 @@ spells the key is not the key. The reader is a conservative block-YAML
 subset: block mappings with plain keys, block sequences (a mapping may
 open on an item's line), one-line plain, single-quoted and backslash-free
 double-quoted scalars, one-line flow sequences of plain words, literal (|)
-block scalars and comments. A workflow entry that is not a regular file (a
-symlink, directory, FIFO or device, refused before any read, so none is
-followed or blocks the gate), a workflow it cannot read (a stat or read
-error or a byte outside printable ASCII plus tab and newline) or parse (an
-empty file,
-a tab, a document marker or directive, an anchor, alias or tag, a flow
-mapping, a folded scalar, a multi-line plain or quoted scalar, an
-indentless or one-line nested sequence, a repeated key, a key that is not
-plain, a line the indentation does not place, nesting past the
-interpreter's recursion limit), a uses: that is not one string, a uses:,
-with: or persist-credentials key spelled in another letter case (whether a
-workflow reader folds key case is not modelled), a checkout's with: that is
-not a mapping, a directory that cannot be listed and one holding no
-workflow file are each cannot-evaluate (exit 2), never skipped. The rules
-are CHECKOUT_RULES (persist-credentials and fail-closed); the self-test
-removes each from the running module and shows every case of it red
-without it. Not read: a checkout inside a local composite action, a remote
-action or a remote reusable workflow, whose steps are not in these files;
-another action that writes credentials; an INPUT_PERSIST-CREDENTIALS value
-set through env:; and any other route by which a step obtains the job
-token (an action input that defaults to it among them).
+block scalars and comments; a workflow outside that subset is
+cannot-evaluate (exit 2), never skipped. The workflows directory itself
+is read through lstat: a symlinked one can point this rule at another
+tree, so it is cannot-evaluate, never followed. A workflow entry that is
+not a regular file (a symlink, directory, FIFO or device, refused before
+any read, so none is followed or blocks the gate), a workflow it cannot
+read (a stat or read error or a byte outside printable ASCII plus tab and
+newline) or parse (an empty file, a tab, a document marker or directive,
+an anchor, alias or tag, a flow mapping, a folded scalar, a multi-line
+plain or quoted scalar, an indentless or one-line nested sequence, a
+repeated key, a key that is not plain, a line the indentation does not
+place, nesting past the interpreter's recursion limit), a uses: that is
+not one string, a step's uses: key spelled in another letter case (a step
+is a sequence-item mapping; whether a workflow reader folds key case is
+not modelled, and a key of an env: or other non-step mapping is data,
+never held to this rule), a with: or persist-credentials key of a
+checkout step spelled in another letter case, a step uses: starting with
+./ that does not name a file directly under .github/workflows/ (a local
+composite action's steps are not in these files; a file there is one this
+rule already reads whole), a checkout's with: that is not a mapping, a
+directory that cannot be listed and one holding no workflow file are each
+cannot-evaluate (exit 2), never skipped. The rules are CHECKOUT_RULES
+(persist-credentials and fail-closed); the self-test removes each from the
+running module and shows every case of it red without it, and the main
+wiring vectors run main([]) itself, so the checkout leg cannot be cut out
+of the process exit. Not read: a checkout inside a remote action or a
+remote reusable workflow, whose steps are not in these files (a step's
+local uses: is cannot-evaluate instead, unless it names a file directly
+under .github/workflows/, which this rule already reads); another action
+that writes credentials; an INPUT_PERSIST-CREDENTIALS value set through
+env:; and any other route by which a step obtains the job token (an
+action input that defaults to it among them).
 
 Exit convention (the higher of the parity leg's and the checkout-credentials
 leg's exit):
@@ -663,7 +674,8 @@ HEAVY_JOB_IF_LINE = (
     "(startsWith(github.head_ref, 'merge-train-') && "
     "github.event.pull_request.head.repo.full_name == github.repository)")
 HEAVY_JOBS = frozenset({
-    "opf-tooling", "selftest-execution", "git-fixture-env-core",
+    "opf-tooling-a", "opf-tooling-b", "opf-tooling-c", "selftest-execution",
+    "git-fixture-env-core",
     "opf-host-patch", "git-fixture-env-core-host-patch",
     "git-fixture-env-config-combined-host-patch",
     "git-fixture-env-config-malformed-host-patch",
@@ -4383,12 +4395,20 @@ def _exact_key(mapping, key, line):
     return mapping.get(key, _ABSENT)
 
 
-def _checkout_steps(node, found):
+def _checkout_steps(node, found, item=False):
     """Append (line, uses, mapping) to found for every mapping in the parsed
     tree whose uses: names actions/checkout (the part before @, letter case
-    aside), wherever it sits."""
+    aside), wherever it sits. Only a sequence-item mapping (a step) is held
+    to the uses: letter-case rule: a key of an env: or other non-step
+    mapping is data, not a step property. A step uses: starting with ./ is
+    cannot-evaluate unless it names a file directly under .github/workflows/
+    (a file this rule already reads whole): a local composite action's steps
+    are not in these files."""
     if isinstance(node, dict):
-        uses = _exact_key(node, "uses", 0)
+        if item:
+            uses = _exact_key(node, "uses", 0)
+        else:
+            uses = node.get("uses", _ABSENT)
         if uses is not _ABSENT:
             line = node.key_lines["uses"]
             if not isinstance(uses, str):
@@ -4399,11 +4419,20 @@ def _checkout_steps(node, found):
             if (name == CHECKOUT_ACTION
                     or name.startswith(CHECKOUT_ACTION + "/")):
                 found.append((line, uses, node))
+            elif item and uses.startswith("./"):
+                parts = uses[2:].split("/")
+                if not (parts[:2] == [".github", "workflows"]
+                        and len(parts) == 3 and parts[2]):
+                    raise WorkflowShapeError(
+                        line, "a step uses: of a local action ({!r}): its "
+                        "steps are not in these files, and only a file "
+                        "directly under .github/workflows/, which this rule "
+                        "already reads, stays readable".format(uses))
         for value in node.values():
             _checkout_steps(value, found)
     elif isinstance(node, list):
-        for item in node:
-            _checkout_steps(item, found)
+        for entry in node:
+            _checkout_steps(entry, found, item=True)
 
 
 def _persist_departure(step, line):
@@ -4437,20 +4466,41 @@ def checkout_credentials(directory=WORKFLOWS_PATH, reader=None):
     diagnostics = []
     findings = []
     files = steps = 0
+    # The directory itself is read through lstat: a symlinked workflows
+    # directory can point this rule at another tree, so it is refused,
+    # never followed.
+    names = ()
     try:
-        names = sorted(entry.name for entry in directory.iterdir()
-                       if entry.name.lower().endswith(WORKFLOW_SUFFIXES))
+        linked = stat.S_ISLNK(directory.lstat().st_mode)
     except OSError as exc:
-        names = ()
         if fail_closed:
             diagnostics.append(_diagnostic(
                 WORKFLOWS_SOURCE, 0, "workflow-directory",
                 "cannot list {} ({})".format(directory, type(exc).__name__)))
     else:
-        if not names and fail_closed:
-            diagnostics.append(_diagnostic(
-                WORKFLOWS_SOURCE, 0, "workflow-directory",
-                "no .yml or .yaml workflow file under {}".format(directory)))
+        if linked:
+            if fail_closed:
+                diagnostics.append(_diagnostic(
+                    WORKFLOWS_SOURCE, 0, "workflow-directory",
+                    "a symlinked workflows directory is not read: "
+                    "{}".format(directory)))
+        else:
+            try:
+                names = sorted(
+                    entry.name for entry in directory.iterdir()
+                    if entry.name.lower().endswith(WORKFLOW_SUFFIXES))
+            except OSError as exc:
+                if fail_closed:
+                    diagnostics.append(_diagnostic(
+                        WORKFLOWS_SOURCE, 0, "workflow-directory",
+                        "cannot list {} ({})".format(
+                            directory, type(exc).__name__)))
+            else:
+                if not names and fail_closed:
+                    diagnostics.append(_diagnostic(
+                        WORKFLOWS_SOURCE, 0, "workflow-directory",
+                        "no .yml or .yaml workflow file under "
+                        "{}".format(directory)))
     for name in names:
         source = WORKFLOWS_SOURCE + "/" + name
         # Only a regular file is read: a symlink, directory, FIFO or device
@@ -8095,9 +8145,10 @@ def self_test():
     # its finding.
     def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None,
                 top=CONCURRENCY_BLOCK, job_tail=(),
-                light_commands=None, opf_id="opf-tooling",
+                light_commands=None, opf_id="opf-tooling-a",
                 opf_commands=("python3 tools/b.py",), drop_heavy=()):
-        other_heavy = sorted(HEAVY_JOBS - {"opf-tooling"} - set(drop_heavy))
+        other_heavy = sorted(
+            HEAVY_JOBS - {"opf-tooling-a"} - set(drop_heavy))
         lines = ["name: Test"] + list(labeled_trigger) + list(top) + ["jobs:"]
         for job, commands, condition in (
                 ("secrets",
@@ -8157,8 +8208,8 @@ def self_test():
              ("carries no top-level concurrency: block",)),
             ("the pinned if: removed from a heavy job",
              evaluate(multi_local, lane_ci(heavy_if=None), ()),
-             ("heavy job 'opf-tooling' of {} carries no job-level if:".format(
-                 CI_SOURCE),)),
+             ("heavy job 'opf-tooling-a' of {} carries no job-level "
+              "if:".format(CI_SOURCE),)),
             ("both removed, the workflow before the lane change",
              evaluate(multi_local, lane_ci(heavy_if=None, top=()), ()),
              ("carries no top-level concurrency: block",
@@ -8301,7 +8352,7 @@ def self_test():
                 opf_commands=(heavy_member,)), ())
     lane_case("39j a renamed heavy job (needs: updated, if: removed) is a "
               "missing-heavy-job lane finding",
-              renamed, 1, "heavy job 'opf-tooling' is missing")
+              renamed, 1, "heavy job 'opf-tooling-a' is missing")
     lane_case("39j the renamed job's heavy member runs without the pinned "
               "if: and is a lane finding",
               renamed, 1,
@@ -8645,9 +8696,10 @@ def self_test():
 
     # 42 CHECKOUT CREDENTIALS: each case is a scratch workflow directory judged
     # whole by checkout_credentials, the function main() runs (a file's data
-    # is its bytes, None for a directory or a str for a symlink target, and
-    # an optional sixth member is the reader), and must return its code
-    # with its fragment in the rendered report. Every refused
+    # is its bytes, None for a directory or a str for a symlink target; the
+    # files value "symlink" makes the workflows directory itself a symlink
+    # to a compliant one; and an optional sixth member is the reader), and
+    # must return its code with its fragment in the rendered report. Every refused
     # case then runs again with its rule removed from CHECKOUT_RULES in this
     # running module and must pass there, so each is red on a mutant without
     # that rule. The compliant control passes with or without a rule, so no
@@ -8695,6 +8747,19 @@ def self_test():
              "      - uses: actions/checkout@v4\n        with:\n"
              "          persist-credentials: false\n").encode("ascii")
     unset = checkout_file(("        with:", "          fetch-depth: 0"))
+    uses_case = (
+        "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - Uses: actions/checkout@v4\n").encode("ascii")
+    flow_steps = (
+        "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+        "    steps: [{uses: actions/checkout@v4}]\n").encode("ascii")
+    env_uses = checkout_file(persist_as("false") + (
+        "      - name: Note", "        shell: bash", "        env:",
+        "          Uses: actions/checkout@v4", "        run: echo ok"))
+    local_action = checkout_file(persist_as("false") + (
+        "      - uses: ./local/action",))
+    local_workflow = checkout_file(persist_as("false") + (
+        "      - uses: ./.github/workflows/other.yml",))
     persist = "persist-credentials"
     closed = "fail-closed"
 
@@ -8746,6 +8811,30 @@ def self_test():
              ("        with:", "          fetch-depth: 0"),
              "Actions/Checkout@main")),), 1, "uses Actions/Checkout@main",
          persist),
+        ("a checkout action subpath without with: is a finding",
+         (("ci.yml", checkout_file((), "actions/checkout/sub@v4")),), 1,
+         "uses actions/checkout/sub@v4 and it carries no with: inputs",
+         persist),
+        ("an upper-case CI.YML beside a compliant file is read",
+         (("ci.yml", compliant), ("CI.YML", unset)), 1,
+         ".github/workflows/CI.YML:", persist),
+        ("an env: key spelling Uses is data, not a step property",
+         (("ci.yml", env_uses),), 0,
+         "PASS: 1 actions/checkout step(s) in 1 workflow file(s)", None),
+        ("a step Uses: key in another letter case is cannot-evaluate",
+         (("ci.yml", uses_case),), 2, "in another letter case", closed),
+        ("a flow step list naming uses is cannot-evaluate",
+         (("ci.yml", flow_steps),), 2,
+         "a flow sequence item other than one plain word", closed),
+        ("a local-action step uses: is cannot-evaluate",
+         (("ci.yml", local_action),), 2,
+         "a step uses: of a local action", closed),
+        ("a local uses: of a file under .github/workflows/ stays read",
+         (("ci.yml", local_workflow),), 0,
+         "PASS: 1 actions/checkout step(s) in 1 workflow file(s)", None),
+        ("a symlinked workflows directory is cannot-evaluate, never "
+         "followed", "symlink", 2, "a symlinked workflows directory",
+         closed),
         ("a workflow that cannot be read is cannot-evaluate",
          (("ci.yml", compliant),), 2, "[read-error]", closed, unreadable),
         ("a workflow entry that is a directory is cannot-evaluate",
@@ -8828,7 +8917,12 @@ def self_test():
             count += 1
             reader = reader[0] if reader else None
             directory = Path(tmp) / "case{}".format(number) / "workflows"
-            if files is not None:
+            if files == "symlink":
+                real = directory.parent / "real"
+                real.mkdir(parents=True)
+                (real / "ci.yml").write_bytes(compliant)
+                directory.symlink_to(real)
+            elif files is not None:
                 directory.mkdir(parents=True)
                 for name, data in files:
                     if data is None:
@@ -8858,6 +8952,56 @@ def self_test():
         failures.append(
             "42 checkout: a rule with no case shown red without it: "
             "{}".format(sorted(CHECKOUT_RULES - rules_shown)))
+
+    # 43 MAIN WIRING: these vectors run main([]) itself, with WORKFLOWS_PATH
+    # pointed at a scratch directory, so the checkout-credentials leg cannot
+    # be cut out of the process exit: a finding directory must surface as
+    # exit 1 and a refused one as exit 2 through main([]), while the parity
+    # legs read the live repository files and pass. The flip stubs the leg
+    # always-green in the running module: main([]) must then return the
+    # parity legs' 0, proving the nonzero exits above are the leg's own.
+    import contextlib
+    import io
+
+    def run_main():
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = main([])
+        return code, buffer.getvalue()
+
+    with tempfile.TemporaryDirectory(prefix="ci-parity-main-") as tmp:
+        finding_dir = Path(tmp) / "finding"
+        finding_dir.mkdir()
+        (finding_dir / "ci.yml").write_bytes(unset)
+        refused_dir = Path(tmp) / "refused"
+        refused_dir.mkdir()
+        (refused_dir / "notes.txt").write_bytes(unset)
+        for label, directory, want, fragment in (
+                ("a checkout finding", finding_dir, 1,
+                 "does not set persist-credentials"),
+                ("a refused workflows directory", refused_dir, 2,
+                 "no .yml or .yaml workflow file")):
+            count += 1
+            with patch.object(sys.modules[__name__], "WORKFLOWS_PATH",
+                              directory):
+                code, output = run_main()
+            if code != want or fragment not in output:
+                failures.append(
+                    "43 main wiring: {} returns exit {} from main([]), "
+                    "expected {} with {!r} in the output".format(
+                        label, code, want, fragment))
+        count += 1
+        stubbed = CheckoutReport(0, 1, 1, (), ())
+        with patch.object(sys.modules[__name__], "WORKFLOWS_PATH",
+                          finding_dir), \
+                patch.object(sys.modules[__name__], "checkout_credentials",
+                             lambda *args, **kwargs: stubbed):
+            code, output = run_main()
+        if code != 0:
+            failures.append(
+                "43 main wiring: with the checkout leg stubbed green, "
+                "main([]) returns exit {}, not the parity legs' 0, so the "
+                "vectors above do not isolate the checkout leg".format(code))
 
     if failures:
         print("SELF-TEST FAIL:")
