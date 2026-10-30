@@ -921,7 +921,8 @@ another label's value), in any case, in fullwidth or accented letters, with look
 ASCII in runs of one or two, with any character but an ASCII letter or digit inside its name (a blank
 letter such as U+3164 or U+13441, a mark such as U+0903, a modifier letter such as U+0640, markup with
 no letter or digit), with anything between its name and its colon that does not begin with an ASCII
-letter or digit (a Markdown link destination or reference such as `[Review-path](x):`, an HTML tag that
+letter or digit (a Markdown link destination or reference, such as the label `[Review-path]`
+followed directly by `(x)` and the colon, an HTML tag that
 holds letters such as `<span hidden>x</span>`), with no space, a tab or a no-break space after its
 colon, and with a look-alike colon that is a punctuation mark, a symbol, a mark (U+0903 DEVANAGARI SIGN
 VISARGA) or a space. A terminal escape, a backspace, a carriage return, a bidirectional control or an
