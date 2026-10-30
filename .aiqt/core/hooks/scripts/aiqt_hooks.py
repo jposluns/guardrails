@@ -15974,6 +15974,123 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
+# The ONE narrowing of the closed-grammar deny, applied only on the ordinary parse-error path: a
+# roster-verb git commit whose only departures from the closed literal grammar are a here-string
+# (which bash consumes as a stdin redirection and never passes to git as a word) or a process
+# substitution that is the separated value of a -F/--file message-file option (which feeds the commit
+# message) ALLOWS, because neither can place a verification-hook skip option on the git command.
+# EVERYTHING ELSE still DENIES: a skip spelling (a --no-verify spelling, or -n on commit, bare or
+# clustered as -nF) before or after -F or anywhere in the words, a skip spelling inside the
+# here-string word or the substitution body, a process substitution that is not a -F value (a bare
+# /dev/fd operand does not feed the message), any global option (git -c ... can skip hooks through
+# core.hooksPath or an alias), a git word that is not the literal command word of a lone first
+# segment, a non-commit verb, or any other construct outside the grammar. The here-string word and
+# the substitution body feed stdin or the message, not git's options, so a skip spelling there cannot
+# actually bypass a hook; it is refused fail-closed all the same (a disclosed over-deny of a message
+# that merely names such a spelling). This proves only that no skip option reaches git, never that a
+# hook runs (bash does).
+_GATE_COMMIT_FILE_OPTS = frozenset(("-F", "--file"))
+_GATE_INTERIOR_SKIP_RE = re.compile(r"(?:^|[^A-Za-z0-9])-[A-Za-z]*n(?![A-Za-z0-9])")
+
+
+def _gate_commit_interior_skip(text):
+    """True when text (a here-string's word or a process substitution's body) names a hook-skip
+    spelling: a '--no-ver' long form, or a single-dash token ending in 'n' (a bare or clustered -n)."""
+    return _RAW_NOVERIFY_RE.search(text) is not None or _GATE_INTERIOR_SKIP_RE.search(text) is not None
+
+
+def _gate_commit_message_construct(command):
+    """True when command is a roster-verb git commit whose ONLY departures from the closed literal
+    grammar are a here-string or a process substitution that solely feeds the commit message, and
+    which carries no hook-skip spelling. See the comment above _GATE_COMMIT_FILE_OPTS for the exact
+    permitted set and everything it still denies."""
+    gm = _GATE_GIT_WORD_RE.search(command)
+    if gm is None or command[:gm.start()].strip():
+        return False  # no git word, or git is not the literal command word of the first segment
+    n = len(command)
+    i = gm.start()
+    words = []
+    interiors = []  # the stdin word of each here-string and the body of each -F substitution
+    saw_construct = False
+    while i < n:
+        c = command[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c in "\n;&|)":
+            return False  # a second command or segment: not one bare commit
+        if command.startswith("<<<", i):
+            end = _construct_end(command, i)
+            if end is None:
+                return False
+            interiors.append(command[i + 3:end])  # the here-string's word, which bash feeds to stdin
+            saw_construct = True
+            i = end
+            continue
+        if command.startswith("<(", i) or command.startswith(">(", i):
+            end = _construct_end(command, i)
+            if end is None or not words or words[-1] not in _GATE_COMMIT_FILE_OPTS:
+                return False  # a process substitution that is not a -F/--file value is not message-only
+            interiors.append(command[i + 2:end - 1])  # the substitution body, which feeds the message
+            words.append("")  # a bare /dev/fd word, so -F binds to it and a later -n stays a flag
+            saw_construct = True
+            i = end
+            continue
+        if c == "<":
+            return False  # another '<' redirection or a here-document: outside the permitted set
+        if c == ">":
+            j, bad = _gate_grammar_redirect(command, i, i, "1")
+            if bad is not None:
+                return False
+            i = j
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j < 0 or (j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END):
+                return False
+            words.append(command[i + 1:j])
+            i = j + 1
+            continue
+        if c == '"':
+            j = command.find('"', i + 1)
+            if j < 0 or (j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END):
+                return False
+            inner = command[i + 1:j]
+            if any(ch in "$`\\\n!" for ch in inner):
+                return False
+            words.append(inner)
+            i = j + 1
+            continue
+        if c in _GATE_GRAMMAR_WORD_CHARS and c not in "#~":
+            j = i
+            while j < n and command[j] in _GATE_GRAMMAR_WORD_CHARS:
+                j += 1
+            nxt = command[j:j + 1]
+            if nxt == ">":
+                if command[i:j].isdigit():
+                    if command[i:j] != "2":
+                        return False
+                    k, bad = _gate_grammar_redirect(command, j, i, "2")
+                    if bad is not None:
+                        return False
+                    i = k
+                    continue
+                words.append(command[i:j])
+                i = j
+                continue
+            if nxt and nxt not in _GATE_GRAMMAR_TOKEN_END:
+                return False
+            words.append(command[i:j])
+            i = j
+            continue
+        return False  # an expansion, a backquote, a glob, a brace, a leading '#'/'~' or any other byte
+    if not saw_construct or len(words) < 2 or words[1].lower() != "commit":
+        return False
+    if _no_verify_spelling("commit", words[2:]) is not None:
+        return False
+    return not any(_gate_commit_interior_skip(text) for text in interiors)
+
+
 def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
@@ -16010,7 +16127,7 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
             "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
     grammar_hit = _gate_closed_grammar_scan(command, heredoc_message)
-    if grammar_hit is not None:
+    if grammar_hit is not None and not (runtime and _gate_commit_message_construct(command)):
         grammar_kind, what, how = grammar_hit
         reason, banner = _gate_grammar_messages(grammar_kind, what, how, True)
         return _deny(reason, banner)
@@ -17284,8 +17401,14 @@ def gate_weakening(data):
     git co'mmit' --no-verify, git commit -"n" or --no-$'\\x76'erify, DENIES as its plain spelling does.
     Quoting alone is no ground to deny there: a quoted argument or here-string that spells no bypass (wc
     -l <<<"hello", diff <(sort "a.txt") <(sort "b.txt")) keeps the raw probes' decision, which on a
-    roster-verb git segment (git commit -m "fix bug" <<<x) is the closed grammar's deny, and a bypass
-    spelled so that no such reading assembles it (a variable, an alias) is the open-grammar residual.
+    roster-verb git segment is the closed grammar's deny, NARROWED by _gate_commit_message_construct for
+    one shape: a git commit whose only out-of-grammar construct is a here-string (bash consumes it as a
+    stdin redirection) or a -F/--file process substitution (it feeds the message), and that carries no
+    hook-skip spelling, ALLOWS (git commit -m "fix bug" <<<x, git commit -m x <<<x, git commit -F
+    <(printf ...)); a skip spelling before, after or clustered with -F, inside the here-string word or the
+    substitution body, a process substitution that is not a -F value, a global option, a wrapper or a
+    non-commit roster verb keeps the deny, and a bypass spelled so that no reading assembles it (a variable,
+    an alias) is the open-grammar residual.
     The failed-main-reading floor keeps the conservative raw probes alone (a disclosed narrowing of the
     floor, not of the parse-failure fallback).
     Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A
@@ -17425,7 +17548,9 @@ def gate_weakening(data):
             # spells it (_decoded_readings: quote characters, backslashes and a '$' before a quote removed,
             # each ANSI-C quote's escapes decoded). Quoting alone is no ground to deny: a quoted argument that
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
-            # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
+            # segment that decision is the closed grammar's deny, narrowed by _gate_commit_message_construct
+            # for a git commit whose here-string or -F process substitution only feeds the message and carries
+            # no hook-skip spelling (git commit -m x <<<x, git commit -F <(printf ...)).
             if (_gate_weakening_fallback_kind(command) not in _GATE_FALLBACK_DENIES
                     and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
                             for text in _decoded_readings(command))):
@@ -17437,7 +17562,7 @@ def gate_weakening(data):
                     "verification-hook bypass (a --no-verify spelling, or -n on git commit or am) that its "
                     "raw text does not show; it is denied fail-safe. Never weaken a gate to obtain a pass; "
                     "re-issue it as a parseable command with plain spellings and no bypass so the hooks "
-                    "run. " + _GATE_ALTS,
+                    "run. " + _GATE_ALTS + " " + _GATE_FILE_ROUTE,
                     "AIQT guardrail: denied an unparseable command whose quoting spells a git "
                     "verification-hook bypass (rule gatdis, fail-safe).")
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
