@@ -4,9 +4,9 @@
 The gensrc-drift gate proves a generator reproduces its target byte-for-byte from clean sources. It does
 NOT prove the generator actually CONSULTS that target when checking: a generator whose `--check` ignores
 its output (deriving a verdict from sources alone, or short-circuiting to exit 0) passes drift while
-silently failing to guard the shipped artefact. That is the F-154 class. This gate closes it: for every
+silently failing to guard the shipped artefact. This gate closes that gap: for every
 entry in the .aiqt/gensrc.json registry it corrupts a throwaway copy of the target and asserts the
-generator's `--check` refuses to pass clean. The uniform invariant, the true anti-F-154 property, is a
+generator's `--check` refuses to pass clean. The uniform invariant, the true fail-closed property, is a
 single assertion for every corruption shape: a corrupted target yields a NON-ZERO `--check`. An exit 0 on
 a corrupt target is the violation; the exact non-zero code (drift, decode-error, crash) is not graded.
 
@@ -43,7 +43,7 @@ TMPDIR pointing INSIDE that call's disposable tempdir (so a generator's writes u
 in the per-call throwaway), and repo_root().parent is that unique disposable tempdir. No generator-written
 state (a marker dropped under the sandbox, $HOME, $TMPDIR, or repo_root().parent on one call) can carry
 into another call, so a stateful generator cannot distinguish a baseline call from a probe call without
-consulting the target (the F-154-via-state trick). Residual (NOT categorical): per-call unique
+consulting the target (a bypass hidden in carried state). Residual (NOT categorical): per-call unique
 HOME/TMPDIR do not stop state shared through a filesystem location OUTSIDE the per-call sandbox that a
 generator can still reach: a COMMON ANCESTOR of the per-call tempdirs (the system temp root), the parent
 of its own $HOME/$TMPDIR, or any fixed path. Fully isolating a deliberately-adversarial generator would
@@ -74,7 +74,7 @@ path, a path becoming a symlink), a sandbox/copy failure, or a cleanup failure i
 
 Exit convention (matches the repo's gates):
   0  every entry's generator returned non-zero on every corrupted target.
-  1  a generator VIOLATED the contract: it returned exit 0 on a corrupt target (the F-154 regression).
+  1  a generator VIOLATED the contract: it returned exit 0 on a corrupt target (it ignores its target).
   2  cannot-evaluate: the registry is unreadable/malformed; a baseline `--check` is not clean; a declared
      target is absent (a file/block that is not a regular file, or a tree that is empty or untraversable);
      a `regenerate` command is not of the grammar `python3 tools/gen_<stem>.py`; a probe times out, cannot
@@ -162,7 +162,7 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely w
 _now = time.monotonic  # module-level indirection so the self-test can inject a monotonic clock (deadline)
 _mkdtemp = tempfile.mkdtemp  # module-level indirection so the self-test can inject a sandbox-setup failure
 # Spliced into EVERY template git command (init/add/commit/ls-files/gc): no detached auto-gc/maintenance
-# may churn template/.git while a per-call copytree reads it (F-367). An explicit `git gc` is foreground,
+# may churn template/.git while a per-call copytree reads it. An explicit `git gc` is foreground,
 # but auto-gc/auto-maintenance that commit/gc trigger detaches by default (gc.autoDetach) and would race
 # the per-call copytree of the template; these overrides neutralize that ambient state (test-hermeticity).
 _TEMPLATE_GIT_NO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false")
@@ -316,12 +316,12 @@ def _materialize_git(template, real_root):
     forced empty so no user hooks load, and the environment is sanitized (ambient GIT_* stripped,
     global/system config sent to os.devnull). Every template git command also carries
     _TEMPLATE_GIT_NO_MAINTENANCE so no detached auto-gc/auto-maintenance run can churn template/.git after
-    this returns and race a per-call copytree of the template (F-367): a hermeticity hardening only, it
+    this returns and race a per-call copytree of the template: a hermeticity hardening only, it
     changes nothing the gate certifies.
 
     The template's PATH SET is EXACTLY real_root's tracked set, so a git-reading generator sees the same
     tracked surface the release-side --check saw (an on-disk but untracked build output stays untracked in
-    the sandbox too). Two hardenings (F-234):
+    the sandbox too). Two hardenings:
     (a) The real_root probe runs `-c core.fsmonitor=false --no-optional-locks` (both top-level options
         PRECEDE the ls-files subcommand, so the -c override beats real_root's own repo-LOCAL config): a
         repo-local core.fsmonitor is an arbitrary program git would otherwise EXECUTE during ls-files, and
@@ -338,7 +338,7 @@ def _materialize_git(template, real_root):
     def git(cwd, *args):
         # _TEMPLATE_GIT_NO_MAINTENANCE keeps EVERY template git command from detaching a background auto-gc
         # or auto-maintenance run that would repack/prune template/.git after this returns and race the
-        # per-call copytree of the template (F-367). It hardens hermeticity only; it changes nothing the
+        # per-call copytree of the template. It hardens hermeticity only; it changes nothing the
         # gate certifies about a generator's --check.
         return subprocess.run(
             ["git", "-C", str(cwd), "-c", "user.name=aiqt-failclose",
@@ -349,7 +349,7 @@ def _materialize_git(template, real_root):
     if git(template, "init", "-q", "--template=").returncode != 0:
         raise OSError("cannot git-init the failclose sandbox template")
     # -c core.fsmonitor=false and --no-optional-locks (top-level, before the subcommand) override any
-    # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh (F-234a).
+    # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh.
     probe = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
                             "--no-optional-locks", "ls-files", "-z"],
                            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
@@ -369,7 +369,7 @@ def _materialize_git(template, real_root):
         raise OSError("cannot git-add the tracked set into the failclose template")
     if git(template, "commit", "-q", "-m", "failclose template", "--no-verify").returncode != 0:
         raise OSError("cannot commit the failclose sandbox template")
-    # The materialized index MUST equal real_root's tracked set (F-234b): any missing member is fail-closed.
+    # The materialized index MUST equal real_root's tracked set: any missing member is fail-closed.
     readback = git(template, "ls-files", "-z")
     if readback.returncode != 0:
         raise OSError("cannot read back the materialized template index (git ls-files exit {})"
@@ -386,7 +386,7 @@ def _materialize_git(template, real_root):
     # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). This
     # gc runs in the FOREGROUND; _TEMPLATE_GIT_NO_MAINTENANCE (carried by git() above) stops both this gc
     # and the earlier commit from detaching a background auto-gc/auto-maintenance run that would keep
-    # repacking/pruning template/.git and race the per-call copytree (F-367). A gc failure is non-fatal:
+    # repacking/pruning template/.git and race the per-call copytree. A gc failure is non-fatal:
     # the repo still works with loose objects, only slower.
     git(template, "gc", "--quiet")
 
@@ -677,7 +677,7 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
                               .format(target_rel, stem, rel_path, shape, exc))
                 continue
             if actual == 0:
-                violations.append("{}: gen_{} --check returned exit 0 on {} corrupted with {} (F-154: the "
+                violations.append("{}: gen_{} --check returned exit 0 on {} corrupted with {} (the "
                                   "generator does not consult its target)"
                                   .format(target_rel, stem, rel_path, shape))
             # any non-zero actual = the corrupt target was rejected = a pass; nothing recorded
@@ -801,7 +801,7 @@ def main() -> int:
 #   (a) a conformant repo (a content-guarding file generator AND a content-guarding tree generator, plus
 #       gen_gensrc's own registry target) passes the sweep (exit 0),
 #   (b) a BYPASS generator that ignores its target is caught (exit 1) via VALID-BUT-DIFFERENT content, not
-#       merely invalid UTF-8 - the F-154 regression, the whole point of the gate,
+#       merely invalid UTF-8 - a generator that ignores its target, the whole point of the gate,
 #   (c) a STATEFUL generator that drops a marker under $HOME on one call and keys off it is CAUGHT
 #       (exit 1), proving the per-call unique HOME/TMPDIR and fresh independent sandbox deny it the
 #       cross-call state it needs to fake a guard,
@@ -1684,7 +1684,7 @@ def _self_test_main_isolated():
                     expect_sweep(2, "malformed registry: expected fail-closed exit 2"))
 
         # (g) A declared target absent on disk fails closed (exit 2). Untrack it too, so real_root's
-        #     tracked set still mirrors its on-disk files (the F-234 materialization equality stays clean)
+        #     tracked set still mirrors its on-disk files (the tracked-versus-materialized equality stays clean)
         #     and the ABSENT-DECLARED-TARGET leg of _process_entry is what fails closed, not the new
         #     tracked-set guard (which the dedicated case below covers). The baseline --check of gen_goodfile
         #     would also exit non-zero on the absent target, so exit 2 alone cannot tell the two legs apart:
@@ -1833,7 +1833,7 @@ def _self_test_main_isolated():
             expect_sweep(0, "git-reading generator: expected the sweep to pass (exit 0; the template "
                             "materializes a real git repo so the baseline git ls-files succeeds)"))
 
-        # (o) F-234a: a real_root whose repo-LOCAL core.fsmonitor points at a hook that writes an outside
+        # (o) a real_root whose repo-LOCAL core.fsmonitor points at a hook that writes an outside
         #     marker. The probe runs `-c core.fsmonitor=false --no-optional-locks`, so git NEVER executes
         #     the hook and the marker is never written; the sweep still completes (the goodfile fixture is
         #     otherwise clean). Without the override git would run the hook (arbitrary code out of scope).
@@ -1858,7 +1858,7 @@ def _self_test_main_isolated():
 
         _run_vector(cannot, failures, "fsmonitor probe", _fsmonitor, _evaluate_fsmonitor)
 
-        # (p) F-234b: a FORCED probe failure (real_root's .git replaced by a bare marker, so `git ls-files`
+        # (p) a FORCED probe failure (real_root's .git replaced by a bare marker, so `git ls-files`
         #     exits nonzero) is cannot-evaluate (exit 2), NEVER a silent `git add -A` fallback that would
         #     certify a bogus baseline. Without the fix the old fallback would materialize a repo and the
         #     goodfile fixture would sweep to exit 0.
@@ -1872,7 +1872,7 @@ def _self_test_main_isolated():
                     expect_sweep(2, "forced probe failure: expected cannot-evaluate exit 2 (no git add -A "
                                     "fallback), a nonzero real_root ls-files must fail closed"))
 
-        # (q) F-234b: a TRACKED-SET MISMATCH (a file tracked in real_root's index but absent from the
+        # (q) a TRACKED-SET MISMATCH (a file tracked in real_root's index but absent from the
         #     template) is detected as cannot-evaluate (exit 2). extra.txt is committed then deleted from
         #     disk, so copytree never copies it and the materialized template index lacks it. Without the
         #     equality guard the mismatch is unnoticed and the goodfile fixture sweeps to exit 0.
@@ -1888,7 +1888,7 @@ def _self_test_main_isolated():
                     expect_sweep(2, "tracked-set mismatch: expected cannot-evaluate exit 2 (the materialized "
                                     "template index must equal real_root's tracked set)"))
 
-        # (r) F-367: every TEMPLATE git command carries the no-maintenance hardening flags (gc.auto=0,
+        # (r) Every TEMPLATE git command carries the no-maintenance hardening flags (gc.auto=0,
         #     gc.autoDetach=false, maintenance.auto=false), so no detached auto-gc / auto-maintenance run can
         #     churn template/.git while a per-call copytree reads it (the intermittent hermeticity race). The
         #     template git invocations are CAPTURED during a REAL _materialize_git run over a small fixture

@@ -381,7 +381,7 @@ def self_test_main(_mkdtemp=None, _vectors=True):
                     failures.append("run() with a standards path that is a symlink {} expected exit {}{}, got {}: "
                                     "{!r}".format(shape, want, " naming it" if reason else "", rc_link,
                                                   link_err.getvalue()))
-            # F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's 4300-digit int-string limit
+            # An integer literal past CPython's 4300-digit int-string limit
             # makes tomllib raise a BARE ValueError (not TOMLDecodeError). _standards.load_manifests must
             # still raise ManifestError, so run() fails closed at exit 2 rather than escaping a traceback.
             # The digit limit is pinned to the default 4300 (test-hermeticity) and restored in finally.

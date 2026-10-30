@@ -2185,7 +2185,7 @@ TREE_VECTORS = (
     # allowance leaves both reported plus the count drift.
     ("two sites on one line", {"tools/a.py": _TWO_ON_ONE_LINE},
      (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-column", 0),
-    # Round 6: two chained calls start at one position, so the end position keeps them apart.
+    # Two chained calls start at one position, so the end position keeps them apart.
     ("two chained sites on one line", {"tools/a.py": _TWO_CHAINED},
      (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-end", 0),
     ("allowlist entry without reason", {"tools/a.py": _SITE}, (_ENTRY[:4] + (" ",),),

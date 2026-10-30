@@ -174,7 +174,7 @@ def check_order_record(root, findings):
     if data.get("format-version") != 1 or data.get("apex-corpus-id") != "prjint1":
         raise gen_manifest.GateError("order.toml: format-version 1 and apex-corpus-id 'prjint1' required")
     extra = set(data) - {"format-version", "apex-corpus-id", "precedence-tier", "presentation-order"}
-    if extra:  # F-237: an unknown top-level key (e.g. a typo) is a schema FAIL, never silently tolerated.
+    if extra:  # an unknown top-level key (e.g. a typo) is a schema FAIL, never silently tolerated.
         raise gen_manifest.GateError("order.toml: unknown top-level key(s): {}".format(
             ", ".join(sorted(extra))))
     try:
@@ -202,7 +202,7 @@ def check_references(root):
             or isinstance(data.get("quorum"), bool) or data["quorum"] < 1:
         raise gen_manifest.GateError("references.toml: format-version 1 and integer quorum >= 1 required")
     extra = set(data) - {"format-version", "quorum", "reference"}
-    if extra:  # F-237: an unknown top-level key (e.g. a `quroum` typo) is a schema FAIL.
+    if extra:  # an unknown top-level key (e.g. a `quroum` typo) is a schema FAIL.
         raise gen_manifest.GateError("references.toml: unknown top-level key(s): {}".format(
             ", ".join(sorted(extra))))
     pipelines = set()
@@ -217,7 +217,7 @@ def check_references(root):
                 raise gen_manifest.GateError("references.toml: two independent entries share pipeline "
                                              "identity {!r}".format(row["pipeline-id"]))
             pipelines.add(row["pipeline-id"])
-    # F-237 / spec 5.3: quorum must be SATISFIABLE. Quorum is counted over distinct independent pipeline
+    # Spec 5.3: quorum must be SATISFIABLE. Quorum is counted over distinct independent pipeline
     # identities; a quorum exceeding the count available can never be met, so it is a schema FAIL, not a
     # verdict a later run silently fails.
     if data["quorum"] > len(pipelines):
@@ -241,7 +241,7 @@ def check_dispositions(root):
     if data.get("format-version") != 1:
         raise gen_manifest.GateError("dispositions.toml: format-version must be exactly 1")
     extra = set(data) - {"format-version", "disposition"}
-    if extra:  # F-237: an unknown top-level key is a schema FAIL, never silently tolerated.
+    if extra:  # an unknown top-level key is a schema FAIL, never silently tolerated.
         raise gen_manifest.GateError("dispositions.toml: unknown top-level key(s): {}".format(
             ", ".join(sorted(extra))))
     ids = set()
@@ -266,7 +266,7 @@ def run(root, anchored=False):
         gen_manifest.cross_check_exclusions(root, exclusions)
         gen_manifest.check_authoring_only(root, tracked, classes, exclusions)
         apply_minimums(classes)
-        gen_manifest.check_output_modes(root)  # F-236: the four outputs are index-mode 100644 (defence in depth).
+        gen_manifest.check_output_modes(root)  # the four outputs are index-mode 100644 (defence in depth).
         manifest = load_manifest(root)
 
         # 4: version and genesis consistency.
@@ -400,7 +400,7 @@ def _self_test_main_isolated():
         print("SELF-TEST ERROR: git is unavailable; fail-closed", file=sys.stderr)
         return 2
 
-    # F-TOML-BARE-VALUEERROR-CLASS: _gen_common.load_toml's callers fail closed on the ValueError family by
+    # _gen_common.load_toml's callers fail closed on the ValueError family by
     # contract, but a parser overflow makes tomllib raise RecursionError (a RuntimeError); load_toml must map
     # it into that family at the parse locus.
     # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
@@ -453,7 +453,7 @@ def _self_test_main_isolated():
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
-    failures = list(deep_failures)   # the load_toml RecursionError case above (F-TOML-BARE-VALUEERROR-CLASS)
+    failures = list(deep_failures)   # the load_toml RecursionError case above
     try:
         # (a) clean fixture passes.
         clean = _fresh("clean")
@@ -502,7 +502,7 @@ def _self_test_main_isolated():
         if check_quiet(b) != 1:
             failures.append("a working-tree byte disagreeing with SOURCES expected exit 1")
 
-        # (b2) F-238: a missing SOURCES row must fail SOLELY on set-equality (leg 5), not incidentally on
+        # (b2) a missing SOURCES row must fail SOLELY on set-equality (leg 5), not incidentally on
         #      the tree/root/snippet recompute (leg 8). Drop the src.txt row, then recompute tree-sha256,
         #      root.txt, and the snippet CONSISTENTLY so leg 8 stays clean and the ONLY discrepancy is the
         #      absent tracked member. A mutant deleting the leg-5 set-equality loops then makes this
@@ -526,7 +526,7 @@ def _self_test_main_isolated():
         (m / gm.SNIPPET_REL).write_text(
             "aiqt-guardrails release {}\nroot sha256:{}\n".format(version, root_hex), encoding="utf-8")
         if check_quiet(m) != 1:
-            failures.append("a missing SOURCES row expected exit 1 SOLELY on set-equality (F-238)")
+            failures.append("a missing SOURCES row expected exit 1 SOLELY on set-equality")
 
         # (c) a below-minimum class: build clean (outputs written), then swap the map so a pack path
         #     (src.txt, minimum pack-immutable) is assigned the weaker 'derived'. The checker's
@@ -612,7 +612,7 @@ def _self_test_main_isolated():
         if check_quiet(od) != 1:
             failures.append("an order record disagreeing with gen_rules constants expected exit 1")
 
-        # (i) F-237: an unknown TOP-LEVEL key in each record fails closed (exit 2). Regenerate after the
+        # (i) an unknown TOP-LEVEL key in each record fails closed (exit 2). Regenerate after the
         #     edit so the SOURCES hash matches and it is the schema check that fires, not a byte drift.
         ok = _fresh("orderkey")
         (ok / ".aiqt" / "core" / "order.toml").write_text(
@@ -620,41 +620,41 @@ def _self_test_main_isolated():
             encoding="utf-8")
         gen_quiet(ok)
         if check_quiet(ok) != 2:
-            failures.append("F-237: an unknown top-level key in order.toml expected exit 2")
+            failures.append("an unknown top-level key in order.toml expected exit 2")
         rk = _fresh("refkey")
         (rk / ".aiqt" / "core" / "references.toml").write_text(
             gm._REFERENCES.replace("quorum = 1\n", "quorum = 1\nquroum = 1\n", 1), encoding="utf-8")
         gen_quiet(rk)
         if check_quiet(rk) != 2:
-            failures.append("F-237: an unknown top-level key (a quroum typo) in references.toml expected "
+            failures.append("an unknown top-level key (a quroum typo) in references.toml expected "
                             "exit 2")
         dk = _fresh("dispkey")
         (dk / ".aiqt" / "core" / "dispositions.toml").write_text(gm._DISPOSITIONS + "stray = 1\n",
                                                                  encoding="utf-8")
         gen_quiet(dk)
         if check_quiet(dk) != 2:
-            failures.append("F-237: an unknown top-level key in dispositions.toml expected exit 2")
+            failures.append("an unknown top-level key in dispositions.toml expected exit 2")
 
-        # (j) F-237 / 5.3: an unsatisfiable quorum (2 with a single independent pipeline) fails closed.
+        # (j) Spec 5.3: an unsatisfiable quorum (2 with a single independent pipeline) fails closed.
         q = _fresh("quorum")
         (q / ".aiqt" / "core" / "references.toml").write_text(
             gm._REFERENCES.replace("quorum = 1", "quorum = 2"), encoding="utf-8")
         gen_quiet(q)
         if check_quiet(q) != 2:
-            failures.append("F-237: an unsatisfiable quorum (> distinct independent pipelines) expected "
+            failures.append("an unsatisfiable quorum (> distinct independent pipelines) expected "
                             "exit 2")
 
-        # (k) F-236 (defence in depth): check_manifest independently rejects an output at index mode
+        # (k) Defence in depth: check_manifest independently rejects an output at index mode
         #     100755. Track the generated outputs at 100644 (clean), then chmod one executable and re-stage
         #     so its index mode is 100755 -> exit 2.
         cmmode = _fresh("cm-outmode")
         gm._git(cmmode, "add", "-A")
         if check_quiet(cmmode) != 0:
-            failures.append("F-236: a tracked 100644 output set expected a clean check (exit 0)")
+            failures.append("a tracked 100644 output set expected a clean check (exit 0)")
         os.chmod(cmmode / gm.MANIFEST_REL, 0o755)
         gm._git(cmmode, "add", gm.MANIFEST_REL)
         if check_quiet(cmmode) != 2:
-            failures.append("F-236: check_manifest independently rejects an output at index mode 100755 "
+            failures.append("check_manifest independently rejects an output at index mode 100755 "
                             "(exit 2)")
 
         # (l) The authoring-only roster: both roster files excluded by exact literals verify clean (the
@@ -687,8 +687,8 @@ def _self_test_main_isolated():
           "pipeline-id all fail closed (exit 2); a managed-block digest drift is exit 1 while a "
           "surroundings-only change is clean; an order record disagreeing with the operative "
           "gen_rules constants is exit 1; an unknown top-level key in the order, references, or "
-          "dispositions record and an unsatisfiable quorum each fail closed (exit 2, F-237); and "
-          "check_manifest independently rejects an output at git index mode 100755 (exit 2, F-236); and "
+          "dispositions record and an unsatisfiable quorum each fail closed (exit 2); and "
+          "check_manifest independently rejects an output at git index mode 100755 (exit 2); and "
           "the authoring-only roster verifies clean when excluded but fails closed (exit 2) once given a "
           "release class")
     return 0

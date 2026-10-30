@@ -7265,7 +7265,7 @@ def _main_isolated(monitor):
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
-    # Redirect the recovery ledger into the throwaway tree so the EN-6 recovery layer, which fires on every
+    # Redirect the recovery ledger into the throwaway tree so the recovery layer, which fires on every
     # dirty-tree in-scope case below, never writes to the real user's $XDG_STATE_HOME/~/.local/state.
     os.environ["XDG_STATE_HOME"] = str(tmp / "xdgstate")
     # Make the fail-safe repository-view check (git_discard) deterministic: scrub any ambient GIT_* the
@@ -7284,7 +7284,7 @@ def _main_isolated(monitor):
     for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
                 "GIT_CONFIG_NOSYSTEM") + _MAINTENANCE_PIN_VARS:
         os.environ.pop(key, None)
-    # F-106 regression guard: run the whole self-test with NO ambient git identity, so the EN-6 recovery
+    # F-106 regression guard: run the whole self-test with NO ambient git identity, so the recovery
     # snapshot's `git commit-tree` must supply its OWN fixed identity to succeed. The recovery layer scrubs
     # GIT_CONFIG_*/GIT_AUTHOR_*/GIT_COMMITTER_* itself (the allowlist posture), but NOT HOME/XDG_CONFIG_HOME,
     # so pointing those at an EMPTY throwaway dir is what actually denies the snapshot a global-config
@@ -7382,7 +7382,7 @@ def _main_isolated(monitor):
                "deny", cwd=rp)
         expect("(sw-c) plain switch allows (git aborts on dirty)", "git switch other", "allow", cwd=rp)
 
-        # === EN-6 round-22 Fix 1 (F-81): a force branch-create/RESET on checkout/switch now ASKS =====
+        # === round-22 Fix 1: a force branch-create/RESET on checkout/switch now ASKS =====
         # 'git checkout -B', 'git switch -C', and 'git switch --force-create' force-create or RESET a branch
         # ref exactly like 'git branch -f'/'-M'/'-C' (orphaning committed commits, reflog-recoverable), so
         # they ASK even on a dirty tree; a plain unforced create (-b/-c) keeps its allow. The checkout -f
@@ -7397,13 +7397,13 @@ def _main_isolated(monitor):
         expect("(r22-5) switch -c plain create still allows (unchanged)", "git switch -c foo", "allow",
                cwd=rp)
 
-        # === EN-6 round-23 Fix F-85: argument-aware checkout/switch -b/-B/-c/-C parsing ==============
+        # === argument-aware checkout/switch -b/-B/-c/-C parsing ==============
         # The new-branch NAME argument of -b/-B (checkout) and -c/-C (switch), whether ATTACHED ('-bfoo') or
         # SEPARATED ('-b foo'), is that option's value and is NOT char-scanned as clustered force flags. So
         # an attached name whose characters include 'f'/'B'/'C' ('-bfoo', '-bBranch', '-cfeature') is a plain
         # create -> ALLOW even on a dirty tree, never mis-read as carrying -f/-B/-C. The force-create forms
         # (-Bfoo/-B foo, -Cfoo/-C foo, --force-create foo) still ASK. This mirrors the branch -u<upstream>
-        # parser (F-82) and closes the round-21 char-scan over-restriction.
+        # parser and closes the round-21 char-scan over-restriction.
         expect("(f85-co1) checkout -bfoo attached name allows", "git checkout -bfoo", "allow", cwd=rp)
         expect("(f85-co2) checkout -bBranch attached name (the B) allows", "git checkout -bBranch", "allow",
                cwd=rp)
@@ -7415,7 +7415,7 @@ def _main_isolated(monitor):
         expect("(f85-sw3) switch -C foo separated force-create allows with a note", "git switch -C foo", "allow-note", cwd=rp)
         expect("(f85-sw4) switch --force-create foo allows with a note", "git switch --force-create foo", "allow-note", cwd=rp)
 
-        # === EN-6 round-24 Fix F-88: checkout -m/--merge/--conflict is detected BEFORE the branch-create ==
+        # === checkout -m/--merge/--conflict is detected BEFORE the branch-create ==
         # allow, mirroring the switch classifier. A checkout --merge does a three-way merge that can overwrite
         # (and lose) local changes, so -m/--merge/--conflict[=<style>] is worktree-scoped EVEN when combined
         # with a -b create -> ASK on a dirty tree; a plain -b create with NO merge option stays ALLOW. '-m'
@@ -7473,7 +7473,7 @@ def _main_isolated(monitor):
         expect("(cl-a) clean -fd allows with a note", "git clean -fd", "allow-note", cwd=rp)
         expect("(cl-b) clean -n dry-run allows", "git clean -nfd", "allow", cwd=rp)
         # A bare clean with NO force flag now ASKS: clean.requireForce=false could make it destructive, and
-        # the guard no longer models whether the clean fires (F-66.5). The old cut silently ALLOWed it.
+        # the guard no longer models whether the clean fires. The old cut silently ALLOWed it.
         expect("(cl-c) clean without force allows with a note (requireForce edge, F-66.5)", "git clean -d", "allow-note",
                cwd=rp)
         expect("(st-a) stash drop allows", "git stash drop", "allow", cwd=rp)
@@ -7483,7 +7483,7 @@ def _main_isolated(monitor):
         expect("(br-a) branch -D allows with a note", "git branch -D other", "allow-note", cwd=rp)
         expect("(br-b) branch -d allows (git refuses unmerged)", "git branch -d other", "allow", cwd=rp)
 
-        # === EN-6 round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
+        # === round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
         # The raw fallback (a tokenizer ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
         # branch flags, so an unparseable 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' can no
         # longer slip past the old '-D'/'--delete'-only raw check into a silent ALLOW; under the ROUND-8
@@ -7507,7 +7507,7 @@ def _main_isolated(monitor):
         expect("(r19a-5) parseable non-delete branch-create still allows", "git branch newbranch",
                "allow", cwd=rp)
 
-        # === EN-6 round-21 Fix A: a PARSEABLE force branch move/rename/copy/reset now ASKS ===========
+        # === round-21 Fix A: a PARSEABLE force branch move/rename/copy/reset now ASKS ===========
         # A force MOVE/rename (-M, or -m/--move with --force), a force COPY (-C, or -c/--copy with --force),
         # and a bare force branch RESET (-f/--force with a branch and start-point) each reset or overwrite a
         # branch ref and can orphan committed commits (the same reflog-recoverable loss class as -D), so all
@@ -7522,7 +7522,7 @@ def _main_isolated(monitor):
         expect("(r21a-5b) branch newbr create still allows", "git branch newbr", "allow", cwd=rp)
         expect("(r21a-6) parseable bare branch (list) allows", "git branch", "allow", cwd=rp)
 
-        # === EN-6 round-22 Fix 2 (F-82): '-u <upstream>' value is not char-scanned as a force flag =====
+        # === round-22 Fix 2: '-u <upstream>' value is not char-scanned as a force flag =====
         # Round-21's blind char-scan read the ATTACHED upstream value of '-u<val>' as clustered force flags,
         # so 'git branch -ufoo topic' / '-uMain topic' / '-uCandidate topic' wrongly ASKED. The option parser
         # now stops the cluster scan at '-u' and treats the remainder as the upstream, so these ALLOW; a real
@@ -7538,7 +7538,7 @@ def _main_isolated(monitor):
         expect("(r22-10) branch -f a other force reset still allows with a note (unchanged)", "git branch -f a other",
                "allow-note", cwd=rp)
 
-        # === EN-6 round-25 Fix F-94: a branch delete combined with -r/--remotes ASKS ================
+        # === a branch delete combined with -r/--remotes ASKS ================
         # Deleting remote-tracking refs (-d/-D/--delete with -r/--remotes) is force-removed by git past the
         # merged-branch safeguard that protects a plain local -d, so every delete+remotes spelling ASKS; a
         # local non-force -d keeps its allow, and -D still ASKS.
@@ -7550,7 +7550,7 @@ def _main_isolated(monitor):
         expect("(f94-4) branch -d local (local safe delete) still allows", "git branch -d other", "allow",
                cwd=rp)
 
-        # === EN-6 round-25 Fix F-95: git stash export ASKS for every spelling =======================
+        # === git stash export ASKS for every spelling =======================
         # 'stash export' writes stash state to a ref, and --to-ref overwrites an arbitrary ref
         # unconditionally, so every export form ASKS (drop/clear unchanged; push/list unaffected).
         expect("(f95-1) stash export --to-ref allows with a note", "git stash export --to-ref refs/heads/topic", "allow-note",
@@ -7558,7 +7558,7 @@ def _main_isolated(monitor):
         expect("(f95-2) stash export --print allows with a note", "git stash export --print", "allow-note", cwd=rp)
         expect("(f95-3) stash export (bare) allows with a note", "git stash export", "allow-note", cwd=rp)
 
-        # === EN-6 round-25 Fix F-97: a raw-lossy-flagged command with an UNRECOGNIZED sub ASKS =======
+        # === a raw-lossy-flagged command with an UNRECOGNIZED sub ASKS =======
         # 'git checkout-index -a -f' and 'git read-tree -u --reset HEAD' are flagged in-scope by the raw scan
         # (a 'checkout'/'reset' substring) but resolve to a subcommand the form-classifier does not recognize,
         # so they used to win the catch-all allow and discard tracked worktree content with no snapshot. They
@@ -7598,19 +7598,19 @@ def _main_isolated(monitor):
         # behind a consumed '--' still denies while a value that merely LOOKS like -p (a -m
         # message, a -b branch name) allows ==================================================
         expect("(patch-a) checkout -p DENIES (interactive patch mode; R11 item 4)", "git checkout -p", "deny", cwd=rp)
-        expect("(patch-b) restore -p --staged DENIES (R11 item 4)", "git restore -p --staged file.txt", "deny",
+        expect("(patch-b) restore -p --staged DENIES", "git restore -p --staged file.txt", "deny",
                cwd=rp)
         expect("(patch-c) checkout -2p DENIES (digit-led cluster; R12 item 2)", "git checkout -2p", "deny", cwd=rp)
         expect("(patch-d) restore -3p DENIES (digit-led cluster; R12 item 2)", "git restore -3p", "deny", cwd=rp)
-        expect("(patch-e) checkout -bp names the branch p and ALLOWS (R12 item 2 control)",
+        expect("(patch-e) checkout -bp names the branch p and ALLOWS",
                "git checkout -bp", "allow", cwd=rp)
-        expect("(patch-f) stash push -m -- -p DENIES: the '--' is the message, the -p real (R12 item 2)",
+        expect("(patch-f) stash push -m -- -p DENIES: the '--' is the message, the -p real",
                "git stash push -m -- -p", "deny", cwd=rp)
-        expect("(patch-g) stash push --message -- --patch DENIES (R12 item 2)",
+        expect("(patch-g) stash push --message -- --patch DENIES",
                "git stash push --message -- --patch", "deny", cwd=rp)
-        expect("(patch-h) stash push -m -p is a push whose message is -p, ALLOWS (R12 item 2 control)",
+        expect("(patch-h) stash push -m -p is a push whose message is -p, ALLOWS",
                "git stash push -m -p", "allow", cwd=rp)
-        # R13 DECIDED item 1: the -p scan derives its value-taking options from the SAME closed
+        # the -p scan derives its value-taking options from the SAME closed
         # allowlists as the option validator (_DISCARD_VERB_OPTS / _DISCARD_STASH_OP_OPTS), so a
         # declared separated value spelled -p is a VALUE (a filename, a style, a branch name), a
         # consumed separated value that reads as a terminator makes a LATER -p the REAL patch
@@ -7622,30 +7622,30 @@ def _main_isolated(monitor):
                "(R13 item 1)",
                "git stash push --pathspec-from-file -p", "allow", cwd=rp)
         expect("(patch-j) stash push --pathspec-from-file -- -p DENIES: the terminator is the "
-               "consumed filename, the -p real (R13 item 1)",
+               "consumed filename, the -p real",
                "git stash push --pathspec-from-file -- -p", "deny", cwd=rp)
         expect("(patch-k) checkout --pathspec-from-file -p is scoped, never a patch deny (R13 "
                "item 1)",
                "git checkout --pathspec-from-file -p", "allow-note", cwd=rp)
-        expect("(patch-l) checkout --pathspec-from-file -- -p DENIES (R13 item 1)",
+        expect("(patch-l) checkout --pathspec-from-file -- -p DENIES",
                "git checkout --pathspec-from-file -- -p", "deny", cwd=rp)
         expect("(patch-m) checkout --orphan -- -p DENIES: the terminator is the consumed branch "
-               "name (R13 item 1)",
+               "name",
                "git checkout --orphan -- -p", "deny", cwd=rp)
         expect("(patch-n) checkout --conflict -- -p DENIES: the terminator is the consumed style "
-               "value (R13 item 1)",
+               "value",
                "git checkout --conflict -- -p", "deny", cwd=rp)
-        expect("(patch-o) restore --pathspec-from-file -- -p DENIES (R13 item 1)",
+        expect("(patch-o) restore --pathspec-from-file -- -p DENIES",
                "git restore --pathspec-from-file -- -p", "deny", cwd=rp)
-        expect("(patch-p) reset --pathspec-from-file -- -p DENIES (R13 item 1)",
+        expect("(patch-p) reset --pathspec-from-file -- -p DENIES",
                "git reset --pathspec-from-file -- -p", "deny", cwd=rp)
         expect("(patch-q) the joined --pathspec-from-file=-p spelling stays scoped, a control "
                "(R13 item 1)",
                "git checkout --pathspec-from-file=-p", "allow-note", cwd=rp)
         expect("(patch-r) a genuine terminator after a consumed value leaves -p a pathspec, a "
-               "control (R13 item 1)",
+               "control",
                "git checkout --pathspec-from-file flist -- -p", "allow-note", cwd=rp)
-        # R14 DECIDED item 1: the option listing of git itself for stash save (the installed
+        # the option listing of git itself for stash save (the installed
         # git 2.55.0 'git stash save -h' output) carries "-m, --[no-]message <message>" and
         # "-S, --[no-]staged", so the save entry of _DISCARD_STASH_OP_OPTS lists -m/--message
         # as a VALUE option exactly like push (the R13 entry listed an empty value set on the
@@ -7672,13 +7672,13 @@ def _main_isolated(monitor):
 
         patch_deny("(patch-s) stash save -m -- -p DENIES: the '--' is the message, the -p real "
                    "(R14 item 1)", "git stash save -m -- -p", "'git stash save -p'")
-        patch_deny("(patch-t) stash save --message -- --patch DENIES (R14 item 1)",
+        patch_deny("(patch-t) stash save --message -- --patch DENIES",
                    "git stash save --message -- --patch", "'git stash save --patch'")
         expect("(patch-u) stash save -m -p is a save whose message is -p, ALLOWS (R14 item 1 "
                "control)", "git stash save -m -p", "allow", cwd=rp)
-        expect("(patch-v) stash save -mp carries an attached message, ALLOWS (R14 item 1 control)",
+        expect("(patch-v) stash save -mp carries an attached message, ALLOWS",
                "git stash save -mp", "allow", cwd=rp)
-        # R15 DECIDED item 2: git keeps the '--' of 'stash save -- -p' in the message (git
+        # git keeps the '--' of 'stash save -- -p' in the message (git
         # 2.55.0 saves a stash whose message is '-- -p'); that '--' still ends option parsing,
         # so the -p is message text, git enters no patch mode, and the allow below still holds.
         expect("(patch-w) stash save -- -p: a genuine terminator, git keeps the '--' and saves a "
@@ -7686,18 +7686,18 @@ def _main_isolated(monitor):
                "behaves (R14 item 1 control; R15 item 2 wording)",
                "git stash save -- -p", "allow", cwd=rp)
         patch_deny("(patch-x) implicit push: stash --pathspec-from-file -- -p DENIES, the "
-                   "terminator is the consumed filename value (R14 item 1)",
+                   "terminator is the consumed filename value",
                    "git stash --pathspec-from-file -- -p", "'git stash -p'")
         patch_deny("(patch-y) restore --conflict -- -p DENIES: the terminator is the consumed "
-                   "style value (R14 item 1)",
+                   "style value",
                    "git restore --conflict -- -p", "'git restore -p'")
 
         # === previously-fooled/hanging clean forms now ASK, no probe (F-64.3, F-66.1) ========
         # clean -i used to reach the `clean -n` probe and could hang on interactive input; clean -q
         # suppressed the probe output so it read as "nothing to remove" and ALLOWed. The coarse guard runs
         # no clean probe at all: any real clean ASKS.
-        expect("(clx-a) clean -dfi allows with a note, no hang (F-64.3)", "git clean -dfi", "allow-note", cwd=rp)
-        expect("(clx-b) clean -qfd allows with a note (F-66.1)", "git clean -qfd", "allow-note", cwd=rp)
+        expect("(clx-a) clean -dfi allows with a note, no hang", "git clean -dfi", "allow-note", cwd=rp)
+        expect("(clx-b) clean -qfd allows with a note", "git clean -qfd", "allow-note", cwd=rp)
 
         # === previously-fooled worktree-redirection now ASK (F-62.2/3, F-64.4, F-66.2/3/4) ===
         # A cd/pushd/subshell in the chain, a -C/--git-dir/--work-tree global option, or a GIT_DIR/
@@ -7714,13 +7714,13 @@ def _main_isolated(monitor):
         # FLIPPED (was "allow-note"): each redirect below resolves to this dirty repo, and a whole-tree clobber
         # whose resolved target probes dirty now DENIES (with its snapshot) exactly like the bare (rs-a), so a
         # global option or a leading assignment can no longer turn the bare deny into a snapshot-then-allow.
-        expect("(dir-d) -C global option on a dirty target denies like the bare form (F-66.2)",
+        expect("(dir-d) -C global option on a dirty target denies like the bare form",
                "git -C {} reset --hard".format(rp), "deny", cwd=rp)
-        expect("(dir-e) --git-dir global option on a dirty target denies like the bare form (F-66.4)",
+        expect("(dir-e) --git-dir global option on a dirty target denies like the bare form",
                "git --git-dir={}/.git reset --hard".format(rp), "deny", cwd=rp)
         expect("(dir-f) --work-tree global option on a dirty target denies like the bare form",
                "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "deny", cwd=rp)
-        expect("(dir-g) GIT_WORK_TREE= env on a dirty target denies like the bare form (F-62.3)",
+        expect("(dir-g) GIT_WORK_TREE= env on a dirty target denies like the bare form",
                "GIT_WORK_TREE=sub git reset --hard", "deny", cwd=rp)
         expect("(dir-h) GIT_DIR= env on a dirty target denies like the bare form (F-62.3/F-66.4)",
                "GIT_DIR=.git git reset --hard", "deny", cwd=rp)
@@ -7867,7 +7867,7 @@ def _main_isolated(monitor):
         expect("(opt-b) leading GUARDRAIL_ALLOW_DISCARD prefix no longer overrides: dirty clobber denies",
                "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "deny", cwd=rp)
 
-        # === EN-6 round-13: redirects ASK all forms (plus tombstones of the retired opt-out) =========
+        # === round-13: redirects ASK all forms (plus tombstones of the retired opt-out) =========
         # Fix 1 tombstone: a LOWERCASE guardrail_allow_discard=1 on a heredoc discard is an ordinary
         # assignment, as every spelling of the removed prefix now is -> the bare outcome, a DENY under
         # the ROUND-8 positive grammar (the heredoc operator and the assignment word are outside it).
@@ -7891,7 +7891,7 @@ def _main_isolated(monitor):
         # snapshot cannot capture, so it now DENIES rather than allow on a session-snapshot basis. Revert the
         # finding-5 gitdir-redirect deny and this flips back to 'allow' (the old unsound session-snapshot
         # allow that lost the redirected index). Same-repo --git-dir still allows (dir-e/dir-f below).
-        expect("(r13-3c-f5) --git-dir to a DIFFERENT repo on reset --hard now DENIES (finding 5)",
+        expect("(r13-3c-f5) --git-dir to a DIFFERENT repo on reset --hard now DENIES",
                "git --git-dir=/x reset --hard", "deny", cwd=rp)
         # No regression: a plain non-destructive form with NO redirect still ALLOWs on a dirty
         # tree (recovery-snapshot-backed), exactly as before Fix 3.
@@ -7899,7 +7899,7 @@ def _main_isolated(monitor):
                cwd=rp)
         expect("(r13-4b) plain switch with no redirect still allows", "git switch other", "allow", cwd=rp)
 
-        # === EN-6 round-15 tombstones: the opt-out silent-allow class, now closed by removal ============
+        # === round-15 tombstones: the opt-out silent-allow class, now closed by removal ============
         # Fix 2 tombstone (empty final assignment): no override exists, so with no resolvable cwd the reset
         # --hard DENIES ("cannot resolve to the session directory"), the outcome of the bare command.
         expect("(r15-empty) empty final removed-prefix assignment: same as the bare command -> DENY",
@@ -8236,7 +8236,7 @@ def _main_isolated(monitor):
         if _live:
             failures.append("(rmo-5-live) the loaded hook module still carries {}".format(_live))
 
-        # === ROUND-2 FINDING 4: a command-local worktree redirect (-C/--work-tree/GIT_WORK_TREE) on a
+        # === a command-local worktree redirect (-C/--work-tree/GIT_WORK_TREE) on a
         # === DESTRUCTIVE discard snapshots the ACTUAL TARGET repo, not the session cwd; when the target
         # === cannot be snapshotted the discard DENIES (never allow-note a recovery ref that lacks the state).
         # (a) -C into a DIFFERENT real repo: the recovery snapshot lands in the TARGET, NOT the session cwd.
@@ -8257,7 +8257,7 @@ def _main_isolated(monitor):
                "git -C {} reset --hard".format(str(f4_target)), "deny", cwd=rp)
         if len(_recovery_refs(f4_target)) != f4_before_target + 1:
             failures.append("(f4-C-target-ref) the recovery snapshot for a -C-redirected discard must land "
-                            "in the -C TARGET repo (finding 4): expected exactly one new ref there")
+                            "in the -C TARGET repo: expected exactly one new ref there")
         if len(_recovery_refs(repo)) != f4_before_sess:
             failures.append("(f4-C-not-cwd) the recovery snapshot for a -C-redirected discard must NOT land "
                             "in the session cwd repo (finding 4; the old code snapshotted the wrong repo)")
@@ -8283,7 +8283,7 @@ def _main_isolated(monitor):
         if "prsunc" not in _f4banner:
             failures.append("(f4-note-rule) the same-repo -C redirect banner must name the prsunc rule")
 
-        # === ROUND-2 FINDING 5: the recovery snapshot preserves the STAGED (index) state as the ref's
+        # === the recovery snapshot preserves the STAGED (index) state as the ref's
         # === SECOND PARENT, so staged-only content a `git restore --staged` discards stays recoverable.
         try:
             f5 = _init_repo(tmp / "f5")
@@ -8300,13 +8300,13 @@ def _main_isolated(monitor):
                             "got {} {}".format(_f5st, _f5info))
         else:
             if not _f5info.get("staged"):
-                failures.append("(f5-staged-flag) the snapshot must flag a distinct STAGED state (finding 5)")
+                failures.append("(f5-staged-flag) the snapshot must flag a distinct STAGED state")
             _f5staged = subprocess.run(
                 ["git", "-C", str(f5), "show", "{}^2:file.txt".format(_f5info["ref"])],
                 capture_output=True, text=True, timeout=30, env=git_fixture_env())
             if _f5staged.returncode != 0 or _f5staged.stdout != "STAGED-A\n":
                 failures.append("(f5-staged-recover) the discarded STAGED version A must be recoverable from "
-                                "the ref's second parent (finding 5); got rc={} out={!r}"
+                                "the ref's second parent; got rc={} out={!r}"
                                 .format(_f5staged.returncode, _f5staged.stdout))
             _f5wt = subprocess.run(
                 ["git", "-C", str(f5), "show", "{}:file.txt".format(_f5info["ref"])],
@@ -8315,7 +8315,7 @@ def _main_isolated(monitor):
                 failures.append("(f5-worktree) the snapshot's primary tree must hold the worktree version B; "
                                 "got {!r}".format(_f5wt.stdout))
 
-        # === ROUND-2 FINDING 6: 'git stash drop'/'clear' (NOT reflog-recoverable afterwards) preserves every
+        # === 'git stash drop'/'clear' (NOT reflog-recoverable afterwards) preserves every
         # === stash entry under durable refs BEFORE allowing; denies when it cannot preserve them.
         try:
             f6 = _init_repo(tmp / "f6")
@@ -8339,7 +8339,7 @@ def _main_isolated(monitor):
         _f6_new = [r for r in _recovery_refs(f6) if r.endswith(("stash0", "stash1"))]
         if len(_recovery_refs(f6)) != _f6_before + 2 or len(_f6_new) != 2:
             failures.append("(f6-clear-refs) stash clear must preserve BOTH stash entries under durable "
-                            "refs before allowing (finding 6); expected two new refs")
+                            "refs before allowing; expected two new refs")
         else:
             # the preserved MOST-RECENT stash (stash@{0} = s2) must be recoverable from its ref
             _f6ref0 = sorted(_f6_new)[0]  # ...-stash0
@@ -8347,7 +8347,7 @@ def _main_isolated(monitor):
                                      capture_output=True, text=True, timeout=30, env=git_fixture_env())
             if "stash-2" not in _f6show.stdout:
                 failures.append("(f6-clear-recover) a preserved stash entry must carry the stashed worktree "
-                                "content (finding 6); got {!r}".format(_f6show.stdout))
+                                "content; got {!r}".format(_f6show.stdout))
         # stash drop on a repo with a stash also preserves it before allowing.
         (f6 / "file.txt").write_text("committed line\nstash-3\n", encoding="utf-8")
         _git(f6, "stash", "push", "-m", "s3", env_identity=True)
@@ -8358,12 +8358,12 @@ def _main_isolated(monitor):
         # which one drop targets), so the count rises by at least one; without the fix it would not rise.
         if len(_recovery_refs(f6)) <= _f6_before2:
             failures.append("(f6-drop-refs) stash drop must preserve the stash entries under durable refs "
-                            "before allowing (finding 6); expected at least one new recovery ref")
+                            "before allowing; expected at least one new recovery ref")
         # No session cwd: the stash entries cannot be preserved -> DENY (was an allow-note in round 1).
         expect("(f6-clear-nocwd) stash clear with no session cwd DENIES (cannot preserve the stash)",
                "git stash clear", "deny")
 
-        # === ROUND-2 FINDING 7: 'git clean' whose worktree is UNRESOLVABLE DENIES for parity with
+        # === 'git clean' whose worktree is UNRESOLVABLE DENIES for parity with
         # === reset/checkout (was an allow-note via the role-ask fall-through with no recovery snapshot).
         expect("(f7-clean-nocwd) git clean with no resolvable worktree DENIES (parity with reset/checkout)",
                "git clean -fd", "deny")
@@ -8413,7 +8413,7 @@ def _main_isolated(monitor):
         # Blocker 5: abbreviated destructive options are recognized by prefix, so they do not slip through
         # as inert tokens on the dirty tree.
         expect("(b5-a) checkout --for (abbrev --force) denies", "git checkout --for", "deny", cwd=rp)
-        expect("(b5-b) checkout --patc (abbrev --patch) denies (R11 item 4)", "git checkout --patc", "deny", cwd=rp)
+        expect("(b5-b) checkout --patc (abbrev --patch) denies", "git checkout --patc", "deny", cwd=rp)
         expect("(b5-c) switch --dis (abbrev --discard-changes) denies", "git switch --dis other", "deny",
                cwd=rp)
         expect("(b5-d) branch --del --force (abbrev) allows with a note", "git branch --del --force other", "allow-note",
@@ -8454,7 +8454,7 @@ def _main_isolated(monitor):
         expect("(b8-status) wrapper over a non-lossy git command allows", "command git status", "allow",
                cwd=rp)
 
-        # === EN-6 ULTRA-CONSERVATIVE pristine gate: any shell structure ASKS (never a silent allow) =
+        # === ULTRA-CONSERVATIVE pristine gate: any shell structure ASKS (never a silent allow) =
         # A lossy-verb command reaches the clean probe ONLY when it is a PRISTINE SINGLE BARE 'git <verb>'
         # invocation - no shell metacharacter anywhere (even quoted), no reserved word, no wrapper/redirect/
         # compound, and a command word that is literally 'git'. Each form below hides a real reset --hard
@@ -8560,7 +8560,7 @@ def _main_isolated(monitor):
         expect("(cfg-c) checkout -f on config-hidden untracked tree denies", "git checkout -f", "deny",
                cwd=rh)
 
-        # === malformed / robustness (F-66.7) ================================================
+        # === malformed / robustness ================================================
         # A malformed tool_input (a string, not a dict) is a Bash call whose command cannot be read: a
         # cannot-evaluate input, NOT the true fail-open boundary (which is a non-Bash tool, a non-git
         # command, or no recognized lossy verb). A discard could hide in what was not read, so it DENIES
@@ -8690,7 +8690,7 @@ def _main_isolated(monitor):
                 failures.append("(role) _discard_role({!r}, {!r}) role: expected {}, got {}"
                                 .format(sub, args, want_role, got_role))
 
-        # === EN-6 recovery/snapshot layer ============================================================
+        # === recovery/snapshot layer ============================================================
         # The layer takes an INERT snapshot (a private refs/aiqt-recovery/* ref over a temp-index tree)
         # before returning its decision for a snapshottable in-scope verb on a not-provably-clean, resolvable
         # tree, on the ALLOW and ASK paths alike, and NEVER touches the real index/worktree/HEAD. Each case
@@ -9474,7 +9474,7 @@ def _main_isolated(monitor):
         # class at once (rounds 4-5 kept finding new members: GIT_CONFIG_*, GIT_TRACE*, GIT_ATTR_SOURCE).
         # The ambient GIT_NO_LAZY_FETCH/GIT_TERMINAL_PROMPT and the ambient git identity (GIT_AUTHOR_*/
         # GIT_COMMITTER_*) are set the WRONG way here to prove the re-assertion (Class B) OVERRIDES an ambient
-        # value, not merely fills an absent one; the fixed recovery identity (F-106) must WIN over an ambient
+        # value, not merely fills an absent one; the fixed recovery identity must WIN over an ambient
         # user identity, so a recovery commit is deterministically the guard's and never depends on ambient
         # or on-disk identity that a fresh install / CI runner may lack.
         scrub_in = {"GIT_FOO": "bar", "GIT_ATTR_SOURCE": "HEAD", "GIT_DIR": "decoy",
@@ -9676,7 +9676,7 @@ def _main_isolated(monitor):
             failures.append("(rec-c6-nosnap-snap) expected a recovery ref: any non-pristine in-scope command "
                             "on a dirty tree is snapshot-backed (accepted over-snapshot)")
 
-        # ROUND-3 FINDING 1: a NON-PRISTINE discard whose effective worktree is a -C redirect or a cd'd-into
+        # a NON-PRISTINE discard whose effective worktree is a -C redirect or a cd'd-into
         # target must snapshot THAT target (so the recovery ref contains the state the command discards), not
         # blindly the session cwd. Revert _discard_positive_grammar and the ref lands only in the session
         # repo while the target (T) has NONE -> the note would falsely claim recovery. Discriminates on ref
@@ -9698,7 +9698,7 @@ def _main_isolated(monitor):
             failures.append("(r3f1b-snap) expected a recovery ref in the cd'd-into TARGET repo T2 (finding 1: "
                             "the 'cd T2 && git restore' discard was snapshotting the session cwd)")
 
-        # ROUND-3 FINDING 2: a redirected/compound 'git stash drop'/'clear' must PRESERVE the stash of the
+        # a redirected/compound 'git stash drop'/'clear' must PRESERVE the stash of the
         # repo it actually clears (a refs/aiqt-recovery/*-stash* ref in THAT repo), or DENY. Revert the
         # non-pristine stash handling / the redirect-path stash handling and the stash is not preserved (no
         # stash ref) while the note still claims recovery. Discriminates on the presence of a stash ref.
@@ -9721,7 +9721,7 @@ def _main_isolated(monitor):
             failures.append("(r3f2b-snap) expected a stash recovery ref for the compound 'git stash clear; :' "
                             "(finding 2: the compound stash clear preserved no stash)")
 
-        # ROUND-3 FINDING 3: when the pure-index (staged) write-tree FAILS while staged content is present,
+        # when the pure-index (staged) write-tree FAILS while staged content is present,
         # the snapshot cannot contain the staged-only payload a --staged/--cached/default-reset discard drops,
         # so it must FAIL (the caller DENIES) rather than advertise a snapshot missing it. Fault-inject the
         # FIRST write-tree (the pure-index capture) to fail. Revert the 'elif "staged" in classes' guard and
@@ -9749,9 +9749,9 @@ def _main_isolated(monitor):
             aiqt_hooks._recovery_git = _orig_rg
         if _r3f3_res[0] != "fail":
             failures.append("(r3f3) with staged content and a failing pure-index write-tree, _take_snapshot "
-                            "must FAIL (fail closed), got {!r} (finding 3)".format(_r3f3_res[0]))
+                            "must FAIL (fail closed), got {!r}".format(_r3f3_res[0]))
 
-        # ROUND-3 FINDING 8: in an UNBORN-HEAD repo the staged (index) commit is the snapshot's FIRST parent
+        # in an UNBORN-HEAD repo the staged (index) commit is the snapshot's FIRST parent
         # (there is no HEAD parent), so the recovery pointer must advertise '^1', not '^2'. Stage a file, then
         # differ the worktree so the staged content is staged-only; take the snapshot and confirm the pointer
         # names '^1' and that '<ref>^1' resolves to the staged content (while '^2' does not exist). Revert the
@@ -9770,19 +9770,19 @@ def _main_isolated(monitor):
         else:
             _info = _r3f8_res[1]
             if _info.get("staged_pointer") != "^1":
-                failures.append("(r3f8-ptr) unborn-HEAD staged parent must be '^1', got {!r} (finding 8)"
+                failures.append("(r3f8-ptr) unborn-HEAD staged parent must be '^1', got {!r}"
                                 .format(_info.get("staged_pointer")))
             _show1 = subprocess.run(["git", "-C", str(r3f8), "show", "{}^1:f".format(_info["ref"])],
                                     capture_output=True, text=True, timeout=30, env=git_fixture_env())
             if _show1.returncode != 0 or _show1.stdout != "STAGED-ONLY\n":
                 failures.append("(r3f8-resolve) '<ref>^1:f' must resolve to the staged-only content on an "
-                                "unborn HEAD (finding 8), got rc={} {!r}".format(_show1.returncode,
+                                "unborn HEAD, got rc={} {!r}".format(_show1.returncode,
                                                                                  _show1.stdout))
             if "^1" not in aiqt_hooks._recovery_pointer(_info):
                 failures.append("(r3f8-pointer-text) the recovery pointer must advertise '^1' on an unborn "
-                                "HEAD (finding 8)")
+                                "HEAD")
 
-        # === ROUND-6 findings 3/4/6/7: fail-closed the git_discard forms that lost a redirected target =====
+        # === fail-closed the git_discard forms that lost a redirected target =====
         # A separate DIRTY target repo T the session cwd (repo, dirty) is NOT: the old code snapshotted the
         # session cwd for these forms, whose ref would NOT contain T's discarded state. Each new DENY flips to
         # 'allow' (the old unsound behaviour) if its fix is reverted, and no session-cwd ref is created.
@@ -9796,13 +9796,13 @@ def _main_isolated(monitor):
         # FINDING 3a: a lossy git discard INSIDE a subshell that cd'd to T loses T; the walk cannot model the
         # subshell cwd -> DENY (was allow-with-a-session-cwd snapshot). No ref may land in the session repo.
         _r6_sess_before = len(_recovery_refs(repo))
-        expect("(r6-f3-subshell) '(cd T && git restore)' whose subshell cd moves the target DENIES (finding 3)",
+        expect("(r6-f3-subshell) '(cd T && git restore)' whose subshell cd moves the target DENIES",
                "(cd {} && git restore -- file.txt)".format(r6tc), "deny", cwd=rp)
         if len(_recovery_refs(repo)) != _r6_sess_before:
             failures.append("(r6-f3-subshell-noref) a denied subshell-redirected discard must NOT snapshot the "
-                            "session cwd (finding 3)")
+                            "session cwd")
         # FINDING 3b: a WRAPPED git carrying a -C redirect to T loses T -> DENY (was allow-with-session-snap).
-        expect("(r6-f3-wrapper) 'env git -C T restore' (wrapped + redirect) DENIES (finding 3)",
+        expect("(r6-f3-wrapper) 'env git -C T restore' (wrapped + redirect) DENIES",
                "env git -C {} restore -- file.txt".format(r6tc), "deny", cwd=rp)
         # A subshell, substitution or wrapper reaching a git word is outside the closed
         # grammar even with NO redirect, so these former snapshot-then-allow controls now DENY by design.
@@ -9830,7 +9830,7 @@ def _main_isolated(monitor):
         expect("(r6-f5-gitdir-staged) 'git --git-dir=T/.git restore --staged' to a DIFFERENT repo DENIES "
                "(finding 5)", "git --git-dir={}/.git restore --staged -- file.txt".format(str(r6stg)),
                "deny", cwd=rp)
-        # === PR #423 ROUND-4 (codex findings 1-3, claude MAJOR-1): wrapped and stash discards preserve
+        # === wrapped and stash discards preserve
         # === or deny. Each vector below flips on the pinned base commit.
         # (r9f1) A WRAPPED work-losing verb is outside the closed grammar even after a
         # resolvable cd, so it DENIES and takes no snapshot (the plain 'cd B && git reset --hard' spelling
@@ -10018,7 +10018,7 @@ def _main_isolated(monitor):
             aiqt_hooks._recovery_git = _orig_rg6
         if _r6f6_res[0] != "fail":
             failures.append("(r6-f6-staged-ct) a failing staged (index) commit-tree with distinct staged "
-                            "content must FAIL the snapshot (fail closed), got {!r} (finding 6)"
+                            "content must FAIL the snapshot (fail closed), got {!r}"
                             .format(_r6f6_res[0]))
         # FINDING 7: a recovery snapshot taken against a redirected TARGET repo advertises restore commands
         # bound to that repo ('git -C <target> ...'), not a bare form that would fail from the session cwd.
@@ -10030,10 +10030,10 @@ def _main_isolated(monitor):
             _ptr = aiqt_hooks._recovery_pointer(_r6f7[1])
             if "git -C {}".format(r6tc) not in _ptr:
                 failures.append("(r6-f7-pointer-repo) the recovery pointer must bind its restore command to "
-                                "the target repo 'git -C {} ...' (finding 7); got {!r}".format(r6tc, _ptr))
+                                "the target repo 'git -C {} ...'; got {!r}".format(r6tc, _ptr))
             if "restore it with 'git checkout " in _ptr:
                 failures.append("(r6-f7-pointer-bare) the recovery pointer must NOT advertise a bare "
-                                "'git checkout <ref>' that fails from another cwd (finding 7)")
+                                "'git checkout <ref>' that fails from another cwd")
 
         # === ROUND-7 codex findings 3/4: advertised recovery commands shell-quote the interpolated repo
         # PATH (a space/metacharacter cannot break or inject), and the redirected-stash recovery command
@@ -10059,7 +10059,7 @@ def _main_isolated(monitor):
             _cf3q = shlex.quote(_cf3top)
             if _cf3q not in _cf3snap[1]["restore"]:
                 failures.append("(cf3-restore-quoted) the advertised restore command must shell-quote the "
-                                "repo PATH (codex finding 3); got {!r}".format(_cf3snap[1]["restore"]))
+                                "repo PATH; got {!r}".format(_cf3snap[1]["restore"]))
             if "git -C {} checkout".format(_cf3top) in _cf3snap[1]["restore"]:
                 failures.append("(cf3-restore-unquoted) the restore command interpolated the repo path "
                                 "UNQUOTED (a space would break it, a ';' inject); got {!r}"
@@ -10075,7 +10075,7 @@ def _main_isolated(monitor):
             _cf3bind = "git -C {} stash apply".format(shlex.quote(str(cf3)))
             if _cf3bind not in _cf3msg:
                 failures.append("(cf4-stash-bound) the stash recovery command must bind to the target repo "
-                                "'git -C <quoted repo> stash apply' (codex finding 4); got {!r}"
+                                "'git -C <quoted repo> stash apply'; got {!r}"
                                 .format(_cf3msg))
 
         # === ROUND-7 codex finding 1: git_discard resolves the REPO an index/ref/stash discard acts on from
@@ -10105,17 +10105,17 @@ def _main_isolated(monitor):
                             "(codex finding 1): expected a recovery ref in cf1-idx, found none")
         if _recovery_refs(cf1_decoy):
             failures.append("(cf1a-not-decoy) a --work-tree index discard must NOT snapshot the --work-tree "
-                            "value repo (codex finding 1): found a stray recovery ref in cf1-decoy")
+                            "value repo: found a stray recovery ref in cf1-decoy")
         # F1b: 'git --work-tree=<decoy> stash clear' from cf1_stash must preserve the AMBIENT repo's stash,
         # NOT the decoy's. The ambient repo gains a durable '-stash' recovery ref; the decoy stays empty.
         expect("(cf1b-stash-allows) --work-tree stash clear allows (preserve the ambient repo's stash)",
                "git --work-tree={} stash clear".format(str(cf1_decoy)), "allow-note", cwd=str(cf1_stash))
         if not any(r.endswith("stash0") or "stash" in r for r in _recovery_refs(cf1_stash)):
             failures.append("(cf1b-stash-ambient) a --work-tree stash clear must preserve the AMBIENT repo's "
-                            "stash (codex finding 1): expected a stash recovery ref in cf1-stash, found none")
+                            "stash: expected a stash recovery ref in cf1-stash, found none")
         if _recovery_refs(cf1_decoy):
             failures.append("(cf1b-not-decoy) a --work-tree stash clear must NOT preserve the --work-tree "
-                            "value repo's stash (codex finding 1): stray ref in cf1-decoy")
+                            "value repo's stash: stray ref in cf1-decoy")
         # F1c: 'git --work-tree=<decoy repo, OUTSIDE the ambient repo> reset --hard' destroys WORKTREE content
         # in the decoy while the index stays in the ambient repo: a single snapshot cannot capture the split,
         # so it DENIES. (Before the fix it snapshotted the clean decoy and allow-noted a false recovery.)
@@ -10566,12 +10566,12 @@ def _main_isolated(monitor):
         _G423_IDX_RE = re.compile(r"[0-7]{6} [0-9a-f]{40} [0-3]\t.+")
 
         def _g423_hex40(s):
-            # R8 (codex 7): a full object-id FORMAT check; a 40-char non-hex string is malformed output,
+            # a full object-id FORMAT check; a 40-char non-hex string is malformed output,
             # never evidence.
             return isinstance(s, str) and re.fullmatch(r"[0-9a-f]{40}", s) is not None
 
         def _g423_blob_id(text):
-            # R9 (codex 4): the expected blob id, derived INDEPENDENTLY of git (the loose-object
+            # the expected blob id, derived INDEPENDENTLY of git (the loose-object
             # header sha1 over the exact bytes), so the index comparison cannot inherit a fixture
             # fault from the probe side.
             data = text.encode("utf-8")
@@ -10586,7 +10586,7 @@ def _main_isolated(monitor):
                     "staged.txt": _g423_blob_id("staged " + tag + chr(10))}
 
         def _g423_index_ok(out, want):
-            # R8 (codex 7) reworked by R9 (codex 4): every ls-files --stage record must be
+            # every ls-files --stage record must be
             # well-formed AND the parsed records must BE the expected index - the exact path set,
             # the plain-blob mode, stage zero, and the independently derived blob id per path.
             # Format acceptance alone (or a before/after equality) can hold while the intended
@@ -10671,7 +10671,7 @@ def _main_isolated(monitor):
         g423_S_pre = _g423_prep(g423_S, "S")
         g423_B_pre = _g423_prep(g423_B, "B")
         for _pname, _pstate in (("S", g423_S_pre), ("B", g423_B_pre)):
-            # R8 (codex 7): assert the EXPECTED fixture population (two stash creations in _g423_prep),
+            # assert the EXPECTED fixture population (two stash creations in _g423_prep),
             # not merely a nonempty stash, so a population mismatch fails rather than weakening the
             # preservation comparison below.
             if len(_pstate["stash"]) != 2:
@@ -10738,19 +10738,19 @@ def _main_isolated(monitor):
         # arbitrary command string; the subcommand also opens network access), and every remaining
         # read-only subcommand accepts only its vetted exact option spellings. One deny vector per
         # form, each asserting the OUTCOME through g423_deny, never only the reason text.
-        g423_deny("(g423-deny-lsremote-up) ls-remote --upload-pack is gone with its subcommand (R9 item 1)",
+        g423_deny("(g423-deny-lsremote-up) ls-remote --upload-pack is gone with its subcommand",
                   "git ls-remote --upload-pack 'git -C {} stash clear' {} && true"
                   .format(str(g423_B), str(g423_S)), "ls-remote", rp)
-        g423_deny("(g423-deny-lsremote-u) the -u spelling and the bare subcommand are gone too (R9 item 1)",
+        g423_deny("(g423-deny-lsremote-u) the -u spelling and the bare subcommand are gone too",
                   "git ls-remote -u 'g423up' 'g423url' && git stash list", "ls-remote", rp)
-        g423_deny("(g423-deny-grep-pager) grep --open-files-in-pager runs a program per match (R9 item 1)",
+        g423_deny("(g423-deny-grep-pager) grep --open-files-in-pager runs a program per match",
                   "git grep --open-files-in-pager=g423pager -e stash && :", "--open-files-in-pager", rp)
-        g423_deny("(g423-deny-grep-O) the attached -O spelling denies as unvetted (R9 item 1)",
+        g423_deny("(g423-deny-grep-O) the attached -O spelling denies as unvetted",
                   "git grep -Og423pager stash && :", "-Og423pager", rp)
-        g423_deny("(g423-deny-log-output) log --output writes a file, unvetted (R9 item 1)",
+        g423_deny("(g423-deny-log-output) log --output writes a file, unvetted",
                   "git log --output=g423out --grep=stash && :", "--output=g423out", rp)
         g423_deny("(g423-deny-ro-abbrev) a git-accepted long-option abbreviation is not a vetted exact "
-                  "spelling (R9 item 1)",
+                  "spelling",
                   "git status --porcel && git stash list", "--porcel", rp)
         # R11 MINOR: the --porcelain value validator enumerates the four documented spellings
         # (v1, v2, 1, 2); each in-bound spelling is a control, and each neighbour just outside
@@ -10781,35 +10781,35 @@ def _main_isolated(monitor):
         # R11 items 3-4). Each deny below
         # asserts the OUTCOME and is red (an allow) on the R9 delivery.
         g423_deny("(g423-deny-pretty-sep) a separated word is never a --pretty value: the hidden "
-                  "--output denies (R10 item 1)",
+                  "--output denies",
                   "git log --pretty --output={}/g423out && git stash list".format(str(g423_S)),
                   "--pretty", rp)
-        g423_deny("(g423-deny-format-sep) the --format spelling of the same hole denies (R10 item 1)",
+        g423_deny("(g423-deny-format-sep) the --format spelling of the same hole denies",
                   "git log --format --output={}/g423out && git stash list".format(str(g423_S)),
                   "--format", rp)
         g423_deny("(g423-deny-show-extdiff) show is delisted: --pretty --ext-diff cannot enable an "
-                  "external diff program (R10 item 1)",
+                  "external diff program",
                   "git show --pretty --ext-diff && git stash list", "'show'", rp)
         g423_deny("(g423-deny-diff-p) diff is delisted with -p/--patch everywhere (textconv and "
-                  "external-diff drivers run on patch output) (R10 item 1)",
+                  "external-diff drivers run on patch output)",
                   "git diff -p && git stash list", "'diff'", rp)
         g423_deny("(g423-deny-help) help is delisted (it launches a viewer, and a configured "
-                  "man.<tool>.cmd is shell-evaluated) (R10 item 1)",
+                  "man.<tool>.cmd is shell-evaluated)",
                   "git help stash && :", "'help'", rp)
         g423_deny("(g423-deny-formatG) a %G signature placeholder is outside the --format value "
-                  "allowlist (it runs the configured signature program) (R10 item 1)",
+                  "allowlist (it runs the configured signature program)",
                   "git log '--format=%G?' && git stash list", "--format=%G?", rp)
         g423_deny("(g423-deny-stashlist-arg) an explicit stash list carries NO argument: its "
-                  "arguments ride to git log around the vetted grammar (R10 item 1)",
+                  "arguments ride to git log around the vetted grammar",
                   "git stash list --output={}/g423out && :".format(str(g423_S)), "--output", rp)
         g423_deny("(g423-deny-stashshow-p) an explicit stash show carries no option-shaped "
-                  "argument: its options ride to git diff (R10 item 1)",
+                  "argument: its options ride to git diff",
                   "git stash show -p && :", "stash show -p", rp)
         g423_note("(g423-allow-log-oneline) the bare 'log --oneline -1' control still allows "
                   "(R10 item 1)",
                   "git log --oneline -1 && git stash list", rp)
         g423_note("(g423-allow-pretty-joined) the joined '--pretty=oneline -1' control still "
-                  "allows (R10 item 1)",
+                  "allows",
                   "git log --pretty=oneline -1 && git stash list", rp)
         # R11 DECIDED item 1 (codex BLOCKER 1): the --pretty/--format value is EXACTLY one of the
         # seven named formats or a format:/tformat:-prefixed placeholder string. A %-free value
@@ -10819,22 +10819,22 @@ def _main_isolated(monitor):
         # program. The five name denies below are red (an allow) on the R10 delivery; the seven
         # named-format controls, the format:%H control and the %G/t?format guards stay green.
         g423_deny("(g423-deny-pretty-name) an arbitrary --pretty name denies: a pretty.<name> "
-                  "config alias could carry %G (R11 item 1)",
+                  "config alias could carry %G",
                   "git log --pretty=g423sig -1 && git stash list", "--pretty=g423sig", rp)
         g423_deny("(g423-deny-format-name) the --format spelling of the same hole denies "
                   "(R11 item 1)",
                   "git log --format=g423sig -1 && git stash list", "--format=g423sig", rp)
         g423_deny("(g423-deny-pretty-email) the built-in name email is outside the seven named "
-                  "formats (R11 item 1)",
+                  "formats",
                   "git log --pretty=email -1 && git stash list", "--pretty=email", rp)
         g423_deny("(g423-deny-pretty-mboxrd) the built-in name mboxrd is outside the seven named "
-                  "formats (R11 item 1)",
+                  "formats",
                   "git log --pretty=mboxrd -1 && git stash list", "--pretty=mboxrd", rp)
         g423_deny("(g423-deny-pretty-abbrev) an abbreviation of a named format denies: git reads "
-                  "a prefix, this grammar does not (R11 item 1)",
+                  "a prefix, this grammar does not",
                   "git log --pretty=one -1 && git stash list", "--pretty=one", rp)
         for _g423fmt in ("oneline", "short", "medium", "full", "fuller", "reference", "raw"):
-            g423_note("(g423-allow-pretty-{}) the exact named format {} still allows (R11 item 1)"
+            g423_note("(g423-allow-pretty-{}) the exact named format {} still allows"
                       .format(_g423fmt, _g423fmt),
                       "git log --pretty={} -1 && git stash list".format(_g423fmt), rp)
         g423_note("(g423-allow-format-prefixed) a format:-prefixed placeholder string allows "
@@ -10851,7 +10851,7 @@ def _main_isolated(monitor):
                   "(R11 item 2)",
                   "git for-each-ref --sort=signature:grade && git stash list",
                   "--sort=signature:grade", rp)
-        g423_deny("(g423-deny-fer-sort-rsig) the reverse -signature sort key denies (R11 item 2)",
+        g423_deny("(g423-deny-fer-sort-rsig) the reverse -signature sort key denies",
                   "git for-each-ref --sort=-signature:grade && git stash list",
                   "--sort=-signature:grade", rp)
         g423_deny("(g423-deny-fer-sort-vsig) the v: version-prefixed signature sort key denies "
@@ -10869,19 +10869,19 @@ def _main_isolated(monitor):
         # rode the pristine allow path to a SILENT allow (stash list --output truncates its target
         # through git log; stash show -p selects the delisted patch-output class), so both denies
         # are red by outcome on R10. No metacharacter and no trailing join: these stay pristine.
-        expect("(g423-deny-stashlist-arg-bare) a PRISTINE stash list --output denies (R11 item 3)",
+        expect("(g423-deny-stashlist-arg-bare) a PRISTINE stash list --output denies",
                "git stash list --output={}/g423out".format(str(g423_S)), "deny", cwd=rp)
-        expect("(g423-deny-stashshow-p-bare) a PRISTINE stash show -p denies (R11 item 3)",
+        expect("(g423-deny-stashshow-p-bare) a PRISTINE stash show -p denies",
                "git stash show -p", "deny", cwd=rp)
         # R12 DECIDED item 4 coverage: the stash list/show argument rule holds on the pristine
         # path for the -C spelling (the -C value is skipped, so the subcommand still resolves to
         # stash) and for the bare retained '--' (git stash show then selects patch output
         # itself). Both were already denied on the R11 delivery; the vectors pin the spellings.
-        expect("(g423-deny-stashlist-c-bare) a PRISTINE -C stash list --output denies (R12 item 4)",
+        expect("(g423-deny-stashlist-c-bare) a PRISTINE -C stash list --output denies",
                "git -C {} stash list --output=g423x".format(rp), "deny", cwd=rp)
-        expect("(g423-deny-stashshow-dd-bare) a PRISTINE stash show -- denies (R12 item 4)",
+        expect("(g423-deny-stashshow-dd-bare) a PRISTINE stash show -- denies",
                "git stash show --", "deny", cwd=rp)
-        # R11 DECIDED item 4: -p/--patch on the lossy verbs selects interactive patch mode, whose
+        # -p/--patch on the lossy verbs selects interactive patch mode, whose
         # hunks pass through the configured interactive.diffFilter, so it DENIES on the grammar
         # path and the pristine path alike (the pristine flips are (patch-a)/(patch-b)/(b5-b)
         # above). Each compound deny below was snapshot-then-allowed (or stash-push allowed) on
@@ -10889,21 +10889,21 @@ def _main_isolated(monitor):
         # positional stash reference and nothing else, so a retained "--" (git stash show then
         # selects patch output itself) and a second positional deny; the one-reference control
         # stays green on both ends of that bound (zero and one allow, two denies).
-        g423_deny("(g423-deny-checkout-p) checkout -p denies in a compound (R11 item 4)",
+        g423_deny("(g423-deny-checkout-p) checkout -p denies in a compound",
                   "git checkout -p && :", "git checkout -p", rp)
-        g423_deny("(g423-deny-restore-p) restore -p denies in a compound (R11 item 4)",
+        g423_deny("(g423-deny-restore-p) restore -p denies in a compound",
                   "git restore -p && :", "git restore -p", rp)
-        g423_deny("(g423-deny-reset-p) reset -p denies in a compound (R11 item 4)",
+        g423_deny("(g423-deny-reset-p) reset -p denies in a compound",
                   "git reset -p && :", "git reset -p", rp)
-        g423_deny("(g423-deny-stash-p) an implicit-push stash -p denies (R11 item 4)",
+        g423_deny("(g423-deny-stash-p) an implicit-push stash -p denies",
                   "git stash -p && :", "git stash -p", rp)
         g423_deny("(g423-deny-stashpush-p) stash push -p denies naming the spelling typed, op "
                   "word included (R11 item 4; R12 item 4)",
                   "git stash push -p && :", "git stash push -p", rp)
         g423_deny("(g423-deny-stashshow-dd) a retained stash show option terminator denies: git "
-                  "stash show -- selects patch output (R11 item 4)",
+                  "stash show -- selects patch output",
                   "git stash show -- && :", "stash show --", rp)
-        g423_deny("(g423-deny-stashshow-two) a second stash show positional denies (R11 item 4)",
+        g423_deny("(g423-deny-stashshow-two) a second stash show positional denies",
                   "git stash show 0 1 && :", "stash show 1", rp)
         g423_note("(g423-allow-stashshow-ref) stash show with ONE positional stash reference "
                   "still allows (R11 item 4 allow control)",
@@ -10919,15 +10919,15 @@ def _main_isolated(monitor):
                   "(R12 item 1)",
                   "git branch --sort=signature:grade && git stash list", "--sort=signature:grade",
                   rp)
-        g423_deny("(g423-deny-branch-sortrsig) the reverse -signature sort key denies (R12 item 1)",
+        g423_deny("(g423-deny-branch-sortrsig) the reverse -signature sort key denies",
                   "git branch --sort=-signature:grade && :", "--sort=-signature:grade", rp)
         g423_deny("(g423-deny-branch-sortvsig) the version v:signature sort key denies "
                   "(R12 item 1)",
                   "git branch --sort=v:signature:grade && :", "--sort=v:signature:grade", rp)
-        g423_deny("(g423-deny-branch-format) branch --format placeholders deny (R12 item 1)",
+        g423_deny("(g423-deny-branch-format) branch --format placeholders deny",
                   "git branch '--format=%(signature)' && :", "--format=%(signature)", rp)
         g423_deny("(g423-deny-branch-editdesc) branch --edit-description launches the editor; "
-                  "unlisted, denies (R12 item 1)",
+                  "unlisted, denies",
                   "git branch --edit-description && :", "--edit-description", rp)
         g423_deny("(g423-deny-branch-list) branch --list is the listing/format family; unlisted "
                   "(R12 item 1)",
@@ -10942,18 +10942,18 @@ def _main_isolated(monitor):
         # (branch and the stash drop leg have theirs above), so widening any single verb allowlist
         # cannot leave the suite green. Each was already denied on the R12 delivery (the tables are
         # unchanged); the vectors pin the spellings.
-        g423_deny("(g423-deny-checkout-opt) an unlisted checkout option denies (R13 item 3)",
+        g423_deny("(g423-deny-checkout-opt) an unlisted checkout option denies",
                   "git checkout --track origin/b && :", "--track", rp)
-        g423_deny("(g423-deny-switch-opt) an unlisted switch option denies (R13 item 3)",
+        g423_deny("(g423-deny-switch-opt) an unlisted switch option denies",
                   "git switch --track origin/b && :", "--track", rp)
-        g423_deny("(g423-deny-restore-opt) an unlisted restore option denies (R13 item 3)",
+        g423_deny("(g423-deny-restore-opt) an unlisted restore option denies",
                   "git restore --pathspec-file-nul f.txt && :", "--pathspec-file-nul", rp)
-        g423_deny("(g423-deny-reset-opt) an unlisted reset option denies (R13 item 3)",
+        g423_deny("(g423-deny-reset-opt) an unlisted reset option denies",
                   "git reset --pathspec-file-nul && :", "--pathspec-file-nul", rp)
-        g423_deny("(g423-deny-rm-opt) an unlisted rm option denies (R13 item 3)",
+        g423_deny("(g423-deny-rm-opt) an unlisted rm option denies",
                   "git rm --pathspec-file-nul f.txt && :", "--pathspec-file-nul", rp)
         g423_deny("(g423-deny-clean-opt) git clean --interactive is unlisted and interactive; "
-                  "denies (R13 item 3)",
+                  "denies",
                   "git clean --interactive && :", "--interactive", rp)
         # R12 DECIDED item 3 (codex MAJOR 2): a compound that CONSUMES a stash entry (stash pop,
         # stash branch) together with another lossy verb denies - a successful pop applies then
@@ -10961,7 +10961,7 @@ def _main_isolated(monitor):
         # entry is gone and the pre-command snapshot cannot contain it. A consuming command
         # alone, or joined only with read-only segments, keeps its handling. Both denies are red
         # (allow-notes) on the R11 delivery.
-        g423_deny("(g423-deny-pop-hard) stash pop then reset --hard denies (R12 item 3)",
+        g423_deny("(g423-deny-pop-hard) stash pop then reset --hard denies",
                   "git stash pop && git reset --hard", "git stash pop", rp)
         g423_deny("(g423-deny-stashbranch-hard) stash branch then reset --hard denies "
                   "(R12 item 3)",
@@ -10970,17 +10970,17 @@ def _main_isolated(monitor):
                   "(R12 item 3 control)",
                   "git stash pop && :", rp)
         g423_note("(g423-allow-pop-readonly) a stash pop with a read-only segment keeps its "
-                  "handling (R12 item 3 control)",
+                  "handling",
                   "git stash pop && git log --oneline -1", rp)
-        # R13 DECIDED item 3: the read-only stash forms (list, show) are NOT a lossy verb for the
+        # the read-only stash forms (list, show) are NOT a lossy verb for the
         # stash-consume rule - a pop joined with them destroys nothing - while a pop joined with a
         # genuinely lossy stash form (apply rewrites the worktree) still denies. Both allows are
         # red (stashconsume denies) on the R12 delivery.
         g423_note("(g423-allow-pop-stashlist) a stash pop with a stash list segment keeps its "
-                  "handling: list is read-only (R13 item 3)",
+                  "handling: list is read-only",
                   "git stash pop && git stash list", rp)
         g423_note("(g423-allow-pop-stashshow) a stash pop with a one-reference stash show segment "
-                  "keeps its handling (R13 item 3)",
+                  "keeps its handling",
                   "git stash pop && git stash show 0", rp)
         g423_deny("(g423-deny-pop-apply) a stash pop with a stash apply still denies: apply "
                   "rewrites the worktree (R13 item 3 bound)",
@@ -11000,7 +11000,7 @@ def _main_isolated(monitor):
                   "allow control)",
                   "git checkout -bp && :", rp)
         g423_deny("(g423-deny-stashpush-msep) a separated -m value is consumed, so the later -p "
-                  "is REAL and denies (R12 item 2)",
+                  "is REAL and denies",
                   "git stash push -m -- -p && :", "git stash push -p", rp)
         g423_deny("(g423-deny-stashpush-msgsep) the --message spelling of the same hole denies "
                   "(R12 item 2)",
@@ -11016,34 +11016,34 @@ def _main_isolated(monitor):
         # ((patch-i) to (patch-r)). Red on the R12 delivery: the push allow below was a patch deny
         # there, and each terminator-value deny named the option spelling, not the patch flag.
         g423_note("(g423-allow-stashpush-pfffile) a separated --pathspec-from-file value spelled "
-                  "-p is a filename, a plain push (R13 item 1)",
+                  "-p is a filename, a plain push",
                   "git stash push --pathspec-from-file -p && :", rp)
         g423_deny("(g423-deny-stashpush-pffdd) the consumed terminator value makes the later -p "
-                  "REAL (R13 item 1)",
+                  "REAL",
                   "git stash push --pathspec-from-file -- -p && :", "git stash push -p", rp)
         g423_deny("(g423-deny-checkout-pffdd) checkout --pathspec-from-file -- -p denies as a "
-                  "patch spelling (R13 item 1)",
+                  "patch spelling",
                   "git checkout --pathspec-from-file -- -p && :", "git checkout -p", rp)
         g423_deny("(g423-deny-checkout-orphandd) checkout --orphan -- -p: the terminator is the "
-                  "consumed branch name, the -p real (R13 item 1)",
+                  "consumed branch name, the -p real",
                   "git checkout --orphan -- -p && :", "git checkout -p", rp)
         g423_deny("(g423-deny-checkout-conflictdd) checkout --conflict -- -p: the terminator is "
-                  "the consumed style value, the -p real (R13 item 1)",
+                  "the consumed style value, the -p real",
                   "git checkout --conflict -- -p && :", "git checkout -p", rp)
         g423_deny("(g423-deny-restore-pffdd) restore --pathspec-from-file -- -p denies as a patch "
-                  "spelling (R13 item 1)",
+                  "spelling",
                   "git restore --pathspec-from-file -- -p && :", "git restore -p", rp)
         g423_deny("(g423-deny-reset-pffdd) reset --pathspec-from-file -- -p denies as a patch "
-                  "spelling (R13 item 1)",
+                  "spelling",
                   "git reset --pathspec-from-file -- -p && :", "git reset -p", rp)
         g423_note("(g423-allow-checkout-pffsep) checkout --pathspec-from-file -p: the -p is the "
-                  "filename value (R13 item 1 control)",
+                  "filename value",
                   "git checkout --pathspec-from-file -p && :", rp)
         g423_note("(g423-allow-checkout-pffjoined) the joined --pathspec-from-file=-p spelling, a "
-                  "control (R13 item 1)",
+                  "control",
                   "git checkout --pathspec-from-file=-p && :", rp)
         g423_note("(g423-allow-checkout-pffterm) a genuine terminator after a consumed value "
-                  "leaves -p a pathspec (R13 item 1 control)",
+                  "leaves -p a pathspec",
                   "git checkout --pathspec-from-file flist -- -p && :", rp)
         # R14 DECIDED item 1 (grammar path): stash save derives -m/--message from the option
         # listing of git itself (the installed git 2.55.0 'git stash save -h' output lists
@@ -11058,10 +11058,10 @@ def _main_isolated(monitor):
         # --conflict denies were green already (the class behaviour existed with no vector;
         # they close R14 item 1 on the grammar path).
         g423_deny("(g423-deny-stashsave-mdd) stash save -m -- -p: the consumed terminator is "
-                  "the message, the -p real (R14 item 1)",
+                  "the message, the -p real",
                   "git stash save -m -- -p && :", "git stash save -p", rp)
         g423_deny("(g423-deny-stashsave-msgdd) stash save --message -- --patch denies on the "
-                  "real patch flag (R14 item 1)",
+                  "real patch flag",
                   "git stash save --message -- --patch && :", "git stash save --patch", rp)
         g423_note("(g423-allow-stashsave-msep) stash save -m -p is a save whose message is -p "
                   "(R14 item 1 control)", "git stash save -m -p && :", rp)
@@ -11070,16 +11070,16 @@ def _main_isolated(monitor):
         g423_note("(g423-allow-stashsave-term) a genuine terminator: git keeps the '--' and "
                   "saves a stash whose message is '-- -p', no patch mode (R14 item 1 control; "
                   "R15 item 2 wording)", "git stash save -- -p && :", rp)
-        # R15 DECIDED item 3: the save entry lists --no-include-untracked exactly as push does
+        # the save entry lists --no-include-untracked exactly as push does
         # ('git stash save -h' lists "-u, --[no-]include-untracked" for save as for push); the
         # R14 entry omitted it, an over-deny (a verbopt deny) on which this control is red.
         g423_note("(g423-allow-stashsave-noincl) stash save --no-include-untracked is a listed "
-                  "save flag (R15 item 3)", "git stash save --no-include-untracked && :", rp)
+                  "save flag", "git stash save --no-include-untracked && :", rp)
         g423_deny("(g423-deny-stashimpl-pffdd) implicit push --pathspec-from-file -- -p: the "
-                  "terminator is the consumed filename value (R14 item 1)",
+                  "terminator is the consumed filename value",
                   "git stash --pathspec-from-file -- -p && :", "git stash -p", rp)
         g423_deny("(g423-deny-restore-conflictdd) restore --conflict -- -p: the terminator is "
-                  "the consumed style value (R14 item 1)",
+                  "the consumed style value",
                   "git restore --conflict -- -p && :", "git restore -p", rp)
         # R11 MINOR: one deny vector per delisted or removed read-only form that had none, so
         # restoring any of them to the table cannot leave the suite green, plus the %C/%x
@@ -11115,19 +11115,19 @@ def _main_isolated(monitor):
                 "log", ["--grep=a" + chr(127) + "b"]) != "--grep=a" + chr(127) + "b":
             failures.append("(g423-roargs-del) a --grep value carrying DEL must be the named "
                             "offending spelling")
-        # R12 DECIDED item 4, narrowed by R13 DECIDED item 2: the PUBLISHED residue carries no
+        # R12 DECIDED item 4, narrowed by the PUBLISHED residue carries no
         # internal round label in any form (ROUND, round or rounds followed within a few
         # non-word characters by a number: round 12, ROUND-12, round: 12, any case), checked
         # over the three regenerated publications. A bare R plus digits is NOT a round label:
         # R1 to R6 are the residual-class ids of the secrets residues (the classes
         # tools/check_secrets.py enumerates), which the R12 scrub wrongly deleted, so their
-        # presence in the regenerated views is asserted below, per residue (R14 item 2).
+        # presence in the regenerated views is asserted below, per residue.
         _roundlabel_rx = re.compile(r"\brounds?\W{0,3}\d", re.IGNORECASE)
-        # R14 DECIDED item 2: positive controls for the label regex itself. The publications
+        # positive controls for the label regex itself. The publications
         # are already clean, so without these a regex that can never match would leave the
         # suite green: the round-label forms must match, while a residual-class id, a word
         # that merely contains "round", and a spelling past the three-separator bound must
-        # not. R15 DECIDED item 1: both ends of the {0,3} separator bound are pinned. At the
+        # not. both ends of the {0,3} separator bound are pinned. At the
         # lower end, "round12" (zero separators) must match, red under a {1,3} mutant; at the
         # upper end, "round - 3" (three) must match and "round -  3" (four, just past the
         # bound) must not, red under a {0,4} mutant.
@@ -11143,7 +11143,7 @@ def _main_isolated(monitor):
             if _m is not None:
                 failures.append("(g423-roundlabel) the published residue must carry no round "
                                 "label; {} carries {!r}".format(_pubname, _m.group(0)))
-        # R14 DECIDED item 2: the residual-class ids are asserted PER RESIDUE in each of the
+        # the residual-class ids are asserted PER RESIDUE in each of the
         # three regenerated views, never document-wide (document-wide, the secrets-scan
         # residue alone could supply every id while the secrets-shift-left residue lost its
         # own, the gap the R13 predicate carried). Membership as at the pin: secrets-scan
@@ -11218,12 +11218,12 @@ def _main_isolated(monitor):
                 failures.append("(g423-residual-mut-miss) {}: deleting R4 from the "
                                 "secrets-shift-left residue alone must be reported missing"
                                 .format(_pubname))
-        # R9 DECIDED item 5 (claude 1): a cd is honoured only across '&&'; across ';' the directory
+        # a cd is honoured only across '&&'; across ';' the directory
         # is unprovable even when the operand is a REAL repo (with eff = nd regardless of the join,
         # this would preserve S's stash and ALLOW, so the vector is red by outcome on that mutation).
-        g423_deny("(g423-deny-semicd) a cd followed by ';' never feeds a later discard (R9 item 5)",
+        g423_deny("(g423-deny-semicd) a cd followed by ';' never feeds a later discard",
                   "cd {} ; git stash clear".format(str(g423_S)), "cannot follow through", rp)
-        # R9 DECIDED item 3 (codex 2): the stash operation is ONLY the first argument. Every
+        # the stash operation is ONLY the first argument. Every
         # implicit-push spelling below must ALLOW as a push WITHOUT preserving the stash (git runs
         # none of them as a drop or clear: it either pushes or refuses the spelling outright), so a
         # wrong op read is red by outcome (the R8 walk preserved g423_M's entry and said so in the
@@ -11239,36 +11239,36 @@ def _main_isolated(monitor):
 
         g423_push("(g423-stash-impl-path) -m msg with a stray pathspec (git refuses it; R9 item 3)",
                   "git stash -m g423msg file.txt && :")
-        g423_push("(g423-stash-impl-drop) -m msg with a stray token named drop (R9 item 3)",
+        g423_push("(g423-stash-impl-drop) -m msg with a stray token named drop",
                   "git stash -m g423msg drop && :")
-        g423_push("(g423-stash-impl-mjoined) attached -m<msg> with a token named clear (R9 item 3)",
+        g423_push("(g423-stash-impl-mjoined) attached -m<msg> with a token named clear",
                   "git stash -mg423msg clear && :")
-        g423_push("(g423-stash-impl-msgeq) --message=<msg> with a token named drop (R9 item 3)",
+        g423_push("(g423-stash-impl-msgeq) --message=<msg> with a token named drop",
                   "git stash --message=g423msg drop && :")
-        g423_push("(g423-stash-dd-pathdrop) a '--' pathspec named drop is a push operand (R9 item 3)",
+        g423_push("(g423-stash-dd-pathdrop) a '--' pathspec named drop is a push operand",
                   "git stash -m g423msg -- drop && :")
-        g423_push("(g423-stash-dd-pathclear) a '--' pathspec named clear is a push operand (R9 item 3)",
+        g423_push("(g423-stash-dd-pathclear) a '--' pathspec named clear is a push operand",
                   "git stash --message=g423msg -- clear && :")
         if _stash_refs(g423_M):
             failures.append("(g423-stash-impl-norefs) no implicit-push spelling may preserve g423_M's "
                             "stash, found {}".format(_stash_refs(g423_M)))
-        # R9 DECIDED item 4 (codex 3): a redirect operator ends the preceding word (bash adjacency),
+        # a redirect operator ends the preceding word (bash adjacency),
         # an all-digit word there is an IO number (only 2 accepted, other numbers keep their named
         # rejection), and doubled accepted redirects are DECIDED accepted (each is in the closed set;
         # bash runs the same command with both streams at /dev/null).
-        g423_note("(g423-redir-joined) a redirect directly after a word ends the word (R9 item 4)",
+        g423_note("(g423-redir-joined) a redirect directly after a word ends the word",
                   "git stash list>/dev/null && :", rp)
-        g423_note("(g423-redir-joined-log) adjacency on a read-only segment (R9 item 4)",
+        g423_note("(g423-redir-joined-log) adjacency on a read-only segment",
                   "git log>/dev/null && git stash list", rp)
-        g423_note("(g423-redir-joined-true) adjacency on a true segment (R9 item 4)",
+        g423_note("(g423-redir-joined-true) adjacency on a true segment",
                   "true>/dev/null && git stash list", rp)
-        g423_note("(g423-redir-quoted) a redirect directly after a quoted literal (R9 item 4)",
+        g423_note("(g423-redir-quoted) a redirect directly after a quoted literal",
                   "git log -1 'g423q'>/dev/null && git stash list", rp)
-        g423_note("(g423-redir-doubled) doubled /dev/null redirects are both accepted (R9 item 4)",
+        g423_note("(g423-redir-doubled) doubled /dev/null redirects are both accepted",
                   "git stash list>/dev/null>/dev/null && :", rp)
-        g423_deny("(g423-redir-numbered) an IO number other than 2 keeps its named rejection (R9 item 4)",
+        g423_deny("(g423-redir-numbered) an IO number other than 2 keeps its named rejection",
                   "git stash list 1>/dev/null && :", "1>", rp)
-        g423_note("(g423-redir-stderr) the spaced 2>/dev/null form is unchanged (R9 item 4)",
+        g423_note("(g423-redir-stderr) the spaced 2>/dev/null form is unchanged",
                   "git stash list 2>/dev/null && :", rp)
         # PRESERVE-THEN-ALLOW categories: a worktree discard and a stash removal in the session repository
         # S, and the same through -C to a second repository B. Each asserts CONTENT: the snapshot tree
@@ -11292,7 +11292,7 @@ def _main_isolated(monitor):
                                     .format(label, refs[0], path, want, show.returncode, show.stdout))
 
         def _g423_stash_ok(label, repo, refs, pre):
-            # R7C MEDIUM 6 + R8 (codex 7): require the EXPECTED stash population (the two-entry fixture)
+            # R7C MEDIUM 6 + require the EXPECTED stash population (the two-entry fixture)
             # and full 40-hex resolved object ids before comparing.
             if len(pre["stash"]) != 2:
                 failures.append("{}: fixture expected the two-entry stash population in {}, got {}"
@@ -11535,12 +11535,12 @@ def _main_isolated(monitor):
         pexpect("(pl-j4) commit --amend on main denies", "git commit --amend --no-edit", "deny", cwd=plr)
         pexpect("(pl-j5) 'git -C <dir> commit' allows (redirected repository view)",
                 "git -C {} commit -m 'fix'".format(plf), "allow", cwd=plr)
-        # ROUND-7 (codex finding 2): --work-tree relocates ONLY the worktree, never which repository a commit
+        # ROUND-7: --work-tree relocates ONLY the worktree, never which repository a commit
         # lands on, so 'git --work-tree=<feat> commit' from the main-HEAD session repo is classified against
         # the SESSION repo's protected HEAD (main) and DENIES - not against the --work-tree repo's non-protected
         # HEAD. Before the fix it probed the --work-tree value (pl_feat, HEAD 'other') and allow-noted. Reverting
         # reds this (it becomes an allow).
-        pexpect("(pl-j5wt) 'git --work-tree=<feat> commit' from main HEAD DENIES (codex finding 2)",
+        pexpect("(pl-j5wt) 'git --work-tree=<feat> commit' from main HEAD DENIES",
                 "git --work-tree={} commit -m 'fix'".format(plf), "deny", cwd=plr)
         os.environ["GIT_DIR"] = str(pl_feat / ".git")
         try:
@@ -12264,7 +12264,7 @@ def _main_isolated(monitor):
                     failures.append("(pl239-generated-{}) expected structured artbr1 DENY, got {!r}"
                                     .format(_case, _result.stdout))
 
-        # === ROUND-2 FINDING 13: classify a commit against the branch it will ACTUALLY land on ===========
+        # === classify a commit against the branch it will ACTUALLY land on ===========
         # Direction 1 (false-DENY fix): a 'git switch -c <feature> && git commit' on a main HEAD lands on the
         # NEW branch, so it ALLOWS (was denied on the stale pre-command main HEAD). Discriminates: without the
         # switched_to tracking the commit reads plr's HEAD=main and denies.
@@ -12288,7 +12288,7 @@ def _main_isolated(monitor):
         pexpect("(pl-f13f) 'git -C <repo-on-feature> commit' ALLOWS (the -C target HEAD is non-protected)",
                 "git -C {} commit -m x".format(plf), "allow", cwd=plr)
 
-        # ROUND-3 FINDING 4: an earlier same-command switch exempts a following commit ONLY when that commit
+        # an earlier same-command switch exempts a following commit ONLY when that commit
         # runs in the SAME (session) repository the switch acted on. A 'git switch -c feature && git -C <T>
         # commit' switches the SESSION repo but commits in repo T (on main); the switch must NOT exempt the
         # -C commit, which is classified against T's actual HEAD and DENIES. Revert the '_segment_dir_simple'
@@ -12298,7 +12298,7 @@ def _main_isolated(monitor):
                 "finding 4)", "git switch -c newfeat && git -C {} commit --allow-empty -m qa".format(plr),
                 "deny", cwd=plf)
 
-        # ROUND-3 FINDING 5: only '&&' gates a switch's success. A ';'-sequenced switch runs the commit
+        # only '&&' gates a switch's success. A ';'-sequenced switch runs the commit
         # REGARDLESS of whether the switch succeeded ('git switch missing; git commit' lands on the still-
         # protected branch when the switch fails), so a ';' switch never exempts the following commit: it is
         # classified against the pre-command (protected) branch and DENIES. Revert the "_sep == '&&'" gate
@@ -12342,7 +12342,7 @@ def _main_isolated(monitor):
         if _f2segs != [["cat"], ["git", "push", "--force", "origin", "main"]]:
             failures.append("(pl-r6f2-lex) an ANSI-C $'EOF' heredoc delimiter must resolve to EOF, ending the "
                             "body at the real EOF line so the following 'git push' is a visible segment; got "
-                            "{!r} (finding 2)".format(_f2segs))
+                            "{!r}".format(_f2segs))
         # And the guard now SEES and DENIES the previously-hidden protected force-push.
         pexpect("(pl-r6f2-guard) a force-push hidden after an ANSI-C $'EOF' heredoc is now seen and DENIES "
                 "(finding 2)", _f2cmd, "deny", cwd=plr)
@@ -13210,7 +13210,7 @@ def _main_isolated(monitor):
                 + "git push --force origin main" + chr(10) + "EOF", "deny", cwd=plr)
         pexpect("(pl-r10hd-stacked) STACKED heredocs: after the first quoted opener the R9 stripper "
                 "skipped the rest of the opening line, never saw <<B, and read B's body as a quoted "
-                "opener that swallowed the live push (R10 item 3)",
+                "opener that swallowed the live push",
                 "cat <<'A' <<B" + chr(10) + "A" + chr(10) + "<<'EOF'" + chr(10) + "B" + chr(10)
                 + "git push --force origin main" + chr(10) + "EOF", "deny", cwd=plr)
         _r10q = chr(34)   # a double quote, composed like the g423 expansion vectors above
@@ -13219,11 +13219,11 @@ def _main_isolated(monitor):
         _r10nest = _r10q + "<<'EOF'" + _r10q  # a quoted-heredoc LOOKALIKE inside double quotes
         pexpect("(pl-r10hd-cmdsub) a quoted-heredoc lookalike nested in quotes inside a command "
                 "substitution: the R9 stripper's flat double-quote tracking read it as a real opener "
-                "and swallowed the live push (R10 item 3)",
+                "and swallowed the live push",
                 "true <(true)" + chr(10) + "echo " + _r10q + _r10d + "(echo " + _r10nest + ")" + _r10q
                 + chr(10) + "git push --force origin main", "deny", cwd=plr)
         pexpect("(pl-r10hd-backquote) the backquote command-substitution form of the same shape "
-                "DENIES (R10 item 3)",
+                "DENIES",
                 "true <(true)" + chr(10) + "echo " + _r10q + _r10b + "echo " + _r10nest + _r10b + _r10q
                 + chr(10) + "git push --force origin main", "deny", cwd=plr)
         pexpect("(pl-r10hd-paramexp) the ${...} parameter-expansion form of the same shape DENIES "
@@ -13346,11 +13346,11 @@ def _main_isolated(monitor):
                 "git commit -mfoo --help", "deny", cwd=plr)
         # F-117 round-6 / F-118: the shared diff-source guard (cnsdif). Genuine help allows; a --help
         # that git treats as a pathspec (after `--`) is a real console dump and denies; a non-stdout fd
-        # redirect ('2>') is not a stdout real-file escape (F-118); a real stdout redirect still allows.
+        # redirect ('2>') is not a stdout real-file escape; a real stdout redirect still allows.
         dexpect("(f117r6-g) genuine diff --help allows", "git diff --help", "allow")
         dexpect("(f117r6-i) end-of-options operand --help does not mask a diff dump",
                 "git diff -- file --help", "deny")
-        dexpect("(f117r6-j) stderr redirect is not a stdout real-file escape (F-118)",
+        dexpect("(f117r6-j) stderr redirect is not a stdout real-file escape",
                 "git diff 2> errors.log", "deny")
         dexpect("(f117r6-k) genuine stdout real-file redirect still allows",
                 "git diff > real.txt", "allow")
@@ -14629,7 +14629,7 @@ def _main_isolated(monitor):
         brexpect("(H2) checkout -b from orphan denies",
                  "git checkout -b x orphan-start", "deny")
 
-        # ROUND-7 (codex finding 2): --work-tree relocates only the worktree, never the repository a branch is
+        # ROUND-7: --work-tree relocates only the worktree, never the repository a branch is
         # created in. A second repo (br_wt) has a ROOTED branch 'orphan-start'; the session repo br_repo has an
         # ORPHANED 'orphan-start'. 'git --work-tree=<br_wt> checkout -b x orphan-start' from br_repo creates the
         # branch in br_repo from br_repo's ORPHANED start, so it must DENY. Before the fix the guard probed the
@@ -14667,14 +14667,14 @@ def _main_isolated(monitor):
         brexpect("(H8b) branch --set-upstream-to=<upstream> <name> is non-creation allows",
                  "git branch --set-upstream-to=origin/main x", "allow")
 
-        # H9: ROUND-2 FINDING 12: '--track'/'-t' only ENABLES upstream tracking and names a real rooted
+        # H9: '--track'/'-t' only ENABLES upstream tracking and names a real rooted
         # upstream (origin/main), so it no longer routes the whole form to a fail-safe deny; the checkout/
         # switch --track forms ALLOW (the positional operand remains the start point / a DWIM tracking
         # creation). '--orphan' and worktree '--track' still ASK->deny (their start is genuinely unverifiable).
         brexpect("(H9a) checkout --track origin/main allows (finding 12: rooted upstream)",
                  "git checkout --track origin/main", "allow")
-        brexpect("(H9b) checkout -t origin/main allows (finding 12)", "git checkout -t origin/main", "allow")
-        brexpect("(H9c) switch --track origin/main allows (finding 12)",
+        brexpect("(H9b) checkout -t origin/main allows", "git checkout -t origin/main", "allow")
+        brexpect("(H9c) switch --track origin/main allows",
                  "git switch --track origin/main", "allow")
         brexpect("(H9d) worktree add --orphan denies", "git worktree add --orphan ../wt-orphan", "deny")
         brexpect("(H9e) worktree add --track denies",
@@ -14708,7 +14708,7 @@ def _main_isolated(monitor):
         brexpect("(f12-track-orphan) switch -c topic --track <orphan> still DENIES (--track does not rescue "
                  "an orphan start)", "git switch -c topic --track orphan-start", "deny")
 
-        # ROUND-3 FINDING 6: a '--track'/'-t' checkout/switch WITHOUT an explicit -c/-B still CREATES a local
+        # a '--track'/'-t' checkout/switch WITHOUT an explicit -c/-B still CREATES a local
         # branch (git's DWIM tracking creation) rooted at the operand, so its ancestry MUST be probed. An
         # orphan operand DENIES; a rooted operand (origin/main, H9a-c above) still ALLOWS. Revert the
         # track-creation branch in _checkout_creation_start and these flip to 'allow' (the missing -c wrongly
@@ -14744,12 +14744,12 @@ def _main_isolated(monitor):
             failures.append("(f12-C-orphan) a -C <repo> creation from an ORPHAN start must still DENY "
                             "(the -C target's ancestry is checked, not blindly allowed)")
 
-        # H3: ROUND-2 FINDING 12: origin/HEAD cannot be derived, so the guard falls back to a local
+        # H3: origin/HEAD cannot be derived, so the guard falls back to a local
         # main/master; a MISSING protected line is not evidence a plain local branch is orphaned, so a
         # resolvable-start creation ALLOWS (was an over-block deny). A genuine orphan is still caught by the
         # ancestry probe when a protected line DOES resolve (see the orphaned-start denies above).
         _git(br_repo, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
-        brexpect("(H3) missing origin/HEAD allows a plain local branch (finding 12)",
+        brexpect("(H3) missing origin/HEAD allows a plain local branch",
                  "git checkout -b x", "allow")
 
         # H4: non-creation git commands are untouched even while origin/HEAD is absent.
@@ -16041,7 +16041,7 @@ def _main_isolated(monitor):
                 _redir("git diff > ./proc/self/fd/1"), [(">", 1, "./proc/self/fd/1", "opaque", "opaque")])
         texpect("(tok-18e) a nested 'dev' component ('foo/dev/x') is a plain file, still file-real",
                 _redir("git diff > foo/dev/x"), [(">", 1, "foo/dev/x", "file-real", "file-real")])
-        # Unsupported constructs are cannot-evaluate (ValueError), never partial argv. ROUND-2 FINDING 17: an
+        # Unsupported constructs are cannot-evaluate (ValueError), never partial argv. an
         # UNQUOTED heredoc still raises (its body interpolates and stays in scope); a QUOTED heredoc does NOT
         # (its body is literal data, excluded from analysis - asserted separately below).
         for _bad, _why in [("git diff <<EOF\nx\nEOF", "unquoted heredoc"),
@@ -16069,7 +16069,7 @@ def _main_isolated(monitor):
                 _plex("pytest | head '"), ([(["pytest"], "|"), (["head"], "")], False, True))
         texpect("(tok-partial-d) a newline-closed head segment before a lone quote is complete, not open",
                 _plex("pytest | head\n'"), ([(["pytest"], "|"), (["head"], "")], False, False))
-        # ROUND-2 FINDING 17: a QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) lexes cleanly with its body EXCLUDED,
+        # a QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) lexes cleanly with its body EXCLUDED,
         # so the lexical guards never fire on shell syntax quoted inside heredoc prose. The lexer sees only
         # the command word ('cat'), not the body's 'git diff | tail' / '|| true' / bare '&'.
         _f17_quoted = "cat <<'EOF'\ngit diff | tail\npytest || true\nrm -rf /  &\nEOF"
@@ -16096,7 +16096,7 @@ def _main_isolated(monitor):
                              "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
             if _f17res != (0, None, None):
                 failures.append("(f17-guard-{}) a lexical guard must stay SILENT (0, None, None) on "
-                                "quoted-heredoc prose (finding 17); got {!r}"
+                                "quoted-heredoc prose; got {!r}"
                                 .format(getattr(_f17g, "__name__", _f17g), _f17res))
         _f17dd, _f17do, _ = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                     "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
@@ -16495,7 +16495,7 @@ def _main_isolated(monitor):
                 "git show :/text", "deny")
         dexpect("(l11-blob13) git show -O opt:val HEAD DENIES (bare-ref operand -> full diff; was ALLOW pre-fix)",
                 "git show -O opt:val HEAD", "deny")
-        # ROUND-2 FINDING 16: a value-taking option's SEPARATED value (e.g. '-L 1,3:file') contains a ':' but
+        # a value-taking option's SEPARATED value (e.g. '-L 1,3:file') contains a ':' but
         # is NOT a blob operand; skipping it leaves no blob operand, so the line-range DIFF is DENIED (was
         # ALLOWED - the value was misread as a blob selector). The attached '-L1,3:file' form denies too.
         dexpect("(f16-showL) git show -L 1,3:file DENIES (line-range diff; the -L value is not a blob "
@@ -16508,7 +16508,7 @@ def _main_isolated(monitor):
                 "git show -U 3 HEAD:file", "allow")
         # classifier witness: '-L 1,3:file' is a diff producer (no blob operand once the -L value is skipped).
         if not aiqt_hooks._is_diff_producer(["git", "show", "-L", "1,3:file"]):
-            failures.append("(f16-cls) _is_diff_producer must be True for 'git show -L 1,3:file' (finding 16)")
+            failures.append("(f16-cls) _is_diff_producer must be True for 'git show -L 1,3:file'")
         # Discrimination at the classifier: the blob form is NOT a diff producer, the bare form IS, and a
         # blob-selector operand followed by a bare ref/commit or a ':/' search IS a producer.
         if aiqt_hooks._is_diff_producer(["git", "show", "HEAD:x.py"]):
@@ -16801,11 +16801,11 @@ def _main_isolated(monitor):
                 ([["git", "diff"]], []))
         texpect("(tok-16e) a continuation-joined MID-word '#' stays literal (di\\<nl>ff#x -> diff#x)",
                 _argv("git di\\\nff#x"), [["git", "diff#x"]])
-        # ROUND-2 FINDING 15: ANSI-C $'...' quoting is LITERAL and deterministic, so $'g'it resolves to the
+        # ANSI-C $'...' quoting is LITERAL and deterministic, so $'g'it resolves to the
         # command word 'git' (bash runs 'git diff HEAD^ HEAD' to the console) and is now provably a console
         # diff dump -> DENY (the lexer no longer marks $'...' opaque; a genuine $VAR command word stays
         # opaque and allows, see qa-b3b). Was an allow-note on the over-conservative opaque command word.
-        dexpect("(qa-b3a) $'g'it diff resolves to a real 'git diff' console dump -> DENIES (finding 15)",
+        dexpect("(qa-b3a) $'g'it diff resolves to a real 'git diff' console dump -> DENIES",
                 "$'g'it diff HEAD^ HEAD", "deny")
         dexpect("(qa-b3b) a $VAR command word beside a producer surface never ALLOWs",
                 "$GIT diff HEAD", "allow-note")
@@ -16899,7 +16899,7 @@ def _main_isolated(monitor):
         pexpect('(pl-segment-res1b) DISCLOSED residual: a benign git segment AFTER it also suppresses the broad fallback and allows',
                 'env git push --force origin HEAD && git status', 'allow', cwd=plr)
 
-        # === EN-5 PR-A round-4: matching/prune sweeps, the widened -d fallback, wrapped delete and
+        # === PR-A round-4: matching/prune sweeps, the widened -d fallback, wrapped delete and
         # commit coverage, and the disclosed over-denies and lexical boundary, witnessed ===
         pexpect("(pl-y1) the matching refspec ':' denies (a sweep of every branch on both ends)",
                 "git push origin :", "deny", cwd=plr)
@@ -16916,7 +16916,7 @@ def _main_isolated(monitor):
         pexpect("(pl-y3c) --prune with the matching ':' refspec denies as a prune sweep (GD-145: judged "
                 "before the plain matching case so its deletion effect is named)",
                 "git push --prune origin :", "deny", cwd=plr)
-        # pl-y3c-reason (GD-145): the pruning matching-refspec's ASK reason must name the prune
+        # pl-y3c-reason: the pruning matching-refspec's ASK reason must name the prune
         # deletion, not the non-deleting matching explanation; this gates the prune-before-matching
         # reorder (the verdict is ASK under both orders, so only a reason check fails without the fix).
         _pm_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -17254,13 +17254,13 @@ def _main_isolated(monitor):
         gexpect("(gw-fr-ctl-flag) control: a real -n beside -F still denies", "git commit -F /tmp/msg.txt -n",
                 "deny")
 
-        # ROUND-2 FINDING 14: the checker-shape swallow/truncate HEURISTIC is too broad (a benign optional
+        # the checker-shape swallow/truncate HEURISTIC is too broad (a benign optional
         # probe is common and is not a gate bypass), so it ALLOWS-WITH-NOTE, not deny. These previously
         # denied; each swallow now allows with a note. The truncating-pipe vectors here (gw-s, gw-t) are
         # verification runs whose output reaches a truncating sink, so the gatdis deny tier DENIES them.
         gexpect("(gw-o) pytest || true allows-with-note (heuristic relaxed, finding 14)", "pytest || true",
                 "allow-note")
-        gexpect("(gw-p) pytest || : allows-with-note (finding 14)", "pytest -q || :", "allow-note")
+        gexpect("(gw-p) pytest || : allows-with-note", "pytest -q || :", "allow-note")
         gexpect("(gw-q) make test || true allows-with-note (runner + operand; finding 14)",
                 "make test || true", "allow-note")
         gexpect("(gw-r) checker-named script || true allows-with-note (name parts; finding 14)",
@@ -17270,7 +17270,7 @@ def _main_isolated(monitor):
         gexpect("(gw-t) pytest -q | tail -20 denies (deny tier)", "pytest -q | tail -20", "deny")
         gexpect("(gw-u) python -m pytest || true allows-with-note (runner -m module; finding 14)",
                 "python -m pytest || true", "allow-note")
-        gexpect("(gw-v) npm test || true allows-with-note (finding 14)", "npm test || true", "allow-note")
+        gexpect("(gw-v) npm test || true allows-with-note", "npm test || true", "allow-note")
 
         # The heuristic stays scoped: non-checkers and non-truncating pipes are untouched.
         gexpect("(gw-w) checker with no swallow allows", "pytest && echo done", "allow")
@@ -17395,7 +17395,7 @@ def _main_isolated(monitor):
         gexpect("(gw-an) revert with a stray -n is out of the verb roster, allows",
                 "git revert -n 0000", "allow")
         gexpect("(gw-ao) a plain pytest with no swallow allows", "pytest", "allow")
-        gexpect("(gw-ap) ruff check . || true allows-with-note (finding 14)", "ruff check . || true",
+        gexpect("(gw-ap) ruff check . || true allows-with-note", "ruff check . || true",
                 "allow-note")
         gexpect("(gw-aq) npm test | tail denies (runner target 'test' into a truncating sink; deny tier)",
                 "npm test | tail", "deny")
@@ -17405,7 +17405,7 @@ def _main_isolated(monitor):
         gexpect("(gw-ar) '--message --no-verify' over-denies (disclosed value-spelling residual)",
                 "git commit --message --no-verify", "deny")
 
-        # gatdis round-2 (F-123): the newline-continuation ASK-miss (F3) and the --resolvemsg
+        # gatdis round-2: the newline-continuation ASK-miss (F3) and the --resolvemsg
         # value-option over-block (F4) are fixed; the adjacency/regression locks hold; the disclosed
         # redirect-pollution slips (F1/F2, routed to the common enforcement-hook redesign) are pinned.
         gexpect("(gw-as) newline before the swallow allows-with-note (F3 adjacency held; finding 14)",
@@ -21246,7 +21246,7 @@ def _main_isolated(monitor):
                 or "drop the" in _ct_reason or "full output already" in _ct_reason):
             failures.append("(gw-ct-msg2) the tee variant must name the tee file and recommend the complete capture "
                             "command, never dropping a stage; got {!r}".format(_ct_reason))
-        # A filter before the tee: the file is never called the full output (codex finding 6). Since round 5 the
+        # A filter before the tee: the file is never called the full output. Since round 5 the
         # only filtering pass-through stages are tr and uniq; a plain cat filters nothing (gw-ct-msg8).
         _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
                                         tool_input=dict(command="pytest | uniq | tee /var/tmp/x/l | tail")))
@@ -21316,11 +21316,11 @@ def _main_isolated(monitor):
         cmexpect("(cm-j) unquoted backtick denies", "git commit -m `git clean -fdx`", "deny")
         cmexpect("(cm-k) arithmetic is a disclosed safe-direction over-deny",
                  'git commit -m "n=$((1+2))"', "deny")
-        # ROUND-2 FINDING 15: ANSI-C $'...' quoting does NOT command-substitute, so a literal $( or backtick
+        # ANSI-C $'...' quoting does NOT command-substitute, so a literal $( or backtick
         # inside it is a LITERAL message and now ALLOWS (was a disclosed safe-direction over-deny).
-        cmexpect("(cm-l) ANSI-C $'...' literal $( is a literal message and ALLOWS (finding 15)",
+        cmexpect("(cm-l) ANSI-C $'...' literal $( is a literal message and ALLOWS",
                  "git commit -m $'a $(x) b'", "allow")
-        cmexpect("(cm-l2) ANSI-C $'...' literal backtick is a literal message and ALLOWS (finding 15)",
+        cmexpect("(cm-l2) ANSI-C $'...' literal backtick is a literal message and ALLOWS",
                  "git commit -m $'Document `code` examples'", "allow")
         # DISCRIMINATION: the SAME markers in DOUBLE quotes DO substitute and still DENY, so the allow above
         # is attributable to ANSI-C quoting being literal, not to dropping backtick/$( detection.
@@ -23157,7 +23157,7 @@ def _main_isolated(monitor):
             got = _reduce_result(code, stdout_obj)
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
-            # redaction guard (F-131/F-134/F-136): a secsec decision names the pattern label but NEVER
+            # redaction guard: a secsec decision names the pattern label but NEVER
             # echoes the secret value on ANY emitted surface - permissionDecisionReason, the systemMessage
             # banner (both in stdout_obj), stderr, or a direct stdout/stderr print. Runs for ANY case that
             # plants a secret (not only DENYs), so an allow path that echoed a value is caught too.
@@ -23239,7 +23239,7 @@ def _main_isolated(monitor):
         sexpect("(ss-o) Write with no readable content denies (fail-closed)",
                 "Write", {"file_path": "/tmp/x"}, "deny")
 
-        # secsec round-2 (F-124/F-125)
+        # secsec round-2
         # F-124 (scan ALL assignments per line, not just the first): a placeholder assignment BEFORE a
         # real one on the SAME line must still DENY. Old .search stopped at the first (placeholder) match
         # and ALLOWED; finditer reaches the real second assignment and DENIES. The one-liner is assembled
@@ -23267,11 +23267,11 @@ def _main_isolated(monitor):
         sexpect("(ss-u) F-124 placeholder-only one-liner allows",
                 "Write", {"file_path": "/tmp/x", "content": _ph_only}, "allow")
 
-        # secsec round-3 (F-126/F-128): the two new provider-token variants, MultiEdit coverage, the
+        # secsec round-3: the two new provider-token variants, MultiEdit coverage, the
         # in-handler non-dict guard, and NotebookEdit out-of-scope. Shapes assembled from PARTS at
         # runtime so no contiguous token literal appears in this source (SECP; a literal would trip the
         # repo secret-scan). The sk-proj/xapp tokens stand ALONE with NO credential keyword beside them,
-        # so the DENY is attributable to the NEW prefix pattern (F-126), not the credential-named ASSIGN.
+        # so the DENY is attributable to the NEW prefix pattern, not the credential-named ASSIGN.
         _fake_skproj = "sk-" + "proj-" + "A" * 30           # F-126 OpenAI project key; generic sk- cannot match
         _fake_xapp = "xapp-" + "1-A0123456789-" + "A" * 40  # F-126 Slack app-level token
         sexpect("(ss-v) F-126 Write with a bare sk-proj token denies",
@@ -23342,7 +23342,7 @@ def _main_isolated(monitor):
             if _gate != _hook:
                 failures.append("(ss-parity) gate/hook disagree: gate={} hook={} on a credential line".format(_gate, _hook))
 
-        # secsec round-4 (F-129): the pattern drift gate must REJECT a target carrying more than one
+        # secsec round-4: the pattern drift gate must REJECT a target carrying more than one
         # generated BEGIN..END region. text.find inspects only the FIRST region, so a SECOND region (e.g.
         # a second _SECSEC_PREFIX_SOURCES = []) could override the patterns undetected while --check still
         # passed. gen_secret_patterns._splice now asserts EXACTLY ONE BEGIN and EXACTLY ONE END, raising
@@ -23365,7 +23365,7 @@ def _main_isolated(monitor):
         except ValueError:
             pass
 
-        # secsec round-5 (GD-121): the entropy-gated generic detector and the new provider families.
+        # secsec round-5: the entropy-gated generic detector and the new provider families.
         # Shapes assembled from PARTS at runtime (SECP; a contiguous literal would trip the repo
         # secret-scan). `_hi` is a 48-char, 16-distinct high-entropy token (letters + digits); it clears
         # the 3.5 floor. Handler-level decisions plus a gate/hook agreement loop (the parity battery ask).
@@ -23489,20 +23489,20 @@ def _main_isolated(monitor):
             gs_nogit = tmp / "gsnogit"                 # plain non-git dir (unresolved root)
             gs_nogit.mkdir(parents=True, exist_ok=True)
             # Deterministic hardening fixtures (no permission-dependent skips):
-            gs_repo_sp = _gs_init("gsrepo_sp ")        # dir name with a TRAILING SPACE (F-162)
+            gs_repo_sp = _gs_init("gsrepo_sp ")        # dir name with a TRAILING SPACE
             (gs_repo_sp / ".aiqt").mkdir(parents=True, exist_ok=True)
             (gs_repo_sp / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
-            gs_repo_nl = _gs_init("gsrepo_nl\n")        # dir name ending in a NEWLINE (F-167)
+            gs_repo_nl = _gs_init("gsrepo_nl\n")        # dir name ending in a NEWLINE
             (gs_repo_nl / ".aiqt").mkdir(parents=True, exist_ok=True)
             (gs_repo_nl / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
-            gs_link = _gs_init("gslink")               # registry is a DANGLING symlink (F-164)
+            gs_link = _gs_init("gslink")               # registry is a DANGLING symlink
             (gs_link / ".aiqt").mkdir(parents=True, exist_ok=True)
             os.symlink(str(gs_link / ".aiqt" / "nonexistent.json"),
                        str(gs_link / ".aiqt" / "gensrc.json"))
             gs_dir = _gs_init("gsdir")                 # registry PATH is a DIRECTORY (deterministic unreadable)
             (gs_dir / ".aiqt").mkdir(parents=True, exist_ok=True)
             (gs_dir / ".aiqt" / "gensrc.json").mkdir(parents=True, exist_ok=True)
-            gs_big = _gs_init("gsbig")                 # multibyte OVERSIZE registry: >1M BYTES, <1M chars (F-165)
+            gs_big = _gs_init("gsbig")                 # multibyte OVERSIZE registry: >1M BYTES, <1M chars
             (gs_big / ".aiqt").mkdir(parents=True, exist_ok=True)
             # ensure_ascii=False so the multibyte pad is written as REAL 2-byte UTF-8 (not the 6-byte
             # \\uXXXX ASCII escape): the file is then ~1.2M BYTES but only ~600k CHARS, so a char-count
@@ -23513,7 +23513,7 @@ def _main_isolated(monitor):
                 encoding="utf-8")
             gs_fifo = _gs_init("gsfifo")               # registry PATH is a FIFO (F-169: lstat/S_ISREG rejects)
             (gs_fifo / ".aiqt").mkdir(parents=True, exist_ok=True)
-            gs_race = _gs_init("gsrace")               # NO registry file; the delete-race is injected (F-169)
+            gs_race = _gs_init("gsrace")               # NO registry file; the delete-race is injected
             (gs_race / ".aiqt").mkdir(parents=True, exist_ok=True)
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the gensrc fixtures: {}".format(exc), file=sys.stderr)
@@ -23546,20 +23546,20 @@ def _main_isolated(monitor):
         # ALLOW: an absent registry is inert (repo2 has no .aiqt/gensrc.json).
         gexpect("(gs-h) an absent registry is the inert ALLOW", "allow",
                 tool="Write", file_path=os.path.join(gr2, "GEN.md"), cwd=gr2)
-        # ROUND-2 FINDING 8: a PRESENT-but-unreadable/malformed registry is a cannot-evaluate for a
+        # a PRESENT-but-unreadable/malformed registry is a cannot-evaluate for a
         # PROTECTIVE guard, so it fails CLOSED (DENY), never allow-note - a corrupted/garbled .aiqt/gensrc.json
         # must not silently DISABLE the generated-artefact restriction. malformed JSON, unknown version, and a
         # malformed entry (kind=dir) all DENY. (Contrast the genuinely-ABSENT registry gs-h and the non-git /
         # payload cannot-evaluate branches below, which stay allow: no generated-file protection is expected.)
         gs_reg3.write_text("{ not json", encoding="utf-8")
-        gexpect("(gs-i1) malformed-JSON registry DENIES fail-closed (finding 8)", "deny",
+        gexpect("(gs-i1) malformed-JSON registry DENIES fail-closed", "deny",
                 tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
         gs_reg3.write_text(json.dumps({"version": 2, "generated": []}), encoding="utf-8")
-        gexpect("(gs-i2) unknown-version registry DENIES fail-closed (finding 8)", "deny",
+        gexpect("(gs-i2) unknown-version registry DENIES fail-closed", "deny",
                 tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "dir", "target": "x", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
-        gexpect("(gs-i3) malformed-entry (unknown kind) registry DENIES fail-closed (finding 8)", "deny",
+        gexpect("(gs-i3) malformed-entry (unknown kind) registry DENIES fail-closed", "deny",
                 tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
         # DISCRIMINATION (fails WITHOUT the finding-8 fix): the ONLY difference between gs-i1 (present-but-bad
         # -> deny) and gs-h (absent -> allow) is registry READABILITY, so the deny is attributable to the
@@ -23589,7 +23589,7 @@ def _main_isolated(monitor):
         # DENY: a non-regular-file registry is BAD, never absent (integ-check-fails-closed-on-unreadable).
         # DETERMINISTIC: the registry PATH is a DIRECTORY, so the lstat/S_ISREG probe rejects it as
         # non-regular BEFORE the open (a directory's st_mode is not S_ISREG -> bad) on every runner, root
-        # included. No os.access/chmod skip (F-166).
+        # included. No os.access/chmod skip.
         gexpect("(gs-q) a non-regular (directory-at-path) registry DENIES fail-closed (not a regular file, "
                 "never absent; finding 8)", "deny",
                 tool="Write", file_path=os.path.join(grdir, "GEN.md"), cwd=grdir)
@@ -23607,14 +23607,14 @@ def _main_isolated(monitor):
             failures.append("(gs-s) a mis-wired event hard-blocks (exit 2): expected 2, got {}"
                             .format(_hb_code))
         # ALLOW with a note: a present-but-unreadable tool_name (empty string, list, bool) cannot be matched
-        # (a MISSING tool_name denies instead, gs-k). Was a silent ALLOW (not in _GENSRC_TOOLS). (F-161)
+        # (a MISSING tool_name denies instead, gs-k). Was a silent ALLOW (not in _GENSRC_TOOLS).
         gexpect("(gs-t1) an empty-string tool_name allows with a note (unreadable, not a miss)", "allow-note",
                 tool="", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
         gexpect("(gs-t2) a list tool_name allows with a note (unreadable, not a miss)", "allow-note",
                 tool=[], file_path=os.path.join(gr, "GEN.md"), cwd=gr)
         gexpect("(gs-t3) a bool tool_name allows with a note (unreadable, not a miss)", "allow-note",
                 tool=True, file_path=os.path.join(gr, "GEN.md"), cwd=gr)
-        # DENY: version:true is a JSON bool, not int 1 (type(True) is bool). Was ALLOW (True == 1). (F-159)
+        # DENY: version:true is a JSON bool, not int 1 (type(True) is bool). Was ALLOW (True == 1).
         gs_reg3.write_text(json.dumps({"version": True, "generated": [
             {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
         gexpect("(gs-u) a JSON-bool version:true DENIES fail-closed (type is bool, not int; finding 8)",
@@ -23625,7 +23625,7 @@ def _main_isolated(monitor):
         gexpect("(gs-v) a string version:\"1\" DENIES fail-closed (not int; finding 8)", "deny",
                 tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
         # DENY: a control character (NUL) in a FILE entry target is malformed -> bad. Was ALLOW (target
-        # passed the old validation, no match on an unregistered query). (F-160)
+        # passed the old validation, no match on an unregistered query).
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "file", "target": "GEN\x00.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
         gexpect("(gs-w) a NUL in a file-entry target DENIES fail-closed (control-char rejected; finding 8)",
@@ -23635,10 +23635,10 @@ def _main_isolated(monitor):
         # independent value. Was ALLOW (target passed old validation; no match on an unregistered query).
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "file", "target": "GEN\x1f.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
-        gexpect("(gs-w2) a non-NUL control char in a file-entry target DENIES fail-closed (finding 8)",
+        gexpect("(gs-w2) a non-NUL control char in a file-entry target DENIES fail-closed",
                 "deny", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
         # DENY: a NUL in a BLOCK entry target is rejected BEFORE the block-skip. Was a zero-entry ALLOW
-        # (the block was dropped, leaving no entries). (F-160)
+        # (the block was dropped, leaving no entries).
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "block", "target": "X\x00", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
         gexpect("(gs-x) a NUL in a block-entry target DENIES fail-closed (rejected before the block-skip; "
@@ -23655,17 +23655,17 @@ def _main_isolated(monitor):
         # DENY: a repo dir name with a TRAILING SPACE: the toplevel is preserved because only git's single
         # trailing-newline terminator is stripped (result.stdout[:-1] when it endswith "\\n", stripping
         # exactly that one \\n), not strip(), so the registry IS found and the registered target DENIES. Was
-        # ALLOW (strip() dropped the space -> wrong root -> registry not found -> absent). (F-162)
+        # ALLOW (strip() dropped the space -> wrong root -> registry not found -> absent).
         gexpect("(gs-z) a trailing-space repo dir keeps its toplevel; the registered target DENIES", "deny",
                 tool="Write", file_path=os.path.join(grsp, "GEN.md"), cwd=grsp)
         # DENY: a DANGLING symlink registry is BAD (a symlink is not a trusted regular file). lstat does NOT
         # follow the link, so S_ISREG is False on the link itself -> bad; this rejects a STATIONARY symlink
         # (best-effort against the accidental case, not a TOCTOU-closure claim). Was an inert ALLOW
-        # (open -> FileNotFoundError -> absent). (F-164)
+        # (open -> FileNotFoundError -> absent).
         gexpect("(gs-aa) a dangling-symlink registry DENIES fail-closed (a symlink is never a regular file; "
                 "finding 8)", "deny", tool="Write", file_path=os.path.join(grlink, "GEN.md"), cwd=grlink)
         # DENY: a multibyte OVERSIZE registry (>1M BYTES but <1M chars) exceeds the BYTE bound. Was ALLOW
-        # (a char-count read stayed under the cap and parsed to an empty registry). (F-165)
+        # (a char-count read stayed under the cap and parsed to an empty registry).
         gexpect("(gs-ab) a multibyte-oversize registry DENIES fail-closed (the bound is on BYTES; finding 8)",
                 "deny", tool="Write", file_path=os.path.join(grbig, "GEN.md"), cwd=grbig)
 
@@ -23768,7 +23768,7 @@ def _main_isolated(monitor):
         # terminator, so stripping only that one \n preserves the dir's own trailing newline; the registry
         # IS found and the registered target (relative MultiEdit route, cwd = the newline-terminal repo)
         # DENIES. Falsifiable: rstrip("\n") eats the dir's own newline too -> wrong root -> registry not
-        # found -> inert absent ALLOW. (F-167)
+        # found -> inert absent ALLOW.
         gexpect("(gs-ae) a newline-terminal repo dir keeps its toplevel; the registered target DENIES", "deny",
                 tool="MultiEdit", file_path="GEN.md",
                 edits=[{"old_string": "a", "new_string": "b"}], cwd=grnl)
@@ -23783,7 +23783,7 @@ def _main_isolated(monitor):
         # DENY: a FIFO registry is BAD (lstat/S_ISREG sees S_ISFIFO before the open), and the probe does NOT
         # block: os.lstat does not open the FIFO, so no writer is needed and there is no hang. Falsifiable:
         # dropping the lstat/S_ISREG probe would make open(path, "rb") block on the FIFO until the hook
-        # timeout instead of returning the deny. The fifo is unlinked in the finally below. (F-169)
+        # timeout instead of returning the deny. The fifo is unlinked in the finally below.
         _fifo_path = os.path.join(grfifo, ".aiqt", "gensrc.json")
         os.mkfifo(_fifo_path)
         try:
@@ -23796,7 +23796,7 @@ def _main_isolated(monitor):
         # raise FileNotFoundError; monkeypatch os.lstat to report a REGULAR file for that path so the
         # S_ISREG probe passes and the flow reaches the open, which then raises FNF -> bad (fail-closed DENY),
         # NOT absent. Falsifiable: the pre-fix open FileNotFoundError returned ("absent", None) -> the inert
-        # ALLOW; the fix maps it to bad -> DENY. os.lstat is restored in the finally. (F-169)
+        # ALLOW; the fix maps it to bad -> DENY. os.lstat is restored in the finally.
         _real_lstat = os.lstat
         _regular_st = _real_lstat(os.path.join(gr, ".aiqt", "gensrc.json"))  # a genuine regular-file stat
         _race_rel = os.path.join("gsrace", ".aiqt", "gensrc.json")
@@ -23807,7 +23807,7 @@ def _main_isolated(monitor):
         try:
             os.lstat = _racing_lstat
             gexpect("(gs-ah) a delete-race (regular at lstat, gone at open) DENIES fail-closed, not "
-                    "absent-ALLOW (finding 8)", "deny",
+                    "absent-ALLOW", "deny",
                     tool="Write", file_path=os.path.join(grrace, "GEN.md"), cwd=grrace)
         finally:
             os.lstat = _real_lstat
@@ -24185,10 +24185,10 @@ def _main_isolated(monitor):
         bcmd("(ap-c13) cd option then absolute allows (option skipped)", "cd -P {}".format(rp), "allow")
         bcmd("(ap-c14) cd option then relative allows with a note (option skipped, dest judged)", "cd -P rel", "allow-note")
         bcmd("(ap-c15) pushd '-n' then relative allows with a note", "pushd -n rel", "allow-note")
-        # ROUND-2 FINDING 10: a TRUNCATING redirect ('>', '>|', '&>', '>&' to a file) to a RELATIVE or OPAQUE
+        # a TRUNCATING redirect ('>', '>|', '&>', '>&' to a file) to a RELATIVE or OPAQUE
         # target DENIES-and-educates (it zeroes an unverified ambient target; the `: > file.txt` class). The
         # NON-destructive forms (append '>>', read '<'/'<>') and an absolute truncating target stay allow.
-        bcmd("(ap-c16) relative truncating redirect target DENIES (finding 10)", "echo hi > out.txt", "deny")
+        bcmd("(ap-c16) relative truncating redirect target DENIES", "echo hi > out.txt", "deny")
         bcmd("(ap-c17) absolute redirect target allows", "echo hi > {}/out.txt".format(rp), "allow")
         bcmd("(ap-c18) relative append redirect allows (append does not truncate; convention nudge)",
              "echo hi >> log", "allow-note")
@@ -24200,7 +24200,7 @@ def _main_isolated(monitor):
         bcmd("(ap-c23) opaque truncating redirect target '$F' DENIES (finding 10: unverified target)",
              "echo hi > $F", "deny")
         bcmd("(ap-c24) non-cd relative operand NOT judged (allows)", "cat rel.txt", "allow")
-        bcmd("(ap-c25) compound with a relative TRUNCATING redirect DENIES (finding 10)",
+        bcmd("(ap-c25) compound with a relative TRUNCATING redirect DENIES",
              "cd {} && echo x > out.txt".format(rp), "deny")
         # the bare-truncation `: > file.txt` class (a no-op producer zeroing a relative target) DENIES.
         bcmd("(ap-c25b) ': > relative' bare truncation DENIES (finding 10, the named example)",
@@ -25120,9 +25120,9 @@ def _main_isolated(monitor):
                  "cd /abs/repo && git -C /abs/repo commit -m x", "allow")
         ebexpect("(eb-e3) inline --git-dir target credits the binding",
                  "cd /abs/repo && git --git-dir=/abs/repo/.git commit -m x", "allow")
-        # ROUND-2 FINDING 11: a whole-tree BREADTH stage feeding a PUBLISH in the same command DENIES-and-
+        # a whole-tree BREADTH stage feeding a PUBLISH in the same command DENIES-and-
         # educates (it sweeps unrelated content into a pushed commit); a preceding cd does not mask it.
-        ebexpect("(eb-e4) breadth add feeding push DENIES (finding 11)", "git add -A && git push", "deny")
+        ebexpect("(eb-e4) breadth add feeding push DENIES", "git add -A && git push", "deny")
         ebexpect("(eb-e5) relocated breadth stage and publish DENIES (finding 11; cd does not mask it)",
                  "cd /abs/repo && git add --all && git commit -m x && git push", "deny")
         ebexpect("(eb-e6) pushd feeding untargeted mutation allows with a note",
@@ -25132,7 +25132,7 @@ def _main_isolated(monitor):
         ebexpect("(eb-e8) lone bare mutation is a deliberate non-fire", "git commit -m x", "allow")
         ebexpect("(eb-e9) lone breadth commit (NO publish) is a deliberate non-fire (allow)",
                  "git commit -am x", "allow")
-        ebexpect("(eb-e10) dot pathspec feeding push DENIES (finding 11)", "git add . && git push", "deny")
+        ebexpect("(eb-e10) dot pathspec feeding push DENIES", "git add . && git push", "deny")
         # NOT over-blocked (finding 11 guard): a plain commit and a scoped add + push stay allow; a breadth
         # stage with NO publish stays allow (only breadth PAIRED with a publish denies).
         ebexpect("(eb-e10b) plain 'git commit -m' with no breadth allows", "git commit -m x && git push",
@@ -25804,7 +25804,7 @@ def _main_isolated(monitor):
             failures.append("(ws-frozen-reg-const) _WRTSCP_ALWAYS_FROZEN must freeze "
                             ".aiqt/orchestration.local.json")
 
-        # --- ROUND-2 FINDING 1: the COMMITTED registry .aiqt/orchestration.json is ALSO always-frozen. ---
+        # --- the COMMITTED registry .aiqt/orchestration.json is ALSO always-frozen. ---
         # companion_stores / the yield-roster are read from EITHER registry file (_orch_registry falls back
         # from the LOCAL file to the committed .aiqt/orchestration.json), so freezing ONLY the LOCAL file left
         # a covered Write of companion_stores into .aiqt/orchestration.json to take effect IN-SESSION before
@@ -26235,7 +26235,7 @@ def _main_isolated(monitor):
                 os.path.realpath(os.path.join(str(cs_other), "z")), _cs_stores) is not None:
             failures.append("(ws-cs-match2) a target in an undeclared repo must never match")
 
-        # --- ROUND-2 FINDING 2: the FROZEN denials (always-frozen registry set AND the committed floor) are
+        # --- the FROZEN denials (always-frozen registry set AND the committed floor) are
         # --- evaluated BEFORE the companion-store admission, so a frozen target that RESOLVES (via symlink,
         # --- or a floor entry that resolves) OUTSIDE the session repo INTO a declared store still DENIES; the
         # --- companion allow can never win a HEAD ALLOW over the freeze. Each assertion below FLIPS to
@@ -26413,7 +26413,7 @@ def _main_isolated(monitor):
             failures.append("(noask-orch-shape-{}) an orchestration PreToolUse guard returned an unrecognized "
                             "decision shape: {}".format(getattr(_og, "__name__", _og), _got))
 
-    # ROUND-2 FINDING 18: exercise the orchestration PreToolUse guards on REAL triggering inputs (a real git
+    # exercise the orchestration PreToolUse guards on REAL triggering inputs (a real git
     # repo + a version-1 orchestration registry), not only the /nonexistent probe (which never reaches the
     # registry: the yield guard allows it as having no root, the truncation guard denies it pre-scope).
     # This ADDS orch_yield_tool (previously unexercised by this invariant, so a restored ask path
@@ -26468,7 +26468,7 @@ def _main_isolated(monitor):
         # (a) armed decide_yield over an actionable backlog: a stop MUST DENY (not ask), a REAL decision.
         _f18_stop = _f18_yield({"stop": True})
         if _f18_stop == "ask":
-            failures.append("(noask-yield-stop) orch_yield_tool returned 'ask' on an armed stop (finding 18)")
+            failures.append("(noask-yield-stop) orch_yield_tool returned 'ask' on an armed stop")
         elif _f18_stop != "deny":
             failures.append("(noask-yield-exercised) orch_yield_tool must genuinely DENY a stop past an "
                             "actionable backlog (proving the decision ran, not an inert allow); got {}"
@@ -26501,7 +26501,7 @@ def _main_isolated(monitor):
             failures.append("(noask-trunc-sink) orch_truncation_guard returned 'ask' on a truncating sink")
         elif _f18_sink != "deny":
             failures.append("(noask-trunc-sink-deny) orch_truncation_guard must DENY a background producer "
-                            "piped into a truncating sink on a real repo (finding 9/18); got {}"
+                            "piped into a truncating sink on a real repo; got {}"
                             .format(_f18_sink))
         # (noask-trunc-note) a background dispatch with shell syntax (a redirect) but no truncating sink, on
         # the same real repo + registry, reaches orch_truncation_guard's final allow-with-note. Falsifiable:
@@ -26585,10 +26585,10 @@ def _main_isolated(monitor):
           "with a note any producer-capable-but-unproven or unparseable form (a convention, not a "
           "hazard). abspth (bash_absolute_paths) ALLOWS with a note a relative or opaque cd/redirect and "
           "an unreadable command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
-          "('>'/'>|'/'&>'/'>&') to a relative or opaque target (it could zero the wrong file; finding 10). "
+          "('>'/'>|'/'&>'/'>&') to a relative or opaque target (it could zero the wrong file). "
           "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
           "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "
-          "command (finding 11). prsunc "
+          "command. prsunc "
           "(git_discard) recovers-then-allows: a recoverable discard is snapshotted then ALLOWED with a "
           "recovery-pointer note, a confirmed whole-tree clobber on a dirty tree DENIES (with a snapshot "
           "when one could be made), and it DENIES-and-educates when a warranted recovery snapshot "
@@ -26621,7 +26621,7 @@ def _main_isolated(monitor):
           "/etc - DENIES via the ancestry-unknown fail-safe), treats a missing origin/HEAD as rooted and a "
           "CHECKOUT/SWITCH --track of a real rooted ref as a rooted creation (a git-branch --track is an "
           "unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a redirect whose worktree it cannot pin "
-          "(a --git-dir/GIT_DIR/-c form or an opaque -C/--work-tree) (finding 12); a rooted creation and "
+          "(a --git-dir/GIT_DIR/-c form or an opaque -C/--work-tree); a rooted creation and "
           "non-creation commands ALLOW. "
           "gatdis (gate_weakening) DENIES a --no-verify bypass (with a value-aware '--' boundary so a '--' "
           "eaten as an option value does not hide a following -n), any raw git naming whose segment the "
@@ -26652,13 +26652,13 @@ def _main_isolated(monitor):
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
           "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
           "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "
-          "truncated (| head/tail) - the broad heuristic is too broad to deny (finding 14). sectvl "
+          "truncated (| head/tail) - the broad heuristic is too broad to deny. sectvl "
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "
           "argument (re-issue single-quoted, in ANSI-C $'...' quoting, escaped, or via -F <file>); a "
-          "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS "
-          "(finding 15); the fallback and unreadable command deny fail-safe. gensrc (gensrc_guard) "
+          "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS"
+          "; the fallback and unreadable command deny fail-safe. gensrc (gensrc_guard) "
           "DENIES-and-educates a hand-edit of a registered generated artefact (edit the source and "
-          "regenerate) AND a PRESENT-but-unreadable/malformed registry (fail-closed, finding 8), and ALLOWS "
+          "regenerate) AND a PRESENT-but-unreadable/malformed registry (fail-closed), and ALLOWS "
           "with a note the remaining cannot-evaluate branches (a non-git session, an outside-repo target, a "
           "malformed payload), the CI drift gate remaining the backstop; a genuinely-absent registry is the "
           "inert allow and a missing tool_name also denies. secsec (secrets_shift_left) still "
@@ -26672,7 +26672,7 @@ def _main_isolated(monitor):
           "file (both .aiqt/orchestration.local.json AND the committed .aiqt/orchestration.json) is "
           "ALWAYS-FROZEN against covered writes in both regimes and independent of the committed floor, and "
           "the frozen/floor denials are evaluated BEFORE the companion-store allow so a symlink into a "
-          "declared store cannot bypass the freeze (findings 1 and 2), so a companion_stores widening cannot "
+          "declared store cannot bypass the freeze, so a companion_stores widening cannot "
           "be self-declared through a guarded tool; the general Bash-write path stays the disclosed wrtscp "
           "residual. A "
           "mis-wired PreToolUse event hard-blocks (exit 2). Historical note: several guards were "
