@@ -599,7 +599,12 @@ its writes begin, so a second system's reconciliation sees the held lease and re
 NOT be seized from a live holder; it MUST be reconciled against recorded state on resume or close,
 and a leftover lease from a dead run MUST be released only through that reconciliation. Where
 the concurrent-operation module is enabled, the lease MUST additionally be recorded as a
-`session_lease` record. There is a residual window between taking the lease and its reaching the
+`session_lease` record. That record is lease bookkeeping only (section 8.5): the claim writes it
+at `held`, the release or reconciliation moves it to `released` or `reconciled` in the same act as
+the lease transition it mirrors, and the write MUST NOT carry a worklog entry, since it records no
+store change of its own and is not a store operation under section 16.1; the lease file above,
+never the record, is what holds the lease. There is a residual window between taking the lease
+and its reaching the
 target in which two systems can both begin; the divergence check above is the overlapping control
 that catches that collision after the fact, and the two layers together are the guarantee (disclosed
 in section 17).
@@ -893,7 +898,11 @@ Notes on the roster:
   series, and unmappable imported text stays verbatim in `unparsed` (section 8.3).
 - `transaction` (`TX`) is excluded from the adopter standard with its name and namespace reserved;
   it may enter later as a versioned module only if portable semantics are demonstrated.
-- Modules ship default-off; each is enabled by one manifest edit.
+- Modules ship default-off. Enabling one is a single act that performs the manifest edit and
+  every section 4.2 same-act duty together, the reference tooling's maintainer-only
+  `enable-module` operation (section 8.8); disabling one MUST be refused while any clean or
+  imported record of the module's types exists, and is the same kind of single act
+  (`disable-module`, section 8.8).
 - Imported history uses the same enabled types (section 8.2) in a separate
   series, not additional record types.
   Reserved namespaces remain reserved. Imported states describe history and confer no current
@@ -1107,12 +1116,23 @@ Baseline types:
 | maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` MUST be `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning MUST be a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
 | preference_pattern | `active` > `retired` | A distilled preference pattern carrying `context` and `rationale` (with the envelope `title`). `active` is gated: an assistant-distilled pattern lands `active/proposed` awaiting maintainer ratification to the unqualified `active`. |
 
-Module types, in outline (full schemas ship with the module schemas release): maintainer_action
-`open` > `done` or `dropped`; artifact `staged` > `promoted` or
-`rejected`; gate_run `recorded` with a three-valued verdict field (`pass`, `fail`,
-`cannot_evaluate`), never folded into status; release `planned` > `published` or `abandoned`;
-waiver `active` > `expired` or `revoked`, expiry required at creation; mode `active` > `retired`;
-tier_assessment `recorded`; session_lease `held` > `released` or `reconciled`.
+Module types, enabled through `enable-module` (section 8.8) and declared per section 9, use the
+same grammar; their full schemas are these, stated by this specification rather than deferred to a
+later release. One rule fixes gating, the maintainer-authority mechanism of section 8.4: every
+state that grants current authority is a gated state (an artifact's `promoted`, a release's
+`published`, a waiver's `active`, a mode's `active`), and a recorded factual type (`gate_run`,
+`tier_assessment`) declares none, exactly as `reference` declares none.
+
+| Type | States | Rules |
+|---|---|---|
+| maintainer_action | `open` > `done` or `dropped` | An action only the maintainer can perform, carried as the required one-line `action` field (the envelope `title` stays the human heading); optional `due_at` (RFC 3339 UTC). `done` and `dropped` are terminal, so an assistant or automation lands `done/proposed` or `dropped/proposed` (section 8.4), and a `dropped` record MUST record its reason in `summary`. |
+| artifact | `staged` > `promoted` or `rejected` | A delivery artifact under assurance. Required `locator` (`{kind, locator}`, the section 8.6 reference shape without `note`) naming the artifact, and required `digest` (64 lowercase hexadecimal SHA-256 digits) binding its bytes at staging; optional `media_type`. `promoted` grants delivery authority, so it is gated: an assistant or automation lands `promoted/proposed` and only a maintainer lands the bare grant (section 8.4). A `rejected` record MUST record its reason in `summary`. |
+| gate_run | `recorded` | Created terminal, immutable, a factual record like `reference`: it carries no qualifier whatever the actor. Required `gate` (one line naming the gate that ran) and required `verdict`, exactly one of `pass`, `fail`, or `cannot_evaluate`; the verdict is its own field and MUST NOT be folded into `status`. Evidence rides `refs`; the graded subject, where it is a record, rides a `relates` link. |
+| release | `planned` > `published` or `abandoned` | Required `version`, the SemVer version string. At `planned` the `version.toml` ledger row need not exist yet; a record at `published` MUST name an existing `version.toml` release row by that `version`, and the ledger row is the fact (section 8.1). `published` grants release authority, so it is gated: an assistant or automation lands `published/proposed`. An `abandoned` record MUST record its reason in `summary`. |
+| waiver | `active` > `expired` or `revoked` | Required `scope`, one line naming the waived obligation (the waived finding, where one exists, rides a `relates` link), and required `expires_at` (RFC 3339 UTC), required at creation: a waiver without `expires_at` MUST be refused, never written. `active` is the gated initial state: an assistant or automation creating a waiver lands `active/proposed` (sections 8.4 and 8.8). A waiver confers nothing at or after its `expires_at`, whatever its recorded status (section 8.6); the transition to `expired` records the lapse. A `revoked` record MUST record its reason in `summary`. |
+| mode | `active` > `retired` | Required `mode`, a lowercase machine token naming the operating mode; the policy prose rides `summary`. `active` is the gated initial state: an assistant or automation lands `active/proposed`. At most one clean, unqualified `active` mode record per `mode` token MAY exist among records authored by non-importer actors (section 8.6), and activating a replacement MUST retire the previous record of that token in the same act. |
+| tier_assessment | `recorded` | Created terminal, immutable, a factual record like `gate_run`: no qualifier whatever the actor. Required `tier` (the assessed tier, from the adopter's declared tier vocabulary) and required `subject`, one line naming what was assessed; the basis rides `summary` and `refs`. A re-assessment is a new record linking `follows`. |
+| session_lease | `held` > `released` or `reconciled` | Lease bookkeeping (section 5.7), written only by the lease machinery, never by `create` or `transition` (section 8.8). Required `holder`, `operation` and `acquired_at` (RFC 3339 UTC), mirroring `lease.toml`; `ended_at` (RFC 3339 UTC) MUST be absent at `held` and present once `released` or `reconciled`. No state is gated: the record confers no lease and no authority, the lease file does (sections 5.7 and 8.6), and its writes carry no worklog entry and are not store operations (section 16.1). |
 
 Actionability: a clean backlog item authored by a non-importer actor is actionable when its
 state is `open` or `active` and no clean, unqualified `active` block authored by a non-importer
@@ -1159,6 +1179,22 @@ active `preference_pattern`; a state-bearing status on an importer-authored reco
 history at its source and MUST confer nothing now, and every current-state join, including the
 section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by
 non-importer actors.
+The module types bind to that rule with these joins, each evaluated over clean records authored by
+non-importer actors only. A current waiver for an obligation is a clean, unqualified `active`
+waiver whose `scope` names the obligation and whose `expires_at` is after the evaluating
+operation's clock value; an expired-by-clock, `/proposed`, `revoked` or importer-authored waiver
+confers nothing. The active mode for a `mode` token is the at-most-one clean, unqualified `active`
+record of that token (section 8.5). The current verdict for a gate is the `verdict` field of the
+clean `gate_run` carrying that `gate` with the greatest clean `<n>`, and the current tier
+assessment for a `subject` is the clean `tier_assessment` carrying that `subject` with the
+greatest clean `<n>`; both are recorded facts, never grants, and a verdict MUST NOT be read out of
+`status` (section 8.5). A delivery obligation is satisfied by an artifact only at clean,
+unqualified `promoted`. A release obligation is satisfied only by a clean, unqualified `published`
+release whose `version` names an existing `version.toml` release row, and a `published` release
+without that ledger row MUST be a finding. A maintainer action is discharged only by its own clean
+record at unqualified `done`. A held lease is evidenced by `lease.toml` (section 5.7), never by a
+`session_lease` record: that record is bookkeeping in both series and confers no lease, held or
+otherwise.
 The clean-series writer MUST refuse a transition on an importer-authored record in either series
 (section 8.8). Acting on history MUST take a new strict clean record at the present time, with a
 link back to the historical record.
@@ -1195,11 +1231,15 @@ an importer authors only through `import`. The clean-series subcommands MUST als
 importer-authored record as their operand: acting on imported history is a new clean record
 linking back (section 8.6). Its subcommands:
 
-- `create`: one new record of an enabled baseline type, in the type's initial state. An assistant
+- `create`: one new record of an enabled type, baseline or module tier, in the type's initial
+  state. An assistant
   or automation author entering a gated initial state lands `/proposed`; a created-terminal factual
   or ACT type (`reference`, `autonomous_decision`, `maintainer_decision`) carries no qualifier
-  (section 8.4). `done` receipts and worklog entries are not created this way.
-- `transition`: a status change checked against the type's grammar (section 8.5). An assistant or
+  (section 8.4). `gate_run` and `tier_assessment` are such created-terminal factual types too
+  (section 8.5). A `session_lease` record is never authored through these subcommands: the lease
+  machinery of section 5.7 writes it. `done` receipts and worklog entries are not created this way.
+- `transition`: a status change checked against the type's grammar (section 8.5). The grammar
+  covers every enabled type, the module tables of section 8.5 included. An assistant or
   automation author landing a terminal or gated state takes `/proposed`, and the verb MUST record
   the state the record held at that moment in the record's own `proposed_from` field (section 8.3)
   in the same act; only a maintainer ratifies, or rejects with a recorded reason back to the
@@ -1277,6 +1317,21 @@ linking back (section 8.6). Its subcommands:
 - `worklog-append`: one entry appended to the unreleased tail of `worklog.toml`, status `recorded`,
   never `/proposed` whatever the actor (sections 6.2 and 8.4). An entry that would fall inside a
   released span MUST be refused.
+- `enable-module NAME`: maintainer-only. In one journaled act it enables the named module: it sets
+  the module's `[modules]` flag, adds each of the module's types' `[types.<name>]` row with its
+  section 8.1 namespace, creates each type's clean index and its imported leaf, create-only and
+  empty, and adds each clean counter row and each imported counter row under the section 4.2 and
+  8.2 rules (an imported row at zero only where no imported ancestry exists, otherwise at the
+  largest `<n>` of that namespace's `imported:<NS>-<n>` IDs; a counter row that already exists is
+  kept, never reset). It MUST refuse an unknown module name, a module already enabled, and a module
+  any of whose types this writer cannot author (the section 14.1 bar), each with nothing written.
+  It creates no record.
+- `disable-module NAME`: maintainer-only. It MUST refuse while any clean or imported record of any
+  of the module's types exists, in the active indexes or the archive (section 12): disabling never
+  deletes or hides a record. On a module whose types' indexes and imported leaves are all empty it
+  clears, in one journaled act, the module's `[modules]` flag and its types' `[types.<name>]` rows
+  and removes those empty files; it MUST NOT touch `counters.toml` (section 8.2), so a later
+  `enable-module` finds the kept rows.
 
 - `import --batch FILE [--root DIR]`: the primary import surface (the import write mode; there
   is no separate `--import` flag). A single-record import is a one-row batch. The canonical TOML batch,
@@ -1293,7 +1348,10 @@ entry, one entry per change (section 6.2), in the same journaled transaction as 
 `detail` MUST open with a lifecycle line naming the record and its status change
 (`opf-record create <ID> <status>`, or `opf-record transition <ID> <from> -> <to>`); a rejection's
 entry MUST also record its reason. `worklog-append` MUST refuse a `detail` that opens with that
-lifecycle grammar.
+lifecycle grammar. `enable-module` and `disable-module` MUST each append their own worklog entry in
+the same journaled transaction, its `detail` opening with `opf-record enable-module <NAME>` or
+`opf-record disable-module <NAME>`, and `worklog-append` MUST refuse a `detail` that opens with
+either of those lines too.
 
 Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its
 guarantees:
@@ -1513,6 +1571,12 @@ The `layout` field selects the storage layout only:
 Readers always enter at `<type>.index.toml` in either layout. The ledgers are exempt from the
 per-record layout: `version.toml` and `worklog.toml` MUST always be single files, written under the
 store lock (allocation of WL IDs still goes through `counters.toml` atomically).
+
+The layouts couple to the concurrent-operation module one way only: a manifest declaring
+`layout = "per-record"` without `concurrent_operation = true` MUST be refused, while an inline
+store with `concurrent_operation = true` stays valid, and enabling the module changes no layout by
+itself. An implementation that supports the concurrent-operation module MUST support both layouts,
+the per-record registry duties above included.
 
 ### 9.1 Base standard and profiles
 

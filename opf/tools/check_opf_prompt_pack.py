@@ -35,15 +35,29 @@ Their guards:
   example-reasons   across the set, the `unrecorded` reasons are every _opf_adopt.MISSINGNESS_REASONS
                     value, and at least one row carries `history` and one carries `unparsed`
 
+MODULE TYPE TABLE (validate_module_table, run by the default invocation beside the pack checks). The
+spec's section 8.1 type table is the normative module roster; opf/tools/_opf_store.py MODULE_TYPES is
+the tooling's single source-of-truth copy of it. The guard:
+
+  module-table      the module-tier rows of the OPF-SPEC.md section 8.1 table (type, namespace and the
+                    module family its tier names) equal _opf_store.MODULE_TYPES exactly: every row has
+                    its entry, every entry has its row, and each (namespace, module) pair matches; an
+                    unknown or misspelled tier label, a duplicated type row, a missing section 8.1
+                    heading or an unreadable spec never passes
+
   check_opf_prompt_pack.py              verify the shipped pack beside this tool (../prompt-pack), its
-                                        import examples included
+                                        import examples included, and the spec module type table against
+                                        _opf_store.MODULE_TYPES
   check_opf_prompt_pack.py --self-test  synthetic packs assert each guard's exact status and guard name;
                                         the shipped flow/SKILL.md carries each FLOW_PINNED sentence and a
                                         provenance line whose release is pack.toml's version and whose
                                         template-sha256 matches its bytes; the shipped import/SKILL.md
                                         carries each IMPORT_PINNED sentence, the missingness reasons in
-                                        order and every example path; and adopt/SKILL.md section 8 names
-                                        import/SKILL.md
+                                        order and every example path; adopt/SKILL.md section 8 names
+                                        import/SKILL.md; and the shipped spec's module type table agrees
+                                        with _opf_store.MODULE_TYPES while each deliberate flip (a
+                                        deleted row, a changed namespace or tier, an extra MODULE_TYPES
+                                        entry) is red with the module-table guard
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as digest drift),
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
@@ -106,6 +120,18 @@ EXIT_CODES = {VALID: 0, INVALID: 1, CANNOT_EVALUATE: 2}
 DEFAULT_PACK_DIR = Path(__file__).resolve().parent.parent / "prompt-pack"
 EXAMPLES_DIR = "import/examples/"
 EXAMPLE_SUFFIX = ".batch.toml"
+SPEC_PATH = Path(__file__).resolve().parent.parent / "spec" / "OPF-SPEC.md"
+MAX_SPEC_BYTES = 4 * 1024 * 1024
+# The section 8.1 tier labels of the module families, mapped to their [modules] keys (spec 8.1 and 9).
+MODULE_TIERS = {
+    "Governance module": "governance",
+    "Delivery-assurance module": "delivery_assurance",
+    "Operational-policy module": "operational_policy",
+    "Concurrent-operation module": "concurrent_operation",
+}
+# A three-cell table row; the section 8.1 type table is the only such table in its section.
+_TABLE_ROW_RE = re.compile(r"^\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|[ \t]*$",
+                           re.MULTILINE)
 
 
 class _Refusal(Exception):
@@ -259,6 +285,60 @@ def validate_pack(pack_dir):
     except _Refusal as refusal:
         return refusal.status, refusal.guard, str(refusal)
     return VALID, None, "version {}, digest {}, {} member(s)".format(version, digest, count)
+
+
+def _spec_module_rows(text):
+    """The module-tier rows of the spec's section 8.1 type table, as {type: (namespace, module)}. A
+    row whose tier ends in "module" but is no MODULE_TIERS label, and a duplicated type, are refused,
+    so a misspelled family or a double row never reads as agreement."""
+    start = text.find("\n### 8.1 ")
+    _require(start >= 0, "module-table", "OPF-SPEC.md has no section 8.1 heading", CANNOT_EVALUATE)
+    end = text.find("\n### ", start + 1)
+    section = text[start:] if end < 0 else text[start:end]
+    rows = {}
+    for tier, tname, namespace in _TABLE_ROW_RE.findall(section):
+        if not tier.endswith("module"):
+            continue
+        _require(tier in MODULE_TIERS, "module-table",
+                 "unknown module tier {!r} in the section 8.1 table".format(tier))
+        _require(tname not in rows, "module-table",
+                 "module type {!r} is listed twice in the section 8.1 table".format(tname))
+        rows[tname] = (namespace, MODULE_TIERS[tier])
+    return rows
+
+
+def _module_table_problems(text):
+    """One problem per difference between the spec's module rows and _opf_store.MODULE_TYPES."""
+    rows = _spec_module_rows(text)
+    problems = []
+    for tname in sorted(set(rows) | set(_opf_store.MODULE_TYPES)):
+        if tname not in _opf_store.MODULE_TYPES:
+            problems.append("spec 8.1 lists module type {!r}, absent from _opf_store.MODULE_TYPES".format(tname))
+        elif tname not in rows:
+            problems.append("_opf_store.MODULE_TYPES has {!r}, absent from the spec 8.1 table".format(tname))
+        elif rows[tname] != tuple(_opf_store.MODULE_TYPES[tname]):
+            problems.append("module type {!r} differs: spec 8.1 {}, _opf_store.MODULE_TYPES {}".format(
+                tname, rows[tname], tuple(_opf_store.MODULE_TYPES[tname])))
+    return problems
+
+
+def validate_module_table(text=None):
+    """(status, guard, detail) for the spec's section 8.1 module type table against
+    _opf_store.MODULE_TYPES. Reads the shipped spec when text is None; reads only, writes nothing."""
+    try:
+        if text is None:
+            data = _read_regular(SPEC_PATH, MAX_SPEC_BYTES, "spec")
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _Refusal(CANNOT_EVALUATE, "spec-read", "OPF-SPEC.md is not UTF-8: {}".format(exc))
+        problems = _module_table_problems(text)
+    except _Refusal as refusal:
+        return refusal.status, refusal.guard, str(refusal)
+    if problems:
+        return INVALID, "module-table", "; ".join(problems)
+    return VALID, None, "{} module type row(s) agree with _opf_store.MODULE_TYPES".format(
+        len(_opf_store.MODULE_TYPES))
 
 
 def _is_utc_midnight(value):
@@ -909,6 +989,47 @@ def _self_test_vectors():
                 print("{} midnight-boundary {!r}: {}".format("PASS" if ok else "FAIL", value, want))
                 if not ok:
                     failures.append("midnight-boundary {!r} (wanted {})".format(value, want))
+            # The spec module type table against _opf_store.MODULE_TYPES: the shipped spec agrees, and
+            # each deliberate flip is red with the module-table guard. A flip whose replacement found
+            # nothing leaves the text unchanged and fails its vector, so a stale mutation never passes.
+            shipped_spec = _read_regular(SPEC_PATH, MAX_SPEC_BYTES, "spec").decode("utf-8")
+            gate_run_row = "| Delivery-assurance module | gate_run | GR |\n"
+            for name, status, guard, mutate in (
+                    ("module-table-shipped", VALID, None, lambda t: t),
+                    ("module-table-row-deleted", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, "", 1)),
+                    ("module-table-namespace-flipped", INVALID, "module-table",
+                     lambda t: t.replace("| waiver | WV |", "| waiver | WX |", 1)),
+                    ("module-table-tier-flipped", INVALID, "module-table",
+                     lambda t: t.replace("| Operational-policy module | mode |",
+                                         "| Governance module | mode |", 1)),
+                    ("module-table-unknown-tier", INVALID, "module-table",
+                     lambda t: t.replace("| Concurrent-operation module | session_lease |",
+                                         "| Scheduling module | session_lease |", 1)),
+                    ("module-table-duplicate-row", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, gate_run_row + gate_run_row, 1)),
+                    ("module-table-heading-missing", CANNOT_EVALUATE, "module-table",
+                     lambda t: t.replace("\n### 8.1 ", "\n### 8x1 ", 1)),
+            ):
+                mutated = mutate(shipped_spec)
+                changed = name == "module-table-shipped" or mutated != shipped_spec
+                got = validate_module_table(mutated)
+                count += 1
+                ok = changed and got[:2] == (status, guard)
+                print("{} {}: {} {}".format("PASS" if ok else "FAIL", name, got[0], got[1] or "").rstrip())
+                if not ok:
+                    failures.append("{} (wanted {} {}, mutation applied {}, got {} {}: {})".format(
+                        name, status, guard, changed, got[0], got[1], got[2]))
+            # An entry past the table: MODULE_TYPES extended without its spec row is red too.
+            from unittest.mock import patch
+            with patch.dict(_opf_store.MODULE_TYPES, {"legacy_fragment": ("LF", "governance")}):
+                got = validate_module_table(shipped_spec)
+            count += 1
+            ok = got[:2] == (INVALID, "module-table") and "legacy_fragment" in got[2]
+            print("{} module-table-extra-entry: {} {}".format(
+                "PASS" if ok else "FAIL", got[0], got[1] or "").rstrip())
+            if not ok:
+                failures.append("module-table-extra-entry: {!r}".format(got))
             # The default run (main with no argument) includes the import examples: the shipped pack reports
             # them, and a pack whose only fault is an example guard's is refused, not VALID.
             import contextlib
@@ -959,7 +1080,8 @@ def _self_test_vectors():
 
             # A manifest tomllib refuses with RecursionError (a deeply nested value, and a 1001-part key under
             # the emulated cap) is the manifest-parse refusal, never the backstop's unexpected error.
-            import _opf_store
+            # _opf_store is the module-level import; a local import here would shadow it for the whole
+            # function, unbinding the module-table vectors above.
             for name, text, capped in (("manifest-deep-nesting", _opf_store._ST_DEEP_TOML, False),
                                        ("manifest-key-1001-parts", _opf_store._ST_LONG_KEY_TOML, True)):
                 pack = Path(tmp) / name / "prompt-pack"
@@ -1071,7 +1193,13 @@ def main(argv=None):
             print("OPF PROMPT PACK: VALID ({})".format(detail))
         else:
             print("OPF PROMPT PACK: {} [{}] {}".format(status, guard, detail), file=sys.stderr)
-        return EXIT_CODES[status]
+        table_status, table_guard, table_detail = validate_module_table()
+        if table_status == VALID:
+            print("OPF MODULE TABLE: VALID ({})".format(table_detail))
+        else:
+            print("OPF MODULE TABLE: {} [{}] {}".format(table_status, table_guard, table_detail),
+                  file=sys.stderr)
+        return max(EXIT_CODES[status], EXIT_CODES[table_status])
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0
         print("check_opf_prompt_pack: cannot evaluate: unexpected error ({!r})".format(exc), file=sys.stderr)
         return 2

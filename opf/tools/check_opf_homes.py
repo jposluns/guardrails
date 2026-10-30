@@ -16,7 +16,9 @@ default entry alone: a retired fragment (_RETIRED) restored in its own section, 
 with homes 2 is the only base version (spec 4.2 and 9.2) and the base defines one implementation
 model (spec 16.1). Each fragment names a retired term (homes, legacy state, activation, a target
 contract, a pre-2.0.0 base version, an implementation class or its admission check, the
-legacy_fragment type, the imports reserved name, or the removed section 9.2 remedy adoption), so a sentence on
+legacy_fragment type, the imports reserved name, the removed section 9.2 remedy adoption, the
+one-manifest-edit module enablement, the module outline deferred to a module schemas release, or
+the baseline-only create), so a sentence on
 another upgrade, such as a future 2.x or worklog-generation upgrade, matches none. A retired sentence is quoted, to say it no longer applies, in one exact form, a retired-text
 quotation block: a block quote whose first line is exactly "> Retired text, quoted and not in
 force:", with no line directly above it that opens with ">" after at most three spaces (a
@@ -466,6 +468,7 @@ _CONTRACT = {
         "A **single-writer lease** prevents concurrent divergent writes: before mutating the store, a run MUST take the lease (lease.toml, present only while held, carrying the holder, the operation, and an acquired-at timestamp read from the clock) and MUST make it observable at the sync target before its writes begin, so a second system's reconciliation sees the held lease and refuses.",
         'A lease MUST NOT be seized from a live holder; it MUST be reconciled against recorded state on resume or close, and a leftover lease from a dead run MUST be released only through that reconciliation.',
         'Where the concurrent-operation module is enabled, the lease MUST additionally be recorded as a session_lease record.',
+        'That record is lease bookkeeping only (section 8.5): the claim writes it at held, the release or reconciliation moves it to released or reconciled in the same act as the lease transition it mirrors, and the write MUST NOT carry a worklog entry, since it records no store change of its own and is not a store operation under section 16.1; the lease file above, never the record, is what holds the lease.',
         _D('There is a residual window between taking the lease and its reaching the target in which two systems can both begin; the divergence check above is the overlapping control that catches that collision after the fact, and the two layers together are the guarantee (disclosed in section 17).'),
         _D('This contract states two generic operational requirements inline.'),
         'First, a **single-writer lease**: a run MUST hold a lease so two runs never act on the same store state at once, MUST reconcile it on resume or close, and MUST NOT seize it from a live holder.',
@@ -526,7 +529,8 @@ _CONTRACT = {
         _D('The namespace CL is reserved unassigned so it can never half-collide with the freed word.'),
         _D('- The namespace LF is reserved unassigned in the same way: no record type uses it in either series, and unmappable imported text stays verbatim in unparsed (section 8.3).'),
         _D('- transaction (TX) is excluded from the adopter standard with its name and namespace reserved; it may enter later as a versioned module only if portable semantics are demonstrated.'),
-        _D('- Modules ship default-off; each is enabled by one manifest edit.'),
+        _D('- Modules ship default-off.'),
+        "Enabling one is a single act that performs the manifest edit and every section 4.2 same-act duty together, the reference tooling's maintainer-only enable-module operation (section 8.8); disabling one MUST be refused while any clean or imported record of the module's types exists, and is the same kind of single act (disable-module, section 8.8).",
         _D('- Imported history uses the same enabled types (section 8.2) in a separate series, not additional record types.'),
         _D('Reserved namespaces remain reserved.'),
         _D('Imported states describe history and confer no current authority (section 8.6).'),
@@ -645,7 +649,34 @@ _CONTRACT = {
         'It MAY exemplifies the preference_pattern it instantiates.',
         _D('| | preference_pattern | active > retired | A distilled preference pattern carrying context and rationale (with the envelope title).'),
         _D('active is gated: an assistant-distilled pattern lands active/proposed awaiting maintainer ratification to the unqualified active.'),
-        _D('| Module types, in outline (full schemas ship with the module schemas release): maintainer_action open > done or dropped; artifact staged > promoted or rejected; gate_run recorded with a three-valued verdict field (pass, fail, cannot_evaluate), never folded into status; release planned > published or abandoned; waiver active > expired or revoked, expiry required at creation; mode active > retired; tier_assessment recorded; session_lease held > released or reconciled.'),
+        _D('| Module types, enabled through enable-module (section 8.8) and declared per section 9, use the same grammar; their full schemas are these, stated by this specification rather than deferred to a later release.'),
+        _D("One rule fixes gating, the maintainer-authority mechanism of section 8.4: every state that grants current authority is a gated state (an artifact's promoted, a release's published, a waiver's active, a mode's active), and a recorded factual type (gate_run, tier_assessment) declares none, exactly as reference declares none."),
+        _D('| Type | States | Rules | |---|---|---| | maintainer_action | open > done or dropped | An action only the maintainer can perform, carried as the required one-line action field (the envelope title stays the human heading); optional due_at (RFC 3339 UTC).'),
+        'done and dropped are terminal, so an assistant or automation lands done/proposed or dropped/proposed (section 8.4), and a dropped record MUST record its reason in summary.',
+        _D('| | artifact | staged > promoted or rejected | A delivery artifact under assurance.'),
+        _D('Required locator ({kind, locator}, the section 8.6 reference shape without note) naming the artifact, and required digest (64 lowercase hexadecimal SHA-256 digits) binding its bytes at staging; optional media_type.'),
+        _D('promoted grants delivery authority, so it is gated: an assistant or automation lands promoted/proposed and only a maintainer lands the bare grant (section 8.4).'),
+        'A rejected record MUST record its reason in summary.',
+        _D('| | gate_run | recorded | Created terminal, immutable, a factual record like reference: it carries no qualifier whatever the actor.'),
+        'Required gate (one line naming the gate that ran) and required verdict, exactly one of pass, fail, or cannot_evaluate; the verdict is its own field and MUST NOT be folded into status.',
+        _D('Evidence rides refs; the graded subject, where it is a record, rides a relates link.'),
+        _D('| | release | planned > published or abandoned | Required version, the SemVer version string.'),
+        'At planned the version.toml ledger row need not exist yet; a record at published MUST name an existing version.toml release row by that version, and the ledger row is the fact (section 8.1).',
+        _D('published grants release authority, so it is gated: an assistant or automation lands published/proposed.'),
+        'An abandoned record MUST record its reason in summary.',
+        '| | waiver | active > expired or revoked | Required scope, one line naming the waived obligation (the waived finding, where one exists, rides a relates link), and required expires_at (RFC 3339 UTC), required at creation: a waiver without expires_at MUST be refused, never written.',
+        _D('active is the gated initial state: an assistant or automation creating a waiver lands active/proposed (sections 8.4 and 8.8).'),
+        _D('A waiver confers nothing at or after its expires_at, whatever its recorded status (section 8.6); the transition to expired records the lapse.'),
+        'A revoked record MUST record its reason in summary.',
+        _D('| | mode | active > retired | Required mode, a lowercase machine token naming the operating mode; the policy prose rides summary.'),
+        _D('active is the gated initial state: an assistant or automation lands active/proposed.'),
+        'At most one clean, unqualified active mode record per mode token MAY exist among records authored by non-importer actors (section 8.6), and activating a replacement MUST retire the previous record of that token in the same act.',
+        _D('| | tier_assessment | recorded | Created terminal, immutable, a factual record like gate_run: no qualifier whatever the actor.'),
+        _D("Required tier (the assessed tier, from the adopter's declared tier vocabulary) and required subject, one line naming what was assessed; the basis rides summary and refs."),
+        _D('A re-assessment is a new record linking follows.'),
+        _D('| | session_lease | held > released or reconciled | Lease bookkeeping (section 5.7), written only by the lease machinery, never by create or transition (section 8.8).'),
+        'Required holder, operation and acquired_at (RFC 3339 UTC), mirroring lease.toml; ended_at (RFC 3339 UTC) MUST be absent at held and present once released or reconciled.',
+        _D('No state is gated: the record confers no lease and no authority, the lease file does (sections 5.7 and 8.6), and its writes carry no worklog entry and are not store operations (section 16.1). |'),
         _D('Actionability: a clean backlog item authored by a non-importer actor is actionable when its state is open or active and no clean, unqualified active block authored by a non-importer actor scopes it.'),
         'Imported and importer-authored records MUST NOT enter this join on either side: an importer-authored backlog item is history, never actionable work, whatever its recorded state, and an importer-authored block MUST NOT block (section 8.6).',
         'This is the block join every scheduling view renders; a scheduling view MUST surface an importer-authored item only as history, never as actionable.',
@@ -668,6 +699,14 @@ _CONTRACT = {
         'An importer-authored decision MUST NOT be treated as the current effective resolution of a clean pending_decision chain; resolving such a chain now MUST take a new clean decision linking back.',
         'Importer-authored blocks MUST NOT grant a current stop, and an importer-authored record MUST NOT discharge a required supersession.',
         'The firewall covers every state-bearing type: an importer-authored record MUST NOT be treated as the current handoff, an active waiver, a held session_lease, an active mode, or a ratified active preference_pattern; a state-bearing status on an importer-authored record describes history at its source and MUST confer nothing now, and every current-state join, including the section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer actors.',
+        _D('The module types bind to that rule with these joins, each evaluated over clean records authored by non-importer actors only.'),
+        _D("A current waiver for an obligation is a clean, unqualified active waiver whose scope names the obligation and whose expires_at is after the evaluating operation's clock value; an expired-by-clock, /proposed, revoked or importer-authored waiver confers nothing."),
+        _D('The active mode for a mode token is the at-most-one clean, unqualified active record of that token (section 8.5).'),
+        'The current verdict for a gate is the verdict field of the clean gate_run carrying that gate with the greatest clean <n>, and the current tier assessment for a subject is the clean tier_assessment carrying that subject with the greatest clean <n>; both are recorded facts, never grants, and a verdict MUST NOT be read out of status (section 8.5).',
+        _D('A delivery obligation is satisfied by an artifact only at clean, unqualified promoted.'),
+        'A release obligation is satisfied only by a clean, unqualified published release whose version names an existing version.toml release row, and a published release without that ledger row MUST be a finding.',
+        _D('A maintainer action is discharged only by its own clean record at unqualified done.'),
+        _D('A held lease is evidenced by lease.toml (section 5.7), never by a session_lease record: that record is bookkeeping in both series and confers no lease, held or otherwise.'),
         'The clean-series writer MUST refuse a transition on an importer-authored record in either series (section 8.8).',
         'Acting on history MUST take a new strict clean record at the present time, with a link back to the historical record.',
         'C-IMPORTED-SEGREGATION enforces this firewall: a clean-series record that carries actor.kind = "importer", and a breach of any other part of this firewall, the link rules below included, for which this specification names no other doctor check, MUST each be a C-IMPORTED-SEGREGATION finding.',
@@ -683,10 +722,13 @@ _CONTRACT = {
         _D('Its clean-series subcommands use the strict record model; the import write mode uses the separate imported model.'),
         'Import is not a flag that relaxes create, and the clean-series subcommands MUST refuse actor.kind = "importer": an importer authors only through import.',
         'The clean-series subcommands MUST also refuse an importer-authored record as their operand: acting on imported history is a new clean record linking back (section 8.6).',
-        _D("Its subcommands: - create: one new record of an enabled baseline type, in the type's initial state."),
+        _D("Its subcommands: - create: one new record of an enabled type, baseline or module tier, in the type's initial state."),
         _D('An assistant or automation author entering a gated initial state lands /proposed; a created-terminal factual or ACT type (reference, autonomous_decision, maintainer_decision) carries no qualifier (section 8.4).'),
+        _D('gate_run and tier_assessment are such created-terminal factual types too (section 8.5).'),
+        _D('A session_lease record is never authored through these subcommands: the lease machinery of section 5.7 writes it.'),
         _D('done receipts and worklog entries are not created this way.'),
         _D("- transition: a status change checked against the type's grammar (section 8.5)."),
+        _D('The grammar covers every enabled type, the module tables of section 8.5 included.'),
         "An assistant or automation author landing a terminal or gated state takes /proposed, and the verb MUST record the state the record held at that moment in the record's own proposed_from field (section 8.3) in the same act; only a maintainer ratifies, or rejects with a recorded reason back to the recorded pre-proposal state (section 8.4).",
         'A rejection MUST restore exactly the recorded proposed_from state, and leaving the /proposed status, by rejection or ratification, MUST remove the field.',
         _D('A proposed record that carries no proposed_from was proposed outside transition; that includes a record create lands directly at a /proposed initial state, so the absence establishes no provenance.'),
@@ -721,6 +763,13 @@ _CONTRACT = {
         _D('A repaired receipt is linked one-to-one to its item, so it is not a standalone receipt (section 8.1).'),
         _D('- worklog-append: one entry appended to the unreleased tail of worklog.toml, status recorded, never /proposed whatever the actor (sections 6.2 and 8.4).'),
         'An entry that would fall inside a released span MUST be refused.',
+        _D('- enable-module NAME: maintainer-only.'),
+        _D("In one journaled act it enables the named module: it sets the module's [modules] flag, adds each of the module's types' [types.<name>] row with its section 8.1 namespace, creates each type's clean index and its imported leaf, create-only and empty, and adds each clean counter row and each imported counter row under the section 4.2 and 8.2 rules (an imported row at zero only where no imported ancestry exists, otherwise at the largest <n> of that namespace's imported:<NS>-<n> IDs; a counter row that already exists is kept, never reset)."),
+        'It MUST refuse an unknown module name, a module already enabled, and a module any of whose types this writer cannot author (the section 14.1 bar), each with nothing written.',
+        _D('It creates no record.'),
+        _D('- disable-module NAME: maintainer-only.'),
+        'It MUST refuse while any clean or imported record of any of the module\'s types exists, in the active indexes or the archive (section 12): disabling never deletes or hides a record.',
+        "On a module whose types' indexes and imported leaves are all empty it clears, in one journaled act, the module's [modules] flag and its types' [types.<name>] rows and removes those empty files; it MUST NOT touch counters.toml (section 8.2), so a later enable-module finds the kept rows.",
         _D('- import --batch FILE [--root DIR]: the primary import surface (the import write mode; there is no separate --import flag).'),
         _D('A single-record import is a one-row batch.'),
         _D('The canonical TOML batch, opf.record.import-batch/v1, declares one source path, record rows, worklog rows, historical fields, missingness, verbatim unparsed text and batch-local link keys.'),
@@ -729,6 +778,7 @@ _CONTRACT = {
         'create, transition, done-with-receipt, and receipt-repair MUST each append their own worklog entry, one entry per change (section 6.2), in the same journaled transaction as the change.',
         "Its detail MUST open with a lifecycle line naming the record and its status change (opf-record create <ID> <status>, or opf-record transition <ID> <from> -> <to>); a rejection's entry MUST also record its reason.",
         'worklog-append MUST refuse a detail that opens with that lifecycle grammar.',
+        'enable-module and disable-module MUST each append their own worklog entry in the same journaled transaction, its detail opening with opf-record enable-module <NAME> or opf-record disable-module <NAME>, and worklog-append MUST refuse a detail that opens with either of those lines too.',
         'Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its guarantees: 1.',
         "Resolve the store, then any interrupted authoring transaction MUST be reconciled first, under the section 9.2 refuse-before-write order, which applies the section 9.2 validation refusals before that reconciliation writes.",
         'Reconciliation writes the store, so it MUST run only under the single-writer lease that publication uses: when a live or possibly-live holder holds that lease, reconciliation MUST refuse before any recovery write and MUST NOT seize the lease, and reconciliation MAY itself release a leftover lease from a confirmed-dead run of the same verb, since that release is the reconciliation on resume, and section 5.7 requires a leftover lease from a dead run to be released only through that reconciliation.',
@@ -787,6 +837,8 @@ _CONTRACT = {
         _D('Concurrent writers pay the file-count cost only when they have the problem it solves.'),
         _D('Readers always enter at <type>.index.toml in either layout.'),
         'The ledgers are exempt from the per-record layout: version.toml and worklog.toml MUST always be single files, written under the store lock (allocation of WL IDs still goes through counters.toml atomically).',
+        'The layouts couple to the concurrent-operation module one way only: a manifest declaring layout = "per-record" without concurrent_operation = true MUST be refused, while an inline store with concurrent_operation = true stays valid, and enabling the module changes no layout by itself.',
+        'An implementation that supports the concurrent-operation module MUST support both layouts, the per-record registry duties above included.',
     ),
     "9.2": (
         _D('Base spec 2.0.0 is the baseline, and it declares the homes generation with the required integer [opf].homes = 2 (section 4.2).'),
@@ -1139,8 +1191,10 @@ _PINNED = {
 # Each fragment names a retired term (_RETIRED_TERMS): homes, legacy state, activation, a target
 # contract, a pre-2.0.0 base version, an implementation class or the fresh-only admission check
 # (spec 16.1 defines one implementation model), the legacy_fragment type and its LF quarantine, the
-# imports reserved name, or the removed section 9.2 remedy adoption (its old tree, the old store's
-# files and the store being adopted into). Retired sentences that name none are not fragments, since a
+# imports reserved name, the removed section 9.2 remedy adoption (its old tree, the old store's
+# files and the store being adopted into), the one-manifest-edit module enablement, the module
+# outline deferred to a module schemas release, or the baseline-only create (each superseded when
+# section 8.5 stated the full module schemas). Retired sentences that name none are not fragments, since a
 # future 2.x upgrade could state them again: "The owning writer or migration MUST derive each
 # inventory" and the containment and discovery sentences reworded for 2.0.0 (4.2), the 8.1 governance
 # note's last two sentences, the 1.1.0 delta's "The upgrade weakens nothing" and the generic rules of
@@ -1231,6 +1285,7 @@ _RETIRED = {
         'verbatim unparsed text (section 8.3), not LF quarantine',
         'provides no legacy LF validation',
         'same enabled types except legacy_fragment',
+        'Modules ship default-off; each is enabled by one manifest edit.',
     ),
     "8.2": (
         "rows required once the store declares spec_version 1.3.0 or later",
@@ -1247,6 +1302,7 @@ _RETIRED = {
     ),
     "8.5": (
         'legacy_fragment quarantined > resolved or ignored',
+        'Module types, in outline (full schemas ship with the module schemas release):',
     ),
     "8.6": (
         'written into the clean series by the pre-1.3.0 legacy importer',
@@ -1264,6 +1320,7 @@ _RETIRED = {
         "The journal remains .aiqt/record/journal at homes 1",
         'acting on imported or legacy importer-authored history',
         'A fresh-only implementation (section 16.1) performs that reconciliation',
+        "create: one new record of an enabled baseline type, in the type's initial state.",
     ),
     "9": (
         'spec_version = "1.3.0" # OPFiles base spec version',
@@ -1428,7 +1485,8 @@ _RETIRED_TERMS = ("homes", "legacy", "activat", "target contract", "pre-1.", "1.
                   "1.3.0", "fresh-only", "upgrade-capable", "conformance class", "implementation's class",
                   "devprocess", "admission check", "pre-scan", "recovery bound", "quarantine", "fragment",
                   "except lf", "imports", "remedy adoption", "remedy above", "old tree", "old store's",
-                  "being adopted into")
+                  "being adopted into", "one manifest edit", "module schemas release",
+                  "enabled baseline type")
 # Machine-subdirectory names the reference tooling still reserves (store.RESERVED_MACHINE_SUBDIRS) that
 # spec 4.4 no longer reserves: the legacy staging name imports, dropped from the spec by the maintainer
 # ruling of 2026-10-23 while the tooling keeps refusing a machine store so named until its own change.
@@ -8237,7 +8295,7 @@ def _self_test_vectors():
         ('8.3', ('C-IMPORTED-IDS owns every', 'C-CONTAINMENT recognizes',), (
             'C-CONTAINMENT recognizes the imported managed leaves, C-LINKS resolves the union of both series, and C-IMPORTED-SEGREGATION enforces section 8.6.',
         )),
-        ('8.5', ('| Module types, in outline',), (
+        ('8.5', ('| Module types, enabled through',), (
             '| Module types, in outline (full schemas ship with the module schemas release): maintainer_action open > done or dropped; artifact staged > promoted or rejected; gate_run recorded with a three-valued verdict field (pass, fail, cannot_evaluate), never folded into status; release planned > published or abandoned; waiver active > expired or revoked, expiry required at creation; mode active > retired; tier_assessment recorded; session_lease held > released or reconciled; legacy_fragment quarantined > resolved or ignored.',
         )),
         ('8.6', ('Imported history has an authority firewall', 'A clean-series record MUST NOT carry',), (
@@ -8455,6 +8513,22 @@ def _self_test_vectors():
         )),
     ):
         retired_known[section] = retired_known.get(section, ()) + sentences
+    # Retired when section 8.5 stated the full module schemas: enabling stopped being one bare
+    # manifest edit (8.1 defines the single enabling act with its section 4.2 same-act duties),
+    # the 8.5 outline's deferral to a module schemas release ended, and 8.8 create widened from
+    # baseline types to every enabled type.
+    for section, sentences in (
+        ('8.1', (
+            '- Modules ship default-off; each is enabled by one manifest edit.',
+        )),
+        ('8.5', (
+            'Module types, in outline (full schemas ship with the module schemas release): maintainer_action open > done or dropped; artifact staged > promoted or rejected; gate_run recorded with a three-valued verdict field (pass, fail, cannot_evaluate), never folded into status; release planned > published or abandoned; waiver active > expired or revoked, expiry required at creation; mode active > retired; tier_assessment recorded; session_lease held > released or reconciled.',
+        )),
+        ('8.8', (
+            "- create: one new record of an enabled baseline type, in the type's initial state.",
+        )),
+    ):
+        retired_known[section] = retired_known.get(section, ()) + sentences
     for section, starts, old in retired_runs:
         pins = _CONTRACT[section]
         at = [i for i, f in enumerate(pins) if f.startswith(starts[0])]
@@ -8502,7 +8576,7 @@ def _self_test_vectors():
         # Emptying or narrowing the registry would retire its vectors silently: its shape is pinned.
         check("spec-retired-registry", lambda: tuple(_RETIRED) == (
             "4.2", "4.4", "4.5", "8.1", "8.2", "8.3", "8.5", "8.6", "8.8", "9", "9.1", "9.2", "11", "12", "13", "14.1", "14.2", "14.3", "15", "16.1", "17") and
-              tuple(map(len, _RETIRED.values())) == (47, 2, 7, 6, 7, 2, 1, 5, 8, 2, 3, 36, 5, 2, 1, 9, 9, 1, 3, 44, 17))
+              tuple(map(len, _RETIRED.values())) == (47, 2, 7, 7, 7, 2, 2, 5, 9, 2, 3, 36, 5, 2, 1, 9, 9, 1, 3, 44, 17))
         near_misses = (
             ("plain", "Retired text, quoted and not in force:\n{}"),
             ("inline", "> Retired text, quoted and not in force: {}"),
