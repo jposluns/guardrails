@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The generic AEI v1 reference enumerator for a markdown-checkbox backlog (GD-112; rule grdinp).
+"""The generic AEI v1 reference enumerator for a markdown-checkbox backlog (rule grdinp).
 
 Line grammar (one item per dash bullet; anything else is prose and ignored):
   - <ID> [x]        <title>              closed
@@ -7,7 +7,7 @@ Line grammar (one item per dash bullet; anything else is prose and ignored):
   - <ID> [BLOCKED]  <title> :: blocker:<kind>=<ref>[ :: observed=<iso-utc>][ :: evidence=<text>]
   - ... any item line may end with ':: proposed' (enumerated, never compelling)
 The 6-token state model ([x] [O] [o] [.] [ ] [BLOCKED]) reimplements the semantics of the reference
-host parser supplied with the GD-112 brief: [x] is done; [O]/[o]/[.]/[ ] are open at different seed
+host parser it was written against: [x] is done; [O]/[o]/[.]/[ ] are open at different seed
 stages (a distinction the guard does not need, so all map to open); [BLOCKED] requires a structured
 blocker suffix, because an unproven BLOCKED marker must classify as actionable, never as excused.
 
