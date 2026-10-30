@@ -2369,6 +2369,7 @@ def boundary_self_test():
     import copy
     import hashlib
     import inspect
+    import os
     from types import SimpleNamespace
     from unittest.mock import patch
     import _journal as journal
@@ -2566,14 +2567,44 @@ def boundary_self_test():
     def graded(report, path):
         return any(repr(path) in message for message in report.findings)
 
+    # This tooling's adoption journal home. Containment decides a legacy store has started an adoption
+    # from ONE probe of it (an lstat in the shipped helper, answered here from the fixture), never by
+    # listing journals/ (the listing mock above refuses that).
+    adoption_journal = store.journal_root("adoption").rsplit("/", 1)[0]
+    probed = []
+
+    def journal_probe(_fd):
+        probed.append(adoption_journal)
+        return adoption_journal in directories
+
+    def drop(path, depth):
+        # Remove one fixture file and the `depth` directories beneath it that add() created for it.
+        del files[path]
+        directories.difference_update(path.rsplit("/", n)[0] for n in range(1, depth + 1))
+
     with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", read_toml), \
-            patch.object(doctor, "_read_bytes", read_bytes):
+            patch.object(doctor, "_read_bytes", read_bytes), \
+            patch.object(doctor, "_adoption_journal_present", journal_probe):
         stage = ".working/staging/import/" + run + "/plan.toml"
         add(stage)
         add(".working/journals/import/journal/inflight/frames.log", b"torn")
-        # A legacy store keeps its legacy grading: each homes-2 name is one unregistered path.
+        # A legacy store that has started no adoption keeps its legacy grading (spec 4.2): each homes-2
+        # name, journals/ included, is one unregistered path.
         check("legacy-staging-graded", lambda: graded(containment(), ".working/staging"))
         check("legacy-journals-graded", lambda: graded(containment(), ".working/journals"))
+        # Once this tooling's adoption journal home is a directory the store has started an adoption: its
+        # journals/ is left out unlisted, decided by the probe alone. The same name as a FILE is no
+        # journal home, so journals/ is graded again.
+        txn = adoption_journal + "/journal/" + adopt_run + "/frames.log"
+        add(txn, b"torn")
+        del probed[:]
+        check("legacy-adoption-journal-excluded", lambda: not graded(containment(), ".working/journals")
+              and not any("journals" in m for m in containment().cannot)
+              and probed != [] and ".working/journals" not in listed)
+        drop(txn, 3)
+        add(adoption_journal, b"not a journal home")
+        check("legacy-adoption-journal-file-graded", lambda: graded(containment(), ".working/journals"))
+        drop(adoption_journal, 0)
         check("legacy-staging-not-partial", lambda: not containment(True).triage
               and any("no active" in message for message in containment(True).findings))
         with active():
@@ -2865,7 +2896,8 @@ def boundary_self_test():
         with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", doctor_toml), \
                 patch.object(store, "_read_toml_contained", side_effect=worklog_toml), \
                 patch.object(journal, "_lstat_contained", side_effect=worklog_stat), \
-                patch.object(doctor, "_read_bytes", read_bytes):
+                patch.object(doctor, "_read_bytes", read_bytes), \
+                patch.object(doctor, "_adoption_journal_present", journal_probe):
             report = doctor._Report()
             doctor._validate_opened_store(0, None, machine, None, {}, None, "default", True, report)
         return report.result(), list(listed)
@@ -2920,6 +2952,71 @@ def boundary_self_test():
         activated_legacy, _ = dispatch(full_manifest)
     check("doctor-activated-legacy-roster", lambda: legacy_roster(activated_legacy)
           and activated_legacy.residuals == legacy_report.residuals)
+    # A legacy store holding this tooling's adoption journal home has started an adoption: the doctor
+    # leaves its journals/ out, lists none of it, still grades the other homes-2 names and keeps the
+    # legacy roster and residuals.
+    txn = adoption_journal + "/journal/" + adopt_run + "/frames.log"
+    add(txn, b"torn")
+    adopting_report, adopting_listed = dispatch(full_manifest)
+    drop(txn, 3)
+    check("doctor-legacy-adoption-journal-excluded", lambda: not contained(adopting_report, ".working/journals")
+          and contained(adopting_report, ".working/imported")
+          and not any(p == ".working/journals" or p.startswith(".working/journals/") for p in adopting_listed)
+          and legacy_roster(adopting_report) and adopting_report.residuals == legacy_report.residuals)
+
+    # The shipped probe over a real tree: one no-follow lstat of the adoption journal home, never a listing,
+    # True only for a real directory there (a file, a symlink to a directory, a sibling kind and an absent
+    # journals/ each read False, so journals/ keeps its legacy grading).
+    def probe_tree(plant):
+        with tempfile.TemporaryDirectory(prefix="opf-homes-probe-") as tmp:
+            plant(Path(tmp))
+            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
+            seen = []
+            real_lstat = journal._lstat_contained
+            try:
+                with patch.object(journal, "_lstat_contained", lambda f, rel: seen.append(rel) or real_lstat(f, rel)), \
+                        patch.object(doctor, "_list_contained", side_effect=AssertionError("journals listed")):
+                    return doctor._adoption_journal_present(fd), seen
+            finally:
+                os.close(fd)
+
+    def home_dir(root):
+        (root / adoption_journal / "journal").mkdir(parents=True)
+
+    def home_file(root):
+        (root / adoption_journal).parent.mkdir(parents=True)
+        (root / adoption_journal).write_bytes(b"not a journal home\n")
+
+    def home_symlink(root):
+        (root / ".working/elsewhere").mkdir(parents=True)
+        (root / adoption_journal).parent.mkdir(parents=True)
+        os.symlink("../elsewhere", str(root / adoption_journal))
+
+    def sibling_kind(root):
+        (root / ".working/journals/import/journal").mkdir(parents=True)
+
+    for label, plant, want in (("directory", home_dir, True), ("file", home_file, False),
+                               ("symlink", home_symlink, False), ("sibling-kind", sibling_kind, False),
+                               ("absent", lambda root: (root / ".working").mkdir(), False)):
+        check("adoption-journal-probe-" + label, lambda p=plant, w=want: probe_tree(p) == (w, [adoption_journal]))
+
+    # A probe that cannot observe the home reads False even over a real home directory, so journals/ keeps
+    # its legacy grading: a fault grades, never exempts (red against a probe that reads its fault as present).
+    def probe_faulting(fault):
+        def faulty(_fd, rel):
+            raise fault
+        with tempfile.TemporaryDirectory(prefix="opf-homes-probe-") as tmp:
+            home_dir(Path(tmp))
+            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with patch.object(journal, "_lstat_contained", faulty):
+                    return doctor._adoption_journal_present(fd)
+            finally:
+                os.close(fd)
+
+    for label, fault in (("oserror", PermissionError(13, "an injected EACCES")),
+                         ("journal-error", journal.JournalError("an injected containment refusal"))):
+        check("adoption-journal-probe-unobservable-grades-" + label, lambda f=fault: probe_faulting(f) is False)
     # The render source gate follows the report's roster: a homes-2 evidence finding refuses it, and a
     # legacy report is gated on exactly SOURCE_INTEGRITY_CHECKS.
     flagged = dict.fromkeys(doctor.required_checks(2), "PASS")
