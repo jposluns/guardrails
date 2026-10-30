@@ -469,12 +469,16 @@ DUNDER_CALLEES = frozenset((
 ))
 
 # The callees, by name or final attribute, that read, write or delete the
-# attribute an argument names, each with the positions that name can take:
-# getattr, setattr and delattr take it second; __setattr__ and __delattr__
-# take it first called bound (super().__setattr__(k, v)) and second called
-# through a class (object.__setattr__(self, k, v)), so both are checked.
-ATTRIBUTE_ACCESSORS = {"getattr": (1,), "setattr": (1,), "delattr": (1,),
-                       "__setattr__": (0, 1), "__delattr__": (0, 1)}
+# attribute an argument names, each with the position of that name keyed by
+# the number of positional arguments (None for any other number): getattr,
+# setattr and delattr take it second; __setattr__ and __delattr__ take it
+# first called bound (super().__setattr__(k, v), super().__delattr__(k)) and
+# second called through a class (object.__setattr__(self, k, v)), which the
+# number of arguments tells apart, so a bound call's value is never read as a
+# name. Any other number, which both forms reject, checks both positions.
+ATTRIBUTE_ACCESSORS = {"getattr": {None: (1,)}, "setattr": {None: (1,)}, "delattr": {None: (1,)},
+                       "__setattr__": {2: (0,), 3: (1,), None: (0, 1)},
+                       "__delattr__": {1: (0,), 2: (1,), None: (0, 1)}}
 
 # The nodes that open a scope with its own imports.
 SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -557,9 +561,10 @@ def import_reach(node: ast.Import | ast.ImportFrom, alias: ast.alias) -> str | N
 def accessor_reach(call: ast.Call) -> str | None:
     """Return the label of an ATTRIBUTE_ACCESSORS call the check cannot pass, or ``None``.
 
-    The label is ``<accessor> <name>`` for a literal attribute name, in one
-    of the accessor's name positions, that is a dunder (other than a string
-    one) or a namespace reader, and ``<accessor> *`` or ``<accessor> **``
+    The label is ``<accessor> <name>`` for a literal attribute name, in the
+    accessor's name position for its number of positional arguments, that is
+    a dunder (other than a string one) or a namespace reader, and
+    ``<accessor> *`` or ``<accessor> **``
     for a starred or double-starred argument, whose attribute name cannot be
     read statically.
     """
@@ -572,7 +577,8 @@ def accessor_reach(call: ast.Call) -> str | None:
         return name + " *"
     if any(keyword.arg is None for keyword in call.keywords):
         return name + " **"
-    for position in ATTRIBUTE_ACCESSORS[name]:
+    positions = ATTRIBUTE_ACCESSORS[name]
+    for position in positions.get(len(call.args), positions[None]):
         key = call.args[position] if position < len(call.args) else None
         if isinstance(key, ast.Constant) and isinstance(key.value, str) and opaque_attribute(key.value):
             return name + " " + key.value
@@ -733,13 +739,14 @@ class ScopeMarkers(ast.NodeTransformer):
         return [ast.Expr(annotation), node]
 
 
-def binding_homes(source: str, tree: ast.Module, names: set[str]) -> dict[int, tuple[int, str]] | None:
-    """Return the binding scope of each read of one of ``names`` and of each watched import.
+def binding_homes(source: str, tree: ast.Module,
+                  names: set[str]) -> dict[int, list[tuple[int, str]]] | None:
+    """Return the binding scopes of each read of one of ``names`` and of each watched import.
 
     ``tree`` is ``source`` parsed. The result maps the id of each Name that
     reads one of ``names`` (in a match pattern too) and of each import alias
-    that import_binding() resolves to ``(table id, stored name)``: the
-    symtable scope that binds the name there and the name as that scope
+    that import_binding() resolves to a list of ``(table id, stored name)``:
+    the symtable scope that binds the name there and the name as that scope
     stores it, after private name mangling. symtable reports no columns, so
     it is built for a copy of ``source`` with each such node marked
     (ScopeMarkers), and the scope holding a marker is the scope of its node.
@@ -747,9 +754,13 @@ def binding_homes(source: str, tree: ast.Module, names: set[str]) -> dict[int, t
     nonlocal one too) binds in the nearest enclosing scope that is not a
     class body and holds it as a local; a scope that reads its class's
     namespace (``__classdict__`` is free in it, as in a type alias in a class
-    body) reads a global name from that class body first. ``None`` means
-    symtable could not be built for ``source`` or its copy, or a marker or
-    a name was not where it was placed.
+    body) reads a global name from that class body first. A class body reads
+    a name it binds itself from its own namespace and, until it binds the
+    name there, from the module's globals, so such a read, and a read
+    through ``__classdict__`` of a name the class binds, lists the class
+    scope and then the module; every other read and every import lists one
+    scope. ``None`` means symtable could not be built for ``source`` or its
+    copy, or a marker or a name was not where it was placed.
     """
     try:
         symtable.symtable(source, "<source>", "exec")
@@ -763,25 +774,25 @@ def binding_homes(source: str, tree: ast.Module, names: set[str]) -> dict[int, t
         prefix += "_"
     twin = ast.parse(source)
     marks: dict[int, str] = {}
-    targets: dict[int, tuple[str, str]] = {}
+    targets: dict[int, tuple[str, str, bool]] = {}
     for node, copy in zip(ast.walk(tree), ast.walk(twin)):
         marker = prefix + str(len(marks))
         if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in names
                 and id(node) not in in_patterns):
             marks[id(copy)] = marker
-            targets[id(node)] = (marker, mangled(node.id, owners.get(id(node))))
+            targets[id(node)] = (marker, mangled(node.id, owners.get(id(node))), True)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 binding = import_binding(node, alias)
                 if binding is not None:
                     marks[id(copy)] = marker
-                    targets[id(alias)] = (marker, mangled(binding[0], owners.get(id(node))))
+                    targets[id(alias)] = (marker, mangled(binding[0], owners.get(id(node))), False)
         elif isinstance(node, ast.Match):
             marks[id(copy)] = marker
             for case in node.cases:
                 for part in ast.walk(case.pattern):
                     if isinstance(part, ast.Name) and part.id in names:
-                        targets[id(part)] = (marker, mangled(part.id, owners.get(id(part))))
+                        targets[id(part)] = (marker, mangled(part.id, owners.get(id(part))), True)
     ScopeMarkers(marks).visit(twin)
     try:
         top = symtable.symtable(ast.unparse(twin), "<source>", "exec")
@@ -801,38 +812,40 @@ def binding_homes(source: str, tree: ast.Module, names: set[str]) -> dict[int, t
             parents[child.get_id()] = table
             pending.append(child)
 
-    def binder(table: symtable.SymbolTable, name: str) -> symtable.SymbolTable | None:
+    def binder(table: symtable.SymbolTable, name: str, read: bool) -> list[symtable.SymbolTable] | None:
         if name not in table.get_identifiers():
             return None
         symbol = table.lookup(name)
         if symbol.is_declared_global():
-            return top
+            return [top]
         if symbol.is_free():
             outer = parents.get(table.get_id())
             while outer is not None:
                 if (outer.get_type() != "class" and name in outer.get_identifiers()
                         and outer.lookup(name).is_local()):
-                    return outer
+                    return [outer]
                 outer = parents.get(outer.get_id())
             return None
         if symbol.is_local():
-            return table
+            # A class body reads its own name by LOAD_NAME: the class
+            # namespace, then the module's globals until the class binds it.
+            return [table, top] if read and table.get_type() == "class" else [table]
         if (table.get_type() != "class" and "__classdict__" in table.get_identifiers()
                 and table.lookup("__classdict__").is_free()):
             outer = parents.get(table.get_id())
             while outer is not None and outer.get_type() != "class":
                 outer = parents.get(outer.get_id())
             if outer is not None and name in outer.get_identifiers() and outer.lookup(name).is_local():
-                return outer
-        return top
+                return [outer, top]
+        return [top]
 
-    homes: dict[int, tuple[int, str]] = {}
-    for key, (marker, name) in targets.items():
+    homes: dict[int, list[tuple[int, str]]] = {}
+    for key, (marker, name, read) in targets.items():
         table = tables.get(marker)
-        home = None if table is None else binder(table, name)
-        if home is None:
+        found = None if table is None else binder(table, name, read)
+        if found is None:
             return None
-        homes[key] = (home.get_id(), name)
+        homes[key] = [(home.get_id(), name) for home in found]
     return homes
 
 
@@ -869,10 +882,19 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
     imported: dict[int, dict[str, list[tuple[str, ...]]]] = {}
     for alias, binding in bindings:
         if binding is not None:
-            home, name = homes[id(alias)]
+            home, name = homes[id(alias)][0]
             paths = imported.setdefault(home, {}).setdefault(name, [])
             if binding[1] not in paths:
                 paths.append(binding[1])
+    # The paths each class attribute may hold, by attribute name, for each
+    # one a class body assigns from a name or chain that reads a watched path
+    # (``_os = _os``, as the standard library's dbm.dumb does); filled in
+    # below, once resolve() can read the assigned values.
+    members: dict[str, list[tuple[str, ...]]] = {}
+    # The targets of an annotation with no value (subprocess.DEVNULL: int):
+    # nothing is stored, so each is checked as a read.
+    annotated_only = {id(node.target) for node in ast.walk(tree)
+                      if isinstance(node, ast.AnnAssign) and node.value is None}
     type_positions: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.arg, ast.AnnAssign)) and node.annotation is not None:
@@ -898,29 +920,36 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
                    and node.func.id == "super" and len(node.args) == 2
                    and isinstance(node.args[0], ast.Name) and node.args[0].id == "__class__"}
 
-    def resolve(node: ast.expr) -> tuple[str, ...] | None:
-        # A name reads the first path imported under it in its binding scope,
-        # or, failing that, the watched module it names.
+    def resolve(node: ast.expr, held: bool = True) -> list[tuple[str, ...]]:
+        # Each path the chain may read: a name reads, in each scope it may be
+        # found in, the first path imported under it there or, failing that,
+        # the watched module it names; with ``held``, a chain through a class
+        # attribute in ``members`` also reads that attribute's paths.
         attrs: list[str] = []
         while isinstance(node, ast.Attribute):
             attrs.insert(0, node.attr)
             node = node.value
-        if not isinstance(node, ast.Name) or id(node) not in homes:
-            return None
-        home, name = homes[id(node)]
-        paths = imported.get(home, {}).get(name)
-        if paths:
-            return paths[0] + tuple(attrs)
-        return (node.id,) + tuple(attrs) if node.id in WATCHED_MODULES else None
+        found: list[tuple[str, ...]] = []
+        for home, name in homes.get(id(node), []) if isinstance(node, ast.Name) else []:
+            paths = imported.get(home, {}).get(name)
+            path = paths[0] if paths else (node.id,) if node.id in WATCHED_MODULES else None
+            if path is not None and path + tuple(attrs) not in found:
+                found.append(path + tuple(attrs))
+        for index, attr in enumerate(attrs if held else []):
+            if attr in members:
+                found.extend(path + tuple(attrs[index + 1:]) for path in members[attr]
+                             if path + tuple(attrs[index + 1:]) not in found)
+                break
+        return found
 
-    def checked_launcher(node: ast.expr) -> str | None:
-        path = resolve(node)
-        if (path is not None and len(path) == 2 and path[0] == "subprocess"
-                and path[1] in ISOLATING_STDIN_VALUES):
+    def launcher_of(path: tuple[str, ...]) -> str | None:
+        if len(path) == 2 and path[0] == "subprocess" and path[1] in ISOLATING_STDIN_VALUES:
             return path[1]
         return None
 
     def launch_of(node: ast.expr, callee: bool) -> str | None:
+        # A launcher as the callee of a call is checked at the call, and
+        # Popen as a type is allowed.
         part = node
         while isinstance(part, ast.Attribute):
             if part.attr == "__import__":
@@ -928,30 +957,60 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
             part = part.value
         if isinstance(part, ast.Name) and part.id == "__import__":
             return "__import__"
-        path = resolve(node)
-        return None if path is None else launch_label(path, callee)
+        for path in resolve(node):
+            launcher = launcher_of(path)
+            if launcher is not None and (callee or launcher == "Popen" and id(node) in type_positions):
+                continue
+            label = launch_label(path, callee)
+            if label is not None:
+                return label
+        return None
 
     def written(node: ast.Name | ast.Attribute) -> str | None:
         # A store or delete of an attribute of a watched module changes what
         # every later read of it sees (subprocess.DEVNULL = None); the base of
         # any other store is checked as a read.
-        path = resolve(node.value) if isinstance(node, ast.Attribute) else None
-        if path is None:
-            return None
-        if ".".join(path) not in PERMITTED_ATTRIBUTES:
-            return launch_label(path)
         action = "delete " if isinstance(node.ctx, ast.Del) else "store "
-        return action + ".".join(path + (node.attr,))
+        for path in resolve(node.value) if isinstance(node, ast.Attribute) else []:
+            if ".".join(path) not in PERMITTED_ATTRIBUTES:
+                label = launch_label(path)
+            else:
+                label = action + ".".join(path + (node.attr,))
+            if label is not None:
+                return label
+        return None
 
     def isolates(call: ast.Call, launcher: str) -> bool:
+        # A class attribute is never credited as an isolating value: another
+        # class may bind the same attribute name to something else.
         keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg is not None}
         stdin = keywords.get("stdin")
         isolating = {("subprocess", name) for name in ISOLATING_STDIN_VALUES[launcher]}
-        if stdin is not None and resolve(stdin) in isolating:
+        paths = [] if stdin is None else resolve(stdin, held=False)
+        if paths and all(path in isolating for path in paths):
             return True
         data = keywords.get("input")
         return (launcher in INPUT_LAUNCHERS and data is not None
                 and not (launcher == "run" and isinstance(data, ast.Constant) and data.value is None))
+
+    # A class body's plain assignments, outside its methods and nested
+    # classes, in source order: a target name holds each path its value reads.
+    classes = sorted((node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)),
+                     key=lambda node: (node.lineno, node.col_offset))
+    for cls in classes:
+        pending: list[ast.AST] = list(reversed(cls.body))
+        while pending:
+            statement = pending.pop()
+            if isinstance(statement, SCOPES):
+                continue
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value is not None:
+                paths = resolve(statement.value)
+                targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                for target in targets if paths else []:
+                    if isinstance(target, ast.Name):
+                        held = members.setdefault(target.id, [])
+                        held.extend(path for path in paths if path not in held)
+            pending.extend(reversed(list(ast.iter_child_nodes(statement))))
 
     found: list[tuple[str, str, int]] = []
 
@@ -968,28 +1027,28 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
                         found.append((where, child.module + ".*", child.lineno))
                     binding = import_binding(child, alias)
                     if binding is not None:
-                        home, name = homes[id(alias)]
+                        home, name = homes[id(alias)][0]
                         if len(imported[home][name]) > 1:
                             found.append((where, "alias " + binding[0], child.lineno))
                     label = import_reach(child, alias)
                     if label is not None:
                         found.append((where, label, child.lineno))
             elif isinstance(child, ast.Call):
-                launcher = checked_launcher(child.func)
-                if launcher is not None and not isolates(child, launcher):
-                    found.append((where, "subprocess." + launcher, child.lineno))
+                for path in resolve(child.func):
+                    launcher = launcher_of(path)
+                    if launcher is not None and not isolates(child, launcher):
+                        found.append((where, "subprocess." + launcher, child.lineno))
                 label = accessor_reach(child)
                 if label is not None:
                     found.append((where, label, child.lineno))
             elif (isinstance(child, (ast.Name, ast.Attribute)) and id(child) not in attribute_bases
                   and id(child) not in class_cells):
                 callee = id(child) in callees
-                label = launch_of(child, callee) if isinstance(child.ctx, ast.Load) else written(child)
-                launcher = checked_launcher(child)
-                as_type = launcher == "Popen" and id(child) in type_positions
-                if launcher is not None and (callee or as_type):
-                    label = None
-                elif label is None:
+                if isinstance(child.ctx, ast.Load) or id(child) in annotated_only:
+                    label = launch_of(child, callee)
+                else:
+                    label = written(child)
+                if label is None:
                     label = opaque_reach(child, callee)
                 if label is not None:
                     found.append((where, label, child.lineno))
@@ -1114,9 +1173,13 @@ class StdinIsolationTests(unittest.TestCase):
         __or__), each also reflected (__radd__ and so on) and, but for
         __divmod__, in place (__iadd__ and so on), and unary (__neg__,
         __pos__, __abs__ and __invert__);
-      - __setattr__ and __delattr__, whose literal attribute name, first or
-        second as the call is bound or through a class, is checked as one
-        given to setattr below;
+      - __setattr__ and __delattr__, whose literal attribute name is checked
+        as one given to setattr below: first when the call is bound (two
+        arguments to __setattr__, one to __delattr__, as in
+        ``super().__setattr__(k, v)``) and second when it is through a class
+        (three or two, as in ``object.__setattr__(self, k, v)``), so a bound
+        call's value is not taken for a name; with any other number of
+        arguments both positions are checked;
 
       ``__class__`` is allowed as a name only as super's first argument
       (``super(__class__, self).__init__()``), where it is the implicit cell
@@ -1152,7 +1215,9 @@ class StdinIsolationTests(unittest.TestCase):
       assignment, ``del subprocess.DEVNULL``) is flagged, since it changes
       every later launch that reads it, and a store or delete through any
       other chain from a watched module is checked as a read of its base
-      (``subprocess.Popen.x = 1`` is flagged as ``subprocess.Popen``);
+      (``subprocess.Popen.x = 1`` is flagged as ``subprocess.Popen``); an
+      annotation with no value (``subprocess.DEVNULL: int``) stores nothing,
+      so its target is checked as a read;
     * forms whose target cannot be read statically are flagged rather than
       passed: a launcher referenced other than as the callee of a call or as a
       type (held in a variable, given to functools.partial), subprocess, os,
@@ -1180,8 +1245,19 @@ class StdinIsolationTests(unittest.TestCase):
     annotation is read in the scope it is written in (a method's in its class
     body, a function body's in that body), under the annotations future
     import too, and a type alias in a class body reads that class's names
-    first. The names subprocess, os and sys resolve to those
-    modules in every scope where no import binds them to another path.
+    first. A class body reads a name it binds itself (by an import, a def,
+    an assignment, an annotation alone or a loop) from its own namespace and,
+    until it binds it there, from the module's globals, so such a read, and
+    one through a type alias in that body, resolves to the imports of both
+    and is flagged if either path is (``import os as p`` then ``out =
+    p.system('cat')`` before ``def p`` in a class). A class attribute that a
+    plain assignment in a class body sets from a name or chain resolving to
+    a watched path (``_os = _os``) holds that path: an attribute of that
+    name read off any base (``self._os.system``) resolves through it, though
+    it is never credited as an isolating stdin value, since another class
+    may give the name another value. The names subprocess, os and sys
+    resolve to those modules in every scope where no import binds them to
+    another path.
 
     Not enforced: launches through other modules (asyncio, pty, multiprocessing,
     posix, posixpath, importlib.import_module, inspect, gc); a read through
@@ -1196,8 +1272,17 @@ class StdinIsolationTests(unittest.TestCase):
     or a base class rebound; an object whose ``__name__``, ``__qualname__``,
     ``__doc__`` or ``__module__`` holds something other than a string; a
     class whose DUNDER_CALLEES method returns something other than its
-    protocol's kind of value; an input= value that is None only at run
-    time; and modules other than aiqt_corpus.py.
+    protocol's kind of value; a launcher instance's __init__ run again
+    (``p.__init__(['cat'])`` on a Popen instance,
+    ``type(proc).__init__(proc, ['cat'])``), which starts a new process but
+    is not flagged, since __init__ is allowed as a callee and the instance's
+    class is not known statically; a private name read in a class whose
+    mangled form only a module-level import binds (``import os as _C__p``
+    read as ``__p`` in class C), which the check does not resolve; a class
+    attribute set other than by a plain assignment of a name or chain
+    (unpacked from a tuple, wrapped as in ``staticmethod(_run)``, set through
+    setattr or from outside the class body); an input= value that is None
+    only at run time; and modules other than aiqt_corpus.py.
     """
 
     MODULE = Path(__file__).resolve().parent / "aiqt_corpus.py"
@@ -1411,6 +1496,8 @@ class StdinIsolationTests(unittest.TestCase):
             "class C:\n    def __init_subclass__(cls, **kw):\n        super().__init_subclass__(**kw)\n",
             "class C(B):\n    def __init__(self):\n        super(__class__, self).__init__()\n",
             "super.__init__(x)\nother.__setattr__(x, 'a', 1)\nobject.__delattr__(x, 'a')\n",
+            "super().__setattr__('scope', 'locals')\nobject.__setattr__(x, 'scope', 'locals')\n"
+            "object.__delattr__('globals', 'scope')\n",
             "class F:\n    def __set_name__(self, owner, name):\n"
             "        super().__set_name__(owner, name)\n"
             "    def __del__(self):\n        super().__del__()\n",
@@ -1448,6 +1535,12 @@ class StdinIsolationTests(unittest.TestCase):
              "delattr(x, 'f_globals')\n",
              [("<module>", "__setattr__ __dict__", 1), ("<module>", "__delattr__ __class__", 2),
               ("<module>", "delattr f_globals", 3)]),
+            ("x.__setattr__('locals')\nx.__setattr__(o, 'locals', v)\n"
+             "x.__setattr__('a', 'locals', v, w)\nx.__delattr__(o, 'locals')\n"
+             "x.__delattr__('a', 'locals', v)\n",
+             [("<module>", "__setattr__ locals", 1), ("<module>", "__setattr__ locals", 2),
+              ("<module>", "__setattr__ locals", 3), ("<module>", "__delattr__ locals", 4),
+              ("<module>", "__delattr__ locals", 5)]),
             ("print(__class__)\nsuper(__class__)\nsuper(C, __class__)\n",
              [("<module>", "__class__", 1), ("<module>", "__class__", 2), ("<module>", "__class__", 3)]),
         )
@@ -1488,7 +1581,8 @@ class StdinIsolationTests(unittest.TestCase):
     def test_detector_flags_a_store_or_delete_on_a_watched_module(self):
         # A write to a watched module's attribute changes every later launch
         # that reads it; a write through any other watched chain is checked as
-        # a read of its base.
+        # a read of its base; an annotation with no value stores nothing and
+        # is checked as a read.
         cases = (
             ("import subprocess\nsubprocess.DEVNULL = None\n",
              [("<module>", "store subprocess.DEVNULL", 2)]),
@@ -1502,6 +1596,9 @@ class StdinIsolationTests(unittest.TestCase):
             ("import os\nos.path.join = j\n", [("<module>", "store os.path.join", 2)]),
             ("import sys\nsys.stdin = None\n", [("<module>", "store sys.stdin", 2)]),
             ("import subprocess\nsubprocess.Popen.x = 1\n", [("<module>", "subprocess.Popen", 2)]),
+            ("import subprocess\nsubprocess.DEVNULL: int\nsubprocess.PIPE: int = 0\n",
+             [("<module>", "store subprocess.PIPE", 3)]),
+            ("import os\nos.system: int\n", [("<module>", "os.system", 2)]),
             ("import os\nos.environ['A'] = 'b'\nself.DEVNULL = None\ndel x.PIPE\n", []),
         )
         for source, expected in cases:
@@ -1609,7 +1706,8 @@ class StdinIsolationTests(unittest.TestCase):
         # A nonlocal import binds in the enclosing function that binds the
         # name, not at module level; a global name resolves as at module
         # level; a lambda or comprehension in a class body does not see the
-        # class's imports, but a comprehension's first iterable does.
+        # class's imports, but a comprehension's first iterable does, and
+        # sees the module's too.
         cases = (
             ("def f():\n    p = None\n    def g():\n        nonlocal p\n        import os as p\n"
              "    return p.path.join('a')\np.system('cat')\n", []),
@@ -1626,12 +1724,50 @@ class StdinIsolationTests(unittest.TestCase):
              [("f.C", "os.system", 6)]),
             ("import os as p\nclass C:\n    from subprocess import PIPE as p\n"
              "    run = lambda: p.system('cat')\n    names = [p.system(x) for x in p.split()]\n",
-             [("C", "os.system", 4), ("C", "os.system", 5)]),
+             [("C", "os.system", 4), ("C", "os.system", 5), ("C", "os.split", 5)]),
             ("class C:\n    import os as p\n    run = lambda: p.system('cat')\n"
              "    names = {x: p.system(x) for x in ()}\n", []),
             ("class C:\n    import os as p\n    names = [x for x in p.system('cat')]\n"
              "    run = lambda x=p.system('cat'): x\n",
              [("C", "os.system", 3), ("C", "os.system", 4)]),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(stdin_inheriting_launches(source), expected)
+
+    def test_detector_reads_a_class_body_name_from_the_class_and_the_module(self):
+        # A class body reads a name it binds itself from its own namespace
+        # and, until it binds it there, from the module's globals, so a read
+        # before a def, an assignment, an annotation or a loop that binds the
+        # name in the class reads the module's import. A class attribute
+        # assigned from a watched path holds it, read off any base, but is
+        # never credited as an isolating stdin value.
+        cases = (
+            ("import os as p\nclass Task:\n    out = p.system('cat')\n    def p(self):\n        pass\n",
+             [("Task", "os.system", 3)]),
+            ("import os as p\nclass Task:\n    out = p.system('cat')\n    p = 1\n",
+             [("Task", "os.system", 3)]),
+            ("import os as p\nclass Task:\n    out = p.system('cat')\n    p: int\n",
+             [("Task", "os.system", 3)]),
+            ("import os as p\nclass Task:\n    out = p.system('cat')\n    for p in ():\n        pass\n",
+             [("Task", "os.system", 3)]),
+            ("from os import path as p\nclass Task:\n    out = p.system('cat')\n"
+             "    def p(self):\n        pass\n", [("Task", "os.path.system", 3)]),
+            ("import os as p\nclass Task:\n    type T = p.system('cat')\n    p = 1\n",
+             [("Task", "os.system", 3)]),
+            ("from subprocess import run as _run\nclass C:\n    _run = _run\n    def m(self):\n"
+             "        self._run(['cat'])\n", [("C", "subprocess.run", 3), ("C.m", "subprocess.run", 5)]),
+            ("import os as _os\nclass _Store:\n    _os = _os\n    def sync(self):\n"
+             "        self._os.system('true')\n", [("_Store", "os", 3), ("_Store.sync", "os.system", 5)]),
+            ("from subprocess import run as _run\nimport subprocess\nclass C:\n    _run = _run\n"
+             "    def m(self):\n        self._run(['git'], stdin=subprocess.DEVNULL)\n",
+             [("C", "subprocess.run", 4)]),
+            ("import os\nclass C:\n    join = os.path.join\n    def m(self):\n"
+             "        return self.join('a'), C.join.__name__\n", []),
+            ("import subprocess\nclass C:\n    null = subprocess.DEVNULL\n    def m(self):\n"
+             "        subprocess.run(['git'], stdin=self.null)\n", [("C.m", "subprocess.run", 5)]),
+            ("import os as p\nclass Task:\n    p = 1\n    def m(self):\n        p.system('cat')\n",
+             [("Task.m", "os.system", 5)]),
         )
         for source, expected in cases:
             with self.subTest(source=source):
@@ -1657,8 +1793,9 @@ class StdinIsolationTests(unittest.TestCase):
     def test_detector_resolves_names_by_their_symtable_scope(self):
         # A parameter or a comprehension variable shadows an import around
         # it; an annotation is read in the scope it is written in, a class
-        # body's included, even under the annotations future import; a type
-        # alias in a class body reads the class's names; a private name is
+        # body's included (where a name the class binds also reads the
+        # module's), even under the annotations future import; a type alias
+        # in a class body reads the class's names; a private name is
         # mangled; a match pattern is read in the match statement's scope.
         cases = (
             ("def f():\n    import os as p\n    def g(p):\n        return p.system\n", []),
@@ -1668,7 +1805,7 @@ class StdinIsolationTests(unittest.TestCase):
              [("C.m", "os.system", 3)]),
             ("import os as p\nclass C:\n    from subprocess import PIPE as p\n"
              "    def m(self, x: p.system('cat')) -> p.split:\n        y: p.system('cat') = 1\n",
-             [("C.m", "os.system", 5)]),
+             [("C.m", "os.system", 4), ("C.m", "os.system", 5), ("C.m", "os.split", 4)]),
             ("from __future__ import annotations\nimport subprocess\n"
              "def f() -> subprocess.os.system('cat'):\n    y: subprocess.os = 1\n",
              [("f", "subprocess.os", 4), ("f", "subprocess.os", 3)]),
