@@ -1105,6 +1105,13 @@ DYNAMIC_IMPORT_SITES = (
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(mutant)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
+    ("tools/check_internal_names.py", "_load_ratchet_mutant",
+     ("#1: import importlib.util",
+      "#1: importlib.util.spec_from_file_location('tracker_mutant_{}'.format(tag), str(path))",
+      "#1: importlib.util.module_from_spec(spec)",
+      "#1: spec.loader.exec_module(module)"),
+     "self-test loads a scratch mutant of this file, written from its own source with one ratchet comparison "
+     "disabled, by its path; the mutant imports only what this file imports, which this gate already checks"),
     ("tools/check_manifest.py", "_self_test_main_isolated",
      ("#1: __import__('subprocess').run(['git', '--version'], capture_output=True).returncode",),
      "inline __import__ of the standard-library module subprocess, a string literal"),

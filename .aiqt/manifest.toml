@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "35c99c7028bc92b1a939fa76fb735beb044bc1a1fafa66e7e95ae99d8288fed9"
+tree-sha256 = "ea9a54037b0d6e9fd8e2e2c912830f101633eb123e41e0fe66e7d0763fb36496"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3491,8 +3491,8 @@ sha256 = "8dfc2f59805c973c295196b7bf618cb6c938da109e7a0fc3544449a8ab99fc49"
 
 [[sources]]
 path = "tools/check_import_closure.py"
-bytes = 387224
-sha256 = "3d74dbc89bb01ce29f435c388402db9ad016e5f30d8194b1e74217a3bf750586"
+bytes = 387736
+sha256 = "57d37161e0f4f035031f8b86417fd3a317a3eeeb2992fe94f138011d1162c197"
 
 [[sources]]
 path = "tools/check_install_page.py"
@@ -3506,8 +3506,8 @@ sha256 = "073ba2947543f513f682660ad59eb85a7614665184db50b44d9ebddb8f9da3d5"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 190157
-sha256 = "f79f8c76fc26ddaa457167021d0b682c0fda2b08021ee1663594ff13b11418ca"
+bytes = 190163
+sha256 = "956fa9558c70f3615f8df46bdcfdf652f04d56a8e5879afbdc28d16ab5aabaf4"
 
 [[sources]]
 path = "tools/check_leaks.py"
