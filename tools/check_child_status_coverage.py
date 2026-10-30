@@ -230,7 +230,7 @@ SELF_TEST_GUARD = '_child_status_refusal_exit("{}")'
 # The file whose _ENTRY_STATEMENT SELF_TEST_ENTRY copies: it must bind that name once, at the top level, to a string
 # that parses to the statement SELF_TEST_ENTRY parses to (entry_statement_finding), so the two cannot drift apart.
 ENTRY_STATEMENT_REL = "opf/tools/opf.py"
-HOOK_ANCHOR = "is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS"
+HOOK_ANCHOR = "is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS or is_note_only"
 HOOK_BLOCK = """unobservable = _child_status_refusal()
 if unobservable is not None:
     if not is_fail_open:

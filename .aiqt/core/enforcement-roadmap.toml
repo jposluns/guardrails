@@ -255,7 +255,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "nocncl"
 status = "enforced"
-mechanisms = ["hook:orch-truncation-guard"]
+mechanisms = ["hook:inline-errexit", "hook:orch-truncation-guard"]
 
 [[rule]]
 corpus-id = "nofabr"

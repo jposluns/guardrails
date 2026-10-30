@@ -19,7 +19,7 @@ fix-id = 3
 
 [[path]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-fix-id = 33
+fix-id = 32
 review-round = 1
 
 [[path]]
@@ -207,7 +207,7 @@ fix-id = 2
 
 [[path]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-fix-id = 33
+fix-id = 32
 review-round = 1
 
 [[path]]

@@ -510,8 +510,9 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
 '''
 # The hook form, for HOOK_SURFACES only: the hook's events differ in the direction an error must fail, so
 # a mode named in the FLOOR_FAIL_OPEN_MODES literal (a Stop-type, SessionStart, TeammateIdle,
-# UserPromptSubmit or PostToolUse handler) warns on exit 0, never blocking, and every other argv (a
-# PreToolUse handler, an unknown mode, no mode) fails closed with the canonical refusal and exit 2. That
+# UserPromptSubmit or PostToolUse handler, or a note-only PreToolUse handler) warns on exit 0, never
+# blocking, and every other argv (any other PreToolUse handler, an unknown mode, no mode) fails closed with
+# the canonical refusal and exit 2. That
 # exit is fixed, never {code}: Claude Code reads exit 1 as a non-blocking error and lets a PreToolUse call
 # proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces. Both the
 # stderr refusal and the stdout warning are best-effort writes, each flushed inside its own
