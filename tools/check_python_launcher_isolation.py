@@ -28,15 +28,18 @@ SCANNED SURFACES (the declared set, resolved from the repo root):
     re-add the script directory AHEAD of the stdlib and re-enable the sibling-shadow class under -I; their
     sanctioned sibling-import form is sys.path.append,
   - every Python hook script a launcher in the plugin hooks.json or a scanned .claude/settings.json
-    or .claude/settings.local.json runs (see HOOK SCRIPT BOOTSTRAP below).
+    or .claude/settings.local.json runs (see HOOK SCRIPT BOOTSTRAP below), and, one level deep, the
+    source of each regular sibling module such a script imports unshadowed.
 
 HOOK SCRIPT BOOTSTRAP. `-I` removes the script's own directory from the module path, so a hook script
 that imports a module beside it fails with ModuleNotFoundError unless it adds that directory back
 first. A tool or gate that fails that way exits 1 loudly, but a PreToolUse hook that exits 1 has hit a
 non-blocking error and the tool call goes through unchecked. So every hook script a scanned hook
 launcher runs is parsed (AST) and must import a sibling (an absolute import whose first name is a module
-file or, when any file under it carries a module suffix, a subdirectory in the script's own directory; a
-directory holding no such file provides no code, so it is not a sibling) only after a module-level
+file or ANY subdirectory in the script's own directory: a directory holding a module-suffix file
+somewhere under it is a package or namespace portion, and even a data-only directory resolves the
+import, as an empty namespace portion, ONLY once the bootstrap has put the directory on sys.path, so
+it is a sibling too) only after a module-level
 sys.path.append of its own directory: an expression statement of the module body itself (not nested in a
 function, class, if or try) calling sys.path.append with str() or os.fspath() of Path(__file__).parent
 (optionally .resolve() or .absolute() before or after .parent), os.path.dirname(__file__),
@@ -52,18 +55,38 @@ over-refusal). append, never an index-0 insertion: every sys.path.insert call in
 finding, because a directory ahead of the stdlib lets a file beside the hook shadow a stdlib import.
 The append puts the script's directory LAST on sys.path, so a sibling whose name the stdlib
 (sys.stdlib_module_names) or a module importable from the isolated interpreter path also provides is
-never the one imported: an import of such a shadowed sibling is a finding naming the module that wins.
+never the one imported: an import of such a shadowed sibling is a finding naming the module that wins,
+with two refinements. A spec the isolated path serves with NO loader origin is a NAMESPACE PORTION,
+and a portion does not win over a regular module or package (the import system keeps collecting
+portions and imports a regular sibling found later instead), so it counts as the winner only when the
+sibling is itself only a portion (the portions then combine, the earlier one searched first); and when
+the winner exists but the sibling is a DATA-ONLY directory, the import works through the winner and
+the directory holds no code to shadow, so that import is clean (a data-only directory whose name
+nothing provides keeps the bootstrap requirement above).
 A relative import is a finding too: a hook script runs as a top-level script, never as a package, so
-`from . import x` fails under any launch. And any other module-level mutation of sys.path (a remove,
+`from . import x` fails under any launch. Any other module-level mutation of sys.path (a remove,
 pop or clear call; a slice, item, plain, annotated or augmented assignment to sys.path or a slot of it;
 a del of either) is a finding, because it can drop or reorder the appended directory after the
-bootstrap. Each script is checked once however many
+bootstrap. And any binding of sys or sys.path under another name (`import sys as X`, `from sys import
+path`, or a plain or annotated assignment, walrus, for or comprehension iterable, or with-as whose
+bound value carries sys.path or a bare non-attribute sys, `p = sys.path`, `s = sys`,
+`getattr(sys, 'path')`; sys.argv and the other attribute reads stay clean) is a finding at the binding
+itself, because the mutation rules match dotted sys.path spellings only and a mutation through the
+bound name would pass them unseen. IMPORTED SIBLINGS, ONE LEVEL DEEP: a sanctioned sibling runs at
+hook time with the hook's directory appended, so the source of each regular sibling module the hook
+imports unshadowed (the module file, or a package's own __init__) is read and held to the same
+sys.path rules (insert, mutation, alias binding), each source once; a sibling whose winning file is
+not a single plain .py source is a cannot-evaluate. What a sibling imports in turn is a disclosed
+residual. Each script is checked once however many
 hooks launch it. The script operand is the first non-option word after the interpreter options (the
 LAUNCHER PREDICATE grammar); ${CLAUDE_PLUGIN_ROOT}/ resolves only in a plugin's hooks/hooks.json (to
 the directory above hooks/), and $CLAUDE_PROJECT_DIR/ and a relative path resolve against the repo
-root. A relative operand resolves against the repo root ONLY while nothing moved the working directory:
-when an earlier simple command in the same hook command string is cd, pushd or popd (a subshell
-spelling included), the launch's working directory is unknown, so a relative script operand there is a
+root. A relative operand resolves against the repo root ONLY while nothing can have moved the working
+directory: when any WORD of the same hook command string before the launcher's command word is cd,
+pushd or popd, decoded, in any position (bash runs the directory-change builtin through `builtin cd`,
+`command cd`, a quoted `'cd'` and a function named cd alike, so a command-word-only test is evadable
+and this word test over-refuses by design, an argument word cd included), the launch's working
+directory is unproven, so a relative script operand there is a
 cannot-evaluate (exit 2). A -c, -m or standard-input launch runs no script file and is out of scope; an
 operand that cannot
 be placed (after an unrecognized long option) or resolved (another variable, an absolute path, a glob, a
@@ -180,15 +203,19 @@ the key line or on the deeper line), a value that opens with a node property or 
 ``*``), and a plain scalar continued onto a further deeper-indented line are cannot-evaluate (exit
 2), never skipped.
 
-EXIT CONVENTION: 0 every recognized launcher is isolated and every hook script it runs passes the
-bootstrap rule; 1 at least one recognized launcher is not isolated, or a hook script imports a sibling
+EXIT CONVENTION: 0 every recognized launcher is isolated, every hook script it runs passes the
+bootstrap rule and every scanned sibling source passes the sys.path rules; 1 at least one recognized
+launcher is not isolated, or a hook script imports a sibling
 without its bootstrap, imports a sibling the stdlib or the isolated path shadows, uses a relative
-import, calls sys.path.insert, or otherwise mutates sys.path; 2 cannot-evaluate (a required input
+import, calls sys.path.insert, otherwise mutates sys.path, or binds sys or sys.path under another
+name, or a scanned sibling source does any of those last three; 2 cannot-evaluate (a required input
 missing, unreadable,
 non-regular, or malformed; a JSON parse error; a shell line carrying a python token whose command-word
 position cannot be established; a workflow `run:` value outside the run: grammar above; a hook entry
 with a missing type/command or a non-list args; a hook script that cannot be placed, found, read,
-parsed or analysed, a relative operand after a directory change included; or the gate's own interpreter
+parsed or analysed, a relative operand with an earlier cd, pushd or popd word included; an imported
+sibling whose winning file is not a single plain Python source, or one that cannot be read, parsed or
+analysed; or the gate's own interpreter
 not isolated).
 Diagnostics are deterministic, sorted by relative path then line then location.
 
@@ -212,12 +239,22 @@ the PATH provenance of ``python3``
 itself, and in the hook-script bootstrap rule: a dynamic import (importlib.import_module, __import__),
 a sys.path.append of a directory other than the script's own (it adds trailing entries and cannot drop
 or reorder the bootstrap), names
-``sys``, ``os`` and ``Path`` rebound to something else, a hook script run as a module (-m) or with -c,
+``os`` and ``Path`` rebound to something else (a binding of sys or sys.path under another name is a
+finding, but a binding reached only through a bare call argument or a function parameter default,
+``mutate(sys)``, ``def f(s=sys):``, is not read), what a scanned sibling source itself imports (the
+scan is ONE level deep: only the modules the hook imports by name), a sibling package's submodules
+(``import name.sub`` executes name/sub.py, which is not the scanned __init__) and a namespace
+portion's or data directory's contents (importing either runs no code of them), a hook script run as a
+module (-m) or with -c,
 a hook script launched directly through its shebang (the script path is then the command word, not a
 python operand, so no launcher is recognized and its bootstrap is not checked),
 a symlinked hook script (its own directory is read as the link's), a hook script reached through
 another script it launches, and hook configuration outside the scanned files (an adopter-side settings
-template such as opf/enforcement/claude/settings.opf.json among them). The bootstrap credit is also
+template such as opf/enforcement/claude/settings.opf.json among them). The shadow rule reads
+_ISOLATED_SYS_PATH, captured when this module is imported: run as a script under ``-I`` (the shipped
+form) the capture precedes any scan, but when the gate is EMBEDDED BY IMPORT the capture is
+import-order sensitive, and a host that mutates sys.path before importing the gate changes what the
+shadow rule reads. The bootstrap credit is also
 conservative by design, and these working shapes are REFUSED rather than credited (disclosed
 over-refusals): an append under an ``if __name__ == "__main__"`` guard, a try/except import fallback
 (the append in the except arm), a sys.path.extend of the script's own directory, a sibling import under
@@ -285,6 +322,9 @@ from pathlib import Path  # noqa: E402
 # site directories -I leaves on the path), captured BEFORE this gate adds its own directory below. The
 # bootstrap rule appends a hook script's directory LAST, so a sibling whose name an entry on THIS path
 # also provides is never the module imported; the shadow check reads this list, never the mutated one.
+# The capture runs when this module is imported, so it is import-order sensitive where the gate is
+# EMBEDDED BY IMPORT: a host that mutates sys.path first changes what the shadow rule reads (run as a
+# script under -I, the shipped form, the capture precedes any scan; a disclosed residual).
 _ISOLATED_SYS_PATH = list(sys.path)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -422,6 +462,12 @@ PLAIN_ITEM_RE = re.compile(r"^(?P<indent> *)- +(?P<item>\S.*)$")
 SPACED_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*[ \t]+:(?:[ \t]|$)")
 # Shell separators (as whole tokens after shlex) that end one simple command and begin the next.
 SEPARATORS = {";", ";;", "|", "||", "&&", "&"}
+# The directory-changing words. A relative hook script operand is refused whenever ANY of these
+# appears as a DECODED word anywhere earlier in the same command string, in any position: bash runs
+# the builtin through `builtin cd`, `command cd`, a quoted `'cd'` and a function named cd alike, so
+# a command-word-only test is evadable, and this word test over-refuses by design (an argument word
+# `cd`, or an `env cd` that changes no directory, is refused too) rather than enumerating prefixes.
+CWD_WORDS = frozenset({"cd", "pushd", "popd"})
 # Unquoted shell operators separated from adjacent words before tokenizing, longest first so `;;`,
 # `&&`, and `||` win over their single-character prefixes. shlex.split leaves an operator glued to a
 # word as one token (`prep;python3`, `(python3`), which would hide a launcher after a punctuation-
@@ -577,22 +623,25 @@ def check_argv(argv):
 
 
 def _segments(pairs):
-    """Split a (decoded, raw) token pair list into simple-command segments at shell separator
-    tokens, ONLY in their literal spelling (the raw lexeme equals the decoded one): bash reads a
-    quoted or escaped `';'`, `"&&"` or `\\;` as an ordinary argument word, never a separator, so
-    splitting there would put the next word in a command-word position the shell never gives it
-    (`i'f' ';' python3 x.py` used to be a finding, and its `-I` form clean; both are a
-    cannot-evaluate)."""
-    segments, cur = [], []
-    for pair in pairs:
+    """Split a (decoded, raw) token pair list into (start_index, pair list) simple-command segments
+    at shell separator tokens, ONLY in their literal spelling (the raw lexeme equals the decoded
+    one): bash reads a quoted or escaped `';'`, `"&&"` or `\\;` as an ordinary argument word, never
+    a separator, so splitting there would put the next word in a command-word position the shell
+    never gives it (`i'f' ';' python3 x.py` used to be a finding, and its `-I` form clean; both are
+    a cannot-evaluate). start_index is each segment's position in `pairs`, so a caller can order a
+    segment's words against the rest of the command string."""
+    segments, cur, cur_start = [], [], 0
+    for index, pair in enumerate(pairs):
         if pair[0] in SEPARATORS and pair[1] == pair[0]:
             if cur:
-                segments.append(cur)
+                segments.append((cur_start, cur))
                 cur = []
         else:
+            if not cur:
+                cur_start = index
             cur.append(pair)
     if cur:
-        segments.append(cur)
+        segments.append((cur_start, cur))
     return segments
 
 
@@ -766,18 +815,21 @@ def _scan_command_tokens(rel, lineno, loc, pairs, source_repr, errors, failures,
     is a cannot-evaluate, so it is never silently passed. Each recognized
     launcher that is not isolated is a failure. When launchers_out is a list, each recognized
     launcher is appended to it as (decoded words with the command word first, cwd_changed), where
-    cwd_changed is True when an EARLIER segment's command word is cd, pushd or popd (a subshell
-    spelling included, since `(` is a skipped leading keyword): a relative script operand of such a
-    launcher cannot be resolved against the repo root."""
+    cwd_changed is True when ANY decoded word cd, pushd or popd (CWD_WORDS) appears anywhere
+    earlier in the command string than the launcher's command word, in any position, quoted or not:
+    bash runs the directory-change builtin through `builtin cd`, `command cd`, a quoted `'cd'` and
+    a function named cd alike, so only the word test is not evadable by a prefix, and it over-refuses
+    by design (an argument word `cd` counts too); a relative script operand of such a launcher
+    cannot be resolved against the repo root."""
     py_word_count = sum(1 for dec, _ in pairs if _is_py_word(dec))
+    cwd_word_indexes = [i for i, (dec, _) in enumerate(pairs) if dec in CWD_WORDS]
     launchers = []
-    cwd_changed = False
-    for seg in _segments(pairs):
+    for start, seg in _segments(pairs):
         rest = _strip_launcher_prefix(seg)
         if rest and _is_py_word(rest[0][0]):
-            launchers.append(([dec for dec, _ in rest], cwd_changed))
-        elif rest and rest[0][0] in ("cd", "pushd", "popd"):
-            cwd_changed = True
+            word_index = start + len(seg) - len(rest)
+            launchers.append(([dec for dec, _ in rest],
+                              any(i < word_index for i in cwd_word_indexes)))
     if len(launchers) != py_word_count:
         errors.append((rel, lineno, loc, "a python token is not in a resolvable command-word position: "
                        "{!r}".format(source_repr)))
@@ -1720,24 +1772,38 @@ def _dir_holds_module_file(directory):
     return False
 
 
-def _sibling_module_names(directory):
-    """The top-level module names a file or directory in `directory` provides once that directory is on
-    sys.path: a module file under any import suffix, and a subdirectory (a package, or a namespace
-    package when it has no __init__.py) holding at least one module-suffix file anywhere under it (a
-    directory with none provides no code, so it is not a sibling). Raises OSError when a directory
-    cannot be listed."""
-    names = set()
+def _sibling_module_kinds(directory):
+    """The top-level names an `import` resolves in `directory` once that directory is on sys.path,
+    each mapped to what the entry is: "regular" for a module file under any import suffix or a
+    subdirectory holding an __init__ module file directly (the import system executes its code, and
+    a regular module or package beats a namespace portion anywhere else on the path), "portion" for
+    a subdirectory with no __init__ module file but a module-suffix file somewhere under it (a
+    namespace-package portion: `import name` runs no code of it, but its submodules are importable),
+    and "data" for a subdirectory with no module-suffix file at all (still a namespace portion, so
+    `import name` succeeds through it ONLY when the directory is on sys.path; without the bootstrap
+    the import fails under -I like any other sibling). A name both a file and a directory provide is
+    "regular" when either form is. Raises OSError when a directory cannot be listed."""
+    kinds = {}
     for entry in os.listdir(directory):
-        if os.path.isdir(os.path.join(directory, entry)):
-            if (entry.isidentifier() and entry != "__pycache__"
-                    and _dir_holds_module_file(os.path.join(directory, entry))):
-                names.add(entry)
+        path = os.path.join(directory, entry)
+        if os.path.isdir(path):
+            if not entry.isidentifier() or entry == "__pycache__":
+                continue
+            entries = os.listdir(path)   # raises on an unlistable subtree: fail-closed in the caller
+            if any(("__init__" + suffix) in entries for suffix in MODULE_SUFFIXES):
+                kind = "regular"
+            elif _dir_holds_module_file(path):
+                kind = "portion"
+            else:
+                kind = "data"
+            if kinds.get(entry) != "regular":
+                kinds[entry] = kind
             continue
         for suffix in MODULE_SUFFIXES:
             if entry.endswith(suffix) and entry[:-len(suffix)].isidentifier():
-                names.add(entry[:-len(suffix)])
+                kinds[entry[:-len(suffix)]] = "regular"
                 break
-    return names
+    return kinds
 
 
 def _dotted(node):
@@ -1889,21 +1955,32 @@ def _absolute_import_roots(node):
     return []
 
 
-def _shadowing_provider(name):
+def _shadowing_provider(name, sibling_portion_only):
     """What wins an `import name` ahead of the appended script directory under -I: the standard
     library (sys.stdlib_module_names, which the frozen and builtin finders serve before any path
     entry), or a module an entry of the captured isolated path provides (PathFinder.find_spec over
     _ISOLATED_SYS_PATH: a find, never an execution). Returns a naming phrase for the winner, or None
-    when nothing shadows the sibling (the appended directory is then the only provider)."""
+    when nothing shadows the sibling (the appended directory is then the only provider). A spec with
+    no loader origin (spec.origin is None) is a NAMESPACE PORTION, and a portion does not win over a
+    regular module or package: the import system keeps collecting portions across the whole path and
+    imports a regular sibling found later instead, so such a spec is a winner only when the sibling
+    is itself only a portion (`sibling_portion_only`; the portions then combine into one namespace
+    package with the earlier portion's entries searched first)."""
     if name in sys.stdlib_module_names:
         return "the standard library module {!r}".format(name)
     try:
         spec = importlib.machinery.PathFinder.find_spec(name, _ISOLATED_SYS_PATH)
     except (ImportError, ValueError):
         return None
-    if spec is not None:
-        return "the installed module {!r} on the isolated interpreter path".format(name)
-    return None
+    if spec is None:
+        return None
+    if spec.origin is None:
+        if sibling_portion_only:
+            return ("a namespace portion of {!r} on the isolated interpreter path (the sibling is "
+                    "itself only a portion, so the portions combine with the earlier one searched "
+                    "first)".format(name))
+        return None
+    return "the installed module {!r} on the isolated interpreter path".format(name)
 
 
 def _sys_path_mutation(node):
@@ -1933,25 +2010,120 @@ def _sys_path_mutation(node):
     return None
 
 
+def _binds_sys_object(value):
+    """What a binding's VALUE expression carries out of the dotted sys.path grammar: "sys.path" when
+    any node of it spells sys.path (a bare `sys.path`, a `sys.path.remove` method, a `sys.path[0]`
+    item), or "sys" when a bare Name `sys` appears OUTSIDE an attribute base (`p = sys`,
+    `getattr(sys, 'path')`; `sys.argv` and the other attribute reads stay clean, so the ordinary
+    hook uses of sys are not refused). Returns None when the value carries neither. Deliberately
+    value-shape-blind beyond that: a copy such as `sys.path[:]` is refused too (fail-closed over
+    modelling which expressions alias)."""
+    attribute_bases = {id(node.value) for node in ast.walk(value) if isinstance(node, ast.Attribute)}
+    for node in ast.walk(value):
+        if isinstance(node, ast.Attribute) and _dotted(node) == "sys.path":
+            return "sys.path"
+        if isinstance(node, ast.Name) and node.id == "sys" and id(node) not in attribute_bases:
+            return "the sys module"
+    return None
+
+
+def _sys_alias_binding(node):
+    """The sys object a node can BIND under another name, as (lineno, what), or None: `import sys as
+    X`, a `from sys
+    import path` (or `*`, asname included), and the binding constructs whose bound value expression
+    carries sys.path or a bare sys (_binds_sys_object): a plain or annotated assignment, a walrus, a
+    for or comprehension iterable, and a with-as context expression (a withitem or comprehension node
+    carries no lineno of its own, so the bound expression's is reported). Every mutation rule above
+    matches dotted sys.path spellings only, so a name bound to sys or sys.path would let a later
+    mutation through that name pass unseen; the binding itself is therefore the finding. A binding
+    through a call argument alone or a function parameter default is a disclosed residual."""
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.name.split(".")[0] == "sys" and alias.asname not in (None, "sys"):
+                return node.lineno, "the sys module (import sys as {})".format(alias.asname)
+        return None
+    if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "sys":
+        for alias in node.names:
+            if alias.name in ("path", "*"):
+                return node.lineno, "sys.path (from sys import {})".format(alias.name)
+        return None
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+        value = node.value
+        if value is None:
+            return None
+        bound = _binds_sys_object(value)
+        return None if bound is None else (node.lineno, bound)
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        bound = _binds_sys_object(node.iter)
+        return None if bound is None else (node.iter.lineno, bound)
+    if isinstance(node, ast.withitem) and node.optional_vars is not None:
+        bound = _binds_sys_object(node.context_expr)
+        return None if bound is None else (node.context_expr.lineno, bound)
+    return None
+
+
+def _sys_path_node_findings(node, holder):
+    """The sys.path findings one AST node carries, independent of the bootstrap-order and sibling
+    rules; `holder` names the scanned source in the message ("hook script" or the imported-sibling
+    phrase). Three rule families: a sys.path.insert call, any other sys.path mutation beside the
+    bootstrap append (_sys_path_mutation), and a binding of sys or sys.path under another name
+    (_sys_alias_binding). Applied to every node of a hook script and, one level deep, of each
+    regular sibling module the hook imports."""
+    findings = []
+    if isinstance(node, ast.Call) and _dotted(node.func) == "sys.path.insert":
+        findings.append((node.lineno, "a sys.path.insert in a {} can put a directory ahead of the "
+                         "stdlib, so a file beside the hook could shadow a stdlib import; bootstrap "
+                         "with a module-level sys.path.append of the script's own directory"
+                         .format(holder)))
+    else:
+        mutation = _sys_path_mutation(node)
+        if mutation is not None:
+            findings.append((node.lineno, "a {} can drop or reorder sys.path entries after the "
+                             "bootstrap, so the appended script directory cannot be trusted; the "
+                             "only sanctioned sys.path mutation in a {} is the bootstrap "
+                             "sys.path.append of the hook script's own directory"
+                             .format(mutation, holder)))
+    alias = _sys_alias_binding(node)
+    if alias is not None:
+        lineno, bound = alias
+        findings.append((lineno, "the {} binds {} under another name; the sys.path rules here "
+                         "match dotted sys.path spellings only, so a later mutation through that "
+                         "name would drop or reorder the appended script directory unseen, and any "
+                         "such binding is refused (the bootstrap sys.path.append needs none)"
+                         .format(holder, bound)))
+    return findings
+
+
 def _hook_bootstrap_findings(text, rel, siblings):
-    """Apply the hook-script bootstrap rule to one script's source; return sorted (lineno, message)
-    findings. Raises SyntaxError or ValueError when the source does not parse, and RecursionError or
-    MemoryError when parsing or analysing it overruns the interpreter (the caller refuses each,
-    fail-closed). The bootstrap is the
+    """Apply the hook-script bootstrap rule to one script's source; return (findings, scan_names)
+    where findings is the sorted (lineno, message) list and scan_names names each REGULAR sibling
+    module the script imports that nothing shadows (the modules whose own source the caller then
+    scans one level deep). Raises SyntaxError or ValueError when the source does not parse, and
+    RecursionError or MemoryError when parsing or analysing it overruns the interpreter (the caller
+    refuses each, fail-closed). The bootstrap is the
     first statement of the module body that calls sys.path.append with the script's own directory; it
     must be a statement of the module body itself, not nested in a function, class, if or try. An
-    absolute import whose first name is in `siblings`, anywhere in the file, is a finding when there is
+    absolute import whose first name is in `siblings` (a name -> kind mapping, _sibling_module_kinds:
+    a data-only directory is a sibling too, since without the bootstrap its import fails under -I),
+    anywhere in the file, is a finding when there is
     no bootstrap or when the module-body statement that holds the import comes before the bootstrap
     (source order of the module-body statements, not call order, so an import in a function defined
     before the bootstrap is a finding even when the function is only called after it); when the stdlib
-    or a module importable from the isolated interpreter path provides the same name, the import is a
+    or a module importable from the isolated interpreter path provides the same name
+    (_shadowing_provider: a namespace portion there counts only against a sibling that is itself only
+    a portion), the import is a
     finding whatever the bootstrap, because the appended directory is LAST on sys.path and the sibling
-    is never the module imported. A relative import is a finding (a hook script runs as a top-level
+    is never the module imported, EXCEPT a data-only sibling directory, which provides no code: the
+    provider's import works and nothing meaningful is shadowed, so that import is clean. A relative
+    import is a finding (a hook script runs as a top-level
     script, never a package member, so it fails under any launch). Every
-    sys.path.insert call in the file is a finding (it can put a directory ahead of the stdlib), and so
+    sys.path.insert call in the file is a finding (it can put a directory ahead of the stdlib), so
     is every other sys.path mutation beside the bootstrap append (_sys_path_mutation: a remove, pop or
     clear call, a slice, item, plain, annotated or augmented assignment, a del), because it can drop or
-    reorder the appended directory after the bootstrap."""
+    reorder the appended directory after the bootstrap, and so is any binding of sys or sys.path under
+    another name (_sys_alias_binding: an import-as, a from-sys import of path, or a binding whose
+    value carries sys.path or a bare sys), because the mutation rules match dotted sys.path spellings
+    only and a mutation through the bound name would pass them unseen."""
     tree = ast.parse(text, filename=rel)
     str_dirs, path_dirs, aliases = set(), set(), {}
     boot_index = boot_line = None
@@ -1960,21 +2132,10 @@ def _hook_bootstrap_findings(text, rel, siblings):
             boot_index, boot_line = index, stmt.lineno
         _track_own_dir_names(stmt, str_dirs, path_dirs, aliases)
     findings = []
+    scan_names = set()
     for index, stmt in enumerate(tree.body):
         for node in ast.walk(stmt):
-            if isinstance(node, ast.Call) and _dotted(node.func) == "sys.path.insert":
-                findings.append((node.lineno, "a sys.path.insert in a hook script can put a directory "
-                                 "ahead of the stdlib, so a file beside the hook could shadow a stdlib "
-                                 "import; bootstrap with a module-level sys.path.append of the "
-                                 "script's own directory"))
-            else:
-                mutation = _sys_path_mutation(node)
-                if mutation is not None:
-                    findings.append((node.lineno, "a {} can drop or reorder sys.path entries after the "
-                                     "bootstrap, so the appended script directory cannot be trusted; "
-                                     "the only sanctioned sys.path mutation in a hook script is the "
-                                     "bootstrap sys.path.append of the script's own directory"
-                                     .format(mutation)))
+            findings.extend(_sys_path_node_findings(node, "hook script"))
             if isinstance(node, ast.ImportFrom) and node.level > 0:
                 findings.append((node.lineno, "the hook script uses a relative import; a hook script "
                                  "runs as a top-level script, never as a package member, so a relative "
@@ -1982,16 +2143,24 @@ def _hook_bootstrap_findings(text, rel, siblings):
                                  "a non-blocking error that lets the tool call through; import the "
                                  "sibling absolutely after the append bootstrap"))
             for name in _absolute_import_roots(node):
-                if name not in siblings:
+                kind = siblings.get(name)
+                if kind is None:
                     continue
-                provider = _shadowing_provider(name)
+                provider = _shadowing_provider(name, kind != "regular")
                 if provider is not None:
+                    if kind == "data":
+                        # The provider's import works, and a data-only directory provides no code
+                        # that could be shadowed, so this import needs no bootstrap and is clean.
+                        continue
                     findings.append((node.lineno, "the hook script imports {!r}, but {} is found "
                                      "before the appended script directory (the bootstrap appends it "
                                      "last on sys.path), so the sibling of that name beside the hook "
                                      "is never the module imported; rename the sibling"
                                      .format(name, provider)))
-                elif boot_index is None:
+                    continue
+                if kind == "regular":
+                    scan_names.add(name)
+                if boot_index is None:
                     findings.append((node.lineno, "the hook script imports the sibling module {!r} with "
                                      "no module-level sys.path.append of its own directory; under "
                                      "python3 -I the import fails, and a failing PreToolUse hook exits "
@@ -2004,16 +2173,60 @@ def _hook_bootstrap_findings(text, rel, siblings):
                                      "PreToolUse hook exits 1, a non-blocking error that lets the tool "
                                      "call through".format(name, boot_line)))
     findings.sort()
+    return findings, sorted(scan_names)
+
+
+def _sibling_source_rel(root, dir_rel, name):
+    """The repo-relative plain-Python source file an `import name` executes from the hook's own
+    directory, or (None, message) when that winner cannot be AST-scanned. The import system reads a
+    package directory ahead of a module file of the same name, so a directory with an __init__ module
+    file resolves to that __init__; a bare module name resolves to its file. Either is scannable only
+    as the SINGLE plain `.py` form: a name an extension or bytecode module file (or more than one
+    module file) also provides cannot be proven to load the .py source, so it is a cannot-evaluate."""
+    directory = root / dir_rel
+    package = directory / name
+    if package.is_dir():
+        inits = [suffix for suffix in MODULE_SUFFIXES
+                 if (package / ("__init__" + suffix)).is_file()]
+        if inits:
+            if inits == [".py"]:
+                return posixpath.join(dir_rel, name, "__init__.py"), None
+            return None, ("the sibling package {!r} the hook imports carries an __init__ that is "
+                          "not a single plain Python source file, so its module-level sys.path "
+                          "posture cannot be scanned".format(name))
+    files = [suffix for suffix in MODULE_SUFFIXES if (directory / (name + suffix)).is_file()]
+    if files == [".py"]:
+        return posixpath.join(dir_rel, name + ".py"), None
+    return None, ("the sibling module {!r} the hook imports is not a single plain Python source "
+                  "file, so its module-level sys.path posture cannot be scanned".format(name))
+
+
+def _sibling_source_findings(text, rel):
+    """Apply the sys.path rules (a sys.path.insert, any other mutation, a binding of sys or sys.path
+    under another name) to one imported sibling's source, every node of it: a sanctioned sibling runs
+    at hook time with the hook's directory appended, so a mutation in it re-enables the shadow class
+    exactly as one in the hook would. Only the modules the hook itself imports are scanned (one level
+    deep); what a sibling imports in turn is a disclosed residual. Raises exactly as
+    _hook_bootstrap_findings does (the caller refuses each, fail-closed)."""
+    tree = ast.parse(text, filename=rel)
+    findings = []
+    for stmt in tree.body:
+        for node in ast.walk(stmt):
+            findings.extend(_sys_path_node_findings(node, "sibling module the hook imports"))
+    findings.sort()
     return findings
 
 
 def _scan_hook_bootstrap(root, hook_launches, errors, failures):
     """Check every Python hook script the scanned hook configuration launches (each script once, however
-    many hooks launch it) against the hook-script bootstrap rule. A launch that runs no script file
+    many hooks launch it) against the hook-script bootstrap rule, and each regular sibling module such
+    a script imports unshadowed (each sibling source once) against the sys.path rules, one level deep.
+    A launch that runs no script file
     (`-c`, `-m`, standard input) is out of scope; an operand that cannot be placed or resolved, a
-    relative operand after an earlier directory change in the same command string, a
+    relative operand with a cd, pushd or popd word earlier in the same command string, a
     script missing from the tree, an unreadable one or its unlistable directory, a source that does
-    not parse, and one too deep to parse or analyse are each cannot-evaluate (exit 2)."""
+    not parse, one too deep to parse or analyse, and an imported sibling whose winning file is not a
+    single plain Python source are each cannot-evaluate (exit 2)."""
     scripts = {}
     for config_rel, hloc, words, cwd_changed in hook_launches:
         _, kind, token = _option_walk(words)
@@ -2026,20 +2239,23 @@ def _scan_hook_bootstrap(root, hook_launches, errors, failures):
             continue
         if (cwd_changed and not token.startswith("/")
                 and not token.startswith((HOOK_PLUGIN_ROOT_PREFIX,) + HOOK_PROJECT_DIR_PREFIXES)):
-            # A relative operand resolves against the launch's working directory, and an earlier cd,
-            # pushd or popd in the same command string moved it, so the repo-root resolution below
-            # would read a different file than the hook runs (the two Claude Code variables and an
-            # absolute operand are unaffected; the absolute form keeps its own refusal below).
-            errors.append((config_rel, 0, hloc, "an earlier command in the same hook command string "
-                           "changes the working directory (cd, pushd or popd), so the relative hook "
-                           "script operand " + repr(token) + " cannot be resolved against the repo "
-                           "root and its sibling-import bootstrap cannot be checked"))
+            # A relative operand resolves against the launch's working directory, and a cd, pushd or
+            # popd WORD earlier in the same command string (any position, quoted or not: bash runs
+            # the builtin through `builtin cd`, `command cd`, a quoted spelling and a function named
+            # cd alike) leaves that directory unproven, so the repo-root resolution below could read
+            # a different file than the hook runs (the two Claude Code variables and an absolute
+            # operand are unaffected; the absolute form keeps its own refusal below).
+            errors.append((config_rel, 0, hloc, "a cd, pushd or popd word earlier in the same hook "
+                           "command string leaves the launch's working directory unproven, so the "
+                           "relative hook script operand " + repr(token) + " cannot be resolved "
+                           "against the repo root and its sibling-import bootstrap cannot be checked"))
             continue
         script_rel, problem = _resolve_hook_script(config_rel, token)
         if problem is not None:
             errors.append((config_rel, 0, hloc, problem))
             continue
         scripts.setdefault(script_rel, (config_rel, hloc))
+    sibling_sources = set()          # each imported sibling source is scanned once across all hooks
     for script_rel in sorted(scripts):
         config_rel, hloc = scripts[script_rel]
         if not _present(root / script_rel):
@@ -2050,12 +2266,12 @@ def _scan_hook_bootstrap(root, hook_launches, errors, failures):
         if text is None:
             continue
         try:
-            siblings = _sibling_module_names(root / posixpath.dirname(script_rel))
+            siblings = _sibling_module_kinds(root / posixpath.dirname(script_rel))
         except OSError as exc:
             errors.append((script_rel, 0, "", "cannot list the hook script's directory: {}".format(exc)))
             continue
         try:
-            findings = _hook_bootstrap_findings(text, script_rel, siblings)
+            findings, scan_names = _hook_bootstrap_findings(text, script_rel, siblings)
         except (SyntaxError, ValueError) as exc:
             errors.append((script_rel, getattr(exc, "lineno", None) or 0, "", "the hook script does not "
                            "parse as Python, so its sibling imports cannot be checked: {}".format(exc)))
@@ -2070,6 +2286,31 @@ def _scan_hook_bootstrap(root, hook_launches, errors, failures):
             continue
         for lineno, message in findings:
             failures.append((script_rel, lineno, "", message))
+        for name in scan_names:
+            sib_rel, problem = _sibling_source_rel(root, posixpath.dirname(script_rel), name)
+            if problem is not None:
+                errors.append((script_rel, 0, "", problem))
+                continue
+            if sib_rel in sibling_sources:
+                continue
+            sibling_sources.add(sib_rel)
+            sib_text = _read_required_text(root, sib_rel, errors)
+            if sib_text is None:
+                continue
+            try:
+                sib_findings = _sibling_source_findings(sib_text, sib_rel)
+            except (SyntaxError, ValueError) as exc:
+                errors.append((sib_rel, getattr(exc, "lineno", None) or 0, "", "the imported sibling "
+                               "module does not parse as Python, so its sys.path posture cannot be "
+                               "checked: {}".format(exc)))
+                continue
+            except (RecursionError, MemoryError) as exc:
+                errors.append((sib_rel, 0, "", "the imported sibling module {} is too deeply nested "
+                               "or chained to parse and analyse ({}), so its sys.path posture cannot "
+                               "be checked".format(sib_rel, type(exc).__name__)))
+                continue
+            for lineno, message in sib_findings:
+                failures.append((sib_rel, lineno, "", message))
 
 
 def scan(root):
@@ -2279,8 +2520,9 @@ def main():
 #      a module-level sys.path.append of the script's own directory before the import (os.path,
 #      pathlib and named-directory spellings, abspath of dirname, bare names from a `from os.path
 #      import` binding, .parent.resolve(), os.fspath of the parent, an import in a function defined
-#      after it) pass (exit 0), and a data-only directory beside the hook (no module-suffix file
-#      anywhere under it) is not a sibling (exit 0);
+#      after it) pass (exit 0); a data-only directory beside the hook IS a sibling (its import fails
+#      without the bootstrap: exit 1 bare, exit 0 after the append) EXCEPT when the stdlib provides
+#      its name (a json-named data directory next to `import json` stays clean, exit 0);
 #      an import with no bootstrap (plain, from-import, a sibling package), an import before the
 #      append, an insert(0) then the import, an import in a function with no module-level bootstrap,
 #      a bootstrap only inside a function, an if or an __main__ guard, a try/except import fallback,
@@ -2294,18 +2536,34 @@ def main():
 #      shadowed finding (exit 1); a relative import (plain and from-form, with and without the
 #      bootstrap) fails (exit 1); an append later undone (sys.path.remove, pop, clear, a slice and an
 #      item assignment, a reassignment, a del of an item, an augmented assignment) is the mutation
-#      finding (exit 1);
+#      finding (exit 1); a binding of sys or sys.path under another name (`p = sys.path`, an
+#      import-as, a from-sys import of path and of *, getattr(sys, 'path'), a for-iterable, a
+#      with-as, a walrus) is the alias finding (exit 1) while an attribute binding such as
+#      `argv = sys.argv` stays clean (exit 0);
 #      hook source that does not parse is cannot-evaluate (exit 2); 42b the same
 #      rule through a settings.json launch, with every script operand it cannot place or find
-#      cannot-evaluate (exit 2), a relative operand after an earlier cd, pushd or subshell directory
-#      change cannot-evaluate (exit 2) while a $CLAUDE_PROJECT_DIR operand after a cd still resolves,
+#      cannot-evaluate (exit 2), a relative operand with a cd, pushd or popd word anywhere earlier in
+#      the command string cannot-evaluate (exit 2; a plain cd, a subshell one, `builtin cd`,
+#      `command cd`, `env cd`, a function named cd and a quoted 'cd' alike) while a
+#      $CLAUDE_PROJECT_DIR operand after a cd still resolves,
 #      and a -c or -m launch out of scope (exit 0); 42c with the rule patched
 #      out the no-bootstrap hook passes (exit 0); 42d a real -I interpreter fails the no-bootstrap
 #      import, runs the append form, and lets a sibling shadow a stdlib module only after insert(0);
 #      42e the installed-module arm of the shadow rule through the _ISOLATED_SYS_PATH seam (the
 #      finding under the patched path, a clean pass restored); 42f a hook too deep to parse or
 #      analyse (a long attribute chain, a parser-stack overrun) is a cannot-evaluate (exit 2) naming
-#      the script, each vector run in a bounded child process.
+#      the script, each vector run in a bounded child process; 42g the imported-sibling scan, one
+#      level deep (an insert, mutation or alias in a sibling's own source is a finding naming the
+#      sibling file and line, a clean sibling and an append of another directory stay clean, an
+#      unparseable sibling is cannot-evaluate, and the inserting sibling passes with the scan patched
+#      out); 42h the namespace-portion arm of the shadow rule through the same seam (no winner over a
+#      regular sibling package, the winner over a portion-only sibling, clean over a data-only one);
+#      42i the new rules against a real -I interpreter, a flip each (the alias-undone bootstrap
+#      fails like no bootstrap, the data-directory import fails bare and works bootstrapped, the
+#      stdlib wins over a json-named data directory, and a sibling's insert re-enables the stdlib
+#      shadow a clean sibling leaves closed); 42j real-interpreter and real-bash witnesses (a later
+#      regular package beats an earlier namespace portion, the earlier of two portions wins, and
+#      `builtin cd` moves the working directory under a relative operand).
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -3473,8 +3731,9 @@ def self_test_main():
         # Each exit-1 row names the exact kinds of finding it expects, one per finding in line
         # order: "none" (a sibling import with no bootstrap), "before" (a sibling import ahead of the
         # bootstrap), "insert" (a sys.path.insert call), "shadowed" (a sibling the stdlib or the
-        # isolated path provides first), "relative" (a relative import) and "mutation" (a sys.path
-        # mutation beside the bootstrap append), so one rule cannot stand in for another.
+        # isolated path provides first), "relative" (a relative import), "mutation" (a sys.path
+        # mutation beside the bootstrap append) and "alias" (a binding of sys or sys.path under
+        # another name), so one rule cannot stand in for another.
         def _boot_kinds(findings):
             kinds = []
             for finding in findings:
@@ -3482,14 +3741,16 @@ def self_test_main():
                     kinds.append("none")
                 elif "before the module-level sys.path.append" in finding[3]:
                     kinds.append("before")
-                elif "a sys.path.insert in a hook script" in finding[3]:
+                elif "a sys.path.insert in a" in finding[3]:
                     kinds.append("insert")
                 elif "is found before the appended script directory" in finding[3]:
                     kinds.append("shadowed")
                 elif "uses a relative import" in finding[3]:
                     kinds.append("relative")
-                elif "the only sanctioned sys.path mutation in a hook script" in finding[3]:
+                elif "the only sanctioned sys.path mutation in a" in finding[3]:
                     kinds.append("mutation")
+                elif "under another name" in finding[3]:
+                    kinds.append("alias")
                 else:
                     kinds.append("other")
             return tuple(kinds)
@@ -3515,7 +3776,9 @@ def self_test_main():
                 ("append-fspath",
                  "import os\nimport sys\nfrom pathlib import Path\n"
                  "sys.path.append(os.fspath(Path(__file__).parent))\nimport hooklib\n", 0, ()),
-                ("data-dir-not-a-sibling", "import datadir\n", 0, ()),
+                ("data-dir-needs-bootstrap", "import datadir\n", 1, ("none",)),
+                ("data-dir-after-append", boot_dir + boot_append + "import datadir\n", 0, ()),
+                ("stdlib-named-data-dir", "import json\nprint(json.dumps({}))\n", 0, ()),
                 ("stdlib-shadowed-sibling", boot_dir + boot_append + "import secrets\n", 1,
                  ("shadowed",)),
                 ("stdlib-shadowed-package", boot_dir + boot_append + "import email\n", 1,
@@ -3557,6 +3820,24 @@ def self_test_main():
                 ("undo-del-item", undo_pre + "del sys.path[-1]\nimport hooklib\n", 1, ("mutation",)),
                 ("undo-augmented", undo_pre + "sys.path += ['/usr/lib/other']\nimport hooklib\n", 1,
                  ("mutation",)),
+                ("alias-bound-path", undo_pre + "p = sys.path\np.remove(p[-1])\nimport hooklib\n", 1,
+                 ("alias",)),
+                ("alias-import-sys-as", undo_pre + "import sys as s\ns.path.clear()\nimport hooklib\n",
+                 1, ("alias",)),
+                ("alias-from-sys-path",
+                 undo_pre + "from sys import path\npath.clear()\nimport hooklib\n", 1, ("alias",)),
+                ("alias-from-sys-star", undo_pre + "from sys import *\nimport hooklib\n", 1,
+                 ("alias",)),
+                ("alias-getattr", undo_pre + "p = getattr(sys, 'path')\np.clear()\nimport hooklib\n",
+                 1, ("alias",)),
+                ("alias-for-target",
+                 undo_pre + "for p in (sys.path,):\n    p.clear()\nimport hooklib\n", 1, ("alias",)),
+                ("alias-with-target",
+                 undo_pre + "with (sys.path) as p:\n    pass\nimport hooklib\n", 1, ("alias",)),
+                ("alias-walrus", undo_pre + "_ = (p := sys.path)\nimport hooklib\n", 1,
+                 ("alias", "alias")),
+                ("sys-attribute-binding-clean", undo_pre + "argv = sys.argv\nimport hooklib\n", 0,
+                 ()),
                 ("bootstrap-under-name-guard",
                  boot_dir + "if __name__ == '__main__':\n    " + boot_append + "import hooklib\n", 1,
                  ("none",)),
@@ -3615,9 +3896,14 @@ def self_test_main():
             (hook_path.parent / "secrets.py").write_text("MARK = 1\n", encoding="utf-8")
             (hook_path.parent / "email").mkdir()
             (hook_path.parent / "email" / "__init__.py").write_text("", encoding="utf-8")
-            # A data-only directory (no module-suffix file anywhere under it) is NOT a sibling.
+            # A data-only directory IS a sibling (its import needs the bootstrap), EXCEPT when the
+            # stdlib or an installed module provides its name: the import then works without one and
+            # the directory holds no code to shadow, so the json-named data directory stays clean
+            # beside the default `import json` rows.
             (hook_path.parent / "datadir").mkdir()
             (hook_path.parent / "datadir" / "notes.txt").write_text("data\n", encoding="utf-8")
+            (hook_path.parent / "json").mkdir()
+            (hook_path.parent / "json" / "notes.txt").write_text("data\n", encoding="utf-8")
             rc = run_quiet(hb_root)
             hb_errors, hb_failures = scan(hb_root)
             if rc != want:
@@ -3638,9 +3924,12 @@ def self_test_main():
         #      script operand: a variable other than the two Claude Code substitutes, an absolute path,
         #      a path leaving the tree, a script missing from the tree, the plugin root named outside a
         #      plugin hooks.json, and an unrecognized long interpreter option. A -c or -m launch runs no
-        #      script file and is out of scope (exit 0). A RELATIVE operand after an earlier cd, pushd
-        #      or subshell directory change in the same command string is cannot-evaluate (exit 2),
-        #      while a $CLAUDE_PROJECT_DIR operand after a cd still resolves and is checked (exit 0).
+        #      script file and is out of scope (exit 0). A RELATIVE operand with a cd, pushd or popd
+        #      WORD anywhere earlier in the same command string is cannot-evaluate (exit 2), whatever
+        #      position or spelling carries the word (a plain cd, a subshell one, and the evasions a
+        #      command-word-only test missed: `builtin cd`, `command cd`, `env cd`, a function named
+        #      cd defined and called in the string, and a quoted 'cd'), while a $CLAUDE_PROJECT_DIR
+        #      operand after a cd still resolves and is checked (exit 0).
         def _hook_settings_tree(base, cmd, script_rel=None, source=None):
             root = _settings_tree(base, cmd)
             if script_rel is not None:
@@ -3670,11 +3959,21 @@ def self_test_main():
                 ("unknown-long-option", "python3 -I --unknown-option hk/h.py", None, None, 2,
                  "an unrecognized long interpreter option ends the option scan"),
                 ("cd-before-relative", "cd hk && python3 -I hk/h.py", None, None, 2,
-                 "changes the working directory"),
+                 "leaves the launch's working directory unproven"),
                 ("pushd-before-relative", "pushd hk && python3 -I hk/h.py", None, None, 2,
-                 "changes the working directory"),
+                 "leaves the launch's working directory unproven"),
                 ("subshell-cd-before-relative", "(cd hk; python3 -I hk/h.py)", None, None, 2,
-                 "changes the working directory"),
+                 "leaves the launch's working directory unproven"),
+                ("builtin-cd-before-relative", "builtin cd hk && python3 -I hk/h.py", None, None, 2,
+                 "leaves the launch's working directory unproven"),
+                ("command-cd-before-relative", "command cd hk && python3 -I hk/h.py", None, None, 2,
+                 "leaves the launch's working directory unproven"),
+                ("env-cd-before-relative", "env cd hk && python3 -I hk/h.py", None, None, 2,
+                 "leaves the launch's working directory unproven"),
+                ("function-cd-before-relative", "cd(){ :; }; cd hk; python3 -I hk/h.py", None, None,
+                 2, "leaves the launch's working directory unproven"),
+                ("quoted-cd-before-relative", "'cd' hk && python3 -I hk/h.py", None, None, 2,
+                 "leaves the launch's working directory unproven"),
                 ("cd-before-project-dir", 'cd hk && python3 -I "$CLAUDE_PROJECT_DIR"/hk/h.py',
                  "hk/h.py", boot_dir + boot_append + "import hooklib\n", 0, None),
                 ("dash-c-out-of-scope", "python3 -I -c 'import hooklib'", None, None, 0, None),
@@ -3697,7 +3996,7 @@ def self_test_main():
         (flip_root / HOOK_STUB_REL).parent.joinpath("hooklib.py").write_text("x = 1\n", encoding="utf-8")
         module = sys.modules[__name__]
         saved_findings = module._hook_bootstrap_findings
-        module._hook_bootstrap_findings = lambda text, rel, siblings: []
+        module._hook_bootstrap_findings = lambda text, rel, siblings: ([], [])
         try:
             flip_rc = run_quiet(flip_root)
         finally:
@@ -3802,6 +4101,202 @@ def self_test_main():
                                 "rc={}, out={!r}, err={!r})".format(
                                     ov_label, HOOK_STUB_REL, ov.returncode, ov.stdout[-300:],
                                     ov.stderr[-300:]))
+
+        # 42g. The imported-sibling scan, one level deep: a sanctioned sibling's own source is held
+        #      to the sys.path rules (insert, mutation, alias), each finding naming the SIBLING file
+        #      and line, while a clean sibling and an append of another directory in one stay clean;
+        #      an unparseable sibling is a cannot-evaluate naming the sibling; and with the scan
+        #      patched out the inserting sibling passes, so the finding is owed to the scan.
+        sib_rel = posixpath.join(posixpath.dirname(HOOK_STUB_REL), "hooklib.py")
+        for sg_label, sib_source, sg_want, sg_kinds in (
+                ("insert", "import os\nimport sys\n"
+                 "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n", 1, ("insert",)),
+                ("mutation", "import sys\nsys.path.pop()\n", 1, ("mutation",)),
+                ("alias", "import sys\np = sys.path\np.clear()\n", 1, ("alias",)),
+                ("append-of-other-dir", "import sys\nsys.path.append('/usr/lib/other')\n", 0, ()),
+                ("clean", "x = 1\n", 0, ())):
+            sg_root = _build(tmp / ("hook-sibling-" + sg_label))
+            (sg_root / HOOK_STUB_REL).write_text(boot_dir + boot_append + "import hooklib\n",
+                                                 encoding="utf-8")
+            (sg_root / sib_rel).write_text(sib_source, encoding="utf-8")
+            sg_rc = run_quiet(sg_root)
+            sg_errors, sg_failures = scan(sg_root)
+            if sg_rc != sg_want or _boot_kinds(sg_failures) != sg_kinds or not all(
+                    f[0] == sib_rel and f[1] > 0 for f in sg_failures):
+                failures.append("the imported-sibling {} row expected exit {} with the findings {!r} "
+                                "each naming {} and a line (got {}; errors {!r}, findings {!r})"
+                                .format(sg_label, sg_want, sg_kinds, sib_rel, sg_rc, sg_errors,
+                                        sg_failures))
+        sg_bad = _build(tmp / "hook-sibling-unparseable")
+        (sg_bad / HOOK_STUB_REL).write_text(boot_dir + boot_append + "import hooklib\n",
+                                            encoding="utf-8")
+        (sg_bad / sib_rel).write_text("def broken(:\n    pass\n", encoding="utf-8")
+        sg_rc = run_quiet(sg_bad)
+        sg_errors, sg_failures = scan(sg_bad)
+        if sg_rc != 2 or sg_failures or not any(
+                e[0] == sib_rel and "does not parse as Python" in e[3] for e in sg_errors):
+            failures.append("an unparseable imported sibling expected exit 2 naming {} with no "
+                            "finding (got {}; errors {!r}, findings {!r})".format(
+                                sib_rel, sg_rc, sg_errors, sg_failures))
+        sg_flip = _build(tmp / "hook-sibling-flip")
+        (sg_flip / HOOK_STUB_REL).write_text(boot_dir + boot_append + "import hooklib\n",
+                                             encoding="utf-8")
+        (sg_flip / sib_rel).write_text("import sys\nsys.path.insert(0, '/usr/lib/other')\n",
+                                       encoding="utf-8")
+        saved_sibling_scan = module._sibling_source_findings
+        module._sibling_source_findings = lambda text, rel: []
+        try:
+            sg_flip_rc = run_quiet(sg_flip)
+        finally:
+            module._sibling_source_findings = saved_sibling_scan
+        if sg_flip_rc != 0:
+            failures.append("with the sibling scan patched out the inserting sibling expected exit 0 "
+                            "(got {})".format(sg_flip_rc))
+        if run_quiet(sg_flip) != 1:
+            failures.append("with the sibling scan restored the inserting sibling expected exit 1")
+
+        # 42h. The namespace-portion arm of the shadow rule, through the _ISOLATED_SYS_PATH seam: a
+        #      portion of nsmod on the isolated path is NOT a winner over a sibling REGULAR package
+        #      (Python imports a regular package wherever it sits on the path, so that tree passes;
+        #      it used to fail here with an installed-module finding), it IS the winner over a
+        #      sibling that is itself only a portion (the portions combine, the earlier one searched
+        #      first; the shadowed finding names the portion), and a data-only sibling under the same
+        #      portion stays clean. The real-interpreter witness is in 42j.
+        ns_path = tmp / "ns-path"
+        (ns_path / "nsmod").mkdir(parents=True)
+        (ns_path / "nsmod" / "piece.py").write_text("SRC = 0\n", encoding="utf-8")
+        for ns_label, ns_file, ns_want in (("regular-package", "__init__.py", 0),
+                                           ("portion-only", "piece2.py", 1),
+                                           ("data-only", "notes.txt", 0)):
+            ns_root = _build(tmp / ("hook-ns-" + ns_label))
+            ns_hook = ns_root / HOOK_STUB_REL
+            ns_hook.write_text(boot_dir + boot_append + "import nsmod\n", encoding="utf-8")
+            (ns_hook.parent / "nsmod").mkdir()
+            (ns_hook.parent / "nsmod" / ns_file).write_text("MARK = 1\n", encoding="utf-8")
+            saved_isolated = module._ISOLATED_SYS_PATH
+            module._ISOLATED_SYS_PATH = list(saved_isolated) + [str(ns_path)]
+            try:
+                ns_rc = run_quiet(ns_root)
+                ns_errors, ns_failures = scan(ns_root)
+            finally:
+                module._ISOLATED_SYS_PATH = saved_isolated
+            if ns_want == 0 and (ns_rc != 0 or ns_errors or ns_failures):
+                failures.append("the namespace-portion {} row expected a clean exit 0 (got {}; "
+                                "errors {!r}, findings {!r})".format(ns_label, ns_rc, ns_errors,
+                                                                     ns_failures))
+            if ns_want == 1 and (ns_rc != 1 or _boot_kinds(ns_failures) != ("shadowed",)
+                                 or "namespace portion" not in ns_failures[0][3]):
+                failures.append("the namespace-portion {} row expected exit 1 with one shadowed "
+                                "finding naming the portion (got {}; errors {!r}, findings {!r})"
+                                .format(ns_label, ns_rc, ns_errors, ns_failures))
+
+        # 42i. The mechanism of those rules against a real interpreter under -I, a flip for each: an
+        #      alias-undone bootstrap fails exactly like no bootstrap while the bare binding leaves
+        #      the import working; a data-only directory import fails without the bootstrap, works
+        #      with it, and a json-named data directory never stops the stdlib import; a sibling's
+        #      own index-0 insertion re-enables the stdlib shadow a clean sibling leaves closed.
+        mech_rules = tmp / "mech-rules"
+        mech_rules.mkdir()
+        (mech_rules / "hooklib.py").write_text("x = 1\n", encoding="utf-8")
+        (mech_rules / "alias_undone.py").write_text(
+            boot_dir + boot_append + "p = sys.path\n"
+            "p.remove(os.path.dirname(os.path.abspath(__file__)))\nimport hooklib\n",
+            encoding="utf-8")
+        (mech_rules / "alias_kept.py").write_text(
+            boot_dir + boot_append + "p = sys.path\nimport hooklib\n", encoding="utf-8")
+        (mech_rules / "datadir").mkdir()
+        (mech_rules / "datadir" / "notes.txt").write_text("data\n", encoding="utf-8")
+        (mech_rules / "json").mkdir()
+        (mech_rules / "json" / "notes.txt").write_text("data\n", encoding="utf-8")
+        (mech_rules / "data_bare.py").write_text("import datadir\n", encoding="utf-8")
+        (mech_rules / "data_boot.py").write_text(boot_dir + boot_append + "import datadir\n",
+                                                 encoding="utf-8")
+        (mech_rules / "stdlib_data.py").write_text("import json\nprint(json.dumps({}))\n",
+                                                   encoding="utf-8")
+        (mech_rules / "colorsys.py").write_text("SHADOWED = True\n", encoding="utf-8")
+        (mech_rules / "insmod.py").write_text(
+            "import os\nimport sys\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n",
+            encoding="utf-8")
+        (mech_rules / "insmod_clean.py").write_text("x = 1\n", encoding="utf-8")
+        (mech_rules / "via_insert.py").write_text(
+            boot_dir + boot_append + "import insmod\nimport colorsys\n"
+            "print(getattr(colorsys, 'SHADOWED', False))\n", encoding="utf-8")
+        (mech_rules / "via_clean.py").write_text(
+            boot_dir + boot_append + "import insmod_clean\nimport colorsys\n"
+            "print(getattr(colorsys, 'SHADOWED', False))\n", encoding="utf-8")
+        rule_runs = {}
+        for name in ("alias_undone", "alias_kept", "data_bare", "data_boot", "stdlib_data",
+                     "via_insert", "via_clean"):
+            rule_runs[name] = subprocess.run(
+                [sys.executable, "-I", "-B", str(mech_rules / (name + ".py"))],
+                capture_output=True, text=True, env=env, timeout=30)
+        for name, want_rc, want_out, want_err in (
+                ("alias_undone", 1, None, "ModuleNotFoundError"),
+                ("alias_kept", 0, None, None),
+                ("data_bare", 1, None, "ModuleNotFoundError"),
+                ("data_boot", 0, None, None),
+                ("stdlib_data", 0, "{}", None),
+                ("via_insert", 0, "True", None),
+                ("via_clean", 0, "False", None)):
+            res = rule_runs[name]
+            if (res.returncode != want_rc
+                    or (want_out is not None and res.stdout.strip() != want_out)
+                    or (want_err is not None and want_err not in res.stderr)):
+                failures.append("real -I: the {} probe expected rc {} (out {!r}, err carrying {!r}); "
+                                "got rc={}, out={!r}, err={!r}".format(
+                                    name, want_rc, want_out, want_err, res.returncode,
+                                    res.stdout.strip(), res.stderr[-200:]))
+
+        # 42j. Real-interpreter and real-bash witnesses for the portion rule and the directory-change
+        #      words: a regular package LATER on sys.path wins over an earlier namespace portion
+        #      (so such a portion is no winner over a regular sibling), between two portions the
+        #      EARLIER one's submodule wins (so it is a winner over a portion-only sibling), and
+        #      `builtin cd` moves the working directory so a relative operand after it no longer
+        #      names the same file.
+        ns_mech = tmp / "ns-mech"
+        (ns_mech / "early" / "nsmod").mkdir(parents=True)
+        (ns_mech / "early" / "nsmod" / "piece.py").write_text("SRC = 1\n", encoding="utf-8")
+        (ns_mech / "late-regular" / "nsmod").mkdir(parents=True)
+        (ns_mech / "late-regular" / "nsmod" / "__init__.py").write_text("MARK = 1\n",
+                                                                        encoding="utf-8")
+        (ns_mech / "late-portion" / "nsmod").mkdir(parents=True)
+        (ns_mech / "late-portion" / "nsmod" / "piece.py").write_text("SRC = 2\n", encoding="utf-8")
+        ns_probe = ("import sys\nsys.path.append(sys.argv[1])\nsys.path.append(sys.argv[2])\n"
+                    "import nsmod\n"
+                    "if getattr(nsmod, 'MARK', 0):\n"
+                    "    print('regular')\n"
+                    "else:\n"
+                    "    import nsmod.piece\n"
+                    "    print('portion', nsmod.piece.SRC)\n")
+        for ns_label, later, want_out in (("late-regular", "late-regular", "regular"),
+                                          ("late-portion", "late-portion", "portion 1")):
+            ns_run = subprocess.run([sys.executable, "-I", "-B", "-c", ns_probe,
+                                     str(ns_mech / "early"), str(ns_mech / later)],
+                                    capture_output=True, text=True, env=env, timeout=30)
+            if ns_run.returncode != 0 or ns_run.stdout.strip() != want_out:
+                failures.append("real -I: the {} namespace probe expected {!r} (got rc={}, out={!r}, "
+                                "err={!r})".format(ns_label, want_out, ns_run.returncode,
+                                                   ns_run.stdout.strip(), ns_run.stderr[-200:]))
+        if bash_bin is None:
+            skipped.append("42j real-bash-builtin-cd (bash unavailable)")
+        else:
+            cd_witness = tmp / "cd-witness"
+            (cd_witness / "sub").mkdir(parents=True)
+            (cd_witness / "sub" / "x.py").write_text("import sys\nsys.exit(7)\n", encoding="utf-8")
+            py_quoted = shlex.quote(sys.executable)
+            plain_cd = subprocess.run([bash_bin, "-c", "{} -I -B sub/x.py".format(py_quoted)],
+                                      cwd=str(cd_witness), capture_output=True, text=True, env=env,
+                                      timeout=30)
+            builtin_cd = subprocess.run(
+                [bash_bin, "-c", "builtin cd sub && {} -I -B sub/x.py".format(py_quoted)],
+                cwd=str(cd_witness), capture_output=True, text=True, env=env, timeout=30)
+            if plain_cd.returncode != 7:
+                failures.append("real bash: without a directory change the relative operand should "
+                                "run sub/x.py (expected exit 7, got {})".format(plain_cd.returncode))
+            if builtin_cd.returncode in (0, 7):
+                failures.append("real bash: `builtin cd sub` should move the working directory so "
+                                "the relative operand no longer names the same file (got exit {}, "
+                                "err={!r})".format(builtin_cd.returncode, builtin_cd.stderr[-200:]))
 
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
@@ -3932,16 +4427,23 @@ def self_test_main():
           "a sibling only after a module-level sys.path.append of its own directory (no bootstrap, an "
           "import before it, insert(0) and a function-only bootstrap each fail, exit 1; the credited "
           "spellings include abspath of dirname, bare from-os.path names, .parent.resolve() and "
-          "os.fspath of the parent, while a data-only directory is not a sibling; every module-level "
+          "os.fspath of the parent; a data-only directory is a sibling whose import needs the "
+          "bootstrap unless the stdlib provides its name; every module-level "
           "store or delete of a tracked directory name forgets its credit, one vector per form; an "
           "import of a sibling the stdlib or the seam-patched isolated path provides is the shadowed "
-          "finding; a relative import and every later sys.path mutation beside the bootstrap append "
-          "fail, one vector per form; unparseable "
-          "hook source, an unplaceable or missing script, a relative operand after a cd, pushd or "
-          "subshell directory change, and a hook too deep to parse or analyse (each overrun vector in "
-          "a bounded child process) are cannot-evaluate, exit 2; with the "
+          "finding, with a namespace portion there winning only over a portion-only sibling; a "
+          "relative import, every later sys.path mutation beside the bootstrap append, and every "
+          "binding of sys or sys.path under another name "
+          "fail, one vector per form; each regular sibling the hook imports unshadowed is scanned one "
+          "level deep under the same sys.path rules, with a flip; unparseable "
+          "hook source, an unplaceable or missing script, a relative operand with an earlier cd, "
+          "pushd or popd word (a prefixed, quoted or function spelling included), a hook too deep to "
+          "parse or analyse (each overrun vector in "
+          "a bounded child process), and an imported sibling that is not a single plain Python source "
+          "or does not parse are cannot-evaluate, exit 2; with the "
           "rule patched out the no-bootstrap hook passes, and a real -I interpreter confirms the "
-          "failure and the insert(0) shadow); and "
+          "failure, the insert(0) shadow, the alias and data-directory failures, the sibling-insert "
+          "shadow and the portion precedence, with real bash confirming builtin cd); and "
           "the gate refuses to run non-isolated (exit 2), with stderr on /dev/full and with descriptor "
           "2 closed too" + note)
     return 0
