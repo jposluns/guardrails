@@ -708,10 +708,11 @@ keeps a borrower's restore from silently moving or losing the deadline the calle
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
 finding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer
-explicitly reclassifies it with a recorded rationale. A refutation, by reading or by observation, is
-evidence offered toward that reclassification or toward showing the finding is not real, never a closure
-its author grants itself; it names each cause it ruled out, and the finding stays open for every other
-cause of the named condition.
+explicitly reclassifies it with a recorded rationale. A blocker or major finding closes only by a fix or
+the maintainer's recorded reclassification: a refutation, an argument against the finding, is evidence
+offered to the maintainer for that reclassification, never itself a closure, whoever wrote or accepted it;
+it names each cause it ruled out with the reading or observation that ruled it out, and the finding stays
+open for every other cause of the named condition.
 
 ## Goal fidelity across a long trajectory
 
@@ -1480,7 +1481,7 @@ name cannot redirect those operations to a different object.
 
 Before a new external interface, privileged operation, untrusted data flow, or trust boundary is
 implemented, its credible abuse paths are identified and their mitigations carried into the change's
-acceptance criteria. This makes identified gaps reviewable before implementation rather than waiting for production evidence.
+acceptance criteria.
 
 ## Validate tool arguments before use
 

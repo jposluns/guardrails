@@ -2057,7 +2057,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 18
 canonical-text = "A finding raised by an adversarial verification pass is fixed, not argued away."
-source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
+source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
 
 [[clause]]
 clause-id = "fndfix.2"
@@ -2066,7 +2066,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
+source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
 
 [[clause]]
 clause-id = "fndfix.3"
@@ -2075,7 +2075,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
+source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
 
 [[clause]]
 clause-id = "fndfix.4"
@@ -2084,16 +2084,16 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
+source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
 
 [[clause]]
 clause-id = "fndfix.5"
 corpus-id = "fndfix"
 source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 20
-end-line = 23
-canonical-text = "A refutation, by reading or by observation, is\nevidence offered toward that reclassification or toward showing the finding is not real, never a closure\nits author grants itself; it names each cause it ruled out, and the finding stays open for every other\ncause of the named condition."
-source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
+end-line = 24
+canonical-text = "A blocker or major finding closes only by a fix or\nthe maintainer's recorded reclassification: a refutation, an argument against the finding, is evidence\noffered to the maintainer for that reclassification, never itself a closure, whoever wrote or accepted it;\nit names each cause it ruled out with the reading or observation that ruled it out, and the finding stays\nopen for every other cause of the named condition."
+source-digest = "06a3cf6464c8c2c70d653e39ec71077e967784097fd2b314bf1e47c231427aec"
 
 [[clause]]
 clause-id = "goalfd.1"
@@ -4127,7 +4127,7 @@ source-path = ".aiqt/core/rules/security-seci-threat-model-boundaries.md"
 start-line = 20
 end-line = 22
 canonical-text = "Before a new external interface, privileged operation, untrusted data flow, or trust boundary is\nimplemented, its credible abuse paths are identified and their mitigations carried into the change's\nacceptance criteria."
-source-digest = "377cd7ec6c5e0edf43103093ed413b330be661417d5c1c9701fd35c528b47911"
+source-digest = "22166ed2f01bbb09c02e2233920f75a661862d320610f064f42ab47b0a1d1202"
 
 [[clause]]
 clause-id = "secthm.2"
@@ -4136,7 +4136,7 @@ source-path = ".aiqt/core/rules/security-seci-threat-model-boundaries.md"
 start-line = 20
 end-line = 22
 canonical-text = "Before a new external interface, privileged operation, untrusted data flow, or trust boundary is\nimplemented, its credible abuse paths are identified and their mitigations carried into the change's\nacceptance criteria."
-source-digest = "377cd7ec6c5e0edf43103093ed413b330be661417d5c1c9701fd35c528b47911"
+source-digest = "22166ed2f01bbb09c02e2233920f75a661862d320610f064f42ab47b0a1d1202"
 
 [[clause]]
 clause-id = "sectvl.1"

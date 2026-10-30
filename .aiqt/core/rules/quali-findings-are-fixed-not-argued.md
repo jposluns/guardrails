@@ -17,7 +17,8 @@ map-iso-42001-broad: [A.6.2.4]
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
 finding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer
-explicitly reclassifies it with a recorded rationale. A refutation, by reading or by observation, is
-evidence offered toward that reclassification or toward showing the finding is not real, never a closure
-its author grants itself; it names each cause it ruled out, and the finding stays open for every other
-cause of the named condition.
+explicitly reclassifies it with a recorded rationale. A blocker or major finding closes only by a fix or
+the maintainer's recorded reclassification: a refutation, an argument against the finding, is evidence
+offered to the maintainer for that reclassification, never itself a closure, whoever wrote or accepted it;
+it names each cause it ruled out with the reading or observation that ruled it out, and the finding stays
+open for every other cause of the named condition.

@@ -358,11 +358,6 @@ text = "An adopter can then\nverify that what they installed matches that authen
 reason = "Rationale for secpub.1; no obligation of its own."
 
 [[exempt]]
-corpus-id = "secthm"
-text = "This makes identified gaps reviewable before implementation rather than waiting for production evidence."
-reason = "Rationale for secthm.1; no obligation of its own."
-
-[[exempt]]
 corpus-id = "bgcwai"
 text = "A wait is a resource."
 reason = "Rationale for bgcwai.1; no obligation of its own."
