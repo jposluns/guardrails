@@ -7181,12 +7181,12 @@ _SCAN_CONTRACT_CASES = (
          "                    '--config-env', 'gc.auto=0=' + str(var),",
          "                    'commit', '--allow-empty', '-m', 'x'])", ""))),),
      None),
-    # Round-9b forms: a launch through a call-of-call factory, factory(...)(argv, ...),
+    # Popen-factory forms: a launch through a call-of-call factory, factory(...)(argv, ...),
     # whose factory returns a subprocess.Popen subclass defined in the scanned file (the
     # ownership spawn in tools/_load_bound.py run) is resolved as a Popen launch: a git argv
     # there is enforced like a direct launch, and the run()-shaped caller-argv-plus-
     # executable= form is a finding without a kind-matched justification and clean with one
-    # (each red without the round-9b call-of-call resolver, which then sees no launch at
+    # (each red without the call-of-call resolver, which then sees no launch at
     # all: the first two scans come back clean, and the third's planted entry reads stale).
     ("popen-factory-git-argv",
      (("tools/planted.py", "\n".join((

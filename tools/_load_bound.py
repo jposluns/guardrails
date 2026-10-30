@@ -94,7 +94,7 @@ spawn appends the acquiring Popen object to a cleanup-visible holder at the STAR
 __init__, before the fork (_acquiring_popen), holds the pid the fork returns on that holder
 from INSIDE the spawn primitive (the fork call runs through a per-call copy of Popen's own
 _execute_child whose fork primitive stores the pid on the holder before returning it, so the
-round-9 window between the fork returning and Popen's own pid binding is owned, not merely
+window between the fork returning and Popen's own pid binding is owned, not merely
 disclosed), and the stop falls back from the proc binding
 (None until the spawn statement completes) to that holder, normalized for partial
 initialization (_partial_child), so any exception that leaves after the fork (a fault inside
@@ -853,7 +853,7 @@ def _acquiring_popen(owned):
     falls back to _acquired_pid). Per call and per instance (no shared state is patched), so
     concurrent run() calls on worker threads stay independent. On a Popen implementation whose
     _execute_child does not call a module-global _fork_exec the spawn runs unchanged and the
-    round-9 window between the fork returning and Popen's pid binding stands, the disclosed
+    window between the fork returning and Popen's pid binding stands, the disclosed
     fallback; the residual inside the capture itself (the boundary between the fork syscall
     returning and the held store) is disclosed in the module docstring."""
     spawn_cls = subprocess.Popen
@@ -892,8 +892,9 @@ def _partial_child(proc):
     returncode, inside __init__: its pid, and with it its group id, may already be reused, so
     nothing may be signalled by number, and the exec OSError propagates untouched). Otherwise
     a child is running: where the fault landed inside the spawn before Popen's own pid binding
-    (the round-9 window, now owned), the held _acquired_pid is bound as pid so the stop stages
-    can name the child; the stop stages and the pipe closes read pid and the three streams, so
+    (the window between the fork returning and that binding, now owned), the held _acquired_pid
+    is bound as pid so the stop stages can name the child; the stop stages and the pipe closes
+    read pid and the three streams, so
     any attribute __init__ never reached is filled with None (CPython binds the streams before
     the fork, so a holder with a pid has them; the fill covers other orderings)."""
     if getattr(proc, "pid", None) is None:
@@ -1231,7 +1232,7 @@ def vector_failures(python):
     positive control proves an UNARMED child would have survived and been seen (libc prctl hosts
     only; elsewhere that survival is the disclosed residual).
 
-    Round-8 vectors: EVERY timeout snapshot recovers the bytes communicate had already read, so a
+    Snapshot and boundary vectors: EVERY timeout snapshot recovers the bytes communicate had already read, so a
     child that closed both pipes and kept running keeps them on the budget Hung; a fault raised
     right after Popen returns, before the next statement (a trace-injected boundary fault), still
     stops the child and closes both pipes (the cleanup owns the child from before the spawn); the
@@ -1248,7 +1249,7 @@ def vector_failures(python):
     zero-tick substitute; and a refused prctl surfaces as the named Unarmed outcome, never an
     ordinary exit status.
 
-    Round-9 vectors: a fault raised after Popen returned but BEFORE the local binding to proc
+    Pre-binding vectors: a fault raised after Popen returned but BEFORE the local binding to proc
     (injected at the store instruction through OPCODE tracing, where a line-event trace cannot
     reach) still stops the child and closes both pipes: ownership is appended to a
     cleanup-visible holder before the fork, so the pre-assignment boundary is covered beside the
@@ -1263,7 +1264,7 @@ def vector_failures(python):
     present entry (an unreadable or unparsable stat) reports itself incomplete, while mid-scan
     ENOENT stays complete absence.
 
-    Round-10 vectors: the arming descriptors sit at 3 or above, proven inside subprocesses
+    Arming vectors: the arming descriptors sit at 3 or above, proven inside subprocesses
     whose standard descriptors 0 and 1 (and 0 and 2) are closed (exact captured stdout and
     stderr, and a program exiting with UNARMED_EXIT keeps status 125, never Unarmed); the
     arming consult is non-consuming and repeatable, so an injected fault after a first consult
@@ -2269,12 +2270,12 @@ def vector_failures(python):
                         "and pipes closed {!r}, fault injected {!r}"
                         .format(got, state, opcode_state["raised"]))
 
-    # Round-10: a fault raised INSIDE the spawn, at the store of the child's pid onto the
+    # A fault raised INSIDE the spawn, at the store of the child's pid onto the
     # Popen object (opcode-traced on Popen._execute_child's own code: the instruction right
     # after the fork primitive returned), must still stop the child and close both pipes.
     # The fork primitive handed to the per-call _execute_child copy (_acquiring_popen) holds
     # the pid on the acquiring object before control returns to interpreted code, so the
-    # round-9 window between the fork returning and Popen's pid binding is owned, not merely
+    # window between the fork returning and Popen's pid binding is owned, not merely
     # disclosed (red when that capture, or the _partial_child fallback reading it, is
     # removed: the injected fault then escapes run() over a running child).
     saved_fork_cls = subprocess.Popen  # the class inspected and subclassed below, and restored after the run
@@ -2893,7 +2894,7 @@ def vector_failures(python):
                                 "completed still raises the named Unarmed on the stopped path): "
                                 "expected the marker-carrying Unarmed, got {!r}".format(got))
 
-            # Round-10: the STOPPED path detects a refusal by the missing success byte alone.
+            # The STOPPED path detects a refusal by the missing success byte alone.
             # A refused child whose diagnostic write also failed (stderr EMPTY) beside a
             # monitor fault must still raise the named Unarmed (red when the stopped-path
             # condition is reverted to a marker test: with no marker on stderr, a marker test
@@ -2935,7 +2936,7 @@ def vector_failures(python):
                                 "fault is still the named Unarmed with empty stderr): got {!r}"
                                 .format(got))
 
-            # Round-10: an interruption AFTER the arming verdict was consulted can never turn
+            # An interruption AFTER the arming verdict was consulted can never turn
             # a completed arming into a reported refusal. The consult is non-consuming, so the
             # stopped path's own consult still sees the byte and a program that really exited
             # with the shared status keeps it (red on a consuming read, where the second
@@ -2971,7 +2972,7 @@ def vector_failures(python):
                                 "and consults [True, True], got {!r}, consults {!r}"
                                 .format(got, armed_consults))
 
-            # Round-10: the arming descriptors sit at 3 or above, so a caller whose standard
+            # The arming descriptors sit at 3 or above, so a caller whose standard
             # descriptors are closed can neither receive the success byte into the child's
             # captured stdout or stderr nor misread a program's own UNARMED_EXIT as a refusal.
             # Each leg runs run() inside a subprocess whose descriptors 0 and 1 (or 0 and 2)
@@ -3019,7 +3020,7 @@ def vector_failures(python):
                                     "got {!r} with results {!r}"
                                     .format(leg, want, got, recorded))
 
-            # Round-10: the arming pipe is acquired INSIDE the protected scope with cleanup
+            # The arming pipe is acquired INSIDE the protected scope with cleanup
             # state initialized first, so a fault landing right after the acquisition (a line
             # trace raising at the first line event where armed_read is bound while proc is
             # still None) leaves NO descriptor open, and both descriptors sit at 3 or above

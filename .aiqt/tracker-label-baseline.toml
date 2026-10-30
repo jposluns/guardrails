@@ -20,8 +20,7 @@ fix-id = 3
 [[path]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
 fix-id = 33
-review-round = 127
-reviewer-source = 27
+review-round = 1
 
 [[path]]
 path = ".aiqt/enforceability.json"
@@ -87,11 +86,6 @@ fix-id = 1
 [[path]]
 path = "opf/enforcement/claude/pretooluse_deny.py"
 review-round = 113
-
-[[path]]
-path = "opf/tools/_journal.py"
-review-round = 27
-reviewer-source = 10
 
 [[path]]
 path = "opf/tools/_opf_absorb.py"
@@ -161,11 +155,6 @@ path = "opf/tools/_opf_observe.py"
 review-round = 1
 
 [[path]]
-path = "opf/tools/_opf_oplock.py"
-review-round = 226
-reviewer-source = 69
-
-[[path]]
 path = "opf/tools/_opf_release.py"
 fix-id = 6
 review-round = 10
@@ -215,23 +204,15 @@ qa-round = 9
 [[path]]
 path = "opf/tools/opf.py"
 fix-id = 2
-review-round = 180
-qa-round = 325
-reviewer-source = 232
 
 [[path]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
 fix-id = 33
-review-round = 127
-reviewer-source = 27
+review-round = 1
 
 [[path]]
 path = "site/enforcement.html"
 fix-id = 3
-
-[[path]]
-path = "tools/_qa_adapter.py"
-review-round = 5
 
 [[path]]
 path = "tools/_release_schema.py"
@@ -243,26 +224,8 @@ path = "tools/check_brief_capability.py"
 review-round = 2
 
 [[path]]
-path = "tools/check_byte_canon.py"
-fix-id = 9
-review-round = 2
-reviewer-source = 2
-
-[[path]]
 path = "tools/check_clauses.py"
 review-round = 36
-
-[[path]]
-path = "tools/check_crosswalk.py"
-review-round = 1
-
-[[path]]
-path = "tools/check_dangerous_api.py"
-review-round = 1
-
-[[path]]
-path = "tools/check_newtab.py"
-review-round = 1
 
 [[path]]
 path = "tools/check_overclaim.py"
@@ -294,30 +257,8 @@ qa-round = 1
 reviewer-source = 4
 
 [[path]]
-path = "tools/check_selftest_execution.py"
-fix-id = 11
-review-round = 21
-
-[[path]]
 path = "tools/check_verifier_delivery.py"
 review-round = 7
-
-[[path]]
-path = "tools/gen_enforcement_register.py"
-fix-id = 1
-review-round = 6
-
-[[path]]
-path = "tools/gen_gensrc.py"
-review-round = 1
-
-[[path]]
-path = "tools/gen_manifest.py"
-review-round = 2
-
-[[path]]
-path = "tools/gen_skill.py"
-review-round = 6
 
 [[path]]
 path = "tools/migrate.py"
@@ -326,22 +267,10 @@ review-round = 7
 reviewer-source = 5
 
 [[path]]
-path = "tools/orch_doctor.py"
-review-round = 1
-
-[[path]]
-path = "tools/pin.py"
-review-round = 10
-
-[[path]]
 path = "tools/selftest_aiqt_hooks.py"
 fix-id = 23
-review-round = 239
-reviewer-source = 77
-
-[[path]]
-path = "tools/selftest_checks.toml"
-fix-id = 2
+review-round = 206
+reviewer-source = 58
 
 [[path]]
 path = "tools/selftest_ci_status.py"

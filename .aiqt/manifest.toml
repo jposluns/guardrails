@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "4590013855444a86453c9184bca9aa7555cc9074b40f4964df067948fee299bc"
+tree-sha256 = "214e12c1abf2fec9090c384bc51bf9bb379d2f1ad688a494cd948590397305c4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -936,8 +936,8 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 
 [[sources]]
 path = ".aiqt/tracker-label-baseline.toml"
-bytes = 6207
-sha256 = "1c1b6308cf155e8f4e7dbb50d87721d7e5907299ee674e3e4626ef286ef2fe2b"
+bytes = 5110
+sha256 = "768317cd267fb8dc48206d87b2b8f74bbf69fccd2d34eab287dbabe2c117765b"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
@@ -3356,8 +3356,8 @@ sha256 = "f96440610c978d5138acf597d202323a5c661f90816452c03a38b3e3bf660978"
 
 [[sources]]
 path = "tools/_load_bound.py"
-bytes = 200597
-sha256 = "43b15df1f663d3819844135a145121c3e919ead2bc31771a1f0fb2d66adc70ac"
+bytes = 200579
+sha256 = "6fd79a1494c42856863b666f30cc0a5b9fe41269dc34720a835f18d1498f8d74"
 
 [[sources]]
 path = "tools/_qa_adapter.py"
@@ -3896,8 +3896,8 @@ sha256 = "8d11b8cd543f2ca5da0fa0788d05b476a94635c9919df4e66ff8a19affbc7caa"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 440521
-sha256 = "acef7be4cd2f8a3c18ef2860c480638a9b218eaf4e018486f0f82886c6ba2fdd"
+bytes = 440517
+sha256 = "ee378994ed3bbf44cb1595d34a76fc9bd89ada4824e03f4a5c50067915cc2e41"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
