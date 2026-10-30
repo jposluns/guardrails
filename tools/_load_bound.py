@@ -1281,7 +1281,7 @@ def vector_failures(python):
     import threading
 
     failures = []
-    token = "load-bound-vector-{}".format(os.getpid())
+    vector_tag = "load-bound-vector-{}".format(os.getpid())
     has_proc = os.path.isdir("/proc")
     unobservable_noted = []
 
@@ -1328,7 +1328,7 @@ def vector_failures(python):
                     proc.kill()
                 except OSError:
                     pass
-            for pid in (_alive_with(token) or []):
+            for pid in (_alive_with(vector_tag) or []):
                 _kill_pid(pid)
         timer = threading.Timer(seconds, stop_owned)
         timer.daemon = True
@@ -1348,7 +1348,7 @@ def vector_failures(python):
 
     def outcome(code, **bounds):
         try:
-            done = run([python, "-I", "-B", "-c", code, token], **bounds)
+            done = run([python, "-I", "-B", "-c", code, vector_tag], **bounds)
         except Hung as exc:
             return "hung: " + exc.kind
         return done.returncode
@@ -1369,7 +1369,7 @@ def vector_failures(python):
         finally:
             subprocess.Popen = saved_outer_cls
             timer.cancel()
-        took, left = time.monotonic() - began, alive(token)
+        took, left = time.monotonic() - began, alive(vector_tag)
         for pid in left:
             _kill_pid(pid)  # a regression must not leak its child past this vector
         if (got, took <= limit, left) != (want, True, []):
@@ -1485,7 +1485,7 @@ def vector_failures(python):
             globals()["_own_exit"] = interrupted_own_exit
         stage_watchdog = handle_watchdog(30.0, made)
         try:
-            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token], budget_s=3600,
+            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", vector_tag], budget_s=3600,
                 stall_s=3600, poll_s=0.05, clock=fault_after_two_ticks())
             got = "returned"
         except Hung as exc:
@@ -1501,12 +1501,12 @@ def vector_failures(python):
             globals()["_kill_group"] = saved_group
             globals()["_own_exit"] = saved_own
             stage_watchdog.cancel()
-        left = alive(token)
+        left = alive(vector_tag)
         for _ in range(50):  # a SIGKILLed child can take a moment to leave the process table
             if not left:
                 break
             time.sleep(0.1)
-            left = alive(token)
+            left = alive(vector_tag)
         for pid in left:
             _kill_pid(pid)
         for proc in made:
@@ -1556,7 +1556,7 @@ def vector_failures(python):
         route_watchdog = handle_watchdog(30.0, route_made)
         try:
             try:
-                run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token],
+                run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", vector_tag],
                     budget_s=3600, stall_s=3600, poll_s=0.05, clock=route_clock)
                 got = "returned"
             except KeyboardInterrupt as exc:
@@ -1568,12 +1568,12 @@ def vector_failures(python):
             globals()["_drain"] = saved_route_drain
             globals()["_own_exit"] = saved_route_own
             route_watchdog.cancel()
-        left = alive(token)
+        left = alive(vector_tag)
         for _ in range(50):  # a SIGKILLed child can take a moment to leave the process table
             if not left:
                 break
             time.sleep(0.1)
-            left = alive(token)
+            left = alive(vector_tag)
         for pid in left:
             _kill_pid(pid)
         if (got, len(drained_calls), left) != ("interrupt", 1, []):
@@ -1655,7 +1655,7 @@ def vector_failures(python):
     seeded_watchdog = handle_watchdog(30.0, seeded_made)
     try:
         try:
-            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token], budget_s=3600,
+            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", vector_tag], budget_s=3600,
                 stall_s=3600, poll_s=0.05, clock=seeded_fault_clock)
             got = "returned"
         except Hung as exc:
@@ -1665,7 +1665,7 @@ def vector_failures(python):
     finally:
         subprocess.Popen = saved_popen_cls
         seeded_watchdog.cancel()
-    for pid in alive(token):
+    for pid in alive(vector_tag):
         _kill_pid(pid)
     if got != ("monitor", b"OUT\n", b"FAIL: seeded diagnostic\n"):
         failures.append("_load_bound vector (a monitoring fault keeps the captured streams): got {!r}"
@@ -1693,7 +1693,7 @@ def vector_failures(python):
     second_watchdog = handle_watchdog(30.0, second_made)
     try:
         try:
-            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token], budget_s=3600,
+            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", vector_tag], budget_s=3600,
                 stall_s=3600, poll_s=0.05)
             got = "returned"
         except Hung as exc:
@@ -1703,7 +1703,7 @@ def vector_failures(python):
     finally:
         subprocess.Popen = saved_popen_cls
         second_watchdog.cancel()
-    for pid in alive(token):
+    for pid in alive(vector_tag):
         _kill_pid(pid)
     if got != ("monitor", b"OUT\n", b"FAIL: seeded diagnostic\n"):
         failures.append("_load_bound vector (a fault in a later communicate keeps the earlier captured "
@@ -1755,7 +1755,7 @@ def vector_failures(python):
         subprocess.Popen = MidReadFault
         try:
             try:
-                run([python, "-I", "-B", "-c", code, token], budget_s=3600, stall_s=3600,
+                run([python, "-I", "-B", "-c", code, vector_tag], budget_s=3600, stall_s=3600,
                     poll_s=poll_s)
                 got = "returned"
             except Hung as exc:
@@ -1765,7 +1765,7 @@ def vector_failures(python):
         finally:
             subprocess.Popen = saved_cls
             watchdog.cancel()
-        for pid in alive(token):
+        for pid in alive(vector_tag):
             _kill_pid(pid)
         # WHICH communicate call faulted is asserted, so the label (first call, later call) is
         # proven, never assumed from the fixture shape alone.
@@ -1825,7 +1825,7 @@ def vector_failures(python):
             run([python, "-I", "-B", "-c",
                  "import sys, time\nsys.stdout.write(\"OUT before fault\\n\")\nsys.stdout.flush()\n"
                  "sys.stderr.write(\"FAIL before fault\\n\")\nsys.stderr.flush()\ntime.sleep(3600)\n",
-                 token], budget_s=3600, stall_s=3600, poll_s=0.2)
+                 vector_tag], budget_s=3600, stall_s=3600, poll_s=0.2)
             got = "returned"
         except Hung as exc:
             got = (exc.kind, exc.output, exc.stderr)
@@ -1834,7 +1834,7 @@ def vector_failures(python):
     finally:
         subprocess.Popen = saved_cls
         watchdog.cancel()
-    for pid in alive(token):
+    for pid in alive(vector_tag):
         _kill_pid(pid)
     if got != ("monitor", b"OUT before fault\n", b"FAIL before fault\n"):
         failures.append("_load_bound vector (unread bytes at a reader fault are drained after the "
@@ -1869,7 +1869,7 @@ def vector_failures(python):
             watchdog = handle_watchdog(60.0, made)
             try:
                 try:
-                    run([python, "-I", "-B", "-c", code, token], budget_s=60, stall_s=3600,
+                    run([python, "-I", "-B", "-c", code, vector_tag], budget_s=60, stall_s=3600,
                         poll_s=0.5, clock=lambda: next(budget_ticks, 3600.0),
                         cpu_seconds=release_point)
                     got = "returned"
@@ -1880,7 +1880,7 @@ def vector_failures(python):
             finally:
                 subprocess.Popen = saved_outer
                 watchdog.cancel()
-            for pid in alive(token):
+            for pid in alive(vector_tag):
                 _kill_pid(pid)
             if got != ("budget", None, want_err):
                 failures.append("_load_bound vector ({}): expected (budget, None, {!r}), got {!r}"
@@ -1947,7 +1947,7 @@ def vector_failures(python):
         closed_watchdog = handle_watchdog(30.0, closed_made)
         try:
             try:
-                run([python, "-I", "-B", "-c", closed_code, token, closed_done], budget_s=3,
+                run([python, "-I", "-B", "-c", closed_code, vector_tag, closed_done], budget_s=3,
                     stall_s=3600, poll_s=0.2, clock=closed_clock, cpu_seconds=lambda pid: 0.0)
                 got = "returned"
             except Hung as exc:
@@ -1957,7 +1957,7 @@ def vector_failures(python):
         finally:
             subprocess.Popen = saved_closed_cls
             closed_watchdog.cancel()
-        for pid in alive(token):
+        for pid in alive(vector_tag):
             _kill_pid(pid)
         if got != ("budget", b"OUT: closed-pipe evidence\n", b"FAIL: closed-pipe diagnostic\n"):
             failures.append("_load_bound vector (a child that closed both pipes and kept running "
@@ -2095,7 +2095,7 @@ def vector_failures(python):
         os.pidfd_open = raising_pidfd_open
         try:
             try:
-                run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token],
+                run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", vector_tag],
                     budget_s=3600, stall_s=3600, poll_s=0.2)
                 got = "returned"
             except Hung as exc:
@@ -2122,7 +2122,7 @@ def vector_failures(python):
                     spawned.wait(timeout=REAP_S)
                 except subprocess.TimeoutExpired:
                     pass
-        for pid in alive(token):
+        for pid in alive(vector_tag):
             _kill_pid(pid)
         if got != ("hung: monitor", True) or state != (True, True, True):
             failures.append("_load_bound vector (a non-OSError fault after the spawn still stops "
@@ -2161,7 +2161,7 @@ def vector_failures(python):
     sys.settrace(trace_global)
     try:
         try:
-            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token],
+            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", vector_tag],
                 budget_s=3600, stall_s=3600, poll_s=0.2)
             got = "returned"
         except Hung as exc:
@@ -2191,7 +2191,7 @@ def vector_failures(python):
         for stream in (spawned.stdin, spawned.stdout, spawned.stderr):
             if stream is not None and not stream.closed:
                 stream.close()
-    for pid in alive(token):
+    for pid in alive(vector_tag):
         _kill_pid(pid)
     if got != ("hung: monitor", True) or state != (True, True, True) or not trace_state["raised"]:
         failures.append("_load_bound vector (a fault right after Popen returns, before the next "
@@ -2232,7 +2232,7 @@ def vector_failures(python):
     sys.settrace(opcode_trace_global)
     try:
         try:
-            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token],
+            run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", vector_tag],
                 budget_s=3600, stall_s=3600, poll_s=0.2)
             got = "returned"
         except Hung as exc:
@@ -2262,7 +2262,7 @@ def vector_failures(python):
         for stream in (spawned.stdin, spawned.stdout, spawned.stderr):
             if stream is not None and not stream.closed:
                 stream.close()
-    for pid in alive(token):
+    for pid in alive(vector_tag):
         _kill_pid(pid)
     if got != ("hung: monitor", True) or state != (True, True, True) or not opcode_state["raised"]:
         failures.append("_load_bound vector (a fault after Popen returns, before proc is bound, "
@@ -2317,7 +2317,7 @@ def vector_failures(python):
         sys.settrace(fork_trace_global)
         try:
             try:
-                run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", token],
+                run([python, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n", vector_tag],
                     budget_s=3600, stall_s=3600, poll_s=0.2)
                 got = "returned"
             except Hung as exc:
@@ -2348,7 +2348,7 @@ def vector_failures(python):
                         spawned.wait(timeout=REAP_S)
                     except subprocess.TimeoutExpired:
                         pass
-        for pid in alive(token):
+        for pid in alive(vector_tag):
             _kill_pid(pid)
         if (got != ("hung: monitor", True) or state != (True, True, True, True)
                 or not fork_state["raised"]):
@@ -2382,7 +2382,7 @@ def vector_failures(python):
                             "import subprocess, sys\n"
                             "subprocess.Popen([sys.executable, \"-I\", \"-c\","
                             " \"import time; time.sleep(30)\", sys.argv[1]])\n"
-                            "sys.exit(7)\n", token], budget_s=3600, stall_s=3600, poll_s=0.2)
+                            "sys.exit(7)\n", vector_tag], budget_s=3600, stall_s=3600, poll_s=0.2)
                 got = done.returncode
             except Exception as exc:  # noqa: BLE001  any escape is this vector failing
                 got = "{}: {}".format(type(exc).__name__, exc)
@@ -2392,7 +2392,7 @@ def vector_failures(python):
             globals()["_alive_with"] = saved_expiry_alive
             subprocess.Popen = saved_expiry_cls
         expiry_took = time.monotonic() - expiry_began
-        left = alive(token)
+        left = alive(vector_tag)
         for pid in left:
             _kill_pid(pid)
         if (got, expiry_took <= 20.0, bool(blind_scans), left) != (7, True, True, []):
@@ -2427,8 +2427,8 @@ def vector_failures(python):
 
         def enoent_cmdline(path, mode="rb"):
             raise FileNotFoundError(errno.ENOENT, "injected: exited mid-scan", path)
-        got = (_alive_with(token, opener=eacces_cmdline),
-               _alive_with("absent-" + token, opener=enoent_cmdline))
+        got = (_alive_with(vector_tag, opener=eacces_cmdline),
+               _alive_with("absent-" + vector_tag, opener=enoent_cmdline))
         if got != (None, []):
             failures.append("_load_bound vector (a refused /proc read is unobservable, never "
                             "absence; mid-scan ENOENT is absence): expected (None, []), got {!r}"
@@ -2454,7 +2454,7 @@ def vector_failures(python):
     try:
         try:
             run([python, "-I", "-B", "-c", "import sys\nsys.stdout.buffer.write(bytes([255]))\n"
-                 "sys.stderr.write(\"FAIL: real diagnostic\\n\")\n", token],
+                 "sys.stderr.write(\"FAIL: real diagnostic\\n\")\n", vector_tag],
                 budget_s=60, stall_s=60, text=True)
             got = "returned"
         except Hung as exc:
@@ -2793,7 +2793,7 @@ def vector_failures(python):
                 try:
                     done = run([python, "-I", "-B", "-c",
                                 "open({!r}, \"w\").write(\"survived\")\n".format(refused_marker),
-                                token], budget_s=60, stall_s=60)
+                                vector_tag], budget_s=60, stall_s=60)
                     got = ("returned", done.returncode)
                 except Unarmed as exc:
                     # The named outcome, never an ordinary exit status: an OSError whose message
@@ -2848,7 +2848,7 @@ def vector_failures(python):
                 try:
                     done = run([python, "-I", "-B", "-c",
                                 "open({!r}, \"w\").write(\"survived\")\n".format(diag_marker),
-                                token], budget_s=60, stall_s=60)
+                                vector_tag], budget_s=60, stall_s=60)
                     got = ("returned", done.returncode)
                 except Unarmed as exc:
                     got = ("unarmed", (exc.stderr or b"") == b"")
@@ -2878,7 +2878,7 @@ def vector_failures(python):
             subprocess.Popen = FaultAfterRefusal
             try:
                 try:
-                    run([python, "-I", "-B", "-c", "pass\n", token], budget_s=60, stall_s=60)
+                    run([python, "-I", "-B", "-c", "pass\n", vector_tag], budget_s=60, stall_s=60)
                     got = "returned"
                 except Unarmed as exc:
                     got = ("unarmed", _UNARMED_MARKER in (exc.stderr or b""))
@@ -2918,7 +2918,7 @@ def vector_failures(python):
             subprocess.Popen = FaultAfterSilentRefusal
             try:
                 try:
-                    run([python, "-I", "-B", "-c", "pass\n", token], budget_s=60, stall_s=60)
+                    run([python, "-I", "-B", "-c", "pass\n", vector_tag], budget_s=60, stall_s=60)
                     got = "returned"
                 except Unarmed as exc:
                     got = ("unarmed", (exc.stderr or b"") == b"")
@@ -2954,7 +2954,7 @@ def vector_failures(python):
             globals()["_armed_byte"] = faulting_consult
             try:
                 try:
-                    run([python, "-I", "-B", "-c", "import sys\nsys.exit(125)\n", token],
+                    run([python, "-I", "-B", "-c", "import sys\nsys.exit(125)\n", vector_tag],
                         budget_s=60, stall_s=60)
                     got = "returned"
                 except Unarmed:
@@ -3004,7 +3004,7 @@ def vector_failures(python):
                                          "lowfd-{}-{}".format(closed_pair[0], closed_pair[1]))
                 try:
                     done = run([python, "-I", "-B", lowfd_script, vector_libdir, lowfd_out,
-                                closed_pair[0], closed_pair[1], token], budget_s=120,
+                                closed_pair[0], closed_pair[1], vector_tag], budget_s=120,
                                stall_s=60)
                     got = ("returned", done.returncode)
                 except Exception as exc:  # noqa: BLE001  any escape is this vector failing
@@ -3053,7 +3053,7 @@ def vector_failures(python):
             sys.settrace(pipe_trace_global)
             try:
                 try:
-                    run([python, "-I", "-B", "-c", "pass\n", token], budget_s=60, stall_s=60)
+                    run([python, "-I", "-B", "-c", "pass\n", vector_tag], budget_s=60, stall_s=60)
                     got = "returned"
                 except RuntimeError as exc:
                     got = str(exc)
@@ -3085,7 +3085,7 @@ def vector_failures(python):
             try:
                 done = run([python, "-I", "-B", "-c",
                             "import sys\nsys.stderr.write(\"parent-death signal was not armed\\n\")\n"
-                            "sys.exit(125)\n", token], budget_s=60, stall_s=60)
+                            "sys.exit(125)\n", vector_tag], budget_s=60, stall_s=60)
                 got = ("returned", done.returncode)
             except Exception as exc:  # noqa: BLE001  an Unarmed here is this vector failing
                 got = "{}: {}".format(type(exc).__name__, exc)
@@ -3122,7 +3122,7 @@ def vector_failures(python):
             def outer_leg(label, script, send, want_rc):
                 """(survival marker path, survivors, leg token) for one outer stop, or None when
                 the inner child never started (recorded as that leg's own failure)."""
-                leg_token = "{}-{}".format(token, label)
+                leg_token = "{}-{}".format(vector_tag, label)
                 started = os.path.join(outer_dir, label + "-started")
                 survival = os.path.join(outer_dir, label + "-survived")
                 outer_proc = subprocess.Popen([sys.executable, "-I", "-B", script, libdir, started,
@@ -3204,7 +3204,7 @@ def vector_failures(python):
         code = ("import subprocess, sys\nprint(\"FAIL\", flush=True)\nsubprocess.Popen([sys.executable, "
                 "\"-I\", \"-c\", \"import time; time.sleep(60)\", sys.argv[2]])\nsys.exit(3)\n")
         try:
-            done = run([python, "-I", "-B", "-c", code, token, leaked], budget_s=60, stall_s=1.5, poll_s=0.2,
+            done = run([python, "-I", "-B", "-c", code, vector_tag, leaked], budget_s=60, stall_s=1.5, poll_s=0.2,
                        text=True)
             got = ("returned", done.returncode)
         except Hung as exc:
