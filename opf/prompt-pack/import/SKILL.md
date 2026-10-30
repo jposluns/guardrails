@@ -91,6 +91,11 @@ exists, exits 0 when the change is recorded and 2 on every refusal or cannot-eva
 
 ## 3. The procedure
 
+**Verify the tooling first.** Before you run any step below, obtain the reference tooling's
+artifact digest and compare it with the published hashes at posluns.dev/hashes.txt. Proceed only
+on a match. If the digests differ or the reference evidence is unavailable, stop and report, and
+run no step below.
+
 1. **Check the adoption state (runs).** Run `opf adopt status --root <product root>` and report
    what it prints. `adopt/SKILL.md`, section 2, step 3, says what each result means. Its output
    does not prove that an adoption receipt exists; in this build no adoption run reaches apply,
