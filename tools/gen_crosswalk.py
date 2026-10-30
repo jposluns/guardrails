@@ -359,7 +359,7 @@ def archive_file(archive_fd, data):
             if existing != data:
                 raise AdoptError("archive immutability violation: {}/payload already holds different bytes"
                                  .format(digest))
-            os.fsync(entry_fd)                            # fix #7: durable on the idempotent early-exists return
+            os.fsync(entry_fd)                            # durable on the idempotent early-exists return
             return digest
         _write_payload(entry_fd, digest, data)
         return digest
@@ -414,7 +414,7 @@ def build_candidates(legacy_root, archive_fd, successor_texts):
         raise AdoptError("no legacy files under {}".format(legacy_root), exit_code=1)
     archive_rows, predecessor_rows, mapping_rows = [], [], []
     for f in files:
-        # fix #6: capture the 8.2 OWNER from the SAME opened source fd the raw bytes come from, so the
+        # Capture the 8.2 OWNER from the SAME opened source fd the raw bytes come from, so the
         # recorded owner cannot disagree with the archived payload. No O_NOFOLLOW here: legacy trees may
         # legitimately carry symlinked files that rglob(is_file) and the prior read_bytes both followed.
         fd = os.open(str(f), os.O_RDONLY)
@@ -548,7 +548,7 @@ def _load_successor_inventory(path):
         raise AdoptError("cannot read successor inventory {} ({}); fail-closed".format(path, exc))
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise AdoptError("successor inventory {} is not valid TOML ({}); fail-closed".format(path, exc))
     rows = doc.get("clause", [])
@@ -647,7 +647,7 @@ def _close_vectors(base):
 
 
 def _fdopen_vectors(base):
-    """F-CROSSWALK-FDOPEN-RESIDUAL: _write_payload and _write_candidate under a raising os.fdopen. EARLY raises
+    """Descriptor ownership of _write_payload and _write_candidate under a raising os.fdopen. EARLY raises
     before the descriptor is wrapped; LATE raises after its raw file exists, closing it per the closefd it was
     given (as io.open does when a later layer fails). Each run must propagate the same MemoryError, leave the
     descriptor it opened closed (OPEN otherwise) and, for _write_payload, no temp behind (TEMP otherwise); a
@@ -699,7 +699,7 @@ def _fdopen_vectors(base):
                         "descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
                 problems.append("OPEN")
                 os.close(fd)                              # a failing vector leaks; release it here
-            # F-JOURNAL-HELD-FD-LISTING: dfd was opened BEFORE the vector wrote through it, and a
+            # dfd was opened BEFORE the vector wrote through it, and a
             # listing read through a held descriptor can miss every entry created since its open (on
             # btrfs the kernel snapshots a readdir upper bound at open time), so a leftover temporary
             # would escape this sweep; list through a FRESH "." descriptor opened beneath dfd (the
@@ -800,7 +800,7 @@ def _fdopen_vectors(base):
             os.close(fd)
     if got != "named":
         failures.append("fdopen vector CENSUS: expected the EIO descriptor named, got {}".format(got))
-    # F-JOURNAL-HELD-FD-LISTING: the TEMP sweep must report a leftover temporary created AFTER the
+    # The TEMP sweep must report a leftover temporary created AFTER the
     # fixture descriptor was opened (the vector writes it through dfd and leaves it behind); a listing
     # read through the held descriptor itself can miss every entry created since its open, so the
     # sweep reads through a fresh descriptor. FILESYSTEM-DEPENDENT integration evidence: this native leg
@@ -940,7 +940,7 @@ def self_test():
                             "(a [[pointer-hint]] row lifted from the legacy bytes)")
         if 'semantic-verdict = ""' not in cand_text:
             failures.append("candidate mapping rows must carry EMPTY verdict fields (asserts nothing)")
-        # fix #6: the 8.2-required owner is captured from the source fd and emitted on the archive-file row.
+        # The 8.2-required owner is captured from the source fd and emitted on the archive-file row.
         if "owner = {}".format(os.getuid()) not in cand_text:
             failures.append("archive-file rows must carry the 8.2 owner captured from the source fd")
         # G-hardening: candidate predecessor rows now carry computable 7.2 spans (start-line/end-line).
@@ -966,7 +966,7 @@ def self_test():
             pass
         os.close(afd)
 
-        # (d2) F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's 4300-digit int-string limit
+        # (d2) An integer literal past CPython's 4300-digit int-string limit
         # makes tomllib raise a BARE ValueError (not TOMLDecodeError); the successor-inventory loader must
         # still refuse with AdoptError (exit 2), never let the ValueError escape. The digit limit is pinned to
         # the default 4300 (test-hermeticity) and restored in finally.
@@ -1006,7 +1006,7 @@ def self_test():
             tomllib.loads, tomllib.load = real_loads, real_load
             sys.set_int_max_str_digits(prev_digits)
 
-        # (fix #7) unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
+        # Unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
         # its entry dir, publishes the exact bytes, and a same-bytes re-archive is idempotent.
         fresh = b"a distinct archive payload for the temp/link test\n"
         fdig = hashlib.sha256(fresh).hexdigest()
@@ -1025,7 +1025,7 @@ def self_test():
         if leftover:
             failures.append("archive_file must leave no temp files behind (found {})".format(leftover))
 
-        # (B1) post-publish verification: a payload SUBSTITUTED between the no-overwrite publish link and
+        # Post-publish verification: a payload SUBSTITUTED between the no-overwrite publish link and
         # the digest re-check is refused (fail-closed), never reported as a clean publish. The substitution
         # is injected by wrapping os.link so that immediately AFTER the real link publishes our temp inode,
         # <entry>/payload is repointed at DIFFERENT bytes (a distinct regular file); the post-publish
@@ -1047,7 +1047,7 @@ def self_test():
         os.link = _link_then_swap
         try:
             archive_file(b1fd, b1bytes)
-            failures.append("B1: a payload substituted after the publish link must be refused (fail-closed)")
+            failures.append("a payload substituted after the publish link must be refused (fail-closed)")
         except AdoptError:
             pass
         finally:
@@ -1199,7 +1199,7 @@ def self_test():
         try:
             close_failures, close_runs = _close_vectors(tmp / "close")
             failures.extend(close_failures)
-            # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or
+            # A raising os.fdopen leaves neither writer's descriptor open or
             # closed twice, each green and red under its flip.
             fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
             failures.extend(fdopen_failures)
