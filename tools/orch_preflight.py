@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-yield preflight (GD-112, D2: non-blocking in v1): print the disposition table the stop guard
+"""Pre-yield preflight (non-blocking in v1): print the disposition table the stop guard
 would act on, so the orchestrator sees per-item (id, class, proof) BEFORE yielding. The hooks
 re-enumerate authoritatively at yield time; this CLI adds visibility, never enforcement, and
 escalating it to a required permit is a recorded phase-2 option.
