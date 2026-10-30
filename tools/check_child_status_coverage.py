@@ -70,8 +70,10 @@ with exit 2). This gate holds where it runs:
      is read from the repository root (R12). A word that does not resolve, or resolves to
      a path that is not self-guarded (a same-named file elsewhere included), is a finding. A directory the
      launcher walk cannot list is cannot-evaluate, and a declared launcher that is absent is a finding.
-  5. completeness: every entry point, enumerated from (a) every .py with a module-level __main__ guard
-     (tools/check_python_floor.py's own walk and EXCLUDED_TREES), (b) both runners' rosters, (c) every workflow's
+  5. completeness: every entry point, enumerated from (a) every tracked .py with a module-level __main__ guard
+     (git ls-files at the root, through tracked_entrypoints, never a walk of the tree, so an ignored or untracked
+     script is none; tools/check_python_floor.py's EXCLUDED_TREES and SKIPPED_DIR_NAMES; git that cannot answer
+     is cannot-evaluate), (b) both runners' rosters, (c) every workflow's
      python3 launch targets, (d) every registry runner (tools/selftest_checks.toml, through the execution gate's
      schema validator) and (e) the hook registrations, is classified SELF (it carries the pinned guard),
      NOT-APPLICABLE (a static scan of it and its local import closure finds no spawn or wait API), LAUNCHER (it
@@ -106,7 +108,8 @@ in a variable or computed is pinned only by the expression the call spells (R13)
                                                        (tools/_selftest_exit_report.py)
 Exit: 0 every leg holds; 1 findings, each named; 2 cannot evaluate (an input missing, not a regular file,
 unreadable, not UTF-8, outside the parity reader's grammar or unparsable; a directory that cannot be listed or
-walked; an unresolved dynamic load), the live refusal, or usage. There is no warning tier.
+walked; a tracked list git cannot give (git missing, not a repository, a nonzero exit, output that does not
+parse); an unresolved dynamic load), the live refusal, or usage. There is no warning tier.
 
 Disclosed residuals, not closed by this gate: R1 an ignore or SA_NOCLDWAIT set below Python after interpreter
 start (a native extension, ctypes, an embedding host) is not seen by the disposition read, and the fork probe runs
@@ -145,7 +148,11 @@ workflow grammar is this gate's own reading of a YAML subset, held to the self-t
 workflows and not compared with the parser GitHub runs, so a file inside it that GitHub reads another way is
 not seen; R16 the binding count of legs 2 and 3 reads the module's own binding statements, so a rebinding
 through a computed name (globals(), setattr on the module, sys.modules[__name__]), or of opf.py's _main_exit
-through an attribute store such as _main_exit.__code__, is not counted and not seen. Whether a real launcher
+through an attribute store such as _main_exit.__code__, is not counted and not seen; R17 leg 5's entry points
+come from git's tracked list, but the shell launchers (tools/*.sh and the walk under opf/), the workflow
+directory listing, a declared launch target's existence and the scan's local imports are still read from the
+working tree, so an untracked file there is read as if tracked, and a tracked .py deleted from the working tree
+is cannot-evaluate. Whether a real launcher
 starts these tools with SIGCHLD ignored, and whether the steps of one CI job share one disposition, are not
 established: each job's probe step reads the disposition of its own step only, so it cannot show what the job's
 other steps inherit.
@@ -173,6 +180,7 @@ import os
 import posixpath
 import re
 import shutil
+import subprocess
 import tempfile
 import tomllib
 from pathlib import Path
@@ -181,7 +189,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
 import check_ci_parity  # noqa: E402  (the validated roster reader and loader)
 import check_entry_guard  # noqa: E402  (the non-blocking regular-file reader and the registry runners)
-import check_python_floor  # noqa: E402  (the shipped-entrypoint walk)
+import check_python_floor  # noqa: E402  (the shipped-entrypoint reading and its exclusions)
 import check_selftest_execution  # noqa: E402  (the registry schema)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1255,6 +1263,55 @@ def _shell_launchers(root, listdir=os.listdir, walk=os.walk, lexists=os.path.lex
     return [rel for rel in out if rel not in (LOCAL_RUNNER, OPF_RUNNER)], findings
 
 
+def _git_ls_files(root):
+    """(exit status, stdout, stderr) of git ls-files -z --cached at root, pinned as gen_manifest.git_tracked pins
+    its index read: every GIT_* variable scrubbed, then GIT_NO_LAZY_FETCH=1, core.fsmonitor=false and
+    protocol.allow=never. A git that cannot be started raises OSError or SubprocessError."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                           "ls-files", "-z", "--cached"], capture_output=True, timeout=CHILD_TIMEOUT, env=env)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def tracked_files(root, ls_files=_git_ls_files):
+    """The repository-relative paths git tracks at root, read through ls_files(root), never a walk of the tree. A
+    git that cannot be started, a nonzero exit (root not a repository included), no output, output that does not
+    end in NUL or is not UTF-8, and an empty path are each cannot-evaluate, never an empty or partial list."""
+    try:
+        code, out, err = ls_files(root)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CannotEvaluate("cannot list the tracked files (git ls-files did not run: {})".format(
+            type(exc).__name__))
+    if code != 0:
+        raise CannotEvaluate("cannot list the tracked files (git ls-files exit {}: {})".format(
+            code, err.decode("utf-8", "replace").strip()))
+    if not out.endswith(b"\0"):
+        raise CannotEvaluate("cannot list the tracked files (git ls-files output is empty or does not end in NUL)")
+    try:
+        paths = out[:-1].decode("utf-8").split("\0")
+    except UnicodeDecodeError as exc:
+        raise CannotEvaluate("cannot list the tracked files (git ls-files output is not UTF-8 at byte {})".format(
+            exc.start))
+    if "" in paths:
+        raise CannotEvaluate("cannot list the tracked files (git ls-files listed an empty path)")
+    return frozenset(paths)
+
+
+def tracked_entrypoints(root):
+    """Every tracked .py (tracked_files) outside EXCLUDED_TREES and outside a SKIPPED_DIR_NAMES directory with a
+    module-level __main__ guard: tools/check_python_floor.py's reading of a shipped entrypoint, over the files the
+    repository tracks rather than that gate's walk of the tree, so an ignored or untracked script is none."""
+    out = []
+    for rel in sorted(tracked_files(root)):
+        if (not rel.endswith(".py") or check_python_floor._excluded(rel)
+                or check_python_floor.SKIPPED_DIR_NAMES.intersection(rel.split("/")[:-1])):
+            continue
+        if check_python_floor._has_main_block(check_python_floor._parse(Path(root), rel)):
+            out.append(rel)
+    return out
+
+
 def evaluate(root, residual=None, direct_check=None):
     """(classes, findings); raises CannotEvaluate naming what could not be read or classified."""
     root = Path(root)
@@ -1311,7 +1368,7 @@ def evaluate(root, residual=None, direct_check=None):
             findings.append("{}: a declared launch target that does not exist (unclassified)".format(rel))
     launched = {rel for rel in launched if (root / rel).is_file()}
     try:
-        entries = set(check_python_floor.shipped_entrypoints(root)) | launched
+        entries = set(tracked_entrypoints(root)) | launched
     except check_python_floor.CannotEvaluate as exc:
         raise CannotEvaluate(str(exc))
     trees = {}
@@ -1660,6 +1717,38 @@ def _fake_fs(unreadable=False, unlistable=False, absent=()):
     return listdir, walk, lexists
 
 
+# The tracked-list fixture: one entry that reads a child's exit status and carries no guard, written three times, as
+# a tracked file, under an ignored directory and as an untracked file that is not ignored.
+TRACKED_READER = ('import subprocess\nimport sys\n\nif __name__ == "__main__":\n'
+                  '    sys.exit(subprocess.run([sys.executable, "-c", "pass"]).returncode)\n')
+TRACKED_FIXTURE = ((".gitignore", "ignored/\n"), ("tools/tracked_reader.py", TRACKED_READER),
+                   ("ignored/ignored_reader.py", TRACKED_READER), ("tools/untracked_reader.py", TRACKED_READER))
+# git status --porcelain=v1 -z --ignored --untracked-files=all in the fixture, exactly: the shape the vectors rely on.
+TRACKED_STATUS = (b"A  .gitignore\0A  tools/tracked_reader.py\0?? tools/untracked_reader.py\0"
+                  b"!! ignored/ignored_reader.py\0")
+
+
+def _tracked_fixture(base):
+    """(root, shape ok) for a git repository under base whose index holds .gitignore and tools/tracked_reader.py
+    only, beside ignored/ignored_reader.py (ignored) and tools/untracked_reader.py (untracked, not ignored). No
+    system or global git configuration is read, so no excludes file outside the fixture decides what is ignored;
+    shape ok is whether git reports exactly TRACKED_STATUS."""
+    root = Path(base) / "tracked"
+    for rel, text in TRACKED_FIXTURE:
+        _copy(rel, root, text)
+    (Path(base) / "not-a-repository").mkdir()
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "init", "-q"], capture_output=True,
+                   timeout=CHILD_TIMEOUT, env=env)
+    subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "add", "--", ".gitignore",
+                    "tools/tracked_reader.py"], capture_output=True, timeout=CHILD_TIMEOUT, env=env)
+    status = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z",
+                             "--ignored", "--untracked-files=all"], capture_output=True, timeout=CHILD_TIMEOUT,
+                            env=env)
+    return root, status.returncode == 0 and status.stdout == TRACKED_STATUS
+
+
 def _vectors(module, trees, texts, canonical_tree):
     """{vector id: ok} for every static vector, against module (this gate or a mutant of it); a vector whose
     evaluation raises is not ok."""
@@ -1701,6 +1790,25 @@ def _vectors(module, trees, texts, canonical_tree):
 
     def launchers(**fs):
         return m._shell_launchers(FAKE_ROOT, *_fake_fs(**fs))
+
+    tracked_root, tracked_shape = texts["tracked-root"], texts["tracked-shape"]
+
+    def tracked_entries():
+        """The fixture's entry points, or none unless every fixture file is on disk and git reports the fixture as
+        TRACKED_STATUS."""
+        if not tracked_shape or not all((tracked_root / rel).is_file() for rel, _text in TRACKED_FIXTURE):
+            return []
+        return m.tracked_entrypoints(tracked_root)
+
+    def tracked_reads(rel):
+        return m.closure_reads(rel, lambda each: ast.parse((tracked_root / each).read_text(encoding="utf-8")),
+                               lambda each: (tracked_root / each).is_file())
+
+    def git_reply(code, out, err=b""):
+        return lambda root: (code, out, err)
+
+    def git_missing(root):
+        raise FileNotFoundError(2, "No such file or directory", "git")
 
     every_launcher = ["tools/a.sh", "opf/seen.sh"] + list(m.EXTRA_SHELL_LAUNCHERS)
     reviewed_reads = _synthetic_reads(m, SYNTHETIC_REVIEWED)
@@ -1931,6 +2039,21 @@ def _vectors(module, trees, texts, canonical_tree):
         ("completeness/scan-follows-local-imports",
          lambda: reads_of("tools/new_reader.py")[0] == [("tools/helper_mod.py", "import subprocess")]),
         ("completeness/scan-clean-module", lambda: reads_of("tools/plain.py") == ([], [])),
+        # Entry points come from git's tracked list: the same unguarded reader, ignored or untracked, is none, and
+        # tracked it is a finding; git that cannot answer is cannot-evaluate, never a walk of the tree or a pass.
+        ("completeness/ignored-script-not-entry", lambda: "ignored/ignored_reader.py" not in tracked_entries()
+         and "tools/tracked_reader.py" in tracked_entries()),
+        ("completeness/untracked-script-not-entry", lambda: "tools/untracked_reader.py" not in tracked_entries()
+         and "tools/tracked_reader.py" in tracked_entries()),
+        ("completeness/tracked-unguarded-script-is-finding", lambda: [
+            finding.split(": ", 1)[0] for finding in m.classify(
+                set(tracked_entries()), set(), tracked_reads, (), False)[1]] == ["tools/tracked_reader.py"]),
+        ("completeness/git-failure-cannot-evaluate", lambda: m.tracked_files(
+            FAKE_ROOT, git_reply(0, b"a.py\0tools/b.py\0")) == {"a.py", "tools/b.py"}
+         and raises(lambda: m.tracked_entrypoints(tracked_root.parent / "not-a-repository"))
+         and all(raises(lambda: m.tracked_files(FAKE_ROOT, ls_files)) for ls_files in (
+             git_missing, git_reply(128, b"a.py\0", b"fatal: not a git repository"), git_reply(0, b""),
+             git_reply(0, b"a.py"), git_reply(0, b"\xff.py\0"), git_reply(0, b"a.py\0\0b.py\0")))),
     )
     out = {}
     for vector, thunk in vectors:
@@ -2109,6 +2232,25 @@ MUTANTS = (
      "completeness/reviewed-variable-target-limit"),
     ("scan-closure", "                stack.append(target)\n", "                pass\n",
      "completeness/scan-follows-local-imports"),
+    ("tracked-list-ignored", "    for rel in sorted(tracked_files(root)):\n",
+     "    for rel in check_python_floor._python_files(Path(root)):\n", "completeness/ignored-script-not-entry"),
+    ("tracked-list-untracked", "    for rel in sorted(tracked_files(root)):\n",
+     "    for rel in check_python_floor._python_files(Path(root)):\n", "completeness/untracked-script-not-entry"),
+    ("tracked-main-block",
+     "        if check_python_floor._has_main_block(check_python_floor._parse(Path(root), rel)):\n",
+     "        if False:\n", "completeness/tracked-unguarded-script-is-finding"),
+    ("tracked-git-start",
+     "    except (OSError, subprocess.SubprocessError) as exc:\n        raise CannotEvaluate(\"cannot list",
+     "    except ArithmeticError as exc:\n        raise CannotEvaluate(\"cannot list",
+     "completeness/git-failure-cannot-evaluate"),
+    ("tracked-git-exit", "    if code != 0:\n", "    if False:\n", "completeness/git-failure-cannot-evaluate"),
+    ("tracked-git-terminated", "    if not out.endswith(b\"\\0\"):\n", "    if not out:\n",
+     "completeness/git-failure-cannot-evaluate"),
+    ("tracked-git-decode", "    except UnicodeDecodeError as exc:\n        raise CannotEvaluate(\"cannot list",
+     "    except ArithmeticError as exc:\n        raise CannotEvaluate(\"cannot list",
+     "completeness/git-failure-cannot-evaluate"),
+    ("tracked-git-empty-path", "    if \"\" in paths:\n", "    if False:\n",
+     "completeness/git-failure-cannot-evaluate"),
 )
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "launchers/real-launchers-pass",
              "launchers/real-workflows-in-grammar", "launchers/workflow-host-probe-ahead-of-pin",
@@ -2297,7 +2439,23 @@ def self_test(lane, report_path=None):
         this = sys.modules[__name__]
         trees, texts = _inputs()
         canonical_tree = trees["canonical"]
-        vectors = _vectors(this, trees, texts, canonical_tree)
+        with tempfile.TemporaryDirectory(prefix="child-status-coverage-selftest-") as base:
+            texts["tracked-root"], texts["tracked-shape"] = _tracked_fixture(base)
+            vectors = _vectors(this, trees, texts, canonical_tree)
+            gate_source, marker, rest = Path(__file__).read_text(encoding="utf-8").partition(
+                "\n# ---------------------------------------------------------------------------------------------- "
+                "self-test\n")
+            exposed, uncaught = set(), []
+            for number, (mutant, old, new, vector) in enumerate(MUTANTS, 1):
+                if gate_source.count(old) != 1:
+                    uncaught.append((mutant, "anchor found {} times".format(gate_source.count(old))))
+                    continue
+                module = _load_mutant(gate_source.replace(old, new) + marker + rest, base, number)
+                failed = {key for key, ok in _vectors(module, trees, texts, canonical_tree).items() if not ok}
+                exposed |= failed
+                if vector not in failed:
+                    uncaught.append((mutant, sorted(failed)))
+            behaviour = dict((check_id, (ok, detail)) for check_id, ok, detail in _behaviour(probe, base))
         for check_id, _kind in (("copies/real-copies-identical", 0), ("copies/drift-is-finding", 0),
                                 ("copies/missing-copy-is-finding", 0), ("copies/hook-drift-is-finding", 0),
                                 ("copies/rebound-guard-is-finding", 0),
@@ -2370,26 +2528,15 @@ def self_test(lane, report_path=None):
                                 ("completeness/reviewed-load-target-pinned", 0),
                                 ("completeness/reviewed-variable-target-limit", 0),
                                 ("completeness/scan-follows-local-imports", 0),
-                                ("completeness/scan-clean-module", 0)):
+                                ("completeness/scan-clean-module", 0),
+                                ("completeness/ignored-script-not-entry", 0),
+                                ("completeness/untracked-script-not-entry", 0),
+                                ("completeness/tracked-unguarded-script-is-finding", 0),
+                                ("completeness/git-failure-cannot-evaluate", 0)):
             check(check_id, vectors.get(check_id), sorted(key for key, ok in vectors.items() if not ok))
-        with tempfile.TemporaryDirectory(prefix="child-status-coverage-selftest-") as base:
-            gate_source, marker, rest = Path(__file__).read_text(encoding="utf-8").partition(
-                "\n# ---------------------------------------------------------------------------------------------- "
-                "self-test\n")
-            exposed, uncaught = set(), []
-            for number, (mutant, old, new, vector) in enumerate(MUTANTS, 1):
-                if gate_source.count(old) != 1:
-                    uncaught.append((mutant, "anchor found {} times".format(gate_source.count(old))))
-                    continue
-                module = _load_mutant(gate_source.replace(old, new) + marker + rest, base, number)
-                failed = {key for key, ok in _vectors(module, trees, texts, canonical_tree).items() if not ok}
-                exposed |= failed
-                if vector not in failed:
-                    uncaught.append((mutant, sorted(failed)))
-            check("mutant/every-mutant-caught", MUTANTS and not uncaught, uncaught)
-            never = sorted(set(vectors) - exposed - UNMUTATED)
-            check("mutant/every-vector-discriminates", not never, never)
-            behaviour = dict((check_id, (ok, detail)) for check_id, ok, detail in _behaviour(probe, base))
+        check("mutant/every-mutant-caught", MUTANTS and not uncaught, uncaught)
+        never = sorted(set(vectors) - exposed - UNMUTATED)
+        check("mutant/every-vector-discriminates", not never, never)
         for check_id, _kind in (("behaviour/opf-cli-refuses", 0), ("behaviour/launcher-cli-refuses", 0),
                                 ("behaviour/coverage-gate-refuses", 0), ("behaviour/adopt-complete-refuses", 0),
                                 ("behaviour/adopt-complete-self-test-refuses", 0),
