@@ -12249,12 +12249,17 @@ _RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 # Recognized/apparent commits deny unless that evidence carries an A-D certificate.
 #
 # Certificate contract:
-# A: plain session commit, intact absolute session binding, validated non-protected HEAD.
+# A: plain commit (no -C) with no switch postcondition for its worktree, run in the
+#    operand of the latest preceding admitted cd/pushd, else in the absolute session
+#    cwd (a cd/pushd operand with a '.' or '..' component leaves it unresolved);
+#    validated non-protected HEAD there.
 # B: exact absolute -C commit, proved target identity, applicable non-protected HEAD.
 # C: admitted switch and commit have equal worktree identities; the uninterrupted &&
 #    chain gates the commit on switch success; the conditional branch is non-protected.
-# D: exactly one plain session commit, valid protected local HEAD, and remote probe
-#    result exactly False. D is a policy exemption, NOT non-protected branch evidence.
+# D: the command's only commit, plain (in the directory A would use) or exact absolute
+#    -C, with no switch postcondition and every other step an admitted cd/pushd;
+#    valid protected local HEAD of that target, and its remote probe result exactly
+#    False. D is a policy exemption, NOT non-protected branch evidence.
 #
 # Every certificate additionally requires complete admitted syntax, literal arguments,
 # no redirects/wrappers/assignments, acceptable ambient environment, and successful
@@ -12264,8 +12269,11 @@ _COMMIT_CERTIFICATE_SHAPES = frozenset(("A", "B", "C", "D"))
 _COMMIT_MAX_COMMAND = 65536
 _COMMIT_MAX_SEGMENTS = 64
 
-# target is None for a session-bound Git command, otherwise the exact absolute -C
-# operand. branch is a literal switch operand, NOT a validated reference.
+# For a "cd" step (an admitted cd or pushd), target is its absolute operand, where
+# later plain steps run. For a Git step, target is None without -C (it runs in the
+# latest preceding cd/pushd operand, else the session cwd), otherwise the exact
+# absolute -C operand. An "inert" step has no target. branch is a literal switch
+# operand, NOT a validated reference.
 _CommitStep = collections.namedtuple(
     "_CommitStep", ("kind", "target", "branch", "segment"))
 
@@ -12391,9 +12399,9 @@ def _commit_syntax_step(seg):
         return _CommitStep("inert", None, None, seg)
     if len(tokens) == 3 and tokens[:2] == ["printf", "%s"]:
         return _CommitStep("inert", None, None, seg)
-    if (len(tokens) == 2 and tokens[0] == "cd"
+    if (len(tokens) == 2 and tokens[0] in ("cd", "pushd")
             and tokens[1] and os.path.isabs(tokens[1])):
-        # This invalidates session binding; it does not establish a replacement cwd.
+        # Later plain segments of the && chain run in this directory (see _commit_evaluate).
         return _CommitStep("cd", tokens[1], None, seg)
     prefix = _commit_exact_prefix(tokens)
     if prefix is None:
@@ -13172,13 +13180,15 @@ def _commit_issue(syntax, index, step, target, post, deadline):
         raise _CommitCannotEvaluate("switch evidence does not bind this commit")
     _commit_remaining(deadline)
     if _is_protected_ref(branch):
-        # D is a policy exemption, not a proof of a non-protected destination.
-        if len(syntax.steps) == 1 and step.target is None and post is None:
+        # D is a policy exemption, not a proof of a non-protected destination. It is judged
+        # for the repository this commit targets; only admitted cd/pushd segments may accompany it.
+        if (len(syntax.commit_indexes) == 1 and post is None
+                and all(other is step or other.kind == "cd" for other in syntax.steps)):
             remote = _repo_has_remote(target.directory, deadline)
             _commit_remaining(deadline)
             if remote is False:
                 certificate = _CommitCertificate("D", index, target.identity, branch, None)
-                return _CommitEvidence("proved", certificate, "D: lone session commit; no remote")
+                return _CommitEvidence("proved", certificate, "D: lone commit; target has no remote")
             if remote is None:
                 return _CommitEvidence("unverifiable", None, "remote absence could not be proved")
         return _CommitEvidence("protected", None, "would commit on protected branch " + repr(branch))
@@ -13193,8 +13203,9 @@ def _commit_evaluate(syntax, cwd, deadline):
 
     State is keyed by the worktree Git directory's device/inode, so alternate paths
     share postconditions while linked worktrees keep independent HEAD state.
-    cd permanently invalidates session binding; it never supplies a replacement cwd.
-    Trusted command resolution, stable config/paths and non-hostile hooks/editors/
+    A segment without -C runs in the operand of the latest preceding admitted cd/pushd,
+    else in cwd; an operand with a '.' or '..' component (where the shell's logical
+    directory can differ from Git's physical one) leaves that directory unresolved. Trusted command resolution, stable config/paths and non-hostile hooks/editors/
     helpers remain assumptions. Concurrent mutation and probe-to-execution races
     remain residual risks. Switch aliases are refused; HEAD aliases are resolved.
     """
@@ -13204,7 +13215,7 @@ def _commit_evaluate(syntax, cwd, deadline):
             raise _CommitCannotEvaluate(syntax.detail)
         if _ambient_repo_view_override():
             raise _CommitCannotEvaluate("non-cosmetic ambient GIT_* variable")
-        session_bound = isinstance(cwd, str) and bool(cwd) and os.path.isabs(cwd)
+        current = cwd if isinstance(cwd, str) and cwd and os.path.isabs(cwd) else None
         targets, identities, directory_ids, posts, created = {}, {}, {}, {}, set()
         evidence = []
         for index, step in enumerate(syntax.steps):
@@ -13212,13 +13223,14 @@ def _commit_evaluate(syntax, cwd, deadline):
             if step.kind == "inert":
                 continue
             if step.kind == "cd":
-                session_bound = False
+                dotted = any(part in (".", "..") for part in step.target.split("/"))
+                current = None if dotted else step.target
                 continue
             directory = step.target
             if directory is None:
-                if not session_bound:
-                    raise _CommitCannotEvaluate("session directory binding is unavailable after cd")
-                directory = cwd
+                if current is None:
+                    raise _CommitCannotEvaluate("command directory is unavailable")
+                directory = current
             if directory not in targets:
                 target = _commit_target(directory, deadline)
                 prior_id = directory_ids.get(target.git_directory)
