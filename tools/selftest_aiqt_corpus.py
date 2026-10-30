@@ -405,9 +405,9 @@ ISOLATING_STDIN_VALUES = {
 INPUT_LAUNCHERS = frozenset(("run", "check_output"))
 
 # The only attributes each watched module may be read through. Any other
-# attribute, launcher or not, is flagged, as is a dunder attribute anywhere in
-# a chain read from one of them. os.path is listed because it is itself a
-# module; the launchers in ISOLATING_STDIN_VALUES are checked on their own.
+# attribute, launcher or not, is flagged; a dunder attribute is flagged
+# whatever it is read from. os.path is listed because it is itself a module;
+# the launchers in ISOLATING_STDIN_VALUES are checked on their own.
 PERMITTED_ATTRIBUTES = {
     "subprocess": frozenset(("DEVNULL", "PIPE", "STDOUT", "CalledProcessError", "TimeoutExpired",
                              "SubprocessError", "CompletedProcess")),
@@ -420,11 +420,30 @@ PERMITTED_ATTRIBUTES = {
 # The modules whose names the check resolves, under any alias.
 WATCHED_MODULES = ("subprocess", "os", "sys")
 
+# Names that read a namespace or a frame, and so reach a module without naming
+# it: flagged as a name, an attribute of anything, an imported name, or the
+# literal attribute of a getattr.
+NAMESPACE_READERS = frozenset(("globals", "locals", "vars", "__builtins__", "f_globals", "f_locals",
+                               "f_builtins", "f_back", "gi_frame", "cr_frame", "ag_frame", "tb_frame"))
+
+# The only dunder name the module may read. A dunder it defines (a def name, an
+# assignment target such as __all__ or __slots__) is not read, and __future__
+# is allowed as the module of a from-import.
+PERMITTED_DUNDER_NAMES = frozenset(("__name__",))
+
+# The nodes that open a scope with its own imports.
+SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
 # Launches allowed to inherit stdin: (enclosing qualname, launch label, reason),
 # the first two as stdin_inheriting_launches() reports them. Empty: every launch
 # in aiqt_corpus.py isolates stdin. An entry needs a nonempty reason and must
 # match exactly one reported launch, so it never covers a later one.
 STDIN_EXEMPT_CALLS: tuple[tuple[str, str, str], ...] = ()
+
+
+def is_dunder(name: str) -> bool:
+    """Return whether ``name`` starts and ends with two underscores."""
+    return name.startswith("__") and name.endswith("__")
 
 
 def launch_label(path: tuple[str, ...]) -> str | None:
@@ -438,7 +457,7 @@ def launch_label(path: tuple[str, ...]) -> str | None:
     for depth in range(1, len(path)):
         attr = path[depth]
         permitted = PERMITTED_ATTRIBUTES.get(".".join(path[:depth]))
-        if attr.startswith("__") and attr.endswith("__"):
+        if is_dunder(attr):
             return ".".join(path[:depth + 1])
         if permitted is not None and attr not in permitted:
             return ".".join(path[:depth + 1])
@@ -459,6 +478,74 @@ def import_binding(node: ast.Import | ast.ImportFrom,
     return alias.asname or alias.name, tuple(node.module.split(".")) + (alias.name,)
 
 
+def import_reach(node: ast.Import | ast.ImportFrom, alias: ast.alias) -> str | None:
+    """Return the dunder or namespace reader that ``alias`` imports or imports from, or ``None``."""
+    parts = alias.name.split(".")
+    if isinstance(node, ast.ImportFrom) and node.module and node.module != "__future__":
+        parts = node.module.split(".") + parts
+    for part in parts:
+        if is_dunder(part) or part in NAMESPACE_READERS:
+            return part
+    return None
+
+
+def opaque_reach(node: ast.Name | ast.Attribute) -> str | None:
+    """Return the first dunder or namespace read on the chain that ``node`` ends, or ``None``.
+
+    The chain runs down through attributes to a base that may be any
+    expression. A read name counts when it is a namespace reader or a dunder
+    not in PERMITTED_DUNDER_NAMES, and an attribute when it is either of
+    those; the label is that name, or the chain up to that attribute as source
+    text (``e.__init__``, ``[x][0].__init__``).
+    """
+    chain: list[ast.Attribute] = []
+    while isinstance(node, ast.Attribute):
+        chain.insert(0, node)
+        node = node.value
+    if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+            and (node.id in NAMESPACE_READERS
+                 or is_dunder(node.id) and node.id not in PERMITTED_DUNDER_NAMES)):
+        return node.id
+    for part in chain:
+        if is_dunder(part.attr) or part.attr in NAMESPACE_READERS:
+            return ast.unparse(part)
+    return None
+
+
+def type_parts(annotation: ast.expr) -> list[ast.Name | ast.Attribute]:
+    """Return the names and attribute chains in ``annotation`` that stand for a type.
+
+    Only a subscript of a name or chain (``list[...]``), a tuple or list in
+    one, and a union (``A | B``) are looked into, so a name or chain inside a
+    call or any other expression is not a type.
+    """
+    parts: list[ast.Name | ast.Attribute] = []
+    pending = [annotation]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            parts.append(node)
+        elif isinstance(node, ast.Subscript) and isinstance(node.value, (ast.Name, ast.Attribute)):
+            pending.extend((node.value, node.slice))
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            pending.extend(node.elts)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            pending.extend((node.left, node.right))
+    return parts
+
+
+def own_nodes(scope: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> list[ast.AST]:
+    """Return the nodes of ``scope``'s body in source order, not those of nested functions and classes."""
+    nodes: list[ast.AST] = []
+    pending = list(reversed(scope.body))
+    while pending:
+        node = pending.pop()
+        nodes.append(node)
+        if not isinstance(node, SCOPES):
+            pending.extend(reversed(list(ast.iter_child_nodes(node))))
+    return nodes
+
+
 def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
     """Return ``(enclosing qualname, launch label, lineno)`` for each launch that may inherit stdin.
 
@@ -466,50 +553,74 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
     label is the launcher (``subprocess.run``), the first attribute read that
     is not permitted (``os.system``, ``subprocess.os``, ``sys.modules``,
     ``subprocess.__dict__``), the star import (``subprocess.*``), the bare
-    module (``subprocess``, ``os.path``), ``__import__``, or ``alias <name>``
-    for a name that imports bind to two different watched paths.
+    module (``subprocess``, ``os.path``), ``__import__``, ``alias <name>``
+    for a name that imports in one scope bind to two different watched paths,
+    the first dunder or namespace read on any other chain (``globals``,
+    ``e.__init__``), the dunder or namespace reader an import names, or
+    ``getattr <name>`` for a getattr of one by a literal name.
     """
     tree = ast.parse(source)
-    imported: dict[str, list[tuple[str, ...]]] = {}
+    # Each scope's imports, keyed by the id of the scope they bind in: their own,
+    # or the module for a name that scope declares global or nonlocal. homes
+    # maps each import alias to that scope.
+    imported: dict[int, dict[str, list[tuple[str, ...]]]] = {}
+    homes: dict[int, int] = {}
+    for scope in [tree, *(node for node in ast.walk(tree) if isinstance(node, SCOPES))]:
+        nodes = own_nodes(scope)
+        declared = {name for node in nodes if isinstance(node, (ast.Global, ast.Nonlocal))
+                    for name in node.names}
+        for node in nodes:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    binding = import_binding(node, alias)
+                    if binding is None:
+                        continue
+                    home = tree if binding[0] in declared else scope
+                    homes[id(alias)] = id(home)
+                    paths = imported.setdefault(id(home), {}).setdefault(binding[0], [])
+                    if binding[1] not in paths:
+                        paths.append(binding[1])
     type_positions: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                binding = import_binding(node, alias)
-                if binding is not None and binding[1] not in imported.setdefault(binding[0], []):
-                    imported[binding[0]].append(binding[1])
-        elif isinstance(node, (ast.arg, ast.AnnAssign)) and node.annotation is not None:
-            type_positions.update(id(part) for part in ast.walk(node.annotation))
+        if isinstance(node, (ast.arg, ast.AnnAssign)) and node.annotation is not None:
+            type_positions.update(id(part) for part in type_parts(node.annotation))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None:
-            type_positions.update(id(part) for part in ast.walk(node.returns))
+            type_positions.update(id(part) for part in type_parts(node.returns))
         elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
               and node.func.id == "isinstance" and len(node.args) == 2):
-            kinds = node.args[1]
-            kinds = kinds.elts if isinstance(kinds, ast.Tuple) else [kinds]
-            type_positions.update(id(kind) for kind in kinds)
-    # A name bound to two paths is flagged at each import; uses resolve to the first.
-    bound = {name: (name,) for name in WATCHED_MODULES}
-    bound.update((name, paths[0]) for name, paths in imported.items())
+            kinds = [node.args[1]]
+            while kinds:
+                kind = kinds.pop()
+                if isinstance(kind, ast.Tuple):
+                    kinds.extend(kind.elts)
+                else:
+                    type_positions.add(id(kind))
     callees = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
     attribute_bases = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
 
-    def resolve(node: ast.expr) -> tuple[str, ...] | None:
+    def scope_env(outer: dict[str, tuple[str, ...]], scope: ast.AST) -> dict[str, tuple[str, ...]]:
+        # A name bound to two paths in one scope is flagged at each import; uses resolve to the first.
+        env = dict(outer)
+        env.update((name, paths[0]) for name, paths in imported.get(id(scope), {}).items())
+        return env
+
+    def resolve(node: ast.expr, env: dict[str, tuple[str, ...]]) -> tuple[str, ...] | None:
         attrs: list[str] = []
         while isinstance(node, ast.Attribute):
             attrs.insert(0, node.attr)
             node = node.value
-        if isinstance(node, ast.Name) and node.id in bound:
-            return bound[node.id] + tuple(attrs)
+        if isinstance(node, ast.Name) and node.id in env:
+            return env[node.id] + tuple(attrs)
         return None
 
-    def checked_launcher(node: ast.expr) -> str | None:
-        path = resolve(node)
+    def checked_launcher(node: ast.expr, env: dict[str, tuple[str, ...]]) -> str | None:
+        path = resolve(node, env)
         if (path is not None and len(path) == 2 and path[0] == "subprocess"
                 and path[1] in ISOLATING_STDIN_VALUES):
             return path[1]
         return None
 
-    def launch_of(node: ast.expr) -> str | None:
+    def launch_of(node: ast.expr, env: dict[str, tuple[str, ...]]) -> str | None:
         part = node
         while isinstance(part, ast.Attribute):
             if part.attr == "__import__":
@@ -517,49 +628,83 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
             part = part.value
         if isinstance(part, ast.Name) and part.id == "__import__":
             return "__import__"
-        path = resolve(node)
+        path = resolve(node, env)
         return None if path is None else launch_label(path)
 
-    def isolates(call: ast.Call, launcher: str) -> bool:
+    def isolates(call: ast.Call, launcher: str, env: dict[str, tuple[str, ...]]) -> bool:
         keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg is not None}
         stdin = keywords.get("stdin")
         isolating = {("subprocess", name) for name in ISOLATING_STDIN_VALUES[launcher]}
-        if stdin is not None and resolve(stdin) in isolating:
+        if stdin is not None and resolve(stdin, env) in isolating:
             return True
         data = keywords.get("input")
         return (launcher in INPUT_LAUNCHERS and data is not None
                 and not (launcher == "run" and isinstance(data, ast.Constant) and data.value is None))
 
+    def getattr_reach(call: ast.Call) -> str | None:
+        func = call.func
+        name = (func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else None)
+        if name != "getattr" or len(call.args) < 2:
+            return None
+        key = call.args[1]
+        if (isinstance(key, ast.Constant) and isinstance(key.value, str)
+                and (is_dunder(key.value) or key.value in NAMESPACE_READERS)):
+            return "getattr " + key.value
+        return None
+
     found: list[tuple[str, str, int]] = []
 
-    def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+    def visit(node: ast.AST, scope: tuple[str, ...],
+              env: dict[str, tuple[str, ...]], closure: dict[str, tuple[str, ...]]) -> None:
+        # A function or class body sees its own imports over those of the
+        # scopes around it, but a function does not see the imports of a class
+        # body it is in. Decorators, defaults, annotations and bases are read
+        # in the enclosing scope.
+        body: set[int] = set()
+        body_env, body_closure = env, closure
+        if isinstance(node, SCOPES):
+            body = {id(part) for part in node.body}
+            body_env = scope_env(closure, node)
+            body_closure = closure if isinstance(node, ast.ClassDef) else body_env
         for child in ast.iter_child_nodes(node):
             inner = scope
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(child, SCOPES):
                 inner = scope + (child.name,)
             where = ".".join(inner) or "<module>"
+            child_env, child_closure = (body_env, body_closure) if id(child) in body else (env, closure)
             if isinstance(child, (ast.Import, ast.ImportFrom)):
                 for alias in child.names:
                     if (isinstance(child, ast.ImportFrom) and alias.name == "*" and child.level == 0
                             and child.module.split(".")[0] in WATCHED_MODULES):
                         found.append((where, child.module + ".*", child.lineno))
                     binding = import_binding(child, alias)
-                    if binding is not None and len(imported[binding[0]]) > 1:
+                    if binding is not None and len(imported[homes[id(alias)]][binding[0]]) > 1:
                         found.append((where, "alias " + binding[0], child.lineno))
+                    label = import_reach(child, alias)
+                    if label is not None:
+                        found.append((where, label, child.lineno))
             elif isinstance(child, ast.Call):
-                launcher = checked_launcher(child.func)
-                if launcher is not None and not isolates(child, launcher):
+                launcher = checked_launcher(child.func, child_env)
+                if launcher is not None and not isolates(child, launcher, child_env):
                     found.append((where, "subprocess." + launcher, child.lineno))
-            elif (isinstance(child, (ast.Name, ast.Attribute)) and isinstance(child.ctx, ast.Load)
-                  and id(child) not in attribute_bases):
-                label = launch_of(child)
-                launcher = checked_launcher(child)
-                as_type = launcher == "Popen" and id(child) in type_positions
-                if label is not None and not (launcher is not None and (id(child) in callees or as_type)):
+                label = getattr_reach(child)
+                if label is not None:
                     found.append((where, label, child.lineno))
-            visit(child, inner)
+            elif isinstance(child, (ast.Name, ast.Attribute)) and id(child) not in attribute_bases:
+                label = launch_of(child, child_env) if isinstance(child.ctx, ast.Load) else None
+                launcher = checked_launcher(child, child_env)
+                as_type = launcher == "Popen" and id(child) in type_positions
+                if launcher is not None and (id(child) in callees or as_type):
+                    label = None
+                elif label is None:
+                    label = opaque_reach(child)
+                if label is not None:
+                    found.append((where, label, child.lineno))
+            visit(child, inner, child_env, child_closure)
 
-    visit(tree, ())
+    module_env = scope_env({name: (name,) for name in WATCHED_MODULES}, tree)
+    visit(tree, (), module_env, module_env)
     return found
 
 
@@ -583,11 +728,30 @@ def exemption_errors(found: list[tuple[str, str, int]],
     return errors
 
 
+def flagged_reason(label: str) -> str:
+    """Say why a launch label from stdin_inheriting_launches() is flagged and what clears it."""
+    module, _, attr = label.rpartition(".")
+    if module == "subprocess" and attr in ISOLATING_STDIN_VALUES:
+        return "launch that may inherit stdin (pass stdin=subprocess.DEVNULL or add a reasoned exemption)"
+    if (module in PERMITTED_ATTRIBUTES and attr.isidentifier() and not is_dunder(attr)
+            and attr not in PERMITTED_ATTRIBUTES[module]):
+        return (f"{attr} is not on PERMITTED_ATTRIBUTES for {module} "
+                f"(read {module} only through that table or add a reasoned exemption)")
+    return "read the check cannot follow statically (remove it or add a reasoned exemption)"
+
+
 class StdinIsolationTests(unittest.TestCase):
     """Every process launch in aiqt_corpus.py keeps the caller's standard input.
 
     A helper called from inside a git hook would otherwise hand the hook's own
     stdin (a pre-push hook's ref lines) to the child, which can consume it.
+
+    Threat model: the check guards aiqt_corpus.py against an accidental launch
+    that inherits stdin, by allowlist: the module may reach subprocess, os and
+    sys only in the ways listed below, and any read the check cannot follow is
+    flagged rather than passed. It is not an adversarial boundary. Code written
+    to evade a static check (eval, exec, compile, names built at run time,
+    other modules) is the disclosed residual under Not enforced.
 
     Enforced, by reading the module's syntax tree, unless one exemption names
     the launch by enclosing qualname and launch label:
@@ -607,36 +771,51 @@ class StdinIsolationTests(unittest.TestCase):
 
       - subprocess: DEVNULL, PIPE, STDOUT, CalledProcessError, TimeoutExpired,
         SubprocessError and CompletedProcess, plus the five launchers above as
-        callees, and Popen also as a type (anywhere in an annotation, or as
-        the second argument of isinstance, alone or in a tuple);
+        callees, and Popen also as a type (as a name or chain in an
+        annotation, alone, subscripted or in a union but not inside a call,
+        or as the second argument of isinstance, alone or in a tuple at any
+        depth);
       - os: path, environ, getenv, getcwd, fspath, sep, devnull and _exit;
       - os.path: join, exists, isdir, isfile, dirname, basename, abspath,
         realpath, relpath and splitext;
       - sys: argv, stdin, stdout, stderr, exit, executable and version_info;
 
-    * a dunder attribute anywhere in an attribute chain that starts at a
-      watched module or at a name imported from one is flagged
-      (subprocess.__dict__, subprocess.CalledProcessError.__init__);
+    * a dunder attribute is flagged wherever it appears, whatever it is read
+      from: a watched module, a local name, a call's or a subscript's result
+      (subprocess.__dict__, e.__init__ for any e, f().__init__); so is a
+      dunder name that is read, other than ``__name__``. A dunder the module
+      defines (a def name, an assignment target such as ``__all__`` or
+      ``__slots__``) is not read, and ``__future__`` is allowed as the module
+      of a from-import;
+    * a name or attribute that reads a namespace or a frame (globals, locals,
+      vars, ``__builtins__``, f_globals, f_locals, f_builtins, f_back,
+      gi_frame, cr_frame, ag_frame and tb_frame) is flagged whatever its base,
+      as is an import of one of these names or of a dunder (``from builtins
+      import __import__``, ``import __main__``) and a getattr whose attribute
+      is a literal dunder or one of these names;
     * forms whose target cannot be read statically are flagged rather than
       passed: a launcher referenced other than as the callee of a call or as a
       type (held in a variable, given to functools.partial), subprocess, os,
       os.path or sys referenced other than as the base of an attribute (as in
       getattr), a star import from any of them, and any reference to
       ``__import__``;
-    * a name that imports in any scopes bind to two different modules or
-      members is flagged at each of those imports, since a name resolves the
-      same way in every scope.
+    * a name that imports in one scope bind to two different modules or
+      members is flagged at each of those imports.
 
     Names resolve through ``import`` of the watched modules (os.path included)
     under any alias and through ``from ... import`` of their members under any
-    alias.
+    alias, per scope: an import is seen in the scope it is in and in the
+    functions nested in it, an import in a class body is not seen in that
+    class's methods, and an import of a name its scope declares global or
+    nonlocal is taken as a module-level import. The names subprocess, os and
+    sys resolve to those modules in every scope.
 
     Not enforced: launches through other modules (asyncio, pty, multiprocessing,
-    posix, posixpath, importlib.import_module, or a builtins lookup by computed
-    name); a lookup by computed name (getattr, vars) on anything but a watched
-    module, such as ``getattr(os.getcwd, '__self__')``; code compiled and run at
-    run time; a tracked name rebound after its import (``DEVNULL = None``); an
-    input= value that is None only at run time; and modules other than
+    posix, posixpath, importlib.import_module, inspect, gc); a lookup by a name
+    built at run time (``getattr(builtins, name)``, ``getattr(e, '__in' +
+    'it__')``); code compiled and run at run time (eval, exec, compile); a
+    tracked name rebound after its import (``DEVNULL = None``); an input=
+    value that is None only at run time; and modules other than
     aiqt_corpus.py.
     """
 
@@ -645,8 +824,8 @@ class StdinIsolationTests(unittest.TestCase):
     def test_every_launch_isolates_stdin(self):
         source = self.MODULE.read_text(encoding="utf-8")
         missing = unexempted_launches(stdin_inheriting_launches(source), STDIN_EXEMPT_CALLS)
-        self.assertEqual(missing, [], "launch that may inherit stdin "
-                         "(pass stdin=subprocess.DEVNULL or add a reasoned exemption)")
+        self.assertEqual(missing, [], "; ".join(f"{name} line {lineno} {label}: {flagged_reason(label)}"
+                                                for name, label, lineno in missing))
 
     def test_exemptions_have_reasons_and_match_one_launch(self):
         source = self.MODULE.read_text(encoding="utf-8")
@@ -727,15 +906,137 @@ class StdinIsolationTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertEqual(stdin_inheriting_launches(source), expected)
 
-    def test_detector_flags_a_name_bound_to_two_watched_paths(self):
-        # One scope's alias must not resolve another scope's use of the name.
+    def test_detector_flags_a_dunder_or_namespace_read_on_any_base(self):
+        # A dunder or a namespace read reaches a module without naming it, so
+        # it is flagged whatever the chain starts at: a local alias, a call or
+        # subscript result, an except name, or no watched name at all.
         cases = (
-            ("def f():\n    import subprocess as _sp\ndef g():\n    import os as _sp\n",
-             [("f", "alias _sp", 2), ("g", "alias _sp", 4)]),
+            ("import subprocess\ne = subprocess.CalledProcessError\n"
+             "e.__init__.__globals__['Popen'](['cat'])\n", [("<module>", "e.__init__", 3)]),
+            ("import os\nenv = os.environ\nenv.__class__.__init__.__globals__['system']('cat')\n",
+             [("<module>", "env.__class__", 3)]),
+            ("import os\nj = os.path.join\nj.__globals__['os'].system('cat')\n",
+             [("<module>", "j.__globals__", 3)]),
+            ("import os\ng = os.getcwd\ng.__self__.system('cat')\n", [("<module>", "g.__self__", 3)]),
+            ("import subprocess\n"
+             "subprocess.CalledProcessError(1, 'x').__init__.__globals__['Popen'](['cat'])\n",
+             [("<module>", "subprocess.CalledProcessError(1, 'x').__init__", 2)]),
+            ("import subprocess\n"
+             "[subprocess.CalledProcessError][0].__init__.__globals__['Popen'](['cat'])\n",
+             [("<module>", "[subprocess.CalledProcessError][0].__init__", 2)]),
+            ("import subprocess\ndef f():\n    try:\n"
+             "        subprocess.run(['git'], stdin=subprocess.DEVNULL, check=True)\n"
+             "    except subprocess.CalledProcessError as e:\n"
+             "        e.__init__.__globals__['Popen'](['cat'])\n", [("f", "e.__init__", 6)]),
+            ("import subprocess\nglobals()['subprocess'].Popen(['cat'])\n", [("<module>", "globals", 2)]),
+            ("import subprocess\n(x for x in ()).gi_frame.f_globals['subprocess'].Popen(['cat'])\n",
+             [("<module>", "(x for x in ()).gi_frame", 2)]),
+            ("__builtins__['__import__']('subprocess').Popen(['cat'])\n",
+             [("<module>", "__builtins__", 1)]),
+            ("import builtins\nbuiltins.__dict__['__import__']('subprocess').Popen(['cat'])\n",
+             [("<module>", "builtins.__dict__", 2)]),
+            ("__spec__.loader\n", [("<module>", "__spec__", 1)]),
+            ("x.__class__ = int\n", [("<module>", "x.__class__", 1)]),
+            ("from builtins import __import__ as load\nload('subprocess')\n",
+             [("<module>", "__import__", 1)]),
+            ("from builtins import globals as g\ng()['subprocess']\n", [("<module>", "globals", 1)]),
+            ("import __main__\n__main__.subprocess\n",
+             [("<module>", "__main__", 1), ("<module>", "__main__", 2)]),
+            ("import os\ngetattr(os.getcwd, '__self__').system('cat')\n",
+             [("<module>", "getattr __self__", 2)]),
+            ("import builtins\nbuiltins.getattr(gen, 'gi_frame')\n",
+             [("<module>", "getattr gi_frame", 2)]),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(stdin_inheriting_launches(source), expected)
+
+    def test_detector_flags_every_namespace_reader(self):
+        readers = ("globals", "locals", "vars", "__builtins__", "f_globals", "f_locals", "f_builtins",
+                   "f_back", "gi_frame", "cr_frame", "ag_frame", "tb_frame")
+        for name in readers:
+            with self.subTest(name=name):
+                self.assertEqual(stdin_inheriting_launches(f"{name}\n"), [("<module>", name, 1)])
+                self.assertEqual(stdin_inheriting_launches(f"x().{name}.y\n"),
+                                 [("<module>", f"x().{name}", 1)])
+
+    def test_detector_allows_the_dunders_the_module_defines(self):
+        # The dunders aiqt_corpus.py has: definitions, the __name__ read and
+        # the __future__ import. None of them is read through an attribute.
+        source = ("from __future__ import annotations\n__all__ = ['C']\nclass C:\n"
+                  "    __slots__ = ('a',)\n    def __init__(self) -> None:\n"
+                  "        self.a = '__pycache__'\nif __name__ == '__main__':\n    getattr(C(), 'a')\n")
+        self.assertEqual(stdin_inheriting_launches(source), [])
+
+    def test_failure_message_names_the_table_for_an_attribute(self):
+        launcher = ("launch that may inherit stdin "
+                    "(pass stdin=subprocess.DEVNULL or add a reasoned exemption)")
+        opaque = "read the check cannot follow statically (remove it or add a reasoned exemption)"
+        cases = (
+            ("subprocess.run", launcher),
+            ("os.system", "system is not on PERMITTED_ATTRIBUTES for os "
+                          "(read os only through that table or add a reasoned exemption)"),
+            ("os.path.os", "os is not on PERMITTED_ATTRIBUTES for os.path "
+                           "(read os.path only through that table or add a reasoned exemption)"),
+            ("subprocess.getoutput",
+             "getoutput is not on PERMITTED_ATTRIBUTES for subprocess "
+             "(read subprocess only through that table or add a reasoned exemption)"),
+            ("subprocess.*", opaque),
+            ("os.path", opaque),
+            ("subprocess.__dict__", opaque),
+            ("e.__init__", opaque),
+            ("globals", opaque),
+            ("alias p", opaque),
+        )
+        for label, reason in cases:
+            with self.subTest(label=label):
+                self.assertEqual(flagged_reason(label), reason)
+        # The module check reports the reason with each launch.
+        result = unittest.TestResult()
+        with tempfile.TemporaryDirectory() as d:
+            module = Path(d) / "aiqt_corpus.py"
+            source = self.MODULE.read_text(encoding="utf-8") + "\nos.system('cat')\n"
+            module.write_text(source, encoding="utf-8")
+            with mock.patch.object(StdinIsolationTests, "MODULE", module):
+                StdinIsolationTests("test_every_launch_isolates_stdin").run(result)
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn("os.system: system is not on PERMITTED_ATTRIBUTES for os", result.failures[0][1])
+
+    def test_detector_flags_a_name_bound_to_two_watched_paths(self):
+        # Two imports of one name in one scope are flagged at each; a global or
+        # nonlocal declaration puts a function's import in the module scope.
+        cases = (
+            ("import subprocess as _sp\nimport os as _sp\n",
+             [("<module>", "alias _sp", 1), ("<module>", "alias _sp", 2)]),
+            ("import subprocess as _sp\ndef f():\n    global _sp\n    import os as _sp\n",
+             [("<module>", "alias _sp", 1), ("f", "alias _sp", 4)]),
+            ("def f():\n    import subprocess as _sp\ndef g():\n    import os as _sp\n", []),
+            ("import sys\ndef f():\n    import sys\n    sys.exit(0)\n", []),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(stdin_inheriting_launches(source), expected)
+
+    def test_detector_resolves_imports_per_scope(self):
+        # One scope's alias must not resolve another scope's use of the name,
+        # and must resolve its own uses and those of functions nested in it.
+        cases = (
+            ("def f():\n    import os.path as p\n    return p.join('a')\n"
+             "def g(p):\n    return p.system\n", []),
+            ("class C:\n    import os.path as p\n    def m(self, p):\n        return p.system\n", []),
             ("def f():\n    import subprocess as _sp\n    _sp.run(['git'], stdin=_sp.DEVNULL)\n"
              "def g():\n    import os as _sp\n    _sp.system('cat')\n",
-             [("f", "alias _sp", 2), ("g", "alias _sp", 5), ("g", "subprocess.system", 6)]),
-            ("import sys\ndef f():\n    import sys\n    sys.exit(0)\n", []),
+             [("g", "os.system", 6)]),
+            ("def f():\n    import os as p\n    def g():\n        p.system('cat')\n",
+             [("f.g", "os.system", 4)]),
+            ("import subprocess as p\ndef f():\n    import os as p\n    p.system('cat')\n",
+             [("f", "os.system", 4)]),
+            ("def f():\n    global p\n    import os as p\ndef g():\n    p.system('cat')\n",
+             [("g", "os.system", 5)]),
+            ("def f():\n    p = None\n    def g():\n        nonlocal p\n        import os as p\n"
+             "    p.system('cat')\n", [("f", "os.system", 6)]),
+            ("import os as p\ndef f(x=p.system('cat')):\n    import subprocess as p\n",
+             [("f", "os.system", 2)]),
         )
         for source, expected in cases:
             with self.subTest(source=source):
@@ -747,10 +1048,29 @@ class StdinIsolationTests(unittest.TestCase):
             "    q: list[subprocess.Popen] = [p]\n    return q[0]\n",
             "import subprocess\ndef f(p):\n    return isinstance(p, subprocess.Popen)\n",
             "from subprocess import Popen\ndef f(p):\n    return isinstance(p, (Popen, int))\n",
+            "import subprocess\ndef f(p):\n    return isinstance(p, (int, (subprocess.Popen,)))\n",
+            "import subprocess, typing\ndef f(p: typing.Callable[[subprocess.Popen], None]) -> None:\n"
+            "    q: dict[str, subprocess.Popen | int] = {}\n",
         )
         for source in cases:
             with self.subTest(source=source):
                 self.assertEqual(stdin_inheriting_launches(source), [])
+
+    def test_detector_flags_popen_passed_inside_an_annotation(self):
+        # Only a name or chain, alone, subscripted or in a union, is a type;
+        # Popen handed to a call or to another expression in an annotation is
+        # held by that code and flagged.
+        cases = (
+            ("import subprocess\ndef f(p: wrap(subprocess.Popen)):\n    pass\n",
+             [("f", "subprocess.Popen", 2)]),
+            ("import subprocess\ndef f() -> make()[subprocess.Popen]:\n    pass\n",
+             [("f", "subprocess.Popen", 2)]),
+            ("import subprocess\nq: [subprocess.Popen][0] = None\n",
+             [("<module>", "subprocess.Popen", 2)]),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(stdin_inheriting_launches(source), expected)
 
     def test_detector_flags_an_indirect_launch(self):
         # A launch the detector cannot follow statically is flagged, never passed.
