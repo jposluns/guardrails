@@ -1142,7 +1142,7 @@ FLAGGED_FIXTURES = [
     ("Open source under the Apache License 2.0 with no further notice.", "class1"),
     ("This project is published under the Apache License 2.0 today.", "class1"),
     ("It was released under the Apache License 2.0 last spring.", "class1"),
-    # class 1: the qualifier sits in a DIFFERENT sentence, so it is not credited (codex repro).
+    # class 1: the qualifier sits in a DIFFERENT sentence, so it is not credited.
     ("AIQT is open source under the Apache License 2.0. We do not bundle vendored third-party material.", "class1"),
     # class 1: a claim adjacent to an <article>/</a> still flags (no naive <a>-substring exemption).
     ("<article>AIQT is open source under the Apache License 2.0.</a>", "class1"),

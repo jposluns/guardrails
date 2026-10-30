@@ -213,7 +213,7 @@ def assert_open_journal(root_fd, root):
     """FAIL on any non-terminal cutover transaction until recovered (the 9.3 gate line). An unreadable or
     invalid-sequence journal is MALFORMED (fail-closed). The entries are listed through a FRESH
     descriptor reopened as "." beneath the held journal descriptor, never through the held descriptor
-    itself (F-JOURNAL-HELD-FD-LISTING: a listing read through a descriptor held from an earlier open
+    itself (a listing read through a descriptor held from an earlier open
     can miss entries created since that open, so a transaction created after the journal was opened
     would read as 'no open transaction'); each listed entry is then stat'ed and its frames read beneath
     the SAME held descriptor (no path re-resolution)."""
@@ -553,12 +553,12 @@ def self_test():
         # (Editing the tail row would NOT be detected: the tip is unprotected, the disclosed honesty limit.)
         # A pin-ABSENT history with a broken interior chain: state-completeness passes (history present,
         # no pin) and the chain break surfaces as a FAIL (exit 1). A pin PRESENT without its transition
-        # record is now MALFORMED (RB6), so this fixture omits the pin to isolate the chain-FAIL invariant.
+        # record is now MALFORMED, so this fixture omits the pin to isolate the chain-FAIL invariant.
         (broken / pin.HISTORY_REL).write_text(pin._render_history([r0, r1]), encoding="utf-8")
         rc = run(str(broken))
         check("a broken chain FAILs (exit 1)", rc == 1)
 
-        # F-JOURNAL-HELD-FD-LISTING: a transaction created AFTER the journal descriptor was opened is
+        # A transaction created AFTER the journal descriptor was opened is
         # still reported, because the gate lists the journal through a FRESH descriptor reopened
         # beneath the held one (a held descriptor's listing can miss entries created since its open).
         # The os.open spy creates the open (INTENT-only) transaction right after assert_open_journal

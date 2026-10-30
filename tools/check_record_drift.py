@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record-drift gate (GD-112 component 2): an operational record row that says merge_pending while
+"""Record-drift gate: an operational record row that says merge_pending while
 the truth sources already carry the merge is drift, and drift FAILS.
 
 Truth sources: the optional registry-declared `truth.changelog` file's per-release `refs` arrays (a
