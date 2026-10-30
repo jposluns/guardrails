@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF shared operation lock (OPF-D2B PR2 redesign).
+"""OPF shared operation lock.
 
 SENSITIVE-TIER, concurrency-critical: a lock bug means data corruption or a race. Fail-closed
 throughout, stdlib-only, Linux/macOS (POSIX advisory locks).
@@ -73,7 +73,7 @@ The lock identity is THREE LEGS, held together or the acquisition fails and unwi
   3. The spec 5.7 LEASE at <machine-store>/lease.toml (published exclusively, as the active
      record is), mandatory: acquisition
      requires a RESOLVED machine store and every capability carries a lease. A capability without
-     a lease cannot exist. (OPF-D2B PR3a: `opf init`, which creates the store, first takes the SAME
+     a lease cannot exist. (`opf init`, which creates the store, first takes the SAME
      anchor through acquire_init_operation, a pre-store holder that publishes no record and is not a
      capability, and mints its capability only by attaching the mandatory lease once the machine
      store exists; see the init section below.) The lease schema is single-sourced from the store validator and is not
@@ -87,15 +87,15 @@ file in the same directory (".<name>.opf-stage-<32 hex>", created O_CREAT|O_EXCL
 explicitly to 0o644 and verified on the open descriptor, owner read and write present and no group
 or other write, before any byte is written, so a restrictive umask such as 0o444 or 0o777 can never
 publish a record that release or crash recovery cannot reopen; a newly created anchor has its mode
-set the same way; and initialization is RESTARTABLE (fix round 6): a control directory or anchor,
+set the same way; and initialization is RESTARTABLE: a control directory or anchor,
 new or left by a creator killed before it corrected the mode, whose owner permissions the umask
 masked is repaired on the existing-object path to its intended 0o755 or 0o644, only when it is our
 own object of the expected type whose mode lies within the intended one, bound to the stat'ed object
 and never following a symbolic link, and otherwise refused; that REPAIR accepts and preserves a
 control directory's set-group-ID bit only as mkdir inherits it, from a set-group-ID parent whose
-group it carries, fix round 7; a control directory whose owner permissions are intact is not
+group it carries; a control directory whose owner permissions are intact is not
 repaired, and the directory validation refuses only group or other write, so its special bits are
-accepted as they are, whatever set them, fix round 8) and fsynced; only then is it published
+accepted as they are, whatever set them) and fsynced; only then is it published
 at its final name by os.link, which refuses an existing name (EEXIST) exactly as O_EXCL did; the
 staging name is then unlinked and the directory fsynced, all before the capability returns.
 GUARANTEED against process death (SIGKILL included) at any point: the final name holds either no
@@ -115,10 +115,10 @@ the leftover it could not remove, never a message that implies a clean unwind. T
 unwind then deletes the active record only once the lease name is OBSERVED absent after a failed or
 interrupted lease publication; a lease still present (or a presence check that cannot answer) KEEPS
 the owner-bearing active record beside it, so a later recover=True can clear both, never a lone
-owner-less lease, with ONE exception: the fork-forward composite disclosed in the residuals below
-(fix round 9), under which a lone owner-less lease, should it arise, needs manual removal.
+owner-less lease, with ONE exception: the fork-forward composite disclosed in the residuals below,
+under which a lone owner-less lease, should it arise, needs manual removal.
 
-Interruptions are DEFERRED, not chased line by line (fix round 5). In CPython an asynchronous
+Interruptions are DEFERRED, not chased line by line. In CPython an asynchronous
 exception reaches Python code only through a Python-level signal handler (KeyboardInterrupt is the
 default SIGINT handler's raise). The whole acquisition (recovery included) and the whole release
 therefore run with every signal that has a Python-level handler BLOCKED (_SignalDeferral; SIGKILL,
@@ -129,28 +129,28 @@ below: no signal-raised exception lands inside those sections; it is delivered a
 capability that was fully formed when such a signal was delivered never reaches the caller, so it is
 released (records removed, descriptors closed, the anchor's close giving up the lock) before the
 interruption propagates as itself, through the scoped release directly, with no second /proc
-identity read that could refuse before the release owns the descriptors (fix round 6), and the
+identity read that could refuse before the release owns the descriptors, and the
 interruption carries a note stating the observed outcome of that release, each clause derived from
-the step the release recorded as completed (fix round 7); an acquisition that failed is fully
+the step the release recorded as completed; an acquisition that failed is fully
 unwound before it; a release has ended released and closed before it. A signal handler that FORKS
 splits this into two processes sharing every open file description, and a flock belongs to the
 open file description: cleanup that runs in a forked child (the unreturned release, the
 acquisition unwind, a publication's failure cleanup, the release legs and the release scope's
-exit) therefore acts on records only in the process that began the operation, by pid (fix round
-7): a forked child closes only its own descriptor copies and never removes a record or staging
+exit) therefore acts on records only in the process that began the operation, by pid:
+a forked child closes only its own descriptor copies and never removes a record or staging
 name, so the acquirer keeps its lock and its records. The acquirer's identity is captured ONCE, at
 the acquisition's entry, and the published active record, the capability, and every fork guard
-are bound to that same value (fix round 8), so a child whose handler RETURNS and which continues
+are bound to that same value, so a child whose handler RETURNS and which continues
 the acquisition forward builds a capability that names the acquirer, not itself; the hand-off
 (_handoff) then refuses it: such a forked continuation receives no capability, closes only its
-inherited descriptor copies (no unlink), and raises a refusal stating what that refusal itself did
-(fix round 9). Before that hand-off, such a continuation is refused at the flock or its first
+inherited descriptor copies (no unlink), and raises a refusal stating what that refusal itself did.
+Before that hand-off, such a continuation is refused at the flock or its first
 mutating step under it: the flock, the staging-leftover removals, the recovery deletes, and every
-syscall of both publications run only in the acquiring process (fix round 9, _gated_step, the pid
+syscall of both publications run only in the acquiring process (_gated_step, the pid
 check and the step one expression), and the publication reads its staged bytes back before
 publishing them.
 
-RELEASE BY CLOSE (fix round 9). No lock path of this module calls flock(LOCK_UN) (only the
+RELEASE BY CLOSE. No lock path of this module calls flock(LOCK_UN) (only the
 self-test's own probes of a fresh descriptor do, to test whether the anchor is free). A flock
 belongs to the
 open file description, which the anchor descriptor shares with every dup and every forked copy of
@@ -177,8 +177,8 @@ descriptor's registration, including one raised by a cleanup step itself, every 
 step still runs, each as its own guarded step, and an interruption propagates as itself after that
 cleanup (an ordinary failure is collected into one OpLockError instead). A close an interruption
 cuts short after its ownership was cleared is never retried (its number may have been reused) and
-is reported as UNCONFIRMED, never as closed, separately from a close that ran and failed (fix round
-9). The
+is reported as UNCONFIRMED, never as closed, separately from a close that ran and failed.
+The
 store-root descriptor is closed inside the protected acquisition body, so a failing close (EIO)
 runs the full unwind and never leaks the still-flocked anchor. A publication's staging descriptor
 is protected from the moment it is adopted: by the private owner's context-managed exit when no
@@ -197,25 +197,25 @@ descriptor copies); it then, with the Python-handled signals deferred (above), e
 enclosing cleanup (a context manager armed before any state changes) that takes sole ownership of
 the retained descriptors and marks the capability released before any step that can fail, and does
 so again on exit, so an interruption anywhere in the release, its own bookkeeping included, still
-ends released and closed. Taking ownership is ONE synchronized claim under the capability's lock
-(fix round 8): the released check, the capture of the retained descriptors, and their transfer
+ends released and closed. Taking ownership is ONE synchronized claim under the capability's lock:
+the released check, the capture of the retained descriptors, and their transfer
 happen together, so a second release of the same capability, even from another thread in the same
 instant, loses the claim and refuses holding no descriptor, and can never close a descriptor
-number the winner released and the process reused. That lock is NEVER acquired blocking (fix
-round 9, codex MED 1): each attempt re-checks the pid, tries the lock without blocking, and
+number the winner released and the process reused. That lock is NEVER acquired blocking:
+each attempt re-checks the pid, tries the lock without blocking, and
 re-checks the pid once it is held, for at most _CLAIM_WAIT_SECONDS in all, so a forked child, in
 which a copy another thread held at the fork stays locked forever, never waits on it. The release
 re-checks the retained anchor and control-directory identities (collected, not early-raised); it
 then removes the LEASE and ONLY THEN the active record:
 when the lease cannot be removed, the owner-bearing active record is KEPT beside it, so a later
 recover=True can confirm the holder dead and clear both, never a lone owner-less lease no recovery
-can clear (the one exception is the fork-forward composite disclosed below, fix round 9, whose lone
+can clear (the one exception is the fork-forward composite disclosed below, whose lone
 lease needs manual removal); each removal is a verified unlink (re-open no-follow, type, link count,
 size, device and inode against the retained identity, byte equality against the retained payload,
 and a final pre-unlink name-stat) and a mismatch refuses and PRESERVES the file rather than
 removing it; an unlink whose directory fsync then fails is reported as a removal that is not
 durable, never as an unlink that did not run, and the active record still waits for a durably
-removed lease (fix round 8); an OS error inside a leg (an EIO read, a failed fstat) is normalized
+removed lease; an OS error inside a leg (an EIO read, a failed fstat) is normalized
 to OpLockError and collected like any other leg failure; every retained descriptor is then closed
 by that enclosing cleanup, the anchor's first (its close is what gives up the lock: release by
 close, above), each its own guarded step, so no leg failure or interruption can skip a close; and
@@ -230,14 +230,14 @@ Nothing here creates a missing input root (only the single opf-oplock component 
 under an already-open control root), and a link-count check applies to regular files ONLY, never
 to a directory.
 
-CALLER CONTRACT (fix rounds 8 to 10). An OpCapability is owned by the one thread that acquired it,
+CALLER CONTRACT. An OpCapability is owned by the one thread that acquired it,
 and that thread releases it, once. A concurrent release of the same capability (a second thread
 calling release_operation while the first is in progress, or after it) is REFUSED safely: exactly
 one release claims the capability, and every other refuses with OpLockError holding none of its
 descriptors, removing nothing, and closing nothing, so it can never close a descriptor number the
 process has reused; no release ever waits on the claim without bound (it retries without blocking
 for at most _CLAIM_WAIT_SECONDS, then refuses). An acquisition is in progress from its entry
-identity capture, the FIRST statement of acquire_operation (fix round 10), and this contract is
+identity capture, the FIRST statement of acquire_operation, and this contract is
 bounded there: a fork that lands before that capture (before or at the entry call, or at the
 capture's own line boundary) is a separate caller, not a continuation, which captures its own
 identity and acquires, or is refused, on its own account, contending for the one lock like any
@@ -372,7 +372,7 @@ only (a forked child never shares its live parent's pid): a capability object ca
 LATER process that inherits a recycled acquirer pid after the acquirer died is outside it, as it is
 outside the public release's /proc start-time check where start times are unavailable. A child
 whose signal handler RETURNS continues the interrupted operation FORWARD against the shared control
-state until it reaches a guard (fix round 8). Since fix round 9 the flock and every mutating step
+state until it reaches a guard. The flock and every mutating step
 taken under it are pid-gated (the flock, the staging-leftover removals, the recovery deletes, and
 each syscall of both
 publications: the staging create, the mode set, the write and its fsync, the link, the staging
@@ -381,13 +381,13 @@ records only in the acquirer, and no path unlocks explicitly, so no child can fr
 second holder arises. What is NOT prevented or undone: (a) the ONE step a fork lands inside, after
 its gate's os.getpid() returned or within a Python-level step (the write loop, the mode set), which
 the child completes; for the write loop that lands the payload twice through the shared file
-offset, which the publication's read-back of the staged bytes refuses before the link (fix round
-9), but a child's write landing after that read-back and before the link is not caught and
+offset, which the publication's read-back of the staged bytes refuses before the link,
+but a child's write landing after that read-back and before the link is not caught and
 publishes a record that release refuses and recovery cannot parse, needing manual removal; (b)
 steps outside the gates: before the flock (creating the control directory or the anchor, repairing
 a mode; each idempotent or refused on a lost race, never a record), and inside the release legs
 after their pid check (removing the acquirer's records, which surfaces as the acquirer's own leg
-failure); (c) the FORK-FORWARD COMPOSITE: the composites examined in fix round 9 (a child winning
+failure); (c) the FORK-FORWARD COMPOSITE: the composites examined (a child winning
 the staging retire, the staging create, the lease link, a recovery delete, or the write loop) no
 longer strand a lone owner-less lease (T-f9-3 to T-f9-5), but that outcome is not proven
 impossible for every interleaving of a truly concurrent child with its acquirer, so should it
@@ -396,7 +396,7 @@ case the acquirer's own step fails and surfaces what the child did. The hand-off
 its return are one expression (no line boundary between them), but a fork that lands inside it
 after os.getpid() returned leaves the child a capability object bound to the acquirer's pid, which
 release_operation refuses (not usable), and whose descriptor copies close only at the child's
-exit. RELEASE BY CLOSE leaves this window (fix round 9): while any forked child still holds
+exit. RELEASE BY CLOSE leaves this window: while any forked child still holds
 inherited descriptor copies, the lock stays held after the acquirer's release. A child in one of
 this module's cleanup paths closes its copies at once, but a child forked outside them (a caller's
 own fork while holding; a forked continuation that returns to caller code before reaching one; or
@@ -421,7 +421,7 @@ injection there can leak one descriptor, and one at the deferral's own entry or 
 signals blocked on that thread. At the bytecode level such an injection between an open returning
 and its registration, between a helper's transfer and its caller's adoption, or between ownership
 being cleared and the os.close call, can leak that one descriptor (never double-close it; the close
-is reported UNCONFIRMED, fix round 9); one
+is reported UNCONFIRMED); one
 landing between the active record's publication returning and the acquisition storing its identity
 can leave that complete, owner-bearing record for a later recover=True (a LEASE so left is caught by
 the unwind's absence check, which keeps the active record beside it); and one landing inside a
@@ -436,7 +436,7 @@ recovery then runs from ANOTHER checkout first, the recorded path is absent, rec
 shared active record, and the moved checkout's lease is left as a lone lease that needs manual
 removal (no second holder arises; recovering from the moved checkout itself first avoids it).
 
-Nested journal/index lock composition is DELIBERATELY OUT OF SCOPE here (deferred to PR3); this
+Nested journal/index lock composition is DELIBERATELY OUT OF SCOPE here (deferred to a later increment); this
 module makes no cross-lock ordering claim.
 
 Run: python3 -I -B opf/tools/_opf_oplock.py --self-test
@@ -498,10 +498,10 @@ ACTIVE_NAME = "active.toml"
 
 # Closed top-level key sets for the two control records. The lease shape is single-sourced from
 # the store validator (_opf_check.LEASE_TOP_KEYS, spec 5.7); the active record adds the op_id that
-# correlates the control-side record to the capability that owns it, and (PR2 round 3) the [owner]
+# correlates the control-side record to the capability that owns it, and the [owner]
 # sub-table that persists the acquirer's full identity so recovery can decide liveness without
-# inferring staleness. PR2 OWNS the active-record schema (PR1 froze the coupled-init contracts,
-# NOT this record), so extending it here is in-scope; the lease schema is NOT ours to change.
+# inferring staleness. This module OWNS the active-record schema (the coupled-init contracts are frozen
+# elsewhere, NOT this record), so extending it here is in-scope; the lease schema is NOT ours to change.
 ACTIVE_TOP_KEYS = frozenset(("schema", "op_id", "holder", "operation", "acquired_at", "owner",
                              "machine_store"))
 _SCHEMA = 1  # == _opf_schema.SUPPORTED_SCHEMA (the lease payload the doctor validates)
@@ -540,8 +540,8 @@ _FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 # The modes this module creates its control objects with. The creating process's umask filters a
 # mode passed to open or mkdir, so a restrictive umask (0o444, 0o777) would leave a record, the
 # anchor, or the control directory its own later readers cannot open; each is therefore set
-# explicitly after creation and verified (fix round 5), and one a creator killed before that step
-# left is repaired on the next acquisition (fix round 6, _repair_restrictive_mode).
+# explicitly after creation and verified, and one a creator killed before that step
+# left is repaired on the next acquisition (_repair_restrictive_mode).
 _CONTROL_FILE_MODE = 0o644
 _CONTROL_DIR_MODE = 0o755
 
@@ -549,11 +549,11 @@ _CONTROL_DIR_MODE = 0o755
 class OpLockError(Exception):
     """A fail-closed locking error.
 
-    PR D fix 6: an OpLockError raised out of acquire_operation's protected body also reports what
+    An OpLockError raised out of acquire_operation's protected body also reports what
     that acquisition had REMOVED before it failed, so a caller never words a refusal as having
     written nothing when it had: `recovered` (the stale records unlinked, in delete order),
     `recovered_operation` (the confirmed-dead holder's recorded operation, once the liveness gate
-    has passed) and `staging_removed` (the staging leftovers unlinked). PR D fix 7: it also reports
+    has passed) and `staging_removed` (the staging leftovers unlinked). It also reports
     `created_removed`, each name the acquisition itself created and then unlinked (a publication's
     retired staging name, a failed publication's cleanup, and the unwind's removal of its own new
     records), so every unlink the acquisition performed is reported; the unwind's replacement error
@@ -566,18 +566,18 @@ class OpLockError(Exception):
 
 class _UnlinkNotDurable(OpLockError):
     """A verified unlink REMOVED its name, but the directory fsync that makes the removal durable
-    failed (fix round 8, codex LOW): the removal happened and may not survive a power loss. A
+    failed: the removal happened and may not survive a power loss. A
     caller records the removal as performed and its durability as failed, never as an unlink that
     did not run."""
 
 
 class _ForkedStep(OpLockError):
-    """A mutating step refused because it was reached in a FORKED CONTINUATION (fix round 9, claude
-    MED): a process whose pid differs from the one that began the operation, as a signal handler
+    """A mutating step refused because it was reached in a FORKED CONTINUATION: a process
+    whose pid differs from the one that began the operation, as a signal handler
     that forks and returns in the child produces. The refusal itself performed nothing."""
 
 
-# The release claim (fix round 9, codex MED 1) is taken WITHOUT ever blocking on the capability's
+# The release claim is taken WITHOUT ever blocking on the capability's
 # lock: each attempt is a non-blocking acquire, retried every _CLAIM_POLL_SECONDS for at most
 # _CLAIM_WAIT_SECONDS. The step the lock guards is a few attribute assignments, so the bound is
 # generous; it only ends a wait that a paused or wedged concurrent releaser would otherwise make
@@ -589,7 +589,7 @@ _NEVER_RETRIED = "it is never retried, since its number may have been reused"
 
 
 def _unconfirmed_closes(count, what="descriptor"):
-    """The fix-round-9 wording for `count` closes an interruption cut short after their ownership
+    """The wording for `count` closes an interruption cut short after their ownership
     was cleared: whether they closed is UNCONFIRMED, never reported as closed."""
     return "the close of {} {}{} was interrupted, so whether {} closed is UNCONFIRMED ({})".format(
         count, what, "" if count == 1 else "s", "it" if count == 1 else "they", _NEVER_RETRIED)
@@ -597,7 +597,7 @@ def _unconfirmed_closes(count, what="descriptor"):
 
 def _gated_step(pid, what, fn, *args, **kwargs):
     """Run ONE mutating step, fn(*args, **kwargs), only in the process `pid` that began the
-    operation (fix round 9, claude MED): a forked continuation (a signal handler that forked and
+    operation: a forked continuation (a signal handler that forked and
     returned in the child, which then runs the interrupted operation forward) is refused with
     _ForkedStep before it publishes, retires, or unlinks anything. The pid check and the call are
     ONE expression, so no line boundary lies between them; a fork landing inside it after
@@ -615,7 +615,7 @@ def _refuse_forked_step(pid, what):
 
 
 class _FdOwner:
-    """The single owner of the descriptors one unit of work opens (round 3, D2).
+    """The single owner of the descriptors one unit of work opens.
 
     A descriptor is registered (adopt) the moment the call that opened it returns, and leaves this
     owner in exactly one of three ways: an explicit TRANSFER to the caller on success, an explicit
@@ -635,7 +635,7 @@ class _FdOwner:
     non-signal injection (sys.settrace, an externally set asynchronous exception) or a MemoryError
     landing in the few bytecodes between an open returning and its adopt, or between a transfer and
     the caller's adopt, can leak that one descriptor; one landing between ownership being cleared
-    and os.close leaks that one descriptor rather than risk a double close, and since fix round 9
+    and os.close leaks that one descriptor rather than risk a double close, and
     that close is reported as UNCONFIRMED, never as closed (the interruption may equally have
     landed just after the close completed, which no pure-Python check can tell apart)."""
     __slots__ = ("_fds",)
@@ -699,7 +699,7 @@ class _FdOwner:
         """Close every descriptor still owned, most recently adopted first, each close its own
         guarded step. Returns (problems, unconfirmed, interrupt): the collected close failures
         (the close ran and reported an error), the descriptors whose close step an interruption
-        cut short (fix round 9, codex LOW: ownership was already cleared, so whether each closed is
+        cut short (ownership was already cleared, so whether each closed is
         UNCONFIRMED, and none is ever closed again, since its number may have been reused), and the
         first interruption a close step raised (None when there was none)."""
         problems = []
@@ -740,7 +740,7 @@ class _FdOwner:
         return False
 
 
-# Signal deferral (fix round 5). In CPython an asynchronous exception reaches Python code only
+# Signal deferral. In CPython an asynchronous exception reaches Python code only
 # through a Python-level signal handler (KeyboardInterrupt is the default SIGINT handler's raise),
 # and that handler runs only on the main thread, at an interpreter check point. Blocking every
 # signal that has such a handler across a critical section therefore keeps any signal-raised
@@ -776,7 +776,7 @@ def _deferrable_signals():
 
 
 class _SignalDeferral:
-    """Defer the Python-handled signals across a critical section (fix round 5), as a context manager.
+    """Defer the Python-handled signals across a critical section, as a context manager.
 
     Entry reads the current mask and then blocks _deferrable_signals(). Both calls run any handler
     whose signal arrived before the block took effect, so such a signal is delivered at the entry,
@@ -832,7 +832,7 @@ class _SignalDeferral:
         return False
 
 
-# Atomic publication (round 3, D1). A control record is written in full to a uniquely named STAGING
+# Atomic publication. A control record is written in full to a uniquely named STAGING
 # file in the same directory and fsynced, and only then published at its final name by os.link,
 # which fails with EEXIST (the O_EXCL exclusivity the final name needs); the staging name is then
 # unlinked and the directory fsynced. A process killed at any point therefore leaves either no
@@ -863,10 +863,10 @@ class OpCapability:
     Carries the three legs (the flocked anchor, the active record, the lease), the recorded
     (st_dev, st_ino) identities and exact payload bytes that release verifies against, and the
     acquirer identity (pid plus /proc start time) that release refuses any other caller on. It
-    exposes NO further lock acquisition: nested journal/index composition is out of scope here
-    (PR3), so this object cannot be used to widen what was acquired.
+    exposes NO further lock acquisition: nested journal/index composition is out of scope here,
+    so this object cannot be used to widen what was acquired.
 
-    Fix round 8: the acquirer identity is the one captured ONCE at the acquisition's entry (the same
+    The acquirer identity is the one captured ONCE at the acquisition's entry (the same
     pid the published active record names), and the capability carries the lock (_claim) under
     which one release claims it: the released check, the capture of the retained descriptors, and
     the transfer of their ownership are one synchronized step (_ReleaseScope.take_ownership), and
@@ -908,7 +908,7 @@ class OpCapability:
         self._released = False
         self._claim = threading.Lock()
         self._claimant = None
-        # OPF-D2B PR3a: set only on a capability minted by attach_init_lease from an InitHolder. The
+        # Set only on a capability minted by attach_init_lease from an InitHolder. The
         # explicit product root the init operation is bound to (its store does not RESOLVE until the
         # manifest is published, so the resume substrate binds to this root instead of the resolver),
         # and the holder's token, which binds the capability to the operation handle begun or resumed
@@ -919,12 +919,12 @@ class OpCapability:
         # ("lease", then "active record"): set only by a recover=True acquisition whose liveness gate
         # confirmed the recorded holder dead, and empty on every other capability.
         self.recovered = recovered
-        # PR D fix 6: the `operation` the confirmed-dead holder's active record names (None unless
+        # The `operation` the confirmed-dead holder's active record names (None unless
         # this acquisition recovered a record), and the staging leftovers it removed under the held
         # flock before stale classification, so a caller can say exactly what was cleared.
         self.recovered_operation = recovered_operation
         self.staging_removed = staging_removed
-        # PR D fix 7: the names this acquisition itself created and then unlinked, in removal order:
+        # The names this acquisition itself created and then unlinked, in removal order:
         # on every capability acquire_operation returns, the retired staging names of its own two
         # publications (the active record's, then the lease's).
         self.created_removed = created_removed
@@ -1003,7 +1003,7 @@ def _open_dir_at(parent_fd, name, label):
 
 
 # Fallible acquisition steps, each a helper so the acquisition body holds no nested try statement
-# after its first descriptor adoption (fix round 4: a try statement's own line lies outside every
+# after its first descriptor adoption (a try statement's own line lies outside every
 # enclosing exception range, so an interruption landing on it would skip the unwind).
 
 
@@ -1083,7 +1083,7 @@ def _control_payload(document, closed_keys, label):
     try:
         reparsed = tomllib.loads(text)
     # Defensive: emit_checked already reparsed. RecursionError too: tomllib raises it (not a
-    # ValueError) on deep nesting (F-TOML-BARE-VALUEERROR-CLASS).
+    # ValueError) on deep nesting, so both are the same refusal class.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise OpLockError("emitted {} did not reparse ({})".format(label, exc))
     if set(reparsed) != set(closed_keys):
@@ -1099,7 +1099,7 @@ def _read_control_record(dir_fd, name, label):
     oversize, unparseable, or a non-table document) raises OpLockError, so a record the recovery
     gate cannot read is a refusal, never a silent clean pass (check-fails-closed-on-unreadable).
     Returns (the parsed dict, its (st_dev, st_ino) identity, its exact raw bytes) so the recovery
-    gate can bind its later delete to the very object and bytes it verified (DEF-1)."""
+    gate can bind its later delete to the very object and bytes it verified, so a record swapped after the check is never deleted."""
     with _FdOwner() as owner:
         try:
             fd = owner.adopt(os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd))
@@ -1128,7 +1128,7 @@ def _read_control_record(dir_fd, name, label):
     try:
         doc = tomllib.loads(bytes(data).decode("utf-8", errors="strict"))
     # RecursionError too: tomllib raises it (not a ValueError) on deep nesting
-    # (F-TOML-BARE-VALUEERROR-CLASS).
+    # (the same refusal class as a ValueError).
     except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
         raise OpLockError("{} is not decodable UTF-8 TOML; refusing recovery ({})".format(label, exc))
     if not isinstance(doc, dict):
@@ -1288,7 +1288,7 @@ def _git_view(store_root, toplevel, rel):
     # git prints one line per option, each ended by EXACTLY one newline record terminator (the
     # submodule probe prints nothing at all for a repository that is no submodule). Only those
     # terminators are split on, never other whitespace: a directory path may legitimately end in
-    # a space or a tab, and stripping it would redirect the control root (DEF-4).
+    # a space or a tab, and stripping it would redirect the control root.
     lines = out.split("\n")
     if not out.endswith("\n") or len(lines) < 4 or not lines[2]:
         raise OpLockError("git rev-parse {} at {} returned unexpected output; refusing".format(
@@ -1464,10 +1464,10 @@ def _open_store_home(common_fd, common_desc, key, create):
 def _open_control_dir(control_root_fd, control_root_desc, dirname=CONTROL_DIRNAME):
     """Open (creating on genuine absence) a single-component control home beneath an already-open
     parent: by default this module's own opf-oplock control directory, and by explicit `dirname` a
-    SIBLING control home (the OPF-D2B resume substrate's opf-init tree composes this rather than
+    SIBLING control home (the resume substrate's opf-init tree composes this rather than
     reimplementing it). A pre-existing symlink or wrong type at the name refuses up front; only
     the single component is ever created (no parents, and never a missing input root). Creation is
-    RESTARTABLE (fix round 6): an existing directory whose owner permissions a restrictive umask
+    RESTARTABLE: an existing directory whose owner permissions a restrictive umask
     masked, as a creator killed before correcting its mode leaves it, is repaired to its intended
     mode by _repair_restrictive_mode, whoever created it."""
     label = "{}/{}".format(control_root_desc, dirname)
@@ -1503,8 +1503,8 @@ def _open_control_dir(control_root_fd, control_root_desc, dirname=CONTROL_DIRNAM
 
 
 def _repair_restrictive_mode(parent_fd, name, label, st, is_dir):
-    """Self-heal a control object whose owner permissions a restrictive umask masked (fix round 6,
-    RESTARTABLE initialization). A creator killed between creating the control directory or the
+    """Self-heal a control object whose owner permissions a restrictive umask masked
+    (RESTARTABLE initialization). A creator killed between creating the control directory or the
     anchor and correcting its mode leaves, under umask 0o444 or 0o777, a directory of mode 0311 or
     0000 or an anchor of mode 0200 or 0000, which every later open refuses; this repairs it on the
     next acquisition, whether this call or an earlier one created it. `st` is the no-follow stat of
@@ -1514,7 +1514,7 @@ def _repair_restrictive_mode(parent_fd, name, label, st, is_dir):
     write for the anchor). Such an object is repaired ONLY when its mode is a subset of the intended
     one (0755 or 0644), which is all a umask can leave: a mode carrying any other bit (a group or
     other write, a special bit), or a hard-linked anchor, is not what an interrupted creation
-    leaves, and refuses unchanged. One special bit is the exception (fix round 7): a directory
+    leaves, and refuses unchanged. One special bit is the exception: a directory
     created beneath a set-group-ID parent inherits that parent's S_ISGID bit and group from mkdir
     itself, so a control directory carrying S_ISGID is what an interrupted creation leaves exactly
     when the trusted parent (the parent_fd already held, fstat'ed here) is a set-group-ID directory
@@ -1556,7 +1556,7 @@ def _repair_restrictive_mode(parent_fd, name, label, st, is_dir):
 
 
 def _inherits_setgid(parent_fd, label, st):
-    """Whether a control directory's S_ISGID bit is the one mkdir inherits (fix round 7): true only
+    """Whether a control directory's S_ISGID bit is the one mkdir inherits: true only
     when the trusted parent descriptor is a set-group-ID directory and the directory `st` describes
     carries the parent's group, as inheritance gives it. An fstat failure refuses."""
     try:
@@ -1570,7 +1570,7 @@ def _inherits_setgid(parent_fd, label, st):
 
 def _chmod_bound(parent_fd, name, label, st, mode):
     """chmod the object `name` beneath parent_fd to `mode` WITHOUT following a symbolic link and
-    bound to the object `st` describes (fix round 6). Where O_PATH exists (Linux), the name is
+    bound to the object `st` describes. Where O_PATH exists (Linux), the name is
     opened O_PATH|O_NOFOLLOW (which needs no permission on the object itself, so a mode-0000 object
     opens), the OPENED object is confirmed to be that same (st_dev, st_ino), type, and owner, and
     its mode is set through that descriptor's /proc/self/fd entry, which names the opened object
@@ -1612,8 +1612,8 @@ def _open_anchor(ctl_fd):
     """Open the persistent mutex anchor, existing-first: a pre-existing regular file is opened
     O_RDWR|O_NOFOLLOW; creation (O_CREAT|O_EXCL) happens only on genuine absence; a symlink or any
     other type at the name refuses. The opened file is validated (regular, link count exactly 1,
-    owned by us, not group/other-writable) before it may carry the flock. Creation is RESTARTABLE
-    (fix round 6): a pre-existing anchor whose owner read or write a restrictive umask masked, as a
+    owned by us, not group/other-writable) before it may carry the flock. Creation is RESTARTABLE:
+    a pre-existing anchor whose owner read or write a restrictive umask masked, as a
     creator killed between its creation and its fchmod leaves it, is repaired to 0644 by
     _repair_restrictive_mode before it is opened."""
     st = _lstat_at(ctl_fd, ANCHOR_NAME, ANCHOR_NAME)
@@ -1633,7 +1633,7 @@ def _open_anchor(ctl_fd):
                 # EEXIST here means a lost creation race or a dangling symlink at the name: refuse
                 # rather than guess which; the next attempt classifies what is there.
                 raise OpLockError("cannot create mutex anchor ({})".format(exc))
-            # Fix round 5: the creating process's umask filters the requested mode, so the mode is
+            # The creating process's umask filters the requested mode, so the mode is
             # set explicitly; a umask masking the owner's read or write would otherwise leave an
             # anchor every later O_RDWR open refuses. One try for both steps, so this round adds no
             # nested try statement's line to the function.
@@ -1728,7 +1728,7 @@ def _classify_stale(dir_fd, name, label):
 
 
 def _remove_staging_garbage(dir_fd, name, label, removed=None):
-    """D1: remove the staging leftovers a process killed mid-publication left for the control record
+    """Remove the staging leftovers a process killed mid-publication left for the control record
     `name` beneath dir_fd. Called ONLY under the held anchor flock, before stale classification, so
     no cooperating publisher can be mid-publication: a leftover never became a record, is never a
     finding, and is simply removed. A leftover killed after its os.link shares its inode with the
@@ -1775,7 +1775,7 @@ def _remove_staging_garbage(dir_fd, name, label, removed=None):
 
 def _validate_recovery_active(doc):
     """Validate a stale ACTIVE record against its COMPLETE schema before its holder or owner is
-    trusted for a recovery decision (DEF-2). Without this a record with a missing holder yields
+    trusted for a recovery decision. Without this a record with a missing holder yields
     None, and a paired lease with a missing holder also yields None, so None == None would compare
     equal and a live holder be seized; an unchecked top-key set would likewise admit a forged or
     truncated record. The full closed top-key set, the supported integer schema, a required
@@ -1850,7 +1850,7 @@ def _machine_store_table(machine_path, machine_st):
 
 def _validate_recovery_lease(doc, active_doc):
     """Validate a stale LEASE against its COMPLETE schema before it is paired with the validated
-    active record (DEF-2): the full closed top-key set, the supported integer schema, and a required
+    active record: the full closed top-key set, the supported integer schema, and a required
     non-empty holder / operation / acquired_at, so a missing lease holder can never compare equal to
     a missing active holder as None == None. The pairing then requires the holder, operation, and
     acquired_at to EQUAL the active record's, since acquisition writes both records from the same
@@ -1878,7 +1878,7 @@ def _validate_recovery_lease(doc, active_doc):
 
 
 def _recorded_machine_store_present(machine):
-    """D4: whether the machine store a stale active record names still exists. The recorded path is
+    """Whether the machine store a stale active record names still exists. The recorded path is
     walked no-follow from the filesystem root to its parent (_opf_store._open_dir_nofollow in its
     traverse mode: search permission only on every component where O_PATH exists, since the parent
     is never read here) and its final component is stat'ed no-follow beneath that parent. Returns
@@ -1928,9 +1928,9 @@ def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease
     possibly-live, cross-host, or malformed holder, or a stale lease with no paired active record,
     RAISES rather than being seized, so a live holder whose records are exposed under a split
     anchor can never be recovered into a two-holder state. Both records are validated against their
-    COMPLETE schemas first (DEF-2). Returns the (st_dev, st_ino) identity and exact bytes it read
+    COMPLETE schemas first. Returns the (st_dev, st_ino) identity and exact bytes it read
     for the active record and, when present, the lease, so the caller's delete removes ONLY those
-    same objects with those same bytes (DEF-1: a record swapped to a LIVE holder B's after this
+    same objects with those same bytes (a record swapped to a LIVE holder B's after this
     read is refused and preserved, never seized). Called ONLY on the explicit recover=True path,
     under the held anchor flock, before any _recover_stale delete runs.
 
@@ -1944,7 +1944,7 @@ def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease
     applies only while the RECORDED machine store still exists: when its recorded path is absent,
     or now binds a different object, the recorded machine store and the paired lease inside it are
     taken as gone (a deleted worktree, or this checkout's machine store destroyed and recreated),
-    and recovery continues to the liveness gate (D4); a checkout MOVED rather than deleted reads the
+    and recovery continues to the liveness gate; a checkout MOVED rather than deleted reads the
     same way, the disclosed moved-store limit under which its lease is left as a lone lease."""
     if not stale_active:
         raise OpLockError("a stale lease exists with no paired active record; its holder carries no "
@@ -1952,7 +1952,7 @@ def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease
                           "recovery (manual intervention required)")
     doc, active_ident, active_bytes = _read_control_record(ctl_fd, ACTIVE_NAME, "active record")
     owner, machine = _validate_recovery_active(doc)
-    # OPF-D2B PR3a: `machine_st` is None when the recovering acquirer is the init PRE-STORE holder of a
+    # `machine_st` is None when the recovering acquirer is the init PRE-STORE holder of a
     # checkout whose machine store does not exist yet; the recorded machine store is then never this
     # checkout's, so the pairing is decided by whether the recorded one still exists, exactly as for a
     # differing identity.
@@ -1996,7 +1996,7 @@ def _recover_stale(dir_fd, name, ident, expected_bytes, label, removed=None):
     liveness gate read for THIS record; the record is removed ONLY when it is STILL that same object
     carrying those same bytes, re-verified here before the unlink. A record swapped after the
     liveness read (a LIVE holder B publishing fresh records under a split anchor) fails the identity
-    or byte check and is refused and PRESERVED rather than deleted into a two-holder state (DEF-1).
+    or byte check and is refused and PRESERVED rather than deleted into a two-holder state.
     The opened object (not just the name) must be a plain singly-linked regular file; the name must
     still bind that same inode at the final pre-unlink re-check; anything else refuses and
     preserves. Once the unlink returns, `label` is appended to `removed` (a list) when given, BEFORE
@@ -2063,11 +2063,11 @@ def _recover_stale_verify(fd, ident, expected_bytes, label):
 
 
 def _unlink_created_on_failure(dir_fd, names, fd, removed=None):
-    """LOW-1: best-effort removal of the names a FAILED or INTERRUPTED publication bound to its new
+    """Best-effort removal of the names a FAILED or INTERRUPTED publication bound to its new
     inode, so neither a staging leftover nor a final record the caller never received is stranded.
     `names` are the CANDIDATE names (the staging name first, then the final name once its os.link
     was ATTEMPTED); which of them the publication actually bound is established by OBSERVATION
-    here (fix round 4, H1), never from bookkeeping an interruption could have skipped: a candidate
+    here, never from bookkeeping an interruption could have skipped: a candidate
     is bound when a no-follow stat finds it binding the open fd's (st_dev, st_ino). A final name
     that is absent or binds another inode (an EEXIST refusal, or a link never made) is not ours and
     is left alone; a staging name binding another inode is substituted and left in place. The inode
@@ -2077,8 +2077,8 @@ def _unlink_created_on_failure(dir_fd, names, fd, removed=None):
     substituted target is never removed. Returns None when every bound name was removed (or was
     already gone); returns a reason string NAMING the stranded leftover when one could not be
     removed, so the caller aggregates it into the raise rather than claim a clean unwind it did not
-    achieve (DEF-5: the disclosure stays accurate, the cleanup failure is never swallowed). Each name
-    whose unlink returns is appended to `removed` (a list) when given (PR D fix 7), so the caller
+    achieve (the disclosure stays accurate, the cleanup failure is never swallowed). Each name
+    whose unlink returns is appended to `removed` (a list) when given, so the caller
     reports every name this cleanup removed, a later step's failure included."""
     if not names:
         return None
@@ -2132,7 +2132,7 @@ def _unlink_created_on_failure(dir_fd, names, fd, removed=None):
 
 def _create_control_file(dir_fd, name, payload, label, owner=None, publisher_pid=None,
                          removed=None):
-    """ATOMIC, exclusive publication of a control record (D1). The payload is written in full to a
+    """ATOMIC, exclusive publication of a control record. The payload is written in full to a
     fresh staging file (O_CREAT|O_EXCL under a unique _staging_name) with the full-byte write loop
     and fsynced; only then is it published at `name` by os.link, which refuses an existing name
     (EEXIST) exactly as O_EXCL did; the staging name is then unlinked and the directory fsynced.
@@ -2145,15 +2145,15 @@ def _create_control_file(dir_fd, name, payload, label, owner=None, publisher_pid
     it, a private owner holds the descriptor and transfers it to the caller on success.
 
     On any FAILURE or INTERRUPTION before return (an OSError, or any BaseException such as a
-    KeyboardInterrupt), the publication is treated as POTENTIALLY PUBLISHED (fix round 4, H1): the
+    KeyboardInterrupt), the publication is treated as POTENTIALLY PUBLISHED: the
     names it bound are established by observation (the staging name, and the final name once its
     os.link was attempted, each counted only when it binds the created inode) and removed by
     verified identity, so an interruption landing just after the link or the staging unlink
     completed can no longer leave an untracked final record behind; the descriptor is closed
-    through the single descriptor owner before raising (LOW-1: nothing is stranded), UNLESS that
+    through the single descriptor owner before raising (nothing is stranded), UNLESS that
     cleanup itself fails, in which case the raise NAMES the leftover rather than implying a clean
-    unwind (DEF-5), and the caller must treat the record as possibly present. The staging descriptor
-    is protected from the moment it is adopted (fix round 4, M; wording qualified in fix round 5):
+    unwind, and the caller must treat the record as possibly present. The staging descriptor
+    is protected from the moment it is adopted:
     WITHOUT `owner`, by the private owner, which encloses the whole publication as a context manager,
     so an interruption landing before the protected body is entered still closes it (its empty
     staging file is then garbage for the next acquisition); WITH `owner` (the acquisition's path),
@@ -2164,12 +2164,12 @@ def _create_control_file(dir_fd, name, payload, label, owner=None, publisher_pid
     itself with the cleanup outcome attached as notes; an interruption raised by the cleanup itself
     is re-raised after the descriptor is closed.
 
-    Fix round 9 (claude MED): every mutating step of the publication runs only in the process
+    Every mutating step of the publication runs only in the process
     `publisher_pid` (_gated_step), the pid the operation began with: the acquisition passes the
     pid it captured at its entry, so a forked continuation of it is refused before it creates,
     writes, links, or unlinks anything; without it, the pid at this call's entry is used.
 
-    PR D fix 7: with `removed` (a list), each name this publication unlinks is appended to it as
+    With `removed` (a list), each name this publication unlinks is appended to it as
     the unlink returns: its retired staging name, and whatever a failure's cleanup removed, so the
     acquisition reports every unlink it performed."""
     if publisher_pid is None:
@@ -2186,7 +2186,7 @@ def _create_control_file(dir_fd, name, payload, label, owner=None, publisher_pid
 
 
 def _own_name_removed(name, staging, label):
-    """How a name a publication itself created and then unlinked is reported (PR D fix 7)."""
+    """How a name a publication itself created and then unlinked is reported."""
     if name == staging:
         return "the staging name {} of its own {} publication".format(staging, label)
     return "its own just-published {} (removed by the failed publication's cleanup)".format(label)
@@ -2194,28 +2194,28 @@ def _own_name_removed(name, staging, label):
 
 def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publisher_pid,
                     removed=None):
-    """The body of _create_control_file (fix round 4, M). ONE protected region spans everything
+    """The body of _create_control_file. ONE protected region spans everything
     from the staging open to the return, so no line boundary after the staging descriptor's
     adoption lies outside the failure handler below (a nested try statement's own line is outside
     the enclosing exception ranges, so none sits between the adoption and the protection). The
     progress marker `step` is set BEFORE each syscall it names, so the cleanup's candidate names
     never lag a completed syscall. On success the descriptor is transferred out of `owner` when
     `transfer` is set and otherwise stays owned by it; on failure only this descriptor is closed.
-    A failure raised in a FORKED CHILD of the publishing process (fix round 7: a signal handler
+    A failure raised in a FORKED CHILD of the publishing process (a signal handler
     that forked where no deferral stands) removes no name, since the names and the inode are the
-    publisher's; the child closes only its own copy of the descriptor. Fix round 8 (claude LOW):
-    every note and message states the descriptor close only when it ran; an interruption landing in
+    publisher's; the child closes only its own copy of the descriptor.
+    Every note and message states the descriptor close only when it ran; an interruption landing in
     the hand-over to the caller (after the owner released the descriptor, before the caller
     received it) leaves the descriptor owned by nobody, and the note then says it was not closed
     and stays open until this process exits (the disclosed transfer-to-adoption residual).
 
-    Fix round 9 (claude MED): each mutating step (the staging create, the mode set, the write and
+    Each mutating step (the staging create, the mode set, the write and
     its fsync, the link, the staging retire, the directory fsync) runs through _gated_step, bound
     to `publisher_pid`, the pid the operation began with (for the acquisition, the pid captured at
     its entry), so a forked continuation is refused before it performs any of them rather than
-    racing the publisher for the staging and final names. Fix round 9 (codex LOW): a close that an
+    racing the publisher for the staging and final names. A close that an
     interruption cut short after ownership was cleared is reported as UNCONFIRMED, never as
-    closed. PR D fix 7: each name it unlinks (the staging retire, and the failure cleanup's
+    closed. Each name it unlinks (the staging retire, and the failure cleanup's
     removals) is appended to `removed` when given (_create_control_file)."""
     step = "create the staging file for"
     fd = None
@@ -2256,7 +2256,7 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publ
                     "landed in its hand-over to the caller), so it was not closed and stays open "
                     "until this process exits")
         if os.getpid() != publisher_pid:
-            # Fix round 7: a forked child shares the publisher's names and inode; removing them
+            # A forked child shares the publisher's names and inode; removing them
             # would destroy the publisher's record mid-publication. Close only the child's copy.
             problems, unconfirmed, interrupt = owner.close_guarded(fd) if owned \
                 else ([], [], None)
@@ -2302,10 +2302,10 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publ
             problems.append(strand)
         close_problems, close_unconfirmed, close_interrupt = owner.close_guarded(fd) if owned \
             else ([], [], None)
-        # PR D fix 16: the removal report is built only after the descriptor's close.
+        # The removal report is built only after the descriptor's close.
         if removed is not None:
             removed.extend(_own_name_removed(n, staging, label) for n in gone)
-        # Fix round 9 (codex LOW): the close is named as it happened; "closed" only when it ran and
+        # The close is named as it happened; "closed" only when it ran and
         # reported success, UNCONFIRMED when an interruption cut it short after ownership cleared.
         if not owned:
             closure = unclosed
@@ -2353,8 +2353,8 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publ
 
 
 def _verify_staged(fd, payload, label):
-    """Read the staged bytes back before publication (fix round 9, a class-width finding beside
-    claude MED): the staging file must hold exactly `payload`, its size and its bytes read at
+    """Read the staged bytes back before publication (a second fork defence, not pid-gated:
+    it detects a forked continuation's duplicate write): the staging file must hold exactly `payload`, its size and its bytes read at
     explicit offsets from 0 (os.pread, so the shared file offset is neither used nor moved). A
     forked continuation that completed the write loop it was forked inside (a Python-level step no
     pid gate can split) writes through the SAME open file description, whose offset it shares, so
@@ -2376,7 +2376,7 @@ def _verify_staged(fd, payload, label):
 
 def _set_record_mode(fd, label):
     """Set a staging record's mode to _CONTROL_FILE_MODE explicitly, before anything is written or
-    published (fix round 5): the staging open's requested mode is filtered by the process umask, and
+    published: the staging open's requested mode is filtered by the process umask, and
     a umask that masks the owner's read or write (0o444, 0o777) would otherwise publish a record that
     release and crash recovery cannot reopen. The result is verified on the open descriptor: owner
     read and write present and no group or other write, or this refuses (an OSError from fchmod or
@@ -2398,15 +2398,15 @@ def _verified_unlink(dir_fd, name, ident, expected_bytes, label, outcome=None, r
     final pre-unlink name-stat re-check; then unlink by dir_fd and fsync the parent. ANY mismatch
     refuses and PRESERVES the file (never-seize: a replaced or modified record is somebody's
     evidence, not ours to delete). An unlink whose directory fsync then fails raises
-    _UnlinkNotDurable (fix round 8): the name WAS removed, only its durability failed.
+    _UnlinkNotDurable: the name WAS removed, only its durability failed.
 
-    Fix round 10 (codex LOW): with `outcome` (a dict), the caller learns what happened even when an
+    With `outcome` (a dict), the caller learns what happened even when an
     interruption (any BaseException that is not an OSError) lands anywhere from the unlink through
     the fsync: "done" is set once both completed; on an interruption "interrupted" is set and
     "unlinked" records, by OBSERVATION (a no-follow stat of the name, never bookkeeping the
     interruption could have skipped), whether the name no longer binds the verified record (True),
     still does (False), or could not be observed (None). The interruption itself propagates
-    unchanged. PR D fix 7: once the unlink returns, `label` is appended to `removed` (a list) when
+    unchanged. Once the unlink returns, `label` is appended to `removed` (a list) when
     given, BEFORE the directory fsync, so a removal whose fsync then fails is still reported."""
     with _FdOwner() as owner:
         try:
@@ -2444,7 +2444,7 @@ def _verified_unlink(dir_fd, name, ident, expected_bytes, label, outcome=None, r
 
 
 def _unlinked_by_observation(dir_fd, name, ident):
-    """Whether `name` beneath dir_fd no longer binds the record `ident` (fix round 10): True when
+    """Whether `name` beneath dir_fd no longer binds the record `ident`: True when
     it is absent or binds another object, False when it still binds that record, None when the
     no-follow stat cannot answer (an OSError), which the caller reports as UNCONFIRMED."""
     try:
@@ -2480,7 +2480,7 @@ def _verified_unlink_verify(fd, ident, expected_bytes, label):
             raise OpLockError("{} payload does not match the recorded bytes; preserved".format(
                 label))
     except OSError as exc:
-        # DEF-3: normalize a raw OS failure (an fstat or an EIO read) to OpLockError, so the
+        # Normalize a raw OS failure (an fstat or an EIO read) to OpLockError, so the
         # error-collecting callers (release_operation and the acquire unwind) that catch ONLY
         # OpLockError still run the remaining legs and the descriptor closes (the anchor's too),
         # rather than a raw OSError skipping them and leaking the fd and the records.
@@ -2498,8 +2498,8 @@ def _recorded_operation(active_bytes):
 
 
 def _tag_removals(exc, recovered, recovered_operation, staging_removed, created_removed):
-    """PR D fix 6: record on an acquisition's OpLockError what it had removed before failing (fix
-    7: the names it had itself created and then unlinked included)."""
+    """Record on an acquisition's OpLockError what it had removed before failing (the names
+    it had itself created and then unlinked included)."""
     exc.recovered = tuple(recovered)
     exc.recovered_operation = recovered_operation
     exc.staging_removed = tuple(staging_removed)
@@ -2513,8 +2513,8 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     All three legs are taken or the acquisition unwinds: the anchor flock under the authoritative
     control root, the exclusive active record, and the mandatory lease. A host whose nodename is
     empty is refused before anything else, because the owner identity the active record persists
-    would carry no host and a later recovery could never confirm the holder dead (D6). Under the
-    held flock, staging leftovers of a publication killed mid-way are removed as garbage (D1). A
+    would carry no host and a later recovery could never confirm the holder dead. Under the
+    held flock, staging leftovers of a publication killed mid-way are removed as garbage. A
     pre-existing active record or lease under a free anchor is a crash artefact: it refuses
     acquisition unless recover=True. recover=True is NOT a licence to seize: the recovery liveness
     gate clears a stale record only when the recorded holder is CONFIRMED DEAD on this host (via the
@@ -2522,14 +2522,14 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     a possibly-live, cross-host, or malformed holder, or a stale lease with no paired active record,
     is refused so a live holder whose records are exposed under a split anchor is never seized into
     a two-holder state. Recovery also refuses an active record paired with a different machine
-    store that still exists (a sibling git worktree's; D4), and deletes the lease before the active
+    store that still exists (a sibling git worktree's), and deletes the lease before the active
     record, so an interrupted recovery leaves only a lone active record that a later recovery can
     clear. Returns an OpCapability whose `recovered` names the stale records this acquisition
     cleared, in delete order (empty when it cleared none), `recovered_operation` the operation their
     confirmed-dead holder recorded, `staging_removed` the staging leftovers it removed, and
     `created_removed` the names it created and then unlinked itself (its publications' retired
     staging names); raises OpLockError fail-closed on everything else. Which of those errors carry
-    the same four reports of what it had removed before it failed (PR D fix 6; fix 7): every
+    the same four reports of what it had removed before it failed: every
     OpLockError raised by the protected body (_acquire_body, from the store-root open through the
     capability's build, the unwind's own removals included, and the unwind's replacement error)
     and the forked-continuation refusal (_refuse_continuation). The validation raises carry NONE:
@@ -2538,19 +2538,19 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     removal step; nor does an exception a signal handler raises when a deferred signal is
     delivered (the handler's own). An
     interruption (a BaseException that is not an Exception) propagates as itself after the unwind.
-    Everything after the argument validation runs with the Python-handled signals deferred (fix
-    round 5): a signal arriving meanwhile is delivered only once the acquisition has either failed
+    Everything after the argument validation runs with the Python-handled signals deferred:
+    a signal arriving meanwhile is delivered only once the acquisition has either failed
     and unwound or fully formed its capability, which is then released before the interruption
     propagates, because the caller never receives it.
 
-    Fix round 10 (codex MED): the acquirer identity is captured by this function's FIRST
+    The acquirer identity is captured by this function's FIRST
     statement, before any preliminary call, and the fork contract is bounded there: a fork that
     lands before that capture (before or at the entry call, or at the capture's own line boundary)
     is a separate caller, which captures its own identity and acquires, or is refused, on its own
     account, contending for the one lock like any other caller; every fork after it is a
     continuation, which receives no capability.
     """
-    # Fix round 8 (codex HIGH 1), moved first in fix round 10 (codex MED): the acquirer identity is
+    # The acquirer identity is
     # captured ONCE, here, before any other statement, and everything the acquisition binds to an
     # identity (the default holder, the active record's owner, the capability, and every fork
     # guard) uses this same value, never a later os.getpid(), which a forked continuation would
@@ -2561,7 +2561,7 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     if type(recover) is not bool:
         raise OpLockError("recover must be a bool (a control parameter is validated, never "
                           "coerced)")
-    # D6: the nodename is read ONCE and must be a non-empty string, because recovery refuses an owner
+    # The nodename is read ONCE and must be a non-empty string, because recovery refuses an owner
     # with no usable nodename; writing one would create a record no recovery could ever clear.
     nodename = os.uname().nodename
     if type(nodename) is not str or not nodename:
@@ -2573,14 +2573,14 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     _validate_field("holder", holder)
     _validate_field("operation", operation)
 
-    # Fix round 5: the whole acquisition, recovery included, runs with the Python-handled signals
+    # The whole acquisition, recovery included, runs with the Python-handled signals
     # DEFERRED (_SignalDeferral), so no signal-raised exception (a KeyboardInterrupt) can land inside
     # it; a signal that arrives meanwhile is delivered at the deferral's exit, after the capability
     # is fully formed or the acquisition fully unwound. A capability that was fully formed when such
     # a signal was delivered never reaches the caller, so it is released here before the
     # interruption propagates as itself. The body is ONE call on the with statement's own line, and
     # the return sits inside the same try, so no line boundary of this frame after the acquisition
-    # lies outside the release below. Fix round 8: the return goes through _handoff, which hands
+    # lies outside the release below. The return goes through _handoff, which hands
     # the capability over only in the process that began the acquisition.
     args = (store_root, operation, holder, recover, nodename, acquirer_pid)
     cap = None
@@ -2595,34 +2595,34 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
 
 def _release_unreturned(cap, exc):
     """Release a fully formed capability the caller never received because `exc` (a signal deferred
-    across the acquisition, delivered at its end) interrupted the return (fix round 5). The release
+    across the acquisition, delivered at its end) interrupted the return. The release
     runs under its own deferral; whatever it raises is attached to `exc` as a note, so the original
     interruption is the one that propagates.
 
-    Fix round 6 (codex MEDIUM 2): this process built the capability moments ago, so the acquirer
+    This process built the capability moments ago, so the acquirer
     identity is already established. The release therefore goes straight to the scoped release
     (_release_scoped, the enclosing cleanup that owns the descriptors), never through
     release_operation, whose fresh /proc identity read can refuse BEFORE that cleanup takes
     ownership (an unreadable /proc/<pid>/stat reads as a differing start time) and would leave the
     descriptors open and the anchor locked.
 
-    Fix round 7 (codex HIGH): the identity is still bound, by pid alone and with no /proc read: the
-    capability carries the acquirer's pid (_acquirer_pid, captured once at the acquisition's entry
-    since fix round 8, never at the build, which a forked continuation could reach), and only that
+    The identity is still bound, by pid alone and with no /proc read: the
+    capability carries the acquirer's pid (_acquirer_pid, captured once at the acquisition's entry,
+    never at the build, which a forked continuation could reach), and only that
     process releases here. A signal handler that FORKS turns this path into
     two processes: the acquirer, whose handler returned and which receives the capability, and a
     child, whose copy of the interruption arrives here. The child shares the acquirer's open file
     descriptions, and a flock belongs to the open file description, so a record removal in the
-    child would destroy the acquirer's records (and, before fix round 9, its explicit unlock freed
-    the acquirer's lock; no path unlocks explicitly since). A forked child (a pid that differs from
+    child would destroy the acquirer's records (an explicit unlock would also free
+    the acquirer's lock, so no path unlocks explicitly). A forked child (a pid that differs from
     the builder's; a live parent's pid is never a child's) therefore closes ONLY its own inherited
     descriptor copies, which cannot free the lock the acquirer still references, and never removes
     a record.
 
     The note states the OBSERVED outcome, each clause derived from what the release recorded as it
-    completed each step (fix round 7, codex and claude LOW), never from which exception escaped:
+    completed each step, never from which exception escaped:
     which records its verified unlinks removed, whether the anchor descriptor's close (which gives
-    up this process's hold on the lock, fix round 9) completed, failed, was cut short (UNCONFIRMED),
+    up this process's hold on the lock) completed, failed, was cut short (UNCONFIRMED),
     or was never confirmed, and whether the other descriptor closes completed, failed, or were cut
     short; "released" only when every step completed, "released only in part" otherwise, and NOT
     released when an interruption landed before the release took ownership (the disclosed
@@ -2641,27 +2641,27 @@ def _release_unreturned(cap, exc):
 
 
 def _handoff(cap, acquirer_pid):
-    """Hand a fully formed capability to the caller, only in the process that began the acquisition
-    (fix round 8, codex HIGH 1). A signal handler that FORKS inside the acquisition and RETURNS in
+    """Hand a fully formed capability to the caller, only in the process that began the acquisition.
+    A signal handler that FORKS inside the acquisition and RETURNS in
     the child lets the child continue the acquisition forward; the capability it builds is bound to
     the entry identity (the acquirer's pid), never the child's own, and it reaches here in a process
     whose pid differs from that identity. Such a forked continuation receives NO capability: it
     closes only its inherited descriptor copies (ownership taken first; a flock belongs to the open
     file description it shares with the acquirer, so those closes cannot free the acquirer's lock,
     and nothing here unlinks, since the records are the acquirer's), under its own deferral, and
-    raises a refusal that says what the refusal itself did (fix round 9, claude LOW). The check
+    raises a refusal that says what the refusal itself did. The check
     and the return are ONE expression, so no line boundary lies between them; a fork landing
     inside that expression after os.getpid() returned is the disclosed hand-off residual."""
     return cap if os.getpid() == acquirer_pid else _refuse_continuation(cap, acquirer_pid)
 
 
 def _refuse_continuation(cap, acquirer_pid):
-    """_handoff's refusal of a forked continuation (fix round 8): close only this process's
+    """_handoff's refusal of a forked continuation: close only this process's
     inherited descriptor copies, under its own deferral, then raise the refusal. The message states
-    only what this refusal did (fix round 9, claude LOW): a forward step the continuation ran
+    only what this refusal did: a forward step the continuation ran
     before reaching the hand-off is not observed here, and surfaces as the acquirer's own failure.
     An interruption a close step raised propagates as itself, carrying the refusal as a note.
-    PR D fix 7: the refusal carries the capability's four reports of what the acquisition removed
+    The refusal carries the capability's four reports of what the acquisition removed
     (_tag_removals). No removal runs in a forked continuation (each removal step is gated on the
     acquirer's pid, _gated_step, and the failure cleanup and the unwind skip every unlink in a
     forked child), so each reported removal is one the acquiring process performed before the
@@ -2681,9 +2681,9 @@ def _refuse_continuation(cap, acquirer_pid):
 
 
 def _release_unreturned_forked(cap, exc, what):
-    """The forked child's side of _release_unreturned (fix round 7): close only this process's
+    """The forked child's side of _release_unreturned: close only this process's
     inherited descriptor copies, under its own deferral, and note exactly what this release did
-    (fix round 9: an interrupted close is UNCONFIRMED, never reported closed)."""
+    (an interrupted close is UNCONFIRMED, never reported closed)."""
     who = "not released by this process, a forked child (pid {}) of its acquirer (pid {}): this " \
           "release removed no record and did not unlock the anchor (a flock belongs to the open " \
           "file description the child shares with its acquirer, so the child's closes cannot " \
@@ -2701,8 +2701,8 @@ def _release_unreturned_forked(cap, exc, what):
 
 def _close_inherited(cap, done):
     """Close a forked child's copies of the capability's descriptors, ownership taken first so no
-    number is closed twice; no unlink, and never an explicit unlock (fix round 7; since fix round 9
-    no path unlocks explicitly, and a child's closes cannot free a lock its acquirer still
+    number is closed twice; no unlink, and never an explicit unlock (no path
+    unlocks explicitly, and a child's closes cannot free a lock its acquirer still
     references). Records in `done` the count, the close failures, the descriptors whose close an
     interruption cut short ("unconfirmed"), and that interruption; nothing is raised here, so the
     caller reports every outcome and re-raises the interruption itself."""
@@ -2717,7 +2717,7 @@ def _close_inherited(cap, done):
 
 
 def _inherited_closes(done):
-    """What _close_inherited observed (fix round 9): "it closed only its N inherited descriptor
+    """What _close_inherited observed: "it closed only its N inherited descriptor
     copies" only when every close ran and succeeded; otherwise the failures and the UNCONFIRMED
     closes, never a close that was not confirmed."""
     if not done["problems"] and not done["unconfirmed"]:
@@ -2731,7 +2731,7 @@ def _inherited_closes(done):
 
 
 def _unreturned_note(what, cap, sink, rexc):
-    """The note on an unreturned capability's release (fix round 7), derived from the state the
+    """The note on an unreturned capability's release, derived from the state the
     release scope recorded (sink[0], a _ReleaseScope) as each step completed."""
     if not sink or not sink[0].claimed:
         return ("{} NOT released: {!r} interrupted its release before the release took ownership, "
@@ -2739,9 +2739,9 @@ def _unreturned_note(what, cap, sink, rexc):
                 "for this process's exit".format(what, rexc))
     scope = sink[0]
     facts = []
-    # Fix round 8 (codex LOW): an unlink that ran is a removal; only its durability can fail, and a
+    # An unlink that ran is a removal; only its durability can fail, and a
     # removal whose directory fsync failed is named as not durable, never as not performed.
-    # Fix round 10 (codex LOW): a removal whose directory fsync was interrupted is named with its
+    # A removal whose directory fsync was interrupted is named with its
     # durability UNCONFIRMED, and a removal that could not be observed is named as UNCONFIRMED.
     def _shown(n):
         if n in scope.undurable:
@@ -2755,7 +2755,7 @@ def _unreturned_note(what, cap, sink, rexc):
     shown = [_shown(n) for n in scope.removed]
     qualified = scope.undurable or scope.durability_unconfirmed
     if scope.removal_unconfirmed:
-        # Fix round 11 (codex and claude LOW): with an UNCONFIRMED removal, each record's own
+        # With an UNCONFIRMED removal, each record's own
         # outcome is rendered separately (removed, removal UNCONFIRMED, or not removed), so a record
         # whose removal is unconfirmed is never also reported as not removed.
         parts = []
@@ -2781,8 +2781,8 @@ def _unreturned_note(what, cap, sink, rexc):
         records = "neither of its records removed (any that remains waits for a later " \
             "recover=True)"
     facts.append(records)
-    # Fix round 9 (codex MED 2): the lock is given up only by closing the anchor descriptor, so
-    # that close's recorded outcome is the lock clause; (codex LOW) a close an interruption cut
+    # The lock is given up only by closing the anchor descriptor, so
+    # that close's recorded outcome is the lock clause; a close an interruption cut
     # short after its ownership was cleared is UNCONFIRMED, never reported as closed.
     anchor = scope.retained[2] if scope.retained else None
     if scope.anchor_close == "":
@@ -2794,7 +2794,7 @@ def _unreturned_note(what, cap, sink, rexc):
         facts.append("its anchor descriptor's close reported a failure ({}), so the release of its "
                      "hold on the lock is NOT confirmed".format(scope.anchor_close))
     else:
-        # Fix round 10 (claude LOW): only what was recorded; a close of the anchor descriptor may
+        # Only what was recorded; a close of the anchor descriptor may
         # still have run, unattributed, among the general closes.
         facts.append("the release of its hold on the lock NOT confirmed (no anchor-close step "
                      "was recorded)")
@@ -2824,21 +2824,21 @@ def _unreturned_note(what, cap, sink, rexc):
 
 
 def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid):
-    """The body of acquire_operation, run with the Python-handled signals deferred (fix round 5):
+    """The body of acquire_operation, run with the Python-handled signals deferred:
     resolve the store, take the three legs (recovering first under recover=True), and return the
     capability, or unwind everything and raise. An unwind that runs in a FORKED CHILD of the
-    acquiring process (fix round 7: a signal handler that forked where no deferral stands) closes
+    acquiring process (a signal handler that forked where no deferral stands) closes
     only the child's descriptor copies: the records and the flock's open file description are the
     acquirer's, so it neither removes a record nor unlocks the anchor. `acquirer_pid` is the
-    identity acquire_operation captured at its entry (fix round 8): the active record's owner, the
+    identity acquire_operation captured at its entry: the active record's owner, the
     capability, and the unwind's fork guard are all bound to it, and its /proc start time is read
     once, so the record and the capability name the same process.
 
-    Fix round 9 (claude MED): the flock and every mutating step taken under it run only in the
+    The flock and every mutating step taken under it run only in the
     acquiring process (_gated_step on `acquirer_pid`): the flock itself, the staging-leftover
     removals, the recovery deletes, and both publications (whose own syscalls are gated inside
     _publish_staged, before the lease publication's first), so a forked continuation is refused
-    before it locks, removes, or publishes anything. Fix round 9 (codex MED 2): the unwind never
+    before it locks, removes, or publishes anything. The unwind never
     calls flock(LOCK_UN); it gives the lock up only by closing the anchor descriptor, which frees
     nothing a forked copy still references."""
     res = _opf_store.resolve_store(store_root)
@@ -2847,30 +2847,30 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                           "a resolved store".format(store_root, res.status, res.detail))
     store_root_abs = str(res.store_root)
 
-    # D2: ONE owner holds every descriptor this acquisition opens, from the moment each open returns
+    # ONE owner holds every descriptor this acquisition opens, from the moment each open returns
     # until the capability takes them all (transfer_all) or the unwind closes them (close_all).
     owner = _FdOwner()
     anchor_fd = None
     # A record counts as created once its identity is stored (the publication's own return); the
     # lease is ATTEMPTED from just before its publication call, after which a failure is treated as
-    # potentially published (fix round 4, H1).
+    # potentially published.
     lease_attempted = False
     active_ident = lease_ident = None
     active_payload = lease_payload = None
     ctl_fd = machine_fd = None
     cap = None
     recovered = ()
-    # PR D fix 6: what this acquisition removes, recorded as each removal happens, so a failure
+    # What this acquisition removes, recorded as each removal happens, so a failure
     # after a removal reports it (on the raised OpLockError) instead of reading as nothing removed.
     recovered_operation = None
     removed_stale = []
     staging_removed = []
-    # PR D fix 7: the names this acquisition itself creates and then unlinks (its publications'
+    # The names this acquisition itself creates and then unlinks (its publications'
     # retired staging names, a failed publication's cleanup, the unwind's removal of its own new
     # records), so every unlink it performs is reported.
     created_removed = []
     try:
-        # Fix round 4: no nested try statement follows the first adoption in this body. A try
+        # No nested try statement follows the first adoption in this body. A try
         # statement's own line lies outside every enclosing exception range, so an interruption
         # landing on it would skip the unwind below; each fallible step is therefore a small
         # fail-closed helper whose own frame holds its try.
@@ -2898,19 +2898,19 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         ctl_fd = owner.adopt(_open_control_dir(control_root_fd, control_root_desc))
         # Ownership of the control-root descriptor is cleared BEFORE its close, so a failing close
         # (Linux has released the number even then) can never lead the unwind to close whatever
-        # unrelated file has since been given the same number (codex HIGH 4).
+        # unrelated file has since been given the same number.
         owner.close(control_root_fd, "cannot close the control-root descriptor ({})")
 
         anchor_fd = owner.adopt(_open_anchor(ctl_fd))
-        # Fix round 9: the flock too is taken only in the acquiring process, so a forked
+        # The flock too is taken only in the acquiring process, so a forked
         # continuation takes no lock, on the shared open file description or on its own.
         _gated_step(acquirer_pid, "take the anchor lock", _flock_exclusive, anchor_fd)
         anchor_ident = _post_lock_anchor_check(ctl_fd, anchor_fd)
 
-        # D1: under the held flock no cooperating publisher is mid-publication, so a staging leftover
+        # Under the held flock no cooperating publisher is mid-publication, so a staging leftover
         # is garbage from a process killed mid-publication: removed, never a finding. This runs
         # BEFORE stale classification, so a record killed between its os.link and its staging
-        # unlink is back to a single link when the recovery gate reads it. Fix round 9: only in
+        # unlink is back to a single link when the recovery gate reads it. Only in
         # the acquiring process (a forked continuation is refused here, having removed nothing).
         _gated_step(acquirer_pid, "remove the active record's staging leftovers",
                     _remove_staging_garbage, ctl_fd, ACTIVE_NAME, "active record", staging_removed)
@@ -2933,7 +2933,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             # recover=True: CONFIRM the recorded holder is dead before any delete (never seize a
             # possibly-live, cross-host, or malformed holder, nor a lone owner-less lease). The gate
             # returns the identity and bytes it read for each record so the delete below removes ONLY
-            # those same objects with those same bytes (DEF-1: a record swapped to a live holder's
+            # those same objects with those same bytes (a record swapped to a live holder's
             # after the liveness read is preserved, never seized). The gate also refuses an active
             # record paired with ANOTHER checkout's still-existing machine store (a sibling git
             # worktree), so the shared active record is never deleted out from under a lease this
@@ -2947,7 +2947,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             # delete between the two leaves a LONE ACTIVE RECORD, which still carries the owner
             # identity the liveness gate reads, so a later recover=True re-confirms the dead holder
             # and clears it. The reverse order stranded a lone owner-less lease that no recovery
-            # could ever confirm dead. Fix round 9: each delete runs only in the acquiring process.
+            # could ever confirm dead. Each delete runs only in the acquiring process.
             if stale_lease:
                 _gated_step(acquirer_pid, "remove the stale lease", _recover_stale, machine_fd,
                             _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes, "lease",
@@ -2981,8 +2981,8 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             _opf_check.LEASE_TOP_KEYS, "lease")
 
         # Each record's descriptor is adopted straight into this acquisition's owner (owner=owner),
-        # so no transfer step lies between a publication and the unwind's ownership of it. Fix
-        # round 9: both publications are bound to the acquirer's entry pid (publisher_pid), so the
+        # so no transfer step lies between a publication and the unwind's ownership of it.
+        # Both publications are bound to the acquirer's entry pid (publisher_pid), so the
         # lease's publication refuses a forked continuation before its first syscall.
         active_fd, active_ident = _create_control_file(ctl_fd, ACTIVE_NAME, active_payload,
                                                        "active record", owner=owner,
@@ -3018,7 +3018,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         owner.transfer_all()               # the capability now owns every retained descriptor
         return cap
     except BaseException as exc:
-        # PR D fix 16: the removal-report tagging runs after this process's own releases (in a
+        # The removal-report tagging runs after this process's own releases (in a
         # forked child, after closing its inherited descriptors, never freeing the acquirer's
         # records or lock), so tagging cannot skip a release; failure-message building inside
         # the unwind is covered by the allocation-failure disclosure in _opf_record.py's module
@@ -3033,9 +3033,9 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             owner.adopt_all((cap._machine_fd, cap._ctl_fd, cap._anchor_fd, cap._active_fd,
                              cap._lease_fd))
         if os.getpid() != acquirer_pid:
-            # Fix round 7: a forked child shares the acquirer's open file descriptions (the flock
+            # A forked child shares the acquirer's open file descriptions (the flock
             # belongs to one) and its records; it closes only its own descriptor copies, which
-            # cannot free the lock the acquirer still references (fix round 9: release by close).
+            # cannot free the lock the acquirer still references (release by close).
             problems, unconfirmed, interrupt = owner.close_all()
             if isinstance(exc, OpLockError):
                 _tag_removals(exc, removed_stale, recovered_operation, staging_removed,
@@ -3056,19 +3056,19 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             raise
         # Unwind in reverse leg order; every unwind failure is collected, never swallowed, and
         # every step (each leg, each close) is its own guarded step, so neither a
-        # failure nor an interruption in one step skips the rest. D3: the active record is removed
+        # failure nor an interruption in one step skips the rest. The active record is removed
         # ONLY after the lease is: if the lease cannot be removed, the owner-bearing active record
         # is KEPT, so a later recover=True can confirm the holder dead and clear both, rather than a
         # lone owner-less lease that no recovery can ever clear. A leg's raw OSError is collected
-        # like an OpLockError (DEF-3, defence in depth over _verified_unlink's own normalization).
-        # H1 (fix round 4): a lease publication that FAILED or was INTERRUPTED is treated as
+        # like an OpLockError (defence in depth over _verified_unlink's own normalization).
+        # A lease publication that FAILED or was INTERRUPTED is treated as
         # potentially published, because its own cleanup can fail or be interrupted after the link.
         # The active record is then deleted only once the lease name is OBSERVED absent (under the
         # held flock, where stale classification found no lease before this publication); a lease
         # still present, or a presence check that cannot answer, KEEPS the owner-bearing active
         # record beside it, never leaving the lone owner-less lease no recovery can clear.
         unwind = []
-        # PR D fix 7: the unwind's own verified removals, reported (as created_removed) on the
+        # The unwind's own verified removals, reported (as created_removed) on the
         # error this unwind raises.
         unwound = []
         interrupt = None
@@ -3080,7 +3080,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                 _verified_unlink(machine_fd, _opf_check.LEASE_NAME, lease_ident, lease_payload,
                                  "lease (unwind)", lease_outcome, unwound)
             except _UnlinkNotDurable as uexc:
-                # Fix round 8: the lease name WAS removed but not durably; the conservative order
+                # The lease name WAS removed but not durably; the conservative order
                 # still keeps the active record, and the message says which step failed.
                 unwind.append(str(uexc))
                 lease_removed = False
@@ -3089,7 +3089,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                 unwind.append(str(uexc))
                 lease_removed = False
             except BaseException as uexc:
-                # Fix round 10 (codex LOW): the interruption is held (re-raised after the full
+                # The interruption is held (re-raised after the full
                 # unwind) and the lease leg's outcome is taken from what _verified_unlink observed:
                 # a leg that completed is a durable removal; a lease observed gone after an
                 # interrupted fsync has its durability UNCONFIRMED (the active record is then kept,
@@ -3130,7 +3130,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                 except BaseException as uexc:
                     if interrupt is None:
                         interrupt = uexc
-        # Fix round 9 (codex MED 2): NO flock(LOCK_UN). The flock belongs to the anchor's open file
+        # NO flock(LOCK_UN). The flock belongs to the anchor's open file
         # description and is freed when its LAST descriptor closes, so the lock is given up by
         # closing the anchor descriptor (first, so its outcome is known), and a forked copy that
         # still references the description keeps it held: never a second holder.
@@ -3151,7 +3151,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             interrupt = close_interrupt
         created_removed.extend("its own new " + n for n in unwound)
         if isinstance(exc, OpLockError):
-            # PR D fix 7: tagged after the unwind, so its own removals are reported too.
+            # Tagged after the unwind, so its own removals are reported too.
             _tag_removals(exc, removed_stale, recovered_operation, staging_removed,
                           created_removed)
         if interrupt is not None and isinstance(exc, Exception):
@@ -3180,17 +3180,17 @@ def release_operation(cap):
     interruption landing anywhere in the release's own bookkeeping still ends released and closed).
     It re-checks the retained anchor and control-directory
     identities, then removes the LEASE first (a verified, fsynced unlink) and ONLY THEN the active
-    record: if the lease cannot be removed, the owner-bearing active record is KEPT (D3), so a later
+    record: if the lease cannot be removed, the owner-bearing active record is KEPT, so a later
     recover=True can confirm the holder dead and clear both. Each unlink is verified byte for byte
     (a mismatch refuses and PRESERVES the file). Every retained descriptor is then closed by that
     enclosing cleanup, the anchor's first, each as its own guarded step that runs whatever happened
-    before it; the lock is given up by that close alone, never by flock(LOCK_UN) (fix round 9:
-    release by close), so a forked copy of the anchor descriptor keeps it held until it too is
+    before it; the lock is given up by that close alone, never by flock(LOCK_UN)
+    (release by close), so a forked copy of the anchor descriptor keeps it held until it too is
     closed. The
     collected failures raise as one OpLockError, and an interruption (a BaseException that is not
     an Exception) raised anywhere in the release propagates as itself after that cleanup. The
     anchor itself is NEVER unlinked. Everything after the acquirer check runs with the
-    Python-handled signals deferred (fix round 5), so a signal arriving meanwhile is delivered
+    Python-handled signals deferred, so a signal arriving meanwhile is delivered
     only after the release has ended released and closed.
     """
     if not isinstance(cap, OpCapability):
@@ -3207,38 +3207,38 @@ def release_operation(cap):
         raise OpLockError("release refused: caller (pid {}) is not the recorded acquirer "
                           "(pid {})".format(pid, cap._acquirer_pid))
 
-    # D2 plus fix round 4 (H2): the whole release lifecycle runs inside an ENCLOSING cleanup (a
+    # One owner per unit of work, and the whole release lifecycle runs inside an ENCLOSING cleanup (a
     # context manager armed before any state changes), whose exit takes sole ownership of the
     # retained descriptors, marks the capability released, and closes every descriptor (the
-    # anchor's close giving up the lock, fix round 9), whatever interrupted the body. An
+    # anchor's close giving up the lock), whatever interrupted the body. An
     # interruption before the scope is entered changes nothing (the capability stays unreleased, so
     # a retry still works); one anywhere inside it still ends released and closed. The body is ONE
     # call on the with statement's own line, deliberately: a line boundary between the body's end
     # and the scope's exit lies outside every exception range, so an interruption landing there
     # would skip the exit. Every boundary of the body belongs to _release_legs's own frame instead.
-    # Fix round 5: the scope, its exit (the closes) included, runs with the Python-handled signals
+    # The scope, its exit (the closes) included, runs with the Python-handled signals
     # DEFERRED, so a signal-raised exception is delivered only after the release has ended released
     # and closed; the same one-call-per-with shape holds for the deferral.
     with _SignalDeferral(): _release_scoped(cap)
 
 
 def _release_scoped(cap, sink=None):
-    """The deferred part of release_operation (fix round 5): the enclosing _ReleaseScope around the
+    """The deferred part of release_operation: the enclosing _ReleaseScope around the
     release legs, as one call on the with statement's own line. With `sink` (a list), the scope
-    appends itself to it, so a caller can read the per-step outcome it recorded (fix round 7)."""
+    appends itself to it, so a caller can read the per-step outcome it recorded."""
     with _ReleaseScope(cap, sink) as scope: _release_legs(cap, scope)
 
 
 def _release_legs(cap, scope):
-    """The body of release_operation (fix round 4, H2), run inside its enclosing _ReleaseScope:
+    """The body of release_operation, run inside its enclosing _ReleaseScope:
     take ownership, re-check the retained identities, then the lease leg and (only once the lease
     is gone) the active leg, each failure collected into scope.errors and each removal recorded in
-    scope.removed once its verified unlink returned. In a forked child of the acquirer (fix round
-    7) no leg runs: the records are the acquirer's. Fix round 8: taking ownership is the
+    scope.removed once its verified unlink returned. In a forked child of the
+    acquirer no leg runs: the records are the acquirer's. Taking ownership is the
     synchronized claim, and a release that loses it (another thread's release of the same
     capability won) refuses here, holding no descriptor and touching nothing; a removal whose
     directory fsync failed is recorded in scope.removed AND scope.undurable, and the active leg then
-    still waits (the conservative order: the lease's removal is not yet durable). Fix round 9: a
+    still waits (the conservative order: the lease's removal is not yet durable). A
     claim taken in a forked child (scope.in_child) runs no leg either, and the scope's exit then
     refuses, stating what this release did."""
     if not scope.take_ownership():
@@ -3265,12 +3265,12 @@ def _release_legs(cap, scope):
             raise OpLockError("control directory identity changed while held")
     except (OSError, OpLockError) as exc:
         errors.append("control dir: {}".format(exc))
-    # D3: the lease first, and the active record ONLY once the lease is gone. A lease the
+    # The lease first, and the active record ONLY once the lease is gone. A lease the
     # release could not remove keeps the owner-bearing active record beside it (recoverable by a
     # later recover=True once this holder is dead); the reverse would strand a lone owner-less
     # lease that no recovery can confirm dead. A leg's raw OSError is collected like an
-    # OpLockError (DEF-3, defence in depth over _verified_unlink's own normalization).
-    # Fix round 10 (codex LOW): an interruption from a leg's unlink through its fsync is recorded
+    # OpLockError (defence in depth over _verified_unlink's own normalization).
+    # An interruption from a leg's unlink through its fsync is recorded
     # from the leg's observed outcome (_record_interrupted_removal) before it propagates unchanged,
     # so a completed unlink is never reported as a record that was not removed.
     outcome = {}
@@ -3310,8 +3310,8 @@ def _release_legs(cap, scope):
 
 
 def _record_interrupted_removal(scope, name, outcome):
-    """Record in `scope` what an interrupted release leg's verified unlink did (fix round 10, codex
-    LOW), from the outcome _verified_unlink observed: a leg that completed (the interruption landed
+    """Record in `scope` what an interrupted release leg's verified unlink did, from
+    the outcome _verified_unlink observed: a leg that completed (the interruption landed
     after it) is a removal; a name observed gone after an interruption between the unlink and the
     end of its fsync is a removal whose durability is UNCONFIRMED; a name whose state could not be
     observed is a removal that is itself UNCONFIRMED; a name observed still bound is no removal."""
@@ -3335,12 +3335,12 @@ _CLAIM_TIMEOUT = ("release refused: another release of the same capability held 
 
 
 class _ReleaseScope:
-    """The enclosing cleanup of one release (fix round 4, H2), used as a context manager.
+    """The enclosing cleanup of one release, used as a context manager.
 
     Construction changes nothing and captures nothing (so an interruption before the scope is
     entered leaves the capability unreleased and a retry still works). take_ownership, the body's
-    first step, is ONE synchronized claim (fix round 8, codex HIGH 2): under the capability's lock
-    (taken without ever blocking, fix round 9) it checks that no other release has claimed the
+    first step, is ONE synchronized claim: under the capability's lock
+    (taken without ever blocking) it checks that no other release has claimed the
     capability, captures the retained descriptors, marks the capability released, and clears its
     descriptor fields, so two releases of the same capability can never both retain its descriptor
     numbers; the loser holds nothing and refuses. It is idempotent for the scope that won, and the
@@ -3354,28 +3354,28 @@ class _ReleaseScope:
     the collected failures as notes, and a clean body with collected failures raises one
     OpLockError.
 
-    The whole scope, this exit included, runs inside release_operation's _SignalDeferral (fix round
-    5), so a signal-raised interruption cannot land in it. NOT covered (disclosed in the module
+    The whole scope, this exit included, runs inside release_operation's _SignalDeferral,
+    so a signal-raised interruption cannot land in it. NOT covered (disclosed in the module
     contract): a non-signal injection (sys.settrace, an externally set asynchronous exception) or a
     MemoryError landing inside this exit itself, outside its individually guarded close steps (for
     example at its entry, before the first guarded step), which no pure-Python handler can close.
 
-    Fix round 7: the scope acts only in the process that built the capability (`pid`, its
+    The scope acts only in the process that built the capability (`pid`, its
     _acquirer_pid, no /proc read). In a FORKED CHILD, which shares the acquirer's open file
     descriptions (a flock belongs to one), the legs remove no record and the exit closes only the
-    child's descriptor copies. Fix round 9 (codex MED 2): the exit NEVER calls flock(LOCK_UN), in
+    child's descriptor copies. The exit NEVER calls flock(LOCK_UN), in
     the acquirer or in a child: the lock is given up only by closing the anchor descriptor, which
     frees it once no other descriptor references its open file description, so a child's closes
     can never free a lock its acquirer still references. The scope also RECORDS each step as it
     completes, for a truthful outcome note: `removed` (the records whose unlink ran and removed the
-    name), `undurable` (those among them whose directory fsync then failed, fix round 8),
+    name), `undurable` (those among them whose directory fsync then failed),
     `anchor_close` (None until the anchor descriptor's close is confirmed or fails: "" once it
     closed, else the failure), `closed` (None until every close step has run, then the list of
     close failures), and `unconfirmed` (the descriptors whose close an interruption cut short
-    after ownership cleared, fix round 9: never reported closed, never closed again); `claimed` is
+    after ownership cleared, never reported closed, never closed again); `claimed` is
     True once this scope holds the claim, `in_child` once it claimed in a forked child, and
     `refused` (None, "lost", or "timeout") once a claim attempt has concluded that it cannot win.
-    Fix round 10 (codex LOW): `durability_unconfirmed` (removals whose directory fsync an
+    `durability_unconfirmed` (removals whose directory fsync an
     interruption cut short) and `removal_unconfirmed` (records whose interrupted unlink could not
     be observed), both recorded by _record_interrupted_removal."""
     __slots__ = ("_cap", "retained", "claimed", "in_child", "refused", "errors", "pid", "removed",
@@ -3401,8 +3401,8 @@ class _ReleaseScope:
             sink.append(self)
 
     def take_ownership(self):
-        """The synchronized claim (fix round 8), fork-aware and never blocking (fix round 9, codex
-        MED 1): True when this scope holds the capability (now or already), False when another
+        """The synchronized claim, fork-aware and never blocking: True
+        when this scope holds the capability (now or already), False when another
         release claimed it first or held the claim step past _CLAIM_WAIT_SECONDS. Idempotent for
         the winner, and a concluded refusal is not retried.
 
@@ -3456,8 +3456,8 @@ class _ReleaseScope:
         return True
 
     def lost_claim(self):
-        """The refusal of a release that did not win the claim (fix round 8; the bounded wait's
-        own message since fix round 9)."""
+        """The refusal of a release that did not win the claim (the bounded wait
+        has its own message)."""
         return _CLAIM_TIMEOUT if self.refused == "timeout" else _LOST_CLAIM
 
     def __enter__(self):
@@ -3465,7 +3465,7 @@ class _ReleaseScope:
 
     def __exit__(self, exc_type, exc, tb):
         if not self.take_ownership():
-            # Fix round 8: another release holds the capability; this scope retained nothing, so
+            # Another release holds the capability; this scope retained nothing, so
             # it unlocks nothing and closes nothing.
             if exc is None:
                 raise OpLockError(self.lost_claim())
@@ -3473,7 +3473,7 @@ class _ReleaseScope:
         owner = _FdOwner()
         owner.adopt_all(self.retained)
         errors = self.errors
-        # Fix round 9 (codex MED 2): NO flock(LOCK_UN), here or anywhere. The flock belongs to the
+        # NO flock(LOCK_UN), here or anywhere. The flock belongs to the
         # anchor's open file description and is freed when its LAST descriptor closes, so the lock
         # is given up by closing the anchor descriptor, first and on its own so its outcome is
         # recorded. In a forked child the same close frees nothing the acquirer still references,
@@ -3481,7 +3481,7 @@ class _ReleaseScope:
         anchor = self.retained[2]
         anchor_problems, anchor_unconfirmed, interrupt = owner.close_guarded(anchor)
         if anchor in owner:
-            # Fix round 10 (claude LOW): the close step was interrupted BEFORE its ownership was
+            # The close step was interrupted BEFORE its ownership was
             # cleared, so os.close never ran on it and the number is still ours: its one close is
             # made here, attributed, rather than left to the general closes below, whose outcome
             # the anchor clause could not name. The first interruption is kept.
@@ -3503,7 +3503,7 @@ class _ReleaseScope:
         if interrupt is None:
             interrupt = close_interrupt
         if self.in_child or os.getpid() != self.pid:
-            # Fix round 7, stated from what this release recorded (fix round 9): a forked child
+            # Stated from what this release recorded: a forked child
             # removes no record in its legs and frees no lock with its closes.
             errors.append("forked child (pid {}) of the acquirer (pid {}): this release removed "
                           "{}, and it touched only this process's own descriptor copies, whose "
@@ -3522,20 +3522,20 @@ class _ReleaseScope:
                     "; ".join(errors)))
             return False
         if errors:
-            # Fix round 7: state which records were removed (observed), rather than a fixed claim
+            # State which records were removed (observed), rather than a fixed claim
             # that mismatched files were preserved, which was false when every record was removed.
-            # Fix round 8: a removal whose directory fsync failed is named as not durable.
+            # A removal whose directory fsync failed is named as not durable.
             raise OpLockError("release completed with failures (records removed: {}): {}".format(
                 ", ".join(n + (" (removal not durable)" if n in self.undurable else "")
                           for n in self.removed) or "none", "; ".join(errors)))
         return False
 
 
-# --- OPF-D2B PR3a: the init-specific PRE-STORE holder (PD-D2B-PR3-SCHEMA decisions 1, 2, and 4) ------
+# --- The init-specific PRE-STORE holder: the shared mutex taken before the machine store exists ------
 #
 # `opf init` cannot use acquire_operation as it stands: acquisition requires a RESOLVED machine store
 # and writes the mandatory lease into it, while init is the operation that creates that store. The
-# ratified lifecycle (decision 1) is therefore: take the SHARED mutex first, through the same control
+# lifecycle is therefore: take the SHARED mutex first, through the same control
 # root, anchor, flock, owner checks, and recovery machinery as acquire_operation (never a second mutex,
 # never an already_locked assertion); let the init operation layer persist its plan and create the
 # machine directory through its own journal while ONLY the flock is held; and only then ATTACH the
@@ -3548,8 +3548,8 @@ class _ReleaseScope:
 # nested writer) accepts it; the resume substrate accepts it explicitly for the records it writes before
 # the lease exists (the plan, the milestone phases, the directory-effect journal).
 #
-# Completion versus release (decision 4): detach_init_lease is the lease-release step. It removes the
-# lease and then the active record (the D3 order) while KEEPING the flock, and hands back an InitHolder,
+# Completion versus release: detach_init_lease is the lease-release step. It removes the
+# lease and then the active record (the lease-first order) while KEEPING the flock, and hands back an InitHolder,
 # so the caller's final validation runs after the last store write (the lease removal) while the outer
 # mutex still excludes every cooperating writer; release_init_holder then closes the anchor, which gives
 # up the lock (release by close). A detach that fails partway closes everything (a full release by close,
@@ -3578,13 +3578,18 @@ class InitHolder:
     `token` is a fresh object the resume substrate binds an operation handle to, and that
     attach_init_lease copies into the minted OpCapability, so a handle begun under one holder can
     never be written through another. `spent` is set when attach_init_lease transfers the
-    descriptors into a capability; `_released` when release_init_holder has closed them."""
+    descriptors into a capability; `_released` when release_init_holder has closed them.
+    `staging_removed` names the staging leftovers its acquisition removed and `recovered` the stale
+    records its explicit recovery removed, in delete order (each empty when it removed none), so a
+    caller can name every removal the acquisition performed."""
     __slots__ = ("product_root", "machine_rel", "control_root", "token", "_ctl_fd", "_anchor_fd",
                  "_anchor_ident", "_ctl_ident", "_product_ident", "_acquirer_pid",
-                 "_acquirer_pid_start", "_released", "_spent", "_claim", "_operation", "_holder")
+                 "_acquirer_pid_start", "_released", "_spent", "_claim", "_operation", "_holder",
+                 "recovered", "staging_removed")
 
     def __init__(self, product_root, control_root, ctl_fd, anchor_fd, anchor_ident, ctl_ident,
-                 product_ident, acquirer_pid, acquirer_pid_start, operation, holder):
+                 product_ident, acquirer_pid, acquirer_pid_start, operation, holder,
+                 recovered=(), staging_removed=()):
         self.product_root = product_root
         self.machine_rel = _INIT_MACHINE_REL
         self.control_root = control_root
@@ -3601,6 +3606,8 @@ class InitHolder:
         self._claim = threading.Lock()
         self._operation = operation
         self._holder = holder
+        self.recovered = tuple(recovered)
+        self.staging_removed = tuple(staging_removed)
 
 
 def _require_acquirer(obj, what):
@@ -3691,7 +3698,10 @@ def acquire_init_operation(product_root, operation, holder=None, recover=False):
     staging-garbage sweep are acquire_operation's own. A stale active record (and, when the machine store already
     exists from an interrupted bootstrap, a stale lease) refuses without recover=True; with it, the
     confirmed-dead liveness gate and the lease-first delete order are reused verbatim. `product_root`
-    must be absolute: it is the explicit binding, never an ambient working directory."""
+    must be absolute: it is the explicit binding, never an ambient working directory. The holder
+    reports what the acquisition removed (`staging_removed`, then `recovered` in delete order), and
+    an OpLockError raised once the body has begun carries the same two reports of what it had
+    removed before it failed."""
     acquirer_pid = os.getpid()
     if not _containment.probe():
         raise OpLockError("race-free containment primitive absent; fail-closed")
@@ -3708,13 +3718,17 @@ def acquire_init_operation(product_root, operation, holder=None, recover=False):
     _validate_field("holder", holder)
     _validate_field("operation", operation)
     result = None
+    recovered, staging_removed = [], []   # appended as each removal happens, so a failure reports it
     try:
         with _SignalDeferral(): result = _acquire_init_body(root, operation, holder, recover,
-                                                              acquirer_pid)
+                                                              acquirer_pid, recovered,
+                                                              staging_removed)
         return result if os.getpid() == acquirer_pid else _refuse_init_continuation(result)
-    except BaseException:
+    except BaseException as exc:
         if result is not None and not result._released and os.getpid() == acquirer_pid:
             _close_holder_fds(result)
+        if isinstance(exc, OpLockError):
+            exc.recovered, exc.staging_removed = tuple(recovered), tuple(staging_removed)
         raise
 
 
@@ -3744,8 +3758,11 @@ def _close_holder_fds(holder):
     return problems
 
 
-def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
-    """The body of acquire_init_operation, run with the Python-handled signals deferred."""
+def _acquire_init_body(root, operation, holder, recover, acquirer_pid, recovered,
+                       staging_removed):
+    """The body of acquire_init_operation, run with the Python-handled signals deferred. Each
+    stale record it removes is appended to `recovered` and each staging leftover to
+    `staging_removed` (lists) as the removal happens."""
     owner = _FdOwner()
     anchor_fd = None
     try:
@@ -3773,12 +3790,13 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
         _gated_step(acquirer_pid, "take the anchor lock", _flock_exclusive, anchor_fd)
         anchor_ident = _post_lock_anchor_check(ctl_fd, anchor_fd)
         _gated_step(acquirer_pid, "remove the active record's staging leftovers",
-                    _remove_staging_garbage, ctl_fd, ACTIVE_NAME, "active record")
+                    _remove_staging_garbage, ctl_fd, ACTIVE_NAME, "active record", staging_removed)
         machine_fd = _probe_init_machine_dir(product_fd, root)
         if machine_fd is not None:
             owner.adopt(machine_fd)
             _gated_step(acquirer_pid, "remove the lease's staging leftovers",
-                        _remove_staging_garbage, machine_fd, _opf_check.LEASE_NAME, "lease")
+                        _remove_staging_garbage, machine_fd, _opf_check.LEASE_NAME, "lease",
+                        staging_removed)
         machine_st = None if machine_fd is None else _fstat_or_refuse(machine_fd, "machine store")
         machine_path = os.path.join(root, _INIT_MACHINE_REL)
         stale_active = _classify_stale(ctl_fd, ACTIVE_NAME, "active record")
@@ -3800,10 +3818,12 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
                                                machine_st, machine_path)
             if stale_lease:
                 _gated_step(acquirer_pid, "remove the stale lease", _recover_stale, machine_fd,
-                            _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes, "lease")
+                            _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes, "lease",
+                            recovered)
             if stale_active:
                 _gated_step(acquirer_pid, "remove the stale active record", _recover_stale, ctl_fd,
-                            ACTIVE_NAME, rec_active_ident, rec_active_bytes, "active record")
+                            ACTIVE_NAME, rec_active_ident, rec_active_bytes, "active record",
+                            recovered)
         if machine_fd is not None:
             owner.close(machine_fd, "cannot close the machine-store descriptor ({})")
         owner.close(product_fd, "cannot close the product-root descriptor ({})")
@@ -3813,7 +3833,7 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
             anchor_ident=anchor_ident, ctl_ident=(ctl_st.st_dev, ctl_st.st_ino),
             product_ident=(product_st.st_dev, product_st.st_ino), acquirer_pid=acquirer_pid,
             acquirer_pid_start=_journal._pid_start(acquirer_pid), operation=operation,
-            holder=holder)
+            holder=holder, recovered=recovered, staging_removed=staging_removed)
         owner.transfer_all()
         return result
     except BaseException as exc:
@@ -3856,7 +3876,7 @@ def attach_init_lease(holder, operation_id):
     control-directory descriptors, so the flock is never released between the two. The capability's
     op_id IS the operation id (minted bound to the operation, never mutated afterwards), and it
     carries the holder's token and product root. The holder is SPENT on success. On failure the
-    records this call published are removed in the D3 order (a lease that cannot be removed keeps the
+    records this call published are removed in the lease-first order (a lease that cannot be removed keeps the
     owner-bearing active record beside it for a later recover=True) and the holder stays live, still
     holding the flock, for the caller to release."""
     if not isinstance(holder, InitHolder):
@@ -4146,7 +4166,7 @@ def _st_with_git_lifecycle(callback):
 def _st_git_env(home):
     """A pinned, hermetic environment for FIXTURE git commands: ambient GIT_* dropped, then HOME,
     XDG_CONFIG_HOME, and the global/system config files bound into the fixture so no ambient user
-    or system git config can affect a fixture command (LOW-5). The production rev-parse keeps
+    or system git config can affect a fixture command. The production rev-parse keeps
     HOME/XDG_CONFIG_HOME (scrubbing only GIT_*), so self_test() also pins those in os.environ."""
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
     env["HOME"] = home
@@ -4158,7 +4178,7 @@ def _st_git_env(home):
 
 
 def _st_git(args, cwd, env):
-    # F-367: no DETACHED auto-gc/auto-maintenance may outlive a fixture commit and churn .git
+    # No DETACHED auto-gc/auto-maintenance may outlive a fixture commit and churn .git
     # while a later read or the teardown rmtree traverses it.
     proc = subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + args,
                           cwd=cwd, env=env, stdout=subprocess.PIPE,
@@ -4382,7 +4402,7 @@ def _t_c2_anchor_validation(d, env):
 
 
 def _t_c2_dirperms(d, env):
-    """T-c2-dirperms (LOW-4): a group- or other-writable CONTROL DIRECTORY refuses acquisition (the
+    """T-c2-dirperms: a group- or other-writable CONTROL DIRECTORY refuses acquisition (the
     directory ownership/permission vector, distinct from the anchor-file bits in T-c2)."""
     root = _st_git_store(d, "repo", env)
     cap = acquire_operation(root, "op")
@@ -4491,7 +4511,7 @@ def _t_c5_stale_and_recovery(d, env):
 
 
 def _t_r3_live_recover_refuses(d, env):
-    """T-r3-live-recover-refuses (the gemini-CRITICAL regression): a LIVE holder's records exposed
+    """T-r3-live-recover-refuses (a split-anchor seizure regression): a LIVE holder's records exposed
     under a FRESH/free anchor are NEVER seized under recover=True. The anchor is split BOTH ways (a
     fresh anchor via unlink of mutex.lock, and via rename aside); recovery must REFUSE and delete
     nothing, so no two-holder state can arise."""
@@ -4551,13 +4571,13 @@ def _t_r3_dead_recover_proceeds(d, env):
 
 
 def _t_x6_removal_reports(d, env):
-    """T-x6 (PR D fix 6): an acquisition reports exactly what it removed, on its capability and on
+    """T-x6: an acquisition reports exactly what it removed, on its capability and on
     the OpLockError of a failure after a removal: the staging leftovers (staging_removed), the
     stale records in delete order (recovered) and their confirmed-dead holder's recorded operation
     (recovered_operation). A publication failing after the recovery deletes carries all three, so
     a caller never words that refusal as having removed nothing; an ordinary acquisition, and a
     contended one that fails before any removal, report no stale-record, recorded-operation or
-    staging-leftover removal (PR D fix 11: created_removed still names an ordinary acquisition's
+    staging-leftover removal (created_removed still names an ordinary acquisition's
     retirement of its own two publication staging names, T-x7, and is empty on the contended
     refusal, which fails before any publication)."""
     root = _st_git_store(d, "repo", env)
@@ -4618,7 +4638,7 @@ def _t_x6_removal_reports(d, env):
 
 
 def _t_x7_every_unlink_reported(d, env):
-    """T-x7 (PR D fix 7): EVERY unlink an acquisition performs is reported. A capability names the
+    """T-x7: EVERY unlink an acquisition performs is reported. A capability names the
     retired staging names of its own two publications (created_removed); a lease publication that
     fails after the active record's publishes reports that staging retirement and the unwind's
     removal of the new active record; a forked-continuation refusal carries the capability's reports
@@ -4711,7 +4731,7 @@ def _t_r3_crosshost_refuses(d, env):
 def _t_c6_c7_med6_verified_release(d, env):
     """T-c6/T-c7 plus T-med6: a tampered record is refused and PRESERVED at release, with error
     collection (not an early raise). A tampered LEASE keeps the owner-bearing active record beside
-    it (round 3, D3: the active record is removed only once the lease is gone); a tampered ACTIVE
+    it (the active record is removed only once the lease is gone); a tampered ACTIVE
     record still lets the lease leg run. The preserved leftovers are cleared by explicit manual
     intervention (the tampered lease no longer pairs with its active record, so recover=True
     refuses it)."""
@@ -4724,7 +4744,7 @@ def _t_c6_c7_med6_verified_release(d, env):
     msg = _st_expect_refusal(release_operation, cap, needle="lease leg")
     assert "active leg: KEPT" in msg, msg
     assert os.path.exists(lease), "a mismatched lease must be PRESERVED"
-    assert os.path.exists(active), "the active record is KEPT while its lease remains (D3)"
+    assert os.path.exists(active), "the active record is KEPT while its lease remains (lease-first order)"
     os.unlink(lease)                                     # manual clear of the preserved pair
     os.unlink(active)
     cap = acquire_operation(root, "op")
@@ -4739,9 +4759,9 @@ def _t_c6_c7_med6_verified_release(d, env):
 
 
 def _t_c6_diffinode(d, env):
-    """T-c6-diffinode (LOW-4): a same-BYTES but DIFFERENT-INODE lease swap under a held capability
+    """T-c6-diffinode: a same-BYTES but DIFFERENT-INODE lease swap under a held capability
     is refused and PRESERVED at release (identity is device+inode, not bytes), and the active
-    record is KEPT beside it (round 3, D3)."""
+    record is KEPT beside it."""
     root = _st_git_store(d, "repo", env)
     cap = acquire_operation(root, "op")
     lease = _st_lease_path(root)
@@ -4754,7 +4774,7 @@ def _t_c6_diffinode(d, env):
     os.chmod(lease, 0o644)
     _st_expect_refusal(release_operation, cap, needle="device/inode")
     assert os.path.exists(lease), "a byte-identical but inode-swapped lease is PRESERVED"
-    assert os.path.exists(active), "the active record is KEPT while its lease remains (D3)"
+    assert os.path.exists(active), "the active record is KEPT while its lease remains (lease-first order)"
     os.unlink(lease)                                     # manual clear of the preserved swap
     os.unlink(active)
     cap = acquire_operation(root, "op")
@@ -4762,7 +4782,7 @@ def _t_c6_diffinode(d, env):
 
 
 def _t_toml_class_read_control(d, env):
-    """T-toml-class (F-TOML-BARE-VALUEERROR-CLASS): a control record whose parse overflows (tomllib
+    """T-toml-class (a parse RecursionError is refused like a ValueError): a control record whose parse overflows (tomllib
     raises RecursionError, a RuntimeError, not a ValueError), and one carrying an over-long integer
     literal (a bare ValueError); _read_control_record must refuse both with OpLockError, never let
     either escape. The overflow is INJECTED (tomllib.loads raises RecursionError on a marked, otherwise
@@ -4801,7 +4821,7 @@ def _t_toml_class_read_control(d, env):
 
 
 def _t_h4_quote(d, env):
-    """T-h4-quote (LOW-4): a holder carrying a double-quote (allowed: it is outside the control
+    """T-h4-quote: a holder carrying a double-quote (allowed: it is outside the control
     class) round-trips through the checked encoder to a schema-valid lease with the value intact,
     distinct from the control-character refusal (T-low1)."""
     root = _st_git_store(d, "repo", env)
@@ -5027,7 +5047,7 @@ def _t_e3_enclosing_git_unreadable(d, env):
 def _t_travanc_search_only_ancestor(d, env):
     """T-travanc: a store with NO .git beneath a SEARCH-ONLY ancestor (execute permission, no read;
     the owner-bound spelling of the root-owned 0711 scratch shape is 0111) acquires and releases:
-    the ancestor sweep (_enclosing_git_toplevel) and the D4 recorded-machine-store probe open such
+    the ancestor sweep (_enclosing_git_toplevel) and the recorded-machine-store probe open such
     a directory in the shared walk's TRAVERSE mode (O_PATH, search permission only) instead of
     refusing EACCES. FAILS WITHOUT THE FIX (the mutant: either walker reverted to the readable-final
     walk raises EACCES at the shielded ancestor and the acquisition refuses). Needs a uid the mode
@@ -5048,7 +5068,7 @@ def _t_travanc_search_only_ancestor(d, env):
     try:
         cap = acquire_operation(store, "op")
         release_operation(cap)
-        # The D4 probe: a recorded machine store directly beneath the search-only ancestor is still
+        # The recorded-machine-store probe: a machine store directly beneath the search-only ancestor is still
         # confirmed PRESENT (its parent is only traversed), never refused as unconfirmable.
         st = os.stat(store)
         assert _recorded_machine_store_present(
@@ -5333,7 +5353,7 @@ def _t_e8_nested_close_failure(d, env):
 
 
 def _t_e9_own_repo_bare(d, env):
-    """T-e9 (D2): an own-repository store with literal core.bare=true refuses when git's
+    """T-e9: an own-repository store with literal core.bare=true refuses when git's
     --show-toplevel query fails, before the path comparison. Removing only that comparison does
     not bypass this refusal; bypassing the own-repository toplevel query does. Unsetting the
     option on the SAME fixture is the positive control: it acquires and releases."""
@@ -5356,7 +5376,7 @@ def _t_e9_own_repo_bare(d, env):
 
 
 def _t_e10_own_repo_worktree(d, env):
-    """T-e10 (D2): literal core.worktree pointing at a sibling directory refuses by the
+    """T-e10: literal core.worktree pointing at a sibling directory refuses by the
     toplevel cross-check. Without that comparison the refusal assertion must fail
     (acquire_operation did not refuse). Unsetting the option on the SAME fixture is the
     positive control: it acquires and releases."""
@@ -5383,7 +5403,7 @@ def _t_e10_own_repo_worktree(d, env):
 
 
 def _t_c3_companion(d, env):
-    """T-c3-companion (LOW-4): two product roots companion-pointed at ONE store contend on the
+    """T-c3-companion: two product roots companion-pointed at ONE store contend on the
     single shared anchor; the lease is rooted at the RESOLVED store root, not at either product
     root."""
     store = _st_git_store(d, "store", env)
@@ -5438,10 +5458,10 @@ def _t_c13_fifo_control_names(d, env):
 
 
 def _t_c8_c14_scope_out(d, env):
-    """T-c8/T-c14: the nested-lock surface and the phases subtree are REMOVED (PR3 scope-out),
+    """T-c8/T-c14: the nested-lock surface and the phases subtree are REMOVED (out of scope for this module),
     and no cross-lock ordering claim survives in the module's public docstrings."""
-    assert not hasattr(OpCapability, "acquire_journal_lock"), "nested journal lock is PR3"
-    assert not hasattr(OpCapability, "acquire_index_lock"), "nested index lock is PR3"
+    assert not hasattr(OpCapability, "acquire_journal_lock"), "nested journal lock is out of scope here"
+    assert not hasattr(OpCapability, "acquire_index_lock"), "nested index lock is out of scope here"
     for name in (None, "OpCapability", "acquire_operation", "release_operation"):
         text = _optlevel.source_docstring(__file__, name) or ""
         assert "canonical lock order" not in text and "canonical order" not in text \
@@ -5471,7 +5491,7 @@ def _t_low1_field_validation(d, env):
 
 
 def _t_low1_torn_write(d, env):
-    """T-low1-torn (LOW-1): a forced short/failed control write leaves NO stranded file. The
+    """T-low1-torn: a forced short/failed control write leaves NO stranded file. The
     active-record write is made to write a partial prefix and then raise; the just-created record
     must be unlinked (not stranded as a crash artefact), and the lock must remain re-acquirable."""
     root = _st_git_store(d, "repo", env)
@@ -5495,7 +5515,7 @@ def _t_low1_torn_write(d, env):
 
 
 def _t_d1_swap_after_liveness_gate(d, env):
-    """T-d1 (DEF-1, BLOCKER): after the liveness gate confirms holder A dead, an anchor split lets a
+    """T-d1: after the liveness gate confirms holder A dead, an anchor split lets a
     LIVE holder B publish FRESH records at the same names before the recovery delete runs. The delete
     must remove ONLY the very objects+bytes the gate read, so B's swapped-in live records are refused
     and PRESERVED, never seized into a two-holder state. The interleave is injected by wrapping the
@@ -5537,12 +5557,12 @@ def _t_d1_swap_after_liveness_gate(d, env):
 
 
 def _t_d2_missing_holder_fields(d, env):
-    """T-d2 (DEF-2): stale records whose holder is MISSING or EMPTY must NOT be seized under
+    """T-d2: stale records whose holder is MISSING or EMPTY must NOT be seized under
     recover=True. A missing holder yields None on both records (None == None) and an empty holder
     yields "" on both ("" == ""), so the pre-fix equality would match and seize a possibly-live
     holder. Both the completed-schema keyset check and the required-non-empty-holder check refuse,
     with a CONFIRMED-DEAD reaped-child owner so ONLY that validation stands in the way. Sub-cases E
-    and F (round 3, D5) keep the ACTIVE record valid and break ONLY the lease holder, so the LEASE
+    and F keep the ACTIVE record valid and break ONLY the lease holder, so the LEASE
     keyset and non-empty-holder checks are the ones exercised."""
     root = _st_git_store(d, "repo", env)
     cap = acquire_operation(root, "op")
@@ -5612,7 +5632,7 @@ def _t_d2_missing_holder_fields(d, env):
                        needle="stale active record schema is not the supported version")
     assert os.path.exists(active) and os.path.exists(lease), "an unsupported schema is never seized"
 
-    # Sub-cases E and F (round 3, D5): the ACTIVE record is complete, valid, and confirmed dead, and
+    # Sub-cases E and F: the ACTIVE record is complete, valid, and confirmed dead, and
     # ONLY the LEASE holder is missing (E) or empty (F). Sub-cases A and B broke BOTH records, so the
     # active-record check refused first and the lease checks were never reached; here the
     # active-record validation passes and the needle names the LEASE check that refuses.
@@ -5632,8 +5652,8 @@ def _t_d2_missing_holder_fields(d, env):
 
 
 def _t_d3_eio_release_and_unwind(d, env):
-    """T-d3 (DEF-3): a raw OS failure (EIO) inside a verified-unlink leg is normalized to OpLockError
-    and collected, so the release still decides the active leg (round 3, D3: KEPT beside a lease it
+    """T-d3: a raw OS failure (EIO) inside a verified-unlink leg is normalized to OpLockError
+    and collected, so the release still decides the active leg (KEPT beside a lease it
     could not remove) and still runs the final anchor unlock, instead of a raw OSError skipping the
     unlock and _released and leaking the fds. Exercised
     for BOTH the release path and the acquire unwind path. os.read is faulted ONLY for the control
@@ -5661,7 +5681,7 @@ def _t_d3_eio_release_and_unwind(d, env):
             raise OSError(errno.EIO, "simulated read failure (T-d3)")
         return saved_read(fd, n)
 
-    # Phase 1: EIO in RELEASE. The lease leg fails, so the active record is KEPT (D3); the anchor is
+    # Phase 1: EIO in RELEASE. The lease leg fails, so the active record is KEPT (lease-first order); the anchor is
     # unlocked and _released set.
     cap = acquire_operation(root, "op")
     os.read = _eio_read
@@ -5672,7 +5692,7 @@ def _t_d3_eio_release_and_unwind(d, env):
     assert "lease leg" in msg and "active leg" in msg, msg
     assert cap._released is True, "the unlock/close/_released must run despite the EIO legs"
     assert os.path.exists(active) and os.path.exists(lease), \
-        "both records PRESERVED: the lease leg failed, so the active record was KEPT (D3)"
+        "both records PRESERVED: the lease leg failed, so the active record was KEPT (lease-first order)"
     os.unlink(active)
     os.unlink(lease)
     cap = acquire_operation(root, "op")    # re-acquirable: the anchor was truly unlocked
@@ -5695,7 +5715,7 @@ def _t_d3_eio_release_and_unwind(d, env):
         mod.OpCapability = saved_cap
     assert "lease (unwind)" in msg and "active record (unwind)" in msg, msg
     assert os.path.exists(active) and os.path.exists(lease), \
-        "the EIO-failed lease unwind leg PRESERVED the lease and KEPT the active record (D3)"
+        "the EIO-failed lease unwind leg PRESERVED the lease and KEPT the active record (lease-first order)"
     os.unlink(active)                      # manual clear of the preserved records
     os.unlink(lease)
     cap = acquire_operation(root, "op")    # anchor unlocked + fds closed by the unwind finally
@@ -5703,7 +5723,7 @@ def _t_d3_eio_release_and_unwind(d, env):
 
 
 def _t_d4_gitdir_trailing_space(d, env):
-    """T-d4 (DEF-4): git's answer (_git_view) is split on its newline record terminators ONLY, never
+    """T-d4: git's answer (_git_view) is split on its newline record terminators ONLY, never
     on arbitrary trailing whitespace, so a common git dir whose real name ends in a space is honoured
     and the control root is not silently redirected to a stripped decoy. Witnessed end to end over
     a REAL git store whose separate git dir is named "common " beside a decoy "common": the buggy
@@ -5728,12 +5748,12 @@ def _t_d4_gitdir_trailing_space(d, env):
 
 
 def _t_d5_failed_cleanup(d, env):
-    """T-d5 (DEF-5): when the torn-record cleanup ITSELF cannot remove the file, the write failure
+    """T-d5: when the torn-record cleanup ITSELF cannot remove the file, the write failure
     AND the stranded leftover are both surfaced (the leftover named), never swallowed into a bare
     'cannot write' that falsely implies a clean unwind. Witnessed by hardlinking the just-created
     torn active record's staging file during the failing write so cleanup finds a link count it did
     not make and leaves it in place; the buggy code returned only 'cannot write' with the strand
-    unnamed. (Round 3, D1: the torn bytes live in the staging file, never at the final name.)"""
+    unnamed. (Atomic publication: the torn bytes live in the staging file, never at the final name.)"""
     root = _st_git_store(d, "repo", env)
     cap = acquire_operation(root, "op")    # create the control dir + anchor first
     release_operation(cap)
@@ -5765,7 +5785,7 @@ def _t_d5_failed_cleanup(d, env):
 
 
 def _st_staging_leftovers(dir_path, name):
-    """The staging leftovers (D1 staging names) for the control record `name` under dir_path."""
+    """The staging leftovers (atomic-publication staging names) for the control record `name` under dir_path."""
     return sorted(e for e in os.listdir(dir_path) if _is_staging_name(e, name))
 
 
@@ -6134,8 +6154,8 @@ def _t_r2_5_machine_walk_close(d, env):
 
 
 def _t_f3_1_sigkill_mid_publication(d, env):
-    """T-f3-1 (round 3, D1: atomic publication). A RECOVERING process (a crashed holder's records
-    are left behind first, as in the codex counterexample) is SIGKILLed mid-publication: after a
+    """T-f3-1 (atomic publication). A RECOVERING process (a crashed holder's records
+    are left behind first, as in the recovery counterexample) is SIGKILLed mid-publication: after a
     partial write of the ACTIVE record's staging file, after a partial write of the LEASE's staging
     file, and after the active record's os.link but before its staging name is retired. In every
     case a later recover=True must SUCCEED: the final name holds either nothing or the complete
@@ -6194,7 +6214,7 @@ def _t_f3_1_sigkill_mid_publication(d, env):
 
 
 def _t_f3_2_lease_removal_failure_keeps_active(d, env):
-    """T-f3-2 (round 3, D3: release order). When removing the LEASE fails (EIO injected into the
+    """T-f3-2 (release order). When removing the LEASE fails (EIO injected into the
     lease unlink only), the owner-bearing ACTIVE record is KEPT, on the release path and on the
     acquisition-unwind path alike, so once the holder has exited a recover=True confirms it dead and
     clears BOTH records. Before the fix the active record was deleted anyway, leaving a lone
@@ -6261,7 +6281,7 @@ def _t_f3_2_lease_removal_failure_keeps_active(d, env):
 
 
 def _t_f3_3_control_root_close_fd_reuse(d, env):
-    """T-f3-3 (round 3, D2, codex HIGH 4: descriptor REUSE). The control-root descriptor's close is
+    """T-f3-3 (descriptor REUSE). The control-root descriptor's close is
     made to really close and then report EIO, and its number is immediately reused for an unrelated
     /dev/null descriptor. The acquisition must refuse WITHOUT closing that unrelated descriptor:
     ownership is cleared before the close. Before the fix the unwind closed the number a second
@@ -6337,9 +6357,9 @@ def _st_expect_interrupt(fn, *args, **kwargs):
 
 
 def _t_f3_4_release_interruptions(d, env):
-    """T-f3-4 (round 3, D2, codex HIGH 3: release sites). A KeyboardInterrupt lands (1) during the
-    release's anchor identity re-check, (2) at the step that gives up the lock (the LOCK_UN until
-    fix round 9; since then the anchor descriptor's close, interrupted right after the kernel
+    """T-f3-4 (release sites). A KeyboardInterrupt lands (1) during the
+    release's anchor identity re-check, (2) at the step that gives up the lock (formerly the
+    LOCK_UN; now the anchor descriptor's close, interrupted right after the kernel
     closed it), and (3) right after the first retained record descriptor closes. Each time it
     propagates AS ITSELF, but only after EVERY retained descriptor is closed (no descriptor-count
     delta) and the anchor flock is free. Before the fix the first two leaked all five retained
@@ -6376,7 +6396,7 @@ def _t_f3_4_release_interruptions(d, env):
     os.unlink(active)                      # manual clear: the interruption preceded the legs
     os.unlink(lease)
 
-    # Site 2: the step that gives up the lock. Fix round 9 (release by close) removed the LOCK_UN
+    # Site 2: the step that gives up the lock. Release by close removed the LOCK_UN
     # this site used to interrupt; the lock is given up by the anchor descriptor's close, which is
     # interrupted here right after the kernel really closed it.
     cap = acquire_operation(root, "op")
@@ -6425,7 +6445,7 @@ def _t_f3_4_release_interruptions(d, env):
 
 
 def _t_f3_5_acquire_interruptions(d, env):
-    """T-f3-5 (round 3, D2, codex HIGH 3: acquisition sites). A KeyboardInterrupt lands during (1)
+    """T-f3-5 (acquisition sites). A KeyboardInterrupt lands during (1)
     the control-directory validation, (2) the anchor validation, (3) the control-directory fsync
     after the anchor's creation, and (4) the cleanup of a failed control-record write. Each time it
     propagates AS ITSELF with no descriptor-count delta, and the lock is re-acquirable afterwards
@@ -6523,7 +6543,7 @@ def _t_f3_5_acquire_interruptions(d, env):
 
 
 def _t_f3_6_shared_walker_handoff(d, env):
-    """T-f3-6 (round 3, D2, codex MEDIUM 5: the shared no-follow walker). Through acquire_operation,
+    """T-f3-6 (the shared no-follow walker). Through acquire_operation,
     the close of an intermediate parent descriptor in _opf_store._open_dir_nofollow is made to
     really close and then report EIO. The refusal must leak NO descriptor: the walker owns the
     child before it closes the parent and closes the child on failure. Before the fix the newly
@@ -6571,7 +6591,7 @@ def _t_f3_6_shared_walker_handoff(d, env):
 
 
 def _t_f3_7_stale_pairing_recorded_path(d, env):
-    """T-f3-7 (round 3, D4: stale pairing by the RECORDED path). A dead holder's active record whose
+    """T-f3-7 (stale pairing by the RECORDED path). A dead holder's active record whose
     [machine_store] identity differs from the recovering checkout's is recoverable when the RECORDED
     machine store is gone: (a) this checkout's machine store was destroyed and recreated (a new
     inode at the same path; the lease went with it), and (b) the sibling worktree that acquired was
@@ -6626,7 +6646,7 @@ def _t_f3_7_stale_pairing_recorded_path(d, env):
 
 
 def _t_f3_8_empty_nodename_refuses(d, env):
-    """T-f3-8 (round 3, D6): on a host whose nodename is EMPTY, acquisition refuses before any
+    """T-f3-8: on a host whose nodename is EMPTY, acquisition refuses before any
     filesystem action (with the default and with an explicit holder), because recovery refuses an
     owner with no usable nodename and could never clear the record. Before the fix the module wrote
     nodename = "" and the record became unrecoverable."""
@@ -6687,7 +6707,7 @@ def _st_arm_interrupt(funcs, k):
 
 
 def _t_f4_1_failed_lease_publication(d, env):
-    """T-f4-1 (fix round 4, H1: a failed publication is potentially published). In a holder child,
+    """T-f4-1 (a failed publication is potentially published). In a holder child,
     the LEASE publication is (a) interrupted the instant its os.link completes, (b) interrupted the
     instant its staging unlink completes (the two syscall-completed boundaries), (c) reported as
     failed by os.link although the link was made, (d) failed at the directory fsync with its own
@@ -6777,7 +6797,7 @@ def _t_f4_1_failed_lease_publication(d, env):
 
 
 def _t_f4_2_release_interruption_sweep(d, env):
-    """T-f4-2 (fix round 4, H2: release bookkeeping). ONE KeyboardInterrupt is injected by line
+    """T-f4-2 (release bookkeeping). ONE KeyboardInterrupt is injected by line
     trace at EVERY line event of the release body in turn (the verifier's technique; repeats
     counted). Each time the interruption propagates as itself and then EITHER nothing changed (the
     capability is still unreleased and a retry releases it) OR the release still ended released,
@@ -6818,16 +6838,16 @@ def _t_f4_2_release_interruption_sweep(d, env):
 
 
 def _t_f4_3_acquire_interruption_sweep(d, env):
-    """T-f4-3 (fix round 4, M and H1: acquisition and publication). ONE KeyboardInterrupt is
+    """T-f4-3 (acquisition and publication). ONE KeyboardInterrupt is
     injected by line trace at EVERY line event of the acquisition and publication bodies in turn,
     repeats counted, including the boundary right after the staging descriptor is adopted and the
     boundaries right after the lease's os.link and staging unlink complete. Each time the
     interruption propagates as itself with no descriptor-count delta, the anchor free, and NO
     record left behind (in particular never a lone lease). Before the fix the staging descriptor
-    leaked at the boundary after its adoption (M), and the link and staging-unlink boundaries of
-    the lease stranded a lone lease with its active record deleted (H1).
+    leaked at the boundary after its adoption, and the link and staging-unlink boundaries of
+    the lease stranded a lone lease with its active record deleted.
 
-    Fix round 5 extends the scope to the smaller helpers codex named in round 4 (the machine-store
+    The scope extends to the smaller helpers (the machine-store
     walk, the anchor open, the staging-leftover listing, the record read, the verified unlink, the
     recorded-store probe, and the shared no-follow walker), with a REAL signal (os.kill from the
     line trace, delivered by the interpreter through a KeyboardInterrupt handler) at every line
@@ -6870,7 +6890,7 @@ def _t_f4_3_acquire_interruption_sweep(d, env):
 
 
 def _st_arm_signal(funcs, k):
-    """Arm ONE REAL SIGINT at the k-th line event of the own frames of `funcs` (fix round 5). Unlike
+    """Arm ONE REAL SIGINT at the k-th line event of the own frames of `funcs`. Unlike
     _st_arm_interrupt, the line-trace hook does not raise: it sends the signal with os.kill and
     returns normally, so the interpreter itself runs the installed handler at its next check point,
     exactly as it delivers an asynchronous Ctrl-C. Returns the state dict; the caller disarms with
@@ -6930,8 +6950,8 @@ def _st_in_child(body):
 
 def _st_named(*names):
     """The module-level functions (or Class.method) among `names` that exist in this module, so a
-    sweep list written for this round still runs against an earlier round's copy (the fail-before
-    evidence), where a name introduced by this round is simply absent. That tolerance is only
+    sweep list written for the current code still runs against an earlier copy (the fail-before
+    evidence), where a name introduced since is simply absent. That tolerance is only
     for fail-before copies: T-named validates every call in the CURRENT module's source."""
     found = []
     g = globals()
@@ -7012,7 +7032,7 @@ def _st_section_codes():
     """The code objects of the frames that HOLD the deferred critical sections: the acquisition body
     and the scoped release, beneath one of which every critical step runs. A signal whose handler
     runs with one of them on the stack was delivered INSIDE a critical section. On an earlier
-    round's copy (no such split) the outer functions hold the sections instead."""
+    copy (no such split) the outer functions hold the sections instead."""
     held = _st_named("_acquire_body", "_release_scoped")
     if not held:
         held = [acquire_operation, release_operation]
@@ -7020,7 +7040,7 @@ def _st_section_codes():
 
 
 def _st_signal_sweep(root, funcs, prepare, invoke, settle, check, ctl=None):
-    """The real-signal sweep engine (fix round 5); run it INSIDE a child (_st_in_child). A SIGINT
+    """The real-signal sweep engine; run it INSIDE a child (_st_in_child). A SIGINT
     handler is installed that raises KeyboardInterrupt and records whether it ran inside a critical
     section (_st_section_codes). For each function in `funcs`, its own line events are counted on
     one clean run (repeats counted; settle() disposes of that run's result), and then, for each
@@ -7172,8 +7192,8 @@ def _st_recovery_scenario(root, gone_machine_path):
 
 
 def _st_f4_3_signal_helpers(d, root):
-    """T-f4-3's real-signal extension (fix round 5), run in a child: every line event of each helper
-    codex named in round 4, in the scenario that reaches it."""
+    """T-f4-3's real-signal extension, run in a child: every line event of each smaller
+    helper T-f4-3 covers, in the scenario that reaches it."""
     gone = os.path.join(d, "recorded-machine-store-gone")
     swept = _st_signal_sweep(root, _st_named("_open_machine_dir", "_open_anchor",
                                              "_remove_staging_garbage"),
@@ -7188,7 +7208,7 @@ def _st_f4_3_signal_helpers(d, root):
 
 
 def _t_f5_1_signal_acquisition(d, env):
-    """T-f5-1 (fix round 5: signals are DEFERRED across the acquisition). In a child whose SIGINT
+    """T-f5-1 (signals are DEFERRED across the acquisition). In a child whose SIGINT
     handler raises KeyboardInterrupt, a REAL SIGINT is sent (os.kill from a line trace, delivered by
     the interpreter) at every line event of the acquisition body, the publication, and every helper
     they call on the clean path, repeats counted. Each time the KeyboardInterrupt must be delivered
@@ -7208,13 +7228,13 @@ def _t_f5_1_signal_acquisition(d, env):
                       "_machine_store_table", "_handoff",
                       "_gated_step") + [_opf_store.resolve_store]
     if not _st_named("_acquire_body"):
-        funcs.insert(0, acquire_operation)  # an earlier round's copy: the body is the outer function
+        funcs.insert(0, acquire_operation)  # an earlier copy: the body is the outer function
     failure = _st_in_child(lambda: _st_signal_sweep(root, funcs, *_st_acquire_scenario(root)))
     assert failure is None, failure
 
 
 def _t_f5_2_signal_release(d, env):
-    """T-f5-2 (fix round 5: signals are DEFERRED across the release). As T-f5-1, over every line
+    """T-f5-2 (signals are DEFERRED across the release). As T-f5-1, over every line
     event of the scoped release, its legs, the release scope's exit, and the verified unlink's
     checks: the KeyboardInterrupt is delivered exactly once, only after the release ended released
     with both records removed, no descriptor leaked, and the anchor free."""
@@ -7227,13 +7247,13 @@ def _t_f5_2_signal_release(d, env):
                       "_FdOwner.close_all", "_FdOwner.adopt_all", "_FdOwner.close_guarded",
                       "_FdOwner.close")
     if not _st_named("_release_scoped"):
-        funcs.insert(0, release_operation)  # an earlier round's copy: the scope is in the outer one
+        funcs.insert(0, release_operation)  # an earlier copy: the scope is in the outer one
     failure = _st_in_child(lambda: _st_signal_sweep(root, funcs, *_st_release_scenario(root)))
     assert failure is None, failure
 
 
 def _t_f5_3_signal_recovery(d, env):
-    """T-f5-3 (fix round 5: signals are DEFERRED across recovery). As T-f5-1, under recover=True
+    """T-f5-3 (signals are DEFERRED across recovery). As T-f5-1, under recover=True
     over a confirmed-dead holder's paired records whose recorded machine store is gone, at every
     line event of the liveness gate, the record read, the schema validation, the recorded-store
     probe (and the shared walker it uses), and the verified recovery deletes: the KeyboardInterrupt
@@ -7248,7 +7268,7 @@ def _t_f5_3_signal_recovery(d, env):
                       "_recorded_machine_store_present", "_recover_stale", "_recover_stale_verify")
     funcs.append(_opf_store._open_dir_nofollow)
     if not _st_named("_acquire_body"):
-        funcs.insert(0, acquire_operation)  # an earlier round's copy: recovery is in the outer one
+        funcs.insert(0, acquire_operation)  # an earlier copy: recovery is in the outer one
     failure = _st_in_child(lambda: _st_signal_sweep(root, funcs,
                                                     *_st_recovery_scenario(root, gone)))
     assert failure is None, failure
@@ -7314,7 +7334,7 @@ def _t_f5_4_restrictive_umask(d, env):
 
 
 def _t_f5_4_body(d, env):
-    """T-f5-4 (fix round 5, codex MEDIUM 3: publication under a restrictive umask). Under umask
+    """T-f5-4 (publication under a restrictive umask). Under umask
     0o444 and under 0o777, in a child: (a) a holder acquires and is SIGKILLed, and a recover=True
     from a normal process must then succeed; (b) a holder acquires and releases normally, which must
     succeed; (c) on a FRESH store, the first-ever acquisition (creating the control directory and
@@ -7366,8 +7386,8 @@ def _t_f5_4_body(d, env):
 
 def _st_kill_when_present(path):
     """Arm a line trace over EVERY frame that SIGKILLs this process at the first line event at which
-    `path` exists (no-follow): the first interpreter step after the syscall that created it (fix
-    round 6). Run it only in a child."""
+    `path` exists (no-follow): the first interpreter step after the syscall that created it.
+    Run it only in a child."""
     def local(frame, event, arg):
         if event == "line" and os.path.lexists(path):
             os.kill(os.getpid(), signal.SIGKILL)
@@ -7382,7 +7402,7 @@ def _t_f6_1_restartable_init(d, env):
 
 
 def _t_f6_1_body(d, env):
-    """T-f6-1 (fix round 6, codex MEDIUM 1 and claude LOW: restartable initialization). Under umask
+    """T-f6-1 (restartable initialization). Under umask
     0o444 and under 0o777, a first acquisition is SIGKILLed at the first interpreter step after the
     syscall that CREATES (a) the control directory and (b) the mutex anchor, before its mode is
     corrected, leaving an object whose owner permissions the umask masked (0311 or 0000 for the
@@ -7484,7 +7504,7 @@ def _t_f6_1_body(d, env):
 
 
 def _t_f6_2_unreturned_release(d, env):
-    """T-f6-2 (fix round 6, codex MEDIUM 2: the unreturned capability's release). In a child, a REAL
+    """T-f6-2 (the unreturned capability's release). In a child, a REAL
     SIGINT sent during the publication is deferred and delivered after the acquisition built its
     capability; its handler first arms a fault, then raises KeyboardInterrupt. (A) An EIO on every
     /proc read (the acquirer-identity read release_operation makes, which reads it as a differing
@@ -7562,7 +7582,7 @@ def _st_f6_2_body(root, active, lease):
                 assert _st_anchor_free(root), "the anchor must be unlocked ({})".format(case)
                 assert os.path.exists(active) and os.path.exists(lease), \
                     "a lease the release could not remove keeps its active record ({})".format(case)
-                # Fix round 7: the note is derived from the recorded steps (no record removed,
+                # The note is derived from the recorded steps (no record removed,
                 # anchor descriptor closed, descriptors closed), never a fixed "with failures" text.
                 assert "released only in part: neither of its records removed" in notes \
                     and "its anchor descriptor closed (releasing its hold on the lock), and its " \
@@ -7583,7 +7603,7 @@ def _st_f6_2_body(root, active, lease):
 
 
 def _st_state(root):
-    """The acquirer-visible lock state a forked child must never change (fix round 7): whether the
+    """The acquirer-visible lock state a forked child must never change: whether the
     anchor's flock is free, whether each control record exists, and the staging leftovers."""
     ctl = _st_ctl_dir(root)
     machine = os.path.join(root, ".working", "toml")
@@ -7593,7 +7613,7 @@ def _st_state(root):
 
 
 def _st_forking_handler(root, record):
-    """Install a SIGINT handler that FORKS (fix round 7, the codex probe). In the child the handler
+    """Install a SIGINT handler that FORKS (the forked-cleanup probe). In the child the handler
     raises KeyboardInterrupt, so the child runs whatever cleanup the interrupted code has, and must
     then leave through _st_forked_exit. In the parent the handler waits for the child to exit,
     appends (the lock state before the fork, the lock state after the child exited, the child's
@@ -7659,7 +7679,7 @@ def _st_forked_event(record, where):
 
 
 def _t_f7_1_forked_unreturned(d, env):
-    """T-f7-1 (fix round 7, codex HIGH, a round-6 regression: the unreturned release in a forked
+    """T-f7-1 (a regression guard: the unreturned release in a forked
     child). In a child, a REAL SIGINT sent during the publication is deferred and delivered after
     the capability is built; its handler FORKS. The parent's handler returns normally, so the parent
     receives the capability; the forked child's KeyboardInterrupt reaches the unreturned-capability
@@ -7703,7 +7723,7 @@ def _st_f7_1_body(root):
 
 
 def _t_f7_2_forked_cleanup_sweep(d, env):
-    """T-f7-2 (fix round 7, the class check behind codex HIGH: every release or unwind path a forked
+    """T-f7-2 (the class check behind T-f7-1: every release or unwind path a forked
     child can reach). With the deferral disabled in a child (as on a thread or platform where it is
     a no-op), a SIGINT whose handler FORKS is sent at every line event of the acquisition (the
     public entry, its body, the publication) and of the release (the public entry, the scoped
@@ -7773,7 +7793,7 @@ def _t_f7_3_setgid_restartable(d, env):
 
 
 def _t_f7_3_body(d, env):
-    """T-f7-3 (fix round 7, codex MEDIUM: restartable initialization beneath a set-group-ID
+    """T-f7-3 (restartable initialization beneath a set-group-ID
     parent). With the repository's .git at mode 02755, mkdir of the control directory inherits the
     S_ISGID bit. Under umask 0o444 and 0o777 a first acquisition is SIGKILLed at the first step
     after creating (a) the control directory (left 02311 or 02000) and (b) the anchor; recover=True
@@ -7782,7 +7802,7 @@ def _t_f7_3_body(d, env):
     crash) must also succeed. Bounds: an S_ISGID control directory whose parent is NOT set-group-ID,
     or whose group is not the parent's, is not what an interrupted creation leaves and is refused
     unchanged. Before the fix every case (a) and every fresh acquisition refused ("mode 2311 ... is
-    not what an interrupted creation leaves"). Fix round 8 (claude LOW): the group-mismatch bound
+    not what an interrupted creation leaves"). The group-mismatch bound
     runs on EVERY host, a single-group host included: where the process belongs to another group
     the directory is really chowned to it, and in every case the repair is also handed the real
     directory's no-follow stat with only its group replaced by one that is not the parent's, so
@@ -7861,7 +7881,7 @@ def _t_f7_3_body(d, env):
         _st_expect_refusal(acquire_operation, fresh, "op", needle="interrupted creation")
         assert stat.S_IMODE(os.lstat(ctl).st_mode) == 0o2311, "a refused directory is unchanged"
         os.chown(ctl, -1, own_gid)
-    # The same bound on every host (fix round 8): the stat of the real 02311 directory, with only
+    # The same bound on every host: the stat of the real 02311 directory, with only
     # its group replaced by one that is not the parent's. A positive control first shows that the
     # real stat (the parent's group) IS read as inheritance, so the refusal below is the group
     # check.
@@ -7886,21 +7906,21 @@ def _t_f7_3_body(d, env):
 
 
 def _t_f7_4_unreturned_note_truth(d, env):
-    """T-f7-4 (fix round 7, codex and claude LOW: the unreturned release's note derives from the
-    observed state; extended in fix round 9). In a child per case, a REAL SIGINT sent during the
+    """T-f7-4 (the unreturned release's note derives from the
+    observed state; extended to interrupted closes). In a child per case, a REAL SIGINT sent during the
     publication is deferred and delivered after the capability is built; its handler arms a fault,
     then raises KeyboardInterrupt. (A) An interruption at the release scope's exit ENTRY: the
     records were removed but no close ran (five descriptors retained, the anchor held), so the note
     must say the lock's release is NOT confirmed and the closes NOT completed, never that a
-    descriptor closed. (B) The anchor descriptor's close reports a failure (fix round 9: the lock is
+    descriptor closed. (B) The anchor descriptor's close reports a failure (the lock is
     given up by that close, never by LOCK_UN): both records are removed, so the note must say so
     and that the lock's release is NOT confirmed, never that a record is kept. (C) The lease leg
     fails: the note must say neither record was removed, with the anchor descriptor and the
-    descriptors closed. (D) Fix round 9 (codex LOW): the close of a record descriptor is
+    descriptors closed. (D) The close of a record descriptor is
     interrupted after ownership was cleared and before os.close ran, so it stays open: the note must
-    say that close is UNCONFIRMED, never that the descriptors closed. Before round 7 (A) claimed
-    "its anchor unlocked and its descriptors closed" and (B) claimed a kept record that did not
-    exist; before round 9 (D) claimed "its descriptors closed" with a descriptor still open."""
+    say that close is UNCONFIRMED, never that the descriptors closed. Earlier code had (A) claim
+    "its anchor unlocked and its descriptors closed" and (B) claim a kept record that did not
+    exist, and (D) claim "its descriptors closed" with a descriptor still open."""
     root = _st_git_store(d, "repo", env)
     release_operation(acquire_operation(root, "op"))
     for case in ("exit-entry", "anchor-close-fails", "lease-leg", "close-interrupted"):
@@ -7995,7 +8015,7 @@ def _st_f7_4_case(root, case):
 
 
 def _st_returning_fork_handler(root, record):
-    """Install a SIGINT handler that FORKS and RETURNS in both processes (fix round 8, the codex
+    """Install a SIGINT handler that FORKS and RETURNS in both processes (the
     forward-execution probe): the child continues whatever the parent was doing, forward, and must
     leave through _st_continuation; the parent waits for the child to exit, appends (the lock state
     before the fork, the lock state after the child exited, the child's wait status, the child's
@@ -8060,7 +8080,7 @@ def _st_continuation_event(record, where):
         and "it receives no capability" in report \
         and "it closed only its 5 inherited descriptor copies" in report, \
         "a forked continuation must receive no capability ({}): {}".format(where, report)
-    # Fix round 9 (claude LOW): the refusal states only what the refusal itself did.
+    # The refusal states only what the refusal itself did.
     assert "this refusal removed nothing" in report and "it removed no record" not in report, \
         "the refusal must claim only what it did ({}): {}".format(where, report)
     assert before == after, "the continuation changed the acquirer's lock state ({}): {} -> {}; " \
@@ -8085,9 +8105,9 @@ def _st_parent_after_continuation(root, cap, baseline, where):
 
 
 def _t_f8_1_forked_continuation(d, env):
-    """T-f8-1 (fix round 8, codex HIGH 1: a forked acquisition continuation). A SIGINT handler
+    """T-f8-1 (a forked acquisition continuation). A SIGINT handler
     FORKS and, unlike T-f7-1, RETURNS in the child, which therefore continues the acquisition
-    forward. (A) The codex route, with the production deferral standing: a secondary thread leaves
+    forward. (A) The thread route, with the production deferral standing: a secondary thread leaves
     SIGINT unblocked, and a SIGINT sent at the line that builds the capability has its handler run
     on the main thread inside the section (the disclosed multithreaded limitation). (B) With the
     deferral disabled, at every line event of the acquisition's entry, its body, the capability's
@@ -8204,7 +8224,7 @@ def _st_f8_1_sweep(root):
 
 
 def _t_f8_2_concurrent_release(d, env):
-    """T-f8-2 (fix round 8, codex HIGH 2: concurrent release of one capability). Thread B calls
+    """T-f8-2 (concurrent release of one capability). Thread B calls
     release_operation on a capability and is paused (by a trace hook that only schedules, never
     injects) as it enters the release scope, after the released check; the main thread releases
     the same capability to completion; the five descriptor numbers it freed are then REUSED for
@@ -8278,7 +8298,7 @@ def _st_f8_2_body(root):
 
 
 def _t_f8_3_not_durable_removal(d, env):
-    """T-f8-3 (fix round 8, codex LOW: a failed durability step is not an unperformed unlink). A
+    """T-f8-3 (a failed durability step is not an unperformed unlink). A
     directory fsync is failed (EIO) right after a SUCCESSFUL verified unlink: (A) in the unreturned
     capability's release (a real SIGINT during the publication, deferred, whose handler arms the
     fault), after the lease's unlink and, separately, after the active record's; (B) in a public
@@ -8396,19 +8416,19 @@ def _st_f8_3_release_and_unwind(root):
 
 
 def _t_f8_4_publication_close_truth(d, env):
-    """T-f8-4 (fix round 8, claude LOW: a publication note claims only a close that ran; extended in
-    fix round 9). On the ownerless publication path (_create_control_file with no owner, as the
+    """T-f8-4 (a publication note claims only a close that ran; extended to
+    interrupted closes). On the ownerless publication path (_create_control_file with no owner, as the
     resume substrate calls it), an interruption lands inside the descriptor's hand-over to the
     caller, after the owner has released it: (A) raised in the publishing process itself, (B)
     raised in a FORKED CHILD whose handler forked there (the publisher's hand-over completes). In
     neither case did any close run, so the note must say the descriptor was NOT closed and stays
     open, and the descriptor must be observed open; in (B) the child removes no name and the
-    publisher's record is intact. (C) Fix round 9 (codex LOW): the write is interrupted, and the
+    publisher's record is intact. (C) The write is interrupted, and the
     cleanup's close of the staging descriptor is itself interrupted after ownership was cleared and
     before os.close ran: the descriptor stays open (observed), so the note must say that close is
-    UNCONFIRMED, never that the descriptor closed. Before round 8 (A) noted "the torn record was
-    removed and its descriptor closed" with the descriptor still open, and (B) noted "it closed only
-    its own descriptor copy"; before round 9 (C) noted "its descriptor closed"."""
+    UNCONFIRMED, never that the descriptor closed. Earlier code had (A) note "the torn record was
+    removed and its descriptor closed" with the descriptor still open, (B) note "it closed only
+    its own descriptor copy", and (C) note "its descriptor closed"."""
     failure = _st_in_child(lambda: _st_f8_4_body(d))
     assert failure is None, failure
 
@@ -8497,13 +8517,13 @@ def _st_f8_4_body(d):
 
 
 def _t_f8_5_setgid_contract(d, env):
-    """T-f8-5 (fix round 8, codex LOW: the set-group-ID contract matches the implementation). The
+    """T-f8-5 (the set-group-ID contract matches the implementation). The
     implementation: with .git at 0755 (not set-group-ID) and an existing control directory at
     02755 (owner permissions intact), acquisition and release succeed and leave 02755 unchanged,
     because the directory is not repaired and its validation refuses only group or other write.
     The contract must describe exactly that: the inheritance condition is the REPAIR's, and an
-    intact directory's special bits are accepted as they are. The behavioural half passes on round
-    7 as well (it pins the behaviour the corrected text describes); the contract half fails there,
+    intact directory's special bits are accepted as they are. The behavioural half passes on the
+    earlier code as well (it pins the behaviour the corrected text describes); the contract half fails there,
     whose text claimed the bit was accepted ONLY as mkdir's inheritance."""
     root = _st_git_store(d, "repo", env)
     release_operation(acquire_operation(root, "op"))
@@ -8523,7 +8543,7 @@ def _t_f8_5_setgid_contract(d, env):
 
 
 def _st_reap_bounded(pid, deadline):
-    """Reap the forked child `pid` by `deadline` (a time.monotonic() value, fix round 9): a child
+    """Reap the forked child `pid` by `deadline` (a time.monotonic() value): a child
     still running then is SIGKILLed and reaped. Returns (its wait status, whether it hung)."""
     while True:
         done, status = os.waitpid(pid, os.WNOHANG)
@@ -8537,8 +8557,8 @@ def _st_reap_bounded(pid, deadline):
 
 
 def _st_collect(pid, rfd, seconds):
-    """Collect a forked child's report from `rfd` and its wait status within `seconds` (fix round
-    9), so a hang is a failure, never a stalled self-test: a child that has not ended by then is
+    """Collect a forked child's report from `rfd` and its wait status within `seconds`,
+    so a hang is a failure, never a stalled self-test: a child that has not ended by then is
     SIGKILLed and reported hung. Returns (its wait status, its report, whether it hung)."""
     import select
     deadline = time.monotonic() + seconds
@@ -8562,7 +8582,7 @@ def _st_collect(pid, rfd, seconds):
 
 
 def _st_in_child_bounded(body, seconds):
-    """_st_in_child with a bound (fix round 9): a child that has not ended within `seconds` is
+    """_st_in_child with a bound: a child that has not ended within `seconds` is
     SIGKILLed and reported as hung, never waited on forever. Returns None when body() returned,
     else the failure the child reported."""
     import traceback
@@ -8594,7 +8614,7 @@ def _st_in_child_bounded(body, seconds):
 
 
 def _st_bounded_fork_handler(record, probe, seconds, after=None):
-    """Install a SIGINT handler that FORKS and RETURNS in both processes (fix round 9; the returning
+    """Install a SIGINT handler that FORKS and RETURNS in both processes (the returning
     fork of _st_returning_fork_handler, bounded). The child continues whatever the parent was
     doing, forward, and must leave through _st_forward. The parent collects the child within
     `seconds` (a hung child is killed and reported, never waited on forever), appends (probe()
@@ -8623,7 +8643,7 @@ def _st_forward(top, record, fn, *args, **kwargs):
     """Run fn(*args, **kwargs) in the process `top`, returning or raising as usual. A forked
     continuation (any other pid) reports how the call ended, "RETURNED" and the result's type, or
     "RAISED: " and the exception with its notes, through record["wfd"], and exits 0 without running
-    the test's own code further (fix round 9)."""
+    the test's own code further."""
     try:
         result = fn(*args, **kwargs)
     except BaseException as exc:
@@ -8643,8 +8663,8 @@ def _st_forward(top, record, fn, *args, **kwargs):
 
 def _st_arm_counted(funcs, k, when=None):
     """Arm ONE REAL SIGINT at the k-th line event of the own frames of `funcs`, counting only the
-    events at which when() holds (every event when it is None); k 0 counts without sending (fix
-    round 9). Returns the state dict ("seen", "fired"); the caller disarms with
+    events at which when() holds (every event when it is None); k 0 counts without sending.
+    Returns the state dict ("seen", "fired"); the caller disarms with
     sys.settrace(None) in a finally."""
     codes = set(f.__code__ for f in funcs)
     state = {"seen": 0, "fired": False}
@@ -8663,7 +8683,7 @@ def _st_arm_counted(funcs, k, when=None):
 
 
 def _st_fork_event(record, where):
-    """The single fork event of one attempt (fix round 9), asserted to have ended by itself, in
+    """The single fork event of one attempt, asserted to have ended by itself, in
     time, with exit 0. Returns (probe before the fork, probe after the child ended, its report)."""
     assert len(record["events"]) == 1, "exactly one fork ({}): {}".format(where, record["events"])
     before, after, status, report, hung = record["events"][0]
@@ -8675,7 +8695,7 @@ def _st_fork_event(record, where):
 
 
 def _st_settle(root, baseline, where):
-    """After one fork attempt (fix round 9): no descriptor leaked and the anchor free; any record or
+    """After one fork attempt: no descriptor leaked and the anchor free; any record or
     staging leftover a continuation's forward steps left is then cleared (the property under test
     is asserted by the caller, not here)."""
     assert _st_open_fds() == baseline, "no descriptor may leak ({})".format(where)
@@ -8691,7 +8711,7 @@ def _st_settle(root, baseline, where):
 
 
 def _st_flock_semantics(d):
-    """The flock semantics release-by-close rests on (fix round 9), witnessed on the fixture's own
+    """The flock semantics release-by-close rests on, witnessed on the fixture's own
     filesystem: the lock belongs to the open file description, a dup or a forked child's inherited
     copy keeps it held after the holder's own descriptor closes, and the LAST close frees it."""
     path = os.path.join(d, "flock-semantics")
@@ -8735,7 +8755,7 @@ def _st_flock_semantics(d):
 
 
 def _t_f9_1_claim_fork(d, env):
-    """T-f9-1 (fix round 9, codex MED 1: a fork during a contended release claim). Thread B releases
+    """T-f9-1 (a fork during a contended release claim). Thread B releases
     a capability and is paused inside the claim step (_ReleaseScope._claim_locked) holding the
     claim lock; the main thread A releases the same capability, and a SIGINT whose handler FORKS and
     RETURNS is sent at each line of A's take_ownership in turn, each case in a bounded child with
@@ -8855,7 +8875,7 @@ def _st_f9_1_case(root, line, marks):
 
 
 def _t_f9_2_release_by_close(d, env):
-    """T-f9-2 (fix round 9, codex MED 2: a forked child can never free the acquirer's lock). The
+    """T-f9-2 (a forked child can never free the acquirer's lock). The
     flock semantics the design rests on are witnessed first (_st_flock_semantics). Then, in a
     bounded child with the deferral disabled, a SIGINT whose handler FORKS and RETURNS is sent at
     every line event of (A) the release (the public entry, the scoped release, its legs, the release
@@ -8960,7 +8980,7 @@ def _st_f9_2_body(root):
 
 
 def _t_f9_3_publication_continuation(d, env):
-    """T-f9-3 (fix round 9, claude MED: a forked publication continuation). In a bounded child with
+    """T-f9-3 (a forked publication continuation). In a bounded child with
     the deferral disabled, a SIGINT whose handler FORKS and RETURNS is sent at every line event of
     the acquisition body, the publication, and the pid-gated step, repeats counted; the parent's
     handler waits for the child, so the continuation runs forward first (the adversarial schedule).
@@ -9027,7 +9047,7 @@ def _st_f9_3_body(root):
 
 
 def _t_f9_4_recovery_continuation(d, env):
-    """T-f9-4 (fix round 9, claude LOW: a refusal claims only what it did; and the recovery deletes'
+    """T-f9-4 (a refusal claims only what it did; and the recovery deletes'
     pid gate). In a bounded child with the deferral disabled, a confirmed-dead holder's paired
     records are planted and recover=True acquires; a SIGINT whose handler FORKS and RETURNS is sent
     as the liveness gate returns, and the parent waits, so the continuation runs forward first. It
@@ -9101,7 +9121,7 @@ def _st_f9_4_body(root):
 
 def _st_f8_4_interrupted_close(dir_fd):
     """T-f8-4 (C): the write is interrupted, then the cleanup's close of the staging descriptor is
-    interrupted after ownership was cleared and before os.close ran (fix round 9, codex LOW)."""
+    interrupted after ownership was cleared and before os.close ran."""
     baseline = _st_open_fds()
     armed = {}
     saved_write = _journal._write_all
@@ -9134,7 +9154,7 @@ def _st_f8_4_interrupted_close(dir_fd):
 
 
 def _t_f9_5_write_loop_continuation(d, env):
-    """T-f9-5 (fix round 9, a class-width finding beside claude MED: a fork inside the write loop).
+    """T-f9-5 (the same fork guard applied to the write loop: a fork inside it).
     In a bounded child with the deferral disabled, a SIGINT whose handler FORKS and RETURNS is sent
     at every line event of the shared full-write loop (_journal._write_all) during an acquisition;
     the parent's handler waits, so the continuation finishes the loop first. The loop is a
@@ -9197,7 +9217,7 @@ def _st_f9_5_body(root):
 
 
 def _t_f10_1_entry_continuation(d, env):
-    """T-f10-1 (fix round 10, codex MED: a returning fork anywhere in the outer acquisition entry).
+    """T-f10-1 (a returning fork anywhere in the outer acquisition entry).
     In a bounded child, first with the production deferral and then with it disabled, a SIGINT
     whose handler FORKS and RETURNS is sent at every line event of acquire_operation's own frame,
     the public entry the earlier sweeps (T-f8-1, T-f9-3) started after; the parent's handler waits,
@@ -9312,7 +9332,7 @@ def _st_f10_1_body(root, deferral):
 
 
 def _t_f10_2_interrupted_fsync(d, env):
-    """T-f10-2 (fix round 10, codex LOW: an interrupted post-unlink fsync). A KeyboardInterrupt is
+    """T-f10-2 (an interrupted post-unlink fsync). A KeyboardInterrupt is
     raised by the directory fsync right after a SUCCESSFUL verified unlink (the fsync never ran):
     (A) in the unreturned capability's release (a real SIGINT during the publication, deferred,
     whose handler arms the fault), after the lease's unlink and, separately, after the active
@@ -9450,7 +9470,7 @@ def _st_f10_2_unwind(root):
 
 
 def _t_f10_3_anchor_close_attributed(d, env):
-    """T-f10-3 (fix round 10, claude LOW: the anchor clause states only a recorded outcome). In a
+    """T-f10-3 (the anchor clause states only a recorded outcome). In a
     child, a REAL SIGINT sent during the publication is deferred and delivered after the capability
     is built; its handler arms a non-signal injection (a line trace, the self-tests' own
     mechanism) at the first line of _FdOwner.close, then raises KeyboardInterrupt. The injection
@@ -9491,7 +9511,7 @@ def _st_f10_3_body(root):
 
 
 def _t_f11_1_unobservable_removal(d, env):
-    """T-f11-1 (fix round 11, codex and claude LOW: each record's outcome rendered on its own). As
+    """T-f11-1 (each record's outcome rendered on its own). As
     T-f10-2 (A), but the interrupted directory fsync is followed by a FAILING no-follow stat of the
     record's name (EIO), so the release cannot observe whether the unlink removed it (the
     `unlinked is None` path): for the lease, and separately for the active record. The note must
@@ -9647,6 +9667,7 @@ def _t_i4_crash_and_recovery(d, env):
             assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME]
             h = acquire_init_operation(root, "opf-init")
             release_init_holder(h)
+            assert (h.recovered, h.staging_removed) == ((), ()), "an ordinary acquisition removes nothing"
             continue
         assert os.path.exists(os.path.join(_st_ctl_dir(root), ACTIVE_NAME))
         assert os.path.exists(_st_lease_path(root))
@@ -9654,6 +9675,7 @@ def _t_i4_crash_and_recovery(d, env):
         h = acquire_init_operation(root, "opf-init", recover=True)
         assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME]
         assert not os.path.exists(_st_lease_path(root))
+        assert h.recovered == ("lease", "active record"), h.recovered
         release_init_holder(h)
     # A holder that died after attaching, whose machine store was then removed: the stale active
     # record's recorded machine store is gone, so recovery reaches the liveness gate with NO machine
@@ -9672,7 +9694,51 @@ def _t_i4_crash_and_recovery(d, env):
     _st_expect_refusal(acquire_init_operation, root, "opf-init", needle="stale")
     h = acquire_init_operation(root, "opf-init", recover=True)
     assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME], "the stale active record is cleared"
+    assert h.recovered == ("active record",), h.recovered
     release_init_holder(h)
+    # A failure after a removal reports it: a planted lease staging leftover and the crashed
+    # holder's lease are removed, then the active record's removal fails, so the refusal names the
+    # leftover and the lease (never nothing removed); the next recovery clears the lone record.
+    pid = os.fork()
+    if pid == 0:
+        try:
+            h = acquire_init_operation(root, "opf-init")
+            if not os.path.isdir(os.path.join(root, ".working", "toml")):
+                _st_make_machine_dir(root)
+            attach_init_lease(h, _ST_OP_ID)
+            os._exit(0)
+        except BaseException:
+            os._exit(3)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status
+    staging = _staging_name(_opf_check.LEASE_NAME)
+    with open(os.path.join(os.path.dirname(_st_lease_path(root)), staging), "wb") as fh:
+        fh.write(b"torn")
+    mod = sys.modules[__name__]
+    saved = mod._recover_stale
+
+    def _active_fails(dir_fd, name, *a, **k):
+        if name == ACTIVE_NAME:
+            raise OpLockError("synthetic active record removal failure after the lease's")
+        return saved(dir_fd, name, *a, **k)
+
+    mod._recover_stale = _active_fails
+    failed = None
+    try:
+        acquire_init_operation(root, "opf-init", recover=True)
+    except OpLockError as exc:
+        failed = exc
+    finally:
+        mod._recover_stale = saved
+    assert failed is not None, "the synthetic removal failure must refuse"
+    assert (getattr(failed, "recovered", None), getattr(failed, "staging_removed", None)) \
+        == (("lease",), ("lease staging leftover " + staging,)), failed
+    assert not os.path.exists(_st_lease_path(root)), "the lease was removed before the failure"
+    h = acquire_init_operation(root, "opf-init", recover=True)
+    release_init_holder(h)
+    assert (h.recovered, h.staging_removed) == (("active record",), ()), (h.recovered,
+                                                                          h.staging_removed)
+    assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME], "the lone active record is cleared"
 
 
 def _t_i5_holder_identity_bound(d, env):
@@ -9722,40 +9788,40 @@ def self_test():
 
 def self_test_isolated():
     """Regression roster (plan section (e)): the resolving-roster check T-named,
-    the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
-    round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
-    T-r3-crosshost-refuses), the PR D fix-6 removal-report witness (T-x6: an acquisition reports
-    what it removed, on its capability and on a failure after a removal) and its fix-7 extension
-    (T-x7: every unlink it performs, the forked-continuation refusal included), the LOW-4 coverage tests
+    the T-c/T-crit/T-med/T-low roster PLUS the
+    recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
+    T-r3-crosshost-refuses), the removal-report witness (T-x6: an acquisition reports
+    what it removed, on its capability and on a failure after a removal) and its extension
+    (T-x7: every unlink it performs, the forked-continuation refusal included), the coverage tests
     (T-c2-dirperms, T-c3-companion, T-h4-quote,
-    T-c6-diffinode), the LOW-1 torn-write witness (T-low1-torn), and the recovery-hardening
-    witnesses T-d1 to T-d5 (DEF-1 to DEF-5), and the round-2 witnesses T-r2-1 to T-r2-5 (recovery
+    T-c6-diffinode), the torn-write witness (T-low1-torn), and the recovery-hardening
+    witnesses T-d1 to T-d5, and the witnesses T-r2-1 to T-r2-5 (recovery
     delete order, cross-worktree pairing, store-root close, interrupted write, walk hand-off), and
-    the fix-round-3 witnesses T-f3-1 to T-f3-8 (atomic publication under SIGKILL, lease-first
+    the witnesses T-f3-1 to T-f3-8 (atomic publication under SIGKILL, lease-first
     release order, descriptor reuse, release and acquisition interruptions, the shared walker
-    hand-off, stale pairing by the recorded path, the empty-nodename refusal), and the fix-round-4
+    hand-off, stale pairing by the recorded path, the empty-nodename refusal), and the
     witnesses T-f4-1 to T-f4-3 (failed or interrupted lease publication, and line-trace
-    interruption sweeps over release and acquisition, T-f4-3 extended in round 5 to the smaller
-    helpers with a real signal), and the fix-round-5 witnesses T-f5-1 to T-f5-4 (a real signal at
+    interruption sweeps over release and acquisition, T-f4-3 extended to the smaller
+    helpers with a real signal), and the witnesses T-f5-1 to T-f5-4 (a real signal at
     every line of the acquisition, the release, and recovery is deferred until after the section,
-    and records published under a restrictive umask), and the fix-round-6 witnesses T-f6-1 and
+    and records published under a restrictive umask), and the witnesses T-f6-1 and
     T-f6-2 (restartable initialization after a kill inside the creation window, and the unreturned
-    capability's release with no identity re-read), and the fix-round-7 witnesses T-f7-1 to T-f7-4
+    capability's release with no identity re-read), and the witnesses T-f7-1 to T-f7-4
     (a forked child never releases, unlocks, or removes what its acquirer holds, including at every
     line of the acquisition and release with no deferral; restartable initialization beneath a
     set-group-ID parent; the unreturned release's note states only the steps that completed), and
-    the fix-round-8 witnesses T-f8-1 to T-f8-5 (a forked continuation receives no capability; a
+    the witnesses T-f8-1 to T-f8-5 (a forked continuation receives no capability; a
     concurrent release of one capability is refused holding nothing; a removal whose directory
     fsync failed is reported as not durable, never as not performed; a publication note claims only
-    a close that ran; the set-group-ID contract matches the implementation), and the fix-round-9
+    a close that ran; the set-group-ID contract matches the implementation), and the
     witnesses T-f9-1 to T-f9-5 (a fork during a contended release claim never waits on the
     inherited lock; a forked continuation of a release or unwind never frees the acquirer's lock,
     which is released only by closing; a forked publication continuation never strands a lone
     owner-less lease; a forked recovery continuation deletes nothing and its refusal claims only
-    its own acts; a fork inside the write loop never publishes a doubled record; and, fix round 10,
+    its own acts; a fork inside the write loop never publishes a doubled record; and
     T-f10-1 to T-f10-3: a fork anywhere in the acquisition entry after its identity capture gets no
     capability, an interrupted post-unlink fsync is noted as an unconfirmed removal, and an
-    interrupted anchor close is retried and attributed; T-f11-1, fix round 11: an unobservable
+    interrupted anchor close is retried and attributed; T-f11-1, an unobservable
     interrupted removal is noted per record, never as not removed; T-f7-4 and T-f8-4
     extended to interrupted closes), and T-e1 to T-e10 (a nested store anchors at its enclosing
     repository's common git dir, shared across worktrees; malformed, ambiguous, or unreadable
@@ -9769,7 +9835,7 @@ def self_test_isolated():
     are removed), each a witness against a named defect. A
     missing containment primitive or git binary, or a fixture base inside a git repository, is a
     REFUSAL (non-zero), never a clean skip. The git fixtures are pinned
-    hermetically (LOW-5). The restrictive-umask witnesses (T-f5-4, T-f6-1, T-f7-3) run under a
+    hermetically. The restrictive-umask witnesses (T-f5-4, T-f6-1, T-f7-3) run under a
     fixture root probed to honour the umask (a default ACL on TMPDIR overrides it), falling back to
     /dev/shm; with no such root they print SKIP with the reason, as T-e3 does under uid 0, and the
     run ends SELF-TEST INCOMPLETE with exit 3, never a pass."""
@@ -9952,7 +10018,7 @@ def self_test_isolated():
         print("REFUSED: {}; the non-git fixtures cannot run hermetically there (fail-closed, "
               "non-zero)".format(enclosed))
         return 2
-    # LOW-5: pin the git fixtures AND the production rev-parse hermetically. Bind HOME and
+    # Pin the git fixtures AND the production rev-parse hermetically. Bind HOME and
     # XDG_CONFIG_HOME (which the production rev-parse keeps, scrubbing only GIT_*) plus
     # GIT_CONFIG_GLOBAL/SYSTEM into the per-run temp dir, and restore them afterwards, so no ambient
     # user or system git config can affect a fixture command or the module's own rev-parse.

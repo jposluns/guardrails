@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Leak-denylist gate for the COMMIT-MESSAGE and PR-METADATA channels (F-144).
+"""Leak-denylist gate for the COMMIT-MESSAGE and PR-METADATA channels.
 
 check_leaks.py scans FILE CONTENT; this gate covers the channels files never touch: the commit messages in
 a PR's base..head range, the PR title and body (scanned as one composed blob so a denied term split across

@@ -7,7 +7,7 @@ delivered-prefix-obligations and floor-profile-obligations (FIRST_PIN_DEMO_KEYS)
 AGENTS.md digest, with the delivered list a non-empty subset of the floor list (_demo_superset_findings).
 This generator BUILDS that file from the candidate's own AGENTS.md and rule corpus and CHECKS it with the
 consumer's own _demo_superset_findings before writing, so the obligation lists are derived, never authored
-(PD-FIRST-PIN-FLOOR-PROFILE, option 1).
+by hand.
 
 Obligation identifier. An obligation is a RULE, named by its `corpus-id` front-matter field in
 .aiqt/core/rules/*.md: the id gen_rules.load_corpus validates as unique (CID_RE), the id

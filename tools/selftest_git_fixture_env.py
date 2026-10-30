@@ -496,6 +496,15 @@ CONFIG_EXCLUSIONS = {
             "A bare launch is a real timing measurement of the shipped hooks, not a self-test:"
             " minutes at its defaults, and the hooks' own git calls drop GIT_CONFIG_NOSYSTEM by"
             " design; its self-test stays in this roster as the hook-latency-selftest suite step.",
+        ("tools/check_internal_names.py",):
+            "A bare launch is the real gate over this checkout, whose tracked-file read drops the"
+            " GIT_* environment but deliberately keeps the caller's on-disk configuration (where"
+            " safe.directory trust for the checkout lives), so a poisoned caller home fails it"
+            " closed by design; its self-test stays in this roster twice: as the"
+            " internal-names-selftest suite step, whose launcher sanitizes the child environment,"
+            " and as the direct self-test launch CONFIG_DIRECT_SELFTESTS keeps, so each poisoned"
+            " lane still enters that self-test's own entry point without any launcher sanitizing"
+            " the environment first.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
@@ -509,6 +518,16 @@ CONFIG_EXCLUSIONS = {
         ("tools/check_release_delta.py", "--self-test"):
             "Real-checkout archives intentionally retain caller trust configuration.",
     },
+}
+
+# A registered suite step whose BARE runner is excluded above would otherwise leave the runner's own
+# self-test entry point outside these lanes entirely: the execution gate deliberately sanitizes its
+# child environment, so the suite step never exposes that entry point to a poisoned caller. Each entry
+# here names the direct self-test launch the roster keeps for such a suite (keyed by suite id), so the
+# poisoned lanes still run the entry point itself, which must isolate its own git reads; a stale entry
+# (its suite no longer in any roster, or its launch missing from the built roster) refuses the roster.
+CONFIG_DIRECT_SELFTESTS = {
+    "internal-names-selftest": ("tools/check_internal_names.py", "--self-test"),
 }
 
 
@@ -534,7 +553,10 @@ def _registered_selftests(root=ROOT):
     --self-test, --selftest or --suite flag, not fixture-building behaviour.
     Other entry modes, unregistered entries and conditional reachability are outside
     this inventory. Manifest runners also run directly, because the
-    execution gate deliberately sanitizes its child environment.
+    execution gate deliberately sanitizes its child environment; a suite
+    whose bare runner is excluded keeps the direct self-test launch its
+    CONFIG_DIRECT_SELFTESTS entry names instead, so the lanes still enter
+    that runner's own self-test entry point under the poison.
     """
     from check_ci_parity import (
         adapt_standalone_runner, extract_local, extract_ci,
@@ -603,6 +625,12 @@ def _registered_selftests(root=ROOT):
                 raise ValueError("unparseable suite invocation: {!r}".format(argv))
             if identity not in CONFIG_EXCLUSIONS["all"]:
                 commands.add((runners[argv[2]],))
+                direct = CONFIG_DIRECT_SELFTESTS.get(argv[2])
+                if direct is not None:
+                    commands.add(direct)
+    for suite_id, direct in CONFIG_DIRECT_SELFTESTS.items():
+        if suite_id not in runners or direct not in commands:
+            raise ValueError("stale direct self-test entry: {!r}".format(suite_id))
     identities = {_command_identity(argv) for argv in commands}
     for lane, exclusions in CONFIG_EXCLUSIONS.items():
         for argv, reason in exclusions.items():
@@ -1117,9 +1145,9 @@ CONFIG_MEMBER_BOUNDS = {
     # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case, READ FROM
     # SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
     # member's legs' bounds, one 10 s cleanup deadline per leg, the flip and its cleanup where it
-    # runs, and the 350 s vector allowance), 12732 s (opf-closure-a), 8775 s (b), 7780 s (c),
-    # 8570 s (d) and 9526 s (e), and below each CI job's worst case (20793 s, 17800 s, 15810 s,
-    # 17390 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
+    # runs, and the 350 s vector allowance), 13322 s (opf-closure-a), 10585 s (b), 7780 s (c),
+    # 9840 s (d) and 9526 s (e), and below each CI job's worst case (21193 s, 21420 s, 15810 s,
+    # 19930 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
     # as the default's comment above sanctions: this lane owns no member's
     # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
     # member. The member's OWN inner bounds are read differently: when one of its legs is killed at
@@ -4688,6 +4716,29 @@ _SCAN_ALLOWED_UNPINNED = (
      " _opf_observe._scrubbed_env; its callers pass plumbing subcommands only, never a"
      " maintenance-triggering one"),
     # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
+    ("tools/_load_bound.py", "run", ("unresolved",),
+     "cannot-evaluate argv and executable=: the shared load-tolerant runner spawns through"
+     " _acquiring_popen(owned)(...), an ownership subclass of subprocess.Popen (the holder is"
+     " appended before the fork and the pid the fork returns is stored on it from inside the"
+     " spawn primitive, so a fault before run() binds the handle, the store of the pid onto"
+     " the Popen object included, still stops the child; the residual is the boundary between"
+     " the fork syscall returning and that held store, stated in the module docstring)"
+     " that this scan resolves as a Popen launch (a call whose callee is a call returning a"
+     " Popen subclass defined in the scanned file, _scan_popen_factories); it launches its"
+     " caller argv, which this scan does not follow to the call site, and its executable= is"
+     " the program it resolved from that argv head; run() refuses (ValueError), before any"
+     " launch, an argv whose program (resolved as the exec in the child resolves it: PATH"
+     " from env, a relative or empty entry taken from the child cwd, then symlinks) is git"
+     " or the same file as git, or whose head is one of the known shell and launcher"
+     " spellings in _LAUNCHERS (env, nice, timeout and the rest), and it launches the"
+     " resolved path so lookup and exec agree. That is a deny list, not proof that no git"
+     " runs below it: an interpreter head (python -c, perl, awk, make), an unlisted launcher"
+     " or a copy of the git binary under another name can still run git. Every adopting call"
+     " site (the module's own vectors launch scratch fixtures) passes sys.executable or the"
+     " registered hook command (python3) as the head, and git launched by the code those"
+     " interpreters run (generators, self-tests) sits on those files' own subprocess calls,"
+     " which this scan reads where they stand; its vectors include /usr/bin/env git, a"
+     " symlink alias and relative PATH entries"),
     ("tools/check_git_option_table.py", "_git", ("unresolved",),
      "cannot-evaluate funnel: the argv tail is the caller's *args; every caller passes"
      " option-table introspection forms (init -q --template= of a scratch probe repo,"
@@ -4704,10 +4755,6 @@ _SCAN_ALLOWED_UNPINNED = (
      " never absorbed here: the maintenance-capable add and commit argvs carry the three"
      " F-367 pins as literal `-c` pairs in option position, and the bare `git init -q`"
      " carries none (init is not maintenance-triggering)"),
-    ("tools/selftest_aiqt_hooks.py", "_main_isolated", ("unresolved",),
-     "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
-     " python3 hook-script argv from the hooks registry), not a git launch; the suite's"
-     " lifecycle PATH wrapper pins any git a hook child resolves through PATH"),
     ("tools/measure_hook_latency.py", "_sample", ("unresolved",),
      "cannot-evaluate head: the timing funnel launches the command each hooks.json PreToolUse"
      " entry declares (python3 running the dispatcher, or the self-test's stub dispatcher)"
@@ -5869,6 +5916,78 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, scope_scrubbed,
     return False
 
 
+def _scan_popen_factories(tree):
+    """The bare names of functions defined anywhere in the module whose own scope returns a
+    class derived from the module-qualified subprocess.Popen: the base spelled directly
+    (class X(subprocess.Popen)), through a name the scope or the module scope binds to
+    subprocess.Popen (spawn_cls = subprocess.Popen; class X(spawn_cls)), or through another
+    such class. _scan_launches resolves a call THROUGH such a factory's result,
+    factory(...)(argv, ...), as a subprocess.Popen launch at the outer call (the ownership
+    spawn in tools/_load_bound.py run). Read in each scope's OWN statements (control flow
+    descended, nested scopes excluded; source order is not ordered here, so a base bound
+    anywhere in the scope counts, erring toward MORE resolved launches, never fewer). Bounded
+    by design, like every resolution here, to the scanned file: a factory imported from
+    another module, a locally defined subclass instantiated directly by its bare name, a
+    callee that is an ATTRIBUTE access (holder.acquire(owned)(...)), a factory returning
+    subprocess.Popen ITSELF or a bare alias of it (only ClassDef-derived subclasses are
+    tracked, never a returned alias name), a factory result bound to a name first
+    (cls = factory(); cls(...)), and a class derived from an alias bound in an ENCLOSING
+    function scope (only the module scope feeds a function's aliases) are not resolved by
+    this rule and stay on the scan's other rules and the audited allowlist."""
+    def popen_expr(node, aliases):
+        if isinstance(node, ast.Attribute) and node.attr == "Popen" \
+                and isinstance(node.value, ast.Name) and node.value.id == "subprocess":
+            return True
+        return isinstance(node, ast.Name) and node.id in aliases
+
+    def scope_nodes(body):
+        # The scope's own nodes: control flow is descended, nested scopes are not (a ClassDef
+        # contributes its name and bases, never its body).
+        nodes, stack = [], list(body)
+        while stack:
+            node = stack.pop()
+            nodes.append(node)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                 ast.Lambda)):
+                continue
+            stack.extend(ast.iter_child_nodes(node))
+        return nodes
+
+    def popen_classes(nodes, outer_aliases, outer_classes):
+        # Fixpoint over the scope's single-target Popen aliases and its Popen-derived classes
+        # (an alias of an alias, and a subclass of a subclass, both resolve).
+        aliases, classes = set(outer_aliases), set(outer_classes)
+        grown = True
+        while grown:
+            grown = False
+            for node in nodes:
+                if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                        and isinstance(node.targets[0], ast.Name) \
+                        and node.targets[0].id not in aliases \
+                        and popen_expr(node.value, aliases):
+                    aliases.add(node.targets[0].id)
+                    grown = True
+                elif isinstance(node, ast.ClassDef) and node.name not in classes \
+                        and any(popen_expr(base, aliases)
+                                or (isinstance(base, ast.Name) and base.id in classes)
+                                for base in node.bases):
+                    classes.add(node.name)
+                    grown = True
+        return aliases, classes
+
+    module_aliases, module_classes = popen_classes(scope_nodes(tree.body), (), ())
+    factories = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        nodes = scope_nodes(func.body)
+        classes = popen_classes(nodes, module_aliases, module_classes)[1]
+        if any(isinstance(node, ast.Return) and isinstance(node.value, ast.Name)
+               and node.value.id in classes for node in nodes):
+            factories.add(func.name)
+    return factories
+
+
 def _scan_launches(tree):
     """(node, flavor, launcher, dotted qualname, qualname parts, enclosing function node,
     innermost enclosing class node) for every launch-shaped or tripwire-shaped node in the
@@ -5880,8 +5999,12 @@ def _scan_launches(tree):
     getattr(asyncio, ...) except a literal
     NON-launcher attribute (getattr(os, "O_NOFOLLOW", 0) reads a constant, not a launcher),
     subprocess.__dict__ / os.__dict__ / asyncio.__dict__, and vars(subprocess) / vars(os) /
-    vars(asyncio)."""
+    vars(asyncio). A call through a Popen-subclass factory's result, factory(...)(argv, ...)
+    where the factory returns a subprocess.Popen subclass defined in this file
+    (_scan_popen_factories), is a direct launch of that subclass: flavor 'subprocess',
+    launcher 'Popen'."""
     found = []
+    factories = _scan_popen_factories(tree)
     stack = [(tree, (), None, None)]
     while stack:
         node, parts, func_node, class_node = stack.pop()
@@ -5897,6 +6020,15 @@ def _scan_launches(tree):
                 if isinstance(func, ast.Attribute) and func.attr in _SCAN_LAUNCH_NAMES \
                         and isinstance(func.value, ast.Name) and func.value.id == "subprocess":
                     found.append((child, "subprocess", func.attr, qualname, parts,
+                                  func_node, class_node))
+                elif isinstance(func, ast.Call) and isinstance(func.func, ast.Name) \
+                        and func.func.id in factories:
+                    # factory(...)(argv, ...): the callee is a call whose own callee is a
+                    # factory returning a subprocess.Popen subclass defined in this file
+                    # (_scan_popen_factories), so the outer call IS that subclass's launch
+                    # (the ownership spawn in tools/_load_bound.py run) and resolves exactly
+                    # like a direct subprocess.Popen call.
+                    found.append((child, "subprocess", "Popen", qualname, parts,
                                   func_node, class_node))
                 else:
                     name = func.attr if isinstance(func, ast.Attribute) else (
@@ -7053,6 +7185,55 @@ _SCAN_CONTRACT_CASES = (
          "                    '--config-env', 'gc.auto=0=' + str(var),",
          "                    'commit', '--allow-empty', '-m', 'x'])", ""))),),
      None),
+    # Popen-factory forms: a launch through a call-of-call factory, factory(...)(argv, ...),
+    # whose factory returns a subprocess.Popen subclass defined in the scanned file (the
+    # ownership spawn in tools/_load_bound.py run) is resolved as a Popen launch: a git argv
+    # there is enforced like a direct launch, and the run()-shaped caller-argv-plus-
+    # executable= form is a finding without a kind-matched justification and clean with one
+    # (each red without the call-of-call resolver, which then sees no launch at
+    # all: the first two scans come back clean, and the third's planted entry reads stale).
+    ("popen-factory-git-argv",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _acquire(owned):",
+         "    spawn_cls = subprocess.Popen", "",
+         "    class Acquiring(spawn_cls):",
+         "        def __init__(self, *args, **kwargs):",
+         "            owned.append(self)",
+         "            super().__init__(*args, **kwargs)",
+         "    return Acquiring", "", "",
+         "def _seed(owned):",
+         "    _acquire(owned)(['git', 'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "maintenance-triggering git launch"),
+    ("popen-factory-executable-override",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _acquire(owned):",
+         "    spawn_cls = subprocess.Popen", "",
+         "    class Acquiring(spawn_cls):",
+         "        def __init__(self, *args, **kwargs):",
+         "            owned.append(self)",
+         "            super().__init__(*args, **kwargs)",
+         "    return Acquiring", "", "",
+         "def _seed(argv, real, owned):",
+         "    _acquire(owned)(argv, executable=real)", ""))),),
+     "executable= keyword overrides"),
+    ("popen-factory-justified",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _acquire(owned):",
+         "    spawn_cls = subprocess.Popen", "",
+         "    class Acquiring(spawn_cls):",
+         "        def __init__(self, *args, **kwargs):",
+         "            owned.append(self)",
+         "            super().__init__(*args, **kwargs)",
+         "    return Acquiring", "", "",
+         "def _seed(argv, real, owned):",
+         "    _acquire(owned)(argv, executable=real)", ""))),),
+     None,
+     (("tools/planted.py", "_seed", ("unresolved",),
+       "planted: the factory-call launch mirrors tools/_load_bound.py run (caller argv and"
+       " resolved executable=)"),)),
 )
 
 
