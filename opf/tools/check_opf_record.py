@@ -3636,14 +3636,19 @@ def _claims_retyped(payload, literal):
 
 
 def flip_t22_refuse():
-    """The reviewed head seam: a homes-2 claim raises instead of deriving and reserving."""
+    """The reviewed head seam: a homes-2 claim raises instead of deriving and reserving. The stand-in
+    keeps the live seam's signature exactly; once the two differ the flip refuses to apply (a Harness
+    fault naming both), never a TypeError that only the record CLI's backstop would report."""
     seam = record.claim_ids
 
-    def refusing(homes, high, demand, known_complete, reserved=None):
+    def refusing(homes, high, demand, known_complete, reserved=None, imported_series=False):
         if homes != 1:
             raise record.RecordError("homes-{} id allocation is not active in this build; refusing "
                                      "(the reviewed head seam)".format(homes))
-        return seam(homes, high, demand, known_complete)
+        return seam(homes, high, demand, known_complete, imported_series=imported_series)
+    if inspect.signature(refusing) != inspect.signature(seam):
+        raise Harness("flip_t22_refuse: the stand-in signature {} no longer matches "
+                      "record.claim_ids{}".format(inspect.signature(refusing), inspect.signature(seam)))
     return patch.object(record, "claim_ids", refusing)
 
 

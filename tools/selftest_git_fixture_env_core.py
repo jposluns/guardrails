@@ -2630,6 +2630,10 @@ def _core_lanes(base):
 
     # Stop the OPF suite at its first in-process invocation, after its fixture
     # isolation. Observe the actual inherited environment and its finally restoration.
+    # Plain init inspects the .working/.gitignore installation, whose config-discovery probe
+    # refuses a GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM override, so the suite carries neither:
+    # its own HOME (and no XDG_CONFIG_HOME) keeps the caller's global configuration out, and
+    # GIT_CONFIG_NOSYSTEM the system configuration.
     opf_code = "\n".join((
         "import json, os, sys",
         "sys.path.insert(0, sys.argv[1])",
@@ -2641,12 +2645,13 @@ def _core_lanes(base):
         "    seen.append(dict(os.environ))",
         "    raise StopProbe()",
         "check_opf_init._suite(invoke)",
-        "expected = {'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull,",
-        "            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_TERMINAL_PROMPT': '0',",
+        "expected = {'GIT_CONFIG_NOSYSTEM': '1', 'GIT_TERMINAL_PROMPT': '0',",
         "            'GIT_OPTIONAL_LOCKS': '0'}",
         "print(json.dumps([len(seen) == 1 and",
         "    {k: v for k, v in seen[0].items() if k.startswith('GIT_')} == expected,",
         "    bool(seen) and seen[0].get('PATH') == saved.get('PATH'),",
+        "    bool(seen) and seen[0].get('HOME') not in (None, saved.get('HOME'))",
+        "    and 'XDG_CONFIG_HOME' not in seen[0],",
         "    dict(os.environ) == saved]))",
     ))
     opf_env = dict(os.environ)
@@ -2658,7 +2663,7 @@ def _core_lanes(base):
         got = (child.returncode, json.loads(child.stdout))
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         got = "OPF isolation child failed: {}".format(exc)
-    check("env/opf-init-inherited-allowlist", got, (0, [True, True, True]))
+    check("env/opf-init-inherited-allowlist", got, (0, [True, True, True, True]))
 
     _system_pin_checks(base)
 
