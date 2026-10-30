@@ -1819,6 +1819,9 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
 # backquote, or a '${' (a '${ cmd; }' or '${| cmd; }' substitution), backslash-newlines between its '$' and '{'
 # included.
 _HEREDOC_NESTING_RE = re.compile(r"[(`]|\$(?:\\\n)*\{")
+# The lexer's refusal of a here-document while a '${' is open on its nesting stack: a '<<' read there, or the
+# newline that would start the bodies of a line's here-documents read there (the raises in _lex_pass).
+_HEREDOC_DOLLAR_BRACE_OPEN = "uncertain here-document while a '${' is open"
 
 
 def _heredoc_body_ends_early(command, body_at, body_end, heredocs, backquoted):
@@ -2326,11 +2329,13 @@ def _empty_repeat(segments, sep):
 
 def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
-    escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
-    '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
-    a partially-cleaned command. A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal
-    body is EXCLUDED from analysis (round-2 finding 17) so a guard never fires on shell syntax quoted inside
-    heredoc prose. This quoting model is a best-effort reading of bash, not a guarantee (a
+    escape, a NUL, an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
+    '{fd}>' redirect, or a malformed redirect), or a quoted here-document whose reading is uncertain (a '<<',
+    or the newline that would start its body, read while a '${' is open on the nesting stack, where bash may
+    read the '<<' as text; or a body read inside a substitution or group whose end _heredoc_body_ends_early
+    cannot place), so the caller falls back conservatively rather than acting on a partially-cleaned command.
+    A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal body is EXCLUDED from analysis
+    (round-2 finding 17) so a guard never fires on shell syntax quoted inside heredoc prose. This quoting model is a best-effort reading of bash, not a guarantee (a
     comment, heredoc body or nested substitution can read differently under bash), so the push
     guard never depends on it: _raw_push_guard rescans the raw text on every protected_line
     call. Linear, non-recursive, stdlib-only.
@@ -2674,6 +2679,16 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 if pending_heredocs:
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
                     # literal data (finding 17), then resume lexing after the closing delimiter line(s).
+                    if "${" in nest:
+                        # A '${' opened after the '<<' on this line is still open at this newline. Inside a
+                        # '${...}' parameter expansion the newline is text to bash, which starts the bodies
+                        # only at the newline after the expansion closes, so a body skipped from here can
+                        # end where bash's has not begun and read bash's body as commands, where a quote in
+                        # it can hide a command bash runs; the stack's one "${" entry does not tell such an
+                        # expansion from a '${ cmd; }' substitution, whose newline is a line end. The reading
+                        # is UNCERTAIN, as at a '<<' read while a '${' is open (the raise at that operator
+                        # below): raise so the whole lex fails.
+                        raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
                     body_at = i
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
                     # The exact-delimiter-line skip above ends each body where bash ends it only
@@ -2689,6 +2704,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     # as bash reads it) ONLY when nothing is open on the stack AND no '(', backquote
                     # or '${' appears anywhere before the body, quoted or not (_HEREDOC_NESTING_RE,
                     # searched once per pass, so the test stays linear however many bodies follow).
+                    # No body opened while a '${' was still open on the stack reaches here: the lex
+                    # already failed at that '<<' (the uncertain operator raise below).
                     if nesting_at is None:
                         nesting = _HEREDOC_NESTING_RE.search(command)
                         nesting_at = n if nesting is None else nesting.start()
@@ -2798,6 +2815,23 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         i = run
                     continue
                 if kind == "cannot":
+                    if op == "<<" and "${" in nest:
+                        # A '<<' read while a '${' is open on the nesting stack. Inside a '${...}' parameter
+                        # expansion bash reads it as text and opens no here-document, so a body skipped here
+                        # would hide the lines after it, which bash runs (bash 5.3.9 runs the git in
+                        # echo ${x:-<<'EOF' }, git commit -m x, EOF on three lines, and with the '}' glued
+                        # to the delimiter and a last line EOF}). Inside a bash 5.3 '${ cmd; }' or
+                        # '${| cmd; }' substitution, or a '$(...)' that such an expansion holds, it IS an
+                        # operator. The stack keeps one "${" entry for both kinds and cannot always tell
+                        # which construct is innermost (a '(' that is text inside the expansion, as in
+                        # ${x:-(<<'EOF' }, opens one here), and reading the lines after the '<<' as
+                        # commands where bash reads a body could let a quote in that body hide a command
+                        # bash runs. Neither reading is exact wherever a '${' is open, so the reading is
+                        # UNCERTAIN: raise so the whole lex fails and every guard takes its fail-closed
+                        # fallback, as at the uncertain body end above (a disclosed over-refusal of a
+                        # here-document in such a substitution). The newline that would start a body
+                        # follows the same rule (the raise above, where the bodies are skipped).
+                        raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
                     if op == "<<":
                         parsed = _parse_heredoc_delim(command, i + oplen, n)
                         if parsed is not None and parsed[0]:
