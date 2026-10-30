@@ -163,6 +163,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import _signal
 import ast
+import base64
 import collections
 import contextlib
 import datetime
@@ -2119,8 +2120,10 @@ def _test_coauthor_guards(failures, tmp):
     over-widens to a blanket deny. The token is BUILT AT RUN TIME (_CAB_UC/_CAB_MIXED/_CAB_LC), never
     spelled, so this suite stays editable under the layer it tests. Fixtures are throwaway files under
     the temp tree; the Bash commands submitted to coauthor_bash in-process here are never executed. The
-    fix-round battery (_test_coauthor_children) runs its cases through main() in child processes, and its
-    landing checks run their commands in throwaway repositories."""
+    paired battery (_test_coauthor_children) runs its cases through main() in child processes, its
+    landing checks run their commands in throwaway repositories, and the real-git oracle
+    (_test_coauthor_oracle) runs each landing vector gated by every layer with the commit-msg hook
+    installed."""
     base = tmp / "cab"
     base.mkdir(parents=True, exist_ok=True)
     cab = _CAB_UC + ": Claude <c@x>"
@@ -2393,15 +2396,16 @@ def _test_coauthor_guards(failures, tmp):
     if not os.access(script, os.X_OK):
         failures.append("(cab-g8) the shipped commit-msg hook is not executable")
     _test_coauthor_children(failures, base, script)
+    _test_coauthor_oracle(failures, base, script)
 
 
 def _test_coauthor_children(failures, base, script):
-    """(cab-c*, cab-l*, cab-m*) The fix-round vectors of the co-author layers. Every case runs through the
+    """(cab-c*, cab-l*, cab-m*) The paired vectors of the co-author layers. Every case runs through the
     hook's main() in a CHILD process (python3 -I -B aiqt_hooks.py <mode>, the payload on stdin, the way the
     platform runs it) and is PAIRED: a deny vector and the allow vector one change away, so a flip of the
-    rule in either direction fails a case (the review round's survivors included: replace_all, MultiEdit
-    order, the Bash referenced-file size, unreadable and unexaminable bounds, the Bash length bound, and
-    the commit-msg size bound). Each Bash rule that can land a commit or a file also has a LANDING check
+    rule in either direction fails a case (replace_all, MultiEdit order, the Bash referenced-file size,
+    unreadable and unexaminable bounds, the Bash length bound, and the commit-msg size bound included).
+    Each Bash rule that can land a commit or a file also has a LANDING check
     in throwaway repositories (cab-l*): the denied command run UNGATED records the trailer, so the vector
     is real; run GATED by the child's decision it records none; and its allowed twin runs gated and leaves
     no trailer either. gh cannot land here (no network), so its rule is decision-only. The commit-msg
@@ -2456,7 +2460,7 @@ def _test_coauthor_children(failures, base, script):
     new = str(root / "new.txt")
     tok12 = _CAB_UC[:12]  # the token up to its last word, so a vector can split or brace it
 
-    # --- the file layer (F1, F7, F8, and the replace_all and MultiEdit-order survivors) ------------------
+    # --- the file layer (Edit matching, the narrowed pattern, JSON readings, replace_all, MultiEdit order) -
     crlf = fixture("crlf.txt", b"alpha line\r\nbeta line\r\ngamma\r\n")
     pair("cab-c1 an Edit matched only across CRLF line ends is simulated as the Edit tool matches it", "Edit",
          {"file_path": crlf, "old_string": "alpha line\nbeta line", "new_string": "alpha line\n" + cab},
@@ -2529,7 +2533,7 @@ def _test_coauthor_children(failures, base, script):
          {"file_path": str(root / "data.json"), "content": '{"m": "Co\\u002d' + _CAB_UC[3:] + ': x"}\n'},
          {"file_path": str(root / "data.json"), "content": '{"m": "Co\\u002dReviewed: x"}\n'})
 
-    # --- the Bash layer: message files in any spelling, run directories, gh fields (F2) ----------------
+    # --- the Bash layer: message files in any spelling, run directories, gh fields ---------------------
     bpair("cab-c20 an attached short cluster (-aFFILE) is read", "git commit -aF" + dirty, "git commit -aF" + clean)
     bpair("cab-c21 an abbreviated long option with = is read", "git commit --fil=" + dirty,
           "git commit --fil=" + clean)
@@ -2559,7 +2563,7 @@ def _test_coauthor_children(failures, base, script):
     bpair("cab-c31 standard input piped into a message option denies; a here-document feeding it allows",
           "printf x | git commit -F -", "git commit -F - <<'EOF'\nfix things\nEOF")
 
-    # --- the Bash layer: continuations, brace expansion, ANSI-C (F3, F9) --------------------------------
+    # --- the Bash layer: continuations, brace expansion, ANSI-C -----------------------------------------
     bpair("cab-c32 a backslash-newline is joined before the scan",
           'git commit -m fix -m "' + tok12 + '\\\nBy: Bob <b@x>"', 'git commit -m fix -m "Reviewed-\\\nBy: Bob <b@x>"')
     bpair("cab-c33 a brace expansion forming the token is expanded (echo)",
@@ -2582,18 +2586,18 @@ def _test_coauthor_children(failures, base, script):
           "fallback", "git commit -F " + dirty + " && cat <<EOF\nit's done\nEOF",
           "git commit -F " + clean + " && cat <<EOF\nit's done\nEOF")
 
-    # --- the Bash layer: copies into a new path as one class (F4) ---------------------------------------
+    # --- the Bash layer: copies into a new path as one class --------------------------------------------
     bpair("cab-c40 cat into a redirect is a copy", "cat " + dirty + " > " + new, "cat " + clean + " > " + new)
     bpair("cab-c41 a reader into tee is a copy", "cat " + dirty + " | tee " + new, "cat " + clean + " | tee " + new)
     bpair("cab-c42 git mv is a move", "git mv " + dirty + " " + new, "git mv " + clean + " " + new)
     bpair("cab-c43 ln is a copy", "ln " + dirty + " " + new, "ln " + clean + " " + new)
     bpair("cab-c44 install is a copy", "install " + dirty + " " + new, "install " + clean + " " + new)
-    bpair("cab-c45 a { } group feeding a message command is read", "{ cat " + dirty + "; } | git am",
-          "{ cat " + clean + "; } | git am")
+    bpair("cab-c45 a { } group feeding a message command is read", "{ cat " + dirty + "; } | git hash-object -w --stdin",
+          "{ cat " + clean + "; } | git hash-object -w --stdin")
     bpair("cab-c46 the words of a command substitution are read with the command around it",
           'git commit -m "$(cat ' + dirty + ')"', 'git commit -m "$(cat ' + clean + ')"')
 
-    # --- the Bash layer: survivors of the review round (size, unreadable, unexaminable, length bounds) ----
+    # --- the Bash layer: size, unreadable, unexaminable and length bounds --------------------------------
     huge = root / "huge.txt"
     with open(huge, "wb") as handle:
         handle.seek(aiqt_hooks._CAB_MAX_BYTES)
@@ -2620,7 +2624,7 @@ def _test_coauthor_children(failures, base, script):
     bpair("cab-c50 a command past the read bound with a redirect denies (its references cannot be read); "
           "one with no write, redirect or commit word allows", "echo " + long_text + " > " + new, "echo " + long_text)
 
-    # --- the Bash layer: replayed messages and the hooks switch (F5) -------------------------------------
+    # --- the Bash layer: replayed messages and the hooks switch ------------------------------------------
     replay = _init_repo(root / "replay")
     _git(replay, "checkout", "-q", "-b", "side-dirty")
     (replay / "d.txt").write_text("d\n", encoding="utf-8")
@@ -2648,6 +2652,72 @@ def _test_coauthor_children(failures, base, script):
     bpair("cab-c58 a GIT_CONFIG_KEY_n naming core.hooksPath beside a commit denies; a message that only "
           "mentions the key allows", "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/x "
           "git commit -m fix", 'git commit -m "explain core.hooksPath in the README"')
+    bpair("cab-c75 a message spelling a core.hooksPath=<dir> value in prose allows; a -c setting denies",
+          "git -c core.hooksPath=/x commit -m docs",
+          "git commit -m 'docs: install with git config --global core.hooksPath=<dir>'")
+    bpair("cab-c76 a git config command unsetting core.hooksPath beside a commit denies",
+          "git config --unset core.hooksPath && git commit -m x", "git config --get core.abbrev && git commit -m x")
+
+    # --- the Bash layer: trailer options, writes by another stage, mailboxes, git apply, the length bound --
+    cab_words = _CAB_UC
+    bpair("cab-c59 a bare --trailer name, which git writes as '<name>: ', denies",
+          "git commit -m x --trailer " + cab_words, "git commit -m x --trailer Reviewed-by")
+    bpair("cab-c60 git interpret-trailers beside the token's words denies",
+          "git interpret-trailers --trailer " + cab_words + " " + clean,
+          "git interpret-trailers --trailer Reviewed-by " + clean)
+    bpair("cab-c61 a --trailer separator a trailer.separators setting adds denies",
+          "git -c trailer.separators=':#' commit -m x --trailer '" + cab_words + "#AI'",
+          "git -c trailer.separators=':#' commit -m x --trailer 'Reviewed-by#AI'")
+    hashed = fixture("hashed.txt", "subject\n\n" + cab_words + "# AI <ai@x>\n")
+    bpair("cab-c62 a file a trailer-writing stage reads is counted by the token's words with any separator",
+          "git -c trailer.separators=':#' interpret-trailers --in-place --trailer 'Reviewed-by: X' " + hashed,
+          "git -c trailer.separators=':#' interpret-trailers --in-place --trailer 'Reviewed-by: X' " + clean)
+    clean2 = fixture("clean2.txt", "fix\n")
+    bpair("cab-c63 a message file another stage of the command writes denies, though it does not exist yet",
+          "cat " + clean + " > " + new + " && git commit -F " + new,
+          "cat " + clean + " > " + new + " && git commit -F " + clean)
+    bpair("cab-c64 an existing clean file another stage overwrites denies (what it holds when read is unknown)",
+          "echo hi > " + clean2 + " && git commit -F " + clean2, "echo hi > " + clean2 + " && git commit -F " + clean)
+    outdir = str(root / "patches")
+    bpair("cab-c65 a file in a directory a git output option fills denies",
+          "git format-patch -o " + outdir + " HEAD~1 && git am " + outdir + "/0001-x.patch",
+          "git format-patch -o " + outdir + " HEAD~1")
+    mbox_clean = fixture("clean.mbox", "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] fix\n\nfix\n---\n")
+    bpair("cab-c66 git am reading a pipe denies; one fed by a redirect reads the file", "git format-patch -1 "
+          "--stdout HEAD | git am", "git am < " + mbox_clean)
+    bpair("cab-c67 git am with no operand reads standard input and denies; a resume reads none",
+          "git am", "git am --continue")
+    bpair("cab-c68 an option value read as an operand names no existing path, so git am still reads the pipe",
+          "printf x | git am -p 1", "git am -p 1 " + mbox_clean)
+    for name, text in (("md-dirty", "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\nx\n\n" + cab + "\n---\n"),
+                       ("md-clean", "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\nx\n---\n")):
+        for sub in ("cur", "new", "tmp"):
+            (root / name / sub).mkdir(parents=True, exist_ok=True)
+        (root / name / "new" / "1").write_text(text, encoding="utf-8")
+    bpair("cab-c69 a Maildir operand of git am is read (its cur and new files)", "git am " + str(root / "md-dirty"),
+          "git am " + str(root / "md-clean"))
+    mime = fixture("mime.mbox", "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\nContent-Transfer-Encoding: "
+                   "base64\n\neA==\n")
+    bpair("cab-c70 a mailbox with a base64 or quoted-printable part denies (git decodes it)", "git am " + mime,
+          "git am " + mbox_clean)
+    series = fixture("series", "# This series applies on GIT commit 0000\n" + mbox_clean + "\n")
+    bpair("cab-c71 an StGit series, which names further patch files, denies", "git am " + series,
+          "git am " + mbox_clean)
+    bpair("cab-c72 a forced StGit series format denies", "git am --patch-format=stgit-series " + mbox_clean,
+          "git am --patch-format=mbox " + mbox_clean)
+    bpair("cab-c73 a mailbox redirected into git mailinfo is read as a mailbox", "git mailinfo m p < " + mime,
+          "git mailinfo m p < " + mbox_clean)
+    diff_dirty = fixture("dirty.diff", "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+" + cab + "\n")
+    diff_clean = fixture("clean.diff", "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+fix\n")
+    bpair("cab-c74 git apply is write-class, so its patch is read", "git apply " + diff_dirty, "git apply " + diff_clean)
+    bpair("cab-c77 past the read bound a quoted command word is read de-quoted", "c''p " + clean + " " + new + " #"
+          + long_text, "c''t x #" + long_text)
+    pair("cab-c14 a JSON Lines record whose escaped hyphen decodes to the token denies; without it allows", "Write",
+         {"file_path": str(root / "log.jsonl"), "content": '{"m": "Co\\u002d' + _CAB_UC[3:] + ': AI"}\n{"n": 1}\n'},
+         {"file_path": str(root / "log.jsonl"), "content": '{"m": "Co\\u002dReviewed: AI"}\n{"n": 1}\n'})
+    pair("cab-c15 a \\u escape spelling the token inside other text denies", "Write",
+         {"file_path": str(root / "lit.py"), "content": 'x = "Co\\u002d' + _CAB_UC[3:] + ': AI"\n'},
+         {"file_path": str(root / "lit.py"), "content": 'x = "Co\\u002dReviewed: AI"\n'})
 
     # --- landing checks: the denied command lands the trailer ungated, and not gated ---------------------
     land_env = git_fixture_env(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
@@ -2776,7 +2846,7 @@ def _test_coauthor_children(failures, base, script):
     land("cab-l18 a { } group copied into a redirect", msg_files, "{ cat dirty.msg; } > copy.txt",
          "{ cat clean.msg; } > copy.txt", file_count, target="copy.txt")
 
-    # --- the commit-msg hook: the message git will record (F6) and its size bound -----------------------
+    # --- the commit-msg hook: the whole message file counted, and its size bound -------------------------
     msg_repo = _init_repo(root / "msg-repo")
     semi_repo = _init_repo(root / "msg-semi")
     _git(semi_repo, "config", "core.commentChar", ";")
@@ -2801,19 +2871,22 @@ def _test_coauthor_children(failures, base, script):
     cut = "# " + "-" * 24 + " >8 " + "-" * 24 + "\n"
     verbose = ("drop the trailer line\n\n# Please enter the commit message.\n" + cut
                + "# Do not modify or remove the line above.\ndiff --git a/n.txt b/n.txt\n-" + cab + "\n")
-    mexpect("cab-m1 with an editor, the verbose diff below the scissors line is not the message (allow)",
-            msg_repo, verbose, True, 0)
+    mexpect("cab-m1 with an editor, the text below a scissors line is counted, since a --no-verbose or "
+            "--cleanup option the hook cannot see makes git keep it (deny, the disclosed over-refusal)",
+            msg_repo, verbose, True, 1)
     mexpect("cab-m2 with no editor, git keeps that text, so it is counted (deny)", msg_repo, verbose, False, 1)
-    mexpect("cab-m3 with an editor, a comment line holding the token is stripped (allow)",
-            msg_repo, "fix\n# " + cab + "\n", True, 0)
+    mexpect("cab-m3 with an editor, a comment line holding the token is counted, since --cleanup=verbatim, "
+            "whitespace or scissors keeps it (deny)", msg_repo, "fix\n# " + cab + "\n", True, 1)
     mexpect("cab-m4 with no editor, git keeps the comment line, so it is counted (deny)",
             msg_repo, "fix\n# " + cab + "\n", False, 1)
-    mexpect("cab-m5 core.commentChar is honoured: a ';' line is stripped (allow)",
-            semi_repo, "fix\n; " + cab + "\n", True, 0)
-    mexpect("cab-m6 core.commentChar is honoured: a '#' line is not a comment there (deny)",
+    mexpect("cab-m5 a line starting with a configured comment string is counted as well (deny)",
+            semi_repo, "fix\n; " + cab + "\n", True, 1)
+    mexpect("cab-m6 a '#' line in a repository with another comment string denies",
             semi_repo, "fix\n# " + cab + "\n", True, 1)
     mexpect("cab-m7 commit.cleanup=verbatim keeps comment lines, so one holding the token denies",
             verbatim_repo, "fix\n# " + cab + "\n", True, 1)
+    mexpect("cab-m12 a clean message with a scissors line and a clean verbose diff passes (allow)", msg_repo,
+            "drop a line\n\n" + cut + "diff --git a/n.txt b/n.txt\n-old line\n", True, 0)
     mexpect("cab-m11 prose naming the words with no colon passes (the narrowed pattern)",
             msg_repo, "fix\n\nThis guide was " + prose_words + " Alice.\n", False, 0)
     big = root / "msg-big.txt"
@@ -2826,7 +2899,9 @@ def _test_coauthor_children(failures, base, script):
         failures.append("(cab-m8) a message file past the size bound must refuse the commit (exit 2), got "
                         "exit {} with stderr {!r}".format(proc.returncode, proc.stderr[-300:]))
 
-    # a real removal commit with the hook installed: git -v -e passes it, and a token commit is refused
+    # a real removal commit with the hook installed: made with an editor and no --verbose it passes; with
+    # -v its diff below the scissors line shows the removed line, so it is refused (the disclosed
+    # over-refusal); and a token commit is refused
     lb = _init_repo(root / "msg-landing")
     _git(lb, "config", "core.hooksPath", str(hooks_dir))
     (lb / "notes.txt").write_text("keep\n" + cab + "\n", encoding="utf-8")
@@ -2835,9 +2910,15 @@ def _test_coauthor_children(failures, base, script):
     (lb / "notes.txt").write_text("keep\n", encoding="utf-8")
     _git(lb, "add", "notes.txt")
     proc = run_shell(lb, "git commit -q -v -e -m 'drop the trailer line from notes'")
+    if proc.returncode != 1:
+        failures.append("(cab-m9) a verbose removal commit whose diff shows the removed line must be refused by "
+                        "the installed hook (exit 1), got exit {} with stderr {!r}".format(
+                            proc.returncode, proc.stderr[-300:]))
+    proc = run_shell(lb, "git commit -q -e -m 'drop the trailer line from notes'")
     if proc.returncode != 0 or head_count(lb, None):
-        failures.append("(cab-m9) a verbose, edited removal commit must pass the installed hook and record a "
-                        "clean message, got exit {} with stderr {!r}".format(proc.returncode, proc.stderr[-300:]))
+        failures.append("(cab-m13) an edited removal commit made without --verbose must pass the installed hook "
+                        "and record a clean message, got exit {} with stderr {!r}".format(
+                            proc.returncode, proc.stderr[-300:]))
     before = subprocess.run(["git", "-C", str(lb), "rev-parse", "HEAD"], capture_output=True, text=True,
                             timeout=60, env=land_env).stdout
     proc = subprocess.run(["git", "-C", str(lb), "commit", "-q", "--allow-empty", "-F", "-"],
@@ -2847,6 +2928,331 @@ def _test_coauthor_children(failures, base, script):
     if proc.returncode != 1 or before != after:
         failures.append("(cab-m10) a commit whose message holds the token must be refused by the installed "
                         "hook (exit 1, HEAD unchanged), got exit {}".format(proc.returncode))
+
+
+def _test_coauthor_oracle(failures, base, script, cab_hook=None):
+    """(cab-o*, cab-k*) The real-git oracle of the co-author layers, run with bash and git 2.x in throwaway
+    repositories. Each PROBE row (cab-o*) is a command, or a Write, that lands the trailer when nothing gates
+    it. UNGATED, in a repository WITHOUT the commit-msg hook and with no layer consulted, it must land the
+    trailer (a new commit whose message holds the token, or a named file that holds it), so the vector is
+    real. GATED, in a repository WITH the shipped commit-msg hook installed, it runs only when every
+    PreToolUse layer the platform runs for its tool allows it (Bash: coauthor_bash, commit_identity,
+    commit_msg_subst and gate_weakening; Write: coauthor_file; each through main() in a child process), and
+    then it must land nothing because the hook refused it. A row marked hook-only runs once more with the
+    hook installed and no layer consulted: the hook alone must refuse it. Each CONTROL row (cab-k*) is an
+    allowed twin: every layer must allow it, it must run to exit 0 with the hook installed, and it must land
+    nothing. The editors build the token at run time, so no layer reads it in a command. cab_hook (default:
+    the dispatcher under test) is the dispatcher the co-author modes run from, so a mutated copy can be
+    judged by the same rows."""
+    hook = os.path.abspath(aiqt_hooks.__file__)
+    cab_hook = cab_hook or hook
+    child_env = dict((k, v) for k, v in os.environ.items() if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_")))
+    root = base / "oracle"
+    root.mkdir(parents=True, exist_ok=True)
+    env = git_fixture_env(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                          GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid", GIT_EDITOR="true")
+    hooks_dir = root / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    shutil.copy2(script, hooks_dir / "commit-msg")
+    editors = root / "editors"
+    editors.mkdir(exist_ok=True)
+    cut = "# " + "-" * 24 + " >8 " + "-" * 24
+    ai = _CAB_UC + ": AI <ai@example.com>"
+    cab_words = _CAB_UC
+    pad = " #" + "a" * (aiqt_hooks._CAB_MAX_COMMAND + 10)
+    seq = [0]
+
+    def editor(name, text):
+        """An editor script that writes text, the token spelled {T} and built when the editor runs."""
+        (editors / name).write_text("import sys\nT = '-'.join(('Co', 'Authored', 'By'))\nopen(sys.argv[1], 'w')"
+                                    ".write({!r}.replace('{{T}}', T))\n".format(text.replace(_CAB_UC, "{T}")),
+                                    encoding="utf-8")
+        return "GIT_EDITOR='python3 {}' ".format(editors / name)
+
+    ed_cut = editor("cut.py", "subject\n" + cut + "\n" + ai + "\n")
+    ed_plain = editor("plain.py", "subject\n\n" + ai + "\n")
+    ed_hash = editor("hash.py", "subject\n\n#" + ai + "\n")
+    ed_cut_clean = editor("cut-clean.py", "subject\n" + cut + "\nReviewed-by: X\n")
+    ed_plain_clean = editor("plain-clean.py", "subject\n\nReviewed-by: X\n")
+
+    def git(repo, *args, stdin=None):
+        return subprocess.run(["git", "-C", str(repo)] + list(args), capture_output=True, text=True, timeout=60,
+                              env=env, input=stdin)
+
+    def commits(repo):
+        # the history of HEAD: a commit git am re-creates can hash the same as its source commit on a side
+        # branch, so a landing is a token commit that joins HEAD's history
+        return set(git(repo, "rev-list", "HEAD").stdout.split())
+
+    def json_strings(value):
+        stack, out = [value], []
+        while stack:
+            item = stack.pop()
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, list):
+                stack.extend(item)
+            elif isinstance(item, dict):
+                stack.extend(item.keys())
+                stack.extend(item.values())
+        return out
+
+    def holds(text):
+        """Whether text holds the token raw, or in a JSON string of a line or of the whole text."""
+        if aiqt_hooks._CAB_RE.search(text):
+            return True
+        for part in [text] + text.split("\n"):
+            try:
+                if any(aiqt_hooks._CAB_RE.search(s) for s in json_strings(json.loads(part))):
+                    return True
+            except (ValueError, RecursionError):
+                continue
+        return False
+
+    def landed_commit(repo, before):
+        for rev in sorted(commits(repo) - before):
+            if aiqt_hooks._CAB_RE.search(git(repo, "log", "-1", "--format=%B", rev).stdout):
+                return True
+        return False
+
+    def landed_file(name):
+        def check(repo, _before):
+            path = repo / name
+            return path.is_file() and holds(path.read_text(encoding="utf-8", errors="replace"))
+        return check
+
+    def fresh(kind, prepare, installed):
+        seq[0] += 1
+        repo = _init_repo(root / "o-{}-{}".format(seq[0], kind))
+        prepare(repo)
+        if installed:
+            _git(repo, "config", "core.hooksPath", str(hooks_dir))  # after the fixtures, some of which hold the token
+        return repo
+
+    def layers(tool, payload, repo):
+        modes = ("coauthor_file",) if tool == "Write" else (
+            "coauthor_bash", "commit_identity", "commit_msg_subst", "gate_weakening")
+        got = {}
+        for mode in modes:
+            data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": payload, "cwd": str(repo)}
+            try:
+                proc = subprocess.run([sys.executable, "-I", "-B", cab_hook if mode.startswith("coauthor") else hook,
+                                       mode], capture_output=True, timeout=60, env=child_env,
+                                      input=json.dumps(data).encode("utf-8"))
+                out = proc.stdout.decode("utf-8", "replace").strip()
+                got[mode] = _reduce_result(proc.returncode, json.loads(out) if out else None)
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                got[mode] = "error {!r}".format(exc)
+        return got
+
+    def run(tool, payload, repo):
+        """(exit code, stderr) of running the payload in repo: a Bash command with bash, a Write by writing."""
+        if tool == "Write":
+            Path(payload["file_path"]).write_text(payload["content"], encoding="utf-8")
+            return 0, ""
+        seq[0] += 1
+        script_path = root / "cmd-{}.sh".format(seq[0])  # a file, since one argument past 128 KiB cannot be passed
+        script_path.write_text(payload["command"], encoding="utf-8")
+        proc = subprocess.run(["bash", str(script_path)], cwd=str(repo), env=env, capture_output=True, text=True,
+                              timeout=120, stdin=subprocess.DEVNULL)
+        return proc.returncode, proc.stderr
+
+    def payload_for(tool, spec, repo):
+        if tool == "Write":
+            return {"file_path": str(repo / spec[0]), "content": spec[1]}
+        return {"command": spec.replace("@REPO@", str(repo))}
+
+    def probe(label, spec, prepare=lambda repo: None, landed=landed_commit, tool="Bash", hook_only=False):
+        repo = fresh("ungated", prepare, False)
+        before = commits(repo)
+        run(tool, payload_for(tool, spec, repo), repo)
+        if not landed(repo, before):
+            failures.append("({}) the vector lands no trailer when run ungated, so it is not real".format(label))
+        repo = fresh("gated", prepare, True)
+        before = commits(repo)
+        payload = payload_for(tool, spec, repo)
+        got = layers(tool, payload, repo)
+        if all(v == "allow" for v in got.values()):
+            _code, stderr = run(tool, payload, repo)
+            if landed(repo, before):
+                failures.append("({}) the trailer landed with every layer allowing: {}".format(label, got))
+            elif "aiqt cmtidn" not in stderr:
+                failures.append("({}) every layer allowed and nothing landed, but the commit-msg hook did not refuse "
+                                "it: {!r}".format(label, stderr[-300:]))
+        if hook_only:
+            repo = fresh("hook", prepare, True)
+            before = commits(repo)
+            _code, stderr = run(tool, payload_for(tool, spec, repo), repo)
+            if landed(repo, before) or "aiqt cmtidn" not in stderr:
+                failures.append("({}-hook) the installed commit-msg hook alone must refuse it, got stderr {!r}"
+                                .format(label, stderr[-300:]))
+
+    def control(label, spec, prepare=lambda repo: None, landed=landed_commit, tool="Bash"):
+        repo = fresh("control", prepare, True)
+        before = commits(repo)
+        payload = payload_for(tool, spec, repo)
+        got = layers(tool, payload, repo)
+        if not all(v == "allow" for v in got.values()):
+            failures.append("({}) the allowed twin must pass every layer, got {}".format(label, got))
+            return
+        code, stderr = run(tool, payload, repo)
+        if code != 0:
+            failures.append("({}) the allowed twin must run to exit 0 with the hook installed, got exit {}: {!r}"
+                            .format(label, code, stderr[-300:]))
+        if landed(repo, before):
+            failures.append("({}) the allowed twin landed a trailer".format(label))
+
+    def steps(*parts):
+        def prepare(repo):
+            for part in parts:
+                part(repo)
+        return prepare
+
+    def config(key, value):
+        return lambda repo: _git(repo, "config", key, value)
+
+    def put(name, text):
+        def prepare(repo):
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text, encoding="utf-8")
+        return prepare
+
+    def side(name, message):
+        def prepare(repo):
+            _git(repo, "checkout", "-q", "-b", name)
+            (repo / (name + ".txt")).write_text(name + "\n", encoding="utf-8")
+            _git(repo, "add", name + ".txt")
+            _git(repo, "commit", "-q", "-m", message, env_identity=True)
+            _git(repo, "checkout", "-q", "main")
+        return prepare
+
+    def patch_of(rev, name):
+        return lambda repo: (repo / name).write_text(git(repo, "format-patch", "-1", "--stdout", rev).stdout,
+                                                     encoding="utf-8")
+
+    def maildir(name, mbox):
+        def prepare(repo):
+            for sub in ("cur", "new", "tmp"):
+                (repo / name / sub).mkdir(parents=True, exist_ok=True)
+            (repo / name / "new" / "1").write_text((repo / mbox).read_text(encoding="utf-8"), encoding="utf-8")
+        return prepare
+
+    def encoded(name):
+        def prepare(repo):
+            head, _sep, rest = git(repo, "format-patch", "-1", "--stdout", "side-mime").stdout.partition("\n\n")
+            head = "\n".join(line for line in head.split("\n")
+                             if not line.lower().startswith(("content-transfer-encoding", "mime-version", "content-type")))
+            body = base64.encodebytes(("\n" + ai + "\n" + rest).encode("utf-8")).decode("ascii")
+            (repo / name).write_text(head + "\nMIME-Version: 1.0\nContent-Type: text/plain; charset=UTF-8\n"
+                                     "Content-Transfer-Encoding: base64\n\n" + body, encoding="utf-8")
+        return prepare
+
+    def removal(repo):
+        (repo / "notes.txt").write_text("keep\n" + ai + "\n", encoding="utf-8")
+        _git(repo, "add", "notes.txt")
+        _git(repo, "commit", "-q", "-m", "add notes", env_identity=True)
+        (repo / "notes.txt").write_text("keep\n", encoding="utf-8")
+        _git(repo, "add", "notes.txt")
+
+    def head_file(repo):
+        (repo / "m5.txt").write_text("m5\n", encoding="utf-8")
+        _git(repo, "add", "m5.txt")
+        _git(repo, "commit", "-q", "-m", "add m5", env_identity=True)
+
+    sides = steps(side("side-dirty", "dirty side\n\n" + ai), side("side-clean", "clean side"))
+    patches = steps(sides, patch_of("side-dirty", "dirty.mbox"), patch_of("side-clean", "clean.mbox"))
+    jsonl_dirty = '{"m": "Co\\u002dAuthored\\u002d' + 'By: AI"}\n{"n": 1}\n'
+
+    # --- the commit-msg layer: the whole message file is counted -----------------------------------------
+    probe("cab-o1 an editor typing a scissors line, then the token, on a commit", ed_cut + "git commit -q --allow-empty",
+          hook_only=True)
+    probe("cab-o2 the same editor on a merge that records a commit", ed_cut + "git merge -q --no-ff -e side-clean",
+          sides, hook_only=True)
+    probe("cab-o3 a typed scissors line with the token split by a shell variable",
+          "A=" + _CAB_UC[:11] + "; GIT_EDITOR=true git commit -q --allow-empty -e -m subject -m '" + cut
+          + "' -m \"$A-By: AI <ai@example.com>\"", hook_only=True)
+    probe("cab-o4 a letter comment character the trailer line starts with, under --cleanup=verbatim",
+          ed_plain + "git -c core.commentChar=C commit -q --allow-empty --cleanup=verbatim -e -m subject",
+          hook_only=True)
+    probe("cab-o5 the same comment character configured, under --cleanup=whitespace",
+          ed_plain + "git commit -q --allow-empty --cleanup=whitespace", config("core.commentChar", "C"),
+          hook_only=True)
+    probe("cab-o6 --cleanup=scissors keeps a comment line holding the token",
+          ed_hash + "git commit -q --allow-empty --cleanup=scissors", hook_only=True)
+    probe("cab-o7 commit.verbose configured, and --no-verbose keeps the text below a typed scissors line",
+          ed_cut + "git commit -q --allow-empty --no-verbose", config("commit.verbose", "true"), hook_only=True)
+    probe("cab-o8 commit.cleanup=scissors configured, and --cleanup=strip keeps that text",
+          ed_cut + "git commit -q --allow-empty --cleanup=strip", config("commit.cleanup", "scissors"), hook_only=True)
+    probe("cab-o9 an editor writing the token with no scissors line", ed_plain + "git commit -q --allow-empty",
+          hook_only=True)
+    control("cab-k1 an editor writing a clean message with a scissors line and clean text below it",
+            ed_cut_clean + "git commit -q --allow-empty")
+    control("cab-k2 the clean editor on a merge that records a commit",
+            ed_cut_clean + "git merge -q --no-ff -e side-clean", sides)
+    control("cab-k3 a clean message under a letter comment character and --cleanup=verbatim",
+            ed_plain_clean + "git -c core.commentChar=C commit -q --allow-empty --cleanup=verbatim -e -m subject")
+    control("cab-k4 an edited removal commit made without --verbose", "git commit -q -e -m 'drop the trailer line'",
+            removal)
+
+    # --- the Bash layer: mailboxes, the length bound, trailer options, writes, git apply -----------------
+    probe("cab-o10 a format-patch of a token commit piped into git am", "git format-patch -1 --stdout side-dirty | "
+          "git am -q", sides)
+    probe("cab-o11 git am of a Maildir holding the token patch", "git am -q md", steps(patches, maildir("md", "dirty.mbox")))
+    probe("cab-o12 git am of an mbox file holding the token", "git am -q dirty.mbox", patches)
+    probe("cab-o13 a quoted git word past the read bound", "g''it am -q dirty.mbox" + pad, patches)
+    probe("cab-o14 git interpret-trailers with a bare --trailer name", "git interpret-trailers --in-place --trailer "
+          + cab_words + " msg.txt", put("msg.txt", "subject\n"), landed_file("msg.txt"))
+    probe("cab-o15 format-patch, a bare --trailer name and git am in one command",
+          "git format-patch -1 --stdout HEAD > m5.mbox && git interpret-trailers --in-place --trailer '" + cab_words
+          + "' m5.mbox && git reset -q --hard HEAD~1 && git am -q m5.mbox", head_file)
+    probe("cab-o16 a quoted cp word past the read bound", "c''p tok.txt new.txt" + pad, put("tok.txt", ai + "\n"),
+          landed_file("new.txt"))
+    probe("cab-o17 the same cp under the read bound", "c''p tok.txt new.txt", put("tok.txt", ai + "\n"),
+          landed_file("new.txt"))
+    probe("cab-o18 a JSON Lines Write whose escaped hyphens decode to the token", ("log.jsonl", jsonl_dirty),
+          landed=landed_file("log.jsonl"), tool="Write")
+    probe("cab-o19 the same text as one JSON document", ("log.json", jsonl_dirty.split("\n")[0] + "\n"),
+          landed=landed_file("log.json"), tool="Write")
+    probe("cab-o20 a patch written to a new file, then applied by git am in the same command",
+          "git format-patch -1 --stdout side-dirty > p.mbox && git am -q p.mbox", sides)
+    probe("cab-o21 the same command over an existing clean file", "git format-patch -1 --stdout side-dirty > p.mbox "
+          "&& git am -q p.mbox", steps(sides, patch_of("side-clean", "p.mbox")))
+    probe("cab-o22 git am of an mbox whose base64 body holds the token", "git am -q b64.mbox",
+          steps(side("side-mime", "add mime"), encoded("b64.mbox")))
+    probe("cab-o23 git am of an StGit series naming a token patch", "git am -q s/series",
+          steps(patches, put("s/series", "# This series applies on GIT commit 0000\np1\n"),
+                lambda repo: (repo / "s" / "p1").write_text((repo / "dirty.mbox").read_text(encoding="utf-8"),
+                                                            encoding="utf-8")))
+    probe("cab-o24 git apply of a patch adding a token line", "git apply dirty.diff",
+          put("dirty.diff", "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+" + ai + "\n"), landed_file("n.txt"))
+    probe("cab-o25 git interpret-trailers rewriting another separator to a colon",
+          "git -c trailer.separators=:# interpret-trailers --in-place --trailer 'Reviewed-by: X' m.txt",
+          put("m.txt", "subject\n\n" + cab_words + "# AI <ai@example.com>\n"), landed_file("m.txt"))
+    probe("cab-o27 a patch written to a new file, then copied in the same command",
+          "git format-patch -1 --stdout side-dirty > p.mbox && cp p.mbox copy.mbox", sides, landed_file("copy.mbox"))
+    generated = "printf 'fix\\n\\nCo-%s-By: AI\\n' Authored | xargs -0 git "
+    probe("cab-o26 -c core.hooksPath switching the hook off for text xargs reads at run time",
+          generated + "-c core.hooksPath=@REPO@/no-hooks commit -q --allow-empty -m")
+    probe("cab-o28 a git config command switching the hook off before such a commit",
+          "git config core.hooksPath @REPO@/no-hooks && " + generated + "commit -q --allow-empty -m")
+    control("cab-k6 git am of a Maildir holding a clean patch", "git am -q mdc",
+            steps(patches, maildir("mdc", "clean.mbox")))
+    control("cab-k7 a command past the read bound with no write, redirect or commit word", "echo" + pad)
+    control("cab-k8 git interpret-trailers with another trailer", "git interpret-trailers --in-place --trailer "
+            "'Reviewed-by: X' msg.txt", put("msg.txt", "subject\n"), landed_file("msg.txt"))
+    control("cab-k9 cp of a clean file", "cp clean.txt new.txt", landed=landed_file("new.txt"))
+    control("cab-k10 a JSON Lines Write with a clean escaped spelling",
+            ("log.jsonl", '{"m": "Co\\u002dReviewed: AI"}\n{"n": 1}\n'), landed=landed_file("log.jsonl"), tool="Write")
+    control("cab-k11 a patch written to a file and not consumed", "git format-patch -1 --stdout side-clean > p.mbox",
+            sides, landed_file("p.mbox"))
+    control("cab-k12 git am of a clean mbox file", "git am -q clean.mbox", patches)
+    control("cab-k13 git apply of a clean patch", "git apply clean.diff",
+            put("clean.diff", "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+fix\n"), landed_file("n.txt"))
+    control("cab-k14 a message spelling a core.hooksPath=<dir> value in prose",
+            "git commit -q --allow-empty -m 'docs: install with git config --global core.hooksPath=<dir>'")
+    control("cab-k15 git interpret-trailers under trailer.separators on a clean file",
+            "git -c trailer.separators=:# interpret-trailers --in-place --trailer 'Reviewed-by: X' msg.txt",
+            put("msg.txt", "subject\n"), landed_file("msg.txt"))
 
 
 def _test_stop_dispatch_note_sites(failures, tmp):

@@ -6,21 +6,26 @@ and that limit is the first thing to know about this layer.
 
 ## commit-msg (rule cmtidn, integ/commit-identity)
 
-Refuses any commit whose message, as git will record it, holds the AI co-author trailer token in
-trailer shape: the trailer name, matched case-insensitively with a hyphen or one space between its
-words, then optional blanks and a colon. Prose that names the words with no colon after them passes.
-The spelling is deliberately not written in this page, because the pack's file-content layer holds
+Refuses any commit whose message file holds the AI co-author trailer token in trailer shape: the
+trailer name, matched case-insensitively with a hyphen or one space between its words, then
+optional blanks and a colon. Prose that names the words with no colon after them passes. The
+spelling is deliberately not written in this page, because the pack's file-content layer holds
 that token out of files. The PreToolUse hooks judge only the assistant's own tool calls; this hook
 makes git itself refuse the commit, so a commit staged by a background script, a scheduler, or any
 process outside the assistant hook path is refused too. It fails closed: an unreadable or oversized
 message file refuses the commit.
 
-git runs commit-msg on its message buffer before its own cleanup, so the hook applies that cleanup
-first. When an editor ran (git sets `GIT_EDITOR=:` for the hook when none does), the hook drops
-everything from git's scissors line on, and, under the default or `strip` cleanup (`commit.cleanup`),
-every line starting with the comment string (`core.commentString`, else `core.commentChar`, else
-`#`). So a removal commit made with `git commit -v -e`, whose diff below the scissors line shows the
-removed trailer line, passes. With no editor, git keeps comment lines, and the hook counts them.
+git runs commit-msg on its message buffer before its own cleanup. Whether that cleanup drops comment
+lines, or the text from a scissors line on, is decided by `--cleanup=<mode>` and `--verbose` or
+`--no-verbose` on git's command line, which override `commit.cleanup` and `commit.verbose` and which
+a hook cannot see. So the hook counts the whole message file: comment lines (whatever the comment
+string) and any text below a scissors line are counted, because git may record them. For example,
+with `commit.verbose` set, `git commit --no-verbose` keeps the text typed below a scissors line, and
+with `core.commentChar` set to a letter and `--cleanup=verbatim`, a trailer line that starts with
+that letter is recorded. The cost is an over-refusal: a removal commit made with `--verbose` (or with
+`commit.verbose` set), whose diff below the scissors line shows the removed trailer line, is refused.
+Commit such a removal without `--verbose` (`git commit --no-verbose`, or
+`git -c commit.verbose=false commit`) and without the token in a comment line.
 
 ### Install (one repository)
 
@@ -59,13 +64,10 @@ at a directory that chains to them.
   command), a `core.hooksPath` set in a configuration file, a `GIT_CONFIG_PARAMETERS` or
   `GIT_CONFIG_COUNT` setting in the environment, or a hook file that is deleted, replaced or made
   non-executable. Of these, only the same-command form is refused at the tool-call boundary.
-- The hook cannot see a `--cleanup` option on the command line. With an editor and
-  `--cleanup=verbatim` or `--cleanup=whitespace`, git records a comment line that holds the token,
-  but the hook does not count it. git does not parse such a line as a trailer; how a forge reads it
-  is unverified. With `core.commentChar=auto`, the hook drops no comment line and finds no scissors
-  line, so it refuses such a removal commit rather than passing it.
 - The scan is byte-based over the message file (surrogateescape decode), so any ASCII-superset
   encoding is read; a wide encoding such as UTF-16 is a disclosed non-catch.
+- A trailer spelled with a separator other than a colon is not counted. git parses one only where a
+  `trailer.separators` setting names that separator.
 
 Requires Python 3 on PATH (`/usr/bin/env python3`); with no Python the hook fails and git refuses
 the commit, which is the fail-closed direction.
