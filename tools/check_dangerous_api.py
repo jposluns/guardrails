@@ -89,11 +89,13 @@ never importing or running the file, and reports:
                lines: a search, findall, finditer, sub, subn or split method of it (called or
                referenced), or its .pattern given (alone, or in a + or conditional expression) as
                the resolved pattern of an re function, where that text is judged. A store of it to
-               a name or attribute is followed to every read the scan resolves to it and to every
-               attribute read named like it (self.P, cls.P or Lines.P for a class attribute P);
-               any other use (match or fullmatch, an argument, a return, a container, any other
-               attribute) reports it there. \\A, \\Z and \\z anchor the whole input under
-               MULTILINE too.
+               a name or attribute (a walrus included) is followed to every read the scan resolves
+               to it, to every attribute read named like it (self.P, cls.P or Lines.P for a class
+               attribute P), and to every name read that may hold the stored value (p = self.P,
+               then p.fullmatch); a getattr in its file with a name it is stored to, or with a name
+               that is not a literal, and any other use (match or fullmatch, an argument, a
+               return, a container, any other attribute) report it there. \\A, \\Z and \\z anchor
+               the whole input under MULTILINE too.
                A compiled pattern is an re.compile call, the value of a walrus, either branch of a
                conditional expression, any operand of a boolean expression (cache or
                re.compile(...)), or a name every binding of which is one of these or a copy of
@@ -222,16 +224,17 @@ named through getattr but not called (getattr(PAT, "fullmatch")); flags held in 
 detectors with no start anchor used with search, and any not anchored at both ends used with
 findall, finditer, sub, subn or split; a line scan (anchored only by ^ or $ under MULTILINE)
 used only to scan lines, so a line validator that admits non-ASCII digits in each line is not
-seen, and a line scan matched from its start only in another module (mod.LINE.fullmatch); a
-lookaround, conditional or backreference group at either end is not entered (^\\d+(?=$) is not
-read as anchored), nor is a group that closes the pattern with a quantifier after it
-(^(\\d+$)? is not read as anchored); a top-level alternation is read by its first and last
-tokens only, and neither it nor a group holding its own alternation is entered at an end (^a|b$
-reads as anchored; (^a)|b$, ^a(?:b|$) and a|^\\d+$ do not); \\D, \\W, \\s, \\S and \\b, which
-change meaning with re.ASCII too, are not judged, so the \\b detector false negatives in
-tools/check_secrets.py and tools/check_leaks.py are not addressed here (a site given re.ASCII
-for its \\d or \\w also narrows its \\s, which then misses U+001C to U+001F); and the regex
-module and bytes patterns (where \\d and \\w are ASCII already).
+seen, and a line scan matched from its start only in another module (mod.LINE.fullmatch) or
+only through a read that is not a name, an attribute or a getattr (vars(self)["P"],
+operator.attrgetter("P")); a lookaround, conditional or backreference group at either end is
+not entered (^\\d+(?=$) is not read as anchored), nor is a group that closes the pattern with a
+quantifier after it (^(\\d+$)? is not read as anchored); a top-level alternation is read by its
+first and last tokens only, and neither it nor a group holding its own alternation is entered
+at an end (^a|b$ reads as anchored; (^a)|b$, ^a(?:b|$) and a|^\\d+$ do not); \\D, \\W, \\s, \\S
+and \\b, which change meaning with re.ASCII too, are not judged, so the \\b detector false
+negatives in tools/check_secrets.py and tools/check_leaks.py are not addressed here (a site
+given re.ASCII for its \\d or \\w also narrows its \\s, which then misses U+001C to U+001F); and
+the regex module and bytes patterns (where \\d and \\w are ASCII already).
 """
 import sys
 
@@ -403,15 +406,17 @@ _IMPORTERS = frozenset({"importlib.import_module", "__import__", "builtins.__imp
 # depend on it. "alias" is import-alias resolution, "scope" its per-scope binding (off, it
 # falls back to one file-global, last-wins map) and "chain" the reading of a sink module
 # reached as an attribute of another module (shutil.os.system is os.system); "regex-lines" is
-# the report, where it is compiled, of a MULTILINE line scan used other than as one, and
-# "regex-pattern" the reading of a compiled pattern's .pattern as its text; the rest are the
-# sink checks and the fail-closed and allowlist legs of the tree scan.
+# the report, where it is compiled, of a MULTILINE line scan used other than as one,
+# "regex-stores" the following of a line scan stored to a name to every read of that name (and
+# the reading of a getattr as a use it cannot follow), and "regex-pattern" the reading of a
+# compiled pattern's .pattern as its text; the rest are the sink checks and the fail-closed and
+# allowlist legs of the tree scan.
 CHECKS = ("alias", "scope", "chain", "star-import", "module-escape", "dsz-ref", "dsz-yaml",
           "dsz-numpy", "tls-verify", "tls-ref", "tls-hostname", "tls-verify-mode", "tls-context",
           "shell-subprocess", "shell-always", "code-ref", "code-loader", "regex-ascii",
-          "regex-lines", "regex-pattern", "fail-encoding", "fail-read", "fail-parse",
-          "fail-nonregular", "fail-symlink", "fail-walk", "fail-root", "allowlist-stale", "allowlist-shape", "site-column",
-          "site-end")
+          "regex-lines", "regex-stores", "regex-pattern", "fail-encoding", "fail-read",
+          "fail-parse", "fail-nonregular", "fail-symlink", "fail-walk", "fail-root",
+          "allowlist-stale", "allowlist-shape", "site-column", "site-end")
 
 # The reviewed allowlist: (path, enclosing qualname, kind, exact count, reason). Every entry
 # names a current legitimate site and why it is safe; a count that no longer matches the
@@ -1492,57 +1497,84 @@ class _Scanner(ast.NodeVisitor):
 
     def _pattern_uses(self):
         """(the name reads the scan resolves to each re.compile, by the call's id, each with its
-        scope; every attribute read, by attribute name, each with its scope; every node's parent),
+        scope; every attribute read, by attribute name, each with its scope; every node's parent;
+        the name reads that may hold each assigned value, by the value's id, each with its scope;
+        the attribute names getattr is called with, None for a name that is not a literal),
         built once per file."""
         if self.uses is None:
             names, attrs, parents = _reads(self.tree, self.binder)
-            by_call = {}
+            by_call, by_value, getattrs = {}, {}, set()
             for read, scope in names:
                 for call, _scope in self._judged_in(scope, self._compiled, read):
                     by_call.setdefault(id(call), []).append((read, scope))
-            self.uses = by_call, attrs, parents
+                for source in self._judged_in(scope, lambda r: self._sources(r.id), read):
+                    if source is not None:
+                        by_value.setdefault(id(source[0]), []).append((read, scope))
+            for read, scope in names + attrs.get("getattr", []):
+                call = parents.get(id(read))
+                if isinstance(call, ast.Call) and call.func is read \
+                        and self._judged_in(scope, self.resolve, read) & _GETATTR:
+                    attr = _positional(call, 1)
+                    getattrs.add(attr.value if isinstance(attr, ast.Constant)
+                                 and isinstance(attr.value, str) else None)
+            self.uses = by_call, attrs, parents, by_value, getattrs
         return self.uses
 
     def _line_uses(self, call):
         """Whether every use of a compiled line scan scans lines (see _line_use): the re.compile
-        call itself, every name read the scan resolves to it (a copy included), and every
-        attribute read anywhere in this file named like a name or attribute it is stored to
-        (self.P, cls.P or Lines.P for a class attribute P). A use in another module is not seen."""
+        call itself, every name read the scan resolves to it (a copy included), every attribute
+        read anywhere in this file named like a name or attribute it is stored to (self.P, cls.P
+        or Lines.P for a class attribute P), and every name read that may hold a value stored to
+        a name (p = self.P, Q = Lines.P, or a walrus of either). A getattr anywhere in this file
+        with a name it is stored to, or with a name that is not a literal, is a use that is not
+        followed, so it is not a line scan. A use in another module is not seen."""
         if id(call) not in self.line_scans:
-            by_call, attrs, _parents = self._pattern_uses()
+            by_call, attrs, _parents, by_value, getattrs = self._pattern_uses()
             pending, stored, lines = [(call, self.scope)] + by_call.get(id(call), []), set(), True
+            followed = set()
             while lines and pending:
                 use, scope = pending.pop()
-                lines, names = self._judged_in(scope, self._line_use, use)
+                lines, names, values = self._judged_in(scope, self._line_use, use)
                 for name in sorted(names - stored):
                     stored.add(name)
                     pending += attrs.get(name, [])
+                    if self.on("regex-stores") and getattrs & {name, None}:
+                        lines = False
+                for value in values:
+                    if self.on("regex-stores") and id(value) not in followed:
+                        followed.add(id(value))
+                        pending += by_value.get(id(value), [])
             self.line_scans[id(call)] = lines
         return self.line_scans[id(call)]
 
     def _line_use(self, use):
-        """(whether one use of a compiled line scan scans lines, the names it is stored to). Read
-        through a walrus or a conditional or boolean expression, it scans lines when it calls or
-        references a REGEX_LINE_METHODS method, or when its .pattern is given as an re function's
-        pattern (alone, or in a + or conditional expression) that resolves, so that text is judged
-        there; a store to names or attributes is followed (_line_uses). Any other use (match or
-        fullmatch, an argument, a return, a container, any other attribute) is not a line scan."""
+        """(whether one use of a compiled line scan scans lines, the names and attributes it is
+        stored to, the values stored to names). Read through a walrus or a conditional or boolean
+        expression, it scans lines when it calls or references a REGEX_LINE_METHODS method, or
+        when its .pattern is given as an re function's pattern (alone, or in a + or conditional
+        expression) that resolves, so that text is judged there; a store to names or attributes,
+        a walrus included, is followed (_line_uses). Any other use (match or fullmatch, an
+        argument, a return, a container, any other attribute) is not a line scan."""
         parents = self._pattern_uses()[2]
         node, parent = use, parents.get(id(use))
+        names, values = set(), []
         while isinstance(parent, (ast.IfExp, ast.BoolOp, ast.NamedExpr)) \
                 and node is not getattr(parent, "test", None):
+            if isinstance(parent, ast.NamedExpr) and self.on("regex-stores"):
+                names.add(parent.target.id)
+                values.append(node)
             node, parent = parent, parents.get(id(parent))
         if isinstance(parent, ast.Attribute) and parent.value is node:
             if parent.attr == "pattern":
-                return self._pattern_argument(parent), set()
-            return parent.attr in REGEX_LINE_METHODS, set()
+                return self._pattern_argument(parent), names, values
+            return parent.attr in REGEX_LINE_METHODS, names, values
         targets = parent.targets if isinstance(parent, ast.Assign) else \
             [parent.target] if isinstance(parent, ast.AnnAssign) else []
         if targets and parent.value is node \
                 and all(isinstance(target, (ast.Name, ast.Attribute)) for target in targets):
-            return True, {target.id if isinstance(target, ast.Name) else target.attr
-                          for target in targets}
-        return False, set()
+            return True, names | {target.id if isinstance(target, ast.Name) else target.attr
+                                  for target in targets}, values + [node]
+        return False, names, values
 
     def _pattern_argument(self, node):
         """Whether a .pattern read is, alone or in a + or conditional expression, the resolved
@@ -2550,6 +2582,29 @@ POSITIVE_VECTORS = (
      ("regex-ascii", "regex-lines")),
     ("import re\nLINE = re.compile(r'^\\d+$', re.M)\nTEXT = LINE.pattern\n",
      ("regex-ascii", "regex-lines")),
+    # Stored to a name from an attribute (or a walrus of one), a line scan is followed to every
+    # read of that name, so one matched from its start there is reported where it is compiled;
+    # so is one an attribute holds that any getattr may read.
+    ("import re\nclass Ids:\n    def __init__(self):\n"
+     "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
+     "        p = self.P\n        return p.fullmatch(t)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    ("import re\nclass C:\n    P = re.compile(r'^\\d+$', re.M)\nQ = C.P\nQ.fullmatch(text)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    ("import re\nclass C:\n    P = re.compile(r'^\\w+$', re.M)\nQ = C.P\nQ.match(text)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    ("import re\nclass Ids:\n    def __init__(self):\n"
+     "        self.P = re.compile(r'^\\d+$', re.M)\n        self.Q = self.P\n"
+     "    def ok(self, t):\n        q = self.Q\n        return q.fullmatch(t)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    ("import re\nclass Ids:\n    def __init__(self):\n"
+     "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
+     "        return getattr(self, 'P').fullmatch(t)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    ("import re\nclass Ids:\n    def __init__(self):\n"
+     "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
+     "        (p := self.P).finditer(t)\n        return p.fullmatch(t)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
     # A comment group before the leading flag groups, and a scoped (?u:...) inside an ASCII scope.
     *((source, ("regex-ascii",)) for source in _REGEX_LEADING_COMMENT + _REGEX_SCOPE_U),
     # Anchored at both ends, a pattern used with findall matches the whole input or nothing.
@@ -2704,8 +2759,9 @@ NEGATIVE_VECTORS = (
     "re.compile(r'^\\d+(?:[ \\t]|$)')\n",
     # A line scan used only as one, called or compiled: finditer, findall, sub, a search anchored
     # at its start, verbose with MULTILINE, split, an inline (?m) with subn, a flags name with
-    # findall, a compiled sub, finditer through a class attribute or a copy, and its .pattern
-    # given to a line scan with MULTILINE (positionally or as pattern=).
+    # findall, a compiled sub, finditer through a class attribute or a copy, its .pattern given
+    # to a line scan with MULTILINE (positionally or as pattern=), and an attribute stored to a
+    # name every read of which scans lines.
     "import re\nre.finditer(r'^\\d+$', text, re.M)\nre.findall(r'^\\d+$', text, re.M)\n"
     "re.sub(r'^\\d+$', '', text, flags=re.M)\nre.search(r'^\\d+', text, re.M)\n"
     "re.findall(r'''^ \\d+ $  # one line''', text, re.X | re.M)\n"
@@ -2717,7 +2773,10 @@ NEGATIVE_VECTORS = (
     " flags=re.M)\nCOPY = LINE\nCOPY.finditer(text)\n"
     "START = re.compile(r'^\\d+', re.M)\nSTART.search(text)\n"
     "class Lines:\n    P = re.compile(r'^\\w+$', re.M)\n    def scan(self, t):\n"
-    "        return self.P.finditer(t)\n",
+    "        return self.P.finditer(t)\n"
+    "class Ids:\n    def __init__(self):\n        self.P = re.compile(r'^\\d+$', re.M)\n"
+    "    def scan(self, t):\n        p = self.P\n        return p.finditer(t)\n"
+    "QUOTE = Lines.P\nQUOTE.findall(text)\nQUOTE.sub('', text)\n",
     # ASCII after comment groups among the leading flag groups, and in a scoped (?a:...) group
     # that holds only part of the pattern, (?u:...) closed before the \d.
     *_REGEX_LEADING_ASCII,
