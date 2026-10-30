@@ -887,22 +887,44 @@ The hook reads labels only from the brief, only at column 0, and only as the exa
 one space. The value is the rest of that line. The brief must be UTF-8 with no NUL and no line
 boundary other than a physical newline.
 
-A line is label-like when its text, after every leading character that is not a letter or digit is
-removed, begins with one of the labels, in any case: for `Review-path:`, the name `Review-path`
-followed by a colon. A letter or digit is a character Python's `str.isalnum` accepts that Unicode does
-not name a FILLER, so whitespace, every character of Unicode category Cf, Mn, Me, Zs, Zl or Zp, a
-filler of category Lo such as U+3164 or U+FFA0 (which shows as blank), and a Markdown list, quote or
-emphasis marker are all such characters. A label's own leading characters that are not letters or
-digits are removed the same way, and a label with no letter or digit is read only in its exact form.
-A label-like line that is not exactly a label at column 0 followed by one space makes the brief
-cannot-evaluate: the dispatch is withheld as `UNVERIFIABLE:` with a reason naming the line, never
-read as if the label were absent. This covers a second `Reviewed-revision:` or an extra
-`Review-path:` behind an invisible prefix, a label in another case or with no space after its colon,
-and a label in a Markdown list or quote, so a brief that quotes a label that way is withheld too. A
-label word inside a sentence (`the Review-path: field`) is not label-like. Only leading characters are
-removed: an invisible character inside a label, a numbered list marker (its digit is a letter or
-digit), a character between a label's name and its colon, and a look-alike letter or colon leave the
-line prose, neither read nor refused.
+Every line is screened, a line read as a label by its value alone, except a line inside a fenced code
+block: a line after a fence line (three or more backticks or tildes after any spaces or tabs, where a
+backtick fence line holds no other backtick) up to the next line that holds a run of at least as many
+of the same character and nothing else, or the end of the brief. A screened line makes the brief
+cannot-evaluate when its letters and digits hold a label's name followed by its colon: the dispatch is
+withheld as `UNVERIFIABLE:` with a reason naming the first such line. The hook compares a line this way:
+
+- It reads the line twice: as written, and as a terminal or an HTML renderer shows it. The rendered
+  form has ECMA-48 escape sequences removed, each backspace removed with the character before it, and
+  HTML comments and tags removed, and then has HTML character references decoded.
+- It puts each form in canonical decomposition, case folds it, puts it in compatibility decomposition
+  (NFKD), case folds it and puts it in NFKD again. A fullwidth or mathematical letter or colon becomes
+  its ASCII form, and an accented letter becomes its base letter.
+- It removes every character that is not a letter or digit: Python's `str.isalnum` decides, less the
+  four Hangul fillers U+115F, U+1160, U+3164 and U+FFA0, which show as blank. A colon is kept. A
+  punctuation mark or symbol outside ASCII (Unicode category P or S) is kept as a colon.
+- A letter or digit outside ASCII next to an ASCII letter or digit matches any letter of a name, so
+  `Review-path:` with its first `e` written as the Cyrillic U+0435 matches.
+- A label's name is its own letters and digits, compared the same way, and colons may stand between
+  them. The line matches when the name is followed by a colon before the next letter or digit. A label
+  with no letter or digit, or no colon after its last one, is read only in its exact form.
+
+So a label is withheld behind any prefix (a list marker, a checkbox, a quote marker, an HTML tag, a
+terminal escape, a backspace, an invisible character, another label's value), with characters that are
+not letters or digits inside its name or before its colon, in any case, with no space, a tab or a
+no-break space after its colon, written with HTML character references, with a look-alike colon of
+category P or S, or with fullwidth or accented letters or with look-alike letters outside ASCII in runs
+of one or two. So is every line that mentions a label's name followed by a colon in prose, a list, a
+table, a heading, a code span or a quote, and a line where a label's name is followed by a curly quote,
+a dash or an arrow. To mention a label, drop the colon (`the Review-path lines`) or put the text in a
+fenced code block. A label at column 0 followed by one space is read even inside a fenced code block.
+
+A label is neither read nor refused when it is inside a fenced code block and not at column 0; when a
+letter or digit is added inside its name (a Markdown link destination, a modifier letter such as U+0640
+ARABIC TATWEEL); when a letter of its name is another ASCII letter or digit (`Rev1ew-path:`), or three
+or more in a row are look-alikes outside ASCII; when its colon is missing or is a look-alike that is a
+letter (U+02D0 MODIFIER LETTER TRIANGULAR COLON); and when it is split across lines, a carriage return
+inside it included.
 
 - `Review-target:` is required, once. It must be `revision`, `working-tree` or `not-a-review`. A
   `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row; where

@@ -23310,8 +23310,9 @@ def orch_dispatch_ledger(data):
 # where a brief that names the worker draft the commit applies has every path the draft's diff headers name
 # declared too, less the paths it records as skipped (_rdp_draft_census);
 # and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
-# at the pinned gitlink, which are not read. A label-like line that is not a column-0 label (_rdp_labels)
-# is a cannot-evaluate. A refusal is a deny naming its reason; a cannot-evaluate
+# at the pinned gitlink, which are not read. A line outside a fenced code block that holds a label's name
+# followed by a colon anywhere but in a column-0 label the hook reads (_rdp_labels) is a cannot-evaluate.
+# A refusal is a deny naming its reason; a cannot-evaluate
 # is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through _review_git, which
 # neutralizes replacement refs, grafts, pathspec magic and the commit-graph cache.
 _RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes"))
@@ -23522,73 +23523,194 @@ def _rdp_read_text(path, max_bytes, what):
 def _rdp_read_brief(path, max_bytes):
     """(text, None) for a readable brief, or (None, reason) for a cannot-evaluate: a file _rdp_read_text
     cannot read, or one holding a non-physical line boundary. The dropped byte-order mark lets a brief
-    saved with one still show its first label at column 0; any other byte-order mark before a label makes
-    its line label-like (_rdp_labels), so the brief cannot be evaluated."""
+    saved with one still show its first label at column 0. A byte-order mark that opens any other line keeps
+    that line from being read as a label, and the label screen (_rdp_labels) removes every byte-order mark it
+    reads, like any other character that is not a letter or digit."""
     text, why = _rdp_read_text(path, max_bytes, "brief")
     if text is not None and any(ch in text for ch in _RDP_NONPHYSICAL):
         return (None, "the brief {} contains a line boundary that is not a physical newline".format(path))
     return (text, why)
 
 
-# One match skips a run of characters str.isalnum rejects (an underscore included); _rdp_label_start
-# skips the fillers it accepts.
-_RDP_NOT_ALNUM = re.compile(r"[\W_]*")
+# The label screen (_rdp_labels). _rdp_rendered removes, in this order: an ECMA-48 escape sequence (a
+# control sequence, a control string up to its terminator or the line's end, or a two-character escape);
+# a backspace with the character before it; an HTML comment and an HTML tag; and then decodes each HTML
+# character reference as html.unescape does, a decoded line boundary becoming a space.
+_RDP_ESCAPE = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+                         r"|(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f]).*?(?:\x07|\x1b\\|\x9c|$)"
+                         r"|\x1b[ -/]*[0-~]?", re.M)
+_RDP_MARKUP = re.compile(r"<!--.*?(?:-->|$)|</?[A-Za-z][^<>\n]*>", re.M)
+_RDP_CHARREF = re.compile(r"&(?:#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)")
+_RDP_BREAKS = dict.fromkeys(map(ord, "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"), " ")
+# _rdp_letters: a character outside ASCII that str.isalnum rejects; the Unicode categories (by their first
+# letter, punctuation and symbol) of such a character that becomes a colon; every character removed outright
+# (one str.isalnum rejects, an underscore included, other than a colon or a newline); and the four Hangul
+# fillers, the characters Unicode names FILLER that str.isalnum accepts, which show as blank.
+_RDP_NOT_WORD = re.compile(r"[^\w\x00-\x7f]")
+_RDP_COLONISH = "PS"
+_RDP_UNLETTER = re.compile(r"[^\w:\n]|_")
+_RDP_FILLERS = dict.fromkeys(map(ord, "\u115f\u1160\u3164\uffa0"))
+# _rdp_screened: a letter or digit outside ASCII next to an ASCII letter or digit
+_RDP_LOOKALIKE = re.compile(r"(?<=[0-9a-z])[^\x00-\x7f:\n]|[^\x00-\x7f:\n](?=[0-9a-z])")
+# A fence line: three or more backticks or tildes after any spaces or tabs, a backtick fence's line holding
+# no other backtick
+_RDP_FENCE = re.compile(r"[ \t]*(`{3,}(?!.*`)|~{3,})")
 
 
-def _rdp_label_start(text):
-    """The index of the first letter or digit in text, len(text) when it has none. A letter or digit is a
-    character str.isalnum accepts that Unicode does not name a FILLER (the Hangul fillers, such as U+3164
-    and U+FFA0, are category Lo yet show as blank). Every character before it (whitespace, a character of
-    category Cf, Mn, Me, Zs, Zl or Zp, a filler, a Markdown list, quote or emphasis marker) is one a reader
-    passes over before a label."""
-    i = 0
-    while True:
-        i = _RDP_NOT_ALNUM.match(text, i).end()
-        if i < len(text) and "FILLER" in unicodedata.name(text[i], ""):
-            i += 1
-        else:
-            return i
+def _rdp_overstrike(text):
+    """text with each backspace and the character before it on its line removed, as a terminal overstrikes
+    (x, a backspace and R show as R)."""
+    if "\x08" not in text:
+        return text
+    pieces = text.split("\x08")
+    kept = list(pieces[0])
+    for piece in pieces[1:]:
+        if kept and kept[-1] != "\n":
+            kept.pop()
+        kept.extend(piece)
+    return "".join(kept)
 
 
-def _rdp_labels(text, labels):
-    """(found, None), found mapping each label key to the list of its values, or (None, reason) for a
-    cannot-evaluate. A label matches only at column 0, as the exact label followed by one space, and its
-    value is the rest of that physical line. A line is label-like when its text, after every leading
-    character that is not a letter or digit (_rdp_label_start) is removed, begins with one of the labels,
-    in any case: for a label such as Review-path:, its name followed by a colon (a label's own leading
-    characters that are not letters or digits are removed too, and a label with no letter or digit is read
-    only in its exact form). A label-like line that is not exactly a label at column 0 followed by one space
-    makes the brief a cannot-evaluate whose reason names the line, so a label a reader sees (a second pin,
-    an extra review path behind an invisible prefix) is never silently absent."""
+def _rdp_rendered(text):
+    """text as a terminal or an HTML renderer shows it, line for line (_RDP_ESCAPE, _rdp_overstrike,
+    _RDP_MARKUP, _RDP_CHARREF), so an escape, a tag or a reference inside a label's name is not between its
+    letters."""
+    text = _RDP_MARKUP.sub("", _rdp_overstrike(_RDP_ESCAPE.sub("", text)))
+    if "&" in text:
+        import html  # read here only: the one branch that decodes character references
+        text = _RDP_CHARREF.sub(lambda m: html.unescape(m.group()).translate(_RDP_BREAKS), text)
+    return text
+
+
+def _rdp_views(text):
+    """The texts the label screen reads, each with the words its reason adds: text as written, and, where it
+    differs, text as rendered (_rdp_rendered). Both are read, since what rendering removes (a comment, a tag's
+    attributes) is still there for a reader of the file."""
+    rendered = _rdp_rendered(text)
+    views = [("", text)]
+    if rendered != text:
+        views.append((", once its escapes, backspaces, markup and character references are rendered,", rendered))
+    return views
+
+
+def _rdp_fold(text):
+    """text put in canonical decomposition, case folded, put in compatibility decomposition (NFKD), case
+    folded and put in NFKD again: a fullwidth or mathematical letter or colon becomes its ASCII form, and an
+    accented letter its base letter and a combining mark."""
+    folded = unicodedata.normalize("NFD", text).casefold()
+    return unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", folded).casefold())
+
+
+def _rdp_letters(text):
+    """text's letters and digits as the label screen compares them, each newline kept: text folded
+    (_rdp_fold), then every character that is not a letter or digit (str.isalnum, less the four Hangul
+    fillers) removed, except a colon, and a punctuation mark or symbol outside ASCII (Unicode category P or
+    S: a look-alike colon such as U+2236 RATIO or U+A789 MODIFIER LETTER COLON, but also a curly quote, a
+    dash or an arrow), which becomes a colon."""
+    folded = _rdp_fold(text)
+    table = dict(_RDP_FILLERS)
+    for ch in set(_RDP_NOT_WORD.findall(folded)):
+        table[ord(ch)] = ":" if unicodedata.category(ch)[0] in _RDP_COLONISH else None
+    return _RDP_UNLETTER.sub("", folded.translate(table))
+
+
+def _rdp_screened(text):
+    """_rdp_letters(text) with each letter or digit outside ASCII that stands next to an ASCII letter or digit
+    written as a NUL, which a name's pattern (_rdp_name) reads as any of its letters: Review-path: with its
+    first e written as the Cyrillic U+0435 is read as the name. A run of three or more such letters keeps
+    its inner ones, so a name written in another script, or a word of one written next to an ASCII word, is
+    not read as a name."""
+    return _RDP_LOOKALIKE.sub("\x00", _rdp_letters(text))
+
+
+def _rdp_name(label):
+    """The pattern the label screen finds label by in _rdp_screened text: the label's letters and digits
+    (_rdp_letters) in order, each also matched by a NUL, with any colons between them, then a colon. None
+    for a label with no letter or digit, or no colon after its last one; such a label is read only in its
+    exact form."""
+    letters = _rdp_letters(label)
+    name = letters.replace(":", "")
+    if not name or not letters.endswith(":"):
+        return None
+    return re.compile(":*".join("[{}\x00]".format(re.escape(ch)) for ch in name) + ":")
+
+
+def _rdp_read_labels(lines, labels):
+    """(found, rest): found maps each label key to the list of its values, a label read only at column 0, as
+    the exact label followed by one space, its value the rest of that physical line; rest is lines with each
+    line read as a label cut to its value, the text the label screen reads."""
     found = {key: [] for key in labels}
     exact = tuple(label + " " for label in labels.values())
-    names = {}
-    for key, label in labels.items():
-        name = label[_rdp_label_start(label):].casefold()
-        if name:
-            names[key] = name
-    named = tuple(names.values())
-    # casefold never shortens a character, so a line prefix as long as the longest name decides the match
-    width = max((len(name) for name in named), default=0)
-    for number, line in enumerate(text.splitlines(), 1):
+    rest = list(lines)
+    for number, line in enumerate(lines):
         if line.startswith(exact):
             for key, label in labels.items():
                 if line.startswith(label + " "):
                     found[key].append(line[len(label) + 1:])
-            continue
-        start = _rdp_label_start(line)
-        head = line[start:start + width].casefold()
-        if not head.startswith(named):
-            continue
-        key = next(key for key, name in names.items() if head.startswith(name))
-        lead = " ".join("U+{:04X}".format(ord(ch)) for ch in line[:min(start, 8)])
-        return (None, "has line {} ({!r}), which reads as the {!r} label{} but is not that label at column 0 "
-                "followed by one space; a reader can take it for a label the hook does not read, so write the "
-                "label exactly or reword the line".format(
-                    number, line[:80], labels[key],
-                    " behind the leading characters {}{}".format(lead, " ..." if start > 8 else "") if start
-                    else ""))
-    return (found, None)
+                    rest[number] = line[len(label) + 1:]
+    return (found, rest)
+
+
+def _rdp_unscreened(lines):
+    """The indexes of the lines the label screen passes over, those inside a fenced code block: after a fence
+    line (_RDP_FENCE) up to the next line that holds a run of at least as many of the same character and
+    nothing else, or the brief's end. A fence line itself is screened."""
+    passed = set()
+    fence = None
+    for number, line in enumerate(lines):
+        mark = _RDP_FENCE.match(line)
+        if fence is None:
+            fence = mark.group(1) if mark else None
+        elif mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) \
+                and not line[mark.end():].strip(" \t"):
+            fence = None
+        else:
+            passed.add(number)
+    return passed
+
+
+def _rdp_labels(text, labels):
+    """(found, None), found mapping each label key to the list of its values, or (None, reason) for a
+    cannot-evaluate. A label is read only at column 0, as the exact label followed by one space, and its
+    value is the rest of that physical line, inside a fenced code block too (_rdp_read_labels). Every line
+    outside a fenced code block (_rdp_unscreened) is screened, a line read as a label by its value alone:
+    the brief is a cannot-evaluate, whose reason names the first such line, when a line's letters and
+    digits, as written or as rendered (_rdp_views), hold a label's name followed by its colon (_rdp_name
+    over _rdp_screened text). So a label is withheld behind any prefix, another label's value included;
+    with characters that are not letters or digits inside its name or before its colon; in any case; with
+    no space, a tab or a no-break space after its colon; with a look-alike colon of category P or S; and
+    with fullwidth or accented letters, or look-alike letters outside ASCII in runs of one or two. So is
+    every line that mentions a label's name followed by a colon in prose, a list, a table, a heading, a
+    code span or a quote, and a name followed by a curly quote, a dash or an arrow. A label is neither read
+    nor refused when it is inside a fenced code block and not at column 0; when a letter or digit is added
+    inside its name (a Markdown link destination, a modifier letter such as U+0640 ARABIC TATWEEL); when a
+    letter of its name is another ASCII letter or digit (Rev1ew-path:), or three or more in a row are
+    look-alikes outside ASCII; when its colon is missing or is a look-alike that is a letter (U+02D0
+    MODIFIER LETTER TRIANGULAR COLON); when it is split across lines, a carriage return inside it included;
+    and when the binding's label has no letter or digit or no colon after its last one."""
+    lines = text.splitlines()
+    found, rest = _rdp_read_labels(lines, labels)
+    passed = _rdp_unscreened(lines)
+    names = {key: _rdp_name(label) for key, label in labels.items()}
+    hits = []
+    for how, view in _rdp_views("\n".join(rest)):
+        screened = _rdp_screened(view)
+        for key, pattern in names.items():
+            number = at = 0
+            for match in pattern.finditer(screened) if pattern else ():
+                number += screened.count("\n", at, match.start())
+                at = match.start()
+                if number not in passed:
+                    hits.append((number, how, key))
+                    break
+    if not hits:
+        return (found, None)
+    number, how, key = min(hits, key=lambda hit: hit[0])
+    return (None, "has line {} ({!r}), which holds{} the {!r} label's name followed by a colon outside a label "
+            "the hook reads (a label is read only at column 0, followed by one space); a reader can take it "
+            "for a label the hook does not read, so write the label exactly, reword the line so no colon "
+            "follows the name, or put the line in a fenced code block".format(
+                number + 1, lines[number][:80], how, labels[key]))
 
 
 def _rdp_listing(items):

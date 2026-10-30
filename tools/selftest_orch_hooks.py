@@ -1244,91 +1244,278 @@ def _rdp_cases(tmp):
     finally:
         aiqt_hooks._rdp_decide, sys.stdin = saved_decide, saved_stdin
     check("rdp/handler-crash-fails-closed", rc, 2)
-    _rdp_label_like_cases(base)
+    _rdp_label_screen_cases(base)
     _rdp_draft_cases(base)
     _rdp_scope_cases(base, bare)
 
 
-def _rdp_without_label_like(fn):
-    """fn() with the label-like screen reverted: _rdp_label_start patched to find no letter or digit, so no
-    label has a name and no line is label-like, and only the column-0 reader is left. The revert leg of
-    each label-like vector: it shows the refusal comes from the screen alone (red on revert)."""
-    saved = aiqt_hooks._rdp_label_start
-    aiqt_hooks._rdp_label_start = len
+def _rdp_mutant(changes, fn):
+    """fn() against a mutant of the hook: each change, a (name, value) pair, sets that attribute of
+    aiqt_hooks, and every attribute is restored after."""
+    saved = {name: getattr(aiqt_hooks, name) for name, _value in changes}
     try:
+        for name, value in changes:
+            setattr(aiqt_hooks, name, value)
         return fn()
     finally:
-        aiqt_hooks._rdp_label_start = saved
+        for name, value in saved.items():
+            setattr(aiqt_hooks, name, value)
 
 
-def _rdp_label_like_cases(base):
-    """The label-like line vectors (rdp/label-like-*): a brief line whose text, after every leading
-    character that is not a letter or digit is removed, begins with a label in any case, and that is not
-    exactly a label at column 0 followed by one space, withholds the dispatch as UNVERIFIABLE with a reason
-    naming the line, so a second pin or an extra review path behind an invisible prefix is never read as
-    absent. Each refusal is also shown allowed with the screen reverted (red on revert)."""
-    ll = RdpFixture(base, "labellike")
-    # The seven measured prefixes: a combining grapheme joiner, a variation selector, the two Hangul
-    # fillers, a zero width space, a no-break space and a space.
-    prefixes = tuple(chr(cp) for cp in (0x034F, 0xFE0F, 0x3164, 0xFFA0, 0x200B, 0x00A0, 0x0020))
-    # Each hidden line, were it read, would change the decision: a second target or pin (the at-most-once
-    # refusal) or a declared path the commit does not change.
-    hidden = (("Review-target:", "working-tree"), ("Reviewed-revision:", ll.seed), ("Review-path:", "seed.txt"))
-    cases = [(p, label + " " + value) for p in prefixes for label, value in hidden]
+def _rdp_label_screen_cases(base):
+    """The label screen vectors (rdp/label-screen-*): a line other than a column-0 label, outside a fenced
+    code block, whose letters and digits as written or as rendered hold a label's name followed by its
+    colon withholds the dispatch as UNVERIFIABLE, with a reason naming the line. Each hide class is shown
+    withheld for each of three labels and each over-refusal class the rule keeps is shown withheld, each row
+    with its flip, which passes (a hide with a semicolon for its colon, an over-refusal line reworded so no
+    colon follows the name); each element of the rule is shown needed by a mutant that flips a row; and a
+    sweep shows that no character that is not a letter or digit hides a label before it, inside its name or
+    before its colon."""
+    import re
+    import types
+    ls = RdpFixture(base, "labelscreen")
+    labels = ls.binding["labels"]
+    head = ["Review the change.", "Review-target: revision", "Reviewed-revision: " + ls.pin,
+            "Review-path: src/a.py"]
 
-    def _named(prefix, line):
-        result = ll.dispatch(ll.good(extra=[prefix + line]))
+    def screen(extra, given=None):
+        found, _why = aiqt_hooks._rdp_labels("".join(line + "\n" for line in head + extra), given or labels)
+        return "withheld" if found is None else "passed"
+
+    def look(colon, alike):
+        return alike if colon == ":" else colon
+
+    # Each row is (class, make): make(name, colon, value) gives the extra lines, the hide with colon ":" and
+    # its flip with ";". Each value would change the decision if the line were read: a second target or pin
+    # (the at-most-once refusal) or a declared path the commit does not change.
+    hides = [("invisible-prefix", lambda n, c, v, p=p: [p + n + c + " " + v])
+             for p in ("\u200b", "\u115f", "\u17b4", "\u2800", "\U000e0041", "\ufeff", "\u3164", "\u00a0", " ")]
+    hides += [
+        ("after-colon", lambda n, c, v: [n + c + "\t" + v]),
+        ("after-colon", lambda n, c, v: [n + c + "\u00a0" + v]),
+        ("after-colon", lambda n, c, v: [n + c + v]),
+        ("case", lambda n, c, v: [n.upper() + c + " " + v]),
+        ("case", lambda n, c, v: [n.lower() + c + " " + v]),
+        ("markdown", lambda n, c, v: ["**" + n + c + "** " + v]),
+        ("markdown", lambda n, c, v: ["_" + n + c + "_ " + v]),
+        ("markdown", lambda n, c, v: ["> " + n + c + " " + v]),
+        ("markdown", lambda n, c, v: ["- " + n + c + " " + v]),
+        ("markdown", lambda n, c, v: ["## " + n + c + " " + v]),
+        ("markdown", lambda n, c, v: ["`" + n + c + "` `" + v + "`"]),
+        ("html", lambda n, c, v: ["<!-- " + n + c + " " + v + " -->"]),
+        ("html", lambda n, c, v: ["<b>" + n + c + "</b> " + v]),
+        ("html", lambda n, c, v: ["<span>" + n + c + " " + v]),
+        ("value-next-line", lambda n, c, v: [n + c, v]),
+        ("before-colon", lambda n, c, v: [n + "\u200b" + c + " " + v]),
+        ("before-colon", lambda n, c, v: [n + " " + c + " " + v]),
+        ("lookalike-colon", lambda n, c, v: [n + look(c, "\uff1a") + " " + v]),
+        ("lookalike-colon", lambda n, c, v: [n + look(c, "\u2236") + " " + v]),
+        ("lookalike-colon", lambda n, c, v: [n + look(c, "\ua789") + " " + v]),
+        ("lookalike-letter", lambda n, c, v: [n.replace("e", "\u0435", 1) + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: [n.replace("e", "\u0435").replace("i", "\u0456") + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: ["\uff32" + n[1:] + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: ["\u0154" + n[1:] + c + " " + v]),
+        ("prefix-letter-or-digit", lambda n, c, v: ["1. " + n + c + " " + v]),
+        ("prefix-letter-or-digit", lambda n, c, v: ["a) " + n + c + " " + v]),
+        ("prefix-letter-or-digit", lambda n, c, v: ["- [x] " + n + c + " " + v]),
+        ("prefix-letter-or-digit", lambda n, c, v: ["x\ufeff" + n + c + " " + v]),
+        ("prefix-letter-or-digit", lambda n, c, v: ["\u0640" + n + c + " " + v]),
+        ("terminal", lambda n, c, v: ["\x1b[0m" + n + c + " " + v]),
+        ("terminal", lambda n, c, v: ["x\x08" + n + c + " " + v]),
+        ("terminal", lambda n, c, v: [n[:3] + "\x1b[2K" + n[3:] + c + " " + v]),
+        ("terminal", lambda n, c, v: [n[:2] + "x\x08" + n[2:] + c + " " + v]),
+        ("entity", lambda n, c, v: ["&#82;" + n[1:] + c + " " + v]),
+        ("entity", lambda n, c, v: [n.replace("-", "&#45;") + c + " " + v]),
+        ("entity", lambda n, c, v: [n + look(c, "&colon;") + " " + v]),
+        ("escape-or-markup-inside", lambda n, c, v: [n.replace("-", "\\-") + c + " " + v]),
+        ("escape-or-markup-inside", lambda n, c, v: [n[:2] + "<b></b>" + n[2:] + c + " " + v]),
+    ]
+    hides += [("inside-name", lambda n, c, v, p=p: [n[0] + p + n[1:] + c + " " + v])
+              for p in ("\u200b", "\u00ad", "\u200d", "\u034f", "\u0301", "\u0323", "\u3164", "\u2800")]
+    hides += [("lookalike-hyphen", lambda n, c, v, p=p: [n.replace("-", p) + c + " " + v])
+              for p in ("\u2010", "\u2011", "\u2212")]
+    # Behind another label's value, on a line read as that label. Its flip is still read as the carrying
+    # label, so the dispatch rows below leave this class out.
+    carried = [("value-of-read-label", lambda n, c, v: ["Review-branch: main " + n + c + " " + v])]
+    values = (("Review-target", "working-tree"), ("Reviewed-revision", ls.seed), ("Review-path", "seed.txt"))
+    check("rdp/label-screen-hides-withheld", [
+        (cls, screen(make(n, ":", v)), screen(make(n, ";", v)))
+        for cls, make in hides + carried for n, v in values],
+        [(cls, "withheld", "passed") for cls, _make in hides + carried for _value in values])
+
+    # One row of each class through the whole hook, the label turning over: the dispatch is withheld with a
+    # reason naming the line, and its flip is allowed.
+    def _named(extra, label):
+        result = ls.dispatch(ls.good(extra=extra))
         reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
-        return (_rdp_kind(result), "line 7 (" in reason and repr(line.split(" ")[0]) in reason,
-                "U+{:04X}".format(ord(prefix)) in reason)
-    check("rdp/label-like-hidden-prefix-unverifiable", [_named(p, line) for p, line in cases],
-          [("unverifiable", True, True)] * len(cases))
-    check("rdp/label-like-hidden-prefix-revert-allows", _rdp_without_label_like(lambda: [
-        _rdp_kind(ll.dispatch(ll.good(extra=[p + line]))) for p, line in cases]), ["allow"] * len(cases))
-    check("rdp/label-like-canonical-dispatches", [
-        _rdp_kind(ll.dispatch(ll.good())), _rdp_without_label_like(lambda: _rdp_kind(ll.dispatch(ll.good())))],
-        ["allow", "allow"])
-    # A label word inside a sentence is prose: a letter comes first.
-    check("rdp/label-word-in-sentence-allows", [_rdp_kind(ll.dispatch(ll.good(extra=[s]))) for s in (
-        "the Review-path: field", "See the Review-path: field and the Reviewed-revision: line.",
-        "Note: Review-target: working-tree is not this review.")], ["allow"] * 3)
-    # In another case, with no space after the colon, behind a Markdown list, quote or emphasis marker, or
-    # behind a byte-order mark that does not open the file.
-    shapes = ("review-path: seed.txt", "REVIEWED-REVISION: " + ll.seed, "Review-path:seed.txt", "Review-target:",
-              "- Review-path: seed.txt", "> Reviewed-revision: " + ll.seed, "**Review-target:** working-tree",
-              chr(0xFEFF) + "Review-path: seed.txt")
-    check("rdp/label-like-case-space-markdown-unverifiable", [(
-        _rdp_kind(ll.dispatch(ll.good(extra=[s]))),
-        _rdp_without_label_like(lambda s=s: _rdp_kind(ll.dispatch(ll.good(extra=[s]))))) for s in shapes],
-        [("unverifiable", "allow")] * len(shapes))
+        return (_rdp_kind(result), "line 7 (" in reason and repr(label) in reason and "reword the line" in reason)
+    picked = {}
+    for cls, make in hides:
+        picked.setdefault(cls, make)
+    rows = [(cls, make, values[k % 3]) for k, (cls, make) in enumerate(picked.items())]
+    check("rdp/label-screen-hides-dispatch", [
+        (cls, _named(make(n, ":", v), n + ":"), _rdp_kind(ls.dispatch(ls.good(extra=make(n, ";", v)))))
+        for cls, make, (n, v) in rows], [(cls, ("unverifiable", True), "allow") for cls, _m, _v in rows])
+
+    # The over-refusal classes the rule keeps: a label's name followed by a colon in prose is withheld, and
+    # the flip (the colon dropped, or ASCII quotes) passes.
+    kept = (
+        ("code-span", "`Review-path:` is repeated per file.", "`Review-path` is repeated per file."),
+        ("list", "- `Review-path:` lines name the files to read.",
+         "- `Review-path` lines name the files to read."),
+        ("table", "| Review-path: | one per file |", "| Review-path | one per file |"),
+        ("heading", "### Review-path: notes", "### Review-path notes"),
+        ("parenthesis", "(Review-path: lines are optional for deletions.)",
+         "(Review-path lines are optional for deletions.)"),
+        ("quote", "'Reviewed-revision:' appears once.", "'Reviewed-revision' appears once."),
+        ("link", "[Review-target:](docs) explains the target.", "[Review-target](docs) explains the target."),
+        ("checkbox", "- [ ] Review-path: lines verified", "- [ ] Review-path lines verified"),
+        ("checkbox", "- [x] Reviewed-revision: checked", "- [x] Reviewed-revision checked"),
+        ("comment-marker", "// Review-path: a comment", "// Review-path a comment"),
+        ("sentence", "See the Review-path: field and the Reviewed-revision: line.",
+         "See the Review-path field and the Reviewed-revision line."),
+        ("case", "review-path: is case-sensitive in the hook.", "review-path is case-sensitive in the hook."),
+        ("punctuation-outside-ascii", "\u201cReview-path\u201d lines name files.",
+         '"Review-path" lines name files.'),
+        ("punctuation-outside-ascii", "Review-path \u2192 one per file", "Review-path -> one per file"),
+        ("space-for-hyphen", "Review path: one per file", "Review path, one per file"),
+        ("word-holding-name", "preview path: build/out", "preview path build/out"),
+    )
+    check("rdp/label-screen-over-refusal-kept", [
+        (cls, screen([line]), screen([flip])) for cls, line, flip in kept],
+        [(cls, "withheld", "passed") for cls, _line, _flip in kept])
+
+    # A fenced code block: the lines inside are not screened; an exact label inside one is still read.
+    hidden = "  Review-path: seed.txt"
+    fenced = (
+        ("backticks", ["```", hidden, "```"], "passed"),
+        ("tildes", ["~~~~", "- `Review-path:` lines", "~~~~"], "passed"),
+        ("info-string-and-indent", ["- item", "    ```text", "    " + hidden, "    ```"], "passed"),
+        ("unclosed-to-end", ["```", hidden], "passed"),
+        ("shorter-closer-stays-open", ["````", "```", hidden, "````"], "passed"),
+        ("other-character-stays-open", ["```", "~~~", hidden, "```"], "passed"),
+        ("closer-with-text-stays-open", ["```", "``` x", hidden, "```"], "passed"),
+        ("closed-before", ["```", "```", hidden], "withheld"),
+        ("backticks-after-run-not-a-fence", ["```x```", hidden], "withheld"),
+        ("fence-line-itself", ["```Review-path: x", "```"], "withheld"),
+        ("unfenced", [hidden], "withheld"),
+    )
+    check("rdp/label-screen-fence", [(name, screen(extra)) for name, extra, _want in fenced],
+          [(name, want) for name, _extra, want in fenced])
+    in_fence = ls.dispatch(ls.good(extra=["```", "Review-target: working-tree", "```"]))
+    check("rdp/label-screen-fence-exact-label-read", (
+        _rdp_kind(in_fence), "has 2 'Review-target:' lines" in
+        in_fence[1]["hookSpecificOutput"].get("permissionDecisionReason", "")), ("unverifiable", True))
+
+    # The reason: the first line, its text, the label, the rendered view where only it holds the name, and
+    # how to reword; a canonical brief and a brief naming the labels without colons dispatch.
+    def _reason(extra):
+        found, why = aiqt_hooks._rdp_labels("".join(line + "\n" for line in head + extra), labels)
+        return why or ""
+    first = _reason(["x", "\u200bReview-path: a", "\u200bReviewed-revision: b"])
+    rendered = _reason(["Review&#45;path: a"])
+    written = _reason(["<!-- Review-path: a -->"])
+    check("rdp/label-screen-reason", (
+        first.startswith("has line 6 ('\\u200bReview-path: a'), which holds the 'Review-path:' label's name "
+                         "followed by a colon outside a label the hook reads (a label is read only at column "
+                         "0, followed by one space)"),
+        "reword the line so no colon follows the name, or put the line in a fenced code block" in first,
+        "line 5 (" in rendered and "once its escapes, backspaces, markup and character references are "
+        "rendered" in rendered, "line 5 (" in written and "rendered" not in written), (True, True, True, True))
+    check("rdp/label-screen-canonical-dispatches", [_rdp_kind(ls.dispatch(ls.good(extra=extra))) for extra in (
+        [], ["Labels: Review-target, Reviewed-revision, Review-path.", "the Review-path field"],
+        ["```", "- `Review-path:` lines name the files to read.", "```"])], ["allow"] * 3)
+
+    # One mutant per element of the rule: each flips its row (the first value is the row with the hook as
+    # it is, the second with the mutant).
+    never = re.compile(r"(?!)")
+    name = aiqt_hooks._rdp_name
+    read = aiqt_hooks._rdp_read_labels
+
+    def _whole_lines(lines, given):
+        return (read(lines, given)[0], list(lines))
+
+    def _values_blank(lines, given):
+        found, rest = read(lines, given)
+        return (found, ["" if cut != line else line for cut, line in zip(rest, lines)])
+
+    def _anchored(label):
+        pattern = name(label)
+        return pattern and re.compile("(?m)^" + pattern.pattern)
+
+    def _no_colon(label):
+        pattern = name(label)
+        return pattern and re.compile(pattern.pattern[:-1])
+
+    def _no_inner_colons(label):
+        pattern = name(label)
+        return pattern and re.compile(pattern.pattern.replace(":*", ""))
+    shim = types.SimpleNamespace(normalize=lambda form, text: text, category=unicodedata.category)
+    rendered_only = ", once rendered,"
+    mutants = (
+        ("read-label-not-screened", [("_rdp_read_labels", _whole_lines)], [], labels),
+        ("read-value-screened", [("_rdp_read_labels", _values_blank)],
+         ["Review-branch: main Reviewed-revision: " + ls.seed], labels),
+        ("fence-passed-over", [("_RDP_FENCE", never)], ["```", hidden, "```"], labels),
+        ("fence-backtick-info", [("_RDP_FENCE", re.compile(r"[ \t]*(`{3,}|~{3,})"))], ["```x```", hidden],
+         labels),
+        ("normalization", [("unicodedata", shim)], ["\uff32\uff45\uff56\uff49\uff45\uff57-path: seed.txt"],
+         labels),
+        ("case-folding", [("_rdp_fold", lambda text: unicodedata.normalize("NFKD", text))],
+         ["REVIEW-PATH: seed.txt"], labels),
+        ("non-letters-removed", [("_RDP_UNLETTER", re.compile(r"[^\w:\n ]|_"))], ["Review-path : seed.txt"],
+         labels),
+        ("fillers-removed", [("_RDP_FILLERS", {})], ["Re\u3164view-path: seed.txt"], labels),
+        ("lookalike-colon", [("_RDP_COLONISH", "")], ["Review-path\u2236 seed.txt"], labels),
+        ("colons-inside-name", [("_rdp_name", _no_inner_colons)], ["Review\u2010path: seed.txt"], labels),
+        ("lookalike-letters", [("_RDP_LOOKALIKE", never)], ["R\u0435view-path: seed.txt"], labels),
+        ("contained-anywhere", [("_rdp_name", _anchored)], ["1. Review-path: seed.txt"], labels),
+        ("colon-after-name", [("_rdp_name", _no_colon)], ["the Review-path field"], labels),
+        ("written-view", [("_rdp_views", lambda text: [(rendered_only, aiqt_hooks._rdp_rendered(text))])],
+         ["<!-- Review-path: seed.txt -->"], labels),
+        ("rendered-view", [("_rdp_rendered", lambda text: text)], ["Review&#45;path: seed.txt"], labels),
+        ("escapes", [("_RDP_ESCAPE", never)], ["Rev\x1b[0miew-path: seed.txt"], labels),
+        ("backspaces", [("_rdp_overstrike", lambda text: text)], ["Rex\x08view-path: seed.txt"], labels),
+        ("markup", [("_RDP_MARKUP", never)], ["Re<b></b>view-path: seed.txt"], labels),
+        ("character-references", [("_RDP_CHARREF", never)], ["&#82;eview-path: seed.txt"], labels),
+        ("label-without-colon", [("_rdp_name", lambda label: name(label + ":"))], ["Branch: protected"],
+         dict(labels, branch="Branch")),
+    )
+    check("rdp/label-screen-mutants", [
+        (element, screen(extra, given) != _rdp_mutant(changes, lambda e=extra, g=given: screen(e, g)))
+        for element, changes, extra, given in mutants], [(element, True) for element, *_rest in mutants])
+
     # The defining property, swept through _rdp_labels: every assigned code point that is not a letter or
-    # digit (category L or N, less a character Unicode names FILLER, written here apart from the hook), and
-    # every 509th unassigned or private-use one, as a one-character prefix before each label on an extra
-    # line. Each such line withholds the brief or, behind a line break, is read as the canonical label; none
-    # is silently absent. Every 61st letter or digit is swept too: a label behind one is prose, neither
-    # withheld nor read. Surrogates cannot occur in a UTF-8 brief and are not swept.
-    labels = ll.binding["labels"]
-    keys = {label: key for key, label in labels.items()}
-    head = "Review-target: revision\nReviewed-revision: " + ll.pin + "\nReview-path: src/a.py\n"
+    # digit (no letter or digit in its folded form, written here apart from the hook), every 509th
+    # unassigned or private-use one, and every 61st letter or digit, as a one-character prefix before each
+    # of three labels; and each such code point that is not a letter or digit also after the name's first
+    # letter and between the name and its colon. Each such line withholds the brief. A line boundary (it
+    # splits the line) and a surrogate (it cannot occur in a UTF-8 brief) are not swept. The four fillers
+    # are checked to be the characters Unicode names FILLER that str.isalnum accepts.
+    breaks = set("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
+    fillers = set()
     tally = {}
-    oracle = 0
     for cp in range(sys.maxunicode + 1):
         ch = chr(cp)
         category = unicodedata.category(ch)
-        letter = category[0] in "LN" and "FILLER" not in unicodedata.name(ch, "")
-        if category == "Cs" or (category in ("Cn", "Co") and cp % 509) or (letter and cp % 61):
+        if ch.isalnum() and "FILLER" in unicodedata.name(ch, ""):
+            fillers.add(cp)
+        if category == "Cs" or ch in breaks or (category in ("Cn", "Co") and cp % 509):
             continue
-        oracle += (aiqt_hooks._rdp_label_start(ch) == 0) != letter
-        for label, value in hidden:
-            found, _why = aiqt_hooks._rdp_labels(head + ch + label + " " + value + "\n", labels)
-            outcome = "withheld" if found is None else "read" if value in found[keys[label]] else "absent"
-            side = "letter-or-digit" if letter else "other"
-            tally[(side, outcome)] = tally.get((side, outcome), 0) + 1
-    check("rdp/label-like-sweep-invariant", (
-        sorted(k for k in tally if k in (("other", "absent"), ("letter-or-digit", "withheld"),
-                                         ("letter-or-digit", "read"))),
-        oracle, tally.get(("other", "withheld"), 0) > 0, tally.get(("letter-or-digit", "absent"), 0) > 0),
-        ([], 0, True, True))
+        folded = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", unicodedata.normalize(
+            "NFD", ch).casefold()).casefold())
+        letter = any(f.isalnum() and "FILLER" not in unicodedata.name(f, "") for f in folded)
+        if letter and cp % 61:
+            continue
+        for n, v in values:
+            spots = [ch + n + ": " + v] + ([] if letter else [n[0] + ch + n[1:] + ": " + v, n + ch + ": " + v])
+            for spot, line in zip(("before", "inside", "before-colon"), spots):
+                key = ("letter-or-digit" if letter else "other", spot, screen([line]))
+                tally[key] = tally.get(key, 0) + 1
+    check("rdp/label-screen-sweep", (sorted(key for key in tally if key[2] != "withheld"), sorted(fillers),
+                                     all(tally.get(("other", spot, "withheld"), 0) > 0 for spot in (
+                                         "before", "inside", "before-colon"))),
+          ([], [0x115F, 0x1160, 0x3164, 0xFFA0], True))
 
 
 def _rwh_iso(hours=0):
