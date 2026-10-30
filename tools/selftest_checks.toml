@@ -508,7 +508,7 @@ expected-check-ids = [
   "stop/escape-spoof-artefact",
   "stop/escape-spoof-logged",
   "stop/symlink-escape-ignored",
-  # ---------- C.1 FIX 2: escape-path anchoring, symlink-component, hardlink hardening ----------
+  # ---------- C.1: escape-path anchoring, symlink-component, hardlink hardening ----------
   "stop/foreign-abs-escape-ignored",
   "stop/foreign-abs-escape-spoof",
   "stop/dotdot-escape-ignored",
@@ -1300,7 +1300,7 @@ expected-check-ids = [
   "attest/anchor-fifo-holds-without-blocking",
   "attest/anchor-regular-after-type-vectors-ok",
   "attest/git-failure-tracked-decision-holds",
-  # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
+  # ---------- the systemic-lapse lifecycle (verdict-preservation legs) ----------
   "lapse/klass-recorded",
   "lapse/no-bypass-still-denies",
   "lapse/park-allows-with-disposition",
@@ -1409,7 +1409,7 @@ expected-check-ids = [
   "recwrite6/earned-cap-relief-survives-a-failed-save",
   "recwrite7/state-dir-permission-sweep-matches-the-table",
   "recwrite10/forced-exit-recorded-at-and-above-the-bound-and-cap",
-  # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
+  # ---------- C.4: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",
   "forced5/deny-3",
@@ -3699,4 +3699,59 @@ expected-check-ids = [
   "measure/interrupt-sigterm-cleans-up",
   "measure/interrupt-sigint-cleans-up",
   "measure/interrupt-sighup-cleans-up",
+]
+
+[[suite]]
+id = "internal-names-selftest"
+runner = "tools/check_internal_names.py"
+expected-check-ids = [
+  # The instrumented check() ids of the shipped tracker-label layer's self-test cases; the gate's older
+  # numbered cases predate the choke point and assert through the failures list, outside this set.
+  # ---------- the four label shapes and their negative controls ----------
+  "tracker/shape-fix-id-caught",
+  "tracker/shape-review-round-caught",
+  "tracker/shape-qa-round-caught",
+  "tracker/shape-reviewer-source-caught",
+  "tracker/negative-controls-unflagged",
+  "tracker/same-line-multiplicity-counted",
+  # ---------- path-only exemptions, scope membership, no line marker ----------
+  "tracker/frozen-allowlist-sha-bound",
+  "tracker/history-allowlist-path-bound",
+  "tracker/scope-membership-decides",
+  "tracker/internal-allow-not-honoured",
+  # ---------- the closed baseline schema and the closed manifest read ----------
+  "tracker/baseline-malformed-refused",
+  "tracker/baseline-duplicate-refused",
+  "tracker/baseline-unknown-key-refused",
+  "tracker/baseline-nonshipped-path-refused",
+  "tracker/baseline-refusal-names-its-guard",
+  "tracker/baseline-noncanonical-refused",
+  "tracker/manifest-missing-sources-refused",
+  "tracker/manifest-malformed-refused",
+  # ---------- mutation flips (each guard load-bearing) ----------
+  "tracker/mutation-pattern-fix-id",
+  "tracker/mutation-pattern-review-round",
+  "tracker/mutation-pattern-qa-round",
+  "tracker/mutation-pattern-reviewer-source",
+  "tracker/mutation-ignorecase-load-bearing",
+  "tracker/mutation-separator-bound-load-bearing",
+  "tracker/mutation-severity-guard-load-bearing",
+  "tracker/mutation-ratchet-compare-load-bearing",
+  # ---------- the real gate over a fixture repository ----------
+  "tracker/wired-clean-tree-exit-0",
+  "tracker/wired-new-path-label-exit-1",
+  "tracker/wired-write-baseline-canonical",
+  "tracker/wired-ratchet-equal-passes",
+  "tracker/wired-baseline-listed-skipped-by-name",
+  "tracker/wired-ratchet-exceeded-names-lines",
+  "tracker/wired-refresh-regeneration-absorbs-growth",
+  "tracker/wired-ratchet-below-asks-lower",
+  "tracker/wired-baseline-nonshipped-exit-2",
+  "tracker/wired-absent-source-exit-2",
+  "tracker/wired-non-utf8-source-exit-2",
+  "tracker/wired-missing-manifest-exit-2",
+  # ---------- suffix-independent path validation and byte-bound exemption ----------
+  "tracker/excluded-suffix-path-still-validated",
+  "tracker/unfamiliar-suffix-decode-decides",
+  "tracker/frozen-allowlist-byte-bound",
 ]
