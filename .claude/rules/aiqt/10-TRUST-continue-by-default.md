@@ -33,8 +33,8 @@ terminal condition that blocks it; the next action meets the human-oversight thr
 authorization that threshold requires, or that authorization is in doubt; a decision reserved to a
 human, not covered by standing authorization and determining the next action, must be answered
 first; or a validation finding reveals a process-integrity or systemic lapse, of which a concrete,
-quotable self-inconsistency is one instance. These triggers are not mutually exclusive; a single
-situation may satisfy more than one, and any one of them suffices.
+quotable self-inconsistency is one instance. These triggers are not mutually exclusive;
+any one of them suffices.
 A systemic-lapse trigger licenses only a recorded wind-down: the lapse is recorded as a fact the
 moment it is confirmed, the work is parked behind the human decision it now awaits or exits through
 the project's bounded, recorded exit, and the maintainer's later confirmation or refutation settles
@@ -69,7 +69,7 @@ left that can proceed while the condition holds, every sanctioned path completed
 closed, and the enumeration records that state for the item. A "blocked", "held", or "needs a go"
 that the assistant authored about its own work is a proposal, not a grant, and does not gate a
 stop; nor does reclassifying work the operating mode already authorizes, such as already-decided
-queued backlog, as newly needing a fresh authorization. A self-authored demotion of decided work
+queued backlog, as needing a fresh authorization. A self-authored demotion of decided work
 to "proposed" or "not granted" is likewise a proposal, not a grant, and licenses no wind-down.
 Moving an open item to held or blocked is itself the maintainer's decision, never the
 assistant's, and the grant is proven by provenance: it counts only when it is recorded in an
@@ -102,7 +102,7 @@ nor a blocker, however recently or often it fires, and neither its existence nor
 licenses an idle, a wake, or a stop while any actionable item remains; waiting on its next firing
 is idleness, whatever schedule dresses it. A tracked task substantiates a blocker only when the
 task it names is one whose completion advances the blocked item, so pointing an item at a
-keep-alive or polling task records no blocker at all.
+keep-alive or polling task records no blocker.
 
 Elapsed run length, session depth, the number of compaction events, accumulated progress or a
 reached milestone, and the anticipated size of the work still ahead, whether observed, measured, or

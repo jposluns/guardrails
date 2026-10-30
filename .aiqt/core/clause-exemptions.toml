@@ -119,17 +119,7 @@ reason = "Scope carve-out naming what estsep.1 permits; a permission, not an obl
 
 [[exempt]]
 corpus-id = "estsep"
-text = "It forbids the unlabelled blend: an estimate\nfolded into a measured total, the whole presented as measured."
-reason = "Restates estsep.1; it adds no obligation."
-
-[[exempt]]
-corpus-id = "estsep"
-text = "The label is the release."
-reason = "Summary of estsep.2; it adds no obligation."
-
-[[exempt]]
-corpus-id = "estsep"
-text = "A figure that\ncarries its grade honestly is sound however uncertain; one that hides it misreports precision it does\nnot have."
+text = "A figure that carries its grade honestly is\nsound however uncertain; one that hides it misreports precision it does not have."
 reason = "Rationale for estsep.2; no obligation of its own."
 
 [[exempt]]
@@ -144,11 +134,6 @@ reason = "Scope note separating a static read from the behavioural claim obsbeh.
 
 [[exempt]]
 corpus-id = "obsbeh"
-text = "A\nconfident assertion of unobserved behaviour is not made."
-reason = "Closing restatement of obsbeh.1; it adds no obligation."
-
-[[exempt]]
-corpus-id = "obsbeh"
 text = "A claim that a shared or external resource has failed, or that you are blocked because it has, is a\nbehavioural claim about the resource's live state; a symptom seen only in your own dependent work, a killed\nworker or a rejected payload, is not that observation and cannot tell a resource-wide failure from a\nself-caused local condition such as your own footprint or a malformed request."
 reason = "Classifies a resource-failure claim as a behavioural claim and names what does not count as observing it; the obligation it triggers is obsbeh.10."
 
@@ -159,13 +144,8 @@ reason = "Cross-reference to trkasy.5 (a truncated deliverable is not observable
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "Applying a fix on disk is not the same as landing it."
+text = "Applying a fix on disk is not landing it."
 reason = "Rationale for vfxcmt.1; no obligation of its own."
-
-[[exempt]]
-corpus-id = "vfxcmt"
-text = "A commit message that asserts a fix, with no matching change in the commit, is an inaccurate record; verify the artefact before the claim."
-reason = "Restates vfxcmt.1 (confirm the fix is in its commit before claiming it); it adds no obligation."
 
 [[exempt]]
 corpus-id = "vfxcmt"
@@ -376,11 +356,6 @@ reason = "Rationale for secvln.1; no obligation of its own."
 corpus-id = "secpub"
 text = "An adopter can then\nverify that what they installed matches that authenticated reference."
 reason = "Rationale for secpub.1; no obligation of its own."
-
-[[exempt]]
-corpus-id = "secthm"
-text = "This makes identified gaps reviewable before implementation rather than waiting for production evidence."
-reason = "Rationale for secthm.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "bgcwai"
