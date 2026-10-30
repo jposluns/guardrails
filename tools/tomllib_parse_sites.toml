@@ -509,7 +509,7 @@ reason = "self-emitted-bytes"
 
 [[site]]
 path = "opf/tools/_opf_emit.py"
-function = "self_test"
+function = "_self_test_body"
 form = "alias"
 count = 9
 class = "EXEMPT"
@@ -517,7 +517,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_emit.py"
-function = "self_test"
+function = "_self_test_body"
 form = "call"
 count = 5
 class = "EXEMPT"
@@ -525,7 +525,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_emit.py"
-function = "self_test._round_trips"
+function = "_self_test_body._round_trips"
 form = "call"
 count = 1
 class = "EXEMPT"
@@ -784,7 +784,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_views.py"
-function = "self_test"
+function = "_self_test"
 form = "alias"
 count = 2
 class = "EXEMPT"
@@ -792,7 +792,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_views.py"
-function = "self_test"
+function = "_self_test"
 form = "call"
 count = 10
 class = "EXEMPT"

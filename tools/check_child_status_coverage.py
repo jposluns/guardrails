@@ -360,6 +360,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/check_opf_drift.py",
     "opf/tools/check_opf_homes.py",
     "opf/tools/check_opf_init.py",
+    "opf/tools/check_opf_init_contract.py",
     "opf/tools/check_opf_init_observe.py",
     "opf/tools/check_opf_init_p0.py",
     "opf/tools/check_opf_init_qa.py",
@@ -379,6 +380,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_clauses.py",
     "tools/check_crosswalk.py",
     "tools/check_entry_guard.py",
+    "tools/check_footer.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
     "tools/check_hooks_preview.py",
@@ -452,8 +454,9 @@ DIRECT_LAUNCH_RESIDUAL = (
 # the expression the call spells: a changed assignment, argument or computation leaves the row reviewed, and the
 # scan follows the row's targets, not the new one (R13; the self-test shows this limit).
 DYNAMIC_LOADS_REVIEWED = (
-    ("opf/tools/check_opf_init_contract.py", ("runpy.run_path(str(ROOT / 'opf/tools/_opf_init_contract.py'))",),
-     ("opf/tools/_opf_init_contract.py",), "runpy.run_path of the literal opf/tools/_opf_init_contract.py"),
+    ("opf/tools/check_opf_init_contract.py", (),
+     ("opf/tools/_opf_init_contract.py",), "runpy.run_path of opf/tools/_opf_init_contract.py inside the child "
+     "script it launches, a string the scan does not parse"),
     ("tools/check_footer.py", ("exec(compile(source.replace(new, old), __file__, 'exec'), reverted)",),
      ("tools/check_footer.py",), "its own source with one check reverted, compiled and run in its self-test"),
     ("tools/check_opf_enforce_platforms.py",
@@ -2181,7 +2184,8 @@ def _behaviour(probe, base):
             ("behaviour/import-complete-refuses", "opf/tools/_opf_import_complete.py", ()),
             ("behaviour/import-complete-self-test-refuses", "opf/tools/_opf_import_complete.py", ("--self-test",)),
             ("behaviour/gitleaks-pin-refuses", "tools/check_gitleaks_pin.py", ()),
-            ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ())):
+            ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ()),
+            ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ())):
         got = via("ignore", python + [str(ROOT / rel)] + list(args), cwd=str(ROOT))
         out.append((check_id, refused(got, Path(rel).name), got))
     for check_id, rel, marker in (("control/opf-cli-default-runs", "opf/tools/opf.py", "opf: the OPFiles"),
@@ -2394,6 +2398,7 @@ def self_test(lane, report_path=None):
                                 ("behaviour/import-complete-refuses", 0),
                                 ("behaviour/import-complete-self-test-refuses", 0),
                                 ("behaviour/gitleaks-pin-refuses", 0), ("behaviour/must-deliver-refuses", 0),
+                                ("behaviour/verifier-delivery-refuses", 0),
                                 ("control/opf-cli-default-runs", 0),
                                 ("control/launcher-cli-default-runs", 0), ("control/coverage-gate-default-runs", 0),
                                 ("behaviour/pretool-refuses", 0), ("behaviour/plugin-pretool-refuses", 0),
