@@ -12,7 +12,8 @@ with exit 2). This gate holds where it runs:
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
      tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
-     tools/check_verifier_delivery.py and tools/check_rule_placement.py; the constant and both functions) and in the
+     tools/check_verifier_delivery.py, tools/check_rule_placement.py, tools/check_footer.py and
+     opf/tools/check_opf_init_contract.py; the constant and both functions) and in the
      hooks dispatcher and its generated plugin copy (the constant and the probe) are each defined once at the
      top level and AST-identical (ast.dump, docstrings included) to the canonical text, and each is bound
      nowhere else in the module (_binding_count: no import, assignment, global or other binding of the name
@@ -206,7 +207,9 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
-              ("tools/check_rule_placement.py", "check_rule_placement.py"))
+              ("tools/check_rule_placement.py", "check_rule_placement.py"),
+              ("tools/check_footer.py", "check_footer.py"),
+              ("opf/tools/check_opf_init_contract.py", "check_opf_init_contract.py"))
 HOOK_COPIES = (".aiqt/core/hooks/scripts/aiqt_hooks.py", "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
 HOOKS_JSON_REL = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
 HOOK_TARGET = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
@@ -589,8 +592,9 @@ DIRECT_LAUNCH_RESIDUAL_BASELINE = (
 # the expression the call spells: a changed assignment, argument or computation leaves the row reviewed, and the
 # scan follows the row's targets, not the new one (R13; the self-test shows this limit).
 DYNAMIC_LOADS_REVIEWED = (
-    ("opf/tools/check_opf_init_contract.py", ("runpy.run_path(str(ROOT / 'opf/tools/_opf_init_contract.py'))",),
-     ("opf/tools/_opf_init_contract.py",), "runpy.run_path of the literal opf/tools/_opf_init_contract.py"),
+    ("opf/tools/check_opf_init_contract.py", (),
+     ("opf/tools/_opf_init_contract.py",), "runpy.run_path of opf/tools/_opf_init_contract.py inside the child "
+     "script it launches, a string the scan does not parse"),
     ("tools/check_footer.py", ("exec(compile(source.replace(new, old), __file__, 'exec'), reverted)",),
      ("tools/check_footer.py",), "its own source with one check reverted, compiled and run in its self-test"),
     ("tools/check_opf_enforce_platforms.py",
@@ -1656,14 +1660,17 @@ def _inputs():
     # This gate's two pinned lists as one small module, written as this file writes them, then with one edit
     # each (the binding count walks the whole module, so a small one keeps every mutant's vectors quick): an
     # entry added to the residual alone, the residual's first entry removed, and either list absent, the baseline
-    # computed, a list display or bound again.
-    def pinned(residual=DIRECT_LAUNCH_RESIDUAL, baseline=DIRECT_LAUNCH_RESIDUAL_BASELINE):
+    # computed, a list display or bound again. The lists are fixed fixtures, not this file's live lists, so the
+    # vectors read only the rule: live/real-tree-passes holds the live lists to it.
+    listed = ("opf/tools/listed.py", "tools/launched.py", "tools/listed.py")
+
+    def pinned(residual=listed, baseline=listed):
         return "".join("{} = (\n{})\n".format(name, "".join('    "{}",\n'.format(rel) for rel in rels))
                        for name, rels in (("DIRECT_LAUNCH_RESIDUAL", residual),
                                           ("DIRECT_LAUNCH_RESIDUAL_BASELINE", baseline)) if rels is not None)
     for key, source in (
-            ("pinned", pinned()), ("pinned-added", pinned(residual=DIRECT_LAUNCH_RESIDUAL + ("tools/new_reader.py",))),
-            ("pinned-removed", pinned(residual=DIRECT_LAUNCH_RESIDUAL[1:])),
+            ("pinned", pinned()), ("pinned-added", pinned(residual=listed + ("tools/new_reader.py",))),
+            ("pinned-removed", pinned(residual=listed[1:])),
             ("pinned-baseline-absent", pinned(baseline=None)), ("pinned-residual-absent", pinned(residual=None)),
             ("pinned-baseline-computed",
              pinned(baseline=None) + "DIRECT_LAUNCH_RESIDUAL_BASELINE = DIRECT_LAUNCH_RESIDUAL\n"),
