@@ -37,10 +37,13 @@ Legs, in order:
                                 container: or strategy: can skip, mask, move or change what it runs);
                  runner         runs-on is RUNNER, ubuntu-24.04: the setup-python versions manifest lists a
                                 patch release's Linux builds by Ubuntu version, so the job names its image;
-                 checkout       the first step is the checkout step as written (uses: CHECKOUT_USES and a
-                                with: of exactly CHECKOUT_INPUTS, no other key), and no other step uses a
-                                checkout action: a ref:, repository: or path: input, or a second checkout,
-                                can put another tree under the gate and the suite;
+                 checkout       the first step is the checkout step as written (uses: CHECKOUT_USES, which
+                                is actions/checkout pinned to the full 40-hex commit SHA CHECKOUT_SHA, and
+                                a with: of exactly CHECKOUT_INPUTS, no other key), and no other step uses a
+                                checkout action: the tag form (a tag can move), another commit SHA and a
+                                short or extended SHA can run other checkout code, and a ref:, repository:
+                                or path: input, or a second checkout, can put another tree under the gate
+                                and the suite;
                  step-env       no step of the job carries env:: a step env: changes what an otherwise
                                 accepted run: command does (a BASH_ENV value, or a write to GITHUB_PATH
                                 or GITHUB_ENV through it), so env: on any step, held or extra, is a
@@ -246,7 +249,10 @@ Legs, in order:
                                         for each finding leg, a copy of this gate loaded through importlib
                                         with that leg's call removed passes the fixture the intact gate
                                         refuses; for each job rule, a copy with that rule removed from
-                                        JOB_RULES passes each of that rule's cases; a copy without the
+                                        JOB_RULES passes each of that rule's cases; a copy whose checkout
+                                        pin is the tag form or another SHA, or accepts a prefix or an
+                                        extension of the pinned reference, passes the tree carrying that
+                                        reference; a copy without the
                                         line-break refusal reads each line-break case; a copy without
                                         the control-character refusal reads each form-feed and
                                         vertical-tab case; a copy whose source parse maps only
@@ -365,7 +371,10 @@ run time by a shell expansion from parts that are not the literal names (a varia
 path or the flag among them), whose tokens are not the judge's and spell neither literal name;
 tools/check_ci_parity.py is the holder for those commands (measured at this commit on a full tree copy:
 a run: splicing a variable into this gate's path is exit 2 there, dynamic-target; a run: of
-${{ matrix.command }} is cannot-evaluate here and exit 2 there too, workflow-expression). The grammar of the whole workflow,
+${{ matrix.command }} is cannot-evaluate here and exit 2 there too, workflow-expression). The checkout pin is
+compared as text: whether CHECKOUT_SHA names a commit of actions/checkout rather than a branch or tag of
+that name, which release it is, and whether that commit is trustworthy are not checked here, and the
+setup-python step's uses: reference is not pinned here. The grammar of the whole workflow,
 the setup-python uses: shape and every other pin
 belong to the python-floor gate (tools/check_python_floor.py), which accepts a pin of a patch release only
 inside the HOST_JOBS jobs of quality.yml and only when it equals this source, and holds every other
@@ -477,8 +486,12 @@ JOB_KEYS = {"name", "runs-on", "steps"}
 HEAVY_JOB_IF_LINE = ("    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && "
                      "github.event.pull_request.head.repo.full_name == github.repository)")
 # The first step of each host-patch job, as written: another ref, repository or path can put another tree
-# under the gate and the suite.
-CHECKOUT_USES = "actions/checkout@v4"
+# under the gate and the suite. The action is pinned to the full 40-hex commit SHA every checkout step of
+# the workflows names (the import-closure gate requires that form of every uses: reference), so the tag
+# form, another commit and a short or extended SHA are each refused; moving the pin is one reviewed change
+# of CHECKOUT_SHA and the checkout uses: line of every host-patch job.
+CHECKOUT_SHA = "11d5960a326750d5838078e36cf38b85af677262"
+CHECKOUT_USES = "actions/checkout@" + CHECKOUT_SHA
 CHECKOUT_KEYS = {"uses", "with"}
 CHECKOUT_INPUTS = {"fetch-depth": "0", "fetch-tags": "true"}
 SETUP_KEYS = {"name", "uses", "with"}
@@ -1697,6 +1710,8 @@ OPF, GFE_JOBS = HOST_JOBS[0], HOST_JOBS[1:]
 GFE = GFE_JOBS[0]
 GFE_RUNS = tuple(run for job in GFE_JOBS for run in HOST_SUITES[job])
 PIN = "python-version: '3.14.4'"
+# Another full 40-hex commit SHA, never the pinned one.
+OTHER_SHA = CHECKOUT_SHA[::-1]
 FLOOR_JOB = ("  floor:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
              "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"
              "      - run: python3 -I -B tools/x.py\n")
@@ -1925,9 +1940,9 @@ def _lane_reading(reader, refusal, text):
 
 def _host_job(job):
     """A whole host-patch job, laid out as quality.yml lays it out, its pinned if: line included."""
-    return ("  {0}:\n    name: {0}\n{2}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
+    return ("  {0}:\n    name: {0}\n{2}\n    runs-on: {1}\n    steps:\n      - uses: {3}\n"
             "        with:\n          fetch-depth: 0\n          fetch-tags: true\n\n".format(
-                job, RUNNER, HEAVY_JOB_IF_LINE)
+                job, RUNNER, HEAVY_JOB_IF_LINE, CHECKOUT_USES)
             + SETUP_STEP + GATE_STEP + _suite_step(job))
 
 
@@ -2112,7 +2127,7 @@ def _job_cases():
     gate_name = "      - name: Python host pin\n"
     suite_name = "      - name: Suite\n"
     setup_uses = "      - uses: actions/setup-python@v5\n"
-    checkout_uses = "      - uses: actions/checkout@v4\n"
+    checkout_uses = "      - uses: " + CHECKOUT_USES + "\n"
     fetch_tags = "          fetch-tags: true\n"
     runs = "    runs-on: "
     pinned_if = HEAVY_JOB_IF_LINE + "\n"
@@ -2474,8 +2489,21 @@ def _job_cases():
         ("jobs/checkout-path-finding", ((OPF, fetch_tags, fetch_tags + "          path: other\n"),), (),
          "opf-host-patch: its first step is not the checkout step as written", "checkout"),
         ("jobs/checkout-other-ref-of-action-finding",
-         ((GFE, "actions/checkout@v4", "actions/checkout@main"),), (),
+         ((GFE, CHECKOUT_USES, "actions/checkout@main"),), (),
          GFE + ": its first step is not the checkout step as written", "checkout"),
+        # The checkout action pinned other than by the full commit SHA CHECKOUT_SHA: the tag form, another
+        # 40-hex commit, a short SHA, and a SHA one character short of and one past the full 40 (the
+        # clean fixture carries exactly the 40).
+        ("jobs/checkout-tag-form-finding", ((OPF, CHECKOUT_USES, "actions/checkout@v4"),), (),
+         "opf-host-patch: its first step is not the checkout step as written", "checkout"),
+        ("jobs/checkout-other-sha-finding", ((GFE, CHECKOUT_SHA, OTHER_SHA),), (),
+         GFE + ": its first step is not the checkout step as written", "checkout"),
+        ("jobs/checkout-short-sha-finding", ((OPF, CHECKOUT_SHA, CHECKOUT_SHA[:7]),), (),
+         "opf-host-patch: its first step is not the checkout step as written", "checkout"),
+        ("jobs/checkout-sha-one-short-finding", ((GFE, CHECKOUT_SHA, CHECKOUT_SHA[:-1]),), (),
+         GFE + ": its first step is not the checkout step as written", "checkout"),
+        ("jobs/checkout-sha-one-long-finding", ((OPF, CHECKOUT_SHA, CHECKOUT_SHA + "0"),), (),
+         "opf-host-patch: its first step is not the checkout step as written", "checkout"),
         ("jobs/checkout-step-if-finding", ((OPF, checkout_uses, checkout_uses + "        if: false\n"),), (),
          "opf-host-patch: its first step is not the checkout step as written", "checkout"),
         ("jobs/second-checkout-finding",
@@ -2570,6 +2598,37 @@ def _self_test_cases(base):
             finally:
                 rules.JOB_RULES = JOB_RULES
         check(check_id, got, want)
+    # The checkout pin is the full commit SHA itself, each of its properties red on revert: a copy pinned to
+    # the tag form passes the tag-form tree and refuses the committed form, a copy pinned to another SHA
+    # passes that SHA, a copy that accepts any prefix of the pinned reference passes a short SHA and a SHA
+    # one character short, and a copy that accepts any extension of it passes a SHA one character long.
+    gate_source = _read_text(Path(__file__).resolve())
+    held = 'first.get("uses") ' + '== CHECKOUT_USES'
+    tag_pin = _mutant(base, "python_host_pin_checkout_tag", gate_source,
+                      (('CHECKOUT_USES = "actions/checkout@" ' + '+ CHECKOUT_SHA',
+                        'CHECKOUT_USES = "actions/checkout@v4"'),))
+    other_pin = _mutant(base, "python_host_pin_checkout_other", gate_source,
+                        (('CHECKOUT_SHA = "{}"'.format(CHECKOUT_SHA), 'CHECKOUT_SHA = "{}"'.format(OTHER_SHA)),))
+    prefix_pin = _mutant(base, "python_host_pin_checkout_prefix", gate_source,
+                         ((held, 'CHECKOUT_USES.startswith(str(first.get("uses")))'),))
+    extended_pin = _mutant(base, "python_host_pin_checkout_extended", gate_source,
+                           ((held, 'str(first.get("uses")).startswith(CHECKOUT_USES)'),))
+    # Each tree carries its reference in every host-patch job, so a copy pinned to it passes the tree whole.
+    committed = _fixture(base)
+    tagged, other, short, one_short, one_long = (
+        _fixture(base, workflow=_workflow(tuple((job, CHECKOUT_SHA, ref) for job in HOST_JOBS))) for ref in (
+            "v4", OTHER_SHA, CHECKOUT_SHA[:7], CHECKOUT_SHA[:-1], CHECKOUT_SHA + "0"))
+    check("jobs/checkout-tag-pin-mutant-red",
+          (evaluate(tagged, HOST)[0], evaluate(committed, HOST)[0], tag_pin.evaluate(tagged, HOST)[0],
+           tag_pin.evaluate(committed, HOST)[0]), (1, 0, 0, 1))
+    check("jobs/checkout-other-sha-mutant-red",
+          (evaluate(other, HOST)[0], other_pin.evaluate(other, HOST)[0]), (1, 0))
+    check("jobs/checkout-short-sha-mutant-red",
+          (evaluate(short, HOST)[0], evaluate(one_short, HOST)[0], prefix_pin.evaluate(short, HOST)[0],
+           prefix_pin.evaluate(one_short, HOST)[0], prefix_pin.evaluate(committed, HOST)[0]), (1, 1, 0, 0, 0))
+    check("jobs/checkout-long-sha-mutant-red",
+          (evaluate(one_long, HOST)[0], extended_pin.evaluate(one_long, HOST)[0],
+           extended_pin.evaluate(committed, HOST)[0]), (1, 0, 0))
     for check_id, pin in (
             ("pins/plain-pin-passes", "3.14.4"),
             ("pins/double-quoted-pin-passes", "\"3.14.4\""),

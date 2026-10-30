@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.17** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.18** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -150,7 +150,9 @@ setup-python versions manifest listed Linux x64 builds of 3.14.4 for Ubuntu 22.0
 (or its retirement) needs a host patch with a build for the new image. `tools/check_python_host_pin.py`
 holds the workflow's top-level keys (only `name`, `on`, `permissions`, the pinned `concurrency` block and
 `jobs`) and each host job whole (no job key but `name`, `runs-on`, `steps` and the pinned `if:`, that
-runner, the checkout step as written, one setup-python pin, the gate itself as the next step, the
+runner, the checkout step as written (`actions/checkout` pinned to the full 40-hex commit SHA the gate's
+`CHECKOUT_SHA` names, with only `fetch-depth: 0` and `fetch-tags: true`, so the tag form, another SHA and
+a short SHA are each refused), one setup-python pin, the gate itself as the next step, the
 job's suite) and fails when the running interpreter is another release, so `tools/run_all_checks.sh` FAILS
 on any patch release other than the one the file names. When the host interpreter changes, update
 `python-host-patch` in `.aiqt/python-host.toml` and the `python-version` pin of every host job in
