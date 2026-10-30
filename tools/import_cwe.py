@@ -339,16 +339,41 @@ def mapped_cwe_ids(root):
     rules = Path(root) / ".aiqt" / "core" / "rules"
     try:
         corpus = gen_rules.load_corpus(rules)
+    except UnicodeDecodeError as exc:
+        # The shared loader's decode error carries no path, so the source it stopped at is named here.
+        raise ImportError_("rule source {} is not UTF-8: {}".format(_undecodable_source(rules) or rules, exc))
     except ValueError as exc:
         # A malformed rule source (bad frontmatter, an integer in non-ASCII digits among them) is a
         # refusal naming the file, so main exits 2 with a message instead of a traceback.
         raise ImportError_("rule corpus {} rejected: {}".format(rules, exc))
+    except OSError as exc:
+        # A missing rules directory, or a subdirectory or source that cannot be listed or read, is a
+        # refusal naming that path, never a PermissionError or FileNotFoundError traceback.
+        raise ImportError_("rule corpus {} cannot be read: {}: {}".format(
+            rules, exc.filename or rules, exc.strerror or exc))
     ids = set()
     for _src, fm, _rel in corpus:
         for key in ("map-cwe-tight", "map-cwe-broad"):
             for cid in fm.get(key, []):
                 ids.add(cid)
     return ids
+
+
+def _undecodable_source(rules):
+    """The first rule source under rules, in the sorted order gen_rules.load_corpus reads them, that is
+    not UTF-8: every source before it decoded there, so it is the one the loader stopped at. None when
+    none is found now (the tree changed, or a source can no longer be read)."""
+    found = []
+    for dirpath, _dirs, filenames in os.walk(rules):
+        found.extend(Path(dirpath) / fn for fn in filenames if fn.endswith(".md"))
+    for src in sorted(found):
+        try:
+            src.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            return src
+        except OSError:
+            return None
+    return None
 
 
 def _close_fd_propagating(fd):
@@ -731,6 +756,52 @@ def self_test():
                                        "--output", str(_rules_root / "cwe.toml")])
         _expect(_code == 2 and "bad-tier.md" in _err.getvalue(), (_code, _err.getvalue()))
         print("  ok (fails closed): a malformed rule source names its file and exits 2")
+        (_rules / "bad-tier.md").unlink()
+        # a source that is not UTF-8, a source that cannot be read (a dangling link), an unlistable
+        # subdirectory and a missing rules directory are each a refusal naming that path, and main maps
+        # each to exit 2 with a message, never a decode, FileNotFoundError or PermissionError traceback.
+        def _refused(label, named):
+            try:
+                mapped_cwe_ids(_rules_root)
+            except ImportError_ as exc:
+                _expect(str(named) in str(exc), (label, str(exc)))
+            else:
+                raise SystemExit("SELF-TEST FAIL: {} should have been refused".format(label))
+            _err = io.StringIO()
+            with contextlib.redirect_stderr(_err):
+                _code = _main_with_render(lambda *_a, **_k: mapped_cwe_ids(_rules_root),
+                                          ["render", "--staging-dir", str(_rules_root),
+                                           "--output", str(_rules_root / "cwe.toml")])
+            _expect(_code == 2 and str(named) in _err.getvalue(), (label, _code, _err.getvalue()))
+            print("  ok (fails closed): {} names {} and exits 2".format(label, named.name))
+        # a valid source sorts first, so the refusal names the source the loader stopped at, not the first.
+        (_rules.parent / "aiqt").mkdir()
+        (_rules.parent / "aiqt" / "a-valid.md").write_text(
+            "---\ncorpus-id: selfc1\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: QUALI\n"
+            "slug: import-cwe-selftest\n---\nbody\n", encoding="utf-8")
+        (_rules / "bad-bytes.md").write_bytes(b"---\ncorpus-id: abc123\nslug: \xff\n---\nbody\n")
+        _refused("a rule source that is not UTF-8", _rules / "bad-bytes.md")
+        (_rules / "bad-bytes.md").unlink()
+        (_rules / "gone.md").symlink_to(_rules / "no-such-target.md")
+        _refused("a rule source that cannot be read", _rules / "gone.md")
+        (_rules / "gone.md").unlink()
+        # where permissions do not bind (a privileged run), the listing is refused by patching os.scandir
+        # for that one path instead.
+        os.chmod(_rules, 0)
+        _real_scandir = os.scandir
+        def _refuse_scandir(target=".", _path=str(_rules)):
+            if os.fspath(target) == _path:
+                raise PermissionError(13, "listing refused", _path)
+            return _real_scandir(target)
+        if os.access(_rules, os.R_OK):
+            os.scandir = _refuse_scandir
+        try:
+            _refused("an unlistable rules subdirectory", _rules)
+        finally:
+            os.scandir = _real_scandir
+            os.chmod(_rules, 0o755)
+        shutil.rmtree(_rules_root / ".aiqt" / "core" / "rules")
+        _refused("a missing rules directory", _rules_root / ".aiqt" / "core" / "rules")
     finally:
         shutil.rmtree(_rules_root, ignore_errors=True)
     # #378 P1: the V1 / V2 close vectors for this tool's _close_fd_propagating copy, through the harness the
