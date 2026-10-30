@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e09c73f27c82d2fa0c243e1411fec249076ad1e440580a7b0be39a355b2de868"
+tree-sha256 = "b3e62f13fc78828fb0d907fe9d83e21e3a6a49dfc8692d3d51bce8f77b2fd4d5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 502691
-sha256 = "6ff64ddf82771a8a497447c356f9a11da48772a8eb23d4eac23aa40b3af0eb96"
+bytes = 502725
+sha256 = "fdb0d4605fcb6a36881fc3f6100b422eca730016afdccceb3c453a58b3bf6039"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3416,8 +3416,8 @@ sha256 = "844fdc5cbe91d0d2697f71c81363406c754d02391aecea5a55311fe90171e643"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 176218
-sha256 = "eeeeb4f0b5dd8edd05a9fcd432991c1542d1a8e8a468f168ca9994bc18f094fc"
+bytes = 176339
+sha256 = "58d11de239fa44cbe106eda8c9ca19fcc6bf09e0b5de4df3ec5f05ce86935485"
 
 [[sources]]
 path = "tools/check_ci_parity.py"

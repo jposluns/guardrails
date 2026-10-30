@@ -232,10 +232,11 @@ CLI_ENTRY = 'sys.exit(_child_status_refusal_exit("{}") or main())'
 # process by raising SystemExit itself (code opf loads can replace sys.exit); a refusal still ends the process at
 # once with its own line and exit 2.
 CLI_ENTRY_BY_NAME = {"opf.py": '_main_exit(lambda: _child_status_refusal_exit("opf.py") or main())'}
-# The CLI copies whose self-test the execution gate runs with an execution report, by basename: an armed run
-# finalizes its report only for a status recorded through _selftest_exit_report.exit_with, so sys.exit there
-# would leave no report, and their entry line is REPORT_ENTRY. The guard is the argument's first operand, so
-# it runs, and refuses by name, before main() and before exit_with is called.
+# The CLI copies whose entry line finalizes the execution report, by basename: an armed run finalizes its
+# report only for a status recorded through _selftest_exit_report.exit_with, so for a copy whose main() does
+# not record it there sys.exit would leave no report, and its entry line is REPORT_ENTRY (a copy whose main()
+# finalizes the report itself, check_verifier_delivery.py, keeps CLI_ENTRY). The guard is the argument's
+# first operand, so it runs, and refuses by name, before main() and before exit_with is called.
 REPORT_ENTRY = '_selftest_exit_report.exit_with(_child_status_refusal_exit("{}") or main())'
 REPORT_ENTRY_NAMES = ("check_rule_placement.py",)
 # Such an entry hands the guard to _main_exit inside a lambda, so the guard runs only if _main_exit calls its
