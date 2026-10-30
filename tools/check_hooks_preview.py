@@ -22,8 +22,14 @@ an absent or unreadable one is exit 2), and every other entry must be a hook fil
       After that scrub the one variable AIQT_HOOKS_REQUIRE_SIBLINGS=1 is set: a hook skips its
       sibling-parity tests when a sibling file is absent unless that variable is "1", and here the
       siblings are present, so a parity test can never skip silently under this gate.
-      A nonzero exit is a finding. A run that outlives SELFTEST_TIMEOUT seconds delivered no verdict and
-      is a cannot-evaluate (exit 2), attributed to this gate's deadline, not reported as a hook failure.
+      A nonzero exit is a finding. A run stopped by this gate's load-tolerant bound (SELFTEST_TIMEOUT
+      load-adjusted seconds, or the heuristic SELFTEST_STALL_S stall bound) delivered no verdict and is a
+      cannot-evaluate (exit 2), attributed to the bound, never reported as a hook failure or a proven hang,
+      unless the self-test had already exited nonzero on its own before the stop (a descendant still held
+      its output): that exit is a finding, whatever bound fired. A stop that carries captured stderr but
+      no exit status stays a cannot-evaluate: a hook self-test legitimately writes its progress to stderr,
+      so this gate judges the exit status alone and captured stderr beside a stop is not failure evidence
+      here (a tolerance named in the tools/_load_bound.py module docstring).
   (b) INTEGRITY. The README.md integrity table (the one table whose header row is exactly
       `| File | SHA-256 | Link |`; every line from its separator row to the first blank line
       or the end of the file must be a `| a | b | c |` row, since GitHub renders a row written without a
@@ -64,9 +70,10 @@ DISCLOSED RESIDUALS (what this gate does not catch):
 
 Exit convention (matches the repo's gates):
   0  clean, or a printed NOT APPLICABLE
-  1  a real finding (a failing hook self-test, a hash or listing disagreement, a wrong or missing link)
-  2  cannot-evaluate: a missing or unreadable required input, an unparseable table or SHA256SUMS line, a
-     self-test that timed out or had no scratch directory, or an unrecognized argument
+  1  a real finding (a failing hook self-test, a hash or listing disagreement, a wrong or missing link),
+     also when other inputs could not be evaluated: a finding is never filed as cannot-evaluate
+  2  cannot-evaluate with no finding: a missing or unreadable required input, an unparseable table or
+     SHA256SUMS line, a self-test that timed out or had no scratch directory, or an unrecognized argument
 """
 import sys
 
@@ -92,6 +99,9 @@ import subprocess
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _load_bound  # noqa: E402  hang-versus-slowness bounds shared by the self-tests and gates
 
 PREVIEW_DIR = ".preview"
 README_NAME = "README.md"
@@ -119,6 +129,17 @@ GFM_SPACE = " \t"
 # Seconds one hook self-test may run. Set well above the slowest shipped self-test (a few seconds today),
 # so a correctly running self-test is never cut short; exceeding it is reported as this gate's deadline.
 SELFTEST_TIMEOUT = 600
+# The bound is load-tolerant (tools/_load_bound.py): SELFTEST_TIMEOUT counts load-adjusted seconds, which
+# stretch while the host runs more work than it has CPUs, and a self-test whose process tree makes no CPU
+# or output progress for SELFTEST_STALL_S wall seconds is stopped by a heuristic stall bound (silence is
+# not proof of a hang). Either stop is the bound firing: unverifiable, never a hook failure, unless the
+# self-test had already exited nonzero on its own before the stop, which is a finding.
+# Longest silent wait a shipped hook self-test legitimately makes: a few seconds (a deliberately timed-out
+# sleeping child, a thread held on an Event that the test releases); a hook self-test's own hang guards
+# (HANG_TIMEOUT = 120 s, Event holds of 60 s) are reached only by a hang. 300 s exceeds them all, so the
+# hook's own guard reports first.
+SELFTEST_STALL_S = 300
+_load_factor = None  # None reads the host load; the self-test injects a factor to simulate a loaded host
 # Characters of an OS error kept in a diagnostic, so a failure is reported, never dumped.
 DIAG_LIMIT = 300
 
@@ -301,7 +322,12 @@ def _tail(data, n=15):
 
 
 def leg_selftest(pdir, hooks, findings, unverifiable):
-    """(a) Run each hook's own --self-test isolated; nonzero is a finding, a timeout is unverifiable. The
+    """(a) Run each hook's own --self-test isolated; nonzero is a finding (also when it exited nonzero
+    before a bound stopped the wait); a stop with no exit status, or with an own exit of 0 (a 0 beside
+    a stop is not the proven pass a completed 0 is: the stop may have cut the verdict's delivery
+    short), is unverifiable, also when stderr was
+    captured beside it: this gate judges the exit status alone (a hook self-test legitimately writes its
+    progress to stderr, a tolerance named in the _load_bound module docstring). The
     environment is scrubbed of AIQT_, ORCH_ and CLAUDE_ variables and then carries AIQT_HOOKS_REQUIRE_SIBLINGS=1
     (set after the scrub), so a hook's sibling-parity tests run rather than skip silently in CI."""
     for name in hooks:
@@ -314,12 +340,21 @@ def leg_selftest(pdir, hooks, findings, unverifiable):
             continue
         try:
             try:
-                res = subprocess.run([sys.executable, "-I", "-S", "-B", path, "--self-test"], cwd=work,
-                                     capture_output=True, timeout=SELFTEST_TIMEOUT, env=_selftest_env(),
-                                     stdin=subprocess.DEVNULL)
-            except subprocess.TimeoutExpired:
-                unverifiable.append("{}/{}: --self-test did not finish within this gate's {}s deadline; no "
-                                    "verdict was delivered".format(PREVIEW_DIR, name, SELFTEST_TIMEOUT))
+                res = _load_bound.run([sys.executable, "-I", "-S", "-B", path, "--self-test"], cwd=work,
+                                      env=_selftest_env(), budget_s=SELFTEST_TIMEOUT, stall_s=SELFTEST_STALL_S,
+                                      clock=_load_bound.LoadClock(factor=_load_factor))
+            except subprocess.TimeoutExpired as exc:
+                if getattr(exc, "returncode", None):
+                    # The self-test exited nonzero on its own before the bound stopped the wait (a descendant
+                    # held its output): a finding, whatever bound fired.
+                    findings.append("{}/{}: --self-test exited {} before this gate's load-tolerant bound "
+                                    "stopped the wait on a descendant still holding its output ({}) (a)".format(
+                                        PREVIEW_DIR, name, exc.returncode, exc.reason))
+                    continue
+                unverifiable.append("{}/{}: --self-test was stopped by this gate's load-tolerant bound ({} "
+                                    "load-adjusted s, stall bound {} s: {}); no verdict was delivered"
+                                    .format(PREVIEW_DIR, name, SELFTEST_TIMEOUT, SELFTEST_STALL_S,
+                                            getattr(exc, "reason", "timeout")))
                 continue
             except (OSError, subprocess.SubprocessError) as exc:
                 unverifiable.append("{}/{}: --self-test could not be launched: {}".format(PREVIEW_DIR, name, exc))
@@ -418,7 +453,9 @@ def run(root):
         leg_link(rows, findings)
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
-        return 2
+        if not findings:
+            return 2
+        unverifiable.append("the run stopped early: {}".format(exc))  # a finding made before it still stands
     if findings:
         print("FAIL: {} hooks-preview finding(s)".format(len(findings)))
         for finding in findings:
@@ -428,9 +465,10 @@ def run(root):
               file=sys.stderr)
         for item in unverifiable:
             print("  " + item, file=sys.stderr)
-        return 2
     if findings:
-        return 1
+        return 1  # a finding stands beside any input that delivered no verdict: the gate fails
+    if unverifiable:
+        return 2
     print("PASS: hooks-preview holds (every hook self-test passes, README and SHA256SUMS agree with the "
           "files, and every row links to its own file)")
     return 0
@@ -443,6 +481,8 @@ def run(root):
 _STUB_OK = b"import sys\nsys.exit(0 if '--self-test' in sys.argv else 3)\n"
 _STUB_FAIL = b"import sys\nprint('stub self-test failure')\nsys.exit(1)\n"
 _STUB_SLOW = b"import time\ntime.sleep(30)\n"
+# Takes about 2 s but prints progress throughout, then passes: slow, not hung.
+_STUB_PROGRESS = b"import time\nfor _ in range(8):\n    print(1, flush=True)\n    time.sleep(0.25)\n"
 # Passes only when its environment carries REQUIRE_SIBLINGS_VAR=1 and no other scrubbed-family variable, and it
 # was launched the way the README tells users to launch a hook (-I -S -B: isolated, no site, no bytecode).
 _STUB_ENV = (b"import os, sys\nkeys = sorted(k for k in os.environ if k.startswith(('AIQT_', 'ORCH_', 'CLAUDE_')))\n"
@@ -520,9 +560,37 @@ def _restore_env(saved):
             os.environ[k] = v
 
 
+# Tokens the leaked-descendant cleanup ran for, in call order: the self-test asserts the REAL
+# call site ran for the real leaked token, so deleting that call is loud, never silent.
+_CLEANUP_CALLS = []
+
+
+def _cleanup_leaked_descendant(leaked, failures, cannot_evaluate):
+    """Kill any descendant still carrying the leaked token, reporting the survivor scan's three
+    DISTINCT results (_load_bound._leak_cleanup_outcome): an OBSERVED scan (a pid list or [];
+    anything listed is killed below), a cleanup FAILURE (an UNOBSERVABLE scan, None, on a host
+    WITH /proc: the leak cannot be proven absent, recorded in failures), and an UNAVAILABLE
+    observation (no /proc at all: the disclosed platform limit, recorded in cannot_evaluate by
+    name and reported as exit 2 at suite level, never a silent pass and never a false leak)."""
+    _CLEANUP_CALLS.append(leaked)
+    leaked_pids = _load_bound._alive_with(leaked)
+    outcome = _load_bound._leak_cleanup_outcome(leaked_pids, os.path.isdir("/proc"))
+    if outcome == "failure":
+        failures.append("leaked-descendant cleanup: the survivor check was unobservable "
+                        "(/proc could not be read) on a host with /proc, so the leaked child "
+                        "cannot be proven absent")
+    elif outcome == "cannot-evaluate":
+        cannot_evaluate.append("leaked-descendant cleanup: no /proc on this host, so the "
+                               "survivor scan is unavailable and leak absence was not "
+                               "evaluated (the disclosed platform limit)")
+    for pid in (leaked_pids or ()):
+        _load_bound._kill_pid(pid)
+
+
 def self_test_main():
     global SELFTEST_TIMEOUT
     failures = []
+    cannot_evaluate = []  # named unavailable observations, reported as exit 2 (no silent pass)
     ok = {"clock-inject.py": _STUB_OK}
     ok_hex = _sha(_STUB_OK)
     link_ok = _link("clock-inject.py")
@@ -619,8 +687,9 @@ def self_test_main():
              needle="has no link")
 
         # 9. (a) no scratch directory can be created for a hook self-test -> exit 2 with a bounded
-        #    diagnostic, never a raw OSError traceback.
-        r = _build(base / "no-scratch", ok, rows=[], sums=[])
+        #    diagnostic, never a raw OSError traceback. The listing is consistent, so no finding stands beside
+        #    it (a finding would make the gate exit 1, case 12c).
+        r = _build(base / "no-scratch", ok)
         saved_mkdtemp = tempfile.mkdtemp
         tempfile.mkdtemp = _no_scratch
         try:
@@ -637,6 +706,20 @@ def self_test_main():
         # 11. (a) a failing hook self-test -> exit 1.
         case("failing hook self-test", 1, _build(base / "selftest-fail", {"clock-inject.py": _STUB_FAIL}))
 
+        # 12b. (a) load tolerance: a self-test that runs past a 1 s bound while printing progress passes on a
+        #      host loaded to the cap (exit 0), and the same self-test on an idle host overruns it (exit 2).
+        global _load_factor
+        r = _build(base / "selftest-loaded", {"clock-inject.py": _STUB_PROGRESS})
+        saved = (SELFTEST_TIMEOUT, _load_factor)
+        SELFTEST_TIMEOUT = 1
+        try:
+            _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
+            case("slow self-test making progress on a loaded host", 0, r)
+            _load_factor = lambda: 1.0  # noqa: E731
+            case("the same slow self-test on an idle host", 2, r)
+        finally:
+            SELFTEST_TIMEOUT, _load_factor = saved
+
         # 12. (a) a self-test that outlives the deadline -> exit 2 (no verdict delivered).
         r = _build(base / "selftest-slow", {"clock-inject.py": _STUB_SLOW})
         saved = SELFTEST_TIMEOUT
@@ -645,6 +728,81 @@ def self_test_main():
             case("hook self-test past the deadline", 2, r)
         finally:
             SELFTEST_TIMEOUT = saved
+
+        # 12c. a finding beside cannot-evaluate is exit 1, never 2: a stopped self-test (unverifiable) next
+        #      to a corrupted hash; a self-test that exits 1 while a leaked descendant holds its output (the
+        #      exit it reached before the stop is a finding); a finding, then an input that cannot be read.
+        bad = "0" * 64
+        r = _build(base / "finding-beside-stop", {"clock-inject.py": _STUB_SLOW},
+                   rows=[("clock-inject.py", bad, link_ok)], sums=[("clock-inject.py", bad)])
+        leaked = "aiqt-hooks-preview-leaked-{}".format(os.getpid())
+        leaky = ("import subprocess, sys\nsubprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", "
+                 "{!r}])\nsys.exit(1)\n".format(leaked)).encode("utf-8")
+        r_leaky = _build(base / "selftest-leaky", {"clock-inject.py": leaky})
+        saved = (SELFTEST_TIMEOUT, _load_factor)
+        SELFTEST_TIMEOUT = 1
+        _load_factor = lambda: 1.0  # noqa: E731
+        try:
+            case("a finding beside a stopped self-test", 1, r, needle="was stopped by this gate")
+            case("a self-test that exits 1 beside a leaked descendant", 1, r_leaky, needle="exited 1 before")
+        finally:
+            SELFTEST_TIMEOUT, _load_factor = saved
+            # The survivor scan's three distinct results: None on a host WITH /proc is a
+            # self-test failure, a host with NO /proc is a named cannot-evaluate (exit 2),
+            # and an observed list is killed; never a silent pass, never a false leak
+            # (_cleanup_leaked_descendant).
+            _cleanup_leaked_descendant(leaked, failures, cannot_evaluate)
+            # Caller-level coverage: the cleanup's three distinct results are driven through
+            # the REAL caller with an injected survivor scan and an injected /proc presence
+            # (no host gate: these legs run on every platform). An UNOBSERVABLE scan (None)
+            # with /proc present records exactly one failure; an observed empty scan records
+            # nothing; an UNAVAILABLE observation (no /proc) records exactly one named
+            # cannot-evaluate entry (exit 2 below), never a silent pass. Removing the guard
+            # here or in _load_bound._leak_cleanup_outcome turns a leg red.
+            def _probe_cleanup(scan_result, proc_present):
+                recorded_failures, recorded_cannot = [], []
+                saved_alive_probe = _load_bound._alive_with
+                saved_isdir_probe = os.path.isdir
+                _load_bound._alive_with = lambda tok, opener=None: scan_result
+                os.path.isdir = (lambda path, saved_isdir_probe=saved_isdir_probe:
+                                 proc_present if path == "/proc" else saved_isdir_probe(path))
+                try:
+                    _cleanup_leaked_descendant("hooks-cleanup-probe", recorded_failures,
+                                               recorded_cannot)
+                finally:
+                    os.path.isdir = saved_isdir_probe
+                    _load_bound._alive_with = saved_alive_probe
+                return recorded_failures, recorded_cannot
+            probe_none = _probe_cleanup(None, True)
+            probe_empty = _probe_cleanup([], True)
+            probe_unavailable = _probe_cleanup(None, False)
+            probe_shape = (len(probe_none[0]), probe_none[1], probe_empty[0], probe_empty[1],
+                           probe_unavailable[0], len(probe_unavailable[1]),
+                           all("no /proc" in entry for entry in probe_unavailable[1]))
+            if probe_shape != (1, [], [], [], [], 1, True):
+                failures.append("leaked-cleanup caller probes: expected one failure for an "
+                                "unobservable scan with /proc, nothing for an observed empty "
+                                "scan, and one named cannot-evaluate for a host with no "
+                                "/proc; got {!r}".format(probe_shape))
+
+        # The REAL cleanup call site above must have run for the real leaked token: deleting
+        # the _cleanup_leaked_descendant call in the finally would otherwise leave the
+        # injected probes green while the lane's own leak went unchecked.
+        if leaked not in _CLEANUP_CALLS:
+            failures.append("leaked-descendant cleanup: the lane never ran its cleanup call "
+                            "site for the leaked token {!r}".format(leaked))
+
+        def _unreadable_leg(rows, findings):
+            raise GateError("an input became unreadable (seeded by the self-test)")
+        global leg_link
+        saved_leg = leg_link
+        leg_link = _unreadable_leg
+        try:
+            case("a finding, then an input that cannot be read", 1,
+                 _build(base / "finding-then-gate-error", {"clock-inject.py": _STUB_FAIL}),
+                 needle="seeded by the self-test")
+        finally:
+            leg_link = saved_leg
 
         # 13. (b) a corrupted hash, README and SHA256SUMS agreeing with each other -> exit 1.
         bad = "0" * 64
@@ -713,13 +871,22 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
+    if cannot_evaluate:
+        print("SELF-TEST CANNOT-EVALUATE:", file=sys.stderr)
+        for entry in cannot_evaluate:
+            print("  - " + entry, file=sys.stderr)
+        return 2
     print("SELF-TEST PASS: {} case(s): the NOT APPLICABLE path, the zero-hook channel, a clean one-hook tree, "
-          "and each leg's seeded fault (a: failing and timed-out self-tests, no scratch directory, the "
+          "and each leg's seeded fault (a: failing and timed-out self-tests, a self-test exiting 1 beside a leaked "
+          "descendant, a finding beside a stop or an unreadable input (exit 1), no scratch directory, the "
           "scrubbed environment with {}=1; b: corrupted hash, disagreement, empty listing, unlisted, absent, "
           "alien and extra entries, path entries in SHA256SUMS, malformed inputs, a table row without a "
           "leading pipe, line separators the reader does not honour, a CRLF README; c: a link to another "
           "file, a mismatched text or target, an absolute URL, a path with a slash, a bare name, an "
-          "angle-bracketed link, and a missing link) all hold".format(len(ran), REQUIRE_SIBLINGS_VAR))
+          "angle-bracketed link, and a missing link) all hold; and the leaked-descendant cleanup "
+          "caller probes drive its three distinct results (an observed scan, an unobservable-scan "
+          "failure, and the no-/proc named cannot-evaluate, exit 2) through the real "
+          "caller".format(len(ran), REQUIRE_SIBLINGS_VAR))
     return 0
 
 
