@@ -4585,6 +4585,12 @@ def validate_store(resolution, supported_profiles=None, *, observations=None, an
     return rep.result(evaluated_profiles, unevaluated_profiles)
 
 
+# The cause each check that reads the worklog entries names when "worklog" is in the collectors' `unread` set:
+# an entry not read could hide a defect from it or make it report a false one.
+_WORKLOG_UNREAD = ("the worklog entries (active + archive) could not all be read (see C-RECORDS and "
+                   "C-ARCHIVE-ENUM)")
+
+
 def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target,
                            pointer_source, in_repo, rep, ancestral_floor=None):
     # --- C-MANIFEST: identify the store, derive enabled types / vendors / layout ----------------------
@@ -4687,9 +4693,13 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-ARCHIVE-ENUM: walk + reconcile the archive; collect rotation-eligibility for C-ROTATION -----
     rep.ran("C-ARCHIVE-ENUM")
+    # The walk records into its own set, joined to `unread` below, so C-ROTATION, which reads the archived
+    # worklog alone, can tell an archived worklog left unread from an active ledger that was not read.
+    archive_unread = set()
     archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, enabled_types,
                                                                   registered_vendors, import_status, rep,
-                                                                  homes=homes, unread=unread)
+                                                                  homes=homes, unread=archive_unread)
+    unread |= archive_unread
 
     # --- C-EVIDENCE-ENUM (homes 2 only): reconcile the evidence homes against their inventories -------
     if homes >= 2:
@@ -4770,6 +4780,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-ROTATION")
     for msg in rotatable:
         rep.finding(msg)
+    if "worklog" in archive_unread:
+        # An archived entry not read could lie beyond the released end; an archived id read beyond it is
+        # still reported.
+        rep.cant("C-ROTATION: the archived worklog entries could not all be read (see C-ARCHIVE-ENUM); "
+                 "released-only rotation is not evaluated over a partial set (spec 12)")
     if archive_wl_ids:
         if version_data is None:
             rep.cant("C-ROTATION: the version ledger did not evaluate; released-only rotation is not "
@@ -4801,6 +4816,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-ID-SPACE: {}".format(f))
     for f in check_ids_within_counters(committed_ids, high):
         rep.finding("C-ID-SPACE: {}".format(f))
+    if "worklog" in unread:
+        # An entry not read can only add a duplicate or an id above its high-water, so a defect among the
+        # ids read is still reported.
+        rep.cant("C-ID-SPACE: {}; worklog id uniqueness and ids-within-counters are not evaluated over a "
+                 "partial set (spec 8.2)".format(_WORKLOG_UNREAD))
     # The imported series is graded on its OWN number lines (spec 8.2: each series independently): read from
     # the imported leaves only, unique within the series, and each id within its own "imported:<NS>"
     # high-water, never the clean one. The clean union above never holds an imported id. The imported
@@ -4861,12 +4881,20 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         _check_imported_segregation(recs, by_id, unseated, rep, unread)
 
     # --- the frozen-span / no-deletion / partition / contiguity checks (active + archive together) ----
+    # Each reads the merged worklog, so each is CANNOT-EVALUATE naming the unread worklog whenever "worklog" is
+    # in `unread`. A check whose finding an unread entry could make false is not run; one whose finding an
+    # unread entry can only add to still reports the entries read.
     rep.ran("C-FROZEN-COVERAGE")
-    if version_data is not None:
+    if version_data is None:
+        rep.cant("C-FROZEN-COVERAGE: the version ledger did not evaluate; frozen coverage is not checkable")
+    if "worklog" in unread:
+        # A covered entry not read reads as absent from its span, and an archived copy not read could
+        # change the digest either way.
+        rep.cant("C-FROZEN-COVERAGE: {}; frozen coverage is not evaluated over a partial set (spec "
+                 "6.1/13)".format(_WORKLOG_UNREAD))
+    elif version_data is not None:
         for f in check_frozen_coverage(version_data, merged):
             rep.finding("C-FROZEN-COVERAGE: {}".format(f))
-    else:
-        rep.cant("C-FROZEN-COVERAGE: the version ledger did not evaluate; frozen coverage is not checkable")
 
     rep.ran("C-NO-DELETION")
     # No expansion of the high-water into an expected range (F15): an id is never deleted or reused, so the
@@ -4903,7 +4931,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     wl_hw = high.get("WL")
     wl_issued, wl_undecided = _split_reserved("WL", reserved.get("WL", ()), merged, holdings)
     wl_skipped = wl_issued | wl_undecided
-    if isinstance(wl_hw, int) and not isinstance(wl_hw, bool) and wl_hw >= 0:
+    if "worklog" in unread:
+        # An entry not read reads as deleted, so the worklog line is not scanned; the other namespaces are.
+        rep.cant("C-NO-DELETION: {}; worklog no-deletion is not evaluated over a partial set (spec "
+                 "12/13)".format(_WORKLOG_UNREAD))
+    elif isinstance(wl_hw, int) and not isinstance(wl_hw, bool) and wl_hw >= 0:
         max_present = max(present_wl[-1] if present_wl else 0, floor.get("WL", 0))
         owed = _unreserved_overhang(wl_hw, max_present, wl_skipped)
         if owed > 0:
@@ -4986,14 +5018,25 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-PARTITION")
     for f in check_ids_partition(active_wl_ids, archive_wl_ids):
         rep.finding("C-PARTITION: {}".format(f))
+    if "worklog" in unread:
+        # An entry not read can only add an id held in both locations, so one found among the ids read is
+        # still reported.
+        rep.cant("C-PARTITION: {}; the one-location partition is not evaluated over a partial set (spec "
+                 "12)".format(_WORKLOG_UNREAD))
 
     rep.ran("C-CONTIGUITY")
     if not reservations_ok:
         rep.cant("C-CONTIGUITY: the id reservations did not evaluate (see C-NO-DELETION), so a reserved "
                  "worklog number cannot be told from a missing one (fail-closed)")
-    _report_undecided("C-CONTIGUITY", "WL", [n for n in wl_undecided if present_wl and n < present_wl[-1]],
-                      no_holdings, rep)
-    _check_worklog_contiguous(merged.keys(), rep, wl_skipped)
+    if "worklog" in unread:
+        # An entry not read reads as a gap, so the clean tiling is not scanned; the imported line below is
+        # graded on its own leaf.
+        rep.cant("C-CONTIGUITY: {}; worklog contiguity is not evaluated over a partial set (spec "
+                 "6.1)".format(_WORKLOG_UNREAD))
+    else:
+        _report_undecided("C-CONTIGUITY", "WL",
+                          [n for n in wl_undecided if present_wl and n < present_wl[-1]], no_holdings, rep)
+        _check_worklog_contiguous(merged.keys(), rep, wl_skipped)
     # imported:WL tiles its own line, apart from the clean tiling above (spec 8.2): `merged` stays clean-only,
     # so clean release spans, frozen coverage and the changelog gates never read an imported entry. A number
     # an imported:WL reservation holds is skipped exactly as a reserved clean worklog number is, decided
@@ -5233,7 +5276,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                 rep.cant("C-CHANGELOG-GATES: {} is not valid UTF-8 ({})".format(
                     _opf_changelog.CHANGELOG_REL, exc))
                 changelog_text = None
-            if changelog_text is not None:
+            if changelog_text is not None and "worklog" in unread:
+                # The gates recompute each release's coverage over the merged worklog, so an entry not read
+                # reads as absent from its release.
+                rep.cant("C-CHANGELOG-GATES: {}; the changelog gates are not evaluated over a partial "
+                         "set (spec 7.1/7.2)".format(_WORKLOG_UNREAD))
+            elif changelog_text is not None:
                 cr = _opf_changelog.run_gates(version_data, merged_doc, changelog_text, registered_vendors)
                 if cr.status == CANNOT_EVALUATE:
                     for f in cr.findings:
@@ -9662,6 +9710,65 @@ def self_test():
             f = clean_machine()
             f["archive/2026/archive.toml"]["worklog_moved"] = [_row]
             check("r4-links-cannot-evaluate-when-worklog-moved-{}".format(_name), _links_worklog_unread(run(f)))
+        # Every other check that reads the worklog entries is CANNOT-EVALUATE naming the unread worklog, never
+        # a pass or a false finding over the entries read, when a listed bucket worklog is absent at read or
+        # cannot be parsed or validated and when the active ledger cannot be read; the store is never VALID.
+        # C-ROTATION reads the archived entries alone, so an active ledger that cannot be read leaves it
+        # graded. The second bucket holds an edited copy of WL-3, which the active ledger also holds: read in
+        # full, it is a partition, frozen-coverage, id-space and changelog-gate finding, so a pass over the
+        # unread bucket would hide a real defect. Removing any one check's unread branch turns red every case
+        # that asserts that check, and the active-ledger case is red when C-ROTATION reads the active ledger's
+        # state too.
+        _wl_readers = ("C-ID-SPACE", "C-FROZEN-COVERAGE", "C-NO-DELETION", "C-PARTITION", "C-CONTIGUITY",
+                       "C-CHANGELOG-GATES")
+
+        def _wl_readers_unread(res, archived):
+            cids = _wl_readers + (("C-ROTATION",) if archived else ())
+            return (res is not None and res.status == CANNOT_EVALUATE
+                    and all(res.checks.get(cid) == "CANNOT-EVALUATE"
+                            and any(m.startswith(cid + ": the ") and "worklog entries" in m
+                                    and "could not all be read" in m and "not evaluated over a partial set" in m
+                                    for m in res.by_check.get(cid, []))
+                            for cid in cids)
+                    and (archived or res.checks.get("C-ROTATION") == "PASS"))
+
+        def _wl_second_bucket():
+            m = clean_machine()
+            _wl_copy = wl(3)
+            _wl_copy["summary"] = "edited"
+            m["archive/2025/archive.toml"] = {"schema": 1, "moved": [], "worklog_moved": []}
+            m["archive/2025/worklog.toml"] = {"schema": 1, "entry": [_wl_copy]}
+            return m
+        _wl_full = run(_wl_second_bucket())
+        check("worklog-second-bucket-read-in-full-findings",
+              _wl_full is not None and _wl_full.status == INVALID
+              and all(_wl_full.checks.get(cid) == "FINDING"
+                      for cid in ("C-PARTITION", "C-FROZEN-COVERAGE", "C-ID-SPACE", "C-CHANGELOG-GATES")))
+        # Absent at read: the archive reader is patched to report the listed bucket worklog absent, as a
+        # removal between the bucket listing and the read would.
+        _wl_gone = "archive/2025/worklog.toml"
+        _wl_real_reader = _opf_worklog.load_archive_worklog_at
+
+        def _wl_vanishing_reader(fd, relpath, **kwargs):
+            if relpath.endswith(_wl_gone):
+                return None
+            return _wl_real_reader(fd, relpath, **kwargs)
+
+        _opf_worklog.load_archive_worklog_at = _wl_vanishing_reader
+        try:
+            _wl_absent = run(_wl_second_bucket())
+        finally:
+            _opf_worklog.load_archive_worklog_at = _wl_real_reader
+        check("worklog-readers-cannot-evaluate-when-archived-worklog-absent-at-read",
+              _wl_readers_unread(_wl_absent, True))
+        for _name, _doc in (("unparseable", "garbage = ["), ("invalid", {"schema": 1, "entry": "x"})):
+            f = _wl_second_bucket()
+            f[_wl_gone] = _doc
+            check("worklog-readers-cannot-evaluate-when-archived-worklog-{}".format(_name),
+                  _wl_readers_unread(run(f), True))
+        f = clean_machine()
+        f["worklog.toml"] = "garbage = ["
+        check("worklog-readers-cannot-evaluate-when-active-ledger-unreadable", _wl_readers_unread(run(f), False))
         # A moved row that cannot be reconciled leaves the population of every type it could stand for
         # incomplete, for each check that joins through moved rows (red when its branch alone stops
         # recording that population unread). A row dropped as malformed still names a record through its
