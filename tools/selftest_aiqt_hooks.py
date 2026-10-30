@@ -7221,6 +7221,438 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(found)
 
 
+# THE BOUNDED HERE-DOCUMENT END (_heredoc_body_ends_early and the span comment in _lex_pass). Each row hides
+# _HD_EARLY_END_HIDDEN after a here-document body read inside a substitution or group, and bash 5.3.9 runs it
+# in every row (a fake git first on PATH recorded its arguments, under bash -c and under eval alike), while the
+# lexer at 848c60f1 read it as body: protected_line allowed each row there and denies the hidden command alone.
+# In V2 to V8 bash ends the body early: V2 to V7 end at a line that starts with the delimiter
+# and holds the closer later on it (')' after a blank, a tab of the <<- form, a nested substitution or a
+# comment, and '}' for '${ cmd; }'), rule (a); V3 has no exact delimiter line either, rule (b) too; V8 ends a
+# backquote substitution at a backquote in the body, rule (c). V7's '<<' and glued-eof's sit inside an open
+# '${', so the lexer now refuses each at that operator (_HD_DOLLAR_BRACE_ROWS) before any body is read; glued-eof
+# was this table's rule (b) row. rule-b is a '<<' after a command word that a shell alias expands to an open
+# array assignment, where bash 5.3.9 opens no here-document (it reports a syntax error at the '<<' and runs the
+# next line) and the lexer, which reads no alias, reads one that no line ends, so only rule (b) holds there; its
+# earlier '<<' inside an arithmetic command, and then inside an array assignment written out, are now refused
+# at that operator (_HD_ARITH_ROWS, _HD_TEXT_MARK_ROWS).
+# brace-word is an untrusted body only through
+# the '${' element of the trust test: the '}' after echo is a word to bash, so the '${ ' substitution stays
+# open, but the lexer's nesting stack pops its '${' there, and nothing else marks the body untrusted.
+_HD_EARLY_END_HIDDEN = "git -c core.hooksPath=/dev/null commit -m x"
+_HD_EARLY_END_REFUSED = "ValueError: uncertain here-document body end in a substitution or group"
+_HD_DOLLAR_BRACE_REFUSED = "ValueError: uncertain here-document while a '${' is open"
+_HD_EARLY_END_ROWS = (
+    ("V2", "x=$(cat <<'EOF'\nEOF ); ", "\nEOF\n)", _HD_EARLY_END_REFUSED),
+    ("V3", "msg=$(cat <<'EOF'\nFix\nEOF )\n", "", _HD_EARLY_END_REFUSED),
+    ("V4", "x=$(cat <<-'EOF'\n\tEOF ); ", "\n\tEOF\n)", _HD_EARLY_END_REFUSED),
+    ("V5", "x=$(echo $(cat <<'EOF'\nEOF )); ", "\nEOF\n))", _HD_EARLY_END_REFUSED),
+    ("V6", "x=$(cat <<'EOF'\nEOF #)\n", "\nEOF\n)", _HD_EARLY_END_REFUSED),
+    ("V7", "x=${ cat <<'EOF'\nEOF}; ", "\nEOF\n}", _HD_DOLLAR_BRACE_REFUSED),
+    ("V8", "x=`cat <<'EOF'\nfoo`; ", "; y=`\nEOF\n`", _HD_EARLY_END_REFUSED),
+    ("glued-eof", "echo ${x:-<<'EOF'}\n", "\nEOF", _HD_DOLLAR_BRACE_REFUSED),
+    ("rule-b", "shopt -s expand_aliases\nalias a='x=( 1 '\na <<'EOF' )\n", "", _HD_EARLY_END_REFUSED),
+    ("brace-word", "x=${ echo }; cat <<'EOF'\nEOF }; ", "\nEOF\n}", _HD_EARLY_END_REFUSED),
+)
+# The exact reading the rule keeps, each with the hidden command after the body as a visible segment: a body
+# read outside every substitution and group ends only at its exact delimiter line, so a line that starts with
+# the delimiter, or a backquote, is body text there (bash 5.3.9 prints such a line as body); and rule (c) holds
+# only where a backquote substitution is open, so a backquote in a body inside '$(...)' leaves it readable.
+_HD_EARLY_END_KEPT = (
+    ("top-delim-prefix", "cat <<'EOF'\nEOF) is body text\nEOF\n", [["cat"]]),
+    ("top-backquote", "cat <<'EOF'\nfoo`\nEOF\n", [["cat"]]),
+    ("subst-backquote", "x=$(cat <<'EOF'\nfoo`\nEOF\n)\n", [["x=$"], ["cat"], [], []]),
+)
+
+
+def _heredoc_early_end_failures():
+    """(hd-early-end-*) Each row of _HD_EARLY_END_ROWS beside its bare control: the shared lexer refuses the
+    row (the uncertain body end, or for V7 and glued-eof the '<<' read while a '${' is open) and protected_line
+    denies it, as it denies the hidden command alone (hd-early-end-control). Every row fails on 848c60f1, where
+    the lex read the hidden command as body and protected_line allowed it; V2, V4 to V6 and brace-word also fail
+    where rule (a) is removed (rule (b) still refuses V3), V8 where rule (c) is, rule-b where rule (b) is, and
+    brace-word where the trust test drops '${'. hd-early-end-kept-*: the lexer reads each
+    _HD_EARLY_END_KEPT body as before, the hidden command a visible segment after it (REGRESSION GUARDS that
+    pass on 848c60f1 too and fail where the rule reaches a body it should read exactly)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    control = _decision(aiqt_hooks.protected_line, hidden)
+    if control != "deny":
+        out.append("(hd-early-end-control) protected_line must deny the bare hidden command {!r}, got {}".format(
+            hidden, control))
+    for name, before, after, refused in _HD_EARLY_END_ROWS:
+        command = before + hidden + after
+        try:
+            lexed = [seg.argv for seg in aiqt_hooks._lex_command(command)]
+        except ValueError as exc:
+            lexed = "ValueError: {}".format(exc)
+        if lexed != refused:
+            out.append("(hd-early-end-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, refused, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-early-end-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, want in _HD_EARLY_END_KEPT:
+        command = before + hidden
+        try:
+            lexed = [seg.argv for seg in aiqt_hooks._lex_command(command)]
+        except ValueError as exc:
+            lexed = "ValueError: {}".format(exc)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-early-end-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
+
+
+# A HERE-DOCUMENT WHILE A '${' IS OPEN (the two raises of _HEREDOC_DOLLAR_BRACE_OPEN in _lex_pass). Inside a
+# '${...}' parameter expansion bash reads '<<' and a newline as text, so it opens no here-document there and
+# starts no body; bash 5.3.9 runs _HD_EARLY_END_HIDDEN in every _HD_DOLLAR_BRACE_ROWS row (a fake git first on
+# PATH recorded its arguments, under bash -c and under eval alike), while the lexer at 116214e1 read it as body
+# and protected_line allowed it, or, in late-open, read it inside a quoted word that an apostrophe in bash's
+# body opens (protected_line denied that one there, its commit grammar reading the word, not the segments).
+# space and glued are the two top-level shapes; subst holds the expansion inside a '$(...)'; paren-text
+# is refused only because the '${' counts wherever it sits on the stack (a '(' that is text to bash is
+# innermost at the '<<'); late-open opens the '${' after the '<<', so only the newline raise holds there. In each
+# _HD_DOLLAR_BRACE_UNCERTAIN row the '<<' IS an operator to bash (a bash 5.3 '${ cmd; }' or '${| cmd; }'
+# substitution, or a '$(...)' an expansion holds) and bash 5.3.9 reads the hidden command as body: the lexer
+# cannot tell that from an expansion on its stack, so it refuses those too (a disclosed over-refusal), never
+# reading them either way. _HD_DOLLAR_BRACE_KEPT rows keep their exact read: a '${' inside double quotes, and
+# one closed before the '<<' or before the newline.
+_HD_DOLLAR_BRACE_ROWS = (
+    ("space", "echo ${x:-<<'EOF' }\n", "\nEOF"),
+    ("glued", "echo ${x:-<<'EOF'}\n", "\nEOF}"),
+    ("subst", "y=$(echo ${x:-<<'EOF' })\n", "\nEOF"),
+    ("paren-text", "echo ${x:-(<<'EOF' )}\n", "\nEOF"),
+    ("late-open", "cat <<'EOF' ${x:-\nEOF\n}\nit's\nEOF\n", "\necho '"),
+)
+_HD_DOLLAR_BRACE_UNCERTAIN = (
+    ("funsub", "x=${ cat <<'EOF'\n", "\nEOF\n}"),
+    ("funsub-pipe", "x=${| cat <<'EOF'\n", "\nEOF\n}"),
+    ("param-subst", "echo ${x:-$(cat <<'EOF'\n", "\nEOF\n)}"),
+)
+_HD_DOLLAR_BRACE_KEPT = (
+    ("dq-param", "echo \"${x:-<<'EOF' }\"\n", [["echo", "${x:-<<'EOF' }"]]),
+    ("closed-before", "echo ${x:-a}; cat <<'EOF'\nbody\nEOF\n", [["echo", "${x:-a}"], ["cat"]]),
+    ("closed-on-line", "cat <<'EOF' ${x:-a}\nbody\nEOF\n", [["cat", "${x:-a}"]]),
+)
+
+
+def _hd_lex_outcome(command):
+    """The argv of each segment the shared lexer reads in command, or 'ValueError: <message>' where it refuses."""
+    try:
+        return [seg.argv for seg in aiqt_hooks._lex_command(command)]
+    except ValueError as exc:
+        return "ValueError: {}".format(exc)
+
+
+def _heredoc_dollar_brace_failures():
+    """(hd-dollar-brace-*) Each row of _HD_DOLLAR_BRACE_ROWS beside its bare control: the shared lexer refuses
+    the row (_HD_DOLLAR_BRACE_REFUSED) and protected_line denies it, as it denies the hidden command alone
+    (hd-dollar-brace-control). Every row fails on 116214e1, where the lex read the hidden command as body or
+    quoted text (protected_line allowed each there but late-open); space, subst and paren-text also fail where
+    the raise at the '<<' is removed (glued still meets the newline raise, its '${' open at the newline),
+    late-open where the raise at the newline is, and paren-text where the raise at the '<<' reads only the
+    innermost entry of the stack.
+    hd-dollar-brace-uncertain-*: the lexer refuses each _HD_DOLLAR_BRACE_UNCERTAIN row rather than read its body
+    either way. hd-dollar-brace-kept-*: the lexer reads each _HD_DOLLAR_BRACE_KEPT command as before, the hidden
+    command a visible segment after it (REGRESSION GUARDS that pass on 116214e1 too)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    control = _decision(aiqt_hooks.protected_line, hidden)
+    if control != "deny":
+        out.append("(hd-dollar-brace-control) protected_line must deny the bare hidden command {!r}, got {}".format(
+            hidden, control))
+    for name, before, after in _HD_DOLLAR_BRACE_ROWS:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_DOLLAR_BRACE_REFUSED:
+            out.append("(hd-dollar-brace-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_DOLLAR_BRACE_REFUSED, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-dollar-brace-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, after in _HD_DOLLAR_BRACE_UNCERTAIN:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_DOLLAR_BRACE_REFUSED:
+            out.append("(hd-dollar-brace-uncertain-{}) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_DOLLAR_BRACE_REFUSED, lexed))
+    for name, before, want in _HD_DOLLAR_BRACE_KEPT:
+        command = before + hidden
+        lexed = _hd_lex_outcome(command)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-dollar-brace-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
+
+
+# A HERE-DOCUMENT WHILE A '((' IS OPEN (THE ARITHMETIC MARK above aiqt_hooks._HEREDOC_ARITH_OPEN, and the two
+# raises of _HEREDOC_ARITH_OPEN in _lex_pass). Inside an arithmetic command or expansion bash reads '<<' as a
+# shift and a newline as text, so it opens no here-document there and starts no body; bash 5.3.9 runs
+# _HD_EARLY_END_HIDDEN in every _HD_ARITH_ROWS row (a fake git first on PATH recorded its arguments, under bash -c
+# and under eval alike), while the lexer at f1248b31 read it as body and protected_line allowed it, as every
+# other PreToolUse handler did. command, expansion and assignment are the three shapes; for-arith is a
+# 'for ((...))' loop; nested holds the expansion inside a '$(...)'; paren-inner puts an unmarked '(' innermost
+# at the '<<', so it is refused only because the mark counts wherever it sits on the stack; comsub is a '$(('
+# that bash reads as a command substitution, where only the mark on its first '(' is still open at the '<<';
+# subshells is a '((' that bash reads again as nested subshells and still runs the line after; continued puts a
+# backslash-newline between the two '('; late-open opens the expansion after the '<<', so only the newline raise
+# holds there, and hides the command in a substitution inside the arithmetic text, which bash expands
+# (hd-arith-control-subst is its bare control). In each _HD_ARITH_UNCERTAIN row bash 5.3.9 reads a here-document
+# and the hidden command as its body (nested subshells, and a command substitution a '$((' opens): the mark
+# cannot tell those from arithmetic, so the lexer refuses them too (a disclosed over-refusal). _HD_ARITH_KEPT rows
+# keep their exact read: '( (' and '$( (', which are never arithmetic, and a '((' or '$((' closed before the
+# '<<' (by a '))' run, a single ')', a 'for' loop's '))') or before the newline.
+_HD_ARITH_REFUSED = "ValueError: uncertain here-document while a '((' is open"
+_HD_ARITH_ROWS = (
+    ("command", "(( 1 <<'EOF' ))\n", "\nEOF"),
+    ("expansion", "echo $(( 1 <<'EOF' ))\n", "\nEOF"),
+    ("assignment", "x=$(( 1 <<'EOF' ))\n", "\nEOF"),
+    ("for-arith", "for (( i=0; i<1<<'EOF'; i++ )); do :; done\n", "\nEOF"),
+    ("nested", "y=$(echo $(( 1 <<'EOF' )))\n", "\nEOF"),
+    ("paren-inner", "echo $(( (1 <<'EOF') ))\n", "\nEOF"),
+    ("comsub", "echo $(( 1 ) <<'EOF' )\n", "\nEOF"),
+    ("subshells", "((cat <<'EOF'\n", "\nEOF\n) )"),
+    ("continued", "(\\\n( 1 <<'EOF' ))\n", "\nEOF"),
+    ("late-open", "cat <<'EOF' $(( 1 +\n$(", ") ))\nEOF\n"),
+)
+_HD_ARITH_UNCERTAIN = (
+    ("closed-early", "(( 1 ) <<'EOF' )\n", "\nEOF"),
+    ("subst-subshell", "echo $((cat <<'EOF'\n", "\nEOF\n) )"),
+)
+_HD_ARITH_KEPT = (
+    ("spaced", "( (cat <<'EOF'\nbody\nEOF\n) )\n", [[], [], ["cat"], [], [], []]),
+    ("subst-spaced", "echo $( (cat <<'EOF'\nbody\nEOF\n) )\n", [["echo", "$"], [], ["cat"], [], [], []]),
+    ("closed-run", "(( 1 )) && cat <<'EOF'\nbody\nEOF\n", [[], [], ["1"], [], [], ["cat"]]),
+    ("closed-single", "echo $(( 1 ) ); cat <<'EOF'\nbody\nEOF\n", [["echo", "$"], [], ["1"], [], [], ["cat"]]),
+    ("closed-for", "for ((;;)); do break; done; cat <<'EOF'\nbody\nEOF\n",
+     [["for"], [], [], [], [], [], [], ["do", "break"], ["done"], ["cat"]]),
+    ("closed-on-line", "cat <<'EOF'; (( 1 ))\nbody\nEOF\n", [["cat"], [], [], ["1"], [], []]),
+)
+
+
+def _heredoc_arith_failures():
+    """(hd-arith-*) Each row of _HD_ARITH_ROWS beside its bare control: the shared lexer refuses the row
+    (_HD_ARITH_REFUSED) and protected_line denies it, as it denies the hidden command alone (hd-arith-control,
+    and hd-arith-control-subst for late-open's substitution). Every row fails on f1248b31, where the lex read
+    the hidden command as body and protected_line allowed it; command, expansion, assignment, for-arith, nested,
+    paren-inner, comsub and continued also fail where the raise at the '<<' is removed (subshells and late-open
+    still meet the newline raise, a mark open at their newline), late-open where the raise at the newline is,
+    every row but comsub where both raises read only the innermost entry of the stack, comsub and continued
+    where the mark goes on the second '(' of a run instead of the first, and continued where the mark's
+    look-ahead does not skip backslash-newlines. hd-arith-uncertain-*: the lexer refuses each
+    _HD_ARITH_UNCERTAIN row rather than read its body either way. hd-arith-kept-*: the lexer reads each
+    _HD_ARITH_KEPT command as before, the hidden command a visible segment after it (REGRESSION GUARDS that pass on
+    f1248b31 too; closed-run, closed-for and closed-on-line fail where a ')' run does not pop a mark, and
+    closed-single where a single ')' does not)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    for tag, control in (("control", hidden), ("control-subst", "x=$(" + hidden + ")")):
+        got = _decision(aiqt_hooks.protected_line, control)
+        if got != "deny":
+            out.append("(hd-arith-{}) protected_line must deny the bare hidden command {!r}, got {}".format(
+                tag, control, got))
+    for name, before, after in _HD_ARITH_ROWS:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_ARITH_REFUSED:
+            out.append("(hd-arith-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_ARITH_REFUSED, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-arith-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, after in _HD_ARITH_UNCERTAIN:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_ARITH_REFUSED:
+            out.append("(hd-arith-uncertain-{}) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_ARITH_REFUSED, lexed))
+    for name, before, want in _HD_ARITH_KEPT:
+        command = before + hidden
+        lexed = _hd_lex_outcome(command)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-arith-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
+
+
+# A HERE-DOCUMENT WHILE ONE OF THE TEXT MARKS IS OPEN (above aiqt_hooks._HEREDOC_TEXT_MARKS: the raises of
+# _heredoc_text_mark, _HEREDOC_SUBST_LATE and _HEREDOC_BACKQUOTE_CLOSED in _lex_pass, and the '$[' and
+# backslash-newline openers of _dollar_opener). bash 5.3.9 runs _HD_EARLY_END_HIDDEN in every _HD_TEXT_MARK_ROWS,
+# _HD_TEXT_MARK_DQ and _HD_TEXT_MARK_HASH row (a fake git first on PATH recorded its arguments, under bash -c and
+# under eval alike), while the lexer at 60c56153 read it as body, as quoted text or as a comment; there every
+# PreToolUse handler allowed each row (cwd a repository on a feature branch) but backquote-late, which
+# gate_weakening denied, and the _HD_TEXT_MARK_HASH rows, which protected_line denied through its raw scan.
+# In _HD_TEXT_MARK_ROWS: inside a '$[...]' or a command word's subscript bash reads '<<' as text
+# (dollar-bracket and its valid-arithmetic, nested '[', inner '(' and backslash-newline forms; subscript,
+# subscript-assign and subscript-then); in an array assignment's '(' it reports a syntax error at the '<<' and
+# reads the next line (array, array-append, array-declare, array-export); in a pattern's '(' it reads it as text
+# ('[[ == ]]' patterns always, others under extglob); dollar-bracket-late, subscript-late and pattern-late open
+# the frame after the '<<', so only the newline raise holds there, and hide the command in a substitution inside
+# it, which bash expands (hd-text-mark-control-subst is its bare control); subst-late, its backslash-newline
+# form, subst-late-reopened (a substitution opened after an entry the '<<' sat in has closed) and
+# backquote-late open a substitution after the '<<', so bash starts the bodies past the line that closes it;
+# backquote-closed reads a '<<' inside a backquote substitution closed on its line, which gives it no body, and
+# backquote-closed-forked reads it again in each reading of an uncertain '#' after it, each resumed from where
+# the first lex stopped (_LexFork) with a copy of the nesting stack. Each
+# _HD_TEXT_MARK_DQ row holds a '$[', or a '$' apart from its opener by a backslash-newline, inside double
+# quotes, where bash reads the nested quotes as one word and opens no here-document: the lexer reads that word
+# whole now, and the hidden command after it. Each _HD_TEXT_MARK_HASH row holds a '#' inside a '$[' or a
+# subscript, text to bash, which the lexer read as a comment hiding the rest of the line: the mark now makes it
+# uncertain, so one reading holds the command. In each _HD_TEXT_MARK_UNCERTAIN row bash 5.3.9 reads a
+# here-document and the hidden command as its body ('$$[' is '$$' and '[' to bash, an argument's 'x[' is no
+# subscript, a here-document in a substitution an array assignment holds, an array assignment opened after the
+# '<<', where bash reads the body at the newline inside it and then a second one after its ')', and a '!('
+# subshell with extglob unset): the marks cannot tell those apart, so the lexer refuses them too (a disclosed
+# over-refusal). _HD_TEXT_MARK_KEPT rows keep their exact read: each frame closed before the '<<' or the
+# newline, a subshell's newline after a '<<' (bash starts the body there), a here-document a backquote
+# substitution holds whole, a here-document in a command substitution opened before its '<<' with an uncertain
+# '#' after it (both readings), and a '#' inside a double-quoted '$[', text to bash.
+_HD_BRACKET_REFUSED = "ValueError: uncertain here-document while a '$[' or subscript '[' is open"
+_HD_ARRAY_REFUSED = "ValueError: uncertain here-document while an array assignment's '(' is open"
+_HD_PATTERN_REFUSED = "ValueError: uncertain here-document while a pattern's '(' is open"
+_HD_SUBST_LATE_REFUSED = "ValueError: uncertain here-document while a substitution opened after it is open"
+_HD_BACKQUOTE_CLOSED_REFUSED = "ValueError: uncertain here-document in a backquote substitution closed before its body"
+_HD_TEXT_MARK_ROWS = (
+    ("dollar-bracket", "echo $[ 1 <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-valid", "echo $[ 1 <<\"2\" ]\n", "\n2", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-nested", "echo $[ x+a[1] <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-paren", "echo $[ ( 1 <<'EOF' ) ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-continued", "echo $\\\n[ 1 <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-late", "cat <<'EOF' $[ 1 +\n$(", ") ]\nEOF\n", _HD_BRACKET_REFUSED),
+    ("subscript", "x[ 1 <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("subscript-assign", "x[1<<\"2\"]=1\n", "\n2", _HD_BRACKET_REFUSED),
+    ("subscript-then", "if true; then x[ 1 <<'EOF' ]; fi\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("subscript-late", "cat <<'EOF'; x[1\n$(", ")\nEOF\n]=1\n", _HD_BRACKET_REFUSED),
+    ("array", "x=( 1 <<'EOF' )\n", "\nEOF", _HD_ARRAY_REFUSED),
+    ("array-append", "x+=( 1 <<'EOF' )\n", "\nEOF", _HD_ARRAY_REFUSED),
+    ("array-declare", "declare -a x=( 1 <<'EOF' )\n", "\nEOF", _HD_ARRAY_REFUSED),
+    ("array-export", "export x=( 1 <<'EOF' )\n", "\nEOF", _HD_ARRAY_REFUSED),
+    ("pattern-cond", "[[ a == @(a|<<'EOF' ) ]]\n", "\nEOF", _HD_PATTERN_REFUSED),
+    ("pattern-cond-bang", "[[ a == !(b|<<'EOF' ) ]]\n", "\nEOF", _HD_PATTERN_REFUSED),
+    ("pattern-extglob", "shopt -s extglob\necho @(a <<'EOF' )\n", "\nEOF", _HD_PATTERN_REFUSED),
+    ("pattern-continued", "shopt -s extglob\necho @\\\n(a <<'EOF' )\n", "\nEOF", _HD_PATTERN_REFUSED),
+    ("pattern-late", "cat <<'EOF'; [[ a == @(a|\n$(", ")\nEOF\n) ]]\n", _HD_PATTERN_REFUSED),
+    ("subst-late", "cat <<'EOF' $(true\n", "\nEOF\n)\nEOF", _HD_SUBST_LATE_REFUSED),
+    ("subst-late-continued", "cat <<'EOF' $\\\n(true\n", "\nEOF\n)\nEOF", _HD_SUBST_LATE_REFUSED),
+    ("subst-late-reopened", "(cat <<'EOF') | cat $(true\n", "\nEOF\n)\nEOF", _HD_SUBST_LATE_REFUSED),
+    ("backquote-late", "cat <<'EOF' `true\n", "\nEOF\n`\nEOF", _HD_SUBST_LATE_REFUSED),
+    ("backquote-closed", "x=`cat <<'EOF' `\n", "\nEOF", _HD_BACKQUOTE_CLOSED_REFUSED),
+    ("backquote-closed-forked", "x=`cat <<'EOF' `; (true # c\n", "\nEOF\n)",
+     "ValueError: a reading of an uncertain '#' does not lex: uncertain here-document in a backquote substitution"
+     " closed before its body"),
+)
+_HD_TEXT_MARK_DQ = (
+    ("dq-dollar-bracket", "echo \"$[ \" <<'EOF' \" ]\"\n", "\nEOF", ["echo", "$[ \" <<'EOF' \" ]"]),
+    ("dq-dollar-bracket-nested", "echo \"$[ a[1] \" <<'EOF' \" ]\"\n", "\nEOF",
+     ["echo", "$[ a[1] \" <<'EOF' \" ]"]),
+    ("dq-continued-paren", "echo \"$\\\n( \" <<'EOF' \" )\"\n", "\nEOF", ["echo", "$\\\n( \" <<'EOF' \" )"]),
+    ("dq-continued-brace", "echo \"$\\\n{x:- \" <<'EOF' \" }\"\n", "\nEOF", ["echo", "$\\\n{x:- \" <<'EOF' \" }"]),
+    ("dq-continued-bracket", "echo \"$\\\n[ \" <<'EOF' \" ]\"\n", "\nEOF", ["echo", "$\\\n[ \" <<'EOF' \" ]"]),
+)
+_HD_TEXT_MARK_HASH = (
+    ("hash-dollar-bracket", "false && echo $[ 1 # ]; "),
+    ("hash-subscript", "false && x[ 1 # ]; "),
+)
+_HD_TEXT_MARK_UNCERTAIN = (
+    ("dollar-dollar-bracket", "echo $$[ 1 <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("argument-subscript", "echo x[ 1 <<'EOF' ]=1\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("array-subst", "x=( $(cat <<'EOF'\n", "\nEOF\n) )", _HD_ARRAY_REFUSED),
+    ("array-late", "cat <<'EOF'; x=( a\nX\n$(", ")\nEOF\n)\n", _HD_ARRAY_REFUSED),
+    ("bang-subshell", "!(cat <<'EOF'\n", "\nEOF\n)", _HD_PATTERN_REFUSED),
+)
+_HD_TEXT_MARK_KEPT = (
+    ("closed-dollar-bracket", "echo $[ 1 ]; cat <<'EOF'\nbody\nEOF\n", [["echo", "$[", "1", "]"], ["cat"]]),
+    ("closed-on-line-dollar-bracket", "cat <<'EOF' $[ 1 ]\nbody\nEOF\n", [["cat", "$[", "1", "]"]]),
+    ("closed-subscript", "x[1]=2; cat <<'EOF'\nbody\nEOF\n", [["x[1]=2"], ["cat"]]),
+    ("argument-brackets", "cat a[1] <<'EOF'\nbody\nEOF\n", [["cat", "a[1]"]]),
+    ("closed-array", "x=( a b ); cat <<'EOF'\nbody\nEOF\n", [["x="], ["a", "b"], [], ["cat"]]),
+    ("closed-on-line-array", "cat <<'EOF'; x=( a b )\nbody\nEOF\n", [["cat"], ["x="], ["a", "b"], []]),
+    ("closed-pattern", "[[ a == @(a|b) ]] && cat <<'EOF'\nbody\nEOF\n",
+     [["[[", "a", "==", "@"], ["a"], ["b"], ["]]"], ["cat"]]),
+    ("subshell-late", "cat <<'EOF'; (true\nbody\nEOF\n)\n", [["cat"], [], ["true"], [], []]),
+    ("closed-subst-on-line", "cat <<'EOF' $(true)\nbody\nEOF\n", [["cat", "$"], ["true"], []]),
+    ("backquote-body", "x=`cat <<'EOF'\nbody\nEOF\n`\n", [["x=`cat"], ["`"]]),
+    ("subst-heredoc-hash", "x=$(cat <<'EOF' # c\nbody\nEOF\n)\n",
+     [["x=$"], ["cat"], [], [], _HD_EARLY_END_HIDDEN.split(), ["x=$"], ["cat", "#", "c"], [], []]),
+    ("dq-bracket-hash", "echo \"$[ 1 # ]\"\n", [["echo", "$[ 1 # ]"]]),
+)
+
+
+def _heredoc_text_mark_failures():
+    """(hd-text-mark-*) Each row of _HD_TEXT_MARK_ROWS beside its bare control: the shared lexer refuses the row
+    with that row's message and protected_line denies it, as it denies the hidden command alone
+    (hd-text-mark-control, and hd-text-mark-control-subst for the late rows' substitution). Every row fails on
+    60c56153, where the lex read the hidden command as body and protected_line allowed it; the dollar-bracket
+    rows fail where no "[" goes on after a '$', the subscript rows where none goes on a word that is so far an
+    identifier, dollar-bracket-nested where a '[' inside an open one pushes nothing, the array rows where a '('
+    after a '=' is not marked, the pattern rows where one after a pattern character is not, every row whose
+    frame closes on its line where the raise at the '<<' is removed, the three late rows where the newline
+    raise for the marks is, dollar-bracket-paren where both read only the innermost entry, subst-late, its
+    continued and reopened forms and backquote-late where the newline raise for a substitution opened after the
+    '<<' is,
+    subst-late-continued and pattern-continued where the look-behind of _lex_paren_entry skips no
+    backslash-newlines, subst-late-reopened where a pop does not lower the stack's low, both backquote-closed
+    rows where the raise for a closed backquote is removed, and backquote-closed-forked where a copy of the
+    stack drops its heredoc_bq. hd-text-mark-dq-*: the lexer reads each _HD_TEXT_MARK_DQ
+    word whole and the hidden command after it (fails where a double-quoted '$[' opens nothing, or where
+    _dollar_opener skips no backslash-newline); hd-text-mark-hash-*: one reading of each _HD_TEXT_MARK_HASH row
+    holds the hidden command and protected_line denies it (fails where no "[" goes on). hd-text-mark-uncertain-*:
+    the lexer refuses each _HD_TEXT_MARK_UNCERTAIN row rather than read its body either way.
+    hd-text-mark-kept-*: the lexer reads each _HD_TEXT_MARK_KEPT command as before, the hidden command a visible
+    segment after it (REGRESSION GUARDS that pass on 60c56153 too; the closed rows fail where a ']' or a ')'
+    does not pop its mark, backquote-body where a backquote still open counts as closed, subst-heredoc-hash
+    where a copy of the stack drops its low, and dq-bracket-hash where a '#' inside a double-quoted '$['
+    follows the comment rule)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    for tag, control in (("control", hidden), ("control-subst", "x=$(" + hidden + ")")):
+        got = _decision(aiqt_hooks.protected_line, control)
+        if got != "deny":
+            out.append("(hd-text-mark-{}) protected_line must deny the bare hidden command {!r}, got {}".format(
+                tag, control, got))
+    for name, before, after, refused in _HD_TEXT_MARK_ROWS:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != refused:
+            out.append("(hd-text-mark-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, refused, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-text-mark-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, after, word in _HD_TEXT_MARK_DQ:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != [word, hidden.split(), ["EOF"]]:
+            out.append("(hd-text-mark-dq-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, [word, hidden.split(), ["EOF"]], lexed))
+    for name, before in _HD_TEXT_MARK_HASH:
+        command = before + hidden
+        lexed = _hd_lex_outcome(command)
+        if isinstance(lexed, str) or hidden.split() not in lexed:
+            out.append("(hd-text-mark-hash-{}-lex) a reading of {!r} must hold the hidden command, got {!r}".format(
+                name, command, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-text-mark-hash-{}) protected_line must deny {!r}, got {}".format(name, command, got))
+    for name, before, after, refused in _HD_TEXT_MARK_UNCERTAIN:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != refused:
+            out.append("(hd-text-mark-uncertain-{}) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, refused, lexed))
+    for name, before, want in _HD_TEXT_MARK_KEPT:
+        command = before + hidden
+        lexed = _hd_lex_outcome(command)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-text-mark-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
+
+
 def main():
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
@@ -12934,14 +13366,20 @@ def _main_isolated(monitor):
         # parenthesis after it on its line, are judged under both readings of that '#' (the shared lexer's
         # comment rule, applied inside _skip_quoting): the comment reading, the one bash takes, ends the
         # substitution at the next line's ')"' and lexes the push as its own segment, so the parsed
-        # classifier denies it first with its own reason. The three whose quoted here-document sits inside a
+        # classifier denies it first with its own reason. The exception is commented-close: its word-text
+        # reading reads the next line's <<'EOF' as a quoted here-document whose body runs to the end of the
+        # command, a body end the lexer cannot place (rule (b) of _heredoc_body_ends_early), so the whole lex
+        # fails and the guard denies through its failed-lex path, whose commit proof reports the incomplete
+        # parse first, as its fallback alone does (a disclosed over-refusal: bash reads no here-document
+        # there). The three whose quoted here-document sits inside a
         # double-quoted command substitution are lexed as bash reads them too: the skip reads the body as
         # text, so the substitution ends at the ')"' after the delimiter line and the push is its own
         # segment, which the parsed classifier denies first (the unquoted one's body is still read as code,
         # so the fallback decides it). Each still denies; the fallback beneath it stays witnessed on the same
         # command (pl-uncertain-<shape>-<spelling>-fallback).
-        _unc_parsed_shapes = ('comment-paren', 'comment-apostrophe', 'commented-close', 'commented-close-heredoc',
+        _unc_parsed_shapes = ('comment-paren', 'comment-apostrophe', 'commented-close-heredoc',
                               'heredoc-paren', 'heredoc-quote', 'nested-heredoc-close')
+        _unc_refused_shapes = ('commented-close',)
         for _unm, _ucmd in _unc_shapes:  # each _ucmd still spells the pl-mispair push; re-spelled below
             for _usn, _usp in (
                 ('head', 'git push --force origin HEAD'),
@@ -12951,7 +13389,17 @@ def _main_isolated(monitor):
             ):
                 _ucmdx = _ucmd.replace('git push --force origin main', _usp)
                 _udetail = 'appears to force-push or delete'
-                if _unm in _unc_parsed_shapes:
+                if _unm in _unc_refused_shapes:
+                    try:
+                        aiqt_hooks._lex_readings(_ucmdx)
+                        _ulex = 'lexed'
+                    except ValueError as _ulex_exc:
+                        _ulex = str(_ulex_exc)
+                    if 'uncertain here-document body end' not in _ulex:
+                        failures.append('(pl-uncertain-{}-{}-lex) the lexer must refuse the word-text reading\'s '
+                                        'here-document body; got {!r}'.format(_unm, _usn, _ulex))
+                    _udetail = 'incomplete shell parse'
+                if _unm in _unc_parsed_shapes + _unc_refused_shapes:
                     _ufall = aiqt_hooks._protected_line_fallback(_ucmdx)
                     _ufall_obj = _ufall[1] if isinstance(_ufall[1], dict) else {}
                     _ufall_reason = _ufall_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -12959,7 +13407,8 @@ def _main_isolated(monitor):
                         failures.append('(pl-uncertain-{}-{}-fallback) the uncertain-lex fallback must deny the '
                                         'shape on its own, with its reason; got uncertain={} reason={!r}'.format(
                                             _unm, _usn, aiqt_hooks._lex_uncertain(_ucmdx), _ufall_reason))
-                    _udetail = 'this git push force-pushes'
+                    if _unm in _unc_parsed_shapes:
+                        _udetail = 'this git push force-pushes'
                 if _usn == 'frag':
                     # The backstop's de-quoted reading now denies the fragmented protected name
                     # first (deny reason changed, decision unchanged); the layer beneath it stays
@@ -15588,14 +16037,21 @@ def _main_isolated(monitor):
         # No guard decides a reviewed shape less strictly than main (e47da1de) does: the shapes above, the two
         # commit message shapes, a body that a nested substitution's line holds (bash 5.3.9 reads its 'git
         # commit' line as body text), two here-documents on one operator line, and a top-level assignment
-        # whose here-document bash ends at 'EOF)' (main and this code allow it alike). Main's decisions were
-        # recorded by running main's module on each command, per guard in _hd_floor_guards order, and each guard
-        # must decide exactly as main does, except the seven guards _hd_retry_over names on the eleven rows of
-        # _hd_then and on two-on-operator-line, which must decide at least as strictly: there the lex starts
-        # again reading no body, one reading of the body's '#' does not lex, and those guards take their
-        # cannot-evaluate path, an over-deny kept from the commit that added the retry. The eleven rows of
-        # _hd_then fail on the code before that retry; the last five rows pass there too and are REGRESSION
-        # GUARDS.
+        # whose here-document bash ends at 'EOF)'. Main's decisions were recorded by running main's module on
+        # each command, per guard in _hd_floor_guards order, and each guard must decide exactly as main does,
+        # except the seven guards _hd_retry_over names on the eleven rows of _hd_then and on
+        # two-on-operator-line, which must decide at least as strictly: there the lex starts again reading no
+        # body, one reading of the body's '#' does not lex, and those guards take their cannot-evaluate path,
+        # an over-deny kept from the commit that added the retry; and except the top-level assignment (below).
+        # The eleven rows of _hd_then fail on the code before that retry; the next four rows pass there too and
+        # are REGRESSION GUARDS. The top-level assignment records decisions stricter than main's: bash 5.3.9
+        # ends its body at the 'EOF)' line and runs the rest of that line (with git replaced by echo it prints
+        # commit --no-verify -m x), which main's lexer read as body, so main's commit_msg_subst and
+        # protected_line allowed a commit bash runs. The lexer now refuses an untrusted body whose end is
+        # uncertain (the bounded rule of _heredoc_body_ends_early; here a line that starts with the delimiter
+        # and is not exactly it), and both guards take their failed-lex fallback and deny, the fail-closed
+        # outcome; the row fails on code whose lexer reads that body to its exact delimiter line, as main's
+        # does. _heredoc_early_end_failures holds the rows for the rest of that rule.
         _hd_floor_guards = (aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.git_explicit_binding,
                             aiqt_hooks.commit_identity, aiqt_hooks.bash_absolute_paths, aiqt_hooks.branch_root,
                             aiqt_hooks.git_discard, aiqt_hooks.git_stash_ref, aiqt_hooks.commit_msg_subst,
@@ -15646,7 +16102,8 @@ def _main_isolated(monitor):
              ("allow",) * 9 + ("deny",), ()),
             ("two-on-operator-line", "echo \"$(cat <<'EOF'; echo $(cat <<B\n# Don't\nEOF\n$(" + _hd_nv + ")\nB\n))\"",
              _hd_main_then, _hd_retry_over),
-            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)", ("allow",) * 10, ()),
+            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)",
+             ("allow",) * 8 + ("deny", "deny"), ()),
         ]
         # The two commit message shapes keep main's decisions exactly: the closed literal grammar accepts the
         # form on a parsed command, so gate_weakening allows them as main does, and both rows fail on code whose
@@ -15654,6 +16111,10 @@ def _main_isolated(monitor):
         for _hdn, _hdc, _hdmain, _hdover in _hd_floor:
             _hd_main_check("hd-main-floor-" + _hdn, _hdc, _hdmain, _hdover,
                            exact=_hdn in ("apostrophe", "five-headings"))
+        failures.extend(_heredoc_early_end_failures())
+        failures.extend(_heredoc_dollar_brace_failures())
+        failures.extend(_heredoc_arith_failures())
+        failures.extend(_heredoc_text_mark_failures())
         # MAIN'S DECISION AS A FLOOR (the comment above _MainHashReading). Main's lex fails on the commit
         # message form whose body holds an apostrophe, and its guards then take their failed-lex path, whose raw
         # scans read the whole text, a command inside a string included; reading that body made the lex clean,
