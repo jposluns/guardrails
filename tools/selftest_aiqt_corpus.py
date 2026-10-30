@@ -9,8 +9,9 @@ root, and the metadata parser is field-agnostic (it captures every field and
 enforces no required-field list of its own).
 
 Every filesystem fixture is synthetic and assembled in a tempdir; the git
-helpers run against a throwaway repository. Nothing outside the tempdirs is
-read or written. Exit convention matches the repo's selftests: 0 pass, 1 a
+helpers run against a throwaway repository. Apart from reading the sibling
+aiqt_corpus.py source (the stdin-keyword check parses it), nothing outside the
+tempdirs is read or written. Exit convention matches the repo's selftests: 0 pass, 1 a
 real assertion failure, 2 an error (a fixture or harness problem).
 """
 import sys
@@ -27,6 +28,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import ast
 import datetime
 import os
 import subprocess
@@ -382,6 +384,108 @@ class GitTests(unittest.TestCase):
                 self.assertIsNone(git_show("HEAD", "no_such_file.md"))
             finally:
                 os.chdir(cwd)
+
+
+# The subprocess launchers whose calls must name their standard input.
+SUBPROCESS_LAUNCHERS = frozenset(("run", "call", "check_call", "check_output", "Popen"))
+
+# Calls allowed to omit the stdin keyword: (enclosing function qualname, reason).
+# Empty: every launch in aiqt_corpus.py passes stdin explicitly. An entry needs a
+# nonempty reason and must name a function that still holds such a call.
+STDIN_EXEMPT_CALLS: tuple[tuple[str, str], ...] = ()
+
+
+def subprocess_calls_without_stdin(source: str) -> list[tuple[str, int]]:
+    """Return ``(enclosing qualname, lineno)`` for each subprocess call with no stdin keyword.
+
+    A call counts when it reaches a launcher in :data:`SUBPROCESS_LAUNCHERS`
+    through the ``subprocess`` module (under any ``import subprocess as`` alias)
+    or through a name bound by ``from subprocess import``. A ``**`` mapping does
+    not count as a stdin keyword, since its keys cannot be read statically.
+    """
+    tree = ast.parse(source)
+    module_names = {"subprocess"}
+    launcher_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    module_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            for alias in node.names:
+                if alias.name in SUBPROCESS_LAUNCHERS:
+                    launcher_names.add(alias.asname or alias.name)
+
+    def is_launcher(func: ast.expr) -> bool:
+        if isinstance(func, ast.Attribute):
+            return (func.attr in SUBPROCESS_LAUNCHERS and isinstance(func.value, ast.Name)
+                    and func.value.id in module_names)
+        return isinstance(func, ast.Name) and func.id in launcher_names
+
+    found: list[tuple[str, int]] = []
+
+    def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                inner = scope + (child.name,)
+            if isinstance(child, ast.Call) and is_launcher(child.func):
+                if not any(kw.arg == "stdin" for kw in child.keywords):
+                    found.append((".".join(inner) or "<module>", child.lineno))
+            visit(child, inner)
+
+    visit(tree, ())
+    return found
+
+
+class StdinIsolationTests(unittest.TestCase):
+    """Every subprocess launch in aiqt_corpus.py names its standard input.
+
+    A helper called from inside a git hook would otherwise hand the hook's own
+    stdin (a pre-push hook's ref lines) to the child, which can consume it.
+    """
+
+    MODULE = Path(__file__).resolve().parent / "aiqt_corpus.py"
+
+    def test_every_subprocess_call_names_stdin(self):
+        source = self.MODULE.read_text(encoding="utf-8")
+        exempt = {name for name, _ in STDIN_EXEMPT_CALLS}
+        missing = [(name, line) for name, line in subprocess_calls_without_stdin(source)
+                   if name not in exempt]
+        self.assertEqual(missing, [], "subprocess call without a stdin keyword "
+                         "(pass stdin=subprocess.DEVNULL or add a reasoned exemption)")
+
+    def test_exemptions_have_reasons_and_are_live(self):
+        source = self.MODULE.read_text(encoding="utf-8")
+        live = {name for name, _ in subprocess_calls_without_stdin(source)}
+        for name, reason in STDIN_EXEMPT_CALLS:
+            with self.subTest(name=name):
+                self.assertTrue(reason.strip(), "exemption without a reason")
+                self.assertIn(name, live, "stale exemption: no such call left")
+
+    def test_detector_flags_a_dropped_stdin_keyword(self):
+        # The detector must see a launch that omits stdin, through each import
+        # spelling, and must accept one that passes it.
+        cases = (
+            ("import subprocess\ndef f():\n    subprocess.run(['git'])\n", [("f", 3)]),
+            ("import subprocess as sp\ndef f():\n    sp.Popen(['git'])\n", [("f", 3)]),
+            ("from subprocess import check_output as co\nco(['git'])\n", [("<module>", 2)]),
+            ("import subprocess\nclass C:\n    def m(self, **kw):\n"
+             "        subprocess.call(['git'], **kw)\n", [("C.m", 4)]),
+            ("import subprocess\nsubprocess.check_call(['git'], stdin=subprocess.DEVNULL)\n", []),
+            ("import subprocess\nsubprocess.getoutput('git')\n", []),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(subprocess_calls_without_stdin(source), expected)
+
+    def test_detector_flags_the_module_with_one_keyword_dropped(self):
+        source = self.MODULE.read_text(encoding="utf-8")
+        needle = "            stdin=subprocess.DEVNULL,\n"
+        self.assertEqual(source.count(needle), 1)
+        mutant = source.replace(needle, "", 1)
+        self.assertEqual([name for name, _ in subprocess_calls_without_stdin(mutant)],
+                         ["git_show"])
 
 
 class GenericityTests(unittest.TestCase):
