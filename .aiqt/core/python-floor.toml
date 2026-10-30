@@ -76,6 +76,7 @@ guarded-surfaces = [
     "opf/tools/_opf_release.py",
     "opf/tools/_opf_schema.py",
     "opf/tools/_opf_store.py",
+    "opf/tools/_opf_sync.py",
     "opf/tools/_opf_views.py",
     "opf/tools/_opf_worklog.py",
     "opf/tools/_opf_worklog_regressions.py",

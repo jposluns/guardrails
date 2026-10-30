@@ -68,8 +68,9 @@ fast-forward and its doctor, or across the push, and released BEFORE the outcome
 success is never reported over a still-held or failed-to-release claim. The claim and its release
 are not themselves store operations; the fast-forward is one, and a push is one too (it writes the
 recorded target), while a fetch is not: a fetch writes only git transport state (objects and
-FETCH_HEAD under .git, and the refs/bundles/* refs of a repository fetch.bundleURI, below), never
-the store tree, which is disclosed here rather than gated.
+FETCH_HEAD under .git, and, where the adopter's own global or system configuration sets
+fetch.bundleURI, that bundle's objects and refs/bundles/* refs; a repository-scope one refuses,
+below), never the store tree, which is disclosed here rather than gated.
 
 The transport boundary (fetch and push only; every other git call runs under the read-only scrubbed
 boundary of _opf_observe._run_git): the adopter's global and system git configuration IS honoured,
@@ -85,20 +86,23 @@ never executes while a global one is honoured as the adopter's own setting. Two 
 gate every fetch and push, both fail-closed. First, the repository scopes (--local and --worktree)
 are listed by name, and a credential helper, core.askpass, core.gitProxy, an http.sslVerify /
 sslCAInfo / sslCAPath server-trust override, an http.cookieFile / saveCookies cookie path, a
-url.*.insteadOf / pushInsteadOf rewrite, and include.path / includeIf.*.path are each REFUSED, in
-the plain and the subsection form alike (http.cookieFile and http.<url>.cookieFile): a
-repository-planted helper is a program launch, a repository trust override can authenticate an
-interposed https server, a repository cookie path makes the https transport read cookies from, or
-write a cookie jar to, a file the repository chooses (a filesystem effect, not routing or shaping),
-and a repository-local include is read by the transport but not expanded by a scoped listing, so
-its keys could not be verified by name. Second, the EFFECTIVE url.* rewrites are read under the
-exact environment and override pairs the transport call runs with, so every source git would honour
-(global, system, local, worktree, include, command) is the source checked, and any insteadOf or
-pushInsteadOf whose prefix matches the verified URL refuses: the URL the destination agreement
-verified is then, byte for byte, the URL the transport uses. Refusal is chosen over an override in
-both gates because a GIT_CONFIG_* pair appends to a multi-valued key rather than resetting it (an
-empty insteadOf value is itself a match-everything rewrite), while an unrelated rewrite of the
-adopter's own matches nothing here and keeps working.
+fetch.bundleURI bundle source, a url.*.insteadOf / pushInsteadOf rewrite, and include.path /
+includeIf.*.path are each REFUSED, in the plain and the subsection form alike (http.cookieFile and
+http.<url>.cookieFile): a repository-planted helper is a program launch, a repository trust
+override can authenticate an interposed https server, a repository cookie path makes the https
+transport read cookies from, or write a cookie jar to, a file the repository chooses (a filesystem
+effect, not routing or shaping), a repository bundle source makes a fetch also download a bundle
+from a location the repository chooses and write its objects and refs/bundles/* refs under .git (a
+fetch source the destination agreement never verified), and a repository-local include is read by
+the transport but not expanded by a scoped listing, so its keys could not be verified by name.
+Second, the EFFECTIVE url.* rewrites are read under the exact environment and override pairs the
+transport call runs with, so every source git would honour (global, system, local, worktree,
+include, command) is the source checked, and any insteadOf or pushInsteadOf whose prefix matches
+the verified URL refuses: the URL the destination agreement verified is then, byte for byte, the
+URL the transport uses. Refusal is chosen over an override in both gates because a GIT_CONFIG_*
+pair appends to a multi-valued key rather than resetting it (an empty insteadOf value is itself a
+match-everything rewrite), while an unrelated rewrite of the adopter's own matches nothing here
+and keeps working.
 
 DISCLOSED RESIDUALS: the lease is NOT made observable at the sync target in this build; the planned
 mechanism for the writes sync itself makes is a lock ref at the target (for example refs/opf/lease)
@@ -130,12 +134,8 @@ inside that trust domain. File reads: http.sslCert / sslKey, the proxy TLS paths
 (http.proxySSLCert / proxySSLKey / proxySSLCAInfo) and http.pinnedPubkey make the transport READ a
 file the repository names, to present a client certificate to the verified server or its proxy, to
 trust the proxy's own TLS, or to narrow the server's trust; they write nothing and leave the
-server's authentication to the adopter's trust roots. Extra fetch source: fetch.bundleURI makes a
-fetch also download bundles from the location it names, writing their objects and refs/bundles/*
-refs under .git (transport state, like FETCH_HEAD); FETCH_HEAD, the only fetched state the
-comparison and the fast-forward read, still comes from the verified URL alone.
-The destination agreement compares by exact string
-where a form (a file path, a file:// URL) has no canonical host+path, so two spellings of one
+server's authentication to the adopter's trust roots. The destination agreement compares by exact
+string where a form (a file path, a file:// URL) has no canonical host+path, so two spellings of one
 filesystem target (a path and its symlink) read as disagreement and over-refuse, never under-refuse.
 A branch at the target is assumed to carry the store's current branch name (the spec names no
 branch); a target that lacks it is a failed fetch, a cannot-evaluate. The fetch timeout and output
@@ -184,8 +184,10 @@ _HELPER_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9+.]*::")
 # destination; a repository-planted credential helper, askpass or git proxy is a program launch on
 # fetch or push; a repository-scope https trust override can authenticate an interposed server; a
 # repository-scope cookie file or cookie save makes the https transport read cookies from, or write a
-# cookie jar to, a path the repository chooses; and a repository-local include is read by the
-# transport but not expanded by a scoped listing, so its keys could not be verified by name.
+# cookie jar to, a path the repository chooses; a repository-scope bundle URI makes a fetch also
+# download a bundle from a location the repository chooses, writing its objects and refs/bundles/*
+# refs under .git; and a repository-local include is read by the transport but not expanded by a
+# scoped listing, so its keys could not be verified by name.
 # Overriding these would also discard the adopter's own global configuration, so presence refuses
 # instead; the effective url.* rewrites of EVERY scope are additionally matched against the verified
 # URL before each transport call. Each entry is a folded section.key, and a name refuses when it is
@@ -196,6 +198,7 @@ _LOCAL_REDIRECT_KEYS = (b"url.insteadof", b"url.pushinsteadof")
 _LOCAL_EXEC_KEYS = (b"credential.helper", b"core.askpass", b"core.gitproxy")
 _LOCAL_TRUST_KEYS = (b"http.sslverify", b"http.sslcainfo", b"http.sslcapath")
 _LOCAL_COOKIE_KEYS = (b"http.cookiefile", b"http.savecookies")
+_LOCAL_BUNDLE_KEYS = (b"fetch.bundleuri",)
 _LOCAL_INCLUDE_KEYS = (b"include.path", b"includeif.path")
 _TRANSPORT_TIMEOUT_S = 120
 _TRANSPORT_MAX_OUTPUT = 8 << 20
@@ -568,7 +571,9 @@ def _refuse_local_redirect_config(git, store_root):
     pushInsteadOf (a silent rewrite of the verified URL), a credential helper, core.askpass,
     core.gitProxy, an http.sslVerify / sslCAInfo / sslCAPath server-trust override, an
     http.cookieFile / saveCookies cookie path (the https transport reads cookies from, or writes a
-    cookie jar to, a file the repository names), and include.path / includeIf.*.path (the transport
+    cookie jar to, a file the repository names), a fetch.bundleURI bundle source (a fetch also
+    downloads a bundle from the location the repository names, writing its objects and
+    refs/bundles/* refs under .git), and include.path / includeIf.*.path (the transport
     reads the included file, but a scoped listing does not expand it, so the included keys could not
     be verified by name). The names are matched from the _LOCAL_* lists alone (_local_key_listed).
     Both repository scopes are enumerated, --local and --worktree (without the worktreeConfig
@@ -593,7 +598,12 @@ def _refuse_local_redirect_config(git, store_root):
         (_LOCAL_COOKIE_KEYS,
          ", a repository-chosen cookie path: the https transport would read cookies from, or write "
          "a cookie jar to, a file the repository names; cookie storage belongs to the adopter's own "
-         "global configuration (spec 5.6); remove it and re-run (fail-closed)"))
+         "global configuration (spec 5.6); remove it and re-run (fail-closed)"),
+        (_LOCAL_BUNDLE_KEYS,
+         ", a repository-chosen bundle source: a fetch would also download a bundle from the "
+         "location the repository names and write its objects and refs/bundles/* refs under .git; "
+         "a bundle source belongs to the adopter's own global configuration (spec 5.6); remove it "
+         "and re-run (fail-closed)"))
     for scope in ("--local", "--worktree"):
         listing = _opf_observe._run_git(git, store_root,
                                         ["config", scope, "-z", "--name-only", "--list"])
@@ -1009,8 +1019,8 @@ def self_test():
     local and the fetched manifest, the equal/behind/ahead/divergent classification, the read-only
     bare report, the fast-forward pull with its doctor gate, the authorized push with its
     destination agreement, the held-lease refusal (never seized), the hostile-repository-config
-    neutralization, the effective URL-rewrite refusal over every config scope, the
-    repository-scope include/helper/trust/cookie refusals (every listed key in its plain and its
+    neutralization, the effective URL-rewrite refusal over every config scope, the repository-scope
+    include/helper/trust/cookie/bundle refusals (every listed key in its plain and its
     subsection form), the pre-git target validation, and the fetch/detached/unborn refusals. The
     load-bearing guards are each also run with the guard dropped (an attribute-patched flip), so the
     vector that watches it is shown to go red. Judged on exit codes, repository state and lease
@@ -1578,12 +1588,46 @@ def _self_test_units(check):
             _git(ck_root, "config", "--local", "--unset", "http.cookieFile")
             check("emptying the cookie list lets the repository cookie path through (shown red)",
                   rc == EXIT_OK)
+            # a repository-scope bundle URI refuses, plain and under a subsection (each set alone on
+            # an equal store, naming a real bundle of another history); a name just past the key
+            # matches nothing and the run reports EQUAL
+            bu_root, _bu_bare = _paired("bundle")
+            bu_head = _head(bu_root)
+            bu_src = _store("bundle-source", "")
+            bu_file = os.path.join(base, "planted.bundle")
+            _git(bu_src, "bundle", "create", bu_file, "main")
+
+            def _bundle_refs():
+                return _git(bu_root, "for-each-ref", "refs/bundles/").strip()
+
+            for bu_key in ("fetch.bundleURI", "fetch.https://example.invalid/.bundleURI"):
+                _git(bu_root, "config", "--local", bu_key, bu_file)
+                rc, out = run(["--root", bu_root])
+                _git(bu_root, "config", "--local", "--unset", bu_key)
+                check("a repository-scope {} refuses before any transport".format(bu_key),
+                      rc == EXIT_MALFORMED and "bundle" in out and _head(bu_root) == bu_head
+                      and not _bundle_refs())
+            for bu_key in ("fetch.bundleURIx", "fetch.xbundleURI"):
+                _git(bu_root, "config", "--local", bu_key, bu_file)
+                rc, out = run(["--root", bu_root])
+                _git(bu_root, "config", "--local", "--unset", bu_key)
+                check("{}, a name just past a listed key, matches nothing and sync runs".format(bu_key),
+                      rc == EXIT_OK and "EQUAL" in out and not _bundle_refs())
+            # the named flip: with the bundle list emptied the fetch downloads the planted bundle
+            # and writes its refs/bundles/* refs, so the refusal reads the list, not a copy of it
+            _git(bu_root, "config", "--local", "fetch.bundleURI", bu_file)
+            with patch.object(module, "_LOCAL_BUNDLE_KEYS", ()):
+                rc, _out = run(["--root", bu_root])
+            _git(bu_root, "config", "--local", "--unset", "fetch.bundleURI")
+            check("emptying the bundle list lets the repository bundle source write refs/bundles/* "
+                  "(shown red)",
+                  rc == EXIT_OK and _bundle_refs() != "")
             # every entry of every _LOCAL_* list refuses, plain, under a subsection and in any case,
             # through the same enumeration (its listing stubbed), while a name one character past
             # the entry does not: a list entry the refusal stopped enforcing shows here
             listed_misses = []
             for family in (_LOCAL_REDIRECT_KEYS, _LOCAL_EXEC_KEYS, _LOCAL_TRUST_KEYS,
-                           _LOCAL_COOKIE_KEYS, _LOCAL_INCLUDE_KEYS):
+                           _LOCAL_COOKIE_KEYS, _LOCAL_BUNDLE_KEYS, _LOCAL_INCLUDE_KEYS):
                 for listed in family:
                     section, _dot, key = listed.partition(b".")
                     for name, refuses in ((listed, True), (listed.upper(), True),
