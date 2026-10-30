@@ -41,10 +41,19 @@ the tooling's single source-of-truth copy of it. The guard:
 
   module-table      the module-tier rows of the OPF-SPEC.md section 8.1 table (type, namespace and the
                     module family its tier names) equal _opf_store.MODULE_TYPES exactly: every row has
-                    its entry, every entry has its row, and each (namespace, module) pair matches; any
-                    row whose tier is not exactly a SPEC_TIERS label (a misspelled, pluralized or
-                    re-cased family included), a duplicated module type row, a missing section 8.1
-                    heading or an unreadable spec never passes
+                    its entry, every entry has its row, and each (namespace, module) pair matches. The
+                    section is read the way a GitHub-flavoured Markdown reader reads a table: it opens
+                    at a line of at most three columns of indentation over a delimiter row with the
+                    same cell count, and every line after the delimiter row up to the first blank line
+                    is a row, whatever its cell count (a reader's display drops cells past the
+                    header's count; this guard counts them). The section must hold exactly that one
+                    table, headed Tier | Type | Namespace. Any row whose tier is not exactly a
+                    SPEC_TIERS label (a blank, "-" or ":" cell and a misspelled, pluralized or re-cased
+                    family included), any row of other than three cells, any row indented four or more
+                    columns (which a reader may show as code), a module type listed more than once
+                    under any tier, a line outside the table that begins with a pipe after at most
+                    three columns of indentation, a missing section 8.1 heading or an unreadable spec
+                    never passes
 
   check_opf_prompt_pack.py              verify the shipped pack beside this tool (../prompt-pack), its
                                         import examples included, and the spec module type table against
@@ -58,8 +67,14 @@ the tooling's single source-of-truth copy of it. The guard:
                                         import/SKILL.md; and the shipped spec's module type table agrees
                                         with _opf_store.MODULE_TYPES while each deliberate flip (a
                                         deleted row, a changed namespace or tier, an extra row under a
-                                        pluralized or re-cased tier, an extra MODULE_TYPES
-                                        entry) is red with the module-table guard
+                                        pluralized, re-cased, blank, "-" or ":" tier, a row of other
+                                        than three cells, an extra row indented or without outer
+                                        pipes, a row indented four spaces, a module type also listed
+                                        under another tier, a row-shaped line or a second table outside
+                                        the type table, an extra MODULE_TYPES entry) is red with the
+                                        module-table guard, and a row re-spelled the way a reader shows
+                                        the same (indented up to three spaces, without outer pipes,
+                                        unpadded) stays VALID
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as digest drift),
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
@@ -131,13 +146,17 @@ MODULE_TIERS = {
     "Operational-policy module": "operational_policy",
     "Concurrent-operation module": "concurrent_operation",
 }
-# Every section 8.1 tier label: the module families above plus the non-module tiers. Any table row
-# whose tier is none of these, a misspelled, pluralized or re-cased family included, is refused
-# INVALID rather than skipped, so an extra row under such a tier never reads as agreement.
+# Every section 8.1 tier label: the module families above plus the non-module tiers. Any type table
+# row whose tier is not exactly one of these, a blank, "-" or ":" cell and a misspelled, pluralized or
+# re-cased family included, is refused INVALID rather than skipped, so an extra row under such a tier
+# never reads as agreement.
 SPEC_TIERS = frozenset(MODULE_TIERS) | {"Baseline", "Reserved, excluded", "Reserved, unassigned"}
-# A three-cell table row; the section 8.1 type table is the only such table in its section.
-_TABLE_ROW_RE = re.compile(r"^\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|[ \t]*$",
-                           re.MULTILINE)
+# The header of the section 8.1 type table, the only table its section may hold.
+TABLE_HEADER = ("Tier", "Type", "Namespace")
+# A GitHub-flavoured Markdown delimiter-row cell: hyphens with an optional colon at either end.
+_DELIMITER_CELL_RE = re.compile(r":?-+:?\Z")
+# The whitespace a GitHub-flavoured Markdown reader trims from a cell (never a no-break space).
+_CELL_SPACE = " \t\v\f\r"
 
 
 class _Refusal(Exception):
@@ -293,26 +312,114 @@ def validate_pack(pack_dir):
     return VALID, None, "version {}, digest {}, {} member(s)".format(version, digest, count)
 
 
+def _gfm_cells(line):
+    """The cells of one table line as a GitHub-flavoured Markdown reader splits them, every cell kept
+    (the reader's own display drops cells past the header's count; the caller judges the count): the
+    line's surrounding whitespace and then one leading and one trailing unescaped pipe are dropped, the
+    rest is split at each pipe no backslash escapes, and each cell is trimmed of _CELL_SPACE, with an
+    escaped pipe read as a pipe."""
+    text = line.strip(_CELL_SPACE)
+    cells, cell, i = [], "", 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            cell += text[i:i + 2]
+            i += 2
+            continue
+        if text[i] == "|":
+            cells.append(cell)
+            cell = ""
+        else:
+            cell += text[i]
+        i += 1
+    cells.append(cell)
+    if text.startswith("|"):
+        cells = cells[1:]
+    if text.endswith("|") and cells and cells[-1] == "":
+        cells = cells[:-1]
+    return [c.strip(_CELL_SPACE).replace("\\|", "|") for c in cells]
+
+
+def _indent(line):
+    """The leading columns of a line, a tab counted as four, as a Markdown reader counts indentation."""
+    return len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip(" "))
+
+
+def _is_delimiter_row(line):
+    """A GitHub-flavoured Markdown delimiter row: at most three columns of indentation, a pipe, and only
+    delimiter cells."""
+    cells = _gfm_cells(line)
+    return (_indent(line) <= 3 and "|" in line and bool(cells)
+            and all(_DELIMITER_CELL_RE.match(c) for c in cells))
+
+
+def _spec_tables(section):
+    """The tables of a spec section, each a (header cells, [(line number, body cells)]) pair, read the
+    way a GitHub-flavoured Markdown reader reads them: a table opens at a non-blank line of at most three
+    columns of indentation whose cell count equals that of the delimiter row under it, and every line
+    after the delimiter row up to the first blank line is a body row, whatever its cell count. A body
+    row indented four or more columns, which a reader may show as code rather than as a row, is refused.
+    A reader ends a table early at a line that opens another block, such as a heading or a list item;
+    such a line is read as a row here and graded by the row rules (no tier label begins with a block
+    marker), never skipped. A line outside every table that begins with a pipe after at most three
+    columns of indentation, which a reader shows as text rather than as a row, is refused too, so no
+    row-shaped line in the section escapes the guard."""
+    lines = section.split("\n")
+    tables, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if (line.strip(_CELL_SPACE) and _indent(line) <= 3 and i + 1 < len(lines)
+                and _is_delimiter_row(lines[i + 1])
+                and len(_gfm_cells(line)) == len(_gfm_cells(lines[i + 1]))):
+            body, i = [], i + 2
+            while i < len(lines) and lines[i].strip(_CELL_SPACE):
+                _require(_indent(lines[i]) <= 3, "module-table",
+                         "section 8.1 table row {!r} is indented four or more columns".format(lines[i]))
+                body.append((i, _gfm_cells(lines[i])))
+                i += 1
+            tables.append((_gfm_cells(line), body))
+            continue
+        _require(not (_indent(line) <= 3 and line.lstrip(" ").startswith("|")), "module-table",
+                 "section 8.1 line {!r} is shaped like a table row but sits in no table".format(line))
+        i += 1
+    return tables
+
+
 def _spec_module_rows(text):
-    """The module-tier rows of the spec's section 8.1 type table, as {type: (namespace, module)}. A
-    row whose tier is not exactly a SPEC_TIERS label (the table heading and separator rows aside),
-    and a duplicated module type, are refused, so a misspelled, pluralized or re-cased family, an
-    extra row filed under one, or a double row never reads as agreement."""
+    """The module-tier rows of the spec's section 8.1 type table, as {type: (namespace, module)}. The
+    section is read by _spec_tables. It must hold exactly one table, headed exactly TABLE_HEADER, and
+    every body row of it must have exactly three cells and a tier that is exactly a SPEC_TIERS label;
+    a module type, one listed under a module tier or one _opf_store.MODULE_TYPES holds, must sit in one
+    row only, whatever the tier of each. Anything else is refused, so a blank, "-" or ":" tier, a
+    misspelled, pluralized or re-cased family, a row of other than three cells, an extra row however it
+    is indented or piped, a double row or a module type also listed under another tier never reads as
+    agreement."""
     start = text.find("\n### 8.1 ")
     _require(start >= 0, "module-table", "OPF-SPEC.md has no section 8.1 heading", CANNOT_EVALUATE)
     end = text.find("\n### ", start + 1)
     section = text[start:] if end < 0 else text[start:end]
-    rows = {}
-    for tier, tname, namespace in _TABLE_ROW_RE.findall(section):
-        if (tier, tname, namespace) == ("Tier", "Type", "Namespace") or set(tier) <= set("-: "):
-            continue
+    tables = _spec_tables(section)
+    _require(len(tables) == 1, "module-table",
+             "section 8.1 holds {} table(s), not exactly the one type table".format(len(tables)))
+    header, body = tables[0]
+    _require(tuple(header) == TABLE_HEADER, "module-table",
+             "the section 8.1 table header is {!r}, not {!r}".format(header, list(TABLE_HEADER)))
+    rows, listed = {}, {}
+    for number, cells in body:
+        _require(len(cells) == 3, "module-table",
+                 "section 8.1 table row {!r} has {} cell(s), not 3".format(section.split("\n")[number],
+                                                                          len(cells)))
+        tier, tname, namespace = cells
         _require(tier in SPEC_TIERS, "module-table",
                  "unknown tier {!r} in the section 8.1 table".format(tier))
-        if tier not in MODULE_TIERS:
-            continue
-        _require(tname not in rows, "module-table",
-                 "module type {!r} is listed twice in the section 8.1 table".format(tname))
-        rows[tname] = (namespace, MODULE_TIERS[tier])
+        listed[tname] = listed.get(tname, 0) + 1
+        if tier in MODULE_TIERS:
+            _require(tname not in rows, "module-table",
+                     "module type {!r} is listed twice in the section 8.1 table".format(tname))
+            rows[tname] = (namespace, MODULE_TIERS[tier])
+    for tname in sorted(listed):
+        _require(listed[tname] == 1 or (tname not in rows and tname not in _opf_store.MODULE_TYPES),
+                 "module-table", "module type {!r} is listed {} times in the section 8.1 table".format(
+                     tname, listed[tname]))
     return rows
 
 
@@ -1003,6 +1110,13 @@ def _self_test_vectors():
             # nothing leaves the text unchanged and fails its vector, so a stale mutation never passes.
             shipped_spec = _read_regular(SPEC_PATH, MAX_SPEC_BYTES, "spec").decode("utf-8")
             gate_run_row = "| Delivery-assurance module | gate_run | GR |\n"
+            table_end = "| Reserved, unassigned | (none) | LF |\n\nNotes on the roster:\n"
+
+            def extra_row(row):
+                return lambda t: t.replace(gate_run_row, gate_run_row + row + "\n", 1)
+
+            def after_table(block):
+                return lambda t: t.replace(table_end, table_end.replace("\n\n", "\n\n" + block + "\n\n", 1), 1)
             for name, status, guard, mutate in (
                     ("module-table-shipped", VALID, None, lambda t: t),
                     ("module-table-row-deleted", INVALID, "module-table",
@@ -1025,6 +1139,54 @@ def _self_test_vectors():
                                          gate_run_row + "| Governance Module | extra_action | XA |\n", 1)),
                     ("module-table-duplicate-row", INVALID, "module-table",
                      lambda t: t.replace(gate_run_row, gate_run_row + gate_run_row, 1)),
+                    # Every line of the table is a row, as a reader reads it: a tier that is blank, "-"
+                    # or ":" (a delimiter-shaped row included) is not a label, a row of other than three
+                    # cells is refused even where the reader's display would drop the excess, and an
+                    # extra row indented up to four spaces or without outer pipes is read and refused.
+                    ("module-table-extra-row-blank-tier", INVALID, "module-table",
+                     extra_row("|  | extra_action | XA |")),
+                    ("module-table-extra-row-dash-tier", INVALID, "module-table",
+                     extra_row("| - | extra_action | XA |")),
+                    ("module-table-extra-row-colon-tier", INVALID, "module-table",
+                     extra_row("| : | extra_action | XA |")),
+                    ("module-table-extra-row-delimiter-shaped", INVALID, "module-table", extra_row("|---|---|---|")),
+                    ("module-table-extra-row-four-cells", INVALID, "module-table",
+                     extra_row("| Governance module | extra_action | XA | x |")),
+                    ("module-table-extra-row-two-cells", INVALID, "module-table",
+                     extra_row("| Governance module | extra_action |")),
+                    ("module-table-extra-row-one-cell-no-pipe", INVALID, "module-table",
+                     extra_row("Governance module")),
+                    ("module-table-extra-row-one-space", INVALID, "module-table",
+                     extra_row(" | Governance module | extra_action | XA |")),
+                    ("module-table-extra-row-three-spaces", INVALID, "module-table",
+                     extra_row("   | Governance module | extra_action | XA |")),
+                    ("module-table-extra-row-four-spaces", INVALID, "module-table",
+                     extra_row("    | Governance module | extra_action | XA |")),
+                    ("module-table-extra-row-no-outer-pipes", INVALID, "module-table",
+                     extra_row("Governance module | extra_action | XA")),
+                    # A module type listed under a second tier, module or not, is a double listing.
+                    ("module-table-module-type-under-baseline", INVALID, "module-table",
+                     extra_row("| Baseline | waiver | WV |")),
+                    ("module-table-module-type-under-reserved", INVALID, "module-table",
+                     extra_row("| Reserved, excluded | gate_run | GR |")),
+                    # Outside the table: a row-shaped line at three spaces and a second table are
+                    # refused, while at four spaces after a blank line the line is code, not a row.
+                    ("module-table-stray-row-three-spaces", INVALID, "module-table",
+                     after_table("   | Governance module | extra_action | XA |")),
+                    ("module-table-stray-row-four-spaces-code", VALID, None,
+                     after_table("    | Governance module | extra_action | XA |")),
+                    ("module-table-second-table", INVALID, "module-table",
+                     after_table("| Tier | Type |\n|---|---|\n| Governance module | extra_action |")),
+                    # A row re-spelled the way a reader shows the same row is never refused; at four
+                    # spaces of indentation a reader may show it as code, so it is refused.
+                    ("module-table-legal-row-three-spaces", VALID, None,
+                     lambda t: t.replace(gate_run_row, "   " + gate_run_row, 1)),
+                    ("module-table-row-four-spaces", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, "    " + gate_run_row, 1)),
+                    ("module-table-legal-row-no-outer-pipes", VALID, None,
+                     lambda t: t.replace(gate_run_row, "Delivery-assurance module | gate_run | GR\n", 1)),
+                    ("module-table-legal-row-unpadded", VALID, None,
+                     lambda t: t.replace(gate_run_row, "|Delivery-assurance module|gate_run|GR|\n", 1)),
                     ("module-table-heading-missing", CANNOT_EVALUATE, "module-table",
                      lambda t: t.replace("\n### 8.1 ", "\n### 8x1 ", 1)),
             ):

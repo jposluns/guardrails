@@ -941,9 +941,15 @@ MUST NOT be reused, even when a record is superseded, refuted, or its work rever
 rewrites, and store relocation MUST NOT touch `counters.toml`. A `counters.toml` row of a known
 module namespace stays legal while its module is disabled, and validation MUST accept it, in
 either series: the kept row is what keeps that namespace's IDs unique across a disable and a
-later re-enable (sections 8.1 and 8.8). Re-adoption MUST seed both series
+later re-enable (sections 8.1 and 8.8). The contiguity and no-deletion checks MUST still
+evaluate a kept row exactly as they evaluate any other row of its series: `disable-module` refuses
+while any record of the module's types exists (section 8.8), so a kept row whose high-water claims
+an ID that no record carries, in the active indexes or the archive, is a finding unless an ID
+reservation holds that number (below). Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
-prior ancestry. Only a genuinely first adoption MAY start its counters at zero. A store manifest
+prior ancestry. Only a genuinely first adoption MAY start its counters at zero, apart from the
+counter rows `enable-module` creates at zero for a namespace that has issued no ID in that series
+(section 8.8). A store manifest
 declaring a `spec_version` of 2.0.0 or above whose `[opf].homes` is missing or not the integer 2
 is refused as a store (section 9.2), never foreign content: that refusal MUST NOT authorize
 adoption over it, and the zero-seed ban above stands (sections 4.5 and 14.1). A store refused
@@ -1041,7 +1047,11 @@ machine-proven. Preserved originals remain the restoration authority.
 Imported records and their worklog entries MUST be immutable after publication; corrections MUST be
 a fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
 this specification states every enabled type's schema, the module tables of section 8.5 included,
-so no enabled type's imported records are ungradable by schema. C-IMPORTED-SCHEMA checks
+so no enabled type's imported records are ungradable by schema. The reference doctor does not
+implement the section 8.5 module schemas yet: it grades a clean record of an enabled module type as
+a named cannot-evaluate deferral, and it reports an imported record of an enabled module type as a
+C-IMPORTED-SCHEMA finding naming a type it holds no schema for, so a store holding either does not
+reach VALID under the reference tooling. C-IMPORTED-SCHEMA checks
 this envelope and missingness; C-IMPORTED-IDS checks the series grammar, counters and no-deletion;
 C-IMPORTED-PROVENANCE re-reads each preserved original and verifies `source_sha256`.
 C-IMPORTED-IDS owns every imported-series ID defect exclusively, its grammar, counter rows,
@@ -1119,7 +1129,7 @@ Baseline types:
 | pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision MUST carry none of `decision`, `decided_at`, `decided_by`; a decided one MUST carry all. A decided record MAY be superseded by a new decision linking `supersedes`; exactly one current effective resolution MUST exist per chain. |
 | autonomous_decision | `recorded` | Immutable ACT record: the classification basis, the action, links. Overturning MUST be a new record (or maintainer decision) linking it. |
 | block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it MUST NOT count toward blocked-ness or justify a stop until a maintainer ratifies it. |
-| handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act: the operation that lands the new record at `current` MUST move the predecessor to `superseded` in the same journaled transaction (section 8.8). At most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). |
+| handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act: the operation that lands the new record at `current` MUST move the predecessor to `superseded` in the same journaled transaction (section 8.8), and where the posting actor's kind is `assistant` or `automation` that move is a terminal transition, so it lands `superseded/proposed` with `proposed_from` recording `current` (sections 8.3 and 8.4). At most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). |
 | reference | `recorded` | Immutable captured reference. |
 | contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project proposes or sends to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` MUST be present once sent, `sent_at` MUST NOT be present before, and the receipt fields MAY appear only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome MUST live in `summary`/`x-<vendor>`, never as a state. A re-send MUST be a new record linking `supersedes`; the superseded record records `superseded`. |
 | maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` MUST be `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning MUST be a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
@@ -1140,7 +1150,7 @@ state that grants current authority is a gated state (an artifact's `promoted`, 
 | release | `planned` > `published` or `abandoned` | Required `version`, the SemVer version string. At `planned` the `version.toml` ledger row need not exist yet; a record at `published` MUST name an existing `version.toml` release row by that `version`, and the ledger row is the fact (section 8.1). `published` grants release authority, so it is gated: an assistant or automation lands `published/proposed`. An `abandoned` record MUST record its reason in `summary`. |
 | waiver | `active` > `expired` or `revoked` | Required `scope`, one line naming the waived obligation (the waived finding, where one exists, rides a `relates` link), and required `expires_at` (RFC 3339 UTC), required at creation: a waiver without `expires_at` MUST be refused, never written. `active` is the gated initial state: an assistant or automation creating a waiver lands `active/proposed` (sections 8.4 and 8.8). A waiver confers nothing at or after its `expires_at`, whatever its recorded status (section 8.6); the transition to `expired` records the lapse. A `revoked` record MUST record its reason in `summary`. |
 | mode | `active` > `retired` | Required `mode`, a lowercase machine token naming the operating mode; the policy prose rides `summary`. `active` is the gated initial state: an assistant or automation lands `active/proposed`. At most one clean, unqualified `active` mode record per `mode` token MAY exist among records authored by non-importer actors (section 8.6), and activating a replacement MUST retire the previous record of that token in the same act: the operation that lands the replacement at unqualified `active`, a maintainer's activation or ratification of `active/proposed`, MUST move the predecessor to `retired` in the same journaled transaction (section 8.8), so a replacement at `active/proposed` retires nothing until that act. |
-| tier_assessment | `recorded` | Created terminal, immutable, a factual record like `gate_run`: no qualifier whatever the actor. Required `tier` (the assessed tier, from the adopter's tier vocabulary, declared in the manifest as `[types.tier_assessment].tier_vocabulary`, section 9) and required `subject`, one line naming what was assessed; the basis rides `summary` and `refs`. A re-assessment is a new record linking `follows`. |
+| tier_assessment | `recorded` | Created terminal, immutable, a factual record like `gate_run`: no qualifier whatever the actor. Required `tier` (the assessed tier, from the adopter's tier vocabulary where the manifest declares one as `[types.tier_assessment].tier_vocabulary`, otherwise any one-line, non-empty string, section 9) and required `subject`, one line naming what was assessed; the basis rides `summary` and `refs`. A re-assessment is a new record linking `follows`. |
 | session_lease | `held` > `released` or `reconciled` | Lease bookkeeping (section 5.7), written only by the lease machinery, never by `create` or `transition` (section 8.8). Required `holder`, `operation` and `acquired_at` (RFC 3339 UTC), mirroring `lease.toml`; `ended_at` (RFC 3339 UTC) MUST be absent at `held` and present once `released` or `reconciled`. No state is gated: the record confers no lease and no authority, the lease file does (sections 5.7 and 8.6), and its writes carry no worklog entry and are not store operations (section 16.1). |
 
 Actionability: a clean backlog item authored by a non-importer actor is actionable when its
@@ -1408,7 +1418,9 @@ guarantees:
    one status and `updated_at` change plus the `proposed_from` write or removal and, for a
    pending_decision, the resolution bundle write or removal and the `supersedes` link append, and
    for an operation that lands a handoff at `current` or a mode at unqualified `active`, the
-   predecessor's paired `superseded` or `retired` status and `updated_at` change, section 8.5),
+   predecessor's paired `superseded` or `retired` status and `updated_at` change, section 8.5, which
+   for a handoff posted by an assistant or automation actor is `superseded/proposed` together with
+   the `proposed_from` write, section 8.4),
    value for value
    and type for type (a boolean or float is never equal to an integer), before anything is
    written. The expected
@@ -1591,7 +1603,9 @@ Where the operational-policy module is enabled, the `[types.tier_assessment]` ta
 declare `tier_vocabulary`, the adopter's tier vocabulary: a non-empty list of distinct, non-empty
 strings, the closed set a `tier_assessment` record's required `tier` comes from (section 8.5). A
 declared `tier_vocabulary` that is not such a list MUST be refused, and the key MUST be refused on
-any other `[types.<name>]` table.
+any other `[types.<name>]` table. Where the table declares no `tier_vocabulary`, the adopter has
+declared no closed set: a `tier_assessment` record's `tier` MUST then be a one-line, non-empty
+string, and no vocabulary membership check applies to it.
 
 Storage layout:
 
@@ -2476,6 +2490,15 @@ The gates in this standard are strong where they are strong and say so where the
 - Public deliverables reach the product repository through `opf render` under the product
   repository's normal review flow (section 5.8); the quality of that review flow is the adopter's
   own discipline, which this standard requires to exist but does not itself gate.
+- C-VERSION-LEDGER is named in section 8.6 as the check that reports a `published` release record
+  without its `version.toml` ledger row, and this specification does not yet define that check's
+  full scope. The reference doctor's C-VERSION-LEDGER checks the structure of `version.toml` alone,
+  and the reference doctor does not grade module records (section 8.3), so no reference check yet
+  reports such a release record.
+- A declared `tier_vocabulary` is a non-empty list of distinct, non-empty strings (section 9); this
+  specification sets no character rule on its members, so a whitespace-only member, a member that
+  holds a line break or an invisible character, and two members that differ only in Unicode
+  normalization are not refused, and two such members can read alike to a person.
 - A base-only tool does not evaluate profiles: a store could satisfy the base and violate a profile
   it declares, and a base-only tool would not detect it. This is by design (profiles are additive
   and a base tool is out of their scope), and it is the reason a conformance report always names
