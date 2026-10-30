@@ -316,7 +316,7 @@ COMMENT_LINE_RE = re.compile(r"<!--(?:(?!-->)[^\n])*-->")
 COMMENT_AFTER_AT_RE = re.compile(r"@[ \t\r\n]*<!--")
 FENCE_OPEN_RE = re.compile(r"(`{3,})[^`]*$|(~{3,})")
 FENCE_ANY_RE = re.compile(r"[ \t]*(?:`{3,}|~{3,})")
-_CONTAINER = r"[ \t>]*(?:(?:[*+-]|\d{1,9}[.)])[ \t>]*)*"
+_CONTAINER = r"[ \t>]*(?:(?:[*+-]|[0-9]{1,9}[.)])[ \t>]*)*"
 # A line the comment scan cannot place: a fence opener that is not at column 0, or any line opening with
 # `<` (an HTML block may run past blank lines), at any indent or container depth.
 UNPLACED_RE = re.compile(_CONTAINER + r"(?:```|~~~|<)")
@@ -340,7 +340,7 @@ PLAIN_GLOB_RE = re.compile(r"(?=.*(?:[/*?\[{]|[A-Za-z]\.[A-Za-z]))[A-Za-z0-9_./*
 KEY_RE = re.compile(r"([A-Za-z0-9_-]+):(?: +(.*))?")
 ITEM_RE = re.compile(r" *- +(.*)")
 QUOTED_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
-VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+VERSION_RE = re.compile(r"\d+\.\d+\.\d+", re.ASCII)
 # A Windows 8.3 short name component (`PAYLOA~1.MD`, `A~VERY~1.MD`): one to six characters other than `.`,
 # a `~` and a number, and an optional extension of one to three characters; on NTFS it can open a long-named
 # file. Prose such as `git diff @~1` or `npm i lodash@~4.17.21` holds no such component.

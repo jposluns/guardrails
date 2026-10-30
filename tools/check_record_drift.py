@@ -54,8 +54,8 @@ from check_mistakes_register import (  # noqa: E402
 
 REGISTRY_FILES = (".aiqt/orchestration.local.json", ".aiqt/orchestration.json")
 ROW_RE = re.compile(r"^-\s+(?P<id>\S+)\s*::\s*(?P<state>\w+)\s*::\s*merge_pending\s*::\s*"
-                    r"refs=(?P<refs>\S+)\s*::")
-REF_RE = re.compile(r"^(pr:\d+|decision:[A-Za-z0-9_.-]+)$")
+                    r"refs=(?P<refs>\S+)\s*::", re.ASCII)
+REF_RE = re.compile(r"^(pr:\d+|decision:[A-Za-z0-9_.-]+)$", re.ASCII)
 
 
 def load_registry(root):

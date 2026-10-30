@@ -246,7 +246,7 @@ PYSOURCE_ISOLATION_REL = ("tools/_qa_adapter.py", "tools/audit_reference.py", "t
 # form for the sources above is sys.path.append, which preserves stdlib precedence.
 SYS_PATH_FRONT_INSERT_RE = re.compile(r"sys\.path\.insert\(\s*0\b")
 
-PY_WORD_RE = re.compile(r"^python(3(\.\d+)?)?$")     # a whole token that is a python interpreter name
+PY_WORD_RE = re.compile(r"^python(3(\.\d+)?)?$", re.ASCII)     # a whole token that is a python interpreter name
 PY_TOKEN_RE = re.compile(r"\bpython3?\b")            # a python word anywhere in a line (a fast pre-filter)
 QUOTE_OR_ESCAPE_RE = re.compile(r"""['"\\]""")       # a quote or backslash that could obfuscate a launcher name
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # a shell VAR=val inline assignment
@@ -1849,6 +1849,13 @@ def self_test_main():
         if iso.returncode != 0 or '{"ok": 1}' not in iso.stdout:
             failures.append("mechanism: -I should have used the real json (got rc={}, out={!r})"
                             .format(iso.returncode, iso.stdout))
+
+        # A python interpreter name is ASCII: a version written in Arabic-Indic or fullwidth digits
+        # names no interpreter.
+        for word, want in (("python3.12", True), ("/usr/bin/python3", True),
+                           ("python3.١٢", False), ("python3.１２", False)):
+            if _is_py_word(word) != want:
+                failures.append("the token {} expected python word {}".format(ascii(word), want))
 
         # 2. A fully-isolated tree passes.
         if run_quiet(_build(tmp / "iso")) != 0:

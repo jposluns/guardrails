@@ -425,7 +425,7 @@ DEFAULT_IGNORABLE_SHA256 = "d1d78a34fea3a0f9cc46bbab9acf2686a8493e4cadf7c1f412a8
 DEFAULT_IGNORABLE = frozenset(point for low, high in DEFAULT_IGNORABLE_RANGES for point in range(low, high + 1))
 FINDINGS_HEADING = "## Findings"
 COMPLETE_LINE = "QA-COMPLETE"
-QUESTION_RE = re.compile(r"(#{1,6}[ \t]+)?(?:\*\*)?(?:Q|Item[ \t]+|Question[ \t]+)?(\d{1,3})[.):](?:\*\*)?(?=[ \t]|$)",
+QUESTION_RE = re.compile(r"(#{1,6}[ \t]+)?(?:\*\*)?(?:Q|Item[ \t]+|Question[ \t]+)?([0-9]{1,3})[.):](?:\*\*)?(?=[ \t]|$)",
                          re.I)
 QUESTIONS_MARKER_RE = re.compile(r"QUESTIONS:?", re.I)
 QUOTE_WORD_RE = re.compile(r"\bquot(?:e|es|ed|ing)\b", re.I)

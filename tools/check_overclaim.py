@@ -310,7 +310,7 @@ NEG_AUX_TAIL = re.compile(
     r"^\s*(?:"
     r"(?:(?:do|does|did|will|would|shall|should|can|could|may|might|must|have|has|had|be|is|are|was|were|been|being|ever)\s+)*"
     r"|(?:a|an|any)\s+(?:[A-Za-z][\w-]*\s+){0,2}"
-    r")$", re.IGNORECASE)
+    r")$", re.IGNORECASE | re.ASCII)
 # A be-form COPULA between the governing negator and the match means the negator governs a DIFFERENT
 # predicate and the banned claim is a fresh copular assertion, so the negator does NOT launder it (the
 # tight-adjacency denial rule _adjacent_denial_clears checks this): "The not-expensive release IS

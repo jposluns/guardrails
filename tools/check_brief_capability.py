@@ -702,9 +702,9 @@ def decode_brief(data):
 
 FENCE_OPEN_RE = re.compile(r"([ \t]*)(`{3,}+|~{3,}+)(.*)\Z")
 HEADING_RE = re.compile(r" {0,3}(#{1,6})(?:\s|\Z)")
-ITEM_RE = re.compile(r" {0,3}(?:[-*+]\s+)?(?:\*\*|__)?(?:Q|Item\s+|Question\s+)?(\d{1,3})(?:[.)]|:(?=\s))"
+ITEM_RE = re.compile(r" {0,3}(?:[-*+]\s+)?(?:\*\*|__)?(?:Q|Item\s+|Question\s+)?([0-9]{1,3})(?:[.)]|:(?=\s))"
                      r"(?:\*\*|__)?(?=\s|\Z)", re.I)
-LIST_LINE_RE = re.compile(r"[ \t]*(?:[-*+]|\d{1,3}[.)])[ \t]+\S")
+LIST_LINE_RE = re.compile(r"[ \t]*(?:[-*+]|[0-9]{1,3}[.)])[ \t]+\S")
 
 
 def _fence_closes(line, opening):
@@ -800,7 +800,7 @@ def parse_blocks(text):
 
 SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?])\s+(?=[*_\"'`(\[]*[A-Z])|;\s+")
 MARKUP_TOKEN_RE = re.compile(r"\s|[>*_#]|[-+–—](?=\s)"
-                             r"|(?:Q|Item\s+|Question\s+|Step\s+)?\d{1,3}(?:[.)]|:|\s+[-–—])(?=\s)", re.I)
+                             r"|(?:Q|Item\s+|Question\s+|Step\s+)?[0-9]{1,3}(?:[.)]|:|\s+[-–—])(?=\s)", re.I)
 LEAD_IN_RE = re.compile(r"(?:(?:please|kindly|also|then|now|first|second|third|next|finally|and|or|but|so|"
                         r"again|separately|additionally|instead|always|just|do\s+not|don't|do|never|"
                         r"(?:can|could|would|will)\s+you|(?:you|we)\s+(?:must|should|may|can|need\s+to|"
@@ -975,7 +975,7 @@ class Sentence:
 # ---------- scope ----------
 
 # each whitespace run is read by one quantifier (a separator's trailing space is not read twice)
-ITEM_LIST = (r"Q?\d{1,3}(?:\s*(?:,\s*(?:(?:and|or)\s+)?|-\s*|\b(?:and|or|to|through)\s+)Q?\d{1,3})*+")
+ITEM_LIST = (r"Q?[0-9]{1,3}(?:\s*(?:,\s*(?:(?:and|or)\s+)?|-\s*|\b(?:and|or|to|through)\s+)Q?[0-9]{1,3})*+")
 ITEM_TOKEN_RE = re.compile(r"\d{1,3}|-|\bto\b|\bthrough\b", re.I)
 ONLY_RE = re.compile(r"answer\s+(?:only\s+)?(?:items?|questions?)\s+(" + ITEM_LIST + r")(\s+only)?", re.I)
 ANSWER_ONLY_RE = re.compile(r"answer\s+only\s+(?:items?|questions?)\s+(" + ITEM_LIST + ")", re.I)
@@ -1176,10 +1176,10 @@ SHELL_TAGS = frozenset(("bash", "sh", "shell", "console", "zsh", "fish", "ksh", 
                         "batch"))
 EXEC_FENCE_TAGS = SHELL_TAGS | frozenset(("pycon", "python-console", "python-repl", "ipython", "repl"))
 PYTHON_TAGS = frozenset(("python", "python3", "py", "py3"))
-RUN_PROMPT_RE = re.compile(r"\s*(?:>>>|\$|In\s*\[\d*\]:)(?:\s|\Z)")
+RUN_PROMPT_RE = re.compile(r"\s*(?:>>>|\$|In\s*\[[0-9]*\]:)(?:\s|\Z)")
 PLAIN_TAGS = frozenset(("", "text", "txt", "plain", "plaintext", "none", "code"))
 SHELL_FIRST_LINE_RE = re.compile(r"\s*(?:\$\s|(?:sudo\s+)?(?:[A-Za-z_]\w*=\S*\s+)*+(?:(?:[\w.~-]*/)*+(?:git|"
-                                 r"python(?:3(?:\.\d+)?)?|pytest|cd|bash|sh|zsh|npm|npx|pip3?|uv|cargo|tox|nox|"
+                                 r"python(?:3(?:\.[0-9]+)?)?|pytest|cd|bash|sh|zsh|npm|npx|pip3?|uv|cargo|tox|nox|"
                                  r"docker|curl|wget|chmod|mkdir|rm|ls|grep|make|go)(?=\s|\Z)|(?:\./|tools/)\S))")
 REFERENCE_INTRO_RE = re.compile(r"\b(?:(?:do\s+not|don['’]t|never)\s+(?:run|execute)\s+(?:this|it|these|them|"
                                 r"the\s+following|(?:the\s+)?(?:block|fence|commands?|snippet)\s+below)\b"

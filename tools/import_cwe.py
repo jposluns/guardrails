@@ -97,7 +97,7 @@ EXPECTED_PUBLISHED_TOTAL = 944  # MITRE's published "Total Weaknesses" headline 
 EXPECTED_RETRIEVED = "2026-08-22"  # the vendored 4.20 snapshot's acquisition date (pin-after-observe)
 
 PROVENANCE_NAME = "cwe-provenance.json"
-CODE_RE = re.compile(r"^CWE-\d+$")
+CODE_RE = re.compile(r"^CWE-\d+$", re.ASCII)
 EN_DASH = "–"
 EM_DASH = "—"
 
@@ -533,6 +533,11 @@ def self_test():
                                            min_elements=1))
     _expect_fail("unexpected zip member",
                  lambda: _extract_member(_zip_of({"wrong.xml": b"x"})))
+    # str.isdigit is true for any script's digits, so CODE_RE (ASCII) is what refuses these ids.
+    for digits in ("١٢", "１２"):
+        _expect_fail("non-ASCII digits {} in an id".format(ascii(digits)),
+                     lambda: _parse_weaknesses(_fixture(extra='<Weakness ID="' + digits
+                                                        + '" Name="X" Status="Draft"/>'), min_elements=1))
     # a transport failure in _https_get maps to a controlled ImportError_ (concise abort + exit 2 via
     # main()), never a raw URLError traceback. Monkeypatch urlopen to raise, expect the mapped abort.
     _orig_urlopen = urllib.request.urlopen
