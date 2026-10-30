@@ -60,6 +60,7 @@ import threading
 import time
 import datetime
 import hashlib
+import unicodedata
 from pathlib import Path
 try:
     import tomllib
@@ -1243,8 +1244,91 @@ def _rdp_cases(tmp):
     finally:
         aiqt_hooks._rdp_decide, sys.stdin = saved_decide, saved_stdin
     check("rdp/handler-crash-fails-closed", rc, 2)
+    _rdp_label_like_cases(base)
     _rdp_draft_cases(base)
     _rdp_scope_cases(base, bare)
+
+
+def _rdp_without_label_like(fn):
+    """fn() with the label-like screen reverted: _rdp_label_start patched to find no letter or digit, so no
+    label has a name and no line is label-like, and only the column-0 reader is left. The revert leg of
+    each label-like vector: it shows the refusal comes from the screen alone (red on revert)."""
+    saved = aiqt_hooks._rdp_label_start
+    aiqt_hooks._rdp_label_start = len
+    try:
+        return fn()
+    finally:
+        aiqt_hooks._rdp_label_start = saved
+
+
+def _rdp_label_like_cases(base):
+    """The label-like line vectors (rdp/label-like-*): a brief line whose text, after every leading
+    character that is not a letter or digit is removed, begins with a label in any case, and that is not
+    exactly a label at column 0 followed by one space, withholds the dispatch as UNVERIFIABLE with a reason
+    naming the line, so a second pin or an extra review path behind an invisible prefix is never read as
+    absent. Each refusal is also shown allowed with the screen reverted (red on revert)."""
+    ll = RdpFixture(base, "labellike")
+    # The seven measured prefixes: a combining grapheme joiner, a variation selector, the two Hangul
+    # fillers, a zero width space, a no-break space and a space.
+    prefixes = tuple(chr(cp) for cp in (0x034F, 0xFE0F, 0x3164, 0xFFA0, 0x200B, 0x00A0, 0x0020))
+    # Each hidden line, were it read, would change the decision: a second target or pin (the at-most-once
+    # refusal) or a declared path the commit does not change.
+    hidden = (("Review-target:", "working-tree"), ("Reviewed-revision:", ll.seed), ("Review-path:", "seed.txt"))
+    cases = [(p, label + " " + value) for p in prefixes for label, value in hidden]
+
+    def _named(prefix, line):
+        result = ll.dispatch(ll.good(extra=[prefix + line]))
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        return (_rdp_kind(result), "line 7 (" in reason and repr(line.split(" ")[0]) in reason,
+                "U+{:04X}".format(ord(prefix)) in reason)
+    check("rdp/label-like-hidden-prefix-unverifiable", [_named(p, line) for p, line in cases],
+          [("unverifiable", True, True)] * len(cases))
+    check("rdp/label-like-hidden-prefix-revert-allows", _rdp_without_label_like(lambda: [
+        _rdp_kind(ll.dispatch(ll.good(extra=[p + line]))) for p, line in cases]), ["allow"] * len(cases))
+    check("rdp/label-like-canonical-dispatches", [
+        _rdp_kind(ll.dispatch(ll.good())), _rdp_without_label_like(lambda: _rdp_kind(ll.dispatch(ll.good())))],
+        ["allow", "allow"])
+    # A label word inside a sentence is prose: a letter comes first.
+    check("rdp/label-word-in-sentence-allows", [_rdp_kind(ll.dispatch(ll.good(extra=[s]))) for s in (
+        "the Review-path: field", "See the Review-path: field and the Reviewed-revision: line.",
+        "Note: Review-target: working-tree is not this review.")], ["allow"] * 3)
+    # In another case, with no space after the colon, behind a Markdown list, quote or emphasis marker, or
+    # behind a byte-order mark that does not open the file.
+    shapes = ("review-path: seed.txt", "REVIEWED-REVISION: " + ll.seed, "Review-path:seed.txt", "Review-target:",
+              "- Review-path: seed.txt", "> Reviewed-revision: " + ll.seed, "**Review-target:** working-tree",
+              chr(0xFEFF) + "Review-path: seed.txt")
+    check("rdp/label-like-case-space-markdown-unverifiable", [(
+        _rdp_kind(ll.dispatch(ll.good(extra=[s]))),
+        _rdp_without_label_like(lambda s=s: _rdp_kind(ll.dispatch(ll.good(extra=[s]))))) for s in shapes],
+        [("unverifiable", "allow")] * len(shapes))
+    # The defining property, swept through _rdp_labels: every assigned code point that is not a letter or
+    # digit (category L or N, less a character Unicode names FILLER, written here apart from the hook), and
+    # every 509th unassigned or private-use one, as a one-character prefix before each label on an extra
+    # line. Each such line withholds the brief or, behind a line break, is read as the canonical label; none
+    # is silently absent. Every 61st letter or digit is swept too: a label behind one is prose, neither
+    # withheld nor read. Surrogates cannot occur in a UTF-8 brief and are not swept.
+    labels = ll.binding["labels"]
+    keys = {label: key for key, label in labels.items()}
+    head = "Review-target: revision\nReviewed-revision: " + ll.pin + "\nReview-path: src/a.py\n"
+    tally = {}
+    oracle = 0
+    for cp in range(sys.maxunicode + 1):
+        ch = chr(cp)
+        category = unicodedata.category(ch)
+        letter = category[0] in "LN" and "FILLER" not in unicodedata.name(ch, "")
+        if category == "Cs" or (category in ("Cn", "Co") and cp % 509) or (letter and cp % 61):
+            continue
+        oracle += (aiqt_hooks._rdp_label_start(ch) == 0) != letter
+        for label, value in hidden:
+            found, _why = aiqt_hooks._rdp_labels(head + ch + label + " " + value + "\n", labels)
+            outcome = "withheld" if found is None else "read" if value in found[keys[label]] else "absent"
+            side = "letter-or-digit" if letter else "other"
+            tally[(side, outcome)] = tally.get((side, outcome), 0) + 1
+    check("rdp/label-like-sweep-invariant", (
+        sorted(k for k in tally if k in (("other", "absent"), ("letter-or-digit", "withheld"),
+                                         ("letter-or-digit", "read"))),
+        oracle, tally.get(("other", "withheld"), 0) > 0, tally.get(("letter-or-digit", "absent"), 0) > 0),
+        ([], 0, True, True))
 
 
 def _rwh_iso(hours=0):

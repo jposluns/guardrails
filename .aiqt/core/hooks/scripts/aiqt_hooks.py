@@ -311,6 +311,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 
 PRETOOL = "PreToolUse"
 STOP_EVENTS = ("Stop", "SubagentStop")
@@ -23309,7 +23310,8 @@ def orch_dispatch_ledger(data):
 # where a brief that names the worker draft the commit applies has every path the draft's diff headers name
 # declared too, less the paths it records as skipped (_rdp_draft_census);
 # and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
-# at the pinned gitlink, which are not read. A refusal is a deny naming its reason; a cannot-evaluate
+# at the pinned gitlink, which are not read. A label-like line that is not a column-0 label (_rdp_labels)
+# is a cannot-evaluate. A refusal is a deny naming its reason; a cannot-evaluate
 # is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through _review_git, which
 # neutralizes replacement refs, grafts, pathspec magic and the commit-graph cache.
 _RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes"))
@@ -23520,22 +23522,73 @@ def _rdp_read_text(path, max_bytes, what):
 def _rdp_read_brief(path, max_bytes):
     """(text, None) for a readable brief, or (None, reason) for a cannot-evaluate: a file _rdp_read_text
     cannot read, or one holding a non-physical line boundary. The dropped byte-order mark lets a brief
-    saved with one still show its first label at column 0."""
+    saved with one still show its first label at column 0; any other byte-order mark before a label makes
+    its line label-like (_rdp_labels), so the brief cannot be evaluated."""
     text, why = _rdp_read_text(path, max_bytes, "brief")
     if text is not None and any(ch in text for ch in _RDP_NONPHYSICAL):
         return (None, "the brief {} contains a line boundary that is not a physical newline".format(path))
     return (text, why)
 
 
+# One match skips a run of characters str.isalnum rejects (an underscore included); _rdp_label_start
+# skips the fillers it accepts.
+_RDP_NOT_ALNUM = re.compile(r"[\W_]*")
+
+
+def _rdp_label_start(text):
+    """The index of the first letter or digit in text, len(text) when it has none. A letter or digit is a
+    character str.isalnum accepts that Unicode does not name a FILLER (the Hangul fillers, such as U+3164
+    and U+FFA0, are category Lo yet show as blank). Every character before it (whitespace, a character of
+    category Cf, Mn, Me, Zs, Zl or Zp, a filler, a Markdown list, quote or emphasis marker) is one a reader
+    passes over before a label."""
+    i = 0
+    while True:
+        i = _RDP_NOT_ALNUM.match(text, i).end()
+        if i < len(text) and "FILLER" in unicodedata.name(text[i], ""):
+            i += 1
+        else:
+            return i
+
+
 def _rdp_labels(text, labels):
-    """Map each label key to the list of its values: a label matches only at column 0, as the exact label
-    followed by one space, and its value is the rest of that physical line."""
+    """(found, None), found mapping each label key to the list of its values, or (None, reason) for a
+    cannot-evaluate. A label matches only at column 0, as the exact label followed by one space, and its
+    value is the rest of that physical line. A line is label-like when its text, after every leading
+    character that is not a letter or digit (_rdp_label_start) is removed, begins with one of the labels,
+    in any case: for a label such as Review-path:, its name followed by a colon (a label's own leading
+    characters that are not letters or digits are removed too, and a label with no letter or digit is read
+    only in its exact form). A label-like line that is not exactly a label at column 0 followed by one space
+    makes the brief a cannot-evaluate whose reason names the line, so a label a reader sees (a second pin,
+    an extra review path behind an invisible prefix) is never silently absent."""
     found = {key: [] for key in labels}
-    for line in text.splitlines():
-        for key, label in labels.items():
-            if line.startswith(label + " "):
-                found[key].append(line[len(label) + 1:])
-    return found
+    exact = tuple(label + " " for label in labels.values())
+    names = {}
+    for key, label in labels.items():
+        name = label[_rdp_label_start(label):].casefold()
+        if name:
+            names[key] = name
+    named = tuple(names.values())
+    # casefold never shortens a character, so a line prefix as long as the longest name decides the match
+    width = max((len(name) for name in named), default=0)
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.startswith(exact):
+            for key, label in labels.items():
+                if line.startswith(label + " "):
+                    found[key].append(line[len(label) + 1:])
+            continue
+        start = _rdp_label_start(line)
+        head = line[start:start + width].casefold()
+        if not head.startswith(named):
+            continue
+        key = next(key for key, name in names.items() if head.startswith(name))
+        lead = " ".join("U+{:04X}".format(ord(ch)) for ch in line[:min(start, 8)])
+        return (None, "has line {} ({!r}), which reads as the {!r} label{} but is not that label at column 0 "
+                "followed by one space; a reader can take it for a label the hook does not read, so write the "
+                "label exactly or reword the line".format(
+                    number, line[:80], labels[key],
+                    " behind the leading characters {}{}".format(lead, " ..." if start > 8 else "") if start
+                    else ""))
+    return (found, None)
 
 
 def _rdp_listing(items):
@@ -26005,7 +26058,9 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
     text, why = _rdp_read_brief(brief, cfg["max_brief_bytes"])
     if text is None:
         return ("unverifiable", why)
-    found = _rdp_labels(text, cfg["labels"])
+    found, why = _rdp_labels(text, cfg["labels"])
+    if found is None:
+        return ("unverifiable", "the brief {} {}".format(brief, why))
     targets = found["target"]
     if not targets:
         return ("deny", "the brief {} has no {!r} line; declare revision, working-tree or "

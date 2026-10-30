@@ -887,6 +887,23 @@ The hook reads labels only from the brief, only at column 0, and only as the exa
 one space. The value is the rest of that line. The brief must be UTF-8 with no NUL and no line
 boundary other than a physical newline.
 
+A line is label-like when its text, after every leading character that is not a letter or digit is
+removed, begins with one of the labels, in any case: for `Review-path:`, the name `Review-path`
+followed by a colon. A letter or digit is a character Python's `str.isalnum` accepts that Unicode does
+not name a FILLER, so whitespace, every character of Unicode category Cf, Mn, Me, Zs, Zl or Zp, a
+filler of category Lo such as U+3164 or U+FFA0 (which shows as blank), and a Markdown list, quote or
+emphasis marker are all such characters. A label's own leading characters that are not letters or
+digits are removed the same way, and a label with no letter or digit is read only in its exact form.
+A label-like line that is not exactly a label at column 0 followed by one space makes the brief
+cannot-evaluate: the dispatch is withheld as `UNVERIFIABLE:` with a reason naming the line, never
+read as if the label were absent. This covers a second `Reviewed-revision:` or an extra
+`Review-path:` behind an invisible prefix, a label in another case or with no space after its colon,
+and a label in a Markdown list or quote, so a brief that quotes a label that way is withheld too. A
+label word inside a sentence (`the Review-path: field`) is not label-like. Only leading characters are
+removed: an invisible character inside a label, a numbered list marker (its digit is a letter or
+digit), a character between a label's name and its colon, and a look-alike letter or colon leave the
+line prose, neither read nor refused.
+
 - `Review-target:` is required, once. It must be `revision`, `working-tree` or `not-a-review`. A
   `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row; where
   that row cannot be written, the note says so (the allow stands).
