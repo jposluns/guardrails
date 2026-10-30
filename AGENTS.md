@@ -149,9 +149,10 @@ replacement, a zero-match conditional skip, or an exception raised before the wr
 while leaving the file unchanged, so an applier's account of itself is not the evidence this rule requires.
 This is claims-rest-on-observation applied to an edit the author did not directly make: the changed source,
 not the applier's report, is the observation completion rests on.
-Where another component reads the edited file, completion also rests on running its own parser, or the
-validator it names as authoritative, over the file as written, not a self-test on its own fixtures; else
-the edit is reported unverified.
+
+Where another tool parses the edited file, completion also rests on that tool's own parser, or the validator
+it names as authoritative, accepting the file as written, not on its self-test fixtures; else the edit is
+reported unverified.
 
 ## A guard is only as good as its input
 
