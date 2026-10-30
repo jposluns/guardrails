@@ -3578,13 +3578,18 @@ class InitHolder:
     `token` is a fresh object the resume substrate binds an operation handle to, and that
     attach_init_lease copies into the minted OpCapability, so a handle begun under one holder can
     never be written through another. `spent` is set when attach_init_lease transfers the
-    descriptors into a capability; `_released` when release_init_holder has closed them."""
+    descriptors into a capability; `_released` when release_init_holder has closed them.
+    `staging_removed` names the staging leftovers its acquisition removed and `recovered` the stale
+    records its explicit recovery removed, in delete order (each empty when it removed none), so a
+    caller can name every removal the acquisition performed."""
     __slots__ = ("product_root", "machine_rel", "control_root", "token", "_ctl_fd", "_anchor_fd",
                  "_anchor_ident", "_ctl_ident", "_product_ident", "_acquirer_pid",
-                 "_acquirer_pid_start", "_released", "_spent", "_claim", "_operation", "_holder")
+                 "_acquirer_pid_start", "_released", "_spent", "_claim", "_operation", "_holder",
+                 "recovered", "staging_removed")
 
     def __init__(self, product_root, control_root, ctl_fd, anchor_fd, anchor_ident, ctl_ident,
-                 product_ident, acquirer_pid, acquirer_pid_start, operation, holder):
+                 product_ident, acquirer_pid, acquirer_pid_start, operation, holder,
+                 recovered=(), staging_removed=()):
         self.product_root = product_root
         self.machine_rel = _INIT_MACHINE_REL
         self.control_root = control_root
@@ -3601,6 +3606,8 @@ class InitHolder:
         self._claim = threading.Lock()
         self._operation = operation
         self._holder = holder
+        self.recovered = tuple(recovered)
+        self.staging_removed = tuple(staging_removed)
 
 
 def _require_acquirer(obj, what):
@@ -3691,7 +3698,10 @@ def acquire_init_operation(product_root, operation, holder=None, recover=False):
     staging-garbage sweep are acquire_operation's own. A stale active record (and, when the machine store already
     exists from an interrupted bootstrap, a stale lease) refuses without recover=True; with it, the
     confirmed-dead liveness gate and the lease-first delete order are reused verbatim. `product_root`
-    must be absolute: it is the explicit binding, never an ambient working directory."""
+    must be absolute: it is the explicit binding, never an ambient working directory. The holder
+    reports what the acquisition removed (`staging_removed`, then `recovered` in delete order), and
+    an OpLockError raised once the body has begun carries the same two reports of what it had
+    removed before it failed."""
     acquirer_pid = os.getpid()
     if not _containment.probe():
         raise OpLockError("race-free containment primitive absent; fail-closed")
@@ -3708,13 +3718,17 @@ def acquire_init_operation(product_root, operation, holder=None, recover=False):
     _validate_field("holder", holder)
     _validate_field("operation", operation)
     result = None
+    recovered, staging_removed = [], []   # appended as each removal happens, so a failure reports it
     try:
         with _SignalDeferral(): result = _acquire_init_body(root, operation, holder, recover,
-                                                              acquirer_pid)
+                                                              acquirer_pid, recovered,
+                                                              staging_removed)
         return result if os.getpid() == acquirer_pid else _refuse_init_continuation(result)
-    except BaseException:
+    except BaseException as exc:
         if result is not None and not result._released and os.getpid() == acquirer_pid:
             _close_holder_fds(result)
+        if isinstance(exc, OpLockError):
+            exc.recovered, exc.staging_removed = tuple(recovered), tuple(staging_removed)
         raise
 
 
@@ -3744,8 +3758,11 @@ def _close_holder_fds(holder):
     return problems
 
 
-def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
-    """The body of acquire_init_operation, run with the Python-handled signals deferred."""
+def _acquire_init_body(root, operation, holder, recover, acquirer_pid, recovered,
+                       staging_removed):
+    """The body of acquire_init_operation, run with the Python-handled signals deferred. Each
+    stale record it removes is appended to `recovered` and each staging leftover to
+    `staging_removed` (lists) as the removal happens."""
     owner = _FdOwner()
     anchor_fd = None
     try:
@@ -3773,12 +3790,13 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
         _gated_step(acquirer_pid, "take the anchor lock", _flock_exclusive, anchor_fd)
         anchor_ident = _post_lock_anchor_check(ctl_fd, anchor_fd)
         _gated_step(acquirer_pid, "remove the active record's staging leftovers",
-                    _remove_staging_garbage, ctl_fd, ACTIVE_NAME, "active record")
+                    _remove_staging_garbage, ctl_fd, ACTIVE_NAME, "active record", staging_removed)
         machine_fd = _probe_init_machine_dir(product_fd, root)
         if machine_fd is not None:
             owner.adopt(machine_fd)
             _gated_step(acquirer_pid, "remove the lease's staging leftovers",
-                        _remove_staging_garbage, machine_fd, _opf_check.LEASE_NAME, "lease")
+                        _remove_staging_garbage, machine_fd, _opf_check.LEASE_NAME, "lease",
+                        staging_removed)
         machine_st = None if machine_fd is None else _fstat_or_refuse(machine_fd, "machine store")
         machine_path = os.path.join(root, _INIT_MACHINE_REL)
         stale_active = _classify_stale(ctl_fd, ACTIVE_NAME, "active record")
@@ -3800,10 +3818,12 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
                                                machine_st, machine_path)
             if stale_lease:
                 _gated_step(acquirer_pid, "remove the stale lease", _recover_stale, machine_fd,
-                            _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes, "lease")
+                            _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes, "lease",
+                            recovered)
             if stale_active:
                 _gated_step(acquirer_pid, "remove the stale active record", _recover_stale, ctl_fd,
-                            ACTIVE_NAME, rec_active_ident, rec_active_bytes, "active record")
+                            ACTIVE_NAME, rec_active_ident, rec_active_bytes, "active record",
+                            recovered)
         if machine_fd is not None:
             owner.close(machine_fd, "cannot close the machine-store descriptor ({})")
         owner.close(product_fd, "cannot close the product-root descriptor ({})")
@@ -3813,7 +3833,7 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
             anchor_ident=anchor_ident, ctl_ident=(ctl_st.st_dev, ctl_st.st_ino),
             product_ident=(product_st.st_dev, product_st.st_ino), acquirer_pid=acquirer_pid,
             acquirer_pid_start=_journal._pid_start(acquirer_pid), operation=operation,
-            holder=holder)
+            holder=holder, recovered=recovered, staging_removed=staging_removed)
         owner.transfer_all()
         return result
     except BaseException as exc:
@@ -9647,6 +9667,7 @@ def _t_i4_crash_and_recovery(d, env):
             assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME]
             h = acquire_init_operation(root, "opf-init")
             release_init_holder(h)
+            assert (h.recovered, h.staging_removed) == ((), ()), "an ordinary acquisition removes nothing"
             continue
         assert os.path.exists(os.path.join(_st_ctl_dir(root), ACTIVE_NAME))
         assert os.path.exists(_st_lease_path(root))
@@ -9654,6 +9675,7 @@ def _t_i4_crash_and_recovery(d, env):
         h = acquire_init_operation(root, "opf-init", recover=True)
         assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME]
         assert not os.path.exists(_st_lease_path(root))
+        assert h.recovered == ("lease", "active record"), h.recovered
         release_init_holder(h)
     # A holder that died after attaching, whose machine store was then removed: the stale active
     # record's recorded machine store is gone, so recovery reaches the liveness gate with NO machine
@@ -9672,7 +9694,51 @@ def _t_i4_crash_and_recovery(d, env):
     _st_expect_refusal(acquire_init_operation, root, "opf-init", needle="stale")
     h = acquire_init_operation(root, "opf-init", recover=True)
     assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME], "the stale active record is cleared"
+    assert h.recovered == ("active record",), h.recovered
     release_init_holder(h)
+    # A failure after a removal reports it: a planted lease staging leftover and the crashed
+    # holder's lease are removed, then the active record's removal fails, so the refusal names the
+    # leftover and the lease (never nothing removed); the next recovery clears the lone record.
+    pid = os.fork()
+    if pid == 0:
+        try:
+            h = acquire_init_operation(root, "opf-init")
+            if not os.path.isdir(os.path.join(root, ".working", "toml")):
+                _st_make_machine_dir(root)
+            attach_init_lease(h, _ST_OP_ID)
+            os._exit(0)
+        except BaseException:
+            os._exit(3)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status
+    staging = _staging_name(_opf_check.LEASE_NAME)
+    with open(os.path.join(os.path.dirname(_st_lease_path(root)), staging), "wb") as fh:
+        fh.write(b"torn")
+    mod = sys.modules[__name__]
+    saved = mod._recover_stale
+
+    def _active_fails(dir_fd, name, *a, **k):
+        if name == ACTIVE_NAME:
+            raise OpLockError("synthetic active record removal failure after the lease's")
+        return saved(dir_fd, name, *a, **k)
+
+    mod._recover_stale = _active_fails
+    failed = None
+    try:
+        acquire_init_operation(root, "opf-init", recover=True)
+    except OpLockError as exc:
+        failed = exc
+    finally:
+        mod._recover_stale = saved
+    assert failed is not None, "the synthetic removal failure must refuse"
+    assert (getattr(failed, "recovered", None), getattr(failed, "staging_removed", None)) \
+        == (("lease",), ("lease staging leftover " + staging,)), failed
+    assert not os.path.exists(_st_lease_path(root)), "the lease was removed before the failure"
+    h = acquire_init_operation(root, "opf-init", recover=True)
+    release_init_holder(h)
+    assert (h.recovered, h.staging_removed) == (("active record",), ()), (h.recovered,
+                                                                          h.staging_removed)
+    assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME], "the lone active record is cleared"
 
 
 def _t_i5_holder_identity_bound(d, env):

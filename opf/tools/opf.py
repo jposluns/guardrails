@@ -19642,10 +19642,14 @@ def _cmd_adopt(rest):
           names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
           creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
           seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
-          classify, a stray or wrong-type journal entry, or a transaction renamed or replaced after the
-          listing), store-lease-held (a store pointer at the product root, or a store lease present, or
-          claimed by another writer, in a machine subdirectory, beside an open transaction other than
-          init-store's), init-store-reversal-unproven (the reversal could remove content the operation
+          classify, a stray or wrong-type journal entry, a transaction renamed or replaced after the
+          listing, or an open transaction whose journal records another product root's binding or none:
+          one copied in from another tree, and equally this tree's own after the tree moved to another
+          filesystem, was restored from a backup or was remounted under another device number, which
+          changes the identity the journal is bound to; reconcile never consumes it, and clearing it is
+          the operator's own act outside any OPF operation), store-lease-held (a store pointer at the
+          product root, or a store lease present, or claimed by another writer, in a machine
+          subdirectory, beside an open transaction other than init-store's), init-store-reversal-unproven (the reversal could remove content the operation
           did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
           began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
           recovery-failed (files already restored or frames already published stay, the transaction stays
@@ -20942,15 +20946,16 @@ def _cli_self_test():
                 if tree_snapshot(clean) != before:
                     failures.append("adopt status mutated the product root (status must be a pure read)")
 
-                # status over adoption-journal DEBRIS -> 1 (an interrupted transaction is a finding), and
-                # the tree byte-unchanged (status reports, never reconciles).
+                # status over adoption-journal DEBRIS -> 1 (an interrupted transaction is a finding naming
+                # the journal's own home), and the tree byte-unchanged (status reports, never reconciles).
                 before = tree_snapshot(debris)
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                     rc = main(["adopt", "status", "--root", debris])
-                if rc != EXIT_FINDING or "interrupted transaction(s) txn" not in buf.getvalue():
+                if rc != EXIT_FINDING or "adoption journal at {} holds interrupted transaction(s) txn".format(
+                        adopt_j_rel) not in buf.getvalue():
                     failures.append("adopt status over journal debris: rc={!r} (expected 1 + the journal "
-                                    "finding)".format(rc))
+                                    "finding naming {})".format(rc, adopt_j_rel))
                 if tree_snapshot(debris) != before:
                     failures.append("adopt status (journal debris) mutated the product root")
 
@@ -21166,7 +21171,8 @@ def _cli_self_test():
                 race_results = []
                 try:
                     for label, product_pid, decoy_pid, want, needle in (
-                            ("held product lock, empty decoy", 1111, None, EXIT_FINDING, "(pid 1111)"),
+                            ("held product lock, empty decoy", 1111, None, EXIT_FINDING,
+                             "lock at {} is held (pid 1111)".format(adopt_j_rel)),
                             ("no product lock, decoy lock", None, 4242, EXIT_OK, "no adoption run exists")):
                         root = fresh_root("race-{}".format(len(race_results)))
                         decoy = os.path.join(abase, "decoy-{}".format(len(race_results)))
@@ -21684,7 +21690,8 @@ def _cli_self_test():
                     if rc != EXIT_MALFORMED or "does not bind" not in err:
                         failures.append("adopt apply with an approval for another plan: rc={!r} (expected 2 + "
                                         "the binding refusal; {})".format(rc, err.strip()))
-                    if tree_snapshot(adoptee) != before or os.path.exists(os.path.join(adoptee, ".aiqt")):
+                    if tree_snapshot(adoptee) != before \
+                            or os.path.exists(os.path.join(adoptee, _opf_store.WORKING_DIRNAME)):
                         failures.append("adopt approve/apply mutated the stage fixture (each must write nothing "
                                         "in this build)")
                     with open(os.path.join(adoptee, "legacy.md"), "w", encoding="utf-8") as fh:
@@ -21766,7 +21773,9 @@ def _cli_self_test():
                 return got
 
             def product(root):
-                return {rel: data for rel, data in snap(root).items() if not rel.startswith(".aiqt" + os.sep)}
+                # every file outside the adoption journal root's subtree (the journal's own bookkeeping)
+                return {rel: data for rel, data in snap(root).items()
+                        if not rel.replace(os.sep, "/").startswith(j_rel + "/")}
 
             def journal_clean(root):
                 try:
