@@ -49,7 +49,8 @@ Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such 
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
 
 Inert: no writer consumes the import examples (`opf record import --batch` does not exist in this
-release), and binding a plan's prompt_pack {version, digest} to this pack is a later slice. VALID means
+release). This gate reads no adoption plan: `opf import --prompt` (opf.py _import_prompt) calls _validate
+here and refuses unless the adoption run's plan binds exactly this pack's version and digest. VALID means
 the manifest agrees with the bytes on disk and each import example passes the guards above. It is not
 authentication, it does not check that a content change also bumped the version, and it does not review
 what the documents say: whether an example's history, unparsed text and missingness reasons are faithful

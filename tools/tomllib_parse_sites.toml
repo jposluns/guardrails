@@ -1063,6 +1063,14 @@ class = "EXEMPT"
 reason = "test-code"
 
 [[site]]
+path = "opf/tools/opf.py"
+function = "_cli_self_test._import_leg"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
 path = "tools/_qa_adapter.py"
 function = "_self_test_isolated"
 form = "alias"

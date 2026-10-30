@@ -10,8 +10,8 @@
 # without it), by a deployer that renders a member with a per-project overlay into a
 # per-account command (the member doubles as the render template; its overlay slots and the drift check
 # are specified inside the member) and by an adoption plan's prompt_pack {version, digest} binding,
-# which `opf adopt plan` takes as caller input and checks for shape only; nothing verifies that binding
-# against this manifest yet.
+# which `opf adopt plan` takes as caller input and checks for shape only; `opf import --prompt` verifies
+# this manifest and refuses unless that binding is exactly its version and digest.
 # import/SKILL.md is the post-adoption import procedure, and the import/examples/<type>.batch.toml members
 # are its inert examples, one per baseline record type: each is a canonical opf.record.import-batch/v1 batch
 # that the gate also parses and checks (validate_examples). No writer consumes them in this release;

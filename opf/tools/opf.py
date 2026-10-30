@@ -19153,7 +19153,14 @@ def _import_prompt(root_abs, run_id):
     except pack_gate._Refusal as refusal:
         print("opf import --prompt: cannot evaluate: {}".format(refusal), file=sys.stderr)
         return EXIT_MALFORMED
-    roster = tomllib.loads(raw.decode("utf-8"))
+    # The roster read is a second read of the manifest, so its bytes are not the ones _validate parsed:
+    # a manifest replaced between the two reads that no longer decodes or parses refuses here.
+    try:
+        roster = tomllib.loads(raw.decode("utf-8"))
+    except (RecursionError, MemoryError, ValueError) as exc:
+        print("opf import --prompt: cannot evaluate: the pack manifest does not parse on the roster read "
+              "({})".format(type(exc).__name__), file=sys.stderr)
+        return EXIT_MALFORMED
     if roster.get("version") != version or roster.get("digest") != digest:
         print("opf import --prompt: cannot evaluate: the pack manifest changed between its verification "
               "and the roster read", file=sys.stderr)
@@ -20373,8 +20380,9 @@ def _cli_self_test():
             line on a drifted frozen source, and 2 on a --run naming no admitted run. --prompt exits 0
             printing the shipped version, digest, the import members and the migrate scope, 2 when the
             verified pack differs from the plan's binding (the validator seam returning another
-            version), and 2 when the shipped pack does not verify (DEFAULT_PACK_DIR patched to a broken
-            scratch pack). --verify, with the observation gather and store_doctor seams stubbed to the
+            version), 2 when the shipped pack does not verify (DEFAULT_PACK_DIR patched to a broken
+            scratch pack), and 2 when the manifest verified and its roster read then returns bytes that
+            do not decode or parse. --verify, with the observation gather and store_doctor seams stubbed to the
             evaluator's full-roster doctor (on a real store that roster is ungraded and the verdict is
             CANNOT-EVALUATE, the evaluator's disclosed residual), exits 0 over a fixture whose two
             migrate sources are both imported, naming both record ids and no INVALID, 1 over the
@@ -20571,6 +20579,17 @@ def _cli_self_test():
                 if rc != EXIT_MALFORMED or "does not verify" not in err:
                     failures.append("import --prompt with a broken pack: rc={!r} stderr={!r} (expected "
                                     "2 + the pack refusal)".format(rc, err))
+                # A manifest that verified and was then replaced by bytes that do not decode or parse
+                # refuses on the roster read (2), never an escape to the class-width backstop.
+                verified = (shipped["version"], shipped["digest"], len(shipped["members"]))
+                for replaced in (b"version = [\n", b"\xff\n"):
+                    with mock.patch.object(pack_gate, "_validate", lambda pack_dir: verified), \
+                            mock.patch.object(pack_gate, "_read_regular", lambda *a, b=replaced: b):
+                        rc, out, err = run_cli(["--prompt", "--root", green])
+                    if rc != EXIT_MALFORMED or out != "" or "does not parse on the roster read" not in err:
+                        failures.append("import --prompt with a manifest replaced by {!r} after it "
+                                        "verified: rc={!r} stdout={!r} stderr={!r} (expected 2 + the "
+                                        "roster-read refusal)".format(replaced, rc, out, err))
 
                 # --verify under the stubbed full-roster doctor: every source complete (0) over the
                 # green fixture; the default fixture's occupying source, with no record and no skip,

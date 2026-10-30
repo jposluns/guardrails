@@ -138,8 +138,9 @@
         <h3>What it does not run yet</h3>
         <p><code>opf adopt apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0,
           and <code>complete</code> refuses
-          with exit 2, so no approval is recorded, nothing is applied, and nothing is retired. Installing the enforcement pack through adoption, and
-          post-adoption import, are not available either. An assistant following the pack stops at
+          with exit 2, so no approval is recorded, nothing is applied, and nothing is retired. Installing the enforcement pack through adoption is not
+          available either, and post-adoption import offers only its read-only verbs: its batch writer is
+          not offered. An assistant following the pack stops at
           the approval step and reports, rather than doing the missing stages by hand.</p>
         <p>Recovery after a refused or reversed run: when an adoption transaction is refused after
           its intent opens, or is reversed, the engine retains <code>.working/</code> holding only
@@ -294,23 +295,42 @@
     <p class="refchips"><code>opf doctor</code> <code>opf doctor --root .</code></p>
 
     <h3 id="cmd-import"><code>opf import</code></h3>
-    <p><b style="color:var(--ink)">Status.</b> The ordinary import modes are retired. The reference CLI's
-      former <code>--scan</code>, <code>--plan</code>, <code>--review</code>, and <code>--apply</code>
-      modes now refuse with exit 2 and write nothing, as does every other <code>opf import</code>
-      command line.</p>
+    <p><b style="color:var(--ink)">Status.</b> The reference CLI offers the read-only import surface
+      <code>opf.import.surface/v1</code>: <code>--prompt</code>, <code>--status</code>, and
+      <code>--verify</code>. Its batch writer, <code>opf record import --batch</code> (spec section
+      8.8), is not offered yet, and neither is the completion writer that records a source's result.
+      The former <code>--scan</code>, <code>--plan</code>, <code>--review</code>, and
+      <code>--apply</code> modes are gone: a former flag gets the same usage error, exit 2, as any
+      unknown argument.</p>
     <p><b style="color:var(--ink)">Purpose.</b> In the standard, <code>opf import</code> is only the
       post-adoption import activity. Clean-start adoption is the intake for an existing project: it
       preserves and retires the old operational files, establishes the new store and enforcement, and
-      imports nothing (spec section 14). Post-adoption import will use the approved, versioned prompt
-      pack (spec section 14.1); the reference CLI does not implement it yet.</p>
-    <p><b style="color:var(--ink)">How it works.</b> The command refuses with a pointer, in words, to
-      clean-start adoption and the prompt pack. It reads none of its arguments, so every command line
-      gets the same refusal: no arguments, <code>--help</code>, any former mode or companion flag
-      however it is spelled, and an unknown flag alike. It resolves no root and reads no named file, so
-      the refusal is the same on an adopted store and on a directory that has not adopted OPFiles.</p>
-    <p><b style="color:var(--ink)">Result.</b> Exit 2 and no change, whatever the mode: nothing is
-      staged under <code>.working/imports/</code>, and nothing is promoted into the store.</p>
-    <p class="refchips"><code>opf import --apply R</code> <span>refused, exit 2</span></p>
+      imports nothing (spec section 14). Post-adoption import uses the approved, versioned prompt pack
+      over the adoption plan's migrate-disposed sources (spec section 14.1); the three verbs expose
+      that activity, and none of them changes the store.</p>
+    <p><b style="color:var(--ink)">How it works.</b> Give exactly one verb, with <code>--root DIR</code>
+      (the current directory by default) and <code>--run RUN_ID</code>, which names the adoption run
+      and can be left out when exactly one adoption run exists at the root. No verb, two verbs, or any
+      other argument is a usage error, refused before anything is read. Each verb reads the adoption
+      run's approved plan from its evidence bundle. <code>--prompt</code> also verifies the shipped
+      prompt pack, refuses unless it is the pack version and digest the plan binds, and prints the pack
+      version and digest, each import member with its sha256, and the plan's migrate-source scope.
+      <code>--status</code> reads the store manifest, the imported series, and each frozen migrate
+      source's live bytes; it reports <code>import_status</code> and, for each migrate-disposed source,
+      the import runs and records that reference it, and a frozen source that is missing or no longer
+      at its plan digest is a finding. <code>--verify</code> evaluates each migrate-disposed source's
+      import completion on the live tree and records nothing: no result, no retirement, and no
+      <code>import_status</code> change. A passing source needs a doctor run that grades the full
+      imported-series roster, which doctor does not produce yet, so on a real store a source that is
+      otherwise complete is reported cannot-evaluate.</p>
+    <p><b style="color:var(--ink)">Result.</b> No store change, whatever the verb: nothing is staged
+      under <code>.working/imports/</code>, no lease is taken, and nothing is promoted into the store.
+      <code>--prompt</code> exits 0 when it prints and 2 on every refusal or cannot-evaluate.
+      <code>--status</code> exits 0 on a clean report, 1 on a finding, and 2 when it cannot evaluate.
+      <code>--verify</code> exits 0 only when every source is complete, 1 on an incomplete source, and
+      2 on one it cannot evaluate, the worst source deciding. Import is a requested operation, so a directory that has not adopted
+      OPFiles, or a root with no adoption run, is a cannot-evaluate (exit 2) for every verb.</p>
+    <p class="refchips"><code>opf import --prompt</code> <code>opf import --status --root .</code> <code>opf import --verify --run RUN_ID</code> <code>opf record import --batch</code> <span>not offered</span></p>
 
     <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
     <p><b style="color:var(--ink)">Status.</b> The reference tooling has no store upgrade to apply.
