@@ -336,8 +336,15 @@ def mapped_cwe_ids(root):
     referenced weaknesses and no complete non-commercial catalogue. Offline, stdlib + repo only."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import gen_rules  # noqa: E402  (the one frontmatter parser + full corpus validation)
+    rules = Path(root) / ".aiqt" / "core" / "rules"
+    try:
+        corpus = gen_rules.load_corpus(rules)
+    except ValueError as exc:
+        # A malformed rule source (bad frontmatter, an integer in non-ASCII digits among them) is a
+        # refusal naming the file, so main exits 2 with a message instead of a traceback.
+        raise ImportError_("rule corpus {} rejected: {}".format(rules, exc))
     ids = set()
-    for _src, fm, _rel in gen_rules.load_corpus(Path(root) / ".aiqt" / "core" / "rules"):
+    for _src, fm, _rel in corpus:
         for key in ("map-cwe-tight", "map-cwe-broad"):
             for cid in fm.get(key, []):
                 ids.add(cid)
@@ -703,6 +710,29 @@ def self_test():
         (_stage / PROVENANCE_NAME).write_text(json.dumps(_prov), encoding="utf-8")
     finally:
         shutil.rmtree(_stage, ignore_errors=True)
+    # a malformed rule source (here an integer in Arabic-Indic digits) is a refusal naming the file, and
+    # main maps it to exit 2 with a message, never a ValueError traceback.
+    import contextlib
+    _rules_root = Path(tempfile.mkdtemp(prefix="aiqt-cwe-rules-"))
+    try:
+        _rules = _rules_root / ".aiqt" / "core" / "rules" / "security"
+        _rules.mkdir(parents=True)
+        (_rules / "bad-tier.md").write_text("---\ncorpus-id: abc123\ntier: ١٠\n---\nbody\n", encoding="utf-8")
+        try:
+            mapped_cwe_ids(_rules_root)
+        except ImportError_ as exc:
+            _expect("bad-tier.md" in str(exc) and "non-ASCII digits" in str(exc), str(exc))
+        else:
+            raise SystemExit("SELF-TEST FAIL: a malformed rule source should have been refused")
+        _err = io.StringIO()
+        with contextlib.redirect_stderr(_err):
+            _code = _main_with_render(lambda *_a, **_k: mapped_cwe_ids(_rules_root),
+                                      ["render", "--staging-dir", str(_rules_root),
+                                       "--output", str(_rules_root / "cwe.toml")])
+        _expect(_code == 2 and "bad-tier.md" in _err.getvalue(), (_code, _err.getvalue()))
+        print("  ok (fails closed): a malformed rule source names its file and exits 2")
+    finally:
+        shutil.rmtree(_rules_root, ignore_errors=True)
     # #378 P1: the V1 / V2 close vectors for this tool's _close_fd_propagating copy, through the harness the
     # other inlined-helper tools share (tools/_close_selftest.py): one close, the released number never
     # touched again, each vector red under RECLOSE (the pre-P1 body) by REUSE alone.
@@ -718,6 +748,16 @@ def self_test():
         raise SystemExit("SELF-TEST FAIL: #378 close vectors: {}".format("; ".join(_close_failures)))
     print("  ok: {} #378 close-vector runs".format(_close_runs))
     print("SELF-TEST: PASS")
+
+
+def _main_with_render(fake, argv):
+    """main(argv) with render replaced by fake for the one call, restored after."""
+    global render
+    saved, render = render, fake
+    try:
+        return main(argv)
+    finally:
+        render = saved
 
 
 def _zip_of(members):
