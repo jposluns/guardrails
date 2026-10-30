@@ -55,6 +55,11 @@ jobs:
   # fetch-depth: 0 gives the version-monotonicity gate the changelog.toml history it compares
   # base-vs-head; fetch-tags: true is explicit (depth-0 already fetches tags) so the tag layer, once
   # a release records a tag, sees real tag objects rather than an unfetched-but-present ambiguity.
+  # persist-credentials: false keeps actions/checkout from writing the job token into the
+  # checkout's git config, where any later step could read it: no job here pushes, fetches or
+  # otherwise uses git credentials after its checkout (each gate reads the history the checkout
+  # already fetched). tools/check_ci_parity.py refuses a checkout step in any workflow without it,
+  # byte-canon-matrix's included.
   # Each gate runs as its own step so a failure names itself in the UI.
   # No step carries continue-on-error: a gate that cannot fail is decorative.
   # Every run: step binds shell: bash. GitHub documents a step-level shell as overriding the job's
@@ -83,6 +88,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -175,6 +181,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -273,6 +280,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -433,6 +441,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -458,6 +467,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -483,6 +493,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -508,6 +519,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -533,6 +545,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -558,6 +571,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -706,6 +720,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -897,6 +912,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -961,6 +977,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1011,6 +1028,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1041,6 +1059,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1067,6 +1086,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1093,6 +1113,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1119,6 +1140,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1144,6 +1166,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1392,6 +1415,8 @@ jobs:
         shell: bash
         run: git config --global core.autocrlf true
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'

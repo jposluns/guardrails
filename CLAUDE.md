@@ -104,6 +104,10 @@ up-to-date, labelled `merge-train-*` pull request, whose run is the full suite, 
 runs it again. A newer run of the same pull request cancels its superseded run; a push run has a
 concurrency group of its own and is never cancelled. `tools/check_ci_parity.py` and
 `tools/check_python_host_pin.py` accept exactly the pinned `concurrency` block and `if:` line.
+Every `actions/checkout` step in `.github/workflows` sets `persist-credentials: false`, so the job token
+stays out of the checkout's git config (no job pushes or fetches after its checkout);
+`tools/check_ci_parity.py` reads each workflow file there as parsed YAML and refuses a checkout step
+without it.
 `tools/ci-status.sh` requires a completed successful run of `.github/workflows/quality.yml` on every
 read, with or without `--require-base` and `--wait`, so a head with none (a member head) reads as missing
 (exit 1), never as passing. It also refuses a commit with any non-success run, a cancelled one included,

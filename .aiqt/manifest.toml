@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "90717703652dba780e92f90d4d48b32b079b374418c6d4bb02bec72fa82eb14e"
+tree-sha256 = "0aa52b063465eebd333372fd019a863510f726a9797fdb30a0a6eddecae17c18"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 506921
-sha256 = "5af48fe549879d79764f269248514f18f3b297e4a4cec3a4e4d04670bbf75e8b"
+bytes = 508237
+sha256 = "606c5e0207e7207da13d8e320afa05532043ec8bd425bc4616d61845c2180172"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -821,8 +821,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 961459
-sha256 = "06d92704b30d5093b02e33cd4b61fcd9560f67be95aafa5ef664d8339ba0816d"
+bytes = 962701
+sha256 = "51f8cebad07c986ccea2ca24a1df9858088e2f687919407b822bcaa91ec6b8ec"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2361,8 +2361,8 @@ sha256 = "a774875eea19a3157fea5127bcd61fbc659d1d56679592bcd3d6e2d2c0d196b1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 582439
-sha256 = "895956032e1e18cb8d5a7fc94c26be2c2674c31f7da8764918b19363f7cf4da3"
+bytes = 583681
+sha256 = "0723008f6f93791c88de567cbd9ee9b7ca987b5646fb0bab0b4a30573c9795f9"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3251,8 +3251,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 641705
-sha256 = "9fd306ea174079daa20a8f17095f547ea033bd75143b8cfe29c47cade16ce1ba"
+bytes = 642947
+sha256 = "a4c4c74a4d9ff2a639fdcc2ea9439c1b59bd2608a0f40afc454276e74d8b6ff4"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3431,8 +3431,8 @@ sha256 = "c3bd103f28aa5c8cf482c5aadb4bb00b3c8470bf1ff81a3a2d85ee9a196b5b83"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 373978
-sha256 = "a3c54e7dc6deddbcfedffb3a89c536e5a5dd495a5eea7e5165fc9536546ca355"
+bytes = 410540
+sha256 = "cb9416985d4d4bcc69fcdc56f5bdcd6f419cb18567a95d1d0d0d60b308e47c3c"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -3581,8 +3581,8 @@ sha256 = "eac06e9e10fb9351ad7c060a0a29b0baf703d7a87a71b9c26a4ea70d4f1e5d0c"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
-bytes = 265491
-sha256 = "355fa85c86b2d132f70ec0e131fbd66437292f22149ae90b55b7a8a2972f63f6"
+bytes = 266653
+sha256 = "0e28c1d2af11f64718c2f74ae527f574eb57c27d5461ef30dabb15998bbfcf20"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
