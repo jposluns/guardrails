@@ -292,6 +292,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import _signal
+import bisect
 import collections
 import datetime
 import errno
@@ -7506,7 +7507,7 @@ def _construct_end(command, pos, escape=None):
     return None
 
 
-def _git_alias_unread_everyword(command, pos):
+def _git_alias_unread_everyword(command, pos, chain=None, base=0):
     """The every-git-word reading of the text from index pos: the region of each git word in the raw text is
     read quote-aware from that word (_git_region_read), denying where it cannot be read to its subcommand word
     (a here-string, heredoc, process substitution, '{fd}' redirect or a word the reader refuses stands before
@@ -7515,7 +7516,10 @@ def _git_alias_unread_everyword(command, pos):
     so this reading reaches a git word inside a construct's own body, a comment, a redirect target or quoted
     text, where it can only over-refuse (a region read from inside quoted text can differ from any word bash
     builds); _git_alias_unread narrows it only where the measured re-lex proves its ground, and takes the union
-    with it everywhere else, so no deny of this reading is lost there."""
+    with it everywhere else, so no deny of this reading is lost there. chain, when given, is the _GitWordChain of
+    a text whose suffix from index base is command, and the reading is made through it (_GitWordChain.unread)."""
+    if chain is not None:
+        return chain.unread(command, pos, base)
     end = pos
     for match in _GIT_WORD_RE.finditer(command, pos):
         if match.start() < end:
@@ -7527,6 +7531,48 @@ def _git_alias_unread_everyword(command, pos):
         if _git_local_alias(words):
             return True
     return False
+
+
+class _GitWordChain:
+    """The every-git-word reading (_git_alias_unread_everyword) of one text, made once for all the suffixes of it
+    that the passes of _git_alias_unread read, each of which once scanned the rest of the text again (time
+    quadratic in a long run of constructs). starts holds where each git word of the text starts, from one scan:
+    no _GIT_WORD_RE match can start inside another (past its 'g' a match holds only i, t and the characters it
+    skips), and whether one starts at an index depends only on the text, its look-behind reading the character
+    before that index even past a search start, so a scan from an index finds the git words of starts from there.
+    clear holds the index in the text of each git word whose walk an earlier reading took to the end of the text
+    with no deny; a region is read forward only, the same on any suffix that holds it, so a walk that reaches
+    such a word ends there with no deny, and each git word's region is read at most once."""
+
+    __slots__ = ("starts", "clear")
+
+    def __init__(self, text):
+        self.starts = [match.start() for match in _GIT_WORD_RE.finditer(text)]
+        self.clear = set()
+
+    def unread(self, command, pos, base):
+        """_git_alias_unread_everyword(command, pos) for command, the suffix of the text from index base. A git
+        word at index 0 of command is matched on command itself: its look-behind reads no character there, where
+        on the text it reads the one before base, so only command can start a git word at that index."""
+        starts = self.starts
+        walked = []
+        if pos == 0 and _GIT_WORD_RE.match(command):
+            at, k = 0, bisect.bisect_left(starts, base + 1)
+        else:
+            k = bisect.bisect_left(starts, base + pos)
+            at, k = (starts[k] - base if k < len(starts) else None), k + 1
+        while at is not None and base + at not in self.clear:
+            region = _git_region_read(command, at)
+            if region is None:
+                return True
+            words, end = region
+            if _git_local_alias(words):
+                return True
+            walked.append(base + at)
+            k = bisect.bisect_left(starts, base + end, k)
+            at, k = (starts[k] - base if k < len(starts) else None), k + 1
+        self.clear.update(walked)
+        return False
 
 
 # The characters no unquoted shell word can carry: a decoded word holding one was spelled through quotes or
@@ -7577,6 +7623,12 @@ def _resumes_at_separator(rest):
     return i >= n or rest[i] in ";\n&|"
 
 
+# Text past a measured construct that holds only blanks before a process substitution ('<(x) >(x)'): a partial
+# lex of it (_lex_pass) skips the blanks and stops at that construct with no segment and its one stop there,
+# unless the text holds a NUL, which every lex refuses at its start (_git_alias_unread).
+_RESUME_AT_PROCSUBST_RE = re.compile(r"[ \t]*[<>]\(")
+
+
 def _git_alias_unread(command, stops):
     """Whether an unparseable command holds a GIT COMMAND of its own whose option region the lexer did not read (A
     GIT REGION THE LEXER DID NOT READ, above), given stops, the (start, words) pairs its partial lex recorded
@@ -7603,6 +7655,10 @@ def _git_alias_unread(command, stops):
     if not stops:
         return False
     pos = min(start for start, _words in stops)
+    # Every pass reads a suffix of the text, which starts at index base of it; the every-git-word reading of
+    # each is made through one _GitWordChain of the text, built at the first pass that reads it.
+    text, base, chain = command, 0, None
+    nul = "\x00" in text
     while True:
         escape = [False]
         end = _construct_end(command, pos, escape)
@@ -7612,10 +7668,22 @@ def _git_alias_unread(command, stops):
             # on the raw text, and the de-quoted reading, which reaches every command word past it but cannot
             # undo a quoted blank or separator that shifts a region; a deny from either stands, so no deny of
             # the every-git-word reading is narrowed here.
-            return (_git_alias_unread_everyword(command, pos)
+            return (_git_alias_unread_everyword(command, pos, chain, base)
                     or any(_segment_runs_git_command(seg)
                            and (_git_region_open(seg) or _git_local_alias(seg))
                            for seg in _git_alias_spelled_segments(command[pos:])))
+        # Where only blanks stand before a process substitution past this construct (_RESUME_AT_PROCSUBST_RE),
+        # the pass below would recover no segment, find its ground unproven (no command separator follows) and
+        # resume at that construct; that pass is made here without copying and lexing the rest of the text,
+        # which, made once per construct, took time quadratic in a long run of them. The next pass then reads
+        # command from that construct, which reads it as the copied rest would (each reading goes forward only).
+        skip = None if nul else _RESUME_AT_PROCSUBST_RE.match(command, end)
+        if skip is not None:
+            chain = _GitWordChain(text) if chain is None else chain
+            if _git_alias_unread_everyword(command, pos, chain, base):
+                return True
+            pos = skip.end() - 2
+            continue
         rest = command[end:]
         with _WordSpellings(), _LexStops() as rstops:
             recovered = _lex_command(rest, partial=True, skip_empty=True)[0]
@@ -7641,10 +7709,13 @@ def _git_alias_unread(command, stops):
                 unproven = True
             if union is not None and (_git_region_open(union) or _git_local_alias(union)):
                 return True
-        if unproven and _git_alias_unread_everyword(command, pos):
-            return True
+        if unproven:
+            chain = _GitWordChain(text) if chain is None else chain
+            if _git_alias_unread_everyword(command, pos, chain, base):
+                return True
         if not rstops.seen:
             return False
+        base += end
         command = rest
         pos = min(start for start, _words in rstops.seen)
 
