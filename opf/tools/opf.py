@@ -172,7 +172,7 @@ def _bootstrap():
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
-    global _opf_adopt_state
+    global _opf_adopt_state, _opf_migrate
     try:
         import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
@@ -190,6 +190,7 @@ def _bootstrap():
         import _opf_adopt_apply  # OPF-ADOPT U1+U2+U3+U4+U5+U7: the apply shell (the three file ops, init-store, the registration ops, enable-hook and the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
+        import _opf_migrate      # OPF-MIGRATE: whole-store relocation to local dir: targets (spec 5.4)
     except ImportError as exc:
         try:
             line = "opf: cannot bootstrap: {} (cannot evaluate)".format(_init_inert(exc.name or str(exc)))
@@ -19356,6 +19357,23 @@ def _cmd_record(rest):
         return EXIT_MALFORMED
 
 
+def _cmd_migrate(rest):
+    """`opf migrate --store <target> [--root DIR]` (spec 5.4): whole-store relocation for local `dir:`
+    targets, run as one ordered, journaled, verified sequence in _opf_migrate (admission before the
+    lease, the single-writer lease, reconcile-first, clean-state and doctor-VALID preconditions,
+    destination validation, commit-for-commit history extraction with the id mapping disclosed,
+    independent clone-back verification, the staged uncommitted product change, the journaled worklog
+    entry at the destination, and the final doctor through the new pointer). Exit 0 relocated (left
+    uncommitted), exit 2 on every refusal or cannot-evaluate; exit 1 is not used. A remote target
+    refuses: its provider and the sync contract land in a later unit."""
+    try:
+        return _opf_migrate.cli(rest)
+    except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success
+        print("opf migrate: cannot evaluate: unexpected error ({!r}); failing closed to exit 2".format(exc),
+              file=sys.stderr)
+        return EXIT_MALFORMED
+
+
 def _adopt_exit(status):
     """Map a planning-layer status (an _opf_adopt_plan.AdoptResult or _opf_adopt.AdoptValidation carries
     the _opf_store VALID / INVALID / CANNOT-EVALUATE vocabulary) to the CLI 0/1/2 exit contract,
@@ -19998,7 +20016,8 @@ def _cli_self_test():
         expect([], EXIT_MALFORMED)
         expect(["frobnicate"], EXIT_MALFORMED)
         for verb in KNOWN_VERBS:
-            if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb", "record", "adopt"):
+            if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb", "record", "adopt",
+                            "migrate"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
         expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
         expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
@@ -20033,6 +20052,25 @@ def _cli_self_test():
         expect(["import", "--scan", "--set", "s.toml"], EXIT_MALFORMED)   # a former --scan form
         expect(["import", "--review", _VALID_RID, "--actor", "x", "--interactive"], EXIT_MALFORMED)
         expect(["import", "--bogus"], EXIT_MALFORMED)            # an unknown flag
+
+        # migrate verb ROUTING (OPF-MIGRATE), judged on exit code AND the usage message. These grammar
+        # cases fail closed in the parser BEFORE any store resolution, so they need no store on disk; the
+        # relocated 0 / refusal 2 discrimination over real stores rides _opf_migrate.self_test. The bare
+        # case asserts the parser's own usage refusal, NOT the KNOWN_VERBS fallback text: both exit 2, so
+        # the message is the wiring discriminator (reverting the migrate dispatch turns it red).
+        expect(["migrate"], EXIT_MALFORMED)                      # bare: --store is required
+        expect(["migrate", "--store"], EXIT_MALFORMED)           # --store needs a value
+        expect(["migrate", "--store", ""], EXIT_MALFORMED)       # empty target refused
+        expect(["migrate", "--store", "dir:x", "--store", "dir:y"], EXIT_MALFORMED)   # duplicate
+        expect(["migrate", "--store", "dir:x", "--root"], EXIT_MALFORMED)             # --root needs a value
+        expect(["migrate", "--bogus"], EXIT_MALFORMED)           # unknown arg
+        mig_err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(mig_err):
+            mig_rc = main(["migrate"])
+        if not (mig_rc == EXIT_MALFORMED and "--store is required" in mig_err.getvalue()
+                and "not yet implemented" not in mig_err.getvalue()):
+            failures.append("bare `migrate` did not reach the migrate parser's usage refusal "
+                            "(rc {}, stderr {!r})".format(mig_rc, mig_err.getvalue()[:200]))
 
         # record verb ROUTING (OPF-RECORD), judged on exit code only. These grammar cases fail closed in the
         # parser BEFORE any store resolution, so they need no store on disk; the recorded 0 / refusal 2
@@ -20195,6 +20233,11 @@ def _cli_self_test():
                 # fixture trees are asserted in _upgrade_self_test.
                 expect(["upgrade", "--root", not_adopted], EXIT_MALFORMED)
                 expect(["upgrade", "--root", broken], EXIT_MALFORMED)
+                # migrate is a requested operation too: a NOT-ADOPTED root is a located refusal (exit 2,
+                # there is nothing to relocate) and a garbage store fails closed (exit 2); both leave the
+                # fixture trees untouched (the byte-identity ride is _opf_migrate.self_test's own).
+                expect(["migrate", "--store", "dir:../elsewhere", "--root", not_adopted], EXIT_MALFORMED)
+                expect(["migrate", "--store", "dir:../elsewhere", "--root", broken], EXIT_MALFORMED)
                 # absorb over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and returns
                 # 0 -- the wiring discriminator (reverting the absorb route sends `absorb` to the fail-closed
                 # KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store fails closed
@@ -23362,6 +23405,7 @@ def _self_tests():
     ("opf-observe", _opf_observe.self_test),
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-record", _opf_record.self_test),
+    ("opf-migrate", _opf_migrate.self_test),
     ("opf-write-guard", _opf_write_guard.self_test),
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
     ("opf-adopt-state", _opf_adopt_state.self_test),
@@ -23386,8 +23430,9 @@ def _self_tests():
 # still run it), so those lanes run each leg once and no group command a second time.
 SELF_TEST_GROUPS = (
     ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
-              "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
-              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli")),
+              "opf-observe", "opf-absorb", "opf-record", "opf-migrate", "opf-write-guard", "opf-fuzz", "opf-check",
+              "opf-journal", "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors",
+              "opf-cli")),
     ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
     ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
 )
@@ -23541,6 +23586,8 @@ def main(argv=None):
         return _cmd_record(rest)
     if verb == "adopt":
         return _cmd_adopt(rest)
+    if verb == "migrate":
+        return _cmd_migrate(rest)
     if verb in KNOWN_VERBS:
         # A recognized verb whose unit has not landed: fail closed (exit 2), never a silent success, so
         # a stub is never mistaken for a completed operation.
