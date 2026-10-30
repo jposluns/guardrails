@@ -176,15 +176,22 @@ views over imported data; assistants read the TOML. Historical releases remain i
 The reserved children `archive/`, `imported/`, `staging/`, and `journals/` are store-tree control
 area, neither machine-store records nor adopter content; they relocate with the machine store.
 OPF MUST NOT write state outside `.working/` except the operation-lock and coupled-init
-substrate in the git common directory, and MUST NOT write any under `.aiqt/`. The record archive
+substrate in the git common directory, and MUST NOT write any under `.aiqt/`. A section 5.4 store
+relocation is the one further exception: `opf migrate --store`, and only it, additionally writes
+the destination store repository, the pointer files at the product repository root, a temporary
+clone-back it MUST remove after verification, and its migrate journal in the git common directory,
+and it MUST write no other state outside `.working/` (section 5.4). The record archive
 MUST remain inside the discovered machine store, and the example name `toml` MUST NOT be hardcoded.
 
-The closed kind vocabulary is `import`, `ingest`, `adoption`, `layout`, `preview`, `record`.
+The closed kind vocabulary is `import`, `ingest`, `adoption`, `layout`, `preview`, `record`,
+`relocation`.
 Import and
 ingest run IDs use `imp-<YYYYMMDD>T<HHMMSS>Z-<hash16>`; adoption uses `adopt-` with that
 suffix. Layout and preview reserve `layout-` and `preview-` with the same suffix. Record
 reserves `record-` with the same suffix; it is a journal-only kind that names just its
-journal home, `journals/record/`, never a staging or imported home. Here
+journal home, `journals/record/`, never a staging or imported home. Relocation reserves
+`reloc-` with the same suffix; it is a journal-only kind that names just its journal home,
+`journals/relocation/`, never a staging or imported home (section 5.4). Here
 `hash16` is 16 lowercase hexadecimal characters; constructors check lexical shape, not calendar
 validity or filesystem safety. File operands MUST use canonical contained relative paths: no empty,
 dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.
@@ -495,25 +502,56 @@ operation MUST:
 
 - run under the consistency contract and the single-writer lease (section 5.7), refusing to start
   from a stale, ahead, or divergent store;
+- refuse to start while the source store holds any open journal transaction or any staging run, so
+  machine-local recovery state never straddles the move;
 - validate the target before any push, per section 5.6: the destination is confirmed to be the
   recorded, intended target, never inherited from ambient state, and a store is never pushed to an
   unexpected place;
 - preserve the store's git history into the destination repository through a history-preserving
-  extraction, and preserve the durable worklog and its archive byte for byte: a
-  relocation that flattens history into a single import commit, or that loses or rewrites any
-  worklog entry, is nonconformant;
+  extraction, and preserve the durable worklog and its archive byte for byte: the extraction
+  replays every commit that touches the store, commit for commit, with identical `.working/` trees
+  and the original author, committer, dates and messages, and a relocation that flattens history
+  into a single import commit, or that loses or rewrites any worklog entry, is nonconformant; the
+  replayed commits carry new commit IDs and lose any commit signatures, a residual section 17
+  discloses;
+- copy the ID reservations under `journals/<kind>/allocations/` byte for byte into the destination
+  working copy, left untracked, so the destination grades the section 8.2 counter checks as the
+  source does (section 17);
 - keep the generated public deliverables in the product repository: `CHANGELOG.md` and `VERSION`
   remain at (or are restored to) the product repository root, and the render targets are rewired
   so future renders keep writing them there (section 5.8);
 - re-point the committed pointer, and the manifest's recorded sync target, in the same change, so
   the pointer, the manifest, and the actual remote never disagree across a landed state;
+- leave a publishable committed pointer in place after every completed migration: where the
+  committed pointer cannot itself safely express the target (section 4.3), it MUST record a
+  relative `dir:` path interpreted against the product repository root, and a target that no
+  publishable committed pointer can express MUST be refused before anything is written;
 - verify the destination before retiring the source: the relocated store is cloned back and
   reconciled (ledgers, indexes, counters, and worklog digests confirmed identical) before the old
   location is removed or archived. The old in-repo `.working/` tree leaves the product repository
   only in the migration change itself, after that verification, and the removal is recorded. An
   unverified destination never justifies destroying the source: this is the
   verified-restore-path discipline applied to the store itself;
-- record the relocation as a worklog entry naming both the old and the new location.
+- record the relocation as a worklog entry naming both the old and the new location, authored as
+  a separate worklog-append transaction at the destination after that verification, never as part
+  of the transfer itself (section 8.2).
+
+The operation is journaled and recoverable: each run keeps one migrate journal of the journal-only
+`relocation` kind (section 4.2) in the source repository's git common directory, beside the
+operation-lock substrate, so the journal survives the removal of an in-repo source tree, and
+requested recovery of an interrupted relocation MUST fail closed on a missing journal
+(section 4.2). The migrate journal, the destination repository, the pointer files and a temporary
+clone-back removed after verification are the only state `opf migrate --store` writes outside
+`.working/` (section 4.2).
+
+Moving into an in-repo store never commits to the current branch: where the destination is the
+product repository itself, the migration MUST prepare the incoming `.working/` tree on a review
+branch, and the move lands through the product repository's normal review flow.
+
+Between the destination going live and the pointer change landing, a clone of the product
+repository can still resolve the old location; that window is accepted, and the section 5.7
+consistency contract with the doctor's pointer and sync-target agreement (section 11) is the
+control that surfaces it, with no long-held lease spanning the window.
 
 Migration is symmetric: a store can move in-repo to companion, companion to in-repo, anywhere to
 anywhere, repeatedly, and each move is one recorded, verified, history-preserving operation.
@@ -550,7 +588,9 @@ store location), `auth` (authenticate creation with the host), and `sync` (clone
   target between them: any local path and any git URL on any host.
 - `github` and `gitlab` plug in only for their create and auth API conveniences; their sync is
   ordinary git. Further hosts join by registering a provider, never by extending the target
-  grammar.
+  grammar. Until a reviewed `github` or `gitlab` provider registration lands, the reference
+  tooling registers neither, and a `github:` or `gitlab:` target MUST refuse as an unregistered
+  provider.
 - Authentication uses the adopter's existing git credentials (SSH keys, tokens through git's own
   credential machinery). OPF stores no credentials of its own, ever.
 - An unregistered provider is unavailable until it is reviewed and registered, on the same posture
@@ -928,7 +968,10 @@ counter high-water, contiguity and no-deletion checks MUST evaluate each series 
 allocation MUST increment its counter under the store's lock as one atomic claim, so no gap between
 choosing and reserving can double-allocate. Counters MUST NOT be reset and IDs
 MUST NOT be reused, even when a record is superseded, refuted, or its work reverted. Rotation, index
-rewrites, and store relocation MUST NOT touch `counters.toml`. Re-adoption MUST seed both series
+rewrites, and store relocation MUST NOT touch `counters.toml`. That ban covers the transfer itself:
+the section 5.4 relocation worklog entry MUST be authored as a separate worklog-append transaction
+at the destination, after the destination is verified, so the entry's own ID claim is an authoring
+operation's, never the transfer's (section 5.4). Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
 prior ancestry. Only a genuinely first adoption MAY start its counters at zero. A store manifest
 declaring a `spec_version` of 2.0.0 or above whose `[opf].homes` is missing or not the integer 2
@@ -1855,7 +1898,10 @@ A per-fragment acceptance or later adopter checkpoint MUST NOT occur within the 
 Any bound-item drift MUST refuse into a fresh plan with its own single approval; a changed old
 file MUST NOT be retired. One renewal is not drift: a section 5.4 whole-store relocation MUST
 rebind the plan's bound paths to their relocated equivalents with the bound digests unchanged
-(section 14.2). Approval MUST NOT absorb a separate posture-weakening authorization (section 11)
+(section 14.2). That rebinding MUST be recorded as an append-only renewal record in the adoption
+bundle, mapping the old store identity to the new with the bound digests unchanged; `plan.toml`,
+the approval and the sealed inventories MUST stay byte-identical (section 14.2).
+Approval MUST NOT absorb a separate posture-weakening authorization (section 11)
 or changelog curation (section 7.3). Digests establish binding, not actor authenticity or
 semantic correctness; self-asserted identity and same-user tampering remain disclosed residuals.
 
@@ -1988,7 +2034,10 @@ The plan MUST record one disposition per foreign file from `keep`, `migrate`, `m
   `.working/archive/moved/<source-path>`, preserving substructure. An occupied move destination
   MUST be a collision finding, never an overwrite. An explicit destination inside the store tree
   MUST lie beneath `.working/archive/moved/`. The default Move MUST refuse a store resolved
-  outside the product root until a multi-root coordinator exists. The relocation MUST run only
+  outside the product root until a multi-root coordinator exists. A section 5.4 relocation MUST
+  likewise refuse a destination outside the product root while any admitted run whose retirement
+  is unrecorded holds a default Move row, so a pending default Move is never stranded
+  (section 5.4). The relocation MUST run only
   after the plan-bound green completion check, with digest-verified preservation; for an
   occupying source it MUST copy the archived bytes to the move destination, and the archived
   copy MUST stay retained.
@@ -2059,7 +2108,9 @@ MUST carry every frozen source, the adoption archive and every evidence bundle b
 into the destination at unchanged store-relative paths, MUST NOT execute, advance or end any
 disposition, and MUST renew the approval's bound paths to their relocated equivalents in the
 same recorded change, the bound digests unchanged; any byte difference remains bound-item drift
-refusing into a fresh plan (section 14.1).
+refusing into a fresh plan (section 14.1). Where the adoption home exists, `opf migrate --store`
+MUST pass the completion check 5 probe (section 14.1) at the destination before the old tree is
+removed, and a destination that fails that probe MUST refuse the relocation.
 
 Detection MUST surface unresolved files in the plan and MUST NOT silently absorb, delete or
 overwrite them. Dispositions are plan data and MUST be covered by the single approval, never by
@@ -2339,7 +2390,10 @@ The gates in this standard are strong where they are strong and say so where the
   `journals/<kind>/allocations/` for the section 8.2 counter checks, so a clone, which holds none,
   can grade those checks differently from the original store: where a reservation covers a number
   that no published record carries, the original store's doctor treats that number as issued and a
-  clone's doctor reports it missing. Adoption admission and recorded retirement, which the doctor
+  clone's doctor reports it missing. A section 5.4 relocation copies those reservations byte for
+  byte into the destination working copy, left untracked, so the destination grades the counter
+  checks as the source does; every other clone keeps this residual (section 5.4). Adoption
+  admission and recorded retirement, which the doctor
   decides from committed evidence alone, grade the same in both (section 4.2).
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
@@ -2349,6 +2403,11 @@ The gates in this standard are strong where they are strong and say so where the
   verify the backup, access, or hosting discipline of the repository that tracks the store. The
   local-only pattern in particular places durability wholly on the adopter's own backup, which is
   why choosing it SHOULD be a recorded decision (section 5.3).
+- A section 5.4 relocation replays history commit for commit with identical `.working/` trees and
+  the original author, committer, dates and messages, but the replayed commits carry new commit
+  IDs and lose any commit signatures: an external reference to an old store commit ID does not
+  resolve at the destination, and signature verification does not transfer. The recorded commit
+  mapping and the byte-for-byte worklog comparison are the compensating controls.
 - The single-writer lease has a propagation window: between a lease being taken and its becoming
   observable at the sync target, two systems can both begin. The consistency contract's divergence
   check is the overlapping control that catches that collision after the fact; the two layers

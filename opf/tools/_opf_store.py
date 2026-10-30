@@ -119,17 +119,19 @@ JOURNALS_REL = "{}/{}".format(WORKING_DIRNAME, JOURNALS_DIRNAME)
 STORE_TREE_CONTROL_DIRS = (IMPORTED_DIRNAME, ARCHIVE_DIRNAME_STORE, STAGING_DIRNAME, JOURNALS_DIRNAME)
 RESERVED_MACHINE_SUBDIRS = ("imports",) + STORE_TREE_CONTROL_DIRS
 STAGING_KINDS = ("import", "ingest", "adoption", "layout", "preview")
-# The journal-home vocabulary: every staging kind plus the journal-only `record` kind (spec 4.2).
-# Record names ONLY a journal home: journal_root, txn_record and allocation_record admit it, while
-# stage_run, evidence_run and evidence_inventory keep refusing it, so `record` never gains a
-# staging or imported home.
-JOURNAL_KINDS = STAGING_KINDS + ("record",)
+# The journal-home vocabulary: every staging kind plus the journal-only `record` and `relocation`
+# kinds (spec 4.2). A journal-only kind names ONLY a journal home: journal_root, txn_record and
+# allocation_record admit it, while stage_run, evidence_run and evidence_inventory keep refusing
+# it, so neither `record` nor `relocation` ever gains a staging or imported home.
+JOURNAL_KINDS = STAGING_KINDS + ("record", "relocation")
 # Import and ingest share the import engine's grammar; adoption has its own existing grammar.
-# Layout and preview reserve new prefixes with the same timestamp/hash shape; record reserves
-# record- with that shape too (journal home only). This checks shape, not calendar validity,
-# ownership, existence, symlinks, or permission to mutate a constructed path.
+# Layout and preview reserve new prefixes with the same timestamp/hash shape; record and
+# relocation reserve record- and reloc- with that shape too (journal home only). This checks
+# shape, not calendar validity, ownership, existence, symlinks, or permission to mutate a
+# constructed path.
 _HOME_RUN_PREFIXES = {"import": "imp", "ingest": "imp", "adoption": "adopt",
-                      "layout": "layout", "preview": "preview", "record": "record"}
+                      "layout": "layout", "preview": "preview", "record": "record",
+                      "relocation": "reloc"}
 _HOME_RUN_SUFFIX = r"-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
 # Evidence-bundle inventories: inventory.toml, then one inventory-<phase>.toml per later phase.
 _EVIDENCE_INVENTORY_RE = re.compile(r"inventory(?:-[a-z][a-z0-9]{0,31})?\.toml")
