@@ -185,13 +185,18 @@ def _registry_ceiling(root, probe):
     return _probe
 
 
-# The child of the dispatcher checks: it loads the hook script from the directory in argv[1], puts the
-# registry walk behind the same test-only ceiling the in-process rows run behind (argv[2] is the JSON list
-# of the (st_dev, st_ino) pairs of _registry_ceiling's .above, each read as carrying no registry), and runs
-# the REAL dispatcher entry for the mode in argv[3], so a registry on the host above the fixture root (for
-# example a TMPDIR inside an orchestrated tree) cannot decide the child's verdict either.
+# The child of the dispatcher checks: it first writes the sorted keys of its own os.environ as one JSON
+# line on stderr (before the hook is imported, and apart from the hook's stdout), so a check can pin the
+# environment the child actually received; it then loads the hook script from the directory in argv[1],
+# puts the registry walk behind the same test-only ceiling the in-process rows run behind (argv[2] is the
+# JSON list of the (st_dev, st_ino) pairs of _registry_ceiling's .above, each read as carrying no
+# registry), and runs the REAL dispatcher entry for the mode in argv[3], so a registry on the host above
+# the fixture root (for example a TMPDIR inside an orchestrated tree) cannot decide the child's verdict
+# either.
 _CEILED_DISPATCH_CHILD = (
     "import json, os, sys\n"
+    "sys.stderr.write(json.dumps(sorted(os.environ)) + '\\n')\n"
+    "sys.stderr.flush()\n"
     "sys.path.insert(0, sys.argv[1])\n"
     "import aiqt_hooks\n"
     "above = frozenset(tuple(pair) for pair in json.loads(sys.argv[2]))\n"
@@ -208,7 +213,11 @@ def _controlled_child_env(home, **extra):
     run's PATH (which puts the fixture git wrapper first), HOME at the fixture directory home, a pinned
     UTF-8 locale, and extra, what the check itself sets. A variable in the caller's environment that the
     hook reads (an opt-in AIQT_ORCH_REQUIRE_REGISTRY, or anything an orchestrator session exports) never
-    reaches the child, so the child's verdict cannot depend on where the suite was launched."""
+    reaches the child, so the child's verdict cannot depend on where the suite was launched. PATH is the
+    one input still taken from the caller, by design: the hook runs git by name, so a verdict it reaches
+    through a git subprocess can depend on which git binary that PATH selects (the fixture wrapper goes
+    first, but the git it runs is the one found on the caller's PATH). That is a disclosed residual, not
+    something these checks control."""
     env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(home), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
     env.update(extra)
     return env
@@ -12580,37 +12589,49 @@ def _main_isolated(report_path=None):
                 input=json.dumps(fx.payload("PreToolUse", "Bash", {
                     "command": "cat <<$'\\c\u00df'\ntext\nEOF\n", "run_in_background": False})),
                 capture_output=True, text=True, timeout=60, env=_ctl_env())
+            # The child's first stderr line is the keys of the environment it received; the rest is the
+            # hook's own stderr.
+            received, _, err = ctl.stderr.partition("\n")
+            try:
+                received = json.loads(received)
+            except ValueError:
+                received = None
             try:
                 out = json.loads(ctl.stdout)
             except ValueError:
                 out = None
             note = out.get("systemMessage") if isinstance(out, dict) else None
-            return (ctl.returncode, sorted(out) if isinstance(out, dict) else None,
-                    isinstance(note, str) and bool(note.strip()), "failing closed" in ctl.stderr)
-        check("trunc/oos-ctl-escape-dispatcher-notes-exit-0", _ctl_dispatch(ti, tmp),
+            return ((ctl.returncode, sorted(out) if isinstance(out, dict) else None,
+                     isinstance(note, str) and bool(note.strip()), "failing closed" in err), received)
+        check("trunc/oos-ctl-escape-dispatcher-notes-exit-0", _ctl_dispatch(ti, tmp)[0],
               (0, ["systemMessage"], True, False))
-        # The same child under the two ways a caller's session reached it: a run root under a host
-        # orchestration registry (a TMPDIR inside an orchestrated tree, which turned the row above into the
-        # registry-scope silent allow; the stand-in registry sits above the run root, beyond the ceiling),
-        # and an opt-in AIQT_ORCH_REQUIRE_REGISTRY in this process's environment at launch (which an
-        # environment copied from os.environ passes on, turning the note into a deny). The child's
-        # environment holds exactly the allowlist and what the check sets.
+        # The same child with its run root below a host orchestration registry (a TMPDIR inside an
+        # orchestrated tree; the stand-in registry sits above the run root, beyond the ceiling): the caller
+        # setting that did change the child's verdict, turning the row above into the registry-scope silent
+        # allow. Then, as defence in depth, the same child launched while this process's environment holds
+        # an opt-in AIQT_ORCH_REQUIRE_REGISTRY and an unrelated canary variable (both restored after). An
+        # inherited opt-in could not reach the child even before, since _main_isolated removes it at entry
+        # and the earlier launch environment filtered it out. The last row is the sorted keys the child
+        # reported of its own os.environ, which must be exactly the allowlist and what the check sets, so
+        # nothing from the caller's environment gets through.
         _ctl_host = tmp / "ctl-host"
         (_ctl_host / ".aiqt").mkdir(parents=True)
         (_ctl_host / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)), encoding="utf-8")
         (_ctl_host / "run").mkdir()
         _ctl_fx = Fixture(_ctl_host / "run", "trunc-no-registry")
         (_ctl_fx.root / ".aiqt" / "orchestration.local.json").unlink()
-        _ctl_rows = [_ctl_dispatch(_ctl_fx, _ctl_host / "run")]
-        _ctl_rr_old = os.environ.get(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV)
-        os.environ[aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV] = "1"
+        _ctl_rows = [_ctl_dispatch(_ctl_fx, _ctl_host / "run")[0]]
+        _ctl_saved = {name: os.environ.get(name)
+                      for name in (aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV, "SELFTEST_ORCH_HOOKS_CTL_CANARY")}
+        os.environ.update(dict.fromkeys(_ctl_saved, "1"))
         try:
-            _ctl_rows += [_ctl_dispatch(ti, tmp), sorted(_ctl_env())]
+            _ctl_rows += list(_ctl_dispatch(ti, tmp))
         finally:
-            if _ctl_rr_old is None:
-                os.environ.pop(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV, None)
-            else:
-                os.environ[aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV] = _ctl_rr_old
+            for name, value in _ctl_saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
         check("trunc/oos-ctl-dispatcher-verdict-ignores-caller-environment", _ctl_rows,
               [(0, ["systemMessage"], True, False), (0, ["systemMessage"], True, False),
                ["HOME", "LANG", "LC_ALL", "PATH", "XDG_STATE_HOME"]])
