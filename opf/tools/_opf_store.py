@@ -119,17 +119,30 @@ JOURNALS_REL = "{}/{}".format(WORKING_DIRNAME, JOURNALS_DIRNAME)
 STORE_TREE_CONTROL_DIRS = (IMPORTED_DIRNAME, ARCHIVE_DIRNAME_STORE, STAGING_DIRNAME, JOURNALS_DIRNAME)
 RESERVED_MACHINE_SUBDIRS = ("imports",) + STORE_TREE_CONTROL_DIRS
 STAGING_KINDS = ("import", "ingest", "adoption", "layout", "preview")
-# The journal-home vocabulary: every staging kind plus the journal-only `record` kind (spec 4.2).
-# Record names ONLY a journal home: journal_root, txn_record and allocation_record admit it, while
-# stage_run, evidence_run and evidence_inventory keep refusing it, so `record` never gains a
-# staging or imported home.
+# The .working/ journal-home vocabulary: every staging kind plus the journal-only `record` kind
+# (spec 4.2). Record names ONLY a journal home: journal_root, txn_record and allocation_record
+# admit it, while stage_run, evidence_run and evidence_inventory keep refusing it, so `record`
+# never gains a staging or imported home.
 JOURNAL_KINDS = STAGING_KINDS + ("record",)
+# The closed kind vocabulary (spec 4.2). `relocation` is journal-only like `record`, but its one
+# journal home is opf-reloc/ in the source repository's git common directory, beside the
+# operation-lock substrate (spec 5.4), and a relocation run claims no IDs (spec 8.2): every
+# .working/ journal constructor refuses it, so no reader expects .working/journals/relocation/ or
+# a relocation allocations home, and relocation_journal_root and relocation_txn_record below are
+# its own explicitly named constructors.
+KIND_VOCABULARY = JOURNAL_KINDS + ("relocation",)
+# The migrate journal's directory in the git common directory (spec 4.2/5.4), beside the
+# operation-lock substrate; the relocation constructors return paths relative to that directory's
+# parent, the git common directory itself.
+RELOCATION_CONTROL_DIRNAME = "opf-reloc"
 # Import and ingest share the import engine's grammar; adoption has its own existing grammar.
-# Layout and preview reserve new prefixes with the same timestamp/hash shape; record reserves
-# record- with that shape too (journal home only). This checks shape, not calendar validity,
-# ownership, existence, symlinks, or permission to mutate a constructed path.
+# Layout and preview reserve new prefixes with the same timestamp/hash shape; record and
+# relocation reserve record- and reloc- with that shape too (journal home only). This checks
+# shape, not calendar validity, ownership, existence, symlinks, or permission to mutate a
+# constructed path.
 _HOME_RUN_PREFIXES = {"import": "imp", "ingest": "imp", "adoption": "adopt",
-                      "layout": "layout", "preview": "preview", "record": "record"}
+                      "layout": "layout", "preview": "preview", "record": "record",
+                      "relocation": "reloc"}
 _HOME_RUN_SUFFIX = r"-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
 # Evidence-bundle inventories: inventory.toml, then one inventory-<phase>.toml per later phase.
 _EVIDENCE_INVENTORY_RE = re.compile(r"inventory(?:-[a-z][a-z0-9]{0,31})?\.toml")
@@ -301,6 +314,20 @@ def allocation_record(kind, run_id):
     run = _home_run(kind, run_id, JOURNAL_KINDS)
     kind, run_id = run.split("/")
     return "{}/{}/allocations/{}.toml".format(JOURNALS_REL, kind, run_id)
+
+
+def relocation_journal_root():
+    """Git-common-directory-relative journal frames of the journal-only relocation kind: the
+    migrate journal lives at opf-reloc/ beside the operation-lock substrate, never under
+    .working/, so it survives the removal of an in-repo source tree (spec 4.2/5.4)."""
+    return "{}/journal".format(RELOCATION_CONTROL_DIRNAME)
+
+
+def relocation_txn_record(run_id):
+    """Git-common-directory-relative transaction projection of one relocation run. A relocation
+    run claims no IDs (spec 8.2), so the kind has no allocation-record counterpart."""
+    run = _home_run("relocation", run_id, KIND_VOCABULARY)
+    return "{}/runs/{}/transaction.toml".format(RELOCATION_CONTROL_DIRNAME, run.split("/")[1])
 
 
 def evidence_inventory(kind, run_id, phase=None):
