@@ -556,6 +556,12 @@ def import_binding(node: ast.Import | ast.ImportFrom,
     return alias.asname or alias.name, tuple(node.module.split(".")) + (alias.name,)
 
 
+def unwatched_star(node: ast.Import | ast.ImportFrom, alias: ast.alias) -> bool:
+    """Return whether ``alias`` is a star import from a module the check does not watch."""
+    return (isinstance(node, ast.ImportFrom) and alias.name == "*"
+            and bool(node.level or node.module.split(".")[0] not in WATCHED_MODULES))
+
+
 def import_reach(node: ast.Import | ast.ImportFrom, alias: ast.alias) -> str | None:
     """Return the dunder or namespace reader that ``alias`` imports or imports from, or ``None``."""
     parts = alias.name.split(".")
@@ -772,7 +778,10 @@ def binding_homes(source: str, tree: ast.Module,
     scope stores it, after private name mangling, and whether something
     binds it in that scope (an import, an assignment, a class, a def, a
     parameter, or, for the module, an assignment or import in any scope
-    under a global declaration of the name). symtable reports no columns, so
+    under a global declaration of the name). Each star import of a module the
+    check does not watch (unwatched_star()) maps to ``[(table id, "*",
+    True)]``: symtable records no name it binds, so it counts as binding
+    every one of ``names`` in its scope. symtable reports no columns, so
     it is built for a copy of ``source`` with each such node marked
     (ScopeMarkers), and the scope holding a marker is the scope of its node.
     A name a scope declares global binds in the module; a free name (a
@@ -803,6 +812,7 @@ def binding_homes(source: str, tree: ast.Module,
     twin = ast.parse(source)
     marks: dict[int, str] = {}
     targets: dict[int, tuple[str, str, bool]] = {}
+    stars: dict[int, str] = {}
     for node, copy in zip(ast.walk(tree), ast.walk(twin)):
         marker = prefix + str(len(marks))
         if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in names
@@ -815,6 +825,9 @@ def binding_homes(source: str, tree: ast.Module,
                 if binding is not None:
                     marks[id(copy)] = marker
                     targets[id(alias)] = (marker, mangled(binding[0], owners.get(id(node))), False)
+                elif unwatched_star(node, alias):
+                    marks[id(copy)] = marker
+                    stars[id(alias)] = marker
         elif isinstance(node, ast.Match):
             marks[id(copy)] = marker
             for case in node.cases:
@@ -846,10 +859,18 @@ def binding_homes(source: str, tree: ast.Module,
         for child in table.get_children():
             parents[child.get_id()] = table
             pending.append(child)
+    # The scope of each star import of an unwatched module, which may bind
+    # any name there.
+    starred: dict[int, int] = {}
+    for key, marker in stars.items():
+        if marker not in tables:
+            return None
+        starred[key] = tables[marker].get_id()
 
     def bound(table: symtable.SymbolTable, name: str) -> bool:
         return (name in table.get_identifiers() and table.lookup(name).is_local()
-                or table is top and name in global_bound)
+                or table is top and name in global_bound
+                or table.get_id() in starred.values())
 
     def global_home(name: str) -> list[symtable.SymbolTable]:
         # The module, for a name it binds; a name it never binds reads nothing
@@ -890,6 +911,8 @@ def binding_homes(source: str, tree: ast.Module,
         if found is None:
             return None
         homes[key] = [(home.get_id(), name, bound(home, name)) for home in found]
+    for key, home_id in starred.items():
+        homes[key] = [(home_id, "*", True)]
     return homes
 
 
@@ -932,6 +955,10 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
             paths = imported.setdefault(home, {}).setdefault(name, [])
             if binding[1] not in paths:
                 paths.append(binding[1])
+    # The scopes holding a star import of an unwatched module, which may bind
+    # any name there after or instead of a watched import of it.
+    starred = {homes[id(alias)][0][0] for node in imports for alias in node.names
+               if unwatched_star(node, alias)}
     # The paths each class attribute may hold, by attribute name, for each
     # one a class body assigns from a name or chain that reads a watched path
     # (``_os = _os``, as the standard library's dbm.dumb does); filled in
@@ -975,13 +1002,16 @@ def stdin_inheriting_launches(source: str) -> list[tuple[str, str, int]]:
         # watched module it names only in a scope that does not bind it, and
         # a scope the name may be found in that has no such path binds it to
         # something else (DEVNULL = None in a class body, class subprocess,
-        # a parameter named subprocess), so the chain reads nothing.
+        # a parameter named subprocess), so the chain reads nothing; so
+        # does a scope in ``starred``, whatever it imports.
         attrs: list[str] = []
         while isinstance(node, ast.Attribute):
             attrs.insert(0, node.attr)
             node = node.value
         found: list[tuple[str, ...]] = []
         for home, name, bound in homes.get(id(node), []) if isinstance(node, ast.Name) else []:
+            if not held and home in starred:
+                return []
             paths = imported.get(home, {}).get(name)
             module = node.id in WATCHED_MODULES and (held or not bound)
             path = paths[0] if paths else (node.id,) if module else None
@@ -1330,11 +1360,24 @@ class StdinIsolationTests(unittest.TestCase):
     module. A stdin value read through subprocess with no import of it is
     credited only when no scope the read may resolve through binds the name
     (by an assignment, a class, a def, a parameter, an import of another
-    name, or an assignment or import under a global or nonlocal
-    declaration): any such binding without an isolating import of that
-    scope (``class subprocess: DEVNULL = None``, ``def f(subprocess)``)
-    means the value is not credited. A global declaration under which no
-    scope assigns or imports the name binds nothing.
+    name, an assignment or import under a global or nonlocal declaration,
+    or a star import as below): any such binding without an isolating
+    import of that scope (``class subprocess: DEVNULL = None``, ``def
+    f(subprocess)``) means the value is not credited. Two forms that store
+    nothing in the name count as bindings, so err toward flagging: an
+    annotation alone in a class body (``subprocess: int``) binds the name in
+    that class, and a global declaration followed by del (``global
+    subprocess`` then ``del subprocess`` in a function) counts as a module
+    binding. A global declaration under which no scope assigns, imports or
+    deletes the name binds nothing. A star import of a module the check does
+    not watch (``from helper import *``, a relative one included) counts as
+    binding every watched name in its scope, since symtable records no name
+    it binds: no stdin value read through such a name in that scope, or in a
+    scope whose read resolves to it, is credited, whichever of the star
+    import and an isolating import of the name comes first. The cost is
+    that a module with such a star import has no credited stdin value read
+    through subprocess, DEVNULL, PIPE or any other watched name. A star
+    import from a watched module is flagged on its own, as above.
 
     Not enforced: launches through other modules (asyncio, pty, multiprocessing,
     posix, posixpath, importlib.import_module, inspect, gc); a read through
@@ -1381,6 +1424,18 @@ class StdinIsolationTests(unittest.TestCase):
          "    run(['cat'], stdin=subprocess.DEVNULL)\n", [("f", "subprocess.run", 5)]),
         ("from subprocess import run\ndef f(subprocess):\n"
          "    run(['cat'], stdin=subprocess.DEVNULL)\n", [("f", "subprocess.run", 3)]),
+    )
+
+    # A stdin value read through a name that a star import of an unwatched
+    # module may bind: a helper defining subprocess, DEVNULL, or both.
+    STAR_WITNESSES = (
+        ("from subprocess import run\nfrom helper import *\n"
+         "run(['cat'], stdin=subprocess.DEVNULL)\n", [("<module>", "subprocess.run", 3)]),
+        ("from subprocess import DEVNULL, run\nfrom helper import *\n"
+         "run(['cat'], stdin=DEVNULL)\n", [("<module>", "subprocess.run", 3)]),
+        ("from subprocess import DEVNULL, run\nfrom helper import *\n"
+         "run(['cat'], stdin=DEVNULL)\nrun(['cat'], stdin=subprocess.DEVNULL)\n",
+         [("<module>", "subprocess.run", 3), ("<module>", "subprocess.run", 4)]),
     )
 
     def test_every_launch_isolates_stdin(self):
@@ -1929,9 +1984,15 @@ class StdinIsolationTests(unittest.TestCase):
         # value, only when no scope the read may resolve through binds the
         # name: an assignment, a class, a def, a parameter, an import of
         # another name, or an assignment under a global or nonlocal
-        # declaration makes the value credit nothing. An isolating import in
-        # the scope that binds the name, whichever scope that is, is credited.
+        # declaration makes the value credit nothing, and so, erring toward
+        # flagging, do an annotation alone in a class body and a del under a
+        # global declaration. An isolating import in the scope that binds
+        # the name, whichever scope that is, is credited.
         flagged = self.SUBPROCESS_REBOUND + (
+            ("from subprocess import run\nclass C:\n    subprocess: int\n"
+             "    run(['cat'], stdin=subprocess.DEVNULL)\n", [("C", "subprocess.run", 4)]),
+            ("from subprocess import run\ndef g():\n    global subprocess\n    del subprocess\n"
+             "run(['cat'], stdin=subprocess.DEVNULL)\n", [("<module>", "subprocess.run", 5)]),
             ("from subprocess import run\nsubprocess = None\n"
              "run(['cat'], stdin=subprocess.DEVNULL)\n", [("<module>", "subprocess.run", 3)]),
             ("from subprocess import run\ndef subprocess():\n    pass\n"
@@ -1996,6 +2057,62 @@ class StdinIsolationTests(unittest.TestCase):
         with mock.patch.object(this, "binding_homes", unbound):
             self.assertEqual(stdin_inheriting_launches("from subprocess import run\nrun(['cat'])\n"),
                              [("<module>", "subprocess.run", 2)])
+
+    def test_detector_credits_no_stdin_value_a_star_import_may_bind(self):
+        # symtable records no name a star import binds, so one from a module
+        # the check does not watch counts as binding every watched name in its
+        # scope: no stdin value read through such a name there, or in a scope
+        # whose read resolves there, is credited, whichever import comes
+        # first. A scope with its own isolating import is credited, input=
+        # still isolates, and a star import from a watched module is flagged
+        # on its own as before.
+        flagged = self.STAR_WITNESSES + (
+            ("from helper import *\nfrom subprocess import DEVNULL, run\nrun(['cat'], stdin=DEVNULL)\n",
+             [("<module>", "subprocess.run", 3)]),
+            ("from subprocess import run\nfrom helper import *\ndef f():\n"
+             "    run(['cat'], stdin=subprocess.PIPE)\n", [("f", "subprocess.run", 4)]),
+            ("from subprocess import run\nfrom helper import *\nclass C:\n"
+             "    from subprocess import DEVNULL\n    run(['cat'], stdin=DEVNULL)\n",
+             [("C", "subprocess.run", 5)]),
+            ("import subprocess\nfrom helper.sub import *\n"
+             "subprocess.run(['cat'], stdin=subprocess.DEVNULL)\n", [("<module>", "subprocess.run", 3)]),
+            ("from subprocess import DEVNULL, run\nfrom . import *\nrun(['cat'], stdin=DEVNULL)\n",
+             [("<module>", "subprocess.run", 3)]),
+            ("from subprocess import DEVNULL, run\nfrom .subprocess import *\nrun(['cat'], stdin=DEVNULL)\n",
+             [("<module>", "subprocess.run", 3)]),
+        )
+        credited = (
+            ("from helper import *\ndef f():\n    from subprocess import DEVNULL, run\n"
+             "    run(['cat'], stdin=DEVNULL)\n", []),
+            ("from helper import *\ndef f():\n    import subprocess\n"
+             "    subprocess.run(['cat'], stdin=subprocess.DEVNULL)\n", []),
+            ("from subprocess import run\nfrom helper import *\nrun(['cat'], input=b'')\n", []),
+        )
+        watched = (
+            ("from subprocess import *\nfrom subprocess import DEVNULL, run\nrun(['cat'], stdin=DEVNULL)\n",
+             [("<module>", "subprocess.*", 1)]),
+            ("from os import *\nimport subprocess\nsubprocess.run(['cat'], stdin=subprocess.DEVNULL)\n",
+             [("<module>", "os.*", 1)]),
+            ("from os.path import *\nfrom subprocess import PIPE, run\nrun(['cat'], stdin=PIPE)\n",
+             [("<module>", "os.path.*", 1)]),
+        )
+        for source, expected in flagged + credited + watched:
+            with self.subTest(source=source):
+                self.assertEqual(stdin_inheriting_launches(source), expected)
+
+    def test_star_import_taken_for_no_binding_credits_the_witnesses(self):
+        # With no star import counted as a binding, each witness is credited
+        # though the name read is the helper's; a star import from a watched
+        # module is flagged either way.
+        this = sys.modules[__name__]
+        for source, expected in self.STAR_WITNESSES:
+            with self.subTest(source=source):
+                self.assertEqual(stdin_inheriting_launches(source), expected)
+                with mock.patch.object(this, "unwatched_star", lambda node, alias: False):
+                    self.assertEqual(stdin_inheriting_launches(source), [])
+        watched = "from subprocess import *\nrun(['cat'], stdin=DEVNULL)\n"
+        with mock.patch.object(this, "unwatched_star", lambda node, alias: False):
+            self.assertEqual(stdin_inheriting_launches(watched), [("<module>", "subprocess.*", 1)])
 
     def test_detector_binds_a_nonlocal_import_where_a_walrus_binds_the_name(self):
         # A walrus in a comprehension, a generator expression, or the
