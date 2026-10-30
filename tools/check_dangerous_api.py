@@ -321,7 +321,7 @@ _SAVED = ("self-test stub: keeps the real subprocess.run or Popen to delegate to
           " turns shell on")
 ALLOWLIST = (
     ("tools/check_footer.py", "_close_vectors", "code", 1,
-     _MUTANT + " (the _read_regular_page close revert)"),
+     _MUTANT + " (the _read_regular_page close revert, loaded by exec_module from a scratch file)"),
     ("tools/check_release_cut.py", "_close_vectors", "code", 1,
      _MUTANT + " (the working_blob close revert)"),
     ("tools/check_release_cut.py", "_self_test_isolated", "code", 1,

@@ -464,8 +464,6 @@ DYNAMIC_LOADS_REVIEWED = (
     ("opf/tools/check_opf_init_contract.py", (),
      ("opf/tools/_opf_init_contract.py",), "runpy.run_path of opf/tools/_opf_init_contract.py inside the child "
      "script it launches, a string the scan does not parse"),
-    ("tools/check_footer.py", ("exec(compile(source.replace(new, old), __file__, 'exec'), reverted)",),
-     ("tools/check_footer.py",), "its own source with one check reverted, compiled and run in its self-test"),
     ("tools/check_opf_enforce_platforms.py",
      ("importlib.util.spec_from_file_location('_opf_enforce_platforms_hook', str(path))",
       "spec.loader.exec_module(module)"),
