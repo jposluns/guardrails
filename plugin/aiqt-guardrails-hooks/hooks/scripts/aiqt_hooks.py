@@ -33287,12 +33287,18 @@ _PUSH_STEP_DEPTH_LIMIT = 4
 # names, a linear probe over the raw command text). Bash can end a here-document body before its delimiter
 # line, end a backquote inside quotes or a body, join a backslash-newline before it compares a body line,
 # run a '${ ...; }' or '${| ...; }' body as commands (bash 5.3), decode an escape inside $'...' into a
-# command word, and end a '$(' somewhere other than the ')' a quoted word's reader takes (a case pattern's
-# ')', a ')' inside a comment or inside a '${...}'), and five rounds of reconstructing those readings each
-# left shapes where bash ran a step after a push the reconstruction hid. A command holding any of them, or
-# one the shared lexer cannot read (_PUSH_STEP_UNREADABLE), is never reconstructed: _push_step_bounded
-# decides it from its text alone. The last three are _RawSequence probes, linear where the lazy '.*?' regex
-# they stand for is not.
+# command word, end a '$(' somewhere other than the ')' a quoted word's reader takes (a case pattern's
+# ')', a ')' inside a comment or inside a '${...}'), and read an extglob pattern ('@(git)', under shopt -s
+# extglob) where the shared lexer reads a subshell, and five rounds of reconstructing those readings each
+# left shapes where bash ran a step after a push the reconstruction hid. A command holding any of them, one
+# whose command word bash may expand by pathname or brace expansion (_PUSH_STEP_PATTERN), or one the shared
+# lexer cannot read (_PUSH_STEP_UNREADABLE), is never reconstructed: _push_step_bounded decides it from its
+# text alone. The '${' probe matches a '${' followed by a '|' or by any character Python's \s matches, which
+# is every character str.isspace() holds: a space, a tab, a newline, a carriage return, a vertical tab, a
+# form feed, U+001C to U+001F, U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F and
+# U+3000. Bash 5.3 reads a substitution only after a space, a tab, a newline or a '|', so the probe sends
+# more commands to the bounded rule than bash needs, never fewer. The 'case', '#' and '${' probes are
+# _RawSequence probes, linear where the lazy '.*?' regex they stand for is not.
 _PUSH_STEP_CASE_RE = _RawSequence(r"\$\(", r"\bcase\b")
 _PUSH_STEP_COMMENT_RE = _RawSequence(r"\$\(", r"#")
 _PUSH_STEP_BRACE_RE = _RawSequence(r"\$\(", r"\$\{")
@@ -33305,20 +33311,36 @@ _PUSH_STEP_UNMODELLED = (
     ("a 'case' after a '$('", _PUSH_STEP_CASE_RE),
     ("a '#' after a '$('", _PUSH_STEP_COMMENT_RE),
     ("a '${' after a '$('", _PUSH_STEP_BRACE_RE),
+    ("an extglob opener ('@(', '+(' or '!(')", re.compile(r"[@+!]\(")),
 )
 _PUSH_STEP_UNREADABLE = ("a construct the shared lexer cannot read (an unbalanced quote, a process "
                          "substitution, a '{fd}>' redirect or a '#' it cannot judge)")
 _PUSH_STEP_TOO_DEEP = "'$(' substitutions in quoted words nested deeper than this check reads"
+_PUSH_STEP_PATTERN = ("a command word bash may expand by pathname or brace expansion (a '*', a '?', a '[...]' "
+                      "or a '{...,...}' in it)")
+# A character every such word holds (_push_step_pattern_word), so a command holding none of them is not walked
+# for one (_push_step_judge): the lexer's words only remove quoting from the raw text, and a $'...' quote, the
+# one spelling that decodes a character, is in the closed set and never reaches the walk.
+_PUSH_STEP_PATTERN_CHARS = frozenset("*?[{")
 # The bounded rule's push probe (_push_step_push_end): a git word, case-folded as the raw push probe is
 # (_RAW_PUSH_RE), the push word, and a character that lets git's subcommand word expand into anything (a '$',
 # a backquote, a brace or a glob character), which the exact reading's push test reads too
-# (_push_step_is_push).
+# (_push_step_is_push). An extglob subcommand ('git @(push)') is read by the pattern probe: its head word may
+# be git itself (_push_step_pattern_end).
 _PUSH_STEP_GIT_RE = re.compile(r"(?i)\bgit\b")
 _PUSH_STEP_PUSH_RE = re.compile(r"(?i)\bpush\b")
 _PUSH_STEP_EXPANDS_RE = re.compile(r"[$`{}*?\[]")
 # A character that can end the push's command or start another command after it, read after the push word
 # (_push_step_bounded): anything but a word character, a blank, or one of . / : = + , @ % ^ ~ - $ < >.
 _PUSH_STEP_AFTER_RE = re.compile(r"[^\w \t./:=+,@%^~$<>-]")
+# The bash blank set: a space, a tab and a newline, the only characters the bounded rule drops from the end of
+# what follows a push (_push_step_bounded). Python's str.isspace() also holds characters bash reads as word
+# characters (a carriage return, a vertical tab, a form feed, U+001C to U+001F, U+0085, U+00A0, U+3000 and the
+# rest named above), so a line holding only such characters is a command bash runs, and no test here uses it.
+_PUSH_STEP_BLANKS = " \t\n"
+# A word of a de-quoted spelling as the bounded rule's pattern probe reads it (_push_step_pattern_end): a run of
+# characters up to a blank, a shell operator character or a backquote, where bash ends a word too.
+_PUSH_STEP_WORD_RE = re.compile(r"[^ \t\n;&|()<>`]+")
 
 
 class _PushStepUncertain(str):
@@ -33338,6 +33360,69 @@ def _push_step_is_push(argv):
         return False
     sub = _git_sub_and_args(eff)[0]
     return sub == "push" or (sub is not None and _PUSH_STEP_EXPANDS_RE.search(sub) is not None)
+
+
+def _push_step_unexpanded(word):
+    """word with each '${...}' and '$[...]' (a parameter or arithmetic expansion, read to its first '}' or ']')
+    replaced by a lone '$': a '*', '?', '[', '{' or ',' inside one is part of that expansion ('${A[@]}',
+    '${!P*}', '${x,}', '$[1*2]'), not a pattern bash expands in the word, and what the expansion gives is read
+    as any text where the '$' stands (_push_step_glob_states). Linear in the length of word: once a '${' or a
+    '$[' has no close after it, the rest is kept as written."""
+    out = []
+    i = 0
+    while True:
+        at = word.find("$", i)
+        if at < 0 or at + 1 >= len(word):
+            break
+        close = {"{": "}", "[": "]"}.get(word[at + 1])
+        if close is None:
+            out.append(word[i:at + 1])
+            i = at + 1
+            continue
+        end = word.find(close, at + 2)
+        if end < 0:
+            break
+        out.append(word[i:at + 1])
+        i = end + 1
+    out.append(word[i:])
+    return "".join(out)
+
+
+def _push_step_pattern_word(word):
+    """True when bash may expand word by pathname or brace expansion: past its parameter and arithmetic
+    expansions (_push_step_unexpanded) it holds a '*' or a '?', a '[' with a ']' after it, or a brace
+    expansion's shape (a '{', then a ',' or a '..', then a '}'). A lone '{' or '}', a '[' or a '[[' with no ']'
+    after it, and a '{x}' with no ',' or '..' are literal to bash. Linear in the length of word."""
+    word = _push_step_unexpanded(word)
+    if "*" in word or "?" in word:
+        return True
+    bracket = word.find("[")
+    if bracket >= 0 and word.find("]", bracket + 1) >= 0:
+        return True
+    return _push_step_brace_span(word)[0] >= 0
+
+
+def _push_step_brace_span(word):
+    """(first '{', last '}') of word when word holds a brace expansion's shape (a '{', then a ',' or a '..',
+    then a '}'), or (-1, -1). Bash expands only such a word, and every text it gives from one keeps what stands
+    before that '{' and after that '}'. Linear."""
+    opening = word.find("{")
+    if opening < 0:
+        return -1, -1
+    separators = [at for at in (word.find(",", opening), word.find("..", opening)) if at >= 0]
+    if not separators or word.find("}", min(separators)) < 0:
+        return -1, -1
+    return opening, word.rfind("}")
+
+
+def _push_step_pattern_command(argv):
+    """True when a segment's command word, past a leading env-assignment prefix and the bare
+    command/exec/builtin/env/sudo wrappers (_expbnd_effective_tokens), is a word bash may expand by pathname or
+    brace expansion (_push_step_pattern_word): '{git,} push', 'g?t push' where a file named git matches, and
+    '/usr/bin/gi[t] push' each run git push. The exact reading cannot read what such a word expands to (one word,
+    several, git and its subcommand both), so push_then_step judges such a command by the bounded rule."""
+    eff = _expbnd_effective_tokens(argv)
+    return bool(eff) and _push_step_pattern_word(eff[0])
 
 
 def _push_step_assigns(argv):
@@ -33488,22 +33573,48 @@ def _push_step_unmodelled(command):
     return None
 
 
-def _push_step_spellings(command):
-    """The texts the bounded rule reads for a push (_push_step_bounded): command with every backslash-newline
-    removed, as bash joins a line outside quotes, and command as written, as bash keeps the pair inside single
-    quotes and ends a comment at its newline; where command holds a $'...' quote, each of those once more with
-    every such quote's escapes decoded as bash decodes them (_ansi_c_decoded); and each then with a '$' before
-    a quote, every quote character and every backslash removed, so a word spelled through quotes, escapes or a
-    line continuation (g''it, g\\it, pu"sh", $'\\x67it', $"git", gi\\<newline>t) reads as the word bash
-    assembles. The rule reads every text, so a reading can only add a push, never hide one. Linear in the
-    length of command."""
+def _push_step_texts(command):
+    """The raw texts the bounded rule reads (_push_step_spellings, _push_step_ansi_rests): command with every
+    backslash-newline removed, as bash joins a line outside quotes, and command as written, as bash keeps the
+    pair inside single quotes and ends a comment at its newline."""
     texts = [command]
     if "\\\n" in command:
         texts.insert(0, command.replace("\\\n", ""))
-    if "$'" in command:
-        texts += [_ansi_c_decoded(text) for text in texts]
-    return [re.sub(r"\$(?=['\"])", "", text).replace("'", "").replace('"', "").replace(chr(92), "")
-            for text in texts]
+    return texts
+
+
+def _push_step_dequoted(text):
+    """text with a '$' before a quote, every quote character and every backslash removed, so a word spelled
+    through quotes or escapes (g''it, g\\it, pu"sh", $"git") reads as the word bash assembles. Removing
+    characters never adds one, so a separator or other character the rule reads after a push stays in it."""
+    return re.sub(r"\$(?=['\"])", "", text).replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+def _push_step_spellings(command):
+    """The texts the bounded rule reads for a push (_push_step_bounded): each of _push_step_texts de-quoted
+    (_push_step_dequoted), so a word spelled through quotes, escapes or a line continuation (g''it, g\\it,
+    pu"sh", $"git", gi\\<newline>t) reads as the word bash assembles. No $'...' quote is decoded: which $'
+    starts a quote and which single quote ends it depends on the quoting, here-document bodies and comments
+    around it, which this rule does not read, so a $' is read on its own terms (_push_step_ansi_rests). The
+    rule reads every text, so a reading can only add a push, never hide one. Linear in the length of
+    command."""
+    return [_push_step_dequoted(text) for text in _push_step_texts(command)]
+
+
+def _push_step_ansi_rests(command):
+    """For each of _push_step_texts that holds a $', the text from its first $' on, de-quoted
+    (_push_step_dequoted). The bounded rule takes that $' as where a git push may stand (_push_step_bounded):
+    an ANSI-C quote can spell any part of a git push through escapes ($'\\x67it' push, g$'\\x69't push, git
+    $'\\x70ush'), and every character of such a push, its push word's end included, stands at or after the
+    first $' of the text. A $' is found in the raw text, quoted or not ('$', "$'"), and nothing in it is
+    decoded or paired, so no quoting around it can hide a push spelled through it; an escape bash decodes
+    stands inside a quoted word and cannot end a command, so it is read as its de-quoted letters. Linear."""
+    rests = []
+    for text in _push_step_texts(command):
+        at = text.find("$'")
+        if at >= 0:
+            rests.append(_push_step_dequoted(text[at:]))
+    return rests
 
 
 def _push_step_push_end(text):
@@ -33564,31 +33675,155 @@ def _push_step_push_end(text):
     return -1
 
 
+def _push_step_bracket_end(text, at, closes):
+    """For the '[' at index at of text (_push_step_glob_states), (end, one): end the index of the ']' bash may
+    close it with and one True when the bracket matches exactly one character, one False when it is read as
+    any text up to end; or (-1, False) where no ']' closes it and bash reads the '[' as itself. closes is False
+    once a search found no ']' after an earlier '[', so a later one is not searched again. A ']' right after
+    the '[' or after its '!' or '^' is a member, not the close. A '[:', '[.' or '[=' inside makes it a
+    character class bash closes past its own ']', so such a bracket is read as any text up to the last ']' in
+    text, a superset of what bash matches there."""
+    start = at + 1
+    if start < len(text) and text[start] in "!^":
+        start += 1
+    end = text.find("]", start + 1) if closes else -1
+    if end < 0:
+        return -1, False
+    inner = text[at + 1:end]
+    if "[:" in inner or "[." in inner or "[=" in inner:
+        return text.rfind("]"), False
+    return end, True
+
+
+# The command word the pattern probe asks a word to be able to spell (_push_step_pattern_git), and every state
+# of that walk: how much of it the last path component read so far may spell.
+_PUSH_STEP_PATTERN_NAME = "git"
+_PUSH_STEP_PATTERN_ANY = frozenset(range(len(_PUSH_STEP_PATTERN_NAME) + 1))
+
+
+def _push_step_glob_states(text, states):
+    """The states (_PUSH_STEP_PATTERN_ANY) after text, a part of a word with no brace expansion in it, from
+    states, reading a superset of what bash's pathname expansion matches: a '/' starts a new last path
+    component; a '$' or a backquote (an expansion, _push_step_unexpanded) may give any text, a '/' included; a
+    '*' is any text, a '?' any one character, a bracket one character or, where it holds a character class or
+    a '/', any text up to its ']' (_push_step_bracket_end); every other character is itself, in either case
+    (shopt -s nocaseglob, a case-insensitive file system). Linear in the length of text: each '[' searches for
+    its ']' once, from past the last one found."""
+    name = _PUSH_STEP_PATTERN_NAME
+    i = 0
+    closes = True
+    while i < len(text):
+        c = text[i]
+        if c == "/":
+            states = {0}
+        elif c in "$`":
+            states = set(_PUSH_STEP_PATTERN_ANY)
+        elif c == "*":
+            states = set(range(min(states), len(name) + 1)) if states else set()
+        elif c == "?":
+            states = {s + 1 for s in states if s < len(name)}
+        elif c == "[" and closes:
+            end, one = _push_step_bracket_end(text, i, closes)
+            if end < 0:
+                closes = False
+                states = set()  # a literal '[', which git does not hold
+            elif "/" in text[i:end]:
+                states = set(_PUSH_STEP_PATTERN_ANY)
+                i = end
+            elif one:
+                states = {s + 1 for s in states if s < len(name)}
+                i = end
+            else:
+                states = set(range(min(states), len(name) + 1)) if states else set()
+                i = end
+        else:
+            states = {s + 1 for s in states
+                      if s < len(name) and (c.lower()[:1] == name[s] or c.upper() == name[s].upper())}
+        i += 1
+    return states
+
+
+def _push_step_pattern_git(word, extglob):
+    """True when word, a word of one of _push_step_spellings that bash may expand by pathname or brace expansion
+    (_push_step_pattern_word) or that ended in an extglob opener's head (extglob, the head dropped from word),
+    may expand to a git command word: one whose last path component may be git. Read, past its parameter and
+    arithmetic expansions (_push_step_unexpanded), as a superset of what bash gives: a leading tilde-prefix
+    may be any text, a '/' included; a brace expansion (_push_step_brace_span) is each of its comma-separated
+    alternatives, each read by _push_step_glob_states ('{git,}', '{g?t,x}'), and any text at all where it holds
+    a '/', a '$', a backquote, a '..' sequence or another brace; the rest is read by _push_step_glob_states; and
+    an extglob head is any text to the end. So 'g?t', 'gi[t]', 'git*', '{git,}', '/usr/bin/@(git)' and '*'
+    may be git, and '*.py', 'a[1]', '[docs]', '?', '{a,b}', '${A[@]}' and 'x{a,b}' may not. Linear in the
+    length of word."""
+    word = _push_step_unexpanded(word)
+    states = {0}
+    start = 0
+    if word.startswith("~"):
+        slash = word.find("/")
+        states, start = set(_PUSH_STEP_PATTERN_ANY), len(word) if slash < 0 else slash
+    opening, closing = _push_step_brace_span(word)
+    if opening >= start:
+        states = _push_step_glob_states(word[start:opening], states)
+        region = word[opening + 1:closing]
+        if any(mark in region for mark in ("/", "$", "`", "..", "{", "}")):
+            states = set(_PUSH_STEP_PATTERN_ANY)
+        else:
+            states = set().union(*(_push_step_glob_states(alt, states) for alt in region.split(",")))
+        start = closing + 1
+    states = _push_step_glob_states(word[start:], states)
+    if extglob and states:
+        states = set(range(min(states), len(_PUSH_STEP_PATTERN_NAME) + 1))
+    return len(_PUSH_STEP_PATTERN_NAME) in states
+
+
+def _push_step_pattern_end(text):
+    """The index where the first word of text (one of _push_step_spellings, words as _PUSH_STEP_WORD_RE reads
+    them) that bash may expand by pathname or brace expansion into a git command word ends, or -1 for none.
+    Such a word is one _push_step_pattern_word reads, or one ending in an extglob opener's head ('?', '*', '@',
+    '+' or '!' before a '('), whose last path component may be git (_push_step_pattern_git). The bounded rule
+    reads no separator, so such a word anywhere may stand where bash runs a command, and its expansion may be
+    git and its subcommand both ('{git,push}', a '*' matching files named git and push), so the push may end
+    with the word itself: every git push bash runs from such a word ends at or after the index returned.
+    Linear in the length of text."""
+    for match in _PUSH_STEP_WORD_RE.finditer(text):
+        word, end = match.group(), match.end()
+        extglob = word[-1] in "?*@+!" and text.startswith("(", end)
+        if extglob:
+            word = word[:-1]
+        elif not _push_step_pattern_word(word):
+            continue
+        if _push_step_pattern_git(word, extglob):
+            return end
+    return -1
+
+
 def _push_step_bounded(command, construct):
     """(finding, pushes) for command by THE BOUNDED RULE, for a command holding construct, one this check does
-    not model exactly (_PUSH_STEP_UNMODELLED, _PUSH_STEP_UNREADABLE, _PUSH_STEP_TOO_DEEP). Nothing in it is
-    reconstructed: no here-document body end, no substitution end, no separator is read. In each text of
-    _push_step_spellings, the first push word a git push could stand on (_push_step_push_end) is a push this
-    check cannot rule out; when anything but plain argument text follows it (_PUSH_STEP_AFTER_RE over the rest
-    of that text, trailing blanks and newlines dropped), a command could run after that push, and the finding
-    is the uncertainty itself (a _PushStepUncertain, denied with the split, never '&&', as its remedy). A
-    push that only plain argument text follows is the last command bash can run, so it allows ('git commit -m
-    "$(cat <<'EOF' ... EOF)" && git push -u origin br'); pushes is True when any text holds such a push. The
-    over-deny is by design: a later command joined by '&&', and text naming git push inside a quoted
-    here-document body or a quoted string with more of the command after it, deny too. Linear in the length
-    of command."""
-    pushes = False
+    not model exactly (_PUSH_STEP_UNMODELLED, _PUSH_STEP_PATTERN, _PUSH_STEP_UNREADABLE, _PUSH_STEP_TOO_DEEP).
+    Nothing in it is reconstructed: no here-document body end, no substitution end, no separator is read. A
+    push this check cannot rule out may end, in each text of _push_step_spellings, at the first push word a
+    git push could stand on (_push_step_push_end) and at the end of the first word bash may expand into a git
+    command word (_push_step_pattern_end); and, in a command holding a $', anywhere from that $' on
+    (_push_step_ansi_rests). When anything but plain argument text follows any of them (_PUSH_STEP_AFTER_RE
+    over the rest, only bash blanks dropped from its end: _PUSH_STEP_BLANKS, never str.isspace()), a command
+    could run after that push, and the finding is the uncertainty itself (a _PushStepUncertain, denied with
+    the split, never '&&', as its remedy). A push that only plain argument text follows is the last command
+    bash can run, so it allows ('git commit -m "$(cat <<'EOF' ... EOF)" && git push -u origin br'); pushes is
+    True when any text holds such a push. The over-deny is by design: a later command joined by '&&', and text
+    naming git push, holding a word that may expand to git, or holding a $' inside a quoted here-document body
+    or a quoted string with more of the command after it, deny too. Linear in the length of command."""
+    rests = []
     for text in _push_step_spellings(command):
-        end = _push_step_push_end(text)
-        if end < 0:
-            continue
-        pushes = True
-        if _PUSH_STEP_AFTER_RE.search(text[end:].rstrip()) is not None:
+        for end in (_push_step_push_end(text), _push_step_pattern_end(text)):
+            if end >= 0:
+                rests.append(text[end:])
+    rests += _push_step_ansi_rests(command)
+    for rest in rests:
+        if _PUSH_STEP_AFTER_RE.search(rest.rstrip(_PUSH_STEP_BLANKS)) is not None:
             return _PushStepUncertain(
                 "this command holds {}, which this check does not model exactly, and more of the command "
                 "follows a git push it cannot rule out, so bash may run a later command after that push "
                 "whether or not it succeeded".format(construct)), True
-    return None, pushes
+    return None, bool(rests)
 
 
 def _push_step_readings(command):
@@ -33602,10 +33837,11 @@ def _push_step_readings(command):
 
 def _push_step_judge(command, depth=0, cache=None):
     """(finding, pushes) for command. A command that holds a construct of the bounded rule's closed set
-    (_push_step_unmodelled), that the shared lexer cannot read, or that is a quoted-word substitution body
-    nested deeper than _PUSH_STEP_DEPTH_LIMIT is judged by the bounded rule alone (_push_step_bounded). Every
-    other command keeps the exact reading: each of the shared lexer's readings judged on its own
-    (_push_step_finding). Each text is judged once per call (cache)."""
+    (_push_step_unmodelled), that the shared lexer cannot read, that has a command word bash may expand by
+    pathname or brace expansion in any reading (_push_step_pattern_command), or that is a quoted-word
+    substitution body nested deeper than _PUSH_STEP_DEPTH_LIMIT is judged by the bounded rule alone
+    (_push_step_bounded). Every other command keeps the exact reading: each of the shared lexer's readings
+    judged on its own (_push_step_finding). Each text is judged once per call (cache)."""
     if cache is None:
         cache = {}
     if command in cache:
@@ -33616,6 +33852,9 @@ def _push_step_judge(command, depth=0, cache=None):
         readings = _push_step_readings(command)
         if readings is None:
             construct = _PUSH_STEP_UNREADABLE
+        elif (not _PUSH_STEP_PATTERN_CHARS.isdisjoint(command)
+              and any(_push_step_pattern_command(seg.argv) for segments in readings for seg in segments)):
+            construct = _PUSH_STEP_PATTERN
     if construct is not None:
         result = _push_step_bounded(command, construct)
     else:
@@ -33679,31 +33918,42 @@ def push_then_step(data):
     is the substitution's, and is then judged as the push itself (_push_step_finding).
 
     THE BOUNDED RULE (_push_step_bounded), for every other command. Its closed set (_PUSH_STEP_UNMODELLED):
-    any '<<' (a here-document or a here-string), any backquote, any '${ ' or '${|', any backslash-newline, any
-    $'...' or $"..." quote, and a 'case', a '#' or a '${' anywhere after a '$(', each found in the raw text,
-    quoted or not; and a command the shared lexer cannot read (an unbalanced quote, a process substitution, a
-    '{fd}>' redirect, a '#' it cannot judge), or a quoted-word substitution body nested deeper than
+    any '<<' (a here-document or a here-string), any backquote, any '${' followed by a '|' or by a character
+    Python's \\s matches (every str.isspace() character, a superset of the space, tab and newline bash 5.3
+    reads there), any backslash-newline, any $'...' or $"..." quote, any extglob opener ('@(', '+(' or '!('),
+    and a 'case', a '#' or a '${' anywhere after a '$(', each found in the raw text, quoted or not; a command
+    word, in any reading, that bash may expand by pathname or brace expansion (a '*', a '?', a '[' with a ']'
+    after it, or a '{', a ',' or '..' and a '}', outside any '${...}' or '$[...]'; _push_step_pattern_command);
+    and a command the shared lexer cannot read (an unbalanced quote, a process substitution, a '{fd}>'
+    redirect, a '#' it cannot judge), or a quoted-word substitution body nested deeper than
     _PUSH_STEP_DEPTH_LIMIT. Such a command is never reconstructed: no here-document body end, substitution end
-    or separator in it is read. Where its text, read with quotes, backslashes and line continuations removed
-    and $'...' escapes decoded (_push_step_spellings), holds a git push this check cannot rule out (a git word
-    whose subcommand word, past git's global options, is push or a word bash expands, or, once an option is
-    read, any later push word; _push_step_push_end) and anything but plain argument text follows where the
-    first such push may end, a command could run after that push, and the command denies on that uncertainty,
-    with the split as the remedy: run the push as its own call, or last. A push that only plain argument text
-    follows allows, so 'git commit -m "$(cat <<'EOF' ... EOF)" && git push -u origin br' allows, and so does a
-    command with no such push.
+    or separator in it is read. A push this check cannot rule out may end, in its text read with quotes,
+    backslashes and line continuations removed (_push_step_spellings), at the first git word whose subcommand
+    word, past git's global options, is push or a word bash expands, or, once an option is read, at any later
+    push word (_push_step_push_end); at the end of the first word bash may expand by pathname or brace
+    expansion into a word whose last path component may be git (g?t, gi[t], git*, {git,}, an extglob pattern,
+    a lone '*'; _push_step_pattern_end), since such a word may stand where bash runs a command and may expand
+    to git and its subcommand both; and, where the text holds a $', anywhere from the first $' on
+    (_push_step_ansi_rests): no $'...' quote is decoded or paired, since which $' opens one depends on quoting
+    this rule does not read. Where anything but plain
+    argument text follows any of them, only a space, a tab or a newline dropped from its end (never a
+    str.isspace() character bash reads as a word character), a command could run after that push, and the
+    command denies on that uncertainty, with the split as the remedy: run the push as its own call, or last.
+    A push that only plain argument text follows allows, so 'git commit -m "$(cat <<'EOF' ... EOF)" && git push
+    -u origin br' allows, and so does a command with no such push.
 
     DISCLOSED OVER-DENY OF THE BOUNDED RULE, plainly: it reads no separator, so a step joined by '&&' denies
     too, and the standard one-call commit, push and pull request command ('git commit -m "$(cat <<'EOF' ...
     EOF)" && git push -u origin br && gh pr create --body "$(cat <<'EOF' ... EOF)"') always denies: the split
     the deny names (commit and push in one call ending with the push, gh pr create in the next) allows. It
     reads no here-document body or quoted string as data, so a commit message, PR body or quoted string that
-    names git push (git then push, or git, an option and later a push word) with more of the command after it
-    denies though nothing pushes; pass such a text from a file (git commit -F FILE, gh pr create --body-file
-    FILE). Any push word after a git option counts, since a de-quoted option value can hold a blank, so 'git -C
-    DIR commit -m "$(cat <<'EOF' ... EOF)" && git -C DIR push' denies where the message holds the word push.
-    Any character after the push word other than plain argument text (a redirect such as 2>&1, a quoted
-    separator, a '#', a glob) denies too.
+    names git push (git then push, or git, an option and later a push word), that holds a word that may expand
+    to git (a lone '*', 'g?t'), or that holds a $', with more of the command after it denies though nothing
+    pushes; pass such a text from a file (git commit -F FILE, gh pr create --body-file FILE). Any push word
+    after a git option counts, since a de-quoted option value can hold a blank, so 'git -C DIR commit -m "$(cat
+    <<'EOF' ... EOF)" && git -C DIR push' denies where the message holds the word push. Any character after
+    the push word other than plain argument text (a redirect such as 2>&1, a quoted separator, a '#', a glob)
+    denies too, and so does a command whose command word is a pattern ('./run-*.sh && git push && x').
 
     DISCLOSED OVER-DENY OF THE EXACT READING: a step bash gates on the push through a compound command ('if git
     push; then x; fi', '{ git push; } && x') reads as ';' and denies, and so does one after a subshell ('(git
@@ -33715,15 +33965,16 @@ def push_then_step(data):
     bash expands counts as a push in both readings, so 'git $sub log; x' denies whatever $sub holds.
 
     DISCLOSED SILENT ALLOWS (no reading here sees the push or the later step): a push inside a script or
-    program the command runs, a shell function or alias, eval or an sh -c string, a variable or substituted
-    command word ($GIT push), an expansion that word splitting turns into the push word inside an option's
-    value (git -C $D origin with D='/r push'), a subcommand that expands to push after a quoted option value
-    holding a blank in a command the bounded rule decides (git -C "a b" $y with y=push), a git alias that runs
-    push, a wrapper carrying its own options (env -i, sudo -u u) or one outside the bare set (timeout, nice,
-    xargs, coproc), and a step started before the push that runs after it (a trap such as 'trap step EXIT', a
-    background job, a process substitution opened earlier). Fail posture: a missing tool_name denies (the
-    shared contract); a missing or non-string command denies (check-fails-closed-on-unreadable); an empty one
-    runs nothing and allows."""
+    program the command runs, a shell function or alias, eval or an sh -c string, a variable, tilde or
+    substituted command word ($GIT push, ${G:-g?t} push, ~ push with HOME naming git), a git binary under
+    another name that a pattern matches (x* where x links to git), an expansion that word splitting turns into
+    the push word inside an option's value (git -C $D origin with D='/r push'), a subcommand that expands to
+    push after a quoted option value holding a blank in a command the bounded rule decides (git -C "a b" $y
+    with y=push), a git alias that runs push, a wrapper carrying its own options (env -i, sudo -u u) or one
+    outside the bare set (timeout, nice, xargs, coproc), and a step started before the push that runs after
+    it (a trap such as 'trap step EXIT', a background job, a process substitution opened earlier). Fail
+    posture: a missing tool_name denies (the shared contract); a missing or non-string command denies
+    (check-fails-closed-on-unreadable); an empty one runs nothing and allows."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: push_then_step wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))

@@ -2648,10 +2648,13 @@ _PTS_TICKED = "x=" + _PTS_BQ + "true" + _PTS_BQ + "; "  # a backquote, so the bo
 # guard names the rule element the row's decision rests on (_PTS_REVERTS): with that element removed, the
 # decision must change, and every element has at least one "deny" row, so removing any element makes some
 # row here a wrong allow (pts-bash-flip-<guard>, pts-bash-flip-coverage). The elements are the bounded rule's
-# closed set ("heredoc", "backquote", "funsub", "continuation", "ansi", "case", "comment", "brace" and
-# "unreadable"), its push probe's readings ("dequote", "decode", "joined", "written"), the probe's word rules
-# ("option", "optionwalk", "expandword", "anchor"), its plain-text test after the push ("after"), and the exact
-# reading's expandable subcommand ("expandsub").
+# closed set ("heredoc", "backquote", "funsub", "continuation", "ansi", "case", "comment", "brace", "extglob"
+# and "unreadable"), the routing of a command word bash expands by pathname or brace expansion ("pattern"),
+# its push probe's readings ("dequote", "joined", "written"), the probe's word rules ("option", "optionwalk",
+# "expandword", "anchor"), its word that may expand to git ("patternword"), its $' read as where a push may
+# stand ("ansianchor"; "ansipair" restores the earlier reading that paired one $' with a later quote and
+# decoded it instead), its plain-text test after the push ("after") with only bash blanks dropped from its end
+# ("blankset"), and the exact reading's expandable subcommand ("expandsub").
 _PTS_BASH_ROWS = (
     ("(pts-b1) quoted substitution argument, unquoted here-document",
      'step "$(git push origin br)" <<EOF\nbody\nEOF', "deny", None),
@@ -2862,7 +2865,7 @@ _PTS_BASH_ROWS = (
     ("(pts-b106) quote-split push word, process substitution", "g''it push origin br <(x); step", "deny",
      "dequote"),
     ("(pts-b107) ANSI-C escape spelling git, bounded", _PTS_TICKED + "$'\\x67it' push origin br; step", "deny",
-     "decode"),
+     "ansianchor"),
     ("(pts-b108) line continuation inside the git word", "gi\\\nt push origin br; step", "deny", "joined"),
     ("(pts-b109) comment ending in a backslash, push on the next line",
      "echo x # note\\\ngit push origin br; step", "deny", "written"),
@@ -2888,11 +2891,58 @@ _PTS_BASH_ROWS = (
     ("(pts-b121) no git option, a message naming push, then the push last",
      'git commit -m "$(cat <<\'EOF\'\nfix: the push guard\nEOF\n)" && git push -u origin br', "allow", None),
 )
+_PTS_HERESTRING = "cat <<<x >/dev/null; "  # a here-string, so the bounded rule decides what follows
+# A command word bash expands by pathname or brace expansion into git: bin is the fixture directory, which holds
+# git, so each of these runs git push and then the step. The exact reading routes each to the bounded rule
+# ("pattern"); behind a here-string the bounded rule reads the word itself ("patternword").
+_PTS_PATTERN_WORDS = ("{git,} push; step", "{git,push}; step", "bin/g?t push; step", "bin/gi[t] push; step",
+                      "bin/git* push; step", "cd bin; g?t push; step")
+# Earlier texts holding a $' that the earlier reading paired with the opening quote of a later $'...', which
+# hid the git it spells, and six spellings of git through ANSI-C escapes.
+_PTS_ANSI_EARLIER = ("echo '$' >/dev/null; ", "echo \"$'\" >/dev/null; ", "x='cost: $'; ")
+_PTS_ANSI_SPELLINGS = ("$'\\x67it' push", "$'\\147it' push", "$'\\u0067it' push", "$'\\U00000067it' push",
+                       "$'\\x67'it push", "$'g\\x69t' push")
+# Characters Python's str.isspace() holds that bash reads as word characters; each names a step fixture.
+_PTS_WORD_SPACES = ("\x1c", "\x1d", "\x1e", "\x1f", "\x0b", "\x0c", "\x85", "\xa0", chr(0x3000))
+_PTS_BASH_ROWS += tuple(
+    [("(pts-g{}) pattern command word {!r}".format(n, cmd), cmd, "deny", "pattern")
+     for n, cmd in enumerate(_PTS_PATTERN_WORDS, 1)]
+    + [("(pts-g{}) pattern command word {!r}, bounded".format(n, cmd), _PTS_HERESTRING + cmd, "deny",
+        "patternword") for n, cmd in enumerate(_PTS_PATTERN_WORDS, 7)]
+    + [("(pts-g13) extglob command word", "shopt -s extglob\nbin/@(git) push; step", "deny", "extglob"),
+       ("(pts-g14) extglob subcommand word matching a file named push",
+        "shopt -s extglob\ncd globs; git @(push) origin br; step", "deny", "patternword"),
+       ("(pts-g15) pattern command word matching no file", "g?t push; step", "over", None),
+       ("(pts-g16) pattern git word, push last", "bin/g?t push origin br", "allow", None),
+       ("(pts-g17) pattern command word that cannot be git", "*.sh; step", "allow", None),
+       ("(pts-g18) pattern git word, push last, bounded", _PTS_HERESTRING + "bin/g?t push origin br", "allow",
+        None),
+       ("(pts-g19) pattern argument words", "echo *.py; step", "allow", None),
+       ("(pts-g20) a test command", "[ -f x ] && step", "allow", None),
+       ("(pts-g21) pattern words that cannot be git, bounded", _PTS_HERESTRING + "echo [docs] a[1] ?; step",
+        "allow", None),
+       ("(pts-g22) pattern command word, then a push '&&' gates", "./run-*.sh && git push origin br && step",
+        "over", None)]
+    + [("(pts-a{}) {!r} after {!r}".format(n, spelling, earlier), earlier + spelling + "; step", "deny",
+        "ansipair")
+       for n, (earlier, spelling) in enumerate(((e, s) for e in _PTS_ANSI_EARLIER for s in _PTS_ANSI_SPELLINGS),
+                                                1)]
+    + [("(pts-a{}) {!r} alone".format(n, spelling), spelling + "; step", "deny", "ansianchor")
+       for n, spelling in enumerate(_PTS_ANSI_SPELLINGS, 19)]
+    + [("(pts-a25) a $' before a push it does not spell: the anchor's over-deny", "x=$'a'; git push origin br",
+        "over", None)]
+    + [("(pts-w{}) step named {!r} on the line after the push{}".format(n, ch, end), _PTS_HERESTRING
+        + "git push origin br\n" + ch + end, "deny", "blankset")
+       for n, (ch, end) in enumerate(((c, e) for c in _PTS_WORD_SPACES for e in ("", "\n")), 1)]
+    + [("(pts-w19) bash blanks after the push, bounded", _PTS_HERESTRING + "git push origin br\n \t\n", "allow",
+        None)])
 
 
-def _pts_spellings(command, dequote=True, decode=True, joined=True, written=True):
+def _pts_spellings(command, dequote=True, decode=False, joined=True, written=True):
     """The self-test's own reading of aiqt_hooks._push_step_spellings, each part switchable for its revert;
-    with every part on it must equal the hook's (pts-bash-revert-faithful)."""
+    with the defaults it must equal the hook's (pts-bash-revert-faithful). decode adds the earlier reading's
+    texts with every $'...' quote decoded (aiqt_hooks._ansi_c_decoded), which pairs a $' with the next single
+    quote wherever it stands: the "ansipair" revert."""
     texts = []
     if joined and "\\\n" in command:
         texts.append(command.replace("\\\n", ""))
@@ -2967,7 +3017,7 @@ def _pts_old_is_push(argv):
 # The closed-set elements, each the start of the construct its _PUSH_STEP_UNMODELLED entry names.
 _PTS_CLOSED = {"heredoc": "a '<<'", "backquote": "a backquote", "funsub": "a '${ ' or", "continuation":
                "a backslash-newline", "ansi": "an ANSI-C", "case": "a 'case'", "comment": "a '#'",
-               "brace": "a '${' after"}
+               "brace": "a '${' after", "extglob": "an extglob opener"}
 
 
 def _pts_revert(element):
@@ -2978,8 +3028,19 @@ def _pts_revert(element):
     if element == "unreadable":
         readings = aiqt_hooks._push_step_readings
         return {"_push_step_readings": lambda command: readings(command) or []}
-    if element in ("dequote", "decode", "joined", "written"):
+    if element in ("dequote", "joined", "written"):
         return {"_push_step_spellings": lambda command: _pts_spellings(command, **{element: False})}
+    if element == "pattern":
+        return {"_push_step_pattern_command": lambda argv: False}
+    if element == "patternword":
+        return {"_push_step_pattern_end": lambda text: -1}
+    if element == "ansianchor":
+        return {"_push_step_ansi_rests": lambda command: []}
+    if element == "ansipair":
+        return {"_push_step_ansi_rests": lambda command: [],
+                "_push_step_spellings": lambda command: _pts_spellings(command, decode=True)}
+    if element == "blankset":
+        return {"_PUSH_STEP_BLANKS": None}  # str.rstrip(None): every str.isspace() character
     if element == "option":
         return {"_push_step_push_end": lambda text: _pts_push_end(text, option=False)}
     if element == "optionwalk":
@@ -2995,8 +3056,9 @@ def _pts_revert(element):
     raise ValueError(element)
 
 
-_PTS_REVERTS = tuple(_PTS_CLOSED) + ("unreadable", "dequote", "decode", "joined", "written", "option", "optionwalk",
-                                     "expandword", "anchor", "after", "expandsub")
+_PTS_REVERTS = tuple(_PTS_CLOSED) + ("unreadable", "pattern", "dequote", "joined", "written", "option",
+                                     "optionwalk", "expandword", "anchor", "patternword", "ansianchor",
+                                     "ansipair", "after", "blankset", "expandsub")
 
 
 @contextlib.contextmanager
@@ -3014,8 +3076,11 @@ def _pts_patched(attrs):
 
 def _pts_bounded(command):
     """True when push_then_step judges command by the bounded rule (its own routing, taken live)."""
-    return (aiqt_hooks._push_step_unmodelled(command) is not None
-            or aiqt_hooks._push_step_readings(command) is None)
+    if aiqt_hooks._push_step_unmodelled(command) is not None:
+        return True
+    readings = aiqt_hooks._push_step_readings(command)
+    return readings is None or any(aiqt_hooks._push_step_pattern_command(seg.argv)
+                                   for segments in readings for seg in segments)
 
 
 def _pts_bash_table(failures, tmp):
@@ -3045,9 +3110,13 @@ def _pts_bash_table(failures, tmp):
         "cat": "while IFS= read -r line; do :; done\n",
         "gh": "exit 0\n",
     }
+    for ch in _PTS_WORD_SPACES:
+        fixtures[ch] = fixtures["step"]
     for name, body in fixtures.items():
         (bindir / name).write_text("#!" + _PTS_BASH + "\n" + body, encoding="utf-8")
         os.chmod(str(bindir / name), 0o755)
+    (root / "globs").mkdir()
+    (root / "globs" / "push").write_text("", encoding="utf-8")  # a file an extglob subcommand word matches
     record = root / "record.txt"
     want_deny = {}
     for label, command, kind, _guard in _PTS_BASH_ROWS:
@@ -4985,6 +5054,13 @@ _DEADLINE_SHAPES = {
     # A long run of &&-joined git words, then a push and a step joined after it by ';', which push_then_step
     # must deny within the bound.
     "push_step_after": lambda n, base: ("Bash", {"command": _repeat("git && ", n, "git push origin br; next-step")}),
+    # A here-string, so push_then_step's bounded rule reads the text, then a long run of pattern words none of
+    # which may spell git, each with a bracket, a '*', a brace list and a parameter expansion for its pattern
+    # probe to read; the *_after form ends with a pattern command word that may be git and a step after it,
+    # which it must deny within the bound.
+    "pattern_words": lambda n, base: ("Bash", {"command": "cat <<<x; " + _repeat("${x[1]}[ab]*.{c,h} ", n - 10)}),
+    "pattern_words_after": lambda n, base: ("Bash", {"command": "cat <<<x; " + _repeat(
+        "${x[1]}[ab]*.{c,h} ", n - 10, "; g?t push origin br; next-step")}),
     # One key run of quoted '-c' mirror options with no '.mirror' and no blank, which the single
     # mirror-configuration regex read in time quadratic in its length (about 0.8 s of CPU at 64 KB and 6.2
     # to 6.5 s at 180 KB for one call of the push backstop alone, in-process on a 24-core host with Python
@@ -5096,7 +5172,8 @@ _DEADLINE_CASES = {
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
-    "push_then_step": ("git_words", "git_push_words_unbal", "nest_parens", "nest_cmdsubst", "push_step_after"),
+    "push_then_step": ("git_words", "git_push_words_unbal", "nest_parens", "nest_cmdsubst", "push_step_after",
+                       "pattern_words", "pattern_words_after"),
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
@@ -5119,7 +5196,8 @@ _DEADLINE_DENY_CASES = frozenset((
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
-    ("protected_line", "procsubst_run_after"), ("push_then_step", "push_step_after")))
+    ("protected_line", "procsubst_run_after"), ("push_then_step", "push_step_after"),
+    ("push_then_step", "pattern_words_after")))
 # The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
 # a detach or detacher (fg_detach_after, fg_setsid_options), a construct left open at the end of the
 # scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
@@ -5138,8 +5216,10 @@ _DEADLINE_NOTE_CASES = frozenset((
 # substitutions are all skipped, provably closed or carry no outer
 # detach, so none draws a note; and every `&` of fg_quoted_heredoc_amps lies in a quoted here-document body
 # the detector lifts, which the note scan's lifted mode skips as data. Pinning the outcome keeps these
-# timing shapes from passing a scanner that mistook one for a detach.
+# timing shapes from passing a scanner that mistook one for a detach. push_then_step's pattern_words holds no
+# word that may spell git, so its pinned allow keeps the shape from passing a pattern probe that stopped early.
 _DEADLINE_ALLOW_CASES = frozenset((
+    ("push_then_step", "pattern_words"),
     ("orch_truncation_guard", "fg_heredocs_plain"),
     ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs"),
