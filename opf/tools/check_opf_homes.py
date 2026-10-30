@@ -363,13 +363,14 @@ _CONTRACT = {
         _D('Historical releases remain in version.toml (section 14.3); there is no version.imported.toml or CHANGELOG.toml.'),
         _D('The reserved children archive/, imported/, staging/, and journals/ are store-tree control area, neither machine-store records nor adopter content; they relocate with the machine store.'),
         'OPF MUST NOT write state outside .working/ except the operation-lock and coupled-init substrate in the git common directory, and MUST NOT write any under .aiqt/.',
-        'A section 5.4 store relocation is the one further exception: opf migrate --store, and only it, additionally writes the destination store repository, the pointer files at the product repository root, a temporary clone-back it MUST remove after verification, and its migrate journal in the git common directory, and it MUST write no other state outside .working/ (section 5.4).',
+        "A section 5.4 store relocation is the one further exception: opf migrate --store, and only it, additionally writes the destination store repository, the pointer files at the product repository root, the public deliverables CHANGELOG.md and VERSION it restores at the product repository root (section 5.8), the migration change it prepares in the product repository when the product repository is not the destination, a temporary clone-back it MUST remove after verification, and its migrate journal, opf-reloc/ in the source repository's git common directory, and it MUST write no other state outside .working/ (section 5.4).",
         'The record archive MUST remain inside the discovered machine store, and the example name toml MUST NOT be hardcoded.',
         _D('The closed kind vocabulary is import, ingest, adoption, layout, preview, record, relocation.'),
         _D('Import and ingest run IDs use imp-<YYYYMMDD>T<HHMMSS>Z-<hash16>; adoption uses adopt- with that suffix.'),
         _D('Layout and preview reserve layout- and preview- with the same suffix.'),
         _D('Record reserves record- with the same suffix; it is a journal-only kind that names just its journal home, journals/record/, never a staging or imported home.'),
-        _D('Relocation reserves reloc- with the same suffix; it is a journal-only kind that names just its journal home, journals/relocation/, never a staging or imported home (section 5.4).'),
+        _D("Relocation reserves reloc- with the same suffix; it is a journal-only kind whose one journal home is opf-reloc/ in the source repository's git common directory, beside the operation-lock substrate, never a .working/ journal home and never a staging or imported home (section 5.4)."),
+        'A relocation run claims no IDs (section 8.2), so the kind has no allocations home: a reader MUST NOT expect .working/journals/relocation/.',
         _D('Here hash16 is 16 lowercase hexadecimal characters; constructors check lexical shape, not calendar validity or filesystem safety.'),
         'File operands MUST use canonical contained relative paths: no empty, dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.',
         'Init, and any upgrade, MUST render this managed block into .working/.gitignore from the topology constants: gitignore # >>> opf-managed >>> /journals/ /staging/ # <<< opf-managed <<< Durable imported/ and archive/ evidence MUST stay tracked.',
@@ -453,6 +454,48 @@ _CONTRACT = {
         _D('Lowercase signals machine-owned source that humans change only through tooling or review, never casually.'),
         'The casing itself is part of the contract: a lowercase file MUST NOT be a deliverable, and an uppercase file MUST NOT be hand-authored truth.',
     ),
+    "5.4": (
+        _D('opf migrate --store <target> relocates the tracked store to any location a target can name.'),
+        'The operation MUST: - run under the consistency contract and the single-writer lease (section 5.7), refusing to start from a stale, ahead, or divergent store;',
+        _D('- refuse to start while the source store holds any open journal transaction or any staging run, so machine-local recovery state never straddles the move; journals and staging are machine-local (section 4.2), so this check sees only the machine the run executes on, and a staging run on another machine is not seen;'),
+        _D('- refuse a destination outside the product root while any admitted adoption run whose retirement is unrecorded holds a default Move row, so a pending default Move is never stranded (section 14.2);'),
+        _D('- validate the target before any push, per section 5.6: the destination is confirmed to be the recorded, intended target, never inherited from ambient state, and a store is never pushed to an unexpected place;'),
+        _D("- preserve the store's git history into the destination repository through a history-preserving extraction, and preserve the durable worklog and its archive byte for byte: the extraction replays every commit that touches the store, commit for commit, with identical .working/ trees and the original author, committer, dates and messages, and a relocation that flattens history into a single import commit, or that loses or rewrites any worklog entry, is nonconformant; the replayed commits carry new commit IDs and lose any commit signatures, a residual section 17 discloses;"),
+        _D("- copy the ID reservations under journals/<kind>/allocations/ byte for byte, left untracked, into the destination working copy where the destination has one: the destination repository's own working tree for a dir: target, and the incoming .working/ tree for a product-repository destination, so that working copy grades the section 8.2 counter checks as the source does; a remote git: destination keeps no local working copy once the clone-back is removed, so the reservations cannot be carried there and every working copy cloned from it keeps the section 17 clone residual (section 17);"),
+        _D('- keep the generated public deliverables in the product repository: CHANGELOG.md and VERSION remain at (or are restored to) the product repository root, and the render targets are rewired so future renders keep writing them there (section 5.8);'),
+        _D("- re-point the committed pointer, and the manifest's recorded sync target, in the same change, so the pointer, the manifest, and the actual remote never disagree across a landed state;"),
+        '- leave a publishable committed pointer in place after every completed migration: a remote destination is recorded as its git URL, which MUST be safe to publish (section 4.3) or the migration MUST refuse; where the committed pointer cannot itself safely express a local destination (section 4.3), it MUST record a relative dir: path interpreted against the product repository root, and a target that no publishable committed pointer can express MUST be refused before anything is written;',
+        _D('- verify the destination before retiring the source: the relocated store is cloned back and reconciled (ledgers, indexes, counters, and worklog digests confirmed identical) before the old location is removed or archived.'),
+        _D('The old in-repo .working/ tree leaves the product repository only in the migration change itself, after that verification, and the removal is recorded.'),
+        _D('An unverified destination never justifies destroying the source: this is the verified-restore-path discipline applied to the store itself;'),
+        '- mark the source store relocated once that verification passes: before the old location is removed or archived, the run commits a relocation marker, .working/relocated.toml at the source store root, holding exactly format = "opf.store.relocated/v1" and a [relocated] table whose keys are exactly target, the destination exactly as the re-pointed committed pointer records it, and run_id, the relocation run\'s id; where the source store has a dedicated sync target, the marker commit MUST be observable there before the source is retired, and a source that rides the product repository takes no separate marker commit, since its tree leaves only in the migration change itself and the product repository\'s branch-and-merge discipline (section 5.7) surfaces a straggling write;',
+        _D('- record the relocation as a worklog entry naming both the old and the new location, authored as a separate worklog-append transaction at the destination after that verification, never as part of the transfer itself (section 8.2).'),
+        "The operation is journaled and recoverable: each run keeps one migrate journal of the journal-only relocation kind, at opf-reloc/ in the source repository's git common directory, beside the operation-lock substrate (section 4.2), so the journal survives the removal of an in-repo source tree, and requested recovery of an interrupted relocation MUST fail closed on a missing journal (section 4.2).",
+        _D('The source repository is the repository that tracks the source store (section 5.1): the product repository for an in-repo store, and the companion repository itself when the source is a companion store.'),
+        "The run MUST record the replay's old-to-new commit mapping in that migrate journal, and the relocation worklog entry MUST carry the mapping's digest, so the recorded commit mapping that section 17 names as a compensating control exists and is bound to the durable worklog.",
+        _D('The migrate journal, the destination repository, the pointer files, the restored public deliverables, the migration change in the product repository and a temporary clone-back removed after verification are the only state opf migrate --store writes outside .working/ (section 4.2).'),
+        "Moving into an in-repo store never commits to the current branch: where the destination is the product repository itself, the migration MUST prepare the incoming .working/ tree on a review branch, and the move lands through the product repository's normal review flow.",
+        "A store marked relocated refuses writes: every operation that would write MUST refuse a store whose resolved tree carries .working/relocated.toml, with a message naming the marker's recorded destination, and opf doctor MUST report a relocated source, naming that destination (section 11).",
+        'The section 5.7 reconciliation is what carries the marker to a clone that still resolves the old location, and an implementation MUST register .working/relocated.toml by its exact path as a managed control file that containment recognizes as OPF control area (section 4.2).',
+        _D('Between the destination going live and the pointer change landing, a clone of the product repository can still resolve the old location; that window is accepted.'),
+        _D("The section 5.7 consistency contract with the doctor's pointer and sync-target agreement (section 11) is the control that surfaces the window, and the relocation marker is the control that bounds its cost: a write attempted at the marked source ends as a refused write naming the destination, never a lost one, and no long-held lease spans the window."),
+        _D('Migration is symmetric: a store can move in-repo to companion, companion to in-repo, anywhere to anywhere, repeatedly, and each move is one recorded, verified, history-preserving operation.'),
+        _D('"Anywhere to anywhere" carries exactly three named refusals: a target no publishable committed pointer can express (above), a github: or gitlab: target while its provider is unregistered (section 5.6), and a destination outside the product root while a pending default Move row stands (section 14.2).'),
+    ),
+    "5.6": (
+        _D('Target handling is extensible through a provider registry with the same shape as the [types.<name>] registry (section 9): one [providers.<name>] table per provider in the manifest.'),
+        _D('Each provider is a handler covering some or all of three roles: create (make a new store location), auth (authenticate creation with the host), and sync (clone, fetch, push).'),
+        _D('- local-directory and generic-git-remote ship as the universal fallbacks and cover every target between them: any local path and any git URL on any host.'),
+        _D('- github and gitlab plug in only for their create and auth API conveniences; their sync is ordinary git.'),
+        _D('Further hosts join by registering a provider, never by extending the target grammar.'),
+        'Until a reviewed github or gitlab provider registration lands, the reference tooling registers neither, and a github: or gitlab: target MUST refuse as an unregistered provider.',
+        _D("- Authentication uses the adopter's existing git credentials (SSH keys, tokens through git's own credential machinery)."),
+        _D('OPF stores no credentials of its own, ever.'),
+        _D('- An unregistered provider is unavailable until it is reviewed and registered, on the same posture as any other tooling dependency.'),
+        _D("Egress discipline binds every provider: a provider's create and auth calls go only to the host the target itself names, and before any push the tooling confirms the actual push destination against the recorded target (the pointer and the manifest's recorded sync target)."),
+        _D('A destination that appears from anywhere else, ambient configuration, a stale remote, or retrieved content, is surfaced and refused, never pushed to.'),
+        _D('A store is never pushed to an unexpected place.'),
+    ),
     "5.7": (
         _D('Nothing stale, nothing ahead.'),
         'Before any OPF operation other than the reconciliation step itself (init, adopt, import, doctor, render, migrate, upgrade, absorb, record; opf sync is that surfaced reconciliation step), the store repository MUST be reconciled to a known-consistent, up-to-date state against its sync target: the target is fetched and the local store compared against it.',
@@ -465,6 +508,7 @@ _CONTRACT = {
         '- **Divergent from the target** (unsynced commits on two systems): the tooling MUST refuse to operate and MUST surface the state.',
         "A divergence MUST halt for the human, always: it MUST NOT be auto-merged or silently resolved by picking a side, because a textual merge of the store's TOML records can silently mangle the very records the standard exists to protect.",
         '- **After any operation that writes,** the store MUST be synced back to its target in the same session, so the store is not left intentionally ahead on one system; a crash between the local write and the sync is detected on the next resume as an ahead-only or a divergent state and MUST be reconciled by the matching path above (an authorized ahead-only push by the lease holder, or a human-resolved halt on divergence), never left standing.',
+        "Reconciliation also carries the section 5.4 relocation marker to a clone that still resolves a relocated source: an operation that would write MUST refuse a store whose resolved tree carries .working/relocated.toml, naming the marker's recorded destination (section 5.4).",
         "A **single-writer lease** prevents concurrent divergent writes: before mutating the store, a run MUST take the lease (lease.toml, present only while held, carrying the holder, the operation, and an acquired-at timestamp read from the clock) and MUST make it observable at the sync target before its writes begin, so a second system's reconciliation sees the held lease and refuses.",
         'A lease MUST NOT be seized from a live holder; it MUST be reconciled against recorded state on resume or close, and a leftover lease from a dead run MUST be released only through that reconciliation.',
         'Where the concurrent-operation module is enabled, the lease MUST additionally be recorded as a session_lease record.',
@@ -888,6 +932,9 @@ _CONTRACT = {
         'Any bound-item drift MUST refuse into a fresh plan with its own single approval; a changed old file MUST NOT be retired.',
         "One renewal is not drift: a section 5.4 whole-store relocation MUST rebind the plan's bound paths to their relocated equivalents with the bound digests unchanged (section 14.2).",
         'That rebinding MUST be recorded as an append-only renewal record in the adoption bundle, mapping the old store identity to the new with the bound digests unchanged; plan.toml, the approval and the sealed inventories MUST stay byte-identical (section 14.2).',
+        'The renewal record is renewal-<relocation-run-id>.toml at the bundle root, and it MUST hold exactly format = "opf.adoption.renewal/v1" and a [renewal] table whose keys are exactly run_id, the section 5.4 relocation run\'s id, and old_target and new_target, the committed pointer targets before and after the move (section 5.5).',
+        "Each renewal record MUST be claimed by its own later-phase inventory (section 4.2), inventory-renewal.toml for a bundle's first renewal and inventory-renewal<n>.toml, with <n> counting from 2, for each later one, so C-EVIDENCE-ENUM claims the record like any other bundle member while the sealed earlier inventories stay byte-identical.",
+        "Completion check 1 MUST read the bundle's renewal records, oldest first, when it verifies roots and destinations, so a store relocated under section 5.4 still matches the approved plan's bound identities, and an identity difference that no renewal record explains still fails the check.",
         'Approval MUST NOT absorb a separate posture-weakening authorization (section 11) or changelog curation (section 7.3).',
         _D('Digests establish binding, not actor authenticity or semantic correctness; self-asserted identity and same-user tampering remain disclosed residuals.'),
         'The clean-start completion check MUST deterministically verify the following roster: 1. Authority and freshness: roots, destinations and live preimages still match the approved plan.',
@@ -1082,7 +1129,7 @@ _CONTRACT = {
         _D('- Adoption and import run with C-EVIDENCE-ENUM, which re-enumerates their control areas (.working/imported/<kind>/<run-id>/, .working/archive/adoption/<run-id>/ and .working/archive/moved/) on every doctor run, and the section 14.1 completion checks still verify their evidence digests themselves when they run; C-EVIDENCE-ENUM asserts membership, not authenticated actor history; deleting a whole bundle (inventory and payload together) is outside its local snapshot check (section 4.2).'),
         _D('Version-control history over the tracked store is the control, and C-IMPORTED-PROVENANCE still re-verifies every preserved original an imported record references.'),
         _D("- Journals are machine-local (section 4.2), and the doctor reads the ID reservations under journals/<kind>/allocations/ for the section 8.2 counter checks, so a clone, which holds none, can grade those checks differently from the original store: where a reservation covers a number that no published record carries, the original store's doctor treats that number as issued and a clone's doctor reports it missing."),
-        _D('A section 5.4 relocation copies those reservations byte for byte into the destination working copy, left untracked, so the destination grades the counter checks as the source does; every other clone keeps this residual (section 5.4).'),
+        _D('A section 5.4 relocation into a destination with a local working copy, a dir: target or the product repository itself, copies those reservations byte for byte into that working copy, left untracked, so it grades the counter checks as the source does; a remote git: destination keeps no local working copy once the clone-back is removed, so every clone of it, like every other clone, keeps this residual (section 5.4).'),
         _D('Adoption admission and recorded retirement, which the doctor decides from committed evidence alone, grade the same in both (section 4.2).'),
         _D('- Store resolution fails closed on a pointer that does not resolve and on zero or multiple manifests at the target; it cannot detect a second store that no pointer names, placed somewhere the tooling was never aimed.'),
         _D("- The tracked-store check verifies the resolved store is under version control, not ignored, and that the pointer, the manifest's recorded sync target, and the actual remote agree; it cannot verify the backup, access, or hosting discipline of the repository that tracks the store."),
@@ -1123,27 +1170,12 @@ _CONTRACT = {
 # like _CONTRACT pins, each proven unique and deletion-red by the self-test, but with no
 # per-section tiling equality, so additions there stay green. Section 9.1 is neither tiled nor
 # pinned: its implementation-class paragraph is retired (_RETIRED), since the base defines one
-# implementation model (spec 16.1). Sections 5.4 and 5.6 stay untiled; their pins are the store
-# relocation sentences, each a new or changed sentence of the relocation contract, so deleting or
-# rewording one turns the gate red while the rest of those sections, and additions to them, stay
-# unprotected. Appendix E is
+# implementation model (spec 16.1). Sections 5.4 and 5.6, the store relocation contract, are tiled
+# in _CONTRACT above: every sentence there is a pin, so a deletion, a rewording and an addition in
+# either section all turn the gate red. Appendix E is
 # informative and stays untiled; its pins are the sentences that state what section 16.1 makes of
 # its probes, so reverting one of them turns the gate red.
 _PINNED = {
-    "5.4": (
-        _D('refuse to start while the source store holds any open journal transaction or any staging run, so machine-local recovery state never straddles the move;'),
-        _D('the extraction replays every commit that touches the store, commit for commit, with identical .working/ trees and the original author, committer, dates and messages, and a relocation that flattens history into a single import commit, or that loses or rewrites any worklog entry, is nonconformant; the replayed commits carry new commit IDs and lose any commit signatures, a residual section 17 discloses;'),
-        _D('copy the ID reservations under journals/<kind>/allocations/ byte for byte into the destination working copy, left untracked, so the destination grades the section 8.2 counter checks as the source does (section 17);'),
-        'leave a publishable committed pointer in place after every completed migration: where the committed pointer cannot itself safely express the target (section 4.3), it MUST record a relative dir: path interpreted against the product repository root, and a target that no publishable committed pointer can express MUST be refused before anything is written;',
-        _D('record the relocation as a worklog entry naming both the old and the new location, authored as a separate worklog-append transaction at the destination after that verification, never as part of the transfer itself (section 8.2).'),
-        "The operation is journaled and recoverable: each run keeps one migrate journal of the journal-only relocation kind (section 4.2) in the source repository's git common directory, beside the operation-lock substrate, so the journal survives the removal of an in-repo source tree, and requested recovery of an interrupted relocation MUST fail closed on a missing journal (section 4.2).",
-        _D('The migrate journal, the destination repository, the pointer files and a temporary clone-back removed after verification are the only state opf migrate --store writes outside .working/ (section 4.2).'),
-        "Moving into an in-repo store never commits to the current branch: where the destination is the product repository itself, the migration MUST prepare the incoming .working/ tree on a review branch, and the move lands through the product repository's normal review flow.",
-        _D("Between the destination going live and the pointer change landing, a clone of the product repository can still resolve the old location; that window is accepted, and the section 5.7 consistency contract with the doctor's pointer and sync-target agreement (section 11) is the control that surfaces it, with no long-held lease spanning the window."),
-    ),
-    "5.6": (
-        'Until a reviewed github or gitlab provider registration lands, the reference tooling registers neither, and a github: or gitlab: target MUST refuse as an unregistered provider.',
-    ),
     "E": (
         _D('This appendix is informative: it recommends practice for checkers and releases working under section 16.1, it adds no requirement, and section 16.1 alone decides what a failure, a verdict, or a conformance claim is.'),
         _D("A shared record informs another checker's work and never substitutes for that checker's own attempts and reference runs."),
@@ -2840,7 +2872,7 @@ def contract_findings(text):
     for name in store.STORE_TREE_CONTROL_DIRS:
         if name + "/" not in layout:
             findings.append("spec 4.2 missing control home: " + name)
-    for kind in store.JOURNAL_KINDS:
+    for kind in store.KIND_VOCABULARY:
         if "`{}`".format(kind) not in layout:
             findings.append("spec 4.2 missing kind: " + kind)
     blocks = re.findall(r"^```gitignore\n(.*?)^```$", layout, re.MULTILINE | re.DOTALL)
@@ -3646,8 +3678,7 @@ def boundary_self_test():
     # The one journal read doctor makes: it lists the id reservation home of each kind and reads the
     # reservation files directly inside one, for the reserved numbers alone.
     allocation_homes = tuple(".working/journals/{}/allocations".format(kind)
-                             for kind in ("import", "ingest", "adoption", "layout", "preview", "record",
-                                          "relocation"))
+                             for kind in ("import", "ingest", "adoption", "layout", "preview", "record"))
 
     def listing(_fd, rel):
         listed.append(rel)
@@ -3753,8 +3784,8 @@ def boundary_self_test():
         check("unknown-kind-always-finding", lambda: any("invalid staging kind" in s
                                                        for s in containment(True, manifest2).findings))
         # The journal-only record kind (spec 4.2): a record staging run is NOT admitted by the
-        # homes-2 walk, exactly as any unknown kind (option ii, adding record to STAGING_KINDS,
-        # turns this red).
+        # homes-2 walk, exactly as any unknown kind (widening STAGING_KINDS with record turns
+        # this red).
         add(".working/staging/record/run/file")
         check("record-staging-kind-invalid", lambda: any("invalid staging kind 'record'" in s
                                                         for s in containment(True, manifest2).findings))
@@ -5456,47 +5487,73 @@ def _self_test_vectors():
         for function in (store.stage_run, store.evidence_run, store.txn_record):
             check("kind-refusal-{}-{!r}".format(function.__name__, bad),
                   lambda: refuses(lambda: function(bad, "imp" + suffix)))
-    # The journal-only record and relocation kinds (spec 4.2): journal_root, txn_record and
-    # allocation_record admit each; stage_run, evidence_run and evidence_inventory keep refusing
-    # them, so neither kind ever gains a staging or imported home. The paired mutations are
-    # exercised in place: dropping a journal-only kind from JOURNAL_KINDS turns the constructors
-    # red, and widening STAGING_KINDS with one (option ii) turns the staging refusals red.
+    # The journal-only record kind (spec 4.2): journal_root, txn_record and allocation_record admit
+    # it; stage_run, evidence_run and evidence_inventory keep refusing it, so record never gains a
+    # staging or imported home. The paired mutations are exercised in place: dropping record from
+    # JOURNAL_KINDS turns the constructors red, and widening STAGING_KINDS with record turns the
+    # staging refusals red.
     from unittest.mock import patch as _patch
     record_run = "record" + suffix
     relocation_run = "reloc" + suffix
-    journal_only = (("record", record_run), ("relocation", relocation_run))
-    check("journal-kinds", lambda: store.JOURNAL_KINDS == store.STAGING_KINDS + ("record", "relocation"))
+    check("journal-kinds", lambda: store.JOURNAL_KINDS == store.STAGING_KINDS + ("record",))
+    check("kind-vocabulary", lambda: store.KIND_VOCABULARY == store.JOURNAL_KINDS + ("relocation",))
     check("relocation-prefix", lambda: store._HOME_RUN_PREFIXES["relocation"] == "reloc")
-    for kind, run in journal_only:
-        check("journal-" + kind, lambda kind=kind: store.journal_root(kind) ==
-              ".working/journals/{}/journal".format(kind))
-        check("transaction-" + kind, lambda kind=kind, run=run: store.txn_record(kind, run) ==
-              ".working/journals/{}/runs/{}/transaction.toml".format(kind, run))
-        check("allocation-" + kind, lambda kind=kind, run=run: store.allocation_record(kind, run) ==
-              ".working/journals/{}/allocations/{}.toml".format(kind, run))
-        for bad in (None, [], "", "imp" + suffix, "adopt" + suffix, run.upper(), run + "/x",
-                    run.split("-")[0] + suffix.replace("Z", "X")):
-            for function in (store.txn_record, store.allocation_record):
-                check("run-refusal-{}-{}-{!r}".format(function.__name__, kind, bad),
-                      lambda function=function, kind=kind, bad=bad: refuses(lambda: function(kind, bad)))
-        check("kind-{}-no-staging".format(kind),
-              lambda kind=kind, run=run: refuses(lambda: store.stage_run(kind, run)))
-        check("kind-{}-no-evidence".format(kind),
-              lambda kind=kind, run=run: refuses(lambda: store.evidence_run(kind, run)))
-        check("kind-{}-no-inventory".format(kind),
-              lambda kind=kind, run=run: refuses(lambda: store.evidence_inventory(kind, run)))
-        with _patch.object(store, "JOURNAL_KINDS", store.STAGING_KINDS):
-            check("journal-{}-flip-dropped-kind".format(kind), lambda kind=kind, run=run:
-                  refuses(lambda: store.journal_root(kind))
-                  and refuses(lambda: store.txn_record(kind, run))
-                  and refuses(lambda: store.allocation_record(kind, run)))
-        with _patch.object(store, "STAGING_KINDS", store.STAGING_KINDS + (kind,)):
-            check("staging-{}-flip-option-ii".format(kind), lambda kind=kind, run=run:
-                  not refuses(lambda: store.stage_run(kind, run))
-                  and not refuses(lambda: store.evidence_run(kind, run)))
-    # A relocation run never admits another journal-only kind's run id: the reloc- prefix is its own.
-    check("run-refusal-relocation-record-id", lambda: refuses(lambda: store.txn_record("relocation", record_run)))
-    check("run-refusal-record-relocation-id", lambda: refuses(lambda: store.txn_record("record", relocation_run)))
+    check("journal-record", lambda: store.journal_root("record") == ".working/journals/record/journal")
+    check("transaction-record", lambda: store.txn_record("record", record_run) ==
+          ".working/journals/record/runs/{}/transaction.toml".format(record_run))
+    check("allocation-record", lambda: store.allocation_record("record", record_run) ==
+          ".working/journals/record/allocations/{}.toml".format(record_run))
+    for bad in (None, [], "", "imp" + suffix, "adopt" + suffix, record_run.upper(), record_run + "/x",
+                "record" + suffix.replace("Z", "X"), relocation_run):
+        for function in (store.txn_record, store.allocation_record):
+            check("run-refusal-{}-record-{!r}".format(function.__name__, bad),
+                  lambda function=function, bad=bad: refuses(lambda: function("record", bad)))
+    check("kind-record-no-staging", lambda: refuses(lambda: store.stage_run("record", record_run)))
+    check("kind-record-no-evidence", lambda: refuses(lambda: store.evidence_run("record", record_run)))
+    check("kind-record-no-inventory", lambda: refuses(lambda: store.evidence_inventory("record", record_run)))
+    with _patch.object(store, "JOURNAL_KINDS", store.STAGING_KINDS):
+        check("journal-record-flip-dropped-kind", lambda: refuses(lambda: store.journal_root("record"))
+              and refuses(lambda: store.txn_record("record", record_run))
+              and refuses(lambda: store.allocation_record("record", record_run)))
+    with _patch.object(store, "STAGING_KINDS", store.STAGING_KINDS + ("record",)):
+        check("staging-record-flip-widened-staging-kinds",
+              lambda: not refuses(lambda: store.stage_run("record", record_run))
+              and not refuses(lambda: store.evidence_run("record", record_run)))
+    # The journal-only relocation kind (spec 4.2/5.4): its one journal home is opf-reloc/ in the git
+    # common directory, so every .working/ journal constructor refuses it, and a relocation run
+    # claims no IDs (spec 8.2), so the kind has no allocation constructor at all; the explicitly
+    # named relocation constructors are the one path authority for the common-directory home, and
+    # their paths are relative to the git common directory, never to the store root.
+    check("kind-relocation-no-working-journal", lambda: refuses(lambda: store.journal_root("relocation")))
+    check("kind-relocation-no-working-txn",
+          lambda: refuses(lambda: store.txn_record("relocation", relocation_run)))
+    check("kind-relocation-no-allocation",
+          lambda: refuses(lambda: store.allocation_record("relocation", relocation_run)))
+    check("kind-relocation-no-staging", lambda: refuses(lambda: store.stage_run("relocation", relocation_run)))
+    check("kind-relocation-no-evidence", lambda: refuses(lambda: store.evidence_run("relocation", relocation_run)))
+    check("kind-relocation-no-inventory",
+          lambda: refuses(lambda: store.evidence_inventory("relocation", relocation_run)))
+    check("relocation-journal-root", lambda: store.relocation_journal_root() == "opf-reloc/journal")
+    check("relocation-transaction", lambda: store.relocation_txn_record(relocation_run) ==
+          "opf-reloc/runs/{}/transaction.toml".format(relocation_run))
+    for bad in (None, [], "", "imp" + suffix, "adopt" + suffix, record_run, relocation_run.upper(),
+                relocation_run + "/x", "reloc" + suffix.replace("Z", "X")):
+        check("run-refusal-relocation_txn_record-{!r}".format(bad),
+              lambda bad=bad: refuses(lambda: store.relocation_txn_record(bad)))
+    # The paired mutations in place: widening JOURNAL_KINDS with relocation would hand it the
+    # .working/ homes back, and dropping it from KIND_VOCABULARY turns its own constructor red.
+    with _patch.object(store, "JOURNAL_KINDS", store.JOURNAL_KINDS + ("relocation",)):
+        check("journal-relocation-flip-widened-journal-kinds",
+              lambda: not refuses(lambda: store.journal_root("relocation"))
+              and not refuses(lambda: store.txn_record("relocation", relocation_run))
+              and not refuses(lambda: store.allocation_record("relocation", relocation_run)))
+    with _patch.object(store, "KIND_VOCABULARY", store.JOURNAL_KINDS):
+        check("relocation-flip-dropped-kind",
+              lambda: refuses(lambda: store.relocation_txn_record(relocation_run)))
+    with _patch.object(store, "STAGING_KINDS", store.STAGING_KINDS + ("relocation",)):
+        check("staging-relocation-flip-widened-staging-kinds",
+              lambda: not refuses(lambda: store.stage_run("relocation", relocation_run))
+              and not refuses(lambda: store.evidence_run("relocation", relocation_run)))
     # PR-3: the reservation writer on a real store: exclusive, create-only, durable publication. The
     # reachable on-disk states are nothing, a torn staging leftover, the complete reservation (its
     # directory entry durable once the publication's final fsync ran), and the complete reservation
