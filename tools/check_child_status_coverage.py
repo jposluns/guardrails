@@ -360,6 +360,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/check_opf_drift.py",
     "opf/tools/check_opf_homes.py",
     "opf/tools/check_opf_init.py",
+    "opf/tools/check_opf_init_contract.py",
     "opf/tools/check_opf_init_observe.py",
     "opf/tools/check_opf_init_p0.py",
     "opf/tools/check_opf_init_qa.py",
@@ -379,6 +380,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_clauses.py",
     "tools/check_crosswalk.py",
     "tools/check_entry_guard.py",
+    "tools/check_footer.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
     "tools/check_hooks_preview.py",
@@ -451,8 +453,9 @@ DIRECT_LAUNCH_RESIDUAL = (
 # the expression the call spells: a changed assignment, argument or computation leaves the row reviewed, and the
 # scan follows the row's targets, not the new one (R13; the self-test shows this limit).
 DYNAMIC_LOADS_REVIEWED = (
-    ("opf/tools/check_opf_init_contract.py", ("runpy.run_path(str(ROOT / 'opf/tools/_opf_init_contract.py'))",),
-     ("opf/tools/_opf_init_contract.py",), "runpy.run_path of the literal opf/tools/_opf_init_contract.py"),
+    ("opf/tools/check_opf_init_contract.py", (),
+     ("opf/tools/_opf_init_contract.py",), "runpy.run_path of opf/tools/_opf_init_contract.py inside the child "
+     "script it launches, a string the scan does not parse"),
     ("tools/check_footer.py", ("exec(compile(source.replace(new, old), __file__, 'exec'), reverted)",),
      ("tools/check_footer.py",), "its own source with one check reverted, compiled and run in its self-test"),
     ("tools/check_opf_enforce_platforms.py",
