@@ -8804,10 +8804,25 @@ def _errexit_hazard(pairs, tail):
             ignored = ignored or exempt or negated  # so does a subshell in a condition or after !
             armed = False
             last, negated, joiner, piped, continued = None, False, None, False, False  # inside the subshell
+            if not argv and not redirected:
+                # Each further equal '(' in a run (a bare subshell, read through the same rules) pushes the scope
+                # this state gives and leaves the state as it is: armed, fn_pending and the open pipeline are
+                # reset, ignored already holds exempt, and no case pattern is pending or the first would not
+                # have reached here. So the rest of the run is pushed at once, one entry object for all of it,
+                # and a long run costs one comparison per pair instead of a walker step.
+                run = i
+                while run < count and pairs[run] == pairs[i - 1]:
+                    run += 1
+                if run > i:
+                    scopes.extend(itertools.repeat((on, pipefail, armed, last, exempt, ignored, negated, joiner,
+                                                    piped, functions, loops, substitution, len(frames),
+                                                    len(braces)), run - i))
+                    i = run
         elif kind == "close":
             if scopes:
+                scope = scopes.pop()
                 (outside_on, outside_pipefail, outside_armed, outside_last, exempt, ignored, negated, joiner,
-                 piped, functions, loops, substitution, frame_depth, brace_depth) = scopes.pop()
+                 piped, functions, loops, substitution, frame_depth, brace_depth) = scope
                 del frames[frame_depth:]  # a construct left open inside the subshell ends with it
                 del braces[brace_depth:]
                 on = outside_on  # an errexit setting made inside (...) ends with the subshell
@@ -8819,6 +8834,16 @@ def _errexit_hazard(pairs, tail):
                     last = outside_last  # the command that holds the substitution
                 else:
                     last = (on, None)  # a command of assignments only takes the substitution's status
+                if not argv and not redirected and not (frames and frames[-1][0] == "case" and frames[-1][2]):
+                    # Each further equal ')' that would pop this same entry (a run of '(' pushed one object)
+                    # restores the same state, and with no case pattern pending none of them ends a pattern, so
+                    # those closes are popped at once.
+                    run = i
+                    while run < count and len(scopes) > run - i and scopes[i - run - 1] is scope and (
+                            pairs[run] == pairs[i - 1]):
+                        run += 1
+                    del scopes[len(scopes) - (run - i):]
+                    i = run
             else:
                 last = (on, None)
             continued = False
