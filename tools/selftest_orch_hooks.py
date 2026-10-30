@@ -10917,6 +10917,301 @@ def _gitalias_oracle_cases(tmp):
     shutil.rmtree(str(root), ignore_errors=True)
 
 
+# ---------- the checked open of declared and state paths ----------
+# A plain open() of a declared or state path waited on a FIFO with no peer: a Stop, TeammateIdle, SessionStart,
+# UserPromptSubmit or PostToolUse hook until the platform's hook timeout ended it, and a PreToolUse hook for its whole
+# deadline before failing closed. Every such open now goes through aiqt_hooks._orch_open_checked. The source probe
+# refuses a plain open() call in any _orch, _rdp or _rwh function of the hooks script outside the exact allowlist below
+# (an allowlisted site that is gone, or repeated, is refused too); the vectors put a regular file, a FIFO and a
+# directory at one path of each class and run the hook that opens it in a child process, so a hook that blocks reads
+# as a timed-out row, never a hung suite.
+_PLAIN_OPEN_PREFIXES = ("_orch", "_rdp", "_rwh")
+_PLAIN_OPEN_ALLOWED = {
+    # (innermost function, open mode): (count, reason)
+    ("_orch_barrier_write", "x"): (
+        1, "an exclusive create (O_CREAT|O_EXCL) of a fresh temporary name, the pid plus 64 random bits, never "
+           "opens a node already there, so no FIFO, device or directory planted at a path can block it; the file "
+           "is then os.replace()d onto the barrier path"),
+}
+
+
+def _plain_open_findings(source):
+    """The plain open() calls the source probe refuses in the hooks source text, as sorted (function, line, mode)
+    rows: a call of open by its bare name, or as builtins.open, io.open or codecs.open, anywhere inside a function
+    whose own name or an enclosing function's name starts with _orch, _rdp or _rwh (a nested function, a lambda
+    and a comprehension inside one included), keyed by the innermost function and the mode literal ('r' where none
+    is given, '?' where it is not a literal). A key in _PLAIN_OPEN_ALLOWED passes only when it occurs exactly its
+    allowed number of times; any other count is one ('allowlist count', function, mode, count) row, so the
+    allowlist stays exact."""
+    import ast
+    found, allowed = [], {}
+
+    def visit(node, chain):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.Call) and any(n.startswith(_PLAIN_OPEN_PREFIXES) for n in chain):
+                func = child.func
+                if (isinstance(func, ast.Name) and func.id == "open") or (
+                        isinstance(func, ast.Attribute) and func.attr == "open"
+                        and isinstance(func.value, ast.Name) and func.value.id in ("builtins", "io", "codecs")):
+                    given = child.args[1] if len(child.args) > 1 else next(
+                        (kw.value for kw in child.keywords if kw.arg == "mode"), None)
+                    mode = "r" if given is None else given.value if isinstance(given, ast.Constant) else "?"
+                    if (chain[-1], mode) in _PLAIN_OPEN_ALLOWED:
+                        allowed[(chain[-1], mode)] = allowed.get((chain[-1], mode), 0) + 1
+                    else:
+                        found.append((chain[-1], child.lineno, mode))
+            named = isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            visit(child, chain + [child.name] if named else chain)
+    visit(ast.parse(source), [])
+    found.sort()
+    for key, (count, _reason) in sorted(_PLAIN_OPEN_ALLOWED.items()):
+        if allowed.get(key, 0) != count:
+            found.append(("allowlist count",) + key + (allowed.get(key, 0),))
+    return found
+
+
+_PLAIN_OPEN_HOOK_CHILD = (
+    "import json, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks\n"
+    "for name, payload in json.loads(sys.argv[2]):\n"
+    "    print(json.dumps(getattr(aiqt_hooks, name)(payload)), flush=True)\n")
+
+# The helper itself: a FIFO (no writer for the read, no reader for the append, then a reader present), a directory
+# and /dev/null are each refused, the reader receiving no byte; a regular file reads as open() in text mode reads it
+# (strict and replace decoding alike, CR and CRLF line ends included); the read bound refuses one byte past it.
+_PLAIN_OPEN_HELPER_CHILD = (
+    "import errno, json, os, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks as h\n"
+    "fifo, dirp, reg = (os.path.join(sys.argv[2], n) for n in ('fifo', 'dir', 'reg'))\n"
+    "os.mkfifo(fifo)\n"
+    "os.mkdir(dirp)\n"
+    "def refusal(call, *args, **kw):\n"
+    "    try:\n"
+    "        call(*args, **kw)\n"
+    "        return 'opened'\n"
+    "    except OSError as exc:\n"
+    "        return (type(exc).__name__ + (':ENXIO' if exc.errno == errno.ENXIO else '')\n"
+    "                + (':not-regular' if 'not a regular file' in str(exc) else '')\n"
+    "                + (':bound' if 'byte bound' in str(exc) else ''))\n"
+    "def text(read, errors):\n"
+    "    try:\n"
+    "        return read(errors)\n"
+    "    except ValueError as exc:\n"
+    "        return type(exc).__name__\n"
+    "def plain(errors):\n"
+    "    with open(reg, encoding='utf-8', errors=errors) as fh:\n"
+    "        return fh.read()\n"
+    "out = [refusal(h._orch_read_checked, fifo), refusal(h._orch_read_checked, dirp),\n"
+    "       refusal(h._orch_read_checked, '/dev/null'), refusal(h._orch_write_checked, fifo, b'x', append=True),\n"
+    "       refusal(h._orch_write_checked, dirp, b'x')]\n"
+    "reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)\n"
+    "out.append(refusal(h._orch_write_checked, fifo, b'x'))\n"
+    "out.append(os.read(reader, 16).decode())\n"
+    "os.close(reader)\n"
+    "with open(reg, 'wb') as fh:\n"
+    "    fh.write(b'a\\r\\nb\\rc\\n\\r\\r\\nd\\xff')\n"
+    "mine = lambda errors: h._orch_read_checked(reg, errors=errors)\n"
+    "out.append([text(mine, e) == text(plain, e) for e in ('strict', 'replace')] + [text(mine, 'replace')])\n"
+    "h._ORCH_STATE_MAX_BYTES = 8\n"
+    "with open(reg, 'wb') as fh:\n"
+    "    fh.write(b'12345678')\n"
+    "at = refusal(h._orch_read_checked, reg)\n"
+    "with open(reg, 'ab') as fh:\n"
+    "    fh.write(b'9')\n"
+    "out.append([at, refusal(h._orch_read_checked, reg)])\n"
+    "print(json.dumps(out), flush=True)\n")
+
+
+def _plain_open_child(source, argv_tail, rows):
+    """Run source in a child interpreter (-I -B) with the hooks directory as its first argument and return its first
+    rows stdout lines parsed as JSON, padded for each row it never printed with 'child timed out' (after 30 seconds)
+    or its exit status and stderr tail, so a call that blocks fails its row instead of hanging the suite."""
+    hooks = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
+    try:
+        p = subprocess.run([sys.executable, "-I", "-B", "-c", source, hooks] + argv_tail,
+                           capture_output=True, text=True, timeout=30)
+        out, missing = p.stdout, "child exit {}: {}".format(p.returncode, p.stderr.strip()[-200:])
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        missing = "child timed out"
+    got = []
+    for line in out.splitlines()[:rows]:
+        try:
+            got.append(json.loads(line))
+        except ValueError:
+            got.append("unparsed child line: {}".format(line[:200]))
+    return got + [missing] * (rows - len(got))
+
+
+def _plain_open_place(path, kind, content):
+    """Put a regular file holding content (kind 'regular'), a FIFO with no peer ('fifo') or an empty directory
+    ('dir') at path, in place of whatever was there."""
+    if os.path.isdir(str(path)) and not os.path.islink(str(path)):
+        shutil.rmtree(str(path))
+    elif os.path.lexists(str(path)):
+        os.unlink(str(path))
+    if kind == "regular":
+        Path(path).write_text(content, encoding="utf-8")
+    elif kind == "fifo":
+        os.mkfifo(str(path))
+    else:
+        os.mkdir(str(path))
+
+
+def _plainopen_cases(tmp):
+    """The checked open of declared and state paths: the source probe and its flips, the helper's own refusals, and
+    one vector per class of path (see the section comment above _PLAIN_OPEN_PREFIXES)."""
+    hooks_src = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    check("plainopen/source-probe-no-plain-open-outside-the-allowlist", _plain_open_findings(hooks_src), [])
+
+    def _mutant(old, new):
+        # the probe over a copy of the source with one substitution, which must apply exactly once
+        if hooks_src.count(old) != 1:
+            return "the substitution does not apply exactly once"
+        return [row if row[0] == "allowlist count" else (row[0], row[2])
+                for row in _plain_open_findings(hooks_src.replace(old, new))]
+    # the flips: one converted site (the turn-state read) reverted to its plain open, and the allowlisted create's
+    # mode changed, so the reverted site is named and the allowlist's exact count is short
+    check("plainopen/source-probe-red-on-a-reverted-site-and-a-changed-allowlisted-open",
+          (_mutant("        data = json.loads(_orch_read_checked(path))\n"
+                   "        return data if isinstance(data, dict) else None\n",
+                   "        with open(path, \"r\", encoding=\"utf-8\") as fh:\n"
+                   "            data = json.load(fh)\n"
+                   "        return data if isinstance(data, dict) else None\n"),
+           _mutant('with open(tmp, "x", encoding="utf-8") as fh:', 'with open(tmp, "w", encoding="utf-8") as fh:')),
+          ([("_orch_turn_state", "r")],
+           [("_orch_barrier_write", "w"), ("allowlist count", "_orch_barrier_write", "x", 0)]))
+    helper = tmp / "plainopen-helper"
+    helper.mkdir()
+    check("plainopen/helper-refuses-each-non-regular-node-promptly-and-reads-as-text-mode-open",
+          _plain_open_child(_PLAIN_OPEN_HELPER_CHILD, [str(helper)], 1),
+          [["OSError:not-regular", "IsADirectoryError", "OSError:not-regular", "OSError:ENXIO", "IsADirectoryError",
+            "OSError:not-regular", "", [True, True, "a\nb\nc\n\n\nd�"], ["opened", "OSError:bound"]]])
+
+    def _set_reg(fx, **changes):
+        regp = fx.root / ".aiqt" / "orchestration.local.json"
+        reg = json.loads(regp.read_text(encoding="utf-8"))
+        reg.update(changes)
+        regp.write_text(json.dumps(reg), encoding="utf-8")
+
+    stop = lambda fx: ["orch_stop_guard", fx.payload("Stop")]
+    resume = lambda fx: ["orch_resume_audit", fx.payload("SessionStart")]
+
+    # Each setup arranges one fixture and returns (the path the hook opens, its regular content, the call).
+    def pending(fx):
+        fx.set_items([item("PO-1", blocker=dict(kind="human-decision", ref="PD-7"))])
+        return fx.pending, "| PD-7 | 2026-01-01 | which licence | RAISED |\n", stop(fx)
+
+    def handoff(fx):
+        return fx.handoff, "Handoff notes\n", resume(fx)
+
+    def mistakes(fx):
+        _set_reg(fx, mistakes_register=str(fx.root / "mistakes.jsonl"))
+        return fx.root / "mistakes.jsonl", "", resume(fx)
+
+    def lease(fx):
+        _set_reg(fx, lease=dict(path=str(fx.lease), max_age_hours=24, holder_is_session_id=True))
+        fx.set_items([item("PO-4")])
+        return fx.lease, "holder: s1\n", stop(fx)
+
+    def turn_state(fx):
+        fx.set_items([item("PO-5")])
+        return fx.state / "turn-state.json", "{}", stop(fx)
+
+    def checkpoint(fx):
+        fx.set_items([item("PO-6", state="proposed")])
+        return (fx.state / "backlog-checkpoint.json",
+                json.dumps(dict(version=1, ts=now_iso(0), ids={"PO-6": "proposed"})), stop(fx))
+
+    def ledger_read(fx):
+        fx.set_items([item("PO-7", blocker=dict(kind="tracked-task", ref="T-9"))])
+        return (fx.state / "dispatch-ledger.jsonl", json.dumps(dict(ts=now_iso(1), event="launch", task_id="T-9",
+                                                                    tool="Bash", wake=True)) + "\n", stop(fx))
+
+    def ledger_append(fx):
+        return fx.state / "dispatch-ledger.jsonl", "", [
+            "orch_dispatch_ledger", fx.payload("PostToolUse", "Bash", dict(command="sleep 1", run_in_background=True),
+                                               extra=dict(tool_response=dict(task_id="po-8")))]
+
+    def events(fx):
+        fx.set_items([item("PO-9")])
+        return fx.state / "guard-events.jsonl", "", stop(fx)
+
+    def spoof_write(fx):
+        fx.set_items([item("PO-10")])
+        (fx.state / "ESCAPE-ALLOW-YIELD").write_text("operator\n", encoding="utf-8")  # actor-owned: a spoof
+        return fx.state / "escape-spoof.json", "{}", stop(fx)
+
+    def asks(fx):
+        fx.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
+        return fx.state / "pending-asks.jsonl", "", [
+            "orch_ask_guard", fx.payload("PreToolUse", "AskUserQuestion", dict(questions=[]))]
+
+    def surfaced(fx):
+        (fx.state / "forced-exit.jsonl").write_text(json.dumps(dict(
+            ts=now_iso(0), event="Stop", key="po-k1", open_ids=["PO-12"], reason="r", enum_status="ok")) + "\n",
+            encoding="utf-8")
+        return fx.state / "forced-exit-surfaced.json", json.dumps(dict(keys=["po-k1"])), resume(fx)
+
+    def spoof_read(fx):
+        return fx.state / "escape-spoof.json", json.dumps(dict(ts="t", detail="d")), resume(fx)
+
+    unreadable = ("warn", True)
+
+    def _row(raw, channel, needle):
+        if not (isinstance(raw, list) and len(raw) == 3):
+            return raw  # a timed-out or broken child row never matches
+        code, obj, err = raw
+        hso = obj.get("hookSpecificOutput") if isinstance(obj, dict) else None
+        reason = hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else ""
+        text = ("", str(reason or err or ""), str(obj.get("systemMessage", "")) if isinstance(obj, dict) else "")
+        verdict = _verdict((code, obj, err))
+        return verdict if channel is None else (verdict, needle in text[channel])
+
+    # (check id naming the class of path, setup, channel read for the needle or None for the verdict alone, needle,
+    # expected rows for a regular file, a FIFO and a directory): each FIFO or directory row is the hook's
+    # cannot-evaluate posture, and the regular row is its flip
+    for check_id, setup, channel, needle, want in (
+            ("plainopen/declared-record-pending-decisions-fifo-and-directory-never-block", pending, None, None,
+             ("allow", "block2", "block2")),
+            ("plainopen/declared-record-handoff-fifo-and-directory-never-block", handoff, 2,
+             "declared handoff unreadable", (("allow", False), unreadable, unreadable)),
+            ("plainopen/declared-register-mistakes-fifo-and-directory-never-block", mistakes, 2,
+             "declared mistakes register fails its inline chain/shape check",
+             (("allow", False), unreadable, unreadable)),
+            ("plainopen/declared-lease-holder-fifo-and-directory-never-block", lease, None, None,
+             ("block2", "allow", "allow")),
+            ("plainopen/state-turn-state-read-fifo-and-directory-never-block", turn_state, None, None,
+             ("block2", "warn", "warn")),
+            ("plainopen/state-checkpoint-read-fifo-and-directory-never-block", checkpoint, 1, "backlog-checkpoint",
+             (("allow", False), ("block2", True), ("block2", True))),
+            ("plainopen/state-ledger-read-fifo-and-directory-never-block", ledger_read, None, None,
+             ("allow", "block2", "block2")),
+            ("plainopen/state-ledger-append-fifo-and-directory-never-block", ledger_append, 2,
+             "dispatch-ledger write failed", (("allow", False), unreadable, unreadable)),
+            ("plainopen/state-guard-events-append-fifo-and-directory-never-block", events, 1,
+             "guard-events row for this deny", (("block2", False), ("block2", True), ("block2", True))),
+            ("plainopen/state-escape-spoof-write-fifo-and-directory-never-block", spoof_write, 1,
+             "escape-spoof.json FAILED", (("block2", False), ("block2", True), ("block2", True))),
+            ("plainopen/state-pending-asks-read-fifo-and-directory-never-block", asks, 2, "could NOT be persisted",
+             (("deny", False), ("deny", True), ("deny", True))),
+            ("plainopen/state-forced-exit-surfaced-read-fifo-and-directory-never-block", surfaced, 2,
+             "surfaced-set is unreadable", (("allow", False), unreadable, unreadable)),
+            ("plainopen/state-escape-spoof-read-fifo-and-directory-never-block", spoof_read, 2,
+             "present but unreadable", (("warn", False), unreadable, unreadable))):
+        calls = []
+        for kind in ("regular", "fifo", "dir"):
+            fx = Fixture(tmp, "plainopen-{}-{}".format(setup.__name__, kind))
+            fx.state.mkdir(parents=True, exist_ok=True)
+            path, content, call = setup(fx)
+            _plain_open_place(path, kind, content)
+            calls.append(call)
+        rows = _plain_open_child(_PLAIN_OPEN_HOOK_CHILD, [json.dumps(calls)], 3)
+        check(check_id, tuple(_row(raw, channel, needle) for raw in rows), want)
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -17326,6 +17621,7 @@ def _main_isolated(report_path=None):
               set(json.loads((hsd / "forced-exit-surfaced.json").read_text(
                   encoding="utf-8")).get("keys", [])), {"k1", "k2"})
         check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
+        _plainopen_cases(tmp)
         _leasehb_cases(tmp)
         _leasehb_fix2_cases(tmp)
         _leasehb_write_integrity_cases(tmp)
