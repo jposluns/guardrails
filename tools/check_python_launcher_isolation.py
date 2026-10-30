@@ -26,7 +26,31 @@ SCANNED SURFACES (the declared set, resolved from the repo root):
   - the QA-suite Python sources tools/_qa_adapter.py, tools/audit_reference.py, and
     tools/check_internal_names.py (required), scanned for a sys.path insertion at index 0 that would
     re-add the script directory AHEAD of the stdlib and re-enable the sibling-shadow class under -I; their
-    sanctioned sibling-import form is sys.path.append.
+    sanctioned sibling-import form is sys.path.append,
+  - every Python hook script a launcher in the plugin hooks.json or a scanned .claude/settings*.json
+    runs (see HOOK SCRIPT BOOTSTRAP below).
+
+HOOK SCRIPT BOOTSTRAP. `-I` removes the script's own directory from the module path, so a hook script
+that imports a module beside it fails with ModuleNotFoundError unless it adds that directory back
+first. A tool or gate that fails that way exits 1 loudly, but a PreToolUse hook that exits 1 has hit a
+non-blocking error and the tool call goes through unchecked. So every hook script a scanned hook
+launcher runs is parsed (AST) and must import a sibling (an absolute import whose first name is a module
+file or a subdirectory in the script's own directory) only after a module-level sys.path.append of its
+own directory: an expression statement of the module body itself (not nested in a function, class, if
+or try) calling sys.path.append with str(Path(__file__).parent) (optionally .resolve() or .absolute()
+first), os.path.dirname(__file__), os.path.dirname(os.path.abspath(__file__)) or its realpath form, or
+a module-level name last bound to one of those. The module-body statement holding the import must come
+after that bootstrap in source order, so an import inside a function defined before it is a finding
+even when the function is only called later (a conservative over-refusal). append, never an index-0
+insertion: every sys.path.insert call in a hook script is a finding, because a directory ahead of the
+stdlib lets a file beside the hook shadow a stdlib import. Each script is checked once however many
+hooks launch it. The script operand is the first non-option word after the interpreter options (the
+LAUNCHER PREDICATE grammar); ${CLAUDE_PLUGIN_ROOT}/ resolves only in a plugin's hooks/hooks.json (to
+the directory above hooks/), and $CLAUDE_PROJECT_DIR/ and a relative path resolve against the repo
+root. A -c, -m or standard-input launch runs no script file and is out of scope; an operand that cannot
+be placed (after an unrecognized long option) or resolved (another variable, an absolute path, a glob, a
+tilde, a path leaving the tree), a script missing from the tree, an unreadable script or directory,
+and source that does not parse are each cannot-evaluate (exit 2).
 
 LAUNCHER PREDICATE. In a scanned command, a leading shell control keyword is skipped ONLY in its
 literal (unquoted, unescaped) spelling: a quoted or backslash-escaped spelling (``i'f'``,
@@ -136,11 +160,13 @@ the key line or on the deeper line), a value that opens with a node property or 
 ``*``), and a plain scalar continued onto a further deeper-indented line are cannot-evaluate (exit
 2), never skipped.
 
-EXIT CONVENTION: 0 every recognized launcher is isolated; 1 at least one recognized launcher is not
-isolated; 2 cannot-evaluate (a required input missing, unreadable, non-regular, or malformed; a JSON
-parse error; a shell line carrying a python token whose command-word position cannot be established; a
-workflow `run:` value outside the run: grammar above; a hook entry with a missing type/command or a
-non-list args; or the gate's own interpreter not isolated).
+EXIT CONVENTION: 0 every recognized launcher is isolated and every hook script it runs passes the
+bootstrap rule; 1 at least one recognized launcher is not isolated, or a hook script imports a sibling
+without its bootstrap or calls sys.path.insert; 2 cannot-evaluate (a required input missing, unreadable,
+non-regular, or malformed; a JSON parse error; a shell line carrying a python token whose command-word
+position cannot be established; a workflow `run:` value outside the run: grammar above; a hook entry
+with a missing type/command or a non-list args; a hook script that cannot be placed, found, read or
+parsed; or the gate's own interpreter not isolated).
 Diagnostics are deterministic, sorted by relative path then line then location.
 
 DISCLOSED RESIDUAL (this gate does not catch): wrapper or indirect launchers (``bash -c "python3 ..."``,
@@ -150,7 +176,8 @@ breaks a ``python`` substring, expands to ``python3 pythn3``), the
 programmatic ``subprocess`` children in the tools and the ``regenerate`` strings in .aiqt/gensrc.json
 (a separate follow-up), a runtime ``sys.path`` mutation OTHER than a literal index-0 insertion in the
 three enumerated QA-suite sources (a ``sys.path[0:0]`` slice, a computed index, a runtime-assembled
-insertion, or one in another source is not caught, and even for those three ``-I`` cannot prevent a
+insertion, or one in another source is not caught, except a sys.path.insert call in a scanned hook
+script, which the HOOK SCRIPT BOOTSTRAP rule fails, and even for those three ``-I`` cannot prevent a
 runtime mutation the source performs), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces,
 YAML or shell constructs beyond the supported line grammar (a run key or value spelling outside it,
 every non-plain key spelling, a folded block scalar and an off-allowlist step key are refused, exit
@@ -158,8 +185,14 @@ every non-plain key spelling, a folded block scalar and an off-allowlist step ke
 line shape is still checked against the closed line grammar), and the
 steps tracker is single-level, so a nested plain steps: key ends the outer block's allowlist
 check early),
-and the PATH provenance of ``python3``
-itself. A ``python3 tools/*.py`` token embedded in a quoted argument or a heredoc may be miscounted,
+the PATH provenance of ``python3``
+itself, and in the hook-script bootstrap rule: a dynamic import (importlib.import_module, __import__),
+a relative import (which fails in any top-level script), a sys.path mutation other than append and
+insert (a slice assignment, a rebinding of sys.path), a directory name rebound inside a function, names
+``sys``, ``os`` and ``Path`` rebound to something else, a hook script run as a module (-m) or with -c,
+a symlinked hook script (its own directory is read as the link's), a hook script reached through
+another script it launches, and hook configuration outside the scanned files (an adopter-side settings
+template such as opf/enforcement/claude/settings.opf.json among them). A ``python3 tools/*.py`` token embedded in a quoted argument or a heredoc may be miscounted,
 mirroring the roster-scan limit the enforceability ledger discloses.
 
   check_python_launcher_isolation.py             scan the declared surfaces
@@ -208,8 +241,11 @@ if not _interpreter_isolated(sys.flags):
         pass
     os._exit(2)
 
-import json  # noqa: E402  imported only after the isolation guard above
+import ast  # noqa: E402  imported only after the isolation guard above
+import importlib.machinery  # noqa: E402
+import json  # noqa: E402
 import os  # noqa: E402
+import posixpath  # noqa: E402
 import re  # noqa: E402
 import shlex  # noqa: E402
 import stat  # noqa: E402
@@ -245,6 +281,23 @@ PYSOURCE_ISOLATION_REL = ("tools/_qa_adapter.py", "tools/audit_reference.py", "t
 # A sys.path insertion at index 0 (`sys.path.insert(0, ...)`, also spelled with whitespace); the sanctioned
 # form for the sources above is sys.path.append, which preserves stdlib precedence.
 SYS_PATH_FRONT_INSERT_RE = re.compile(r"sys\.path\.insert\(\s*0\b")
+
+# HOOK SCRIPT BOOTSTRAP. `-I` drops the script's own directory from sys.path, so a hook script that
+# imports a module beside it fails with ModuleNotFoundError unless it first adds that directory back. For
+# a PreToolUse hook that failure is exit 1, a non-blocking error, so every tool call goes through
+# unchecked. Each Python hook script launched from the scanned hooks.json and .claude/settings*.json
+# files must therefore import a sibling only after a module-level sys.path.append of its own directory
+# (append keeps the stdlib ahead of the sibling; an index-0 insertion would let a sibling shadow it).
+# The two launch-path variables Claude Code substitutes, and the only ones resolved here: the plugin
+# root (for a plugin's hooks/hooks.json, the directory above hooks/) and the project directory (the
+# repo root). Any other variable, an absolute path, a glob, a tilde and a path leaving the tree are
+# cannot-evaluate.
+HOOK_PLUGIN_ROOT_PREFIX = "${CLAUDE_PLUGIN_ROOT}/"
+HOOK_PROJECT_DIR_PREFIXES = ("$CLAUDE_PROJECT_DIR/", "${CLAUDE_PROJECT_DIR}/")
+HOOK_UNRESOLVED_CHARS = "$`~*?[{"
+# Every file suffix the import system loads a module from, longest first so an extension-module suffix
+# wins over the bare `.so` it ends with.
+MODULE_SUFFIXES = tuple(sorted(set(importlib.machinery.all_suffixes()), key=len, reverse=True))
 
 PY_WORD_RE = re.compile(r"^python(3(\.\d+)?)?$")     # a whole token that is a python interpreter name
 PY_TOKEN_RE = re.compile(r"\bpython3?\b")            # a python word anywhere in a line (a fast pre-filter)
@@ -421,18 +474,32 @@ def _flags_isolated(after_interpreter):
     `--check-hash-based-pycs`) has its value skipped rather than letter-scanned, so an isolation letter is
     never forged from a value and a real flag after a separate value is never missed. Isolated iff `I`, or
     all of `P`, `E`, `s`."""
+    flags, _, _ = _option_walk(after_interpreter)
+    return ("I" in flags) or {"P", "E", "s"}.issubset(flags)
+
+
+def _option_walk(after_interpreter):
+    """The interpreter-option walk _flags_isolated reads. Returns (flags, kind, script): flags is the
+    set of credited option letters; kind is "script" with script the token the interpreter runs as a
+    file, "none" when the launch runs no script file (`-c` or `-m` in any form, a `-` stdin operand, or
+    no operand at all), or "unknown" when an unrecognized long `--option` ends the walk, so the operand
+    cannot be placed."""
     flags = set()
     tokens = list(after_interpreter)
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok in ("--", "-m", "-c"):
-            break
+        if tok in ("-m", "-c"):
+            return flags, "none", None
+        if tok == "--":
+            if i + 1 < len(tokens) and tokens[i + 1] != "-":
+                return flags, "script", tokens[i + 1]
+            return flags, "none", None
         if tok in VALUE_LONG_OPTS:
             i += 2                       # skip the long option and its separate value token
             continue
         if tok.startswith("--"):
-            break                        # an unrecognized long interpreter option: not a flag we credit
+            return flags, "unknown", None  # an unrecognized long interpreter option: not a flag we credit
         if tok.startswith("-") and len(tok) > 1:
             j = 1
             skip_next = False
@@ -454,11 +521,13 @@ def _flags_isolated(after_interpreter):
                 flags.add(letter)        # a valueless flag: credit it (e.g. -PEs -> P, E, s)
                 j += 1
             if terminate:
-                break
+                return flags, "none", None
             i += 2 if skip_next else 1
             continue
-        break                            # the script/program token: options end here
-    return ("I" in flags) or {"P", "E", "s"}.issubset(flags)
+        if tok == "-":
+            return flags, "none", None   # the program is read from standard input, not a file
+        return flags, "script", tok      # the script/program token: options end here
+    return flags, "none", None
 
 
 def check_argv(argv):
@@ -652,14 +721,15 @@ def _shell_split(s):
     return [decoded for decoded, _ in _shell_split_pairs(s)]
 
 
-def _scan_command_tokens(rel, lineno, loc, pairs, source_repr, errors, failures):
+def _scan_command_tokens(rel, lineno, loc, pairs, source_repr, errors, failures, launchers_out=None):
     """Scan an already-split (decoded, raw) token pair list for python launchers across its
     simple-command segments. Every python word must resolve to a command-word position; if the
     launcher count does not match the python words present, a launcher is hidden in an unexpected
     construct (one after a quoted or escaped leading keyword or assignment-like word, which is a
     literal command name, or after a quoted separator, which is an argument, included) and this
     is a cannot-evaluate, so it is never silently passed. Each recognized
-    launcher that is not isolated is a failure."""
+    launcher that is not isolated is a failure. When launchers_out is a list, each recognized
+    launcher's decoded words (the command word first) are appended to it."""
     py_word_count = sum(1 for dec, _ in pairs if _is_py_word(dec))
     launchers = []
     for seg in _segments(pairs):
@@ -670,6 +740,8 @@ def _scan_command_tokens(rel, lineno, loc, pairs, source_repr, errors, failures)
         errors.append((rel, lineno, loc, "a python token is not in a resolvable command-word position: "
                        "{!r}".format(source_repr)))
         return
+    if launchers_out is not None:
+        launchers_out.extend(launchers)
     for rest in launchers:
         if not _flags_isolated(rest[1:]):
             failures.append((rel, lineno, loc, "non-isolated launcher {!r}; requires {}"
@@ -1366,12 +1438,13 @@ def _yaml_run_lines(text):
     return out, unsupported
 
 
-def _check_hooks_json(rel, text, errors, failures):
+def _check_hooks_json(rel, text, errors, failures, hook_launches=None):
     """Scan a plugin hooks.json or a Claude settings.json hooks block. Each command-type hook carries
     either an `args` list (the plugin form: argv is command + args, one command) or a shell-string
     `command` (the settings form: a full shell string that may chain several commands, so it is
     segment-split and every python launcher segment is checked). Fail-closed on malformed JSON or a
-    malformed hook entry."""
+    malformed hook entry. When hook_launches is a list, each recognized python launcher is appended
+    to it as (rel, location, the words after the interpreter) for the hook-script bootstrap check."""
     try:
         obj = json.loads(text)
     except ValueError as exc:
@@ -1421,6 +1494,9 @@ def _check_hooks_json(rel, text, errors, failures):
                     if verdict is False:
                         failures.append((rel, 0, hloc, "non-isolated launcher {!r}; requires {}"
                                          .format(" ".join(argv), REQUIRED_FORM)))
+                    if verdict is not None and hook_launches is not None:
+                        rest = _strip_launcher_prefix([(tok, tok) for tok in argv])
+                        hook_launches.append((rel, hloc, [tok for tok, _ in rest[1:]]))
                 else:
                     # The settings form: a shell string that may chain commands (e.g. `prep && python3
                     # x.py`), so segment-split and check every launcher segment, not just the first.
@@ -1429,7 +1505,11 @@ def _check_hooks_json(rel, text, errors, failures):
                     except ValueError as exc:
                         errors.append((rel, 0, hloc, "command string does not parse: {}".format(exc)))
                         continue
-                    _scan_command_tokens(rel, 0, hloc, pairs, command, errors, failures)
+                    launchers = []
+                    _scan_command_tokens(rel, 0, hloc, pairs, command, errors, failures, launchers)
+                    if hook_launches is not None:
+                        for words in launchers:
+                            hook_launches.append((rel, hloc, words[1:]))
 
 
 def _candidate_mode(path):
@@ -1466,13 +1546,13 @@ def _read_required_text(root, rel, errors):
         return None
 
 
-def _scan_json_file(root, rel, errors, failures):
+def _scan_json_file(root, rel, errors, failures, hook_launches=None):
     """Read a required JSON launcher file and scan it. Missing/unreadable/non-regular/non-UTF-8 ->
     cannot-evaluate."""
     text = _read_required_text(root, rel, errors)
     if text is None:
         return
-    _check_hooks_json(rel, text, errors, failures)
+    _check_hooks_json(rel, text, errors, failures, hook_launches)
 
 
 def _scan_shell_file(root, rel, errors, failures):
@@ -1550,10 +1630,241 @@ def _scan_pysource_isolation(root, errors, failures):
                                  "sys.path.append"))
 
 
+def _resolve_hook_script(config_rel, token):
+    """Map a hook launcher's script operand to a repo-relative path. Returns (rel, None), or (None,
+    message) for an operand this gate cannot place: ${CLAUDE_PLUGIN_ROOT}/ is resolved only in a
+    plugin's hooks/hooks.json (to the directory above hooks/), $CLAUDE_PROJECT_DIR/ and a relative path
+    against the repo root (the directory Claude Code runs a project hook from); any other variable, an
+    absolute path, a glob, a tilde and a path that leaves the tree are refused."""
+    base = ""
+    rest = token
+    if token.startswith(HOOK_PLUGIN_ROOT_PREFIX):
+        parts = config_rel.split("/")
+        if len(parts) < 3 or parts[-2:] != ["hooks", "hooks.json"]:
+            return None, ("the hook script operand " + repr(token) + " names the plugin root outside "
+                          "a plugin's hooks/hooks.json, so the script cannot be located")
+        base = "/".join(parts[:-2])
+        rest = token[len(HOOK_PLUGIN_ROOT_PREFIX):]
+    else:
+        for prefix in HOOK_PROJECT_DIR_PREFIXES:
+            if token.startswith(prefix):
+                rest = token[len(prefix):]
+                break
+    if not rest or rest.startswith("/") or any(ch in rest for ch in HOOK_UNRESOLVED_CHARS):
+        return None, ("the hook script operand " + repr(token) + " is not a literal path in the "
+                      "tree (only the plugin root in a plugin hooks.json, the project directory and a "
+                      "relative path are resolved), so its sibling-import bootstrap cannot be checked")
+    rel = posixpath.normpath(posixpath.join(base, rest) if base else rest)
+    if rel in (".", "..") or rel.startswith("../"):
+        return None, ("the hook script operand " + repr(token) + " resolves outside the tree, so its "
+                      "sibling-import bootstrap cannot be checked")
+    return rel, None
+
+
+def _sibling_module_names(directory):
+    """The top-level module names a file or directory in `directory` provides once that directory is on
+    sys.path: a module file under any import suffix, and a subdirectory (a package, or a namespace
+    package when it has no __init__.py). Raises OSError when the directory cannot be listed."""
+    names = set()
+    for entry in os.listdir(directory):
+        if os.path.isdir(os.path.join(directory, entry)):
+            if entry.isidentifier() and entry != "__pycache__":
+                names.add(entry)
+            continue
+        for suffix in MODULE_SUFFIXES:
+            if entry.endswith(suffix) and entry[:-len(suffix)].isidentifier():
+                names.add(entry[:-len(suffix)])
+                break
+    return names
+
+
+def _dotted(node):
+    """The dotted name a Name/Attribute chain spells (`sys.path.append`), or None."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        head = _dotted(node.value)
+        return None if head is None else head + "." + node.attr
+    return None
+
+
+def _is_dunder_file(node):
+    return isinstance(node, ast.Name) and node.id == "__file__"
+
+
+def _is_plain_call(node, names, argc):
+    """True iff node calls one of the dotted `names` with exactly `argc` positional arguments and no
+    keyword."""
+    return (isinstance(node, ast.Call) and _dotted(node.func) in names and len(node.args) == argc
+            and not node.keywords)
+
+
+def _is_own_dir_path(node, path_dirs):
+    """A pathlib spelling of the script's own directory: Path(__file__).parent, with an optional
+    .resolve() or .absolute() before .parent, or a module-level name bound to one."""
+    if isinstance(node, ast.Name):
+        return node.id in path_dirs
+    if not (isinstance(node, ast.Attribute) and node.attr == "parent"):
+        return False
+    inner = node.value
+    if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr in ("resolve", "absolute") and not inner.args and not inner.keywords):
+        inner = inner.func.value
+    return _is_plain_call(inner, ("Path", "pathlib.Path"), 1) and _is_dunder_file(inner.args[0])
+
+
+def _is_own_dir_str(node, str_dirs, path_dirs):
+    """A string spelling of the script's own directory: str() of a pathlib spelling,
+    os.path.dirname(__file__), os.path.dirname(os.path.abspath(__file__)) or its realpath form, or a
+    module-level name bound to one."""
+    if isinstance(node, ast.Name):
+        return node.id in str_dirs
+    if _is_plain_call(node, ("str",), 1):
+        return _is_own_dir_path(node.args[0], path_dirs)
+    if _is_plain_call(node, ("os.path.dirname",), 1):
+        arg = node.args[0]
+        if _is_dunder_file(arg):
+            return True
+        return (_is_plain_call(arg, ("os.path.abspath", "os.path.realpath"), 1)
+                and _is_dunder_file(arg.args[0]))
+    return False
+
+
+def _track_own_dir_names(stmt, str_dirs, path_dirs):
+    """Follow a module-level binding: a name assigned an own-directory spelling is recorded, and any
+    other assignment to a recorded name forgets it."""
+    if isinstance(stmt, ast.Assign):
+        targets, value = stmt.targets, stmt.value
+    elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+        targets, value = [stmt.target], stmt.value
+    else:
+        return
+    is_str = _is_own_dir_str(value, str_dirs, path_dirs)
+    is_path = not is_str and _is_own_dir_path(value, path_dirs)
+    for target in targets:
+        for node in ast.walk(target):
+            if not isinstance(node, ast.Name):
+                continue
+            str_dirs.discard(node.id)
+            path_dirs.discard(node.id)
+            if isinstance(target, ast.Name):
+                if is_str:
+                    str_dirs.add(node.id)
+                elif is_path:
+                    path_dirs.add(node.id)
+
+
+def _is_own_dir_append(stmt, str_dirs, path_dirs):
+    """True iff stmt is the sanctioned bootstrap: an expression statement calling
+    sys.path.append(<the script's own directory>)."""
+    return (isinstance(stmt, ast.Expr) and _is_plain_call(stmt.value, ("sys.path.append",), 1)
+            and _is_own_dir_str(stmt.value.args[0], str_dirs, path_dirs))
+
+
+def _absolute_import_roots(node):
+    """The first name of every absolute import a node performs (`import a.b` and `from a.b import c`
+    give `a`); a relative import gives none."""
+    if isinstance(node, ast.Import):
+        return [alias.name.split(".")[0] for alias in node.names]
+    if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        return [node.module.split(".")[0]]
+    return []
+
+
+def _hook_bootstrap_findings(text, rel, siblings):
+    """Apply the hook-script bootstrap rule to one script's source; return sorted (lineno, message)
+    findings. Raises SyntaxError or ValueError when the source does not parse. The bootstrap is the
+    first statement of the module body that calls sys.path.append with the script's own directory; it
+    must be a statement of the module body itself, not nested in a function, class, if or try. An
+    absolute import whose first name is in `siblings`, anywhere in the file, is a finding when there is
+    no bootstrap or when the module-body statement that holds the import comes before the bootstrap
+    (source order of the module-body statements, not call order, so an import in a function defined
+    before the bootstrap is a finding even when the function is only called after it). Every
+    sys.path.insert call in the file is a finding: it can put a directory ahead of the stdlib."""
+    tree = ast.parse(text, filename=rel)
+    str_dirs, path_dirs = set(), set()
+    boot_index = boot_line = None
+    for index, stmt in enumerate(tree.body):
+        if boot_index is None and _is_own_dir_append(stmt, str_dirs, path_dirs):
+            boot_index, boot_line = index, stmt.lineno
+        _track_own_dir_names(stmt, str_dirs, path_dirs)
+    findings = []
+    for index, stmt in enumerate(tree.body):
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _dotted(node.func) == "sys.path.insert":
+                findings.append((node.lineno, "a sys.path.insert in a hook script can put a directory "
+                                 "ahead of the stdlib, so a file beside the hook could shadow a stdlib "
+                                 "import; bootstrap with a module-level sys.path.append of the "
+                                 "script's own directory"))
+            for name in _absolute_import_roots(node):
+                if name not in siblings:
+                    continue
+                if boot_index is None:
+                    findings.append((node.lineno, "the hook script imports the sibling module {!r} with "
+                                     "no module-level sys.path.append of its own directory; under "
+                                     "python3 -I the import fails, and a failing PreToolUse hook exits "
+                                     "1, a non-blocking error that lets the tool call through"
+                                     .format(name)))
+                elif index < boot_index:
+                    findings.append((node.lineno, "the hook script imports the sibling module {!r} "
+                                     "before the module-level sys.path.append of its own directory "
+                                     "(line {}); under python3 -I the import fails, and a failing "
+                                     "PreToolUse hook exits 1, a non-blocking error that lets the tool "
+                                     "call through".format(name, boot_line)))
+    findings.sort()
+    return findings
+
+
+def _scan_hook_bootstrap(root, hook_launches, errors, failures):
+    """Check every Python hook script the scanned hook configuration launches (each script once, however
+    many hooks launch it) against the hook-script bootstrap rule. A launch that runs no script file
+    (`-c`, `-m`, standard input) is out of scope; an operand that cannot be placed or resolved, a
+    script missing from the tree, an unreadable one or its unlistable directory, and a source that does
+    not parse are each cannot-evaluate (exit 2)."""
+    scripts = {}
+    for config_rel, hloc, words in hook_launches:
+        _, kind, token = _option_walk(words)
+        if kind == "none":
+            continue
+        if kind == "unknown":
+            errors.append((config_rel, 0, hloc, "an unrecognized long interpreter option ends the option "
+                           "scan, so the hook script cannot be placed and its sibling-import bootstrap "
+                           "cannot be checked"))
+            continue
+        script_rel, problem = _resolve_hook_script(config_rel, token)
+        if problem is not None:
+            errors.append((config_rel, 0, hloc, problem))
+            continue
+        scripts.setdefault(script_rel, (config_rel, hloc))
+    for script_rel in sorted(scripts):
+        config_rel, hloc = scripts[script_rel]
+        if not _present(root / script_rel):
+            errors.append((config_rel, 0, hloc, "the hook script {} is not in the tree, so its "
+                           "sibling-import bootstrap cannot be checked".format(script_rel)))
+            continue
+        text = _read_required_text(root, script_rel, errors)
+        if text is None:
+            continue
+        try:
+            siblings = _sibling_module_names(root / posixpath.dirname(script_rel))
+        except OSError as exc:
+            errors.append((script_rel, 0, "", "cannot list the hook script's directory: {}".format(exc)))
+            continue
+        try:
+            findings = _hook_bootstrap_findings(text, script_rel, siblings)
+        except (SyntaxError, ValueError) as exc:
+            errors.append((script_rel, getattr(exc, "lineno", None) or 0, "", "the hook script does not "
+                           "parse as Python, so its sibling imports cannot be checked: {}".format(exc)))
+            continue
+        for lineno, message in findings:
+            failures.append((script_rel, lineno, "", message))
+
+
 def scan(root):
     """Scan every declared surface under root; return (errors, failures) as sorted diagnostic tuples."""
     errors, failures = [], []
-    _scan_json_file(root, HOOKS_JSON_REL, errors, failures)
+    hook_launches = []
+    _scan_json_file(root, HOOKS_JSON_REL, errors, failures, hook_launches)
     _scan_shell_file(root, RUN_ALL_REL, errors, failures)
     _scan_workflows(root, errors, failures)
     _scan_pysource_isolation(root, errors, failures)
@@ -1564,7 +1875,8 @@ def scan(root):
         # presence test uses lstat (via _present) so a present-but-dangling symlink counts as present
         # and is routed to fail-closed, not read through the link as absent.
         if _present(root / rel):
-            _scan_json_file(root, rel, errors, failures)
+            _scan_json_file(root, rel, errors, failures, hook_launches)
+    _scan_hook_bootstrap(root, hook_launches, errors, failures)
     errors.sort()
     failures.sort()
     return errors, failures
@@ -1587,9 +1899,12 @@ def run(root):
         print("RESULT: cannot-evaluate ({} issue(s)); fail-closed".format(len(errors)))
         return 2
     if failures:
-        print("RESULT: {} non-isolated launcher(s)".format(len(failures)))
+        print("RESULT: {} finding(s) (a non-isolated launcher or a hook script sibling import without "
+              "its bootstrap)".format(len(failures)))
         return 1
-    print("PASS: every recognized python launcher in the scanned surfaces runs isolated")
+    print("PASS: every recognized python launcher in the scanned surfaces runs isolated, and every hook "
+          "script it launches imports a sibling only after a module-level sys.path.append of its own "
+          "directory")
     return 0
 
 
@@ -1748,8 +2063,20 @@ def main():
 #      _shell_split_pairs refuse a disagreement injected through the _decode_tokens seam (an
 #      extra decoded token, and a same-count altered token), each through a run_all_checks.sh
 #      line and a settings.json command, with its own guard's message and no finding.
+#  42. the hook-script bootstrap rule: with a sibling module beside the hook, no sibling import and
+#      a module-level sys.path.append of the script's own directory before the import (os.path,
+#      pathlib and named-directory spellings, an import in a function defined after it) pass (exit 0);
+#      an import with no bootstrap (plain, from-import, a sibling package), an import before the
+#      append, an insert(0) then the import, an import in a function with no module-level bootstrap,
+#      a bootstrap only inside a function or an if, an append of another directory, a rebound
+#      directory name and a function defined before the bootstrap each fail (exit 1, naming the
+#      script and line); hook source that does not parse is cannot-evaluate (exit 2); 42b the same
+#      rule through a settings.json launch, with every script operand it cannot place or find
+#      cannot-evaluate (exit 2) and a -c or -m launch out of scope (exit 0); 42c with the rule patched
+#      out the no-bootstrap hook passes (exit 0); 42d a real -I interpreter fails the no-bootstrap
+#      import, runs the append form, and lets a sibling shadow a stdlib module only after insert(0).
 
-SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
+SCRIPT ="${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
 _ISO_RUN_ALL = """#!/usr/bin/env bash
 set -uo pipefail
@@ -1781,11 +2108,19 @@ def _hooks_json(args):
     return json.dumps(obj, indent=2) + "\n"
 
 
+# The repo-relative path SCRIPT resolves to in the plugin hooks.json, and the script the settings.json
+# fixtures launch; _build writes a clean stub at each so the hook-script bootstrap check finds them.
+HOOK_STUB_REL = _resolve_hook_script(HOOKS_JSON_REL, SCRIPT)[0]
+SETTINGS_STUB_REL = "tools/x.py"
+_HOOK_STUB_TEXT = "# hook script stub (launcher-isolation coverage): no sibling import\nimport json\n"
+
+
 def _build(base, hooks_args=("-I", SCRIPT, "h_one"),
            run_all=_ISO_RUN_ALL, workflow=_ISO_WORKFLOW):
-    """A fully-isolated synthetic tree: the plugin hooks.json, run_all_checks.sh, one workflow, and clean
+    """A fully-isolated synthetic tree: the plugin hooks.json, run_all_checks.sh, one workflow, clean
     stubs for the three REQUIRED QA-suite Python sources so the pysource-isolation scan finds them present
-    and clean (a case that needs an index-0 insertion overwrites a stub)."""
+    and clean (a case that needs an index-0 insertion overwrites a stub), and clean hook script stubs at
+    HOOK_STUB_REL and SETTINGS_STUB_REL (a hook-bootstrap case overwrites one)."""
     hooks_path = base / HOOKS_JSON_REL
     hooks_path.parent.mkdir(parents=True)
     hooks_path.write_text(_hooks_json(list(hooks_args)), encoding="utf-8")
@@ -1793,6 +2128,9 @@ def _build(base, hooks_args=("-I", SCRIPT, "h_one"),
     (base / RUN_ALL_REL).write_text(run_all, encoding="utf-8")
     for rel in PYSOURCE_ISOLATION_REL:
         (base / rel).write_text("# qa-suite source stub (launcher-isolation coverage)\n", encoding="utf-8")
+    (base / HOOK_STUB_REL).parent.mkdir(parents=True, exist_ok=True)
+    for rel in (HOOK_STUB_REL, SETTINGS_STUB_REL):
+        (base / rel).write_text(_HOOK_STUB_TEXT, encoding="utf-8")
     wf = base / ".github" / "workflows"
     wf.mkdir(parents=True)
     (wf / "quality.yml").write_text(workflow, encoding="utf-8")
@@ -2895,6 +3233,184 @@ def self_test_main():
                 failures.append("the injected {} disagreement expected a settings.json refusal "
                                 "carrying {!r} (got {!r})".format(label, guard_message, inj_errors))
 
+        # 42. The hook-script bootstrap rule. A hook script launched from the plugin hooks.json or a
+        #     settings.json may import a sibling only after a module-level sys.path.append of its own
+        #     directory. A sibling module hooklib.py (and a package hookpkg/) sits beside the hook in
+        #     every row, so only the import and bootstrap shape changes.
+        boot_dir = "import os\nimport sys\n"
+        boot_append = "sys.path.append(os.path.dirname(os.path.abspath(__file__)))\n"
+        # Each exit-1 row names the exact kinds of finding it expects, one per finding in line
+        # order: "none" (a sibling import with no bootstrap), "before" (a sibling import ahead of the
+        # bootstrap) and "insert" (a sys.path.insert call), so one rule cannot stand in for another.
+        def _boot_kinds(findings):
+            kinds = []
+            for finding in findings:
+                if "with no module-level sys.path.append" in finding[3]:
+                    kinds.append("none")
+                elif "before the module-level sys.path.append" in finding[3]:
+                    kinds.append("before")
+                elif "a sys.path.insert in a hook script" in finding[3]:
+                    kinds.append("insert")
+                else:
+                    kinds.append("other")
+            return tuple(kinds)
+
+        for label, source, want, kinds in (
+                ("no-sibling-import", "import json\nprint(json.dumps({}))\n", 0, ()),
+                ("append-then-import", boot_dir + boot_append + "import hooklib\n", 0, ()),
+                ("append-pathlib-then-from-import",
+                 "import sys\nfrom pathlib import Path\n"
+                 "sys.path.append(str(Path(__file__).resolve().parent))\nfrom hooklib import x\n", 0, ()),
+                ("append-named-dir-then-import",
+                 boot_dir + "HERE = os.path.dirname(os.path.realpath(__file__))\n"
+                 "sys.path.append(HERE)\nimport hooklib.sub\n", 0, ()),
+                ("append-then-function-import",
+                 boot_dir + boot_append + "def main():\n    import hooklib\n", 0, ()),
+                ("no-bootstrap", "import hooklib\n", 1, ("none",)),
+                ("no-bootstrap-from-import", "from hooklib import x\n", 1, ("none",)),
+                ("no-bootstrap-package", "import hookpkg\n", 1, ("none",)),
+                ("import-before-append", boot_dir + "import hooklib\n" + boot_append, 1, ("before",)),
+                ("insert0-then-import",
+                 boot_dir + "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n"
+                 "import hooklib\n", 1, ("insert", "none")),
+                ("append-then-insert-then-import",
+                 boot_dir + boot_append + "sys.path.insert(0, '/usr/lib/other')\nimport hooklib\n", 1,
+                 ("insert",)),
+                ("insert-without-sibling-import",
+                 "import sys\nsys.path.insert(0, '/usr/lib/other')\nimport json\n", 1, ("insert",)),
+                ("function-import-no-module-bootstrap", "def main():\n    import hooklib\n", 1,
+                 ("none",)),
+                ("bootstrap-only-in-function",
+                 boot_dir + "def main():\n    " + boot_append + "    import hooklib\n", 1, ("none",)),
+                ("bootstrap-inside-if",
+                 boot_dir + "if True:\n    " + boot_append + "import hooklib\n", 1, ("none",)),
+                ("append-of-other-dir", boot_dir + "sys.path.append('/usr/lib/other')\nimport hooklib\n", 1,
+                 ("none",)),
+                ("named-dir-rebound",
+                 boot_dir + "HERE = os.path.dirname(os.path.abspath(__file__))\nHERE = '/usr/lib/other'\n"
+                 "sys.path.append(HERE)\nimport hooklib\n", 1, ("none",)),
+                ("function-defined-before-bootstrap",
+                 boot_dir + "def main():\n    import hooklib\n" + boot_append + "main()\n", 1,
+                 ("before",)),
+                ("unparseable", "def broken(:\n    pass\n", 2, ())):
+            hb_root = _build(tmp / ("hook-boot-" + label))
+            hook_path = hb_root / HOOK_STUB_REL
+            hook_path.write_text(source, encoding="utf-8")
+            (hook_path.parent / "hooklib.py").write_text("x = 1\n", encoding="utf-8")
+            (hook_path.parent / "hookpkg").mkdir()
+            (hook_path.parent / "hookpkg" / "__init__.py").write_text("", encoding="utf-8")
+            rc = run_quiet(hb_root)
+            hb_errors, hb_failures = scan(hb_root)
+            if rc != want:
+                failures.append("the hook-bootstrap {} row expected exit {} (got {}; errors {!r}, "
+                                "findings {!r})".format(label, want, rc, hb_errors, hb_failures))
+            elif want == 1 and (_boot_kinds(hb_failures) != kinds or not all(
+                    f[0] == HOOK_STUB_REL and f[1] > 0 for f in hb_failures)):
+                failures.append("the hook-bootstrap {} row expected the findings {!r}, each naming {} "
+                                "and a line (got {!r})".format(label, kinds, HOOK_STUB_REL, hb_failures))
+            elif want == 2 and (hb_failures or not any(
+                    e[0] == HOOK_STUB_REL and "does not parse as Python" in e[3] for e in hb_errors)):
+                failures.append("the hook-bootstrap {} row expected a parse refusal naming {} and no "
+                                "finding (got errors {!r}, findings {!r})".format(
+                                    label, HOOK_STUB_REL, hb_errors, hb_failures))
+
+        # 42b. The same rule through a settings.json shell-string launch ($CLAUDE_PROJECT_DIR and a
+        #      relative path both resolve against the repo root), and the cannot-evaluate edges of the
+        #      script operand: a variable other than the two Claude Code substitutes, an absolute path,
+        #      a path leaving the tree, a script missing from the tree, the plugin root named outside a
+        #      plugin hooks.json, and an unrecognized long interpreter option. A -c or -m launch runs no
+        #      script file and is out of scope (exit 0).
+        def _hook_settings_tree(base, cmd, script_rel=None, source=None):
+            root = _settings_tree(base, cmd)
+            if script_rel is not None:
+                (root / script_rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / script_rel).write_text(source, encoding="utf-8")
+                (root / script_rel).parent.joinpath("hooklib.py").write_text("x = 1\n", encoding="utf-8")
+            return root
+
+        # Each row also names the text its one diagnostic must carry (a finding for exit 1, a
+        # .claude/settings.json refusal for exit 2), so one refusal cannot stand in for another.
+        for label, cmd, script_rel, source, want, expect in (
+                ("project-dir-no-bootstrap", 'python3 -I "$CLAUDE_PROJECT_DIR"/hk/h.py', "hk/h.py",
+                 "import hooklib\n", 1, "with no module-level sys.path.append"),
+                ("project-dir-append", 'python3 -I "${CLAUDE_PROJECT_DIR}"/hk/h.py', "hk/h.py",
+                 boot_dir + boot_append + "import hooklib\n", 0, None),
+                ("relative-no-bootstrap", "echo a && python3 -I hk/h.py", "hk/h.py",
+                 "import hooklib\n", 1, "with no module-level sys.path.append"),
+                ("other-variable", 'python3 -I "$HOME"/hk/h.py', None, None, 2,
+                 "is not a literal path in the tree"),
+                ("absolute-path", "python3 -I /srv/hk/h.py", None, None, 2,
+                 "is not a literal path in the tree"),
+                ("outside-tree", "python3 -I ../hk/h.py", None, None, 2, "resolves outside the tree"),
+                ("missing-script", "python3 -I hk/absent.py", None, None, 2,
+                 "the hook script hk/absent.py is not in the tree"),
+                ("plugin-root-in-settings", "python3 -I ${CLAUDE_PLUGIN_ROOT}/hk/h.py", None, None, 2,
+                 "names the plugin root outside a plugin's hooks/hooks.json"),
+                ("unknown-long-option", "python3 -I --unknown-option hk/h.py", None, None, 2,
+                 "an unrecognized long interpreter option ends the option scan"),
+                ("dash-c-out-of-scope", "python3 -I -c 'import hooklib'", None, None, 0, None),
+                ("dash-m-out-of-scope", "python3 -I -m hooklib", None, None, 0, None)):
+            hs_root = _hook_settings_tree(tmp / ("hook-settings-" + label), cmd, script_rel, source)
+            rc = run_quiet(hs_root)
+            hs_errors, hs_failures = scan(hs_root)
+            diagnostics = hs_failures if want == 1 else hs_errors
+            if rc != want or (expect is not None and not (
+                    len(diagnostics) == 1 and expect in diagnostics[0][3]
+                    and (want == 1 or diagnostics[0][0] == ".claude/settings.json"))):
+                failures.append("the hook-bootstrap settings {} row expected exit {} with one "
+                                "diagnostic carrying {!r} (got {}; errors {!r}, findings {!r})".format(
+                                    label, want, expect, rc, hs_errors, hs_failures))
+
+        # 42c. FLIP: with the rule patched out (the findings function returns nothing) the no-bootstrap
+        #      hook passes (exit 0), so the exit-1 rows above are owed to the rule, not to another check.
+        flip_root = _build(tmp / "hook-boot-flip")
+        (flip_root / HOOK_STUB_REL).write_text("import hooklib\n", encoding="utf-8")
+        (flip_root / HOOK_STUB_REL).parent.joinpath("hooklib.py").write_text("x = 1\n", encoding="utf-8")
+        module = sys.modules[__name__]
+        saved_findings = module._hook_bootstrap_findings
+        module._hook_bootstrap_findings = lambda text, rel, siblings: []
+        try:
+            flip_rc = run_quiet(flip_root)
+        finally:
+            module._hook_bootstrap_findings = saved_findings
+        if flip_rc != 0:
+            failures.append("with the hook-bootstrap rule patched out the no-bootstrap hook expected "
+                            "exit 0 (got {})".format(flip_rc))
+        if run_quiet(flip_root) != 1:
+            failures.append("with the hook-bootstrap rule restored the no-bootstrap hook expected exit 1")
+
+        # 42d. The mechanism, against a real interpreter under -I: the no-bootstrap sibling import
+        #      fails (ModuleNotFoundError, exit 1), the append form imports the sibling (exit 0), and
+        #      after append a sibling named like a stdlib module does NOT shadow it while after an
+        #      index-0 insertion it does.
+        mech_hook = tmp / "mech-hook"
+        mech_hook.mkdir()
+        (mech_hook / "hooklib.py").write_text("x = 1\n", encoding="utf-8")
+        (mech_hook / "colorsys.py").write_text("SHADOWED = True\n", encoding="utf-8")
+        (mech_hook / "bare.py").write_text("import hooklib\n", encoding="utf-8")
+        (mech_hook / "appended.py").write_text(
+            boot_dir + boot_append + "import hooklib\nimport colorsys\n"
+            "print(getattr(colorsys, 'SHADOWED', False))\n", encoding="utf-8")
+        (mech_hook / "inserted.py").write_text(
+            boot_dir + "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n"
+            "import colorsys\nprint(getattr(colorsys, 'SHADOWED', False))\n", encoding="utf-8")
+        mech_runs = {}
+        for name in ("bare", "appended", "inserted"):
+            mech_runs[name] = subprocess.run([sys.executable, "-I", "-B", str(mech_hook / (name + ".py"))],
+                                             capture_output=True, text=True, env=env, timeout=30)
+        if mech_runs["bare"].returncode != 1 or "ModuleNotFoundError" not in mech_runs["bare"].stderr:
+            failures.append("real -I: a sibling import with no bootstrap should fail with "
+                            "ModuleNotFoundError, exit 1 (got rc={}, stderr={!r})".format(
+                                mech_runs["bare"].returncode, mech_runs["bare"].stderr))
+        if mech_runs["appended"].returncode != 0 or mech_runs["appended"].stdout.strip() != "False":
+            failures.append("real -I: the append bootstrap should import the sibling and keep the stdlib "
+                            "colorsys (got rc={}, out={!r})".format(
+                                mech_runs["appended"].returncode, mech_runs["appended"].stdout))
+        if mech_runs["inserted"].returncode != 0 or mech_runs["inserted"].stdout.strip() != "True":
+            failures.append("real -I: an index-0 insertion should let the sibling colorsys shadow the "
+                            "stdlib (got rc={}, out={!r})".format(
+                                mech_runs["inserted"].returncode, mech_runs["inserted"].stdout))
+
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
         refuse = subprocess.run([sys.executable, str(Path(__file__).resolve())], capture_output=True,
@@ -3020,7 +3536,12 @@ def self_test_main():
           "line are cannot-evaluate); "
           "every *.yml workflow candidate that is not a regular "
           "file (a symlink of any kind, a directory, or another non-regular entry) is a named "
-          "cannot-evaluate (exit 2); and "
+          "cannot-evaluate (exit 2); a hook script launched from hooks.json or settings.json imports "
+          "a sibling only after a module-level sys.path.append of its own directory (no bootstrap, an "
+          "import before it, insert(0) and a function-only bootstrap each fail, exit 1; unparseable "
+          "hook source and an unplaceable or missing script are cannot-evaluate, exit 2; with the "
+          "rule patched out the no-bootstrap hook passes, and a real -I interpreter confirms the "
+          "failure and the insert(0) shadow); and "
           "the gate refuses to run non-isolated (exit 2), with stderr on /dev/full and with descriptor "
           "2 closed too" + note)
     return 0
