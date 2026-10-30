@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "7965bac80f7c3ea20120e197ae238f992d4e2650fb96257b10990e0e95c352a9"
+tree-sha256 = "64841e658bb75ef02a40cf6b5657015dcb7fdfc7c1c04e366be2d02caf6b1b1e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -72,7 +72,7 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
 bytes = 521640
-sha256 = "df57c53883f66e7ff5fef5fd477aa090a3a96a80a0a5e2781a6d254eb14f813c"
+sha256 = "7c940e5f2f0ba36254186ce3f593e43762dd8baf2f2f0517a877b3a7d4eb0e73"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3101,8 +3101,8 @@ sha256 = "42d87b39fc677e42aa690d96ef0a49cf50f55ba658f47007d4729d9a2fb60789"
 
 [[sources]]
 path = "opf/tools/check_opf_init_contract.py"
-bytes = 111742
-sha256 = "f06bd22891dedae1ae8df8108028e538fb48acba8d2701393e6307aebe8809c2"
+bytes = 114838
+sha256 = "535819bfb229e09023e5a6812a31f438169ebdaf9002d9c6c5dec23898b9bf44"
 
 [[sources]]
 path = "opf/tools/check_opf_init_observe.py"
@@ -3426,8 +3426,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 158734
-sha256 = "ff10c9f1fe1f447fa0290d4860e4efda49399015f1944a8b8d274afbce834324"
+bytes = 170260
+sha256 = "46ee0e931bcf012673b30c35d4b12f9d8cf3f42afbbeb190da43989bc6c5f2b5"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3466,8 +3466,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 72938
-sha256 = "b3e22cdae3a787535ea167e252d9affa2f103fd9bb058ec43ee02dc40a19ad1d"
+bytes = 75969
+sha256 = "7feb7f203b0916e8ffd81dfc2bba02adb75a77c94078b7ad5e7ab0443a2649ed"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -3626,8 +3626,8 @@ sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 101171
-sha256 = "80cc4d8c10d85882146128e224672ee87f30047db04139b1bafc56b07171d979"
+bytes = 103954
+sha256 = "0a71f6402cfc3f04b7695acd23dbac2fd377e94a8bae818d5a25d8c7bb9e448f"
 
 [[sources]]
 path = "tools/check_secrets.py"
@@ -3886,8 +3886,8 @@ sha256 = "76e57148e1ad7a82478091682afd175a1ea994d4a8b002b5fac6933e243b3d6e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 168233
-sha256 = "1e2735d23b12b141b5746b598841efe198f663cccd6fcad8df92ce34c50367fa"
+bytes = 168382
+sha256 = "6e643ac12902d9cc894f0f5618e4aed2562627fbbc3cbb9c4ff4ab42c016dc1b"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

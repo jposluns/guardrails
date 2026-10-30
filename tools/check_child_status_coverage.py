@@ -11,8 +11,9 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
-     tools/check_verifier_delivery.py; the constant and both functions) and in the
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
+     tools/check_verifier_delivery.py, tools/check_rule_placement.py, tools/check_footer.py and
+     opf/tools/check_opf_init_contract.py; the constant and both functions) and in the
      hooks dispatcher and its generated plugin copy (the constant and the probe) are each defined once at the
      top level and AST-identical (ast.dump, docstrings included) to the canonical text, and each is bound
      nowhere else in the module (_binding_count: no import, assignment, global or other binding of the name
@@ -79,7 +80,11 @@ with exit 2). This gate holds where it runs:
      and has no declared launcher). A LAUNCHER or RESIDUAL entry's direct launch is unguarded, so each must be
      listed in DIRECT_LAUNCH_RESIDUAL, which every run prints by name. A new such entry that is not listed, a
      listed entry that is now SELF, NOT-APPLICABLE or gone (the list only shrinks), an unregistered hook mode and
-     a declared launch target that does not exist are findings.
+     a declared launch target that does not exist are findings. The list's growth is held against a pinned
+     ceiling, DIRECT_LAUNCH_RESIDUAL_BASELINE in this file: an entry the residual lists that the baseline does
+     not is a finding, so listing a new entry needs an explicit, reviewable edit of the baseline too. Both lists
+     are read from this file's own source under the root, each as one top-level tuple of string literals bound
+     once; a list that cannot be read so is cannot-evaluate (R17 says what this does not stop).
   6. switch: DIRECT_LAUNCH_CHECK is False until the Python-floor prelude carries a refusal of its own; set True,
      a LAUNCHER or RESIDUAL entry is a finding whether listed or not, so the residual list must then be empty.
 
@@ -106,7 +111,8 @@ in a variable or computed is pinned only by the expression the call spells (R13)
                                                        (tools/_selftest_exit_report.py)
 Exit: 0 every leg holds; 1 findings, each named; 2 cannot evaluate (an input missing, not a regular file,
 unreadable, not UTF-8, outside the parity reader's grammar or unparsable; a directory that cannot be listed or
-walked; an unresolved dynamic load), the live refusal, or usage. There is no warning tier.
+walked; an unresolved dynamic load; a pinned residual list not read as one top-level tuple of string literals),
+the live refusal, or usage. There is no warning tier.
 
 Disclosed residuals, not closed by this gate: R1 an ignore or SA_NOCLDWAIT set below Python after interpreter
 start (a native extension, ctypes, an embedding host) is not seen by the disposition read, and the fork probe runs
@@ -145,7 +151,12 @@ workflow grammar is this gate's own reading of a YAML subset, held to the self-t
 workflows and not compared with the parser GitHub runs, so a file inside it that GitHub reads another way is
 not seen; R16 the binding count of legs 2 and 3 reads the module's own binding statements, so a rebinding
 through a computed name (globals(), setattr on the module, sys.modules[__name__]), or of opf.py's _main_exit
-through an attribute store such as _main_exit.__code__, is not counted and not seen. Whether a real launcher
+through an attribute store such as _main_exit.__code__, is not counted and not seen; R17 the residual baseline
+sits in this file beside the residual, so an author who adds an entry to both lists in one change passes this
+gate: the baseline makes the growth an explicit edit a reviewer can see, and only review refuses it. An entry
+removed from the residual but left in the baseline can be listed again with no baseline edit until the baseline
+is trimmed, and both lists are read from the source text, so a rebinding of the loaded module's residual through
+a computed name (R16), which the classification would use, is not seen by the growth check. Whether a real launcher
 starts these tools with SIGCHLD ignored, and whether the steps of one CI job share one disposition, are not
 established: each job's probe step reads the disposition of its own step only, so it cannot show what the job's
 other steps inherit.
@@ -195,7 +206,10 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
-              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
+              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
+              ("tools/check_rule_placement.py", "check_rule_placement.py"),
+              ("tools/check_footer.py", "check_footer.py"),
+              ("opf/tools/check_opf_init_contract.py", "check_opf_init_contract.py"))
 HOOK_COPIES = (".aiqt/core/hooks/scripts/aiqt_hooks.py", "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
 HOOKS_JSON_REL = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
 HOOK_TARGET = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
@@ -317,7 +331,7 @@ CHILD_TIMEOUT = 120
 DIRECT_LAUNCH_CHECK = False
 # Every entry point that reads a child's exit status and carries no guard of its own, sorted: a direct launch of
 # it from an ignoring parent is unguarded. Computed by this gate's own classification and reviewed; it only
-# shrinks.
+# shrinks, and DIRECT_LAUNCH_RESIDUAL_BASELINE below is its ceiling (residual_growth_findings).
 DIRECT_LAUNCH_RESIDUAL = (
     ".github/check_cited_standards_contract.py",
     ".preview/char-policy-write.py",
@@ -360,7 +374,6 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/check_opf_drift.py",
     "opf/tools/check_opf_homes.py",
     "opf/tools/check_opf_init.py",
-    "opf/tools/check_opf_init_contract.py",
     "opf/tools/check_opf_init_observe.py",
     "opf/tools/check_opf_init_p0.py",
     "opf/tools/check_opf_init_qa.py",
@@ -380,7 +393,6 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_clauses.py",
     "tools/check_crosswalk.py",
     "tools/check_entry_guard.py",
-    "tools/check_footer.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
     "tools/check_hooks_preview.py",
@@ -405,7 +417,134 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_release_build.py",
     "tools/check_release_cut.py",
     "tools/check_release_delta.py",
-    "tools/check_rule_placement.py",
+    "tools/check_site.py",
+    "tools/check_sized_instructions.py",
+    "tools/check_standards_currency.py",
+    "tools/check_standards_urls_live.py",
+    "tools/check_version_monotonicity.py",
+    "tools/conformance.py",
+    "tools/doctor.py",
+    "tools/gen_adapters.py",
+    "tools/gen_agents.py",
+    "tools/gen_claude.py",
+    "tools/gen_cursor.py",
+    "tools/gen_enforceability.py",
+    "tools/gen_enforcement_register.py",
+    "tools/gen_first_pin_demo.py",
+    "tools/gen_hooks.py",
+    "tools/gen_install.py",
+    "tools/gen_manifest.py",
+    "tools/gen_mappings.py",
+    "tools/gen_reference_facts.py",
+    "tools/gen_renderers.py",
+    "tools/gen_rules.py",
+    "tools/gen_skill.py",
+    "tools/gen_worker_pack.py",
+    "tools/import_cwe.py",
+    "tools/measure_hook_latency.py",
+    "tools/migrate.py",
+    "tools/orch_register.py",
+    "tools/pin.py",
+    "tools/selftest_aiqt_corpus.py",
+    "tools/selftest_aiqt_hooks.py",
+    "tools/selftest_ci_status.py",
+    "tools/selftest_git_fixture_env.py",
+    "tools/selftest_git_fixture_env_config_combined.py",
+    "tools/selftest_git_fixture_env_config_malformed.py",
+    "tools/selftest_git_fixture_env_config_system.py",
+    "tools/selftest_git_fixture_env_core.py",
+    "tools/selftest_orch_hooks.py",
+)
+
+# The reviewed ceiling of DIRECT_LAUNCH_RESIDUAL, sorted: every entry the residual lists must be listed here
+# too (residual_growth_findings), so a new entry in the residual needs an explicit, reviewable edit of this
+# list as well. An entry guarded since may stay here until the list is trimmed; trim it in the change that
+# guards it.
+DIRECT_LAUNCH_RESIDUAL_BASELINE = (
+    ".github/check_cited_standards_contract.py",
+    ".preview/char-policy-write.py",
+    ".preview/clock-inject.py",
+    ".preview/constraint-reread.py",
+    ".preview/future-stamp-write.py",
+    ".preview/pattern-self-match.py",
+    ".preview/record-remove-check.py",
+    ".preview/rerun-pass-check.py",
+    ".preview/stamp-truth-stop.py",
+    ".preview/unbounded-wait.py",
+    ".preview/ungated-record.py",
+    "opf/tools/_opf_absorb.py",
+    "opf/tools/_opf_adopt.py",
+    "opf/tools/_opf_adopt_apply.py",
+    "opf/tools/_opf_adopt_discover.py",
+    "opf/tools/_opf_adopt_hook.py",
+    "opf/tools/_opf_adopt_observe.py",
+    "opf/tools/_opf_adopt_plan.py",
+    "opf/tools/_opf_changelog.py",
+    "opf/tools/_opf_check.py",
+    "opf/tools/_opf_emit.py",
+    "opf/tools/_opf_fuzz.py",
+    "opf/tools/_opf_import_batch.py",
+    "opf/tools/_opf_init.py",
+    "opf/tools/_opf_init_operation.py",
+    "opf/tools/_opf_init_substrate.py",
+    "opf/tools/_opf_observe.py",
+    "opf/tools/_opf_oplock.py",
+    "opf/tools/_opf_pack_manifest.py",
+    "opf/tools/_opf_record.py",
+    "opf/tools/_opf_release.py",
+    "opf/tools/_opf_schema.py",
+    "opf/tools/_opf_store.py",
+    "opf/tools/_opf_views.py",
+    "opf/tools/_opf_worklog.py",
+    "opf/tools/_opf_worklog_regressions.py",
+    "opf/tools/_opf_write_guard.py",
+    "opf/tools/check_opf_doctor.py",
+    "opf/tools/check_opf_drift.py",
+    "opf/tools/check_opf_homes.py",
+    "opf/tools/check_opf_init.py",
+    "opf/tools/check_opf_init_observe.py",
+    "opf/tools/check_opf_init_p0.py",
+    "opf/tools/check_opf_init_qa.py",
+    "opf/tools/check_opf_prompt_pack.py",
+    "opf/tools/check_opf_record.py",
+    "opf/tools/selftest_commonmark_conformance.py",
+    "tools/_qa_adapter.py",
+    "tools/aei_backlog_md.py",
+    "tools/aiqt_corpus.py",
+    "tools/audit_reference.py",
+    "tools/check_applies.py",
+    "tools/check_artifact_checksums.py",
+    "tools/check_branch_root.py",
+    "tools/check_brief_capability.py",
+    "tools/check_byte_canon.py",
+    "tools/check_ci_parity.py",
+    "tools/check_clauses.py",
+    "tools/check_crosswalk.py",
+    "tools/check_entry_guard.py",
+    "tools/check_gensrc_failclose.py",
+    "tools/check_git_option_table.py",
+    "tools/check_hooks_preview.py",
+    "tools/check_instruction_budget.py",
+    "tools/check_internal_names.py",
+    "tools/check_license_qualification.py",
+    "tools/check_manifest.py",
+    "tools/check_mappings.py",
+    "tools/check_mistakes_register.py",
+    "tools/check_msg_leaks.py",
+    "tools/check_newtab.py",
+    "tools/check_no_dashes.py",
+    "tools/check_opf_standalone_closure.py",
+    "tools/check_overclaim.py",
+    "tools/check_portability.py",
+    "tools/check_python_floor.py",
+    "tools/check_python_host_pin.py",
+    "tools/check_python_launcher_isolation.py",
+    "tools/check_record_drift.py",
+    "tools/check_record_sections.py",
+    "tools/check_reference_facts.py",
+    "tools/check_release_build.py",
+    "tools/check_release_cut.py",
+    "tools/check_release_delta.py",
     "tools/check_site.py",
     "tools/check_sized_instructions.py",
     "tools/check_standards_currency.py",
@@ -1232,6 +1371,32 @@ def classify(entries, launched, reads_of, residual, direct_check):
     return classes, findings, cannot
 
 
+def pinned_list(tree, rel, name):
+    """The entries of name, read from the module's source: one top-level assignment that is the module's one binding
+    of name (_binding_count), its value a tuple display of string literals. Anything else, the name absent included,
+    is cannot-evaluate, never read as an empty list."""
+    nodes = _top_definitions(tree, name)
+    value = (nodes[0].value if len(nodes) == 1 and isinstance(nodes[0], ast.Assign)
+             and _binding_count(tree, name) == 1 else None)
+    if not (isinstance(value, ast.Tuple)
+            and all(isinstance(item, ast.Constant) and type(item.value) is str for item in value.elts)):
+        raise CannotEvaluate("{}: {} cannot be read as one top-level tuple of string literals bound once".format(
+            rel, name))
+    return tuple(item.value for item in value.elts)
+
+
+def residual_growth_findings(rel, tree):
+    """A finding for each entry DIRECT_LAUNCH_RESIDUAL lists that DIRECT_LAUNCH_RESIDUAL_BASELINE does not, both read
+    from tree, this gate's own source (pinned_list); an entry removed from the residual is no finding. It stops an
+    entry added to the residual alone. It cannot stop an author who adds the entry to both lists in one change: the
+    baseline sits in this file, so the check only makes that growth an explicit edit a reviewer can see (R17)."""
+    residual = pinned_list(tree, rel, "DIRECT_LAUNCH_RESIDUAL")
+    ceiling = set(pinned_list(tree, rel, "DIRECT_LAUNCH_RESIDUAL_BASELINE"))
+    return ["{}: listed in DIRECT_LAUNCH_RESIDUAL but not in DIRECT_LAUNCH_RESIDUAL_BASELINE; the residual only "
+            "shrinks, so guard it, or list it in the baseline too as a reviewed exception".format(entry)
+            for entry in residual if entry not in ceiling]
+
+
 # ------------------------------------------------------------------------------------------------ evaluate
 
 def _shell_launchers(root, listdir=os.listdir, walk=os.walk, lexists=os.path.lexists):
@@ -1328,6 +1493,7 @@ def evaluate(root, residual=None, direct_check=None):
                             "(stale)".format(rel))
         findings.extend("{}: DYNAMIC_LOADS_REVIEWED names {}, which does not exist".format(rel, target)
                         for target in targets if not (root / target).is_file())
+    findings.extend(residual_growth_findings(COVERAGE_REL, load(COVERAGE_REL)))
 
     def reads_of(rel):
         return closure_reads(rel, load, lambda candidate: (root / candidate).is_file(), reviewed)
@@ -1491,6 +1657,27 @@ def _inputs():
     trees["opf-entry-statement-drift"] = ast.parse(_swap(
         opf, "_ENTRY_STATEMENT = 'if sys.argv[1:] == [\"--self-test\"]:",
         "_ENTRY_STATEMENT = 'if sys.argv[1:] == [\"--selftest\"]:"))
+    # This gate's two pinned lists as one small module, written as this file writes them, then with one edit
+    # each (the binding count walks the whole module, so a small one keeps every mutant's vectors quick): an
+    # entry added to the residual alone, the residual's first entry removed, and either list absent, the baseline
+    # computed, a list display or bound again. The lists are fixed fixtures, not this file's live lists, so the
+    # vectors read only the rule: live/real-tree-passes holds the live lists to it.
+    listed = ("opf/tools/listed.py", "tools/launched.py", "tools/listed.py")
+
+    def pinned(residual=listed, baseline=listed):
+        return "".join("{} = (\n{})\n".format(name, "".join('    "{}",\n'.format(rel) for rel in rels))
+                       for name, rels in (("DIRECT_LAUNCH_RESIDUAL", residual),
+                                          ("DIRECT_LAUNCH_RESIDUAL_BASELINE", baseline)) if rels is not None)
+    for key, source in (
+            ("pinned", pinned()), ("pinned-added", pinned(residual=listed + ("tools/new_reader.py",))),
+            ("pinned-removed", pinned(residual=listed[1:])),
+            ("pinned-baseline-absent", pinned(baseline=None)), ("pinned-residual-absent", pinned(residual=None)),
+            ("pinned-baseline-computed",
+             pinned(baseline=None) + "DIRECT_LAUNCH_RESIDUAL_BASELINE = DIRECT_LAUNCH_RESIDUAL\n"),
+            ("pinned-baseline-list", pinned(baseline=None) + 'DIRECT_LAUNCH_RESIDUAL_BASELINE = ["tools/plain.py"]\n'),
+            ("pinned-baseline-rebound",
+             pinned() + 'DIRECT_LAUNCH_RESIDUAL_BASELINE += ("tools/new_reader.py",)\n')):
+        trees[key] = ast.parse(source)
     probe_line = RUNNER_PROBES[0][1] + "\n"
     opf_probe = 'run_gate "child-status"                python3 -I -B "$here/_child_status.py"\n'
     quality = real[WORKFLOWS_REL + "/quality.yml"]
@@ -1910,6 +2097,17 @@ def _vectors(module, trees, texts, canonical_tree):
         ("completeness/gone-residual-is-finding", lambda: m.classify(
             launched, launched, reads_of, ("tools/gone.py", "tools/launched.py"), False)[1]
          == ["tools/gone.py: listed in DIRECT_LAUNCH_RESIDUAL but no longer an entry point (stale)"]),
+        ("completeness/residual-growth-is-finding", lambda: [
+            finding.split(": ", 1)[0] for finding in m.residual_growth_findings("c", trees["pinned-added"])]
+         == ["tools/new_reader.py"]),
+        ("completeness/residual-shrink-passes", lambda: m.residual_growth_findings("c", trees["pinned"]) == []
+         and m.residual_growth_findings("c", trees["pinned-removed"]) == []),
+        ("completeness/residual-baseline-unreadable-cannot-evaluate", lambda: all(
+            raises(lambda: m.residual_growth_findings("c", trees[key]))
+            for key in ("pinned-baseline-absent", "pinned-residual-absent", "pinned-baseline-computed",
+                        "pinned-baseline-list", "pinned-baseline-rebound"))
+         and raises(lambda: m.residual_growth_findings(m.COVERAGE_REL, m._parse(
+             m._read(FAKE_ROOT, m.COVERAGE_REL), m.COVERAGE_REL)))),
         ("completeness/dynamic-load-cannot-evaluate", lambda: [
             "import_module" in reason for reason in m.classify({"tools/dynamic.py"}, set(), reads_of, (), False)[2]]
          == [True]),
@@ -2081,6 +2279,15 @@ MUTANTS = (
      "completeness/stale-residual-is-finding"),
     ("gone", "        if rel not in classes:\n            findings.append(",
      "        if False:\n            findings.append(", "completeness/gone-residual-is-finding"),
+    ("residual-growth", "for entry in residual if entry not in ceiling]", "for entry in residual if False]",
+     "completeness/residual-growth-is-finding"),
+    ("residual-exact", "for entry in residual if entry not in ceiling]",
+     "for entry in sorted(ceiling.symmetric_difference(residual))]", "completeness/residual-shrink-passes"),
+    ("residual-unread-empty", "        raise CannotEvaluate(\"{}: {} cannot be read as one top-level tuple",
+     "        return ()\n        raise CannotEvaluate(\"{}: {} cannot be read as one top-level tuple",
+     "completeness/residual-baseline-unreadable-cannot-evaluate"),
+    ("residual-bound-once", "             and _binding_count(tree, name) == 1 else None)", " else None)",
+     "completeness/residual-baseline-unreadable-cannot-evaluate"),
     ("dynamic", "            if dynamic:\n", "            if False:\n", "completeness/dynamic-load-cannot-evaluate"),
     ("switch", "        if direct_check:\n", "        if False:\n", "completeness/switch-flips"),
     ("scan-os", "if _spells_os(node.value, os_names) and OS_SPAWN_RE.fullmatch(node.attr):",
@@ -2365,6 +2572,9 @@ def self_test(lane, report_path=None):
                                 ("completeness/unlisted-residual-is-finding", 0),
                                 ("completeness/stale-residual-is-finding", 0),
                                 ("completeness/gone-residual-is-finding", 0),
+                                ("completeness/residual-growth-is-finding", 0),
+                                ("completeness/residual-shrink-passes", 0),
+                                ("completeness/residual-baseline-unreadable-cannot-evaluate", 0),
                                 ("completeness/dynamic-load-cannot-evaluate", 0), ("completeness/switch-flips", 0),
                                 ("completeness/scan-sees-every-api", 0), ("completeness/scan-sees-every-load", 0),
                                 ("completeness/reviewed-load-target-pinned", 0),

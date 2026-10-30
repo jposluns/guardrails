@@ -1857,14 +1857,20 @@ def _flush_window_failures():
     return failures
 
 
-# The entry wiring, checked statically on this file's own source: the final __main__ block must be
-# exactly _ENTRY_WIRING by AST (spacing and comments aside), so a rewiring that keeps _fail_closed_main
-# defined but routes an entry branch around it (a plain sys.exit around the work, say) is red even though
-# the channel probes above drive _fail_closed_main directly.
-_ENTRY_WIRING = '''if __name__ == "__main__":
+# The entry wiring, checked statically on this file's own source: the last two top-level statements must
+# be exactly _ENTRY_WIRING by AST (spacing and comments aside), main() handing each entry branch to
+# _fail_closed_main and the __main__ block running the child-status guard before main(), so a rewiring
+# that keeps _fail_closed_main defined but routes an entry branch around it (a plain sys.exit around the
+# work, say), or that drops the guard, is red even though the channel probes above drive
+# _fail_closed_main directly.
+_ENTRY_WIRING = '''def main():
     if "--self-test" in sys.argv:
         _fail_closed_main(_self_test)
     _fail_closed_main(_checks)
+
+
+if __name__ == "__main__":
+    sys.exit(_child_status_refusal_exit("check_opf_init_contract.py") or main())
 '''
 
 
@@ -1876,11 +1882,10 @@ def _entry_wiring_failures():
         tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     except (OSError, SyntaxError, ValueError) as exc:
         return ["fault-channel/entry-wiring: this file could not be parsed ({})".format(type(exc).__name__)]
-    last = tree.body[-1] if tree.body else None
-    expected = ast.parse(_ENTRY_WIRING).body[0]
-    if last is None or ast.dump(last) != ast.dump(expected):
-        failures.append("fault-channel/entry-wiring: the final __main__ block is not the expected "
-                        "fail-closed form")
+    expected = [ast.dump(node) for node in ast.parse(_ENTRY_WIRING).body]
+    if [ast.dump(node) for node in tree.body[-len(expected):]] != expected:
+        failures.append("fault-channel/entry-wiring: main() and the final __main__ block are not the expected "
+                        "guarded fail-closed form")
     return failures
 
 
@@ -1920,7 +1925,69 @@ def _self_test_fault_channels():
     _expect(not failures, "fault-channel vectors: " + "; ".join(failures))
 
 
-if __name__ == "__main__":
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This gate loads the validator in a child
+# and reads that child's exit status, and its self-test does the same for its probes, so under an ignored
+# SIGCHLD a failing child would read as a pass; the guard runs at the entry line, before main() hands the
+# gate or its self-test to _fail_closed_main.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
+# The process entry, run after the child-status guard: the gate or its self-test, ended through
+# _fail_closed_main, which settles the background fault channels and ends the process itself.
+def main():
     if "--self-test" in sys.argv:
         _fail_closed_main(_self_test)
     _fail_closed_main(_checks)
+
+
+if __name__ == "__main__":
+    sys.exit(_child_status_refusal_exit("check_opf_init_contract.py") or main())
