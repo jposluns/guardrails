@@ -79,11 +79,6 @@ reason = "Classifies a control parameter as a guard input, so grdinp.7 applies; 
 
 [[exempt]]
 corpus-id = "grdinp"
-text = "A guard whose own logic is correct still answers about the wrong target when the parameter\nit was handed cannot answer for the current one, so a parameter that cannot be derived or confirmed is a\ncannot-evaluate, not a clean pass."
-reason = "Applies grdinp.5 (a cannot-evaluate when the source cannot answer) to a target parameter; it adds no obligation."
-
-[[exempt]]
-corpus-id = "grdinp"
 text = "A document's own wording is itself such an input when a check verifies a fact by matching it."
 reason = "Classifies a document's wording as a guard input, so grdinp.8 applies; no obligation of its own."
 
@@ -161,11 +156,6 @@ reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11; no ob
 corpus-id = "vfxcmt"
 text = "It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
 reason = "Disclosed residuals of vfxcmt.3 to vfxcmt.11; the closing clause restates vfxcmt.10 (the verifier reads the declared revision)."
-
-[[exempt]]
-corpus-id = "vfxcmt"
-text = "Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
-reason = "Restates vfxcmt.7 and its cannot-evaluate case inside the disclosure paragraph; it adds no obligation."
 
 [[exempt]]
 corpus-id = "vfxcmt"
