@@ -1814,16 +1814,31 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
     return i
 
 
-def _heredoc_body_ends_early(command, body_at, body_end, heredocs):
-    """True when, reading command[body_at:body_end] for the QUOTED here-documents in heredocs ((delimiter,
-    strip_tabs), in the order their '<<' operators appeared, each ending at a line that is exactly its
-    delimiter as _skip_heredoc_bodies reads them), some body line STARTS with its delimiter and is not exactly
-    it, with a ')' or a backquote right after the delimiter on that line. That is the shape bash 5.3 ends a
-    body at inside a command or process substitution or backquotes (_subst_heredoc_end, which already refuses
-    such a body on the commit-message form), running the rest of that line and the lines after it as commands,
-    while an older bash reads the whole span as literal body. The lexer cannot know which bash will run the
-    command, so a caller that read such a body inside a substitution treats it as UNCERTAIN and fails closed
-    (the span comment in _lex_pass). Reads the same region _skip_heredoc_bodies read, so it stays linear."""
+# What makes a here-document body UNTRUSTED when it appears anywhere before the body, quoted or not (the span
+# comment in _lex_pass): a '(' (a command, process or arithmetic substitution, a subshell or a group), a
+# backquote, or a '${' (a '${ cmd; }' or '${| cmd; }' substitution), backslash-newlines between its '$' and '{'
+# included.
+_HEREDOC_NESTING_RE = re.compile(r"[(`]|\$(?:\\\n)*\{")
+
+
+def _heredoc_body_ends_early(command, body_at, body_end, heredocs, backquoted):
+    """True when the end of the bodies of the QUOTED here-documents in heredocs ((delimiter, strip_tabs), in the
+    order their '<<' operators appeared), read from command[body_at:body_end] as _skip_heredoc_bodies read them
+    (each to a line that is exactly its delimiter, leading tabs stripped for the <<- form), is UNCERTAIN for a
+    body read inside a substitution or group (the span comment in _lex_pass). The rule is bounded, not a list of
+    the lines bash ends a body at: (a) a body line STARTS with its delimiter and is not exactly it (the rule
+    _subst_heredoc_end applies to the commit message form); (b) a body runs to body_end with no line that is
+    exactly its delimiter; or (c) backquoted is True (a backquote substitution is open around the body) and the
+    bodies hold any backquote, an escaped one included. Bash 5.3 ends a body inside a '$(...)', '<(...)',
+    '${ cmd; }' or '${| cmd; }' at a line that starts with the delimiter and holds that construct's closer (')'
+    or '}') anywhere after it, and a backquote substitution at its first unescaped backquote, in a body too, and
+    runs the rest as commands (bash 5.3.9 runs the git in x=$(cat <<'EOF', EOF ); git commit -m x, EOF, ) on
+    four lines, and in x=`cat <<'EOF', foo`; git commit -m x; y=`, EOF, ` on four), where the exact-line read
+    takes it as body. (a) and (c) hold at every such line, whatever the closer and wherever it sits on the line;
+    (b) holds wherever bash ends a body that has no exact delimiter line after that point, since that read took
+    the rest of the command as body. The lexer cannot know which bash runs the command, so a caller that read
+    such a body treats it as UNCERTAIN and fails closed. Reads the region _skip_heredoc_bodies read once more,
+    so it stays linear."""
     i = body_at
     for delim, strip_tabs in heredocs:
         while i < body_end:
@@ -1834,9 +1849,11 @@ def _heredoc_body_ends_early(command, body_at, body_end, heredocs):
             i = body_end if nl == -1 else nl + 1
             if line == delim:
                 break
-            if line.startswith(delim) and len(line) > len(delim) and line[len(delim)] in ")`":
-                return True
-    return False
+            if line.startswith(delim):
+                return True  # (a)
+        else:
+            return True  # (b)
+    return backquoted and command.find("`", body_at, body_end) != -1  # (c)
 
 
 def _subst_heredoc_end(command, i, n, heredocs):
@@ -1846,7 +1863,7 @@ def _subst_heredoc_end(command, i, n, heredocs):
     the <<- form). None where the substitution skip (_skip_quoting) does not read them as bodies: a body that
     does not end before the command does, or a body line that begins with its delimiter but is not exactly
     it. Bash 5.3 ends a body inside a command substitution at such a line when a ')' follows the delimiter
-    on it and reads the rest of that line as commands (bash prints RAN for
+    anywhere on it and reads the rest of that line as commands (bash prints RAN for
     x=$(cat <<'EOF'<newline>EOF); echo RAN), so such a body is read as the skip reads any other text."""
     for delim, strip_tabs in heredocs:
         while True:
@@ -2582,6 +2599,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     tails = {} if fork is None else fork.tails
     tail_key = None  # this resumed pass's state at the first newline it ends (_LexFork.tails), once reached
     tail_from = 0
+    nesting_at = None  # the index of the first _HEREDOC_NESTING_RE match (n for none), once a body needs it
 
     def remember(flags):
         # Record what this resumed pass built after its first newline, for a later reading that reaches the
@@ -2659,28 +2677,35 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     body_at = i
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
                     # The exact-delimiter-line skip above ends each body where bash ends it only
-                    # when the body is read at the TOP LEVEL of the command: inside a command or
-                    # process substitution or backquotes, bash 5.3 ends a body at a line that
-                    # merely STARTS with the delimiter when a ')' or a backquote follows it on
-                    # that line (after x=$(cat <<'EOF' then body then the line EOF), bash runs
-                    # the text after that line as commands, while this skip reads it as body),
-                    # and an unterminated body here consumes text bash executes. The nesting
-                    # stack alone cannot prove such a group closed (a bare case pattern's ')'
-                    # pops its parenthesis), so the body is TRUSTED (read exactly as bash reads
-                    # it) ONLY when nothing is open on the stack AND no '(' and no backquote
-                    # appears anywhere before the body, quoted or not.
-                    trusted = (not nest and command.find("(", 0, body_at) == -1
-                               and command.find("`", 0, body_at) == -1)
-                    if not trusted and _heredoc_body_ends_early(command, body_at, i, pending_heredocs):
-                        # An untrusted body that bash 5.3 ends early at a 'DELIM)' or 'DELIM`' line (above):
-                        # the lines after it run as commands under bash 5.3 but are literal body under an
-                        # older bash, and a guard that reads this lex's segments would otherwise miss a
+                    # when the body is read outside every substitution and group: inside a command
+                    # or process substitution or a '${ cmd; }' or '${| cmd; }' one, bash 5.3 ends a
+                    # body at a line that starts with the delimiter and holds the closer (')' or
+                    # '}') anywhere after it, and inside backquotes at any unescaped backquote, and
+                    # runs the rest as commands (after x=$(cat <<'EOF' then the line EOF ); git ...
+                    # bash runs the git, while this skip reads it as body). The nesting stack alone
+                    # cannot prove such a construct closed (a bare case pattern's ')' pops its
+                    # parenthesis, and a '}' read as a word, as in x=${ echo }; cat <<'EOF', pops
+                    # its '${' while bash reads on inside it), so the body is TRUSTED (read exactly
+                    # as bash reads it) ONLY when nothing is open on the stack AND no '(', backquote
+                    # or '${' appears anywhere before the body, quoted or not (_HEREDOC_NESTING_RE,
+                    # searched once per pass, so the test stays linear however many bodies follow).
+                    if nesting_at is None:
+                        nesting = _HEREDOC_NESTING_RE.search(command)
+                        nesting_at = n if nesting is None else nesting.start()
+                    trusted = not nest and nesting_at >= body_at
+                    if not trusted and _heredoc_body_ends_early(command, body_at, i, pending_heredocs,
+                                                                "`" in nest):
+                        # An untrusted body whose end is uncertain under the bounded rule of
+                        # _heredoc_body_ends_early: a line that starts with its delimiter and is not
+                        # exactly it, a body with no exact delimiter line, or a backquote in a body a
+                        # backquote substitution holds. Bash 5.3 can run what follows such a point as
+                        # commands, and a guard that reads this lex's segments would otherwise miss a
                         # command bash runs (a 'git commit --no-verify' or a 'git push' the body hides). The
                         # hook cannot know which bash runs the command, so the reading is UNCERTAIN: raise so
                         # the whole lex fails and every guard takes its conservative, raw-text fallback (the
                         # same fail-closed path an unquoted here-document already takes), as the
                         # commit-message form already does (_subst_heredoc_end refuses such a body).
-                        raise ValueError("uncertain here-document body ended early in a substitution")
+                        raise ValueError("uncertain here-document body end in a substitution or group")
                     if _LexPlaces.spans is not None:
                         # A trusted body records "heredoc"; every other body records "body", which the
                         # bare-'&' narrowing never lifts (fail closed). The segments are unchanged for
@@ -21069,10 +21094,10 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     every bare `&` they read lies, where the lexer places it in its one reading of the command
     (_orch_lexed_amp_places), inside one of three shapes: (1) the body of a here-document under a quoted
     delimiter (<<'EOF' or <<"EOF") whose end the lexer can prove is where bash ends it: one read at the
-    top level of the command, with nothing open on the nesting stack and no '(' and no backquote
-    anywhere before the body (inside a command or process substitution or backquotes bash 5.3 can end a
-    body at a line that merely STARTS with the delimiter when a ')' or a backquote follows it on that
-    line, running what this lex would read as body, so such a body records as "body" and is never
+    top level of the command, with nothing open on the nesting stack and no '(', backquote or '${'
+    anywhere before the body (inside a substitution bash 5.3 can end a body at a line that starts with
+    the delimiter and holds the closer anywhere after it, or at a backquote inside backquotes, running
+    what this lex would read as body, so such a body records as "body" and is never
     lifted, fail closed), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact
     close the lex itself resolves; (2)
     a single- or double-quoted string; or (3) a '#' comment. Every other case where the lexer and the scan

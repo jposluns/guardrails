@@ -6854,6 +6854,82 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(found)
 
 
+# THE BOUNDED HERE-DOCUMENT END (_heredoc_body_ends_early and the span comment in _lex_pass). Each row hides
+# _HD_EARLY_END_HIDDEN after a here-document body read inside a substitution or group, and bash 5.3.9 runs it
+# in every row (a fake git first on PATH recorded its arguments, under bash -c and under eval alike), while the
+# lexer at 848c60f1 read it as body: protected_line allowed each row there and denies the hidden command alone.
+# V2 to V8 are the round-1 review's vectors of PR 793: V2 to V7 end at a line that starts with the delimiter
+# and holds the closer later on it (')' after a blank, a tab of the <<- form, a nested substitution or a
+# comment, and '}' for '${ cmd; }'), rule (a); V3 has no exact delimiter line either, rule (b) too; V8 ends a
+# backquote substitution at a backquote in the body, rule (c). rule-b is a '<<' inside a '${...}' expansion,
+# which bash reads as text (so the next line runs), where the lexer reads a here-document whose delimiter,
+# glued to the '}', no line matches, so only rule (b) holds there. brace-word is an untrusted body only through
+# the '${' element of the trust test: the '}' after echo is a word to bash, so the '${ ' substitution stays
+# open, but the lexer's nesting stack pops its '${' there, and nothing else marks the body untrusted.
+_HD_EARLY_END_HIDDEN = "git -c core.hooksPath=/dev/null commit -m x"
+_HD_EARLY_END_REFUSED = "ValueError: uncertain here-document body end in a substitution or group"
+_HD_EARLY_END_ROWS = (
+    ("V2", "x=$(cat <<'EOF'\nEOF ); ", "\nEOF\n)"),
+    ("V3", "msg=$(cat <<'EOF'\nFix\nEOF )\n", ""),
+    ("V4", "x=$(cat <<-'EOF'\n\tEOF ); ", "\n\tEOF\n)"),
+    ("V5", "x=$(echo $(cat <<'EOF'\nEOF )); ", "\nEOF\n))"),
+    ("V6", "x=$(cat <<'EOF'\nEOF #)\n", "\nEOF\n)"),
+    ("V7", "x=${ cat <<'EOF'\nEOF}; ", "\nEOF\n}"),
+    ("V8", "x=`cat <<'EOF'\nfoo`; ", "; y=`\nEOF\n`"),
+    ("rule-b", "echo ${x:-<<'EOF'}\n", "\nEOF"),
+    ("brace-word", "x=${ echo }; cat <<'EOF'\nEOF }; ", "\nEOF\n}"),
+)
+# The exact reading the rule keeps, each with the hidden command after the body as a visible segment: a body
+# read outside every substitution and group ends only at its exact delimiter line, so a line that starts with
+# the delimiter, or a backquote, is body text there (bash 5.3.9 prints such a line as body); and rule (c) holds
+# only where a backquote substitution is open, so a backquote in a body inside '$(...)' leaves it readable.
+_HD_EARLY_END_KEPT = (
+    ("top-delim-prefix", "cat <<'EOF'\nEOF) is body text\nEOF\n", [["cat"]]),
+    ("top-backquote", "cat <<'EOF'\nfoo`\nEOF\n", [["cat"]]),
+    ("subst-backquote", "x=$(cat <<'EOF'\nfoo`\nEOF\n)\n", [["x=$"], ["cat"], [], []]),
+)
+
+
+def _heredoc_early_end_failures():
+    """(hd-early-end-*) Each row of _HD_EARLY_END_ROWS beside its bare control: the shared lexer refuses the
+    row (the uncertain body end) and protected_line denies it, as it denies the hidden command alone
+    (hd-early-end-control). Every row fails on 848c60f1, where the lex read the hidden command as body and
+    protected_line allowed it; V2, V4 to V7 and brace-word also fail where rule (a) is removed (rule (b) still
+    refuses V3), V8 where rule (c) is, rule-b where rule (b) is, and brace-word where the trust test drops
+    '${'. hd-early-end-kept-*: the lexer reads each
+    _HD_EARLY_END_KEPT body as before, the hidden command a visible segment after it (REGRESSION GUARDS that
+    pass on 848c60f1 too and fail where the rule reaches a body it should read exactly)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    control = _decision(aiqt_hooks.protected_line, hidden)
+    if control != "deny":
+        out.append("(hd-early-end-control) protected_line must deny the bare hidden command {!r}, got {}".format(
+            hidden, control))
+    for name, before, after in _HD_EARLY_END_ROWS:
+        command = before + hidden + after
+        try:
+            lexed = [seg.argv for seg in aiqt_hooks._lex_command(command)]
+        except ValueError as exc:
+            lexed = "ValueError: {}".format(exc)
+        if lexed != _HD_EARLY_END_REFUSED:
+            out.append("(hd-early-end-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_EARLY_END_REFUSED, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-early-end-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, want in _HD_EARLY_END_KEPT:
+        command = before + hidden
+        try:
+            lexed = [seg.argv for seg in aiqt_hooks._lex_command(command)]
+        except ValueError as exc:
+            lexed = "ValueError: {}".format(exc)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-early-end-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
+
+
 def main():
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
@@ -12309,14 +12385,20 @@ def _main_isolated(monitor):
         # parenthesis after it on its line, are judged under both readings of that '#' (the shared lexer's
         # comment rule, applied inside _skip_quoting): the comment reading, the one bash takes, ends the
         # substitution at the next line's ')"' and lexes the push as its own segment, so the parsed
-        # classifier denies it first with its own reason. The three whose quoted here-document sits inside a
+        # classifier denies it first with its own reason. The exception is commented-close: its word-text
+        # reading reads the next line's <<'EOF' as a quoted here-document whose body runs to the end of the
+        # command, a body end the lexer cannot place (rule (b) of _heredoc_body_ends_early), so the whole lex
+        # fails and the guard denies through its failed-lex path, whose commit proof reports the incomplete
+        # parse first, as its fallback alone does (a disclosed over-refusal: bash reads no here-document
+        # there). The three whose quoted here-document sits inside a
         # double-quoted command substitution are lexed as bash reads them too: the skip reads the body as
         # text, so the substitution ends at the ')"' after the delimiter line and the push is its own
         # segment, which the parsed classifier denies first (the unquoted one's body is still read as code,
         # so the fallback decides it). Each still denies; the fallback beneath it stays witnessed on the same
         # command (pl-uncertain-<shape>-<spelling>-fallback).
-        _unc_parsed_shapes = ('comment-paren', 'comment-apostrophe', 'commented-close', 'commented-close-heredoc',
+        _unc_parsed_shapes = ('comment-paren', 'comment-apostrophe', 'commented-close-heredoc',
                               'heredoc-paren', 'heredoc-quote', 'nested-heredoc-close')
+        _unc_refused_shapes = ('commented-close',)
         for _unm, _ucmd in _unc_shapes:  # each _ucmd still spells the pl-mispair push; re-spelled below
             for _usn, _usp in (
                 ('head', 'git push --force origin HEAD'),
@@ -12326,7 +12408,17 @@ def _main_isolated(monitor):
             ):
                 _ucmdx = _ucmd.replace('git push --force origin main', _usp)
                 _udetail = 'appears to force-push or delete'
-                if _unm in _unc_parsed_shapes:
+                if _unm in _unc_refused_shapes:
+                    try:
+                        aiqt_hooks._lex_readings(_ucmdx)
+                        _ulex = 'lexed'
+                    except ValueError as _ulex_exc:
+                        _ulex = str(_ulex_exc)
+                    if 'uncertain here-document body end' not in _ulex:
+                        failures.append('(pl-uncertain-{}-{}-lex) the lexer must refuse the word-text reading\'s '
+                                        'here-document body; got {!r}'.format(_unm, _usn, _ulex))
+                    _udetail = 'incomplete shell parse'
+                if _unm in _unc_parsed_shapes + _unc_refused_shapes:
                     _ufall = aiqt_hooks._protected_line_fallback(_ucmdx)
                     _ufall_obj = _ufall[1] if isinstance(_ufall[1], dict) else {}
                     _ufall_reason = _ufall_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -12334,7 +12426,8 @@ def _main_isolated(monitor):
                         failures.append('(pl-uncertain-{}-{}-fallback) the uncertain-lex fallback must deny the '
                                         'shape on its own, with its reason; got uncertain={} reason={!r}'.format(
                                             _unm, _usn, aiqt_hooks._lex_uncertain(_ucmdx), _ufall_reason))
-                    _udetail = 'this git push force-pushes'
+                    if _unm in _unc_parsed_shapes:
+                        _udetail = 'this git push force-pushes'
                 if _usn == 'frag':
                     # The backstop's de-quoted reading now denies the fragmented protected name
                     # first (deny reason changed, decision unchanged); the layer beneath it stays
@@ -14973,10 +15066,11 @@ def _main_isolated(monitor):
         # are REGRESSION GUARDS. The top-level assignment records decisions stricter than main's: bash 5.3.9
         # ends its body at the 'EOF)' line and runs the rest of that line (with git replaced by echo it prints
         # commit --no-verify -m x), which main's lexer read as body, so main's commit_msg_subst and
-        # protected_line allowed a commit bash runs. The lexer now fails on an untrusted body that such a
-        # 'DELIM)' or 'DELIM`' line ends early (the comment at that raise in _lex_pass), and both guards take
-        # their failed-lex fallback and deny, the fail-closed outcome; the row fails on code whose lexer reads
-        # that body to its exact delimiter line, as main's does.
+        # protected_line allowed a commit bash runs. The lexer now refuses an untrusted body whose end is
+        # uncertain (the bounded rule of _heredoc_body_ends_early; here a line that starts with the delimiter
+        # and is not exactly it), and both guards take their failed-lex fallback and deny, the fail-closed
+        # outcome; the row fails on code whose lexer reads that body to its exact delimiter line, as main's
+        # does. _heredoc_early_end_failures holds the rows for the rest of that rule.
         _hd_floor_guards = (aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.git_explicit_binding,
                             aiqt_hooks.commit_identity, aiqt_hooks.bash_absolute_paths, aiqt_hooks.branch_root,
                             aiqt_hooks.git_discard, aiqt_hooks.git_stash_ref, aiqt_hooks.commit_msg_subst,
@@ -15036,6 +15130,7 @@ def _main_isolated(monitor):
         for _hdn, _hdc, _hdmain, _hdover in _hd_floor:
             _hd_main_check("hd-main-floor-" + _hdn, _hdc, _hdmain, _hdover,
                            exact=_hdn in ("apostrophe", "five-headings"))
+        failures.extend(_heredoc_early_end_failures())
         # MAIN'S DECISION AS A FLOOR (the comment above _MainHashReading). Main's lex fails on the commit
         # message form whose body holds an apostrophe, and its guards then take their failed-lex path, whose raw
         # scans read the whole text, a command inside a string included; reading that body made the lex clean,
