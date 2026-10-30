@@ -5503,9 +5503,18 @@ def self_test():
         d1 = _record_digest(fn(1))
         d2 = _record_digest(fn_date(2))
         pr_machine = clean_machine()
+        # Spec 9: the per-record layout requires the concurrent-operation module, so the clean
+        # per-record fixture enables it and carries its session_lease type (registered, with an empty
+        # index, an empty imported leaf, and both counter rows at zero).
         pr_machine["manifest.toml"] = base_manifest(layout="per-record")
+        pr_machine["manifest.toml"]["modules"] = {"concurrent_operation": True}
+        pr_machine["manifest.toml"]["types"]["session_lease"] = {"namespace": "SL"}
         pr_machine["manifest.toml"]["vendors"] = {"registered": ["x-acme"]}
-        pr_machine["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=0, HO=0)
+        pr_counters = counters(FN=2, BI=0, DN=0, WL=0, HO=0, SL=0)
+        pr_counters["counters"]["imported:SL"] = 0
+        pr_machine["counters.toml"] = pr_counters
+        pr_machine["session_lease.index.toml"] = idx([])
+        pr_machine.update(_opf_init.imported_leaf_documents(pr_machine["manifest.toml"]))
         pr_machine["backlog_item.index.toml"] = idx([])
         pr_machine["done.index.toml"] = idx([])
         pr_machine["handoff.index.toml"] = idx([])
@@ -5521,12 +5530,25 @@ def self_test():
         pr_machine["archive/2026/worklog.toml"] = {"schema": 1, "entry": []}
         pr_product = {"CHANGELOG.md": make_changelog([])}          # no releases: no VERSION, unreleased-only
         pr_obs = {"tracked": "tracked",
-                  "prior": {"releases": [], "counters_high": counters(FN=2, BI=0, DN=0, WL=0, HO=0)["counters"],
+                  "prior": {"releases": [], "counters_high": dict(pr_counters["counters"]),
                             "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")},
                             "imported": {}}}
         prc = run(pr_machine, product=pr_product, obs=pr_obs)
         check("per-record-clean-valid", prc is not None and prc.status == VALID)
         check("per-record-clean-no-cant", prc is not None and not prc.cannot_evaluate)
+        # Spec 9 layout coupling: the same store with the concurrent-operation module flipped off
+        # declares layout = "per-record" without it and must be refused, with the coupling named.
+        _prf_machine = copy.deepcopy(pr_machine)
+        _prf_machine["manifest.toml"]["modules"]["concurrent_operation"] = False
+        _prf = run(_prf_machine, product=pr_product, obs=pr_obs)
+        # The manifest finding fails the store closed: C-MANIFEST carries the finding and the doctor
+        # stops before traversing manifest-dependent sources, so the overall grade is the fail-closed
+        # CANNOT-EVALUATE, never VALID.
+        check("per-record-module-flip-refused",
+              _prf is not None and _prf.status == CANNOT_EVALUATE
+              and _prf.checks.get("C-MANIFEST") == "FINDING")
+        check("per-record-module-flip-named", _prf is not None and any(
+            '"per-record" requires the concurrent-operation module' in f for f in _prf.findings))
         # --- round-5 containment / deferral / sync fixes (F-1..F-5) ---------------------------------
         # F-1/F-4: an [unmanaged] declaration inside a fully-graded container (a per-record type-body dir,
         # the imports subtree, or an archive bucket) must not launder strays beneath it.
@@ -7966,6 +7988,14 @@ def self_test():
             # unchanged (the first imported-series release keeps them inline in either layout).
             m = _i3_machine()
             m["manifest.toml"]["opf"]["layout"] = "per-record"
+            # Spec 9: the per-record layout requires the concurrent-operation module, so the activated
+            # per-record store enables it and carries its session_lease type (registered, empty index
+            # and imported leaf, both counter rows at zero).
+            m["manifest.toml"]["modules"] = {"concurrent_operation": True}
+            m["manifest.toml"]["types"]["session_lease"] = {"namespace": "SL"}
+            m["session_lease.index.toml"] = idx([])
+            m["session_lease.imported.index.toml"] = idx([])
+            m["counters.toml"]["counters"].update({"SL": 0, "imported:SL": 0})
             for _t, _rows in (("backlog_item", [bi(1, "done"), bi(2, "open")]),
                               ("done", [dn(1, "BI-1")]), ("handoff", [ho(1)])):
                 m[_t + ".index.toml"] = {"schema": 1, "record": [
@@ -9959,10 +9989,12 @@ def self_test():
         # duplicate, over a zero-release store so no frozen span / coverage / rotation check co-fires.
         cgf = copy.deepcopy(pr_machine)
         cgf["worklog.toml"] = {"schema": 1, "entry": [wl(1), wl(3)]}
-        cgf["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=3, HO=0)
+        cg_counters = counters(FN=2, BI=0, DN=0, WL=3, HO=0, SL=0)
+        cg_counters["counters"]["imported:SL"] = 0
+        cgf["counters.toml"] = cg_counters
         cg_obs = {"tracked": "tracked",
                   "prior": {"releases": [],
-                            "counters_high": counters(FN=2, BI=0, DN=0, WL=3, HO=0)["counters"],
+                            "counters_high": dict(cg_counters["counters"]),
                             "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")},
                             "imported": {}}}
         cgr = run(cgf, product=pr_product, obs=cg_obs)
@@ -10749,10 +10781,12 @@ def self_test():
         # this branch; deleting it flips the store VALID.
         _f6a = copy.deepcopy(pr_machine)
         _f6a["worklog.toml"] = {"schema": 1, "entry": [wl(2), wl(3)]}
-        _f6a["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=3, HO=0)
+        _f6a_counters = counters(FN=2, BI=0, DN=0, WL=3, HO=0, SL=0)
+        _f6a_counters["counters"]["imported:SL"] = 0
+        _f6a["counters.toml"] = _f6a_counters
         _f6a_obs = {"tracked": "tracked",
                     "prior": {"releases": [],
-                              "counters_high": counters(FN=2, BI=0, DN=0, WL=3, HO=0)["counters"],
+                              "counters_high": dict(_f6a_counters["counters"]),
                               "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")},
                               "imported": {}}}
         _f6ar = run(_f6a, product=pr_product, obs=_f6a_obs)

@@ -2153,8 +2153,9 @@ nothing rotates, and the step 6 validator already refuses an archive it cannot r
   named `toml`; section 4.2 says "the example name `toml` MUST NOT be hardcoded").
 - Only records in unqualified terminal states, other than worklog records, may rotate, so a
   `/proposed` record stays active. Worklog records rotate only as released, frozen spans. Open
-  records, active blocks, unresolved decisions, unexpired waivers, the current handoff and the
-  unreleased worklog tail never rotate (section 12), and the imported series never rotates.
+  records, active blocks, unresolved decisions, waivers at `active`, the current handoff and the
+  unreleased worklog tail never rotate (section 12: a revoked waiver confers nothing whatever its
+  `expires_at` and, like an expired one, may rotate), and the imported series never rotates.
 - Each rotation writes that year's `archive.toml`, enumerating every moved ID (and, for the
   worklog, every moved span) and its destination. Counters are untouched. Validation confirms that
   every ID exists in exactly one active or archived location, and coverage gates read active and

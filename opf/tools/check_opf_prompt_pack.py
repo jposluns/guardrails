@@ -41,8 +41,9 @@ the tooling's single source-of-truth copy of it. The guard:
 
   module-table      the module-tier rows of the OPF-SPEC.md section 8.1 table (type, namespace and the
                     module family its tier names) equal _opf_store.MODULE_TYPES exactly: every row has
-                    its entry, every entry has its row, and each (namespace, module) pair matches; an
-                    unknown or misspelled tier label, a duplicated type row, a missing section 8.1
+                    its entry, every entry has its row, and each (namespace, module) pair matches; any
+                    row whose tier is not exactly a SPEC_TIERS label (a misspelled, pluralized or
+                    re-cased family included), a duplicated module type row, a missing section 8.1
                     heading or an unreadable spec never passes
 
   check_opf_prompt_pack.py              verify the shipped pack beside this tool (../prompt-pack), its
@@ -56,7 +57,8 @@ the tooling's single source-of-truth copy of it. The guard:
                                         order and every example path; adopt/SKILL.md section 8 names
                                         import/SKILL.md; and the shipped spec's module type table agrees
                                         with _opf_store.MODULE_TYPES while each deliberate flip (a
-                                        deleted row, a changed namespace or tier, an extra MODULE_TYPES
+                                        deleted row, a changed namespace or tier, an extra row under a
+                                        pluralized or re-cased tier, an extra MODULE_TYPES
                                         entry) is red with the module-table guard
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as digest drift),
@@ -129,6 +131,10 @@ MODULE_TIERS = {
     "Operational-policy module": "operational_policy",
     "Concurrent-operation module": "concurrent_operation",
 }
+# Every section 8.1 tier label: the module families above plus the non-module tiers. Any table row
+# whose tier is none of these, a misspelled, pluralized or re-cased family included, is refused
+# INVALID rather than skipped, so an extra row under such a tier never reads as agreement.
+SPEC_TIERS = frozenset(MODULE_TIERS) | {"Baseline", "Reserved, excluded", "Reserved, unassigned"}
 # A three-cell table row; the section 8.1 type table is the only such table in its section.
 _TABLE_ROW_RE = re.compile(r"^\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|[ \t]*$",
                            re.MULTILINE)
@@ -289,18 +295,21 @@ def validate_pack(pack_dir):
 
 def _spec_module_rows(text):
     """The module-tier rows of the spec's section 8.1 type table, as {type: (namespace, module)}. A
-    row whose tier ends in "module" but is no MODULE_TIERS label, and a duplicated type, are refused,
-    so a misspelled family or a double row never reads as agreement."""
+    row whose tier is not exactly a SPEC_TIERS label (the table heading and separator rows aside),
+    and a duplicated module type, are refused, so a misspelled, pluralized or re-cased family, an
+    extra row filed under one, or a double row never reads as agreement."""
     start = text.find("\n### 8.1 ")
     _require(start >= 0, "module-table", "OPF-SPEC.md has no section 8.1 heading", CANNOT_EVALUATE)
     end = text.find("\n### ", start + 1)
     section = text[start:] if end < 0 else text[start:end]
     rows = {}
     for tier, tname, namespace in _TABLE_ROW_RE.findall(section):
-        if not tier.endswith("module"):
+        if (tier, tname, namespace) == ("Tier", "Type", "Namespace") or set(tier) <= set("-: "):
             continue
-        _require(tier in MODULE_TIERS, "module-table",
-                 "unknown module tier {!r} in the section 8.1 table".format(tier))
+        _require(tier in SPEC_TIERS, "module-table",
+                 "unknown tier {!r} in the section 8.1 table".format(tier))
+        if tier not in MODULE_TIERS:
+            continue
         _require(tname not in rows, "module-table",
                  "module type {!r} is listed twice in the section 8.1 table".format(tname))
         rows[tname] = (namespace, MODULE_TIERS[tier])
@@ -1006,6 +1015,14 @@ def _self_test_vectors():
                     ("module-table-unknown-tier", INVALID, "module-table",
                      lambda t: t.replace("| Concurrent-operation module | session_lease |",
                                          "| Scheduling module | session_lease |", 1)),
+                    # An extra row filed under a pluralized or re-cased family label is refused, never
+                    # skipped as a non-module tier (the docstring's any-row tier check).
+                    ("module-table-extra-row-plural-tier", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row,
+                                         gate_run_row + "| Governance modules | extra_action | XA |\n", 1)),
+                    ("module-table-extra-row-recased-tier", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row,
+                                         gate_run_row + "| Governance Module | extra_action | XA |\n", 1)),
                     ("module-table-duplicate-row", INVALID, "module-table",
                      lambda t: t.replace(gate_run_row, gate_run_row + gate_run_row, 1)),
                     ("module-table-heading-missing", CANNOT_EVALUATE, "module-table",
