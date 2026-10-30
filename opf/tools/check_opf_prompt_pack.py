@@ -470,19 +470,17 @@ IMPORT_PINNED = (
     "| Adoption state | `opf adopt status [--root DIR]` | runs; writes nothing |",
     "| Batch pre-check | the read-only `parse_batch` entry (section 3, step 6) | runs; writes nothing; checks one "
     "batch's shape and canonical form only |",
-    "| Pack binding | compare the plan's `prompt_pack` with `pack.toml` by hand (section 3, step 2) | not yet "
-    "executable: no command checks this binding |",
+    "| Pack binding | `opf import --prompt [--root DIR]` (section 3, step 2) | runs; writes nothing; refuses "
+    "when the shipped pack does not verify or does not match the plan's `prompt_pack` binding |",
     "| Submit a batch | `opf record import --batch FILE [--root DIR]` | not yet executable: `opf record` has no "
     "`import` subcommand and refuses with exit 2 |",
     "| Replay and correction | `opf record import --batch FILE [--root DIR]` | not yet executable: both are "
     "behaviour of the batch writer, which this build does not have |",
     "| Record a skip | no command | not yet executable: no command records an attributed skip in this build |",
-    "| Import prompt | `opf import --prompt` | not yet executable: `opf import` refuses every argument with "
-    "exit 2 |",
-    "| Import status | `opf import --status` | not yet executable: `opf import` refuses every argument with "
-    "exit 2 |",
-    "| Verify completion | `opf import --verify` | not yet executable: `opf import` refuses every argument with "
-    "exit 2 |",
+    "| Import prompt | `opf import --prompt` | runs; writes nothing |",
+    "| Import status | `opf import --status` | runs; writes nothing |",
+    "| Verify completion | `opf import --verify` | runs; writes nothing and records nothing; on a real store "
+    "its doctor leg reports cannot-evaluate until the imported-series roster is gradable |",
     "Report the source as not imported and stop.",
 )
 
@@ -493,7 +491,8 @@ IMPORT_PIN_EDITS = (
     ("Write the batch outside the repository.", "Write the batch inside the repository."),
     ("outside the product repository:", "in the product repository:"),
     ("python3 -I -B -c \"import sys, pathlib;", "python3 -c \"import sys, pathlib;"),
-    ("| runs; writes nothing |", "| runs; writes the adoption journal |"),
+    ("`opf adopt status [--root DIR]` | runs; writes nothing |",
+     "`opf adopt status [--root DIR]` | runs; writes the adoption journal |"),
     ("checks one batch's shape and canonical form only", "checks that one batch is ready to submit"),
 )
 

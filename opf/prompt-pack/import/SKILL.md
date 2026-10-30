@@ -4,9 +4,10 @@ description: The OPF post-adoption import procedure for an AI development assist
   adoption whose plan disposes old files as `migrate`, turn each such source into imported
   records: read the source, write one canonical batch for it, pre-check the batch, and submit it
   through `opf record import --batch`. Each step states whether the reference tooling that ships
-  beside this pack can run it. Today only the read-only batch pre-check runs; submitting a batch,
-  recording a skip, import status and verification are not yet executable, and the assistant
-  stops before them rather than doing their work by hand.
+  beside this pack can run it. Today the read-only batch pre-check and the read-only
+  `opf import --prompt`, `--status` and `--verify` verbs run; submitting a batch and recording a
+  skip are not yet executable, and the assistant stops before them rather than doing their work
+  by hand.
 ---
 
 # /import: post-adoption import with `opf record import`
@@ -44,14 +45,14 @@ Three rules govern everything else:
 | Step | How it runs | Status in this build |
 |---|---|---|
 | Adoption state | `opf adopt status [--root DIR]` | runs; writes nothing |
-| Pack binding | compare the plan's `prompt_pack` with `pack.toml` by hand (section 3, step 2) | not yet executable: no command checks this binding |
+| Pack binding | `opf import --prompt [--root DIR]` (section 3, step 2) | runs; writes nothing; refuses when the shipped pack does not verify or does not match the plan's `prompt_pack` binding |
 | Batch pre-check | the read-only `parse_batch` entry (section 3, step 6) | runs; writes nothing; checks one batch's shape and canonical form only |
 | Submit a batch | `opf record import --batch FILE [--root DIR]` | not yet executable: `opf record` has no `import` subcommand and refuses with exit 2 |
 | Replay and correction | `opf record import --batch FILE [--root DIR]` | not yet executable: both are behaviour of the batch writer, which this build does not have |
 | Record a skip | no command | not yet executable: no command records an attributed skip in this build |
-| Import prompt | `opf import --prompt` | not yet executable: `opf import` refuses every argument with exit 2 |
-| Import status | `opf import --status` | not yet executable: `opf import` refuses every argument with exit 2 |
-| Verify completion | `opf import --verify` | not yet executable: `opf import` refuses every argument with exit 2 |
+| Import prompt | `opf import --prompt` | runs; writes nothing |
+| Import status | `opf import --status` | runs; writes nothing |
+| Verify completion | `opf import --verify` | runs; writes nothing and records nothing; on a real store its doctor leg reports cannot-evaluate until the imported-series roster is gradable |
 
 Import cannot start in this build. It needs the adoption receipt that `opf adopt apply` records
 (section 8.8), and `opf adopt apply` is not yet executable (`adopt/SKILL.md`, section 6), so no
@@ -60,9 +61,10 @@ and pre-check them (section 3, steps 3 to 6), so that the batches are ready when
 lands. Those batches are drafts: nothing is imported, and you stop at step 7.
 
 The reference tooling requires Python 3.14 or newer. Its exit convention is 0 clean, 1 a
-finding, 2 cannot-evaluate or refused. A refusal is never a pass. The import verb, once it
+finding, 2 cannot-evaluate or refused. A refusal is never a pass. The batch writer, once it
 exists, exits 0 when the change is recorded and 2 on every refusal or cannot-evaluate
-(section 8.8); it never exits 1.
+(section 8.8); it never exits 1. The read-only `opf import` verbs exit 0 clean, 1 on a finding
+or an incomplete source, and 2 on every refusal or cannot-evaluate (section 14.1).
 
 ## 2. What import covers
 
@@ -100,13 +102,13 @@ run no step below.
    what it prints. `adopt/SKILL.md`, section 2, step 3, says what each result means. Its output
    does not prove that an adoption receipt exists; in this build no adoption run reaches apply,
    so stop at step 7 whatever it prints.
-2. **Check the pack binding by hand (not yet executable as a command).** Read the `version` and
-   `digest` lines of this pack's manifest, `pack.toml`, at the pack root one directory above this
-   member, and compare them with the approved plan's `prompt_pack.version` and
-   `prompt_pack.digest`. If either differs, stop and report: this pack is not the one the adopter
-   approved, and the remedy is a fresh plan with its own single approval, never a reinterpreted
-   approval (section 8.8). No command in this build checks this binding; do not describe your
-   comparison as a tooling check.
+2. **Check the pack binding (runs).** Run `opf import --prompt --root <product root>` and report
+   what it prints: it verifies the pack that ships beside the tooling, compares its `version` and
+   `digest` with the approved plan's `prompt_pack.version` and `prompt_pack.digest`, and prints
+   the import members and the approved migrate-source scope. If it refuses the binding, stop and
+   report: this pack is not the one the adopter approved, and the remedy is a fresh plan with its
+   own single approval, never a reinterpreted approval (section 8.8). A pack you deployed
+   elsewhere is outside that check: compare its `pack.toml` with the plan by hand and say so.
 3. **List the sources.** Read the plan's `import_policy`: `scope` lists the migrate sources in
    order, `skip` is the skip policy (`no-skip` or `attributed-skip`), `missingness` lists the
    closed reasons, and `unparsed` is `retain-verbatim`. For each source, read its `sources` row:
@@ -159,13 +161,15 @@ run no step below.
    `attributed-skip`, the skip is an outcome event naming the source and its actor, and no
    command records an attributed skip in this build. Report the source as not imported and stop.
    Never write a skip event by hand.
-9. **Status and verification (not yet executable).** `opf import --prompt`, `--status` and
-   `--verify` will expose this activity (section 14.1); in this build each refuses with exit 2.
-   For each migrate source, completion will verify the preserved original's digest, at least one
-   imported record referencing the source or a recorded skip under the approved policy, and
-   doctor VALID over both the strict store and the imported series on the live tree
-   (section 14.1). A green result proves source accounting and preservation, not byte-level
-   mapping coverage or semantic fidelity.
+9. **Status and verification (run, read-only).** `opf import --prompt`, `--status` and
+   `--verify` expose this activity (section 14.1); each runs read-only and writes nothing.
+   `--status` reports `import_status` and, per migrate source, the import runs whose records
+   reference it. For each migrate source, `--verify` evaluates the preserved original's digest,
+   at least one imported record referencing the source or a recorded skip under the approved
+   policy, and doctor VALID over both the strict store and the imported series on the live tree
+   (section 14.1), and records nothing: recording the result, the retirement and `import_status`
+   stays with the completion writer, which this build does not have. A green result proves
+   source accounting and preservation, not byte-level mapping coverage or semantic fidelity.
 10. **Retirement (not yet executable).** A green result records the source's retirement. For a
     frozen live source, one journaled transaction records the retirement and removes the file,
     whose live bytes must still match the plan digest; an archived source is already out of the

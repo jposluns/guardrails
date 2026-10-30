@@ -23,11 +23,16 @@ repository whose store was removed cannot pass CI vacuously). Doctor is read-onl
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` is a
 recognized verb, but no store upgrade is defined for base 2.0.0: `opf upgrade` refuses every argument
 list on every root at exit 2, parsing no argument, resolving no root, reading nothing and writing nothing.
-`import`'s former
-modes, `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
-(--decisions FILE | --interactive) | --apply <run-id>)`, are RETIRED (spec 14.1) and their engine is
-removed: the verb refuses every argument list on every root, a NOT-ADOPTED one included, at exit 2 with a
-pointer to adoption and the prompt pack, parsing no argument, reading no input file and writing nothing.
+`import` HAS landed as the
+READ-ONLY surface `opf.import.surface/v1` (spec 14.1): `opf import --prompt` prints the shipped prompt
+pack's version, digest and import members and the approved migrate-source scope once the plan's
+prompt-pack binding matches the verified pack; `opf import --status` reports `[opf].import_status` and
+each migrate-disposed source's referencing import runs and records; and `opf import --verify` grades each
+such source through the import-completion evaluator (_opf_import_complete), recording nothing. Each verb
+writes nothing and exits 2 on every refusal or cannot-evaluate, a NOT-ADOPTED or runless root included (a
+requested operation); the former --scan/--plan/--review/--apply modes are gone, so a former flag meets the
+same usage error as any unknown token, and the batch writer `opf record import --batch` (spec 8.8) is not
+offered in this build.
 
 `init` HAS landed: `opf init [--root DIR] [--recover]` creates validated store sources, a pointer, and a
 starter `CHANGELOG.md` under the shared init operation mutex and the spec 5.7 lease, without rendering or
@@ -975,6 +980,8 @@ _ENTRY_FLOOR_EXEMPT = {
                                   "_retained_close_offpath_self_test)",
     "opf-close-exc-safe-vectors": "the dispatcher's in-flight-exception close vectors (#377, "
                                   "_close_exc_safe_vectors_self_test)",
+    "opf-import-surface": "the dispatcher's import spec-to-tool agreement suite "
+                          "(_import_surface_self_test)",
     "opf-cli": "the dispatcher's command-line suite (_cli_self_test)",
 }
 
@@ -19016,326 +19023,464 @@ def _cmd_upgrade(rest):
     return EXIT_MALFORMED
 
 
-# Spec 14.1: the former --scan, --plan, --review and --apply modes refuse with a pointer to adoption and the
-# prompt pack. The pointer is in words only; it names no command this build lacks.
-IMPORT_RETIRED = (
-    "the ordinary import modes (scan, plan, review and apply) are retired: clean-start adoption (OPF spec "
-    "14.1) is the only intake, and post-adoption import uses the approved prompt pack; nothing was written")
+# Spec 14.1: the read-only post-adoption import surface. The former --scan, --plan, --review and --apply
+# modes and their engine are gone; a former flag meets the same usage error as any other unknown token.
+IMPORT_SURFACE = "opf.import.surface/v1"
+# The verbs of that surface, in the order the spec 14.1 sentence names them. _import_surface_findings
+# holds the spec's sentence and the dispatch table to exactly this tuple.
+IMPORT_VERBS = ("--prompt", "--status", "--verify")
+# Import surfaces the spec names that this build deliberately does not offer. Each must stay named in the
+# spec and absent from the tool; the change that lands one delists it here (_import_surface_findings).
+IMPORT_NOT_OFFERED = ("opf record import --batch",)
+IMPORT_USAGE = ("usage: opf import (--prompt | --status | --verify) [--root DIR] [--run RUN_ID] -- the "
+                "read-only import surface {}; nothing was read or written".format(IMPORT_SURFACE))
+
+
+def _import_adoption_runs(root_abs):
+    """The admitted adoption run ids at the reserved adoption evidence home of the product root, sorted,
+    read contained and no-follow through the apply shell's own primitives (the `opf adopt status` read
+    discipline, bound to one home directory identity). No evidence home means no run ([]). A symlinked,
+    dangling or wrong-type home or entry, or an entry that is not an adoption run id, raises
+    AdoptApplyError: run selection fails closed over foreign content, never guesses past it."""
+    journal = _opf_adopt_apply._journal
+    journal.require_containment()
+    evidence_rel = _opf_store.IMPORTED_REL + "/" + _opf_adopt_apply.KIND
+    root_fd = _opf_adopt_apply._open_product_root(root_abs)
+    try:
+        home = journal._lstat_contained(root_fd, evidence_rel)
+        if home is None:
+            return []
+        if not stat.S_ISDIR(home.st_mode):
+            raise _opf_adopt_apply.AdoptApplyError(
+                "{} is not a directory (a symlinked, dangling or foreign entry at the reserved adoption "
+                "evidence home)".format(evidence_rel))
+        dfd = journal._open_dir_contained(root_fd, evidence_rel)
+        try:
+            entries = [(name, journal._lstat_at(dfd, name)) for name in sorted(os.listdir(dfd))]
+        finally:
+            _opf_store._close_fd_exc_safe(dfd)
+        for name, est in entries:
+            if est is None or not stat.S_ISDIR(est.st_mode) or not _opf_adopt_apply.is_run_id(name):
+                raise _opf_adopt_apply.AdoptApplyError(
+                    "{}/{} is not an adoption run's directory (foreign content at the reserved adoption "
+                    "evidence home)".format(evidence_rel, name))
+        return [name for name, _est in entries]
+    finally:
+        _opf_store._close_fd_exc_safe(root_fd)
+
+
+def _import_select_run(root_abs, run_id):
+    """The adoption run an import verb reports on: --run when given (it must be an admitted run), else
+    the one admitted run when exactly one exists. No run at all, several runs without --run, or a --run
+    naming no admitted run raises ValueError (the caller's located cannot-evaluate, exit 2): import is a
+    REQUESTED operation, so a NOT-ADOPTED or runless root refuses, never the NOT-APPLICABLE exit 0 that
+    doctor and render report on a non-adopter root."""
+    runs = _import_adoption_runs(root_abs)
+    if run_id is not None:
+        if run_id not in runs:
+            raise ValueError("--run {} names no admitted adoption run at this root (admitted: {})".format(
+                run_id, ", ".join(runs) or "none"))
+        return run_id
+    if not runs:
+        raise ValueError("no adoption run exists at this root; import is a requested operation and runs "
+                         "only after an applied adoption (spec 14.1)")
+    if len(runs) > 1:
+        raise ValueError("{} adoption runs exist ({}); give --run RUN_ID".format(
+            len(runs), ", ".join(runs)))
+    return runs[0]
+
+
+def _import_approved_plan(root_abs, run_id):
+    """The approved plan the adoption run froze, read contained and no-follow from the run's evidence
+    bundle and re-proven from its own bytes (_opf_adopt_apply.frozen_plan). Raises ValueError (the
+    caller's located cannot-evaluate) when the plan is absent, unreadable, unproven or another run's."""
+    rel = _opf_adopt_apply.plan_rel(run_id)
+    root_fd = _opf_adopt_apply._open_product_root(root_abs)
+    try:
+        try:
+            _fst, data = _opf_adopt_apply._read_live(root_fd, rel)
+        except _opf_adopt_apply.AdoptApplyError as exc:
+            raise ValueError(str(exc))
+        if data is None:
+            raise ValueError("no approved plan in the run's evidence bundle ({})".format(rel))
+        try:
+            plan = _opf_adopt_apply.frozen_plan(data)
+        except _opf_adopt_apply.AdoptApplyError as exc:
+            raise ValueError(str(exc))
+        if plan["run_id"] != run_id:
+            raise ValueError("the bundle's plan names run {!r}, not {}".format(plan["run_id"], run_id))
+        return plan
+    finally:
+        _opf_store._close_fd_exc_safe(root_fd)
+
+
+def _import_migrate_rows(plan):
+    """The plan's migrate-disposed source rows, in the plan's own (path-sorted) order: exactly the
+    sources post-adoption import may touch (spec 14.1)."""
+    return [row for row in plan["sources"] if row["disposition"] == "migrate"]
+
+
+def _import_prompt(root_abs, run_id):
+    """`opf import --prompt` (spec 14.1): print the approved import prompt surface, read-only. It reads
+    only the shipped prompt pack and the adoption run's approved plan: the pack is verified by the
+    prompt-pack gate's own validator (every member's bytes against the manifest, the manifest against
+    the pack digest), the plan's prompt_pack {version, digest} binding must be exactly the verified
+    pack, and the member roster is re-read and held to that verified version and digest, so a pack that
+    changed between the two reads refuses. Prints the pack version and digest, each import member's
+    path and sha256, and the approved migrate-source scope (path, plan digest, archived or frozen).
+    Writes nothing. Exit 0 printed; exit 2 every refusal or cannot-evaluate (an unverifiable pack, a
+    binding mismatch, no adoption run, an unreadable plan)."""
+    import tomllib
+    import check_opf_prompt_pack as pack_gate
+    run = _import_select_run(root_abs, run_id)
+    plan = _import_approved_plan(root_abs, run)
+    try:
+        version, digest, _count = pack_gate._validate(Path(pack_gate.DEFAULT_PACK_DIR))
+    except pack_gate._Refusal as refusal:
+        print("opf import --prompt: cannot evaluate: the shipped prompt pack does not verify ({}: "
+              "{})".format(refusal.guard, refusal), file=sys.stderr)
+        return EXIT_MALFORMED
+    bound = plan["prompt_pack"]
+    if bound["version"] != version or bound["digest"] != digest:
+        print("opf import --prompt: cannot evaluate: the shipped prompt pack (version {} digest {}) is "
+              "not the plan's prompt_pack binding (version {} digest {}); import uses only the approved, "
+              "versioned pack (spec 14.1)".format(version, digest, bound["version"], bound["digest"]),
+              file=sys.stderr)
+        return EXIT_MALFORMED
+    try:
+        raw = pack_gate._read_regular(Path(pack_gate.DEFAULT_PACK_DIR) / pack_gate.MANIFEST_NAME,
+                                      pack_gate.MAX_MANIFEST_BYTES, "manifest")
+    except pack_gate._Refusal as refusal:
+        print("opf import --prompt: cannot evaluate: {}".format(refusal), file=sys.stderr)
+        return EXIT_MALFORMED
+    roster = tomllib.loads(raw.decode("utf-8"))
+    if roster.get("version") != version or roster.get("digest") != digest:
+        print("opf import --prompt: cannot evaluate: the pack manifest changed between its verification "
+              "and the roster read", file=sys.stderr)
+        return EXIT_MALFORMED
+    print("opf import: surface {}".format(IMPORT_SURFACE))
+    print("opf import --prompt: adoption run {}".format(run))
+    print("opf import --prompt: prompt pack version {} digest {}".format(version, digest))
+    for row in roster["members"]:
+        if row["path"].startswith("import/"):
+            print("opf import --prompt: import member {} sha256 {}".format(row["path"], row["sha256"]))
+    for row in _import_migrate_rows(plan):
+        print("opf import --prompt: migrate source {} digest {} ({})".format(
+            row["path"], row["digest"], "archived at apply" if row["occupying"] else "frozen live"))
+    return EXIT_OK
+
+
+def _import_status(root_abs, run_id):
+    """`opf import --status` (spec 14.1): report the post-adoption import state, read-only. It reads
+    only the store manifest (through store resolution and the manifest validator), the adoption run's
+    approved plan, the imported series leaves, and each frozen (non-occupying) migrate source's live
+    bytes, every store read contained and no-follow. It reports `[opf].import_status` and, per
+    migrate-disposed source, the import runs whose records reference it (by import.source under their
+    own run, the evaluator's own matching) with their record ids. A frozen source absent from the live
+    tree or no longer at its plan digest is a FINDING (spec 14.1: a drifted source is never complete).
+    No completion is graded and no skip is read here; that is `--verify`. Writes nothing, takes no
+    lease, cleans no staging (spec 14.1). Exit 0 clean report, 1 a finding, 2 cannot-evaluate (an
+    unresolvable store, an invalid manifest, no adoption run, an unreadable plan or leaf)."""
+    import _opf_import_complete as impc
+    run = _import_select_run(root_abs, run_id)
+    plan = _import_approved_plan(root_abs, run)
+    res = _opf_store.resolve_store(Path(root_abs))
+    if res.status != _opf_store.RESOLVED:
+        print("opf import --status: cannot evaluate: {}".format(res.detail), file=sys.stderr)
+        return EXIT_MALFORMED
+    checked = _opf_store.load_manifest(res)
+    if checked.status != _opf_store.VALID:
+        print("opf import --status: cannot evaluate: the store manifest does not validate ({})".format(
+            "; ".join(checked.findings)), file=sys.stderr)
+        return EXIT_MALFORMED
+    reports, findings = [], []
+    root_fd = _opf_adopt_apply._open_product_root(root_abs)
+    try:
+        for row in _import_migrate_rows(plan):
+            ev = impc._Evaluation()
+            ev.product_root, ev.run_id, ev.source, ev.plan = str(root_abs), run, row["path"], plan
+            ev.row, ev.root_fd, ev.doctor, ev.events, ev.bundle = row, root_fd, None, None, None
+            ev.import_run, ev.records, ev.skipped = None, [], False
+            try:
+                runs = impc._referencing_runs(ev)
+            except impc.Unevaluable as exc:
+                print("opf import --status: cannot evaluate: {}".format(exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            for import_run in sorted(runs):
+                ids = sorted(impc._ids(runs[import_run]))
+                reports.append("source {}: import run {} records {}".format(
+                    row["path"], import_run, ", ".join(ids) if ids else "(none with a string id)"))
+            if not runs:
+                reports.append("source {}: no imported record references it yet".format(row["path"]))
+            if not row["occupying"]:
+                try:
+                    _fst, live = _opf_adopt_apply._read_live(root_fd, row["path"])
+                except _opf_adopt_apply.AdoptApplyError as exc:
+                    print("opf import --status: cannot evaluate: {}".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                if live is None:
+                    findings.append("the frozen live source {} is absent from the live tree".format(
+                        row["path"]))
+                elif impc._digest(live) != row["digest"]:
+                    findings.append("the frozen live source {} no longer matches its plan digest; a "
+                                    "drifted source is never complete (spec 14.1)".format(row["path"]))
+    finally:
+        _opf_store._close_fd_exc_safe(root_fd)
+    print("opf import: surface {}".format(IMPORT_SURFACE))
+    print("opf import --status: adoption run {}".format(run))
+    print("opf import --status: import_status {!r}".format(checked.base.get("import_status")))
+    for line in reports:
+        print("opf import --status: {}".format(line))
+    for finding in findings:
+        print("opf import --status: FINDING: {}".format(finding), file=sys.stderr)
+    return EXIT_FINDING if findings else EXIT_OK
+
+
+def _import_verify(root_abs, run_id):
+    """`opf import --verify` (spec 14.1): the read-only per-source import-completion evaluation. For
+    each migrate-disposed source of the approved plan it runs the completion evaluator
+    (_opf_import_complete.evaluate_source) with a doctor built the sanctioned way (store_doctor over
+    this verb's own _opf_observe.gather observations, the doctor verb's seam), and reports each
+    source's verdict, import run, record ids, recorded-skip standing and findings. It RECORDS NOTHING:
+    the 14.1 duties to record each source's result in the receipt's outcome-event chain, to record the
+    retirement and to move `import_status` belong to a completion writer this build does not offer, so
+    a green verdict here is an evaluation, never a recorded completion. Exit worst-wins over the
+    sources: 0 every source VALID, 1 any INVALID, 2 any CANNOT-EVALUATE or a cannot-evaluate of this
+    verb's own (an unresolvable store, a failed observation gather, no adoption run). DISCLOSED
+    RESIDUAL (the evaluator's own): a VALID doctor leg needs the full active-imported roster graded,
+    which no doctor run over a store this tooling validates today produces, so on a real store the
+    verdict is CANNOT-EVALUATE until that roster is gradable; the evaluator also inherits the
+    observation gather's split-index .git index mtime refresh."""
+    import _opf_import_complete as impc
+    run = _import_select_run(root_abs, run_id)
+    plan = _import_approved_plan(root_abs, run)
+    res = _opf_store.resolve_store(Path(root_abs))
+    if res.status != _opf_store.RESOLVED:
+        print("opf import --verify: cannot evaluate: {}".format(res.detail), file=sys.stderr)
+        return EXIT_MALFORMED
+    try:
+        obs, notes = _opf_observe.gather(res)
+    except Exception as exc:  # noqa: BLE001  a gather escape must not become a false verdict; fail closed
+        print("opf import --verify: cannot evaluate: unexpected error gathering git observations "
+              "({!r}); failing closed to exit 2".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    print("opf import: surface {}".format(IMPORT_SURFACE))
+    print("opf import --verify: adoption run {}".format(run))
+    for note in notes:
+        print("opf import --verify: note: {}".format(note))
+    doctor = impc.store_doctor(obs)
+    exits = {impc.VALID: EXIT_OK, impc.INVALID: EXIT_FINDING}
+    worst = EXIT_OK
+    for row in _import_migrate_rows(plan):
+        result = impc.evaluate_source(root_abs, run, row["path"], doctor=doctor)
+        detail = "recorded skip" if result.skipped else (
+            "import run {} records {}".format(result.import_run, ", ".join(result.records))
+            if result.import_run is not None else "no import run")
+        print("opf import --verify: source {}: {} ({})".format(row["path"], result.status, detail))
+        for finding in result.findings:
+            print("opf import --verify:   {}".format(finding))
+        worst = max(worst, exits.get(result.status, EXIT_MALFORMED))
+    print("opf import --verify: this is a read-only evaluation: no result, retirement or import_status "
+          "was recorded (the completion writer is not in this build)")
+    return worst
 
 
 def _cmd_import(rest):
-    """`opf import ...`: the retired store import verb. Its former modes were `opf import [--root DIR]
-    (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME (--decisions FILE |
-    --interactive) | --apply <run-id>)`, with the root-ingest planner's companions and the review aids.
-
-    RETIRED (spec 14.1), its engine removed: the verb prints IMPORT_RETIRED and exits 2 for EVERY argument
-    list, whether none, `--help`, any former form (spelled in full, by prefix, joined or repeated) or any
-    other token. No argument is parsed or validated, so no former form can meet a usage error instead of
-    the pointer. Nothing reads the clock, stdin, a named file or the store, and nothing is written. The
-    root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same way (import is a
-    REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
-    doctor/render report on a non-adopter root).
-
-    The CLI self-test checks this two ways. The verb's runtime behaviour, exit 2 with the pointer for
-    every representative argument list, is what the RUNTIME probe observes; the STRUCTURAL checks are a
-    tripwire against an accidental regression of this function, not a proof of its behaviour. Over this
-    function's source as parsed from the file's bytes, decoded as the interpreter decodes them, they flag:
-    a coding declaration other than utf-8 on line 1 or 2; a body after this docstring other than exactly
-    the one print of the pointer to stderr and the one return of EXIT_MALFORMED, a reference to `rest`
-    or any other call included; a binding of print, _cmd_import, sys, IMPORT_RETIRED, EXIT_MALFORMED or
-    __builtins__ by a form the binding scan models, in any expression evaluated at module scope, a
-    `global` of one of them, or a star import; and sys, IMPORT_RETIRED or EXIT_MALFORMED not bound by
-    one direct top-level statement ahead of this def (one nested in an if, try, with, loop, match or
-    function, or one after the def) (all _import_body_findings); a live `_cmd_import.__code__` other
-    than the code compiled from that parsed definition (_import_code_findings); and a live function
-    whose globals are not this module's namespace or whose builtins are not the interpreter's real
-    builtins mapping (_import_namespace_findings). They do not cover reflective or dynamic changes
-    (stores through globals() or vars(), setattr and attribute stores such as builtins.print or
-    sys.stderr, exec, eval or compile, importlib), source-decoding and loader tricks beyond the
-    coding-declaration check, this module's own import-time top-level code (which runs on every `opf
-    import` before main() and which the runtime probe does not cover either, as it calls main() on the
-    already-imported module), the _bootstrap() (the guarded _opf_* helper import) and dispatch main()
-    runs before `return _cmd_import(rest)` (covered only by the runtime probe), calls through routes the
-    probe does not patch (posix, _io, ctypes, already-open file objects or descriptors, a socket), or
-    another module patching this one. The runtime probe covers only a representative set of argument
-    lists: while each runs, a call to any probed filesystem read or write, process-spawn or stdin
-    function through a module attribute the probe patches is recorded and refused, and the row fails; a
-    route it does not patch is outside it."""
-    # `rest` is deliberately never read: every argument list meets the pointer.
-    print("opf import: {}".format(IMPORT_RETIRED), file=sys.stderr)
-    return EXIT_MALFORMED
-
-
-def _parse_unoptimized(source):
-    """ast.parse(source) unoptimized on any Python this can run under: optimize=0 where ast.parse has
-    that parameter (3.13+), plain ast.parse before, which is equivalent because before 3.13 ast.parse
-    never runs the AST optimizer, so it strips no docstring even under python -O or -OO. A bytes
-    `source` is decoded as the interpreter decodes a source file, honouring a PEP 263 coding
-    declaration on line 1 or 2. It delegates to _optlevel.parse, the one shared source of this policy."""
-    import _optlevel
-
-    return _optlevel.parse(source)
-
-
-# The exact body _cmd_import must have after its docstring, compared by AST shape (no line numbers).
-_IMPORT_BODY = ('print("opf import: {}".format(IMPORT_RETIRED), file=sys.stderr)\n'
-                "return EXIT_MALFORMED\n")
-
-
-def _import_body_findings(source):
-    """The structural tripwire for the retired import verb over the module source `source` (the
-    BYTES of opf.py itself in the CLI self-test; a str is parsed as given). Returns a list of findings,
-    empty when clean; a clean result is no proof of the verb's behaviour, which the runtime probe
-    observes. Bytes are parsed as the interpreter decodes the file, honouring a PEP 263 coding
-    declaration, so the checked text is decoded as the interpreter decodes it; and any coding declaration
-    other than utf-8 on line 1 or 2 is itself a finding (an absent one means utf-8), so a declaration that
-    decodes a comment into a statement (raw_unicode_escape turns a backslash-u000a escape into a
-    newline) is flagged both ways. It parses the source and flags a module that does not define
-    `_cmd_import` once, undecorated, taking only `rest`; a body after the docstring other than exactly
-    _IMPORT_BODY (one print of the pointer to sys.stderr, one return of EXIT_MALFORMED), any other
-    statement, a reference to `rest` or a call other than that print and its str.format included; and
-    a modeled module-level binding that changes a name the body uses (`sys` bound other than by one
-    `import sys`, EXIT_MALFORMED other than to the literal 2, IMPORT_RETIRED other than to a string
-    literal, `print` or `_cmd_import` rebound, `__builtins__` bound (a binding ahead of the def changes
-    what print resolves to inside _cmd_import without binding print), a `global` of any of them, a star
-    import, or sys, IMPORT_RETIRED or EXIT_MALFORMED not bound by one direct top-level statement ahead
-    of the def). The binding scan walks every
-    expression evaluated at module scope, the decorators, argument defaults, annotations, class bases
-    and class keywords of a def or class included; inside a lambda or a comprehension any store to a
-    watched name counts (a walrus there, a comprehension's loop target or a walrus in a lambda body
-    alike), an over-approximation. It models exactly the binding forms its walk enumerates and NO
-    MORE: every other change, the reflective or dynamic ones included, is in the residual class named in
-    _cmd_import's docstring, not flagged here. The source is parsed unoptimized (no AST optimizer), so the
-    docstring the body check skips survives under python -O and -OO. It reads no file."""
-    import ast
-    import codecs
-    import re
-
-    # A coding declaration other than utf-8 on line 1 or 2. Lines are split both at b"\n" (the
-    # tokenizer's split) and by bytes.splitlines, and every `coding[:=]` on such a line holding a `#`
-    # counts, an over-approximation of the tokenizer's first-match rule.
-    findings = []
-    raw = source if isinstance(source, bytes) else source.encode("utf-8", "surrogatepass")
-    for lineno, line in list(enumerate(raw.split(b"\n")[:2], 1)) + list(enumerate(raw.splitlines()[:2], 1)):
-        if b"#" not in line:
-            continue
-        for m in re.finditer(rb"coding[:=][ \t]*([-\w.]*)", line):
-            try:
-                name = codecs.lookup(m.group(1).decode("ascii")).name
-            except (LookupError, UnicodeDecodeError):
-                name = None
-            finding = ("line {} carries a coding declaration other than utf-8 ({!r}), so the interpreter "
-                       "decodes the file differently".format(lineno, m.group(1).decode("latin-1")))
-            if name != "utf-8" and finding not in findings:
-                findings.append(finding)
+    """`opf import (--prompt | --status | --verify) [--root DIR] [--run RUN_ID]` (spec 14.1): the
+    READ-ONLY post-adoption import surface, IMPORT_SURFACE. Exactly one verb; `--root` defaults to the
+    cwd product repository root; `--run` names the adoption run and may be omitted when exactly one
+    admitted run exists. The parser is the house fail-closed idiom (no verb, two verbs, an empty,
+    option-looking or duplicate value, a --run outside the adoption run-id grammar, or any other token,
+    the former --scan/--plan/--review/--apply modes included, -> exit 2 with IMPORT_USAGE, before any
+    read). Each verb's contract is its own docstring (_import_prompt, _import_status, _import_verify);
+    all three write nothing, and a NOT-ADOPTED or runless root is a located cannot-evaluate (exit 2),
+    import being a REQUESTED operation. Every residual escape fails closed to exit 2, the class-width
+    backstop record and doctor carry. The spec's 14.1 sentence naming these verbs and this surface is
+    held to this dispatch by _import_surface_findings (the opf-import-surface self-test)."""
     try:
-        tree = _parse_unoptimized(source)
-    except (SyntaxError, ValueError) as exc:
-        return findings + ["the source does not parse ({})".format(exc)]
-    defs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "_cmd_import"]
-    if len(defs) != 1:
-        return findings + ["the module defines _cmd_import {} times at module level (want once)".format(
-            len(defs))]
-    fn = defs[0]
-
-    # Module-level bindings of the watched names. A nested function or class body is its own scope, but
-    # its name binds here, and its decorators, argument defaults, annotations, bases and keywords are
-    # evaluated here. A walrus inside a comprehension binds here too, and a lambda's defaults are
-    # evaluated here; inside a lambda or comprehension every store to a watched name counts
-    # (over-approximation: a comprehension's own loop target or a walrus in a lambda body is flagged
-    # although it binds only in that inner scope).
-    bindings = {name: [] for name in ("_cmd_import", "print", "sys", "EXIT_MALFORMED", "IMPORT_RETIRED",
-                                      "__builtins__")}
-    scoped = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-    own_scope = (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-    pending = list(tree.body)
-    while pending:
-        node = pending.pop()
-        if isinstance(node, scoped):
-            if node.name in bindings:
-                bindings[node.name].append(node)
-            pending.extend(node.decorator_list)
-            if isinstance(node, ast.ClassDef):
-                pending.extend(node.bases)
-                pending.extend(node.keywords)
-            else:
-                a = node.args
-                pending.extend(a.defaults)
-                pending.extend(d for d in a.kw_defaults if d is not None)
-                params = a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg]
-                pending.extend(p.annotation for p in params if p is not None and p.annotation is not None)
-                if node.returns is not None:
-                    pending.append(node.returns)
-            pending.extend(getattr(node, "type_params", ()))
-            continue
-        if isinstance(node, own_scope):
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Name) and sub.id in bindings and not isinstance(sub.ctx, ast.Load):
-                    bindings[sub.id].append(sub)
-            continue
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                if alias.name == "*":
-                    findings.append("a star import at line {} can rebind any name".format(node.lineno))
-                bound = alias.asname or alias.name.split(".")[0]
-                if bound in bindings:
-                    bindings[bound].append(node)
-        if isinstance(node, ast.Name) and node.id in bindings and not isinstance(node.ctx, ast.Load):
-            bindings[node.id].append(node)
-        if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name in bindings:
-            bindings[node.name].append(node)
-        if isinstance(node, ast.MatchMapping) and node.rest in bindings:
-            bindings[node.rest].append(node)
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            # The Assign stands for its plain single-name target, so the literal check can see the value.
-            if node.targets[0].id in bindings:
-                bindings[node.targets[0].id].append(node)
-                pending.append(node.value)
+        verb = root = run_id = None
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok in IMPORT_VERBS:
+                if verb is not None:
+                    print("opf import: give exactly one of {} ({} and {} were both given)".format(
+                        ", ".join(IMPORT_VERBS), verb, tok), file=sys.stderr)
+                    print(IMPORT_USAGE, file=sys.stderr)
+                    return EXIT_MALFORMED
+                verb = tok
+                i += 1
                 continue
-        pending.extend(ast.iter_child_nodes(node))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Global, ast.Nonlocal)):
-            for name in node.names:
-                if name in bindings:
-                    findings.append("line {} declares {} global or nonlocal".format(node.lineno, name))
-    if bindings["_cmd_import"] != [fn]:
-        findings.append("_cmd_import is bound {} times at module level (want only its def)".format(
-            len(bindings["_cmd_import"])))
-    if bindings["print"]:
-        findings.append("print is rebound at module level")
-    if bindings["__builtins__"]:
-        findings.append("__builtins__ is bound at module level (it changes what print resolves to)")
-    sys_nodes = bindings["sys"]
-    if not (len(sys_nodes) == 1 and isinstance(sys_nodes[0], ast.Import)
-            and [(a.name, a.asname) for a in sys_nodes[0].names] == [("sys", None)]):
-        findings.append("sys is not bound by exactly one plain `import sys` at module level")
-    for name, ok in (("EXIT_MALFORMED", lambda v: type(v) is int and v == 2),
-                     ("IMPORT_RETIRED", lambda v: type(v) is str)):
-        nodes = bindings[name]
-        if not (len(nodes) == 1 and isinstance(nodes[0], ast.Assign)
-                and isinstance(nodes[0].value, ast.Constant) and ok(nodes[0].value.value)):
-            findings.append("{} is not bound exactly once at module level to its literal".format(name))
-    # Each watched binding must be a direct top-level statement ahead of the def: one nested in an if,
-    # try, with, loop, match or function (a condition on sys.argv or the environment), or one after the
-    # def, can leave the name unbound when the body reads it (a NameError, never the pointer).
-    ahead = tree.body[:[i for i, n in enumerate(tree.body) if n is fn][0]]
-    for name in ("sys", "EXIT_MALFORMED", "IMPORT_RETIRED"):
-        if len(bindings[name]) == 1 and not any(n is bindings[name][0] for n in ahead):
-            findings.append("{} is not bound by a direct top-level statement ahead of the def".format(name))
+            if tok in ("--root", "--run"):
+                if i + 1 >= len(rest):
+                    print("opf import: {} requires an argument".format(tok), file=sys.stderr)
+                    print(IMPORT_USAGE, file=sys.stderr)
+                    return EXIT_MALFORMED
+                val = rest[i + 1]
+                if val == "" or val.startswith("-"):
+                    print("opf import: {} requires a non-empty argument, not {!r}".format(tok, val),
+                          file=sys.stderr)
+                    print(IMPORT_USAGE, file=sys.stderr)
+                    return EXIT_MALFORMED
+                if tok == "--root":
+                    if root is not None:
+                        print("opf import: --root given more than once", file=sys.stderr)
+                        print(IMPORT_USAGE, file=sys.stderr)
+                        return EXIT_MALFORMED
+                    root = val
+                else:
+                    if run_id is not None:
+                        print("opf import: --run given more than once", file=sys.stderr)
+                        print(IMPORT_USAGE, file=sys.stderr)
+                        return EXIT_MALFORMED
+                    if not _opf_adopt_apply.is_run_id(val):
+                        print("opf import: --run {!r} does not match the adoption run-id "
+                              "grammar".format(val), file=sys.stderr)
+                        print(IMPORT_USAGE, file=sys.stderr)
+                        return EXIT_MALFORMED
+                    run_id = val
+                i += 2
+                continue
+            print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            print(IMPORT_USAGE, file=sys.stderr)
+            return EXIT_MALFORMED
+        if verb is None:
+            print("opf import: give exactly one of {}".format(", ".join(IMPORT_VERBS)), file=sys.stderr)
+            print(IMPORT_USAGE, file=sys.stderr)
+            return EXIT_MALFORMED
+        root_abs = os.path.abspath(root if root is not None else ".")
+        try:
+            return _IMPORT_DISPATCH[verb](root_abs, run_id)
+        except ValueError as exc:
+            print("opf import {}: cannot evaluate: {}".format(verb, exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        except (_opf_adopt_apply.AdoptApplyError, _opf_adopt_apply._journal.JournalError,
+                _opf_store.StoreError, OSError) as exc:
+            print("opf import {}: cannot evaluate: {}".format(verb, exc), file=sys.stderr)
+            return EXIT_MALFORMED
+    except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false verdict
+        print("opf import: cannot evaluate: unexpected error ({!r}); failing closed to exit 2".format(exc),
+              file=sys.stderr)
+        return EXIT_MALFORMED
 
-    if isinstance(fn, ast.AsyncFunctionDef) or fn.decorator_list or fn.returns is not None:
-        findings.append("_cmd_import is async, decorated or annotated")
-    a = fn.args
-    if (a.posonlyargs or [p.arg for p in a.args] != ["rest"] or a.vararg or a.kwonlyargs or a.kwarg
-            or a.defaults or a.kw_defaults or a.args[0].annotation is not None):
-        findings.append("_cmd_import's signature is not exactly (rest)")
-    body = fn.body
-    if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
-            and isinstance(body[0].value.value, str)):
-        body = body[1:]
+
+# The one dispatch table of the import surface, held to IMPORT_VERBS by _import_surface_findings.
+_IMPORT_DISPATCH = {"--prompt": _import_prompt, "--status": _import_status, "--verify": _import_verify}
+
+
+def _import_surface_spec_text():
+    """The shipped spec's text, read beside this tool (the check_opf_homes anchor), so the standalone
+    opf/ subset reaches it."""
+    return (Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md").read_text(encoding="utf-8")
+
+
+def _import_surface_findings(spec_text, surface=None, verbs=None, not_offered=None,
+                             record_subcommands=None, dispatch=None):
+    """The spec-to-tool agreement findings for the import surface, [] when they agree. Over the
+    whitespace-normalized spec text it flags: IMPORT_VERBS not three distinct `--` flags; section 14.1
+    not naming the verbs exactly once as the one sentence `` `opf import --A`, `--B` and `--C` expose
+    that activity. `` built from IMPORT_VERBS in order (a dropped, added, renamed or reordered verb, or
+    a doubled sentence); section 14.1 not naming the surface exactly once as ``The import surface is
+    `IMPORT_SURFACE`.``; any `opf import --x` anywhere in the spec whose flag is not an IMPORT_VERBS
+    verb (a verb named in another section); a not-offered surface (IMPORT_NOT_OFFERED) the spec stops
+    naming while it is still listed; `opf record` offering an `import` subcommand while the 8.8 batch
+    writer is still listed as not offered (the delist-on-landing tripwire); and a dispatch table whose
+    keys are not exactly IMPORT_VERBS. The defaults are the live constants and tables; the self-test
+    passes mutated ones as its flips. Reads no file."""
+    import re
+    surface = IMPORT_SURFACE if surface is None else surface
+    verbs = IMPORT_VERBS if verbs is None else verbs
+    not_offered = IMPORT_NOT_OFFERED if not_offered is None else not_offered
+    record_subcommands = _opf_record.SUBCOMMANDS if record_subcommands is None else record_subcommands
+    dispatch = tuple(_IMPORT_DISPATCH) if dispatch is None else dispatch
+    findings = []
+    flat = " ".join(spec_text.split())
+    head = "### 14.1 "
+    at = flat.find(head)
+    if at < 0:
+        findings.append("the spec has no section 14.1 heading")
+        section = ""
     else:
-        findings.append("_cmd_import has no docstring as its first statement")
-    for node in body:
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Name) and sub.id == "rest":
-                findings.append("_cmd_import references rest at line {}".format(sub.lineno))
-    calls = [sub for node in body for sub in ast.walk(node) if isinstance(sub, ast.Call)]
-    want = _parse_unoptimized(_IMPORT_BODY).body
-    if len(body) != len(want):
-        findings.append("_cmd_import has {} statements after its docstring (want {})".format(
-            len(body), len(want)))
-    if len(calls) != 2:
-        findings.append("_cmd_import makes {} calls (want 2: the print and its str.format)".format(
-            len(calls)))
-    if [ast.dump(n) for n in body] != [ast.dump(n) for n in want]:
-        findings.append("_cmd_import's body after its docstring is not exactly: {}".format(
-            " ; ".join(_IMPORT_BODY.splitlines())))
+        end = flat.find("### ", at + len(head))
+        section = flat[at:] if end < 0 else flat[at:end]
+    if len(verbs) != len(set(verbs)) or not all(
+            type(v) is str and v.startswith("--") and len(v) > 2 for v in verbs):
+        findings.append("IMPORT_VERBS is not a tuple of distinct -- flags: {!r}".format(verbs))
+    if len(verbs) == 3:
+        sentence = "`opf import {}`, `{}` and `{}` expose that activity.".format(*verbs)
+        if section.count(sentence) != 1:
+            findings.append("spec 14.1 does not name the import verbs exactly once as: {}".format(sentence))
+    else:
+        findings.append("IMPORT_VERBS does not hold exactly three verbs, which the 14.1 sentence names")
+    id_sentence = "The import surface is `{}`.".format(surface)
+    if section.count(id_sentence) != 1:
+        findings.append("spec 14.1 does not name the import surface exactly once as: {}".format(id_sentence))
+    for flag in re.findall(r"opf import (--[a-z][a-z-]*)", flat):
+        if flag not in verbs:
+            findings.append("the spec names `opf import {}`, which is not an IMPORT_VERBS verb".format(flag))
+    for item in not_offered:
+        if "`{}`".format(item) not in flat:
+            findings.append("the spec no longer names the not-offered surface {}; restore that text or "
+                            "delist it from IMPORT_NOT_OFFERED".format(item))
+    if "opf record import --batch" in not_offered and "import" in record_subcommands:
+        findings.append("opf record offers an import subcommand while `opf record import --batch` is "
+                        "still listed in IMPORT_NOT_OFFERED; the change that lands the writer delists it")
+    if sorted(dispatch) != sorted(verbs):
+        findings.append("the import dispatch table serves {!r}, not the declared verbs {!r}".format(
+            tuple(sorted(dispatch)), verbs))
     return findings
 
 
-def _import_code_findings(source, func, filename):
-    """The live-code tie for the retired import verb: compile the `_cmd_import` definition parsed from
-    the module source `source` (parsed unoptimized; bytes are decoded as the interpreter decodes the
-    file, honouring its coding declaration) on its own, under `filename` and at its own
-    line numbers, with the source's __future__ flags only and at the interpreter's own optimization
-    level (sys.flags.optimize, so under python -O or -OO both sides drop the same docstring), and
-    require the function `func` (the live _cmd_import in the CLI self-test) to carry exactly that
-    code: equal co_code, co_consts (compared by type and repr, nested
-    code objects recursively under these same fields), co_names, co_varnames, co_freevars, co_cellvars,
-    argument counts, co_flags, co_firstlineno, co_name, co_filename and co_exceptiontable, and no
-    argument defaults. Returns a list of findings, empty when they match. Matching names alone never
-    passes: a swapped `__code__` that differs in any of these fields is a finding. It reads no file."""
-    import __future__
-    import ast
-    import types
-
+def _import_surface_self_test():
+    """The opf-import-surface self-test: the shipped spec and this tool's import surface agree
+    (_import_surface_findings over the shipped text and the live constants is []), and each flip below
+    is red by at least one finding: a verb dropped from the 14.1 sentence, the sentence doubled, a
+    foreign `opf import --resume` added elsewhere in the spec, the surface sentence dropped, the
+    not-offered 8.8 batch writer no longer named, a drifted surface id, a dispatch verb added or
+    dropped, `import` landing in opf record's subcommands while still listed not-offered, and the
+    verbs tuple reordered against the spec sentence. Reads only the shipped spec. Returns 0 clean, 1 a
+    failing check, 2 a harness error (an unreadable spec)."""
     try:
-        tree = _parse_unoptimized(source)
-    except (SyntaxError, ValueError) as exc:
-        return ["the source does not parse ({})".format(exc)]
-    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_cmd_import"]
-    if len(defs) != 1:
-        return ["the module defines _cmd_import {} times at module level (want once)".format(len(defs))]
-    flags = 0
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
-            for alias in node.names:
-                flags |= getattr(getattr(__future__, alias.name, None), "compiler_flag", 0)
-    try:
-        module_code = compile(ast.Module(body=defs, type_ignores=[]), filename, "exec", flags=flags,
-                              dont_inherit=True, optimize=sys.flags.optimize)
-    except (SyntaxError, ValueError) as exc:
-        return ["the parsed _cmd_import does not compile ({})".format(exc)]
-    want = [c for c in module_code.co_consts if isinstance(c, types.CodeType) and c.co_name == "_cmd_import"]
-    live = getattr(func, "__code__", None)
-    if len(want) != 1 or not isinstance(live, types.CodeType):
-        return ["the live _cmd_import has no code object to compare with the parsed definition"]
-    fields = ("co_code", "co_names", "co_varnames", "co_freevars", "co_cellvars", "co_argcount",
-              "co_posonlyargcount", "co_kwonlyargcount", "co_flags", "co_firstlineno", "co_name",
-              "co_filename", "co_exceptiontable")
-
-    def shape(const):
-        if isinstance(const, types.CodeType):
-            return ("code",) + tuple(getattr(const, f, None) for f in fields) + (
-                tuple(shape(c) for c in const.co_consts),)
-        if isinstance(const, tuple):
-            return ("tuple", tuple(shape(c) for c in const))
-        if isinstance(const, frozenset):
-            return ("frozenset", tuple(sorted(repr(shape(c)) for c in const)))
-        return (type(const).__name__, repr(const))
-
-    findings = []
-    for f in fields:
-        if getattr(live, f, None) != getattr(want[0], f, None):
-            findings.append("the live _cmd_import's {} differs from the parsed definition's".format(f))
-    if shape(live.co_consts) != shape(want[0].co_consts):
-        findings.append("the live _cmd_import's co_consts differ from the parsed definition's")
-    if getattr(func, "__defaults__", None) is not None or getattr(func, "__kwdefaults__", None) is not None:
-        findings.append("the live _cmd_import carries argument defaults the parsed definition lacks")
-    return findings
-
-
-def _import_namespace_findings(func):
-    """The live-namespace tie for the retired import verb: require the function `func` (the live
-    _cmd_import in the CLI self-test) to resolve its global names through its own module's namespace
-    (`func.__globals__ is sys.modules[func.__module__].__dict__`) and its builtins through the
-    interpreter's real builtins mapping (`func.__builtins__ is builtins.__dict__`). A module-level
-    `__builtins__` binding ahead of the def (a dict, a copy of the builtins with print replaced, or an
-    imported module) changes what print resolves to inside the function without binding print, and
-    neither the binding scan of print nor the code tie sees it; this check flags the function it
-    produced. Returns a list of findings, empty when both hold. Reassigning an attribute of the real
-    builtins module (builtins.print) leaves both identities intact and stays a DISCLOSED residual
-    class. It reads no file."""
-    import builtins
-
-    findings = []
-    if getattr(func, "__builtins__", None) is not builtins.__dict__:
-        findings.append("the live _cmd_import's __builtins__ is not the interpreter's builtins mapping")
-    module = sys.modules.get(getattr(func, "__module__", None))
-    if module is None or getattr(func, "__globals__", None) is not getattr(module, "__dict__", None):
-        findings.append("the live _cmd_import's __globals__ is not its module's namespace")
-    return findings
+        text = _import_surface_spec_text()
+    except OSError as exc:
+        print("opf import-surface self-test: harness error: the spec is unreadable ({})".format(exc),
+              file=sys.stderr)
+        return EXIT_MALFORMED
+    failures = []
+    for finding in _import_surface_findings(text):
+        failures.append("the shipped spec and the tool disagree: {}".format(finding))
+    flat = " ".join(text.split())
+    sentence = "`opf import {}`, `{}` and `{}` expose that activity.".format(*IMPORT_VERBS)
+    text_flips = (
+        ("spec-sentence-verb-dropped", flat.replace(", `--status`", "", 1)),
+        ("spec-sentence-doubled", flat.replace(sentence, sentence + " " + sentence, 1)),
+        ("spec-foreign-verb-added", flat + " `opf import --resume` is a later unit."),
+        ("spec-surface-id-dropped",
+         flat.replace("The import surface is `{}`.".format(IMPORT_SURFACE), "", 1)),
+        ("spec-not-offered-dropped", flat.replace("`opf record import --batch`", "`a later writer`")),
+    )
+    for name, mutated in text_flips:
+        if not _import_surface_findings(mutated):
+            failures.append("flip {} is not red".format(name))
+    tool_flips = (
+        ("tool-surface-id-drift", dict(surface="opf.import.surface/v2")),
+        ("tool-verb-added", dict(dispatch=IMPORT_VERBS + ("--resume",))),
+        ("tool-verb-dropped", dict(dispatch=IMPORT_VERBS[:-1])),
+        ("record-import-landed",
+         dict(record_subcommands=tuple(_opf_record.SUBCOMMANDS) + ("import",))),
+        ("verbs-reordered", dict(verbs=(IMPORT_VERBS[1], IMPORT_VERBS[0], IMPORT_VERBS[2]))),
+    )
+    for name, kwargs in tool_flips:
+        if not _import_surface_findings(text, **kwargs):
+            failures.append("flip {} is not red".format(name))
+    if failures:
+        for failure in failures:
+            print("opf import-surface self-test: FAIL: {}".format(failure), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf import-surface self-test: PASS (the spec's 14.1 verb and surface sentences, the 8.8 "
+          "not-offered batch writer, and the tool's dispatch agree; {} text and {} tool flips each "
+          "red)".format(len(text_flips), len(tool_flips)))
+    return EXIT_OK
 
 
 def _cmd_record(rest):
@@ -20022,16 +20167,15 @@ def _cli_self_test():
         expect(["absorb", "--covers", ""], EXIT_MALFORMED)       # empty covers refused
         expect(["absorb", "--bogus"], EXIT_MALFORMED)            # unknown arg
 
-        # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. The retired verb parses no
-        # argument, so every argument list, a bare `import` included, meets its retirement pointer at exit 2
-        # before any store resolution and needs no store on disk (the exact pointer text, the structural
-        # tripwire and the probed no-read and no-write rows are asserted in _import_leg below, the
-        # wiring discriminator).
-        _VALID_RID = "imp-20260101T000000Z-0123456789abcdef"   # the former run-id grammar; names no staged run
-        expect(["import"], EXIT_MALFORMED)                       # bare
-        expect(["import", "--help"], EXIT_MALFORMED)             # help is the pointer too
-        expect(["import", "--scan", "--set", "s.toml"], EXIT_MALFORMED)   # a former --scan form
-        expect(["import", "--review", _VALID_RID, "--actor", "x", "--interactive"], EXIT_MALFORMED)
+        # import verb ROUTING (spec 14.1), judged on exit code only. These grammar cases fail closed in
+        # the parser BEFORE any store resolution or read, so they need no store on disk; the read-only
+        # verbs' 0/1/2 discrimination over fixtures rides _import_leg below (the wiring discriminator).
+        _ADOPT_RID = "adopt-20260101T000000Z-0123456789abcdef"   # run-id shaped; names no adoption run
+        expect(["import"], EXIT_MALFORMED)                       # bare: exactly one verb required
+        expect(["import", "--help"], EXIT_MALFORMED)             # an unknown token
+        expect(["import", "--scan", "--set", "s.toml"], EXIT_MALFORMED)   # a former mode is unrecognized
+        expect(["import", "--prompt", "--verify"], EXIT_MALFORMED)        # two verbs
+        expect(["import", "--status", "--run", _ADOPT_RID, "--run", _ADOPT_RID], EXIT_MALFORMED)
         expect(["import", "--bogus"], EXIT_MALFORMED)            # an unknown flag
 
         # record verb ROUTING (OPF-RECORD), judged on exit code only. These grammar cases fail closed in the
@@ -20207,310 +20351,80 @@ def _cli_self_test():
             return None
 
         def _import_leg():
-            """Drive the retired import verb (spec 14.1), judged on the exact output, the exit code AND
-            observable side effects. Returns None on success or EXIT_MALFORMED on a harness (fixture I/O)
-            error. _cmd_import parses no argument, so each argument list below must print exactly the
-            retirement pointer on stderr (a literal pinned here, so a suffix appended to IMPORT_RETIRED
-            is red), nothing on stdout, and exit 2. Vectors: no arguments,
-            `--help` / `-h`, each of the 14 former flags alone, with a separate value, with a joined value
-            and with an empty joined value; abbreviated and ambiguous prefixes, alone and joined; the
-            former argparse review-aid forms (`--review -1 --show-review`, an empty `--root=`, a repeated
-            `--review`, a separate value starting with `-`, the `--s` / `--d` abbreviations); the former
-            full forms of every mode over an adopted store and a NOT-ADOPTED root, with malformed or
-            missing named files; two modes; an unknown flag, a positional token and `--`. The pointer
-            names adoption and the prompt pack in words and no command.
+            """Drive the read-only import verbs (spec 14.1) end to end through main(), judged on exit
+            codes, located messages AND snapshot equality (the read-only contract). Returns None on
+            success or EXIT_MALFORMED on a harness (fixture I/O) error.
 
-            The no-read contract is checked two ways. The verb's runtime behaviour, exit 2 with the
-            pointer for every representative argument list, is what the RUNTIME probe below observes;
-            the STRUCTURAL checks are a tripwire against an accidental regression of _cmd_import, not a
-            proof. _import_body_findings over this file's BYTES (read in binary and parsed as the
-            interpreter decodes them, so a coding declaration is honoured) flags a coding declaration
-            other than utf-8 on line 1 or 2; a body after _cmd_import's docstring other than exactly the
-            one print of the pointer to stderr and the one return of EXIT_MALFORMED, a reference to
-            `rest` or any other call included; a modeled binding of print, _cmd_import, sys,
-            IMPORT_RETIRED, EXIT_MALFORMED or __builtins__ in any expression evaluated at module scope;
-            and sys, IMPORT_RETIRED or EXIT_MALFORMED not bound by one direct top-level statement ahead
-            of the def. _import_code_findings flags a live `_cmd_import.__code__` other than the code
-            compiled from that parsed definition (co_code, co_consts recursively, names, argument counts,
-            flags, first line, filename); _import_namespace_findings flags a live function whose
-            __globals__ is not this module's namespace or whose __builtins__ is not the interpreter's
-            builtins mapping. Planted reads and
-            writes in the body (a listing of an `--apply` root or of the cwd, io.FileIO reads, a shell
-            `cat`, a read of the `--ingest-options` file, an os.mkdir of an argument), planted rebindings
-            (a rebound `_cmd_import`, `print` or EXIT_MALFORMED, a walrus binding in a comprehension,
-            generator expression, lambda, argument default, keyword default, decorator, class base or
-            class keyword, and a `__builtins__` binding ahead of the def: a dict, a copy of the builtins
-            with print replaced, an `import ... as __builtins__`; sys, IMPORT_RETIRED or EXIT_MALFORMED
-            bound under a condition, in a try or past the def; a raw_unicode_escape coding declaration
-            on line 2 hiding a print or an IMPORT_RETIRED binding after the def behind a comment opening
-            with a backslash-u000a escape, flagged both by the bytes parse and as a declaration), a
-            non-utf-8 declaration alone, a swapped `__code__` with the same
-            argument count and names, the live code rebuilt over a scratch module holding each of those
-            `__builtins__` values, and a function over a copy of this module's globals are each asserted
-            flagged. The structural checks parse unoptimized and compile at the interpreter's level, so
-            they are clean under python -O and -OO too. They do not cover reflective or dynamic changes
-            (globals() or vars() stores, setattr and attribute stores such as builtins.print or
-            sys.stderr, exec, eval or compile, importlib), source-decoding and loader tricks beyond the
-            coding-declaration check, the module's own import-time top-level code (outside the runtime
-            probe too), the _bootstrap() and dispatch main() runs before `return _cmd_import(rest)`
-            (covered only by the runtime probe), calls through routes the probe does not patch (posix,
-            _io, ctypes, already-open handles, sockets), or another module patching this one. The RUNTIME
-            probe (representative only) runs every argument list above inside one probe context that
-            records, and refuses, a call through the module attributes it patches (builtins, io, os, os.path,
-            subprocess, pathlib.Path) to the open, stat, listing, walk, access, readlink, cwd, os.path
-            existence and type, pathlib.Path read, query and write, filesystem write and remove (os.mkdir,
-            makedirs, mkfifo, mknod, unlink, remove, removedirs, rename, renames, replace, rmdir, symlink,
-            link, utime, chmod, chown, lchown, truncate, ftruncate), process-spawn
-            (subprocess.Popen, os.system, os.popen, os.spawn*, os.posix_spawn*, os.exec*, os.fork) and
-            stdin-read functions while the verb runs, whatever path or descriptor the call names. A route
-            it does not patch is NOT refused: a read or write through an already-open file object or
-            descriptor (os.write included), a socket, ctypes, or a call through the posix or _io modules
-            directly (os.listdir is posix.listdir, and only the os attribute is patched). A row passes
-            only if no probed call is made, and every probe is first asserted to record and refuse a
-            call. The fixture tree is byte-unchanged. Flip: routing `import` to the fail-closed
-            KNOWN_VERBS branch, restoring any argument check ahead of the pointer, or adding any read,
-            write, spawn or other statement to _cmd_import turns rows red."""
-            import ast
-            import _optlevel
-            import builtins as builtins_mod
-            import pathlib
-            import re
-            import subprocess
-            import types
+            Grammar vectors need no store on disk: a bare `import`, two verbs, each former mode flag
+            (--scan, --plan, --review, --apply and their companions, unrecognized tokens like any
+            other), --root and --run value grammar, an unknown or joined flag, a positional token, an
+            empty token and `--` each exit 2 with nothing on stdout and the usage line on stderr naming
+            the surface and all three verbs, refused by the parser before any read. A NOT-ADOPTED root
+            (an empty directory) refuses at exit 2 for every verb, naming the missing adoption run:
+            import is a REQUESTED operation, never the NOT-APPLICABLE exit 0 of doctor and render
+            (reverting the import dispatch to the fail-closed KNOWN_VERBS branch leaves these at 2 but
+            turns every fixture 0/1 row below red, the wiring discriminator).
+
+            The fixture rows ride the import-completion evaluator's own fixture builder
+            (_opf_import_complete._fixture) under a canonical_plan_bindings patch that binds the plan to
+            the SHIPPED prompt pack, plus the production manifest builder's base table, so the store
+            resolves. --status exits 0 naming the import run, its record ids and import_status, with
+            the surface line first on stdout, the same under an explicit --run, 1 with its own FINDING
+            line on a drifted frozen source, and 2 on a --run naming no admitted run. --prompt exits 0
+            printing the shipped version, digest, the import members and the migrate scope, 2 when the
+            verified pack differs from the plan's binding (the validator seam returning another
+            version), and 2 when the shipped pack does not verify (DEFAULT_PACK_DIR patched to a broken
+            scratch pack). --verify, with the observation gather and store_doctor seams stubbed to the
+            evaluator's full-roster doctor (on a real store that roster is ungraded and the verdict is
+            CANNOT-EVALUATE, the evaluator's disclosed residual), exits 0 over a fixture whose two
+            migrate sources are both imported, naming both record ids and no INVALID, 1 over the
+            default fixture whose occupying source has no record and no skip, naming it, and says it
+            recorded nothing; an unknown --run exits 2. Every fixture tree is byte-identical after all
+            rows, so no verb wrote. Flips: rerouting the dispatch, dropping the surface line, a parser
+            check or the drift finding, mapping INVALID to 0 in --verify, skipping the pack-binding
+            comparison or the pack validation in --prompt, or adding any write turns its row red."""
+            import tomllib
             from unittest import mock
+            import _opf_import_complete as impc
+            import check_opf_prompt_pack as pack_gate
+            import _opf_init
 
-            # The expected text is pinned here, independent of IMPORT_RETIRED (never compared with itself).
-            refusal = ("the ordinary import modes (scan, plan, review and apply) are retired: clean-start "
-                       "adoption (OPF spec 14.1) is the only intake, and post-adoption import uses the "
-                       "approved prompt pack; nothing was written")
-            pointer = "opf import: {}\n".format(refusal)
-            _RID = "imp-20260101T000000Z-0123456789abcdef"   # the former run-id grammar; names no run
-            former_valued = ("--review", "--apply", "--root", "--set", "--actor", "--decisions",
-                             "--dispositions", "--ingest-options", "--include", "--diff-review")
-            former_valueless = ("--scan", "--plan", "--interactive", "--show-review")
+            run_rid = impc._RUN
+            other_rid = "adopt-20270101T000000Z-fedcba9876543210"   # run-id shaped; names no admitted run
+            surface_line = "opf import: surface " + IMPORT_SURFACE
 
             def run_cli(argv):
                 out, err = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    rc = main(argv)
-                return rc, out.getvalue(), err.getvalue()
-
-            # The exact-text row is red on a changed pointer: a suffix appended to IMPORT_RETIRED must fail.
-            g = _cmd_import.__globals__
-            real, g["IMPORT_RETIRED"] = g["IMPORT_RETIRED"], IMPORT_RETIRED + "; see the adoption guide"
-            try:
-                planted_err = run_cli(["import"])[2]
-            finally:
-                g["IMPORT_RETIRED"] = real
-            if planted_err == pointer:
-                failures.append("import pointer check: a pointer with an appended suffix was not flagged")
-
-            calls = []    # the probed calls made while the current argument list runs
-            live = []     # non-empty only while main() runs one argument list under the probes
-
-            def refused(argv):
-                del calls[:]
-                live.append(True)
                 try:
-                    rc, out, err = run_cli(["import"] + argv)
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        rc = main(["import"] + argv)
                 except BaseException as exc:            # an escape is itself a failure, never a pass
                     failures.append("import {!r} raised {!r}".format(argv, exc))
-                    rc = out = err = None
-                finally:
-                    del live[:]
-                if calls:
-                    failures.append("import {!r} made {} probed filesystem, process or stdin call(s) while "
-                                    "the verb ran (want none): {!r}".format(argv, len(calls), calls[:4]))
+                    return None, "", ""
+                return rc, out.getvalue(), err.getvalue()
+
+            # Grammar rows: each refused by the parser (exit 2, no stdout, the usage line naming the
+            # surface and the three verbs) before any store resolution or read.
+            former = ["--scan", "--plan", "--review", "--apply", "--set", "--actor", "--decisions",
+                      "--interactive", "--show-review", "--dispositions", "--ingest-options",
+                      "--include", "--diff-review"]
+            grammar = ([[], ["--help"], ["-h"], ["--prompt", "--status"], ["--status", "--status"],
+                        ["--status", "--root"], ["--status", "--root", ""], ["--status", "--root", "-x"],
+                        ["--status", "--root", ".", "--root", "."], ["--status", "--run"],
+                        ["--status", "--run", "not-a-run-id"],
+                        ["--status", "--run", run_rid, "--run", run_rid],
+                        ["--bogus"], ["--x=y"], ["--prompt=x"], ["frobnicate"], [""], ["--"],
+                        ["--", "--status"]]
+                       + [[flag] for flag in former] + [[flag, "x"] for flag in former])
+            for argv in grammar:
+                rc, out, err = run_cli(argv)
                 if rc is None:
-                    return
-                if rc != EXIT_MALFORMED or out != "" or err != pointer:
-                    failures.append("import {!r}: rc={!r} stdout={!r} stderr={!r} (expected exactly the "
-                                    "retirement pointer on stderr at exit 2)".format(argv, rc, out, err))
-
-            def tree_snapshot(rootdir):
-                snap = {}
-                for dirpath, dirs, files in os.walk(rootdir):
-                    for name in dirs:
-                        snap[os.path.relpath(os.path.join(dirpath, name), rootdir)] = None
-                    for name in files:
-                        p = os.path.join(dirpath, name)
-                        with open(p, "rb") as fh:
-                            snap[os.path.relpath(p, rootdir)] = fh.read()
-                return snap
-
-            # The STRUCTURAL tripwire, independent of argument lists and no proof: it flags a body other
-            # than exactly the print and the return, and a live function other than the checked one. The
-            # source is read as BYTES and those bytes are parsed, so a coding declaration is honoured as
-            # the interpreter honours it (a utf-8 text read would check other text); the mutants below
-            # are built over its utf-8 text.
-            try:
-                with open(__file__, "rb") as fh:
-                    own_source = fh.read()
-            except OSError as exc:
-                print("opf cli self-test: harness error: could not read {} for the import structural "
-                      "check ({})".format(__file__, exc), file=sys.stderr)
-                return EXIT_MALFORMED
-            try:
-                own_text = own_source.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                failures.append("import structural check: {} is not utf-8 ({})".format(__file__, exc))
-                own_text = own_source.decode("utf-8", "replace")
-            for finding in _import_body_findings(own_source):
-                failures.append("import structural check: {}".format(finding))
-            # The live-code tie flags a live code object other than the one the parsed definition
-            # compiles to.
-            for finding in _import_code_findings(own_source, _cmd_import, __file__):
-                failures.append("import structural check: {}".format(finding))
-            # The live-namespace tie flags a live function that does not resolve names through this module
-            # and the real builtins mapping (as after a `__builtins__` binding ahead of the def).
-            for finding in _import_namespace_findings(_cmd_import):
-                failures.append("import structural check: {}".format(finding))
-            # A `__code__` swap keeping the argument count, varnames, names and filename (the former,
-            # metadata-only tie accepted it) is flagged: this replacement parses its arguments.
-            swap_src = ("def _cmd_import(rest):\n"
-                        "    if rest == ['--x']:\n"
-                        "        return 0\n"
-                        "    print('opf import: {}'.format(IMPORT_RETIRED), file=sys.stderr)\n"
-                        "    return EXIT_MALFORMED\n")
-            swap_code = [c for c in compile(swap_src, __file__, "exec", dont_inherit=True).co_consts
-                         if isinstance(c, types.CodeType)][0]
-            live_code = _cmd_import.__code__
-            if (swap_code.co_varnames != live_code.co_varnames
-                    or frozenset(swap_code.co_names) != frozenset(live_code.co_names)
-                    or swap_code.co_argcount != live_code.co_argcount):
-                failures.append("import structural check: the planted __code__ swap does not keep the live "
-                                "names and argument count (harness)")
-            if not _import_code_findings(own_source, types.FunctionType(swap_code, {}), __file__):
-                failures.append("import structural check: a __code__ swap with matching names was not "
-                                "flagged")
-            # The structural check flags each planted read or write (inserted ahead of the print) and each
-            # rebinding (appended to the module); the unchanged source is clean, as asserted just above.
-            fn_node = [n for n in _optlevel.parse(own_text).body
-                       if isinstance(n, ast.FunctionDef) and n.name == "_cmd_import"][0]
-            lines = own_text.splitlines(keepends=True)
-            at = fn_node.body[1].lineno - 1
-            planted_body = (
-                'os.listdir(rest[rest.index("--root") + 1]) if "--apply" in rest and "--root" in rest '
-                'else None',
-                "os.listdir(os.getcwd())",
-                "[__import__('io').FileIO(t).read() for t in rest if t.startswith('/')]",
-                "__import__('subprocess').run('cat .working/toml/manifest.toml', shell=True)",
-                "open(rest[rest.index('--ingest-options') + 1]).read() if '--ingest-options' in rest "
-                "else None",
-                "os.mkdir(rest[0]) if rest else None",
-                "rest = list(rest)",
-                "pass",
-            )
-            planted_tail = (
-                "_cmd_import = lambda rest: open(rest[0]).read()",
-                "print = lambda *a, **k: open(a[0]).read()",
-                "EXIT_MALFORMED = 3",
-                # A walrus in an expression evaluated at module scope (the earlier reproductions first).
-                "[(print := w) for _ in [0]]",
-                "def _z(x=(print := w)): pass",
-                "def _z(*, k=(sys := w)): pass",
-                "@(print := w)\ndef _z(): pass",
-                "class _Z((print := w)): pass",
-                "class _Z(metaclass=(EXIT_MALFORMED := w)): pass",
-                "_z = lambda x=(IMPORT_RETIRED := w): x",
-                "_z = lambda: (print := w)",
-                "(0 for _ in [(_cmd_import := w)])",
-                "{k: (print := w) for k in [0]}",
-            )
-            mutants = [(t, "".join(lines[:at] + ["    " + t + "\n"] + lines[at:])) for t in planted_body]
-            mutants += [(t, own_text + "\n" + t + "\n") for t in planted_tail]
-            # A `__builtins__` binding ahead of the def changes what print resolves to inside _cmd_import
-            # without binding print (the earlier reproductions: a dict, a builtins copy, an import).
-            planted_head = (
-                '__builtins__ = {"print": p}',
-                "__builtins__ = dict(vars(builtins), print=p)",
-                "import evil as __builtins__",
-            )
-            def_at = fn_node.lineno - 1
-            mutants += [(t, "".join(lines[:def_at] + [t + "\n"] + lines[def_at:])) for t in planted_head]
-            for text, mutant in mutants:
-                if not _import_body_findings(mutant):
-                    failures.append("import structural check: a planted {!r} was not flagged".format(text))
-            # A coding declaration hides a binding from a check over utf-8 text: under raw_unicode_escape a
-            # backslash-u000a escape in a comment is a newline to the interpreter, so the rest of that line
-            # is a statement (the earlier reproduction; this file carries no such escape, so the mutant
-            # decodes as intended, and the escape is built from chr(92)). Each mutant, as bytes, must be
-            # flagged both ways: the bytes parse sees the hidden binding, and the declaration is itself a
-            # finding.
-            cookie = "# -*- coding: raw_unicode_escape -*-\n"
-            for hidden, want in (("print = (lambda *a, **k: None)", "print is rebound"),
-                                 ('IMPORT_RETIRED = "x"', "IMPORT_RETIRED is not bound exactly once")):
-                mutant = "".join(lines[:1] + [cookie] + lines[1:fn_node.end_lineno]
-                                 + ["#" + chr(92) + "u000a" + hidden + "\n"] + lines[fn_node.end_lineno:])
-                got = _import_body_findings(mutant.encode("utf-8"))
-                if not (any(want in f for f in got) and any("coding declaration" in f for f in got)):
-                    failures.append("import structural check: a raw_unicode_escape declaration hiding {!r} "
-                                    "after the def was not flagged both ways ({!r})".format(hidden, got))
-            # A declaration other than utf-8 is a finding on its own (it hides nothing here); a utf-8 one
-            # on line 2 is clean.
-            for decl, flagged in (("# -*- coding: latin-1 -*-", True),
-                                  ("# vim: set fileencoding=cp1252 :", True),
-                                  ("# -*- coding: utf-8 -*-", False)):
-                got = _import_body_findings("".join(lines[:1] + [decl + "\n"] + lines[1:]).encode("utf-8"))
-                if any("coding declaration" in f for f in got) != flagged or (not flagged and got):
-                    failures.append("import structural check: a line-2 {!r} gave {!r} (want {})".format(
-                        decl, got, "a coding finding" if flagged else "none"))
-
-            # A watched binding moved under a sys.argv or environment condition, into a try, or past the def
-            # keeps its count and literal but can be unbound when the body runs: each is flagged.
-            def nest(name, head, tail):
-                s = [s for s in _optlevel.parse(own_text).body if isinstance(s, (ast.Assign, ast.Import))
-                     and name in [getattr(t, "id", None) for t in getattr(s, "targets", ())]
-                     + [a.name for a in getattr(s, "names", ())]][0]
-                a, z = s.lineno - 1, s.end_lineno
-                if head is None:  # moved to the end of the module
-                    return "".join(lines[:a] + lines[z:] + ["\n"] + lines[a:z])
-                return "".join(lines[:a] + [head + "\n"] + ["    " + x for x in lines[a:z]] + [tail]
-                               + lines[z:])
-            for name, head, tail in (("IMPORT_RETIRED", 'if "--scan" not in sys.argv:', ""),
-                                     ("IMPORT_RETIRED", 'if os.environ.get("OPF_IMPORT") is None:', ""),
-                                     ("EXIT_MALFORMED", 'if "OPF_IMPORT" not in os.environ:', ""),
-                                     ("EXIT_MALFORMED", "try:", "except Exception:\n    pass\n"),
-                                     ("sys", 'if os.environ.get("OPF_IMPORT") is None:', ""),
-                                     ("IMPORT_RETIRED", None, "")):
-                if not any("direct top-level" in f for f in _import_body_findings(nest(name, head, tail))):
-                    failures.append("import structural check: the binding of {} under {!r} was not "
-                                    "flagged".format(name, head))
-            # The live-namespace tie flags each of those bindings at run time. A def takes its builtins from
-            # its module's `__builtins__` when it runs, so the live code is rebuilt as a function over a
-            # scratch module registered in sys.modules (its globals pass) whose `__builtins__` holds each
-            # planted value: a dict, a builtins copy with print replaced, an imported module. The builtins
-            # module itself is the clean control and must pass; a function over a copy of this module's
-            # globals is flagged too.
-            shadow = types.ModuleType("_opf_import_shadow_builtins")
-            shadow.print = lambda *a, **k: None
-            planted_values = ((None, builtins_mod),
-                              (planted_head[0], dict(print=shadow.print)),
-                              (planted_head[1], dict(vars(builtins_mod), print=shadow.print)),
-                              (planted_head[2], shadow))
-            probe_name = "_opf_import_namespace_probe"
-            saved = sys.modules.get(probe_name)
-            try:
-                for text, value in planted_values:
-                    probe = types.ModuleType(probe_name)
-                    probe.__builtins__ = value
-                    sys.modules[probe_name] = probe
-                    got = _import_namespace_findings(types.FunctionType(_cmd_import.__code__, probe.__dict__))
-                    if text is None and got:
-                        failures.append("import structural check: the clean namespace control was flagged "
-                                        "(harness): {!r}".format(got))
-                    if text is not None and not any("__builtins__" in f for f in got):
-                        failures.append("import structural check: a planted {!r} ahead of the def was not "
-                                        "flagged at run time".format(text))
-            finally:
-                if saved is None:
-                    sys.modules.pop(probe_name, None)
-                else:
-                    sys.modules[probe_name] = saved
-            copied = types.FunctionType(_cmd_import.__code__, dict(_cmd_import.__globals__))
-            if not any("__globals__" in f for f in _import_namespace_findings(copied)):
-                failures.append("import structural check: a function over a copy of the module globals was "
-                                "not flagged")
+                    continue
+                if (rc != EXIT_MALFORMED or out != "" or IMPORT_SURFACE not in err
+                        or any(verb not in err for verb in IMPORT_VERBS)):
+                    failures.append("import {!r}: rc={!r} stdout={!r} stderr={!r} (expected a parser "
+                                    "refusal: exit 2, no stdout, the usage line naming the surface and "
+                                    "the three verbs)".format(argv, rc, out, err))
 
             try:
                 ibase = tempfile.mkdtemp(prefix="opf-cli-import-")
@@ -20520,12 +20434,27 @@ def _cli_self_test():
                 return EXIT_MALFORMED
             try:
                 try:
-                    store = os.path.join(ibase, "store")
-                    machine = os.path.join(store, ".working", "toml")
-                    os.makedirs(machine)
-                    # The [opf] base table comes from the production builder, so the fixture follows
-                    # the tooling's constants rather than restating them.
-                    import _opf_init
+                    shipped = tomllib.loads(pack_gate._read_regular(
+                        Path(pack_gate.DEFAULT_PACK_DIR) / pack_gate.MANIFEST_NAME,
+                        pack_gate.MAX_MANIFEST_BYTES, "manifest").decode("utf-8"))
+                except (pack_gate._Refusal, ValueError) as exc:
+                    print("opf cli self-test: harness error: the shipped prompt pack manifest is "
+                          "unreadable ({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                real_bindings = impc.schema.canonical_plan_bindings
+
+                def shipped_bindings():
+                    bindings = real_bindings()
+                    bindings["prompt_pack"] = dict(version=shipped["version"], digest=shipped["digest"])
+                    return bindings
+
+                def build(root, **kwargs):
+                    # The evaluator's own post-apply fixture, its plan bound to the SHIPPED pack, plus
+                    # the production manifest builder's base table so the store resolves and validates.
+                    os.mkdir(root)
+                    with mock.patch.object(impc.schema, "canonical_plan_bindings", shipped_bindings):
+                        impc._fixture(root, **kwargs)
+                    machine = os.path.join(root, ".working", "toml")
                     manifest = _opf_init.base_table_text(_opf_init._manifest_model()) + "\n".join([
                         "", "[store]", 'sync_target = ""',
                         "", "[modules]", "governance = true",
@@ -20536,182 +20465,140 @@ def _cli_self_test():
                         fh.write(manifest)
                     with open(os.path.join(machine, "counters.toml"), "w", encoding="utf-8") as fh:
                         fh.write("schema = 1\n\n[counters]\nBI = 0\nLF = 0\nWL = 0\n")
-                    with open(os.path.join(store, "a.txt"), "w", encoding="utf-8") as fh:
-                        fh.write("first source body\n")
-                    inputs = {
-                        "set.toml": 'schema = 1\nsource = ["a.txt"]\n',
-                        "not-toml.toml": "option = [\n",
-                        "decisions.json": json.dumps({"schema": 1, "run_id": _RID, "decisions": []}),
-                        "not-json.json": "{",
-                    }
-                    for name, body in inputs.items():
-                        with open(os.path.join(ibase, name), "w", encoding="utf-8") as fh:
-                            fh.write(body)
+
+                try:
+                    green = os.path.join(ibase, "green")
+                    build(green, imports=[
+                        (impc._IMP, impc._SOURCE, [impc._record(1, impc._IMP)]),
+                        (impc._IMP2, impc._OCCUPYING,
+                         [impc._record(2, impc._IMP2, source=impc._OCCUPYING)])])
+                    partial = os.path.join(ibase, "partial")
+                    build(partial)                      # only _SOURCE imported; _OCCUPYING pending
+                    drift = os.path.join(ibase, "drift")
+                    build(drift)
+                    impc._put(drift, impc._SOURCE, b"edited notes\n")
                     not_adopted = os.path.join(ibase, "not-adopted")
                     os.mkdir(not_adopted)
+                    broken_pack = os.path.join(ibase, "broken-pack")
+                    os.mkdir(broken_pack)
+                    with open(os.path.join(broken_pack, "pack.toml"), "w", encoding="utf-8") as fh:
+                        fh.write("format = 1\n")
                 except OSError as exc:
-                    print("opf cli self-test: harness error: could not build the import fixture "
+                    print("opf cli self-test: harness error: could not build the import fixtures "
                           "({})".format(exc), file=sys.stderr)
                     return EXIT_MALFORMED
 
-                def path(name):
-                    return os.path.join(ibase, name)
+                def tree_snapshot(rootdir):
+                    snap = {}
+                    for dirpath, dirs, files in os.walk(rootdir):
+                        for name in dirs:
+                            snap[os.path.relpath(os.path.join(dirpath, name), rootdir)] = None
+                        for name in files:
+                            p = os.path.join(dirpath, name)
+                            with open(p, "rb") as fh:
+                                snap[os.path.relpath(p, rootdir)] = fh.read()
+                    return snap
 
                 before = tree_snapshot(ibase)
-                # A representative set of argument lists, store-free and over the fixture alike.
-                vectors = [[], ["--help"], ["-h"]]
-                for flag in former_valued + former_valueless:
-                    vectors += [[flag], [flag, "x"], [flag + "=x"], [flag + "="]]
-                vectors += [
-                    # Abbreviated prefixes, unambiguous and ambiguous, alone and joined.
-                    ["--rev", _RID], ["--ro", store], ["--sc"], ["--pl"], ["--ap", _RID], ["--rev=" + _RID],
-                    ["--ro=" + store], ["--ro="], ["--r", _RID], ["--in=x"], ["--sh=x"], ["--show-reviews"],
-                    ["--ac"], ["--ac=tester"],
-                    # The former argparse review-aid forms.
-                    ["--review", "-1", "--show-review"], ["--review", _RID, "--show-review", "--root="],
-                    ["--review", _RID, "--review", _RID], ["--review", _RID, "--root", "-old"],
-                    ["--review", _RID, "--s"], ["--review", _RID, "--d", _RID],
-                    ["--review=-x", "--show-review"],
-                    ["--review", _RID, "--show-review", "--root=--scan"],
-                    ["--diff-review=--old", "--review", _RID],
-                    ["--review", _RID, "--show-review", "--show-review"], ["--rev", _RID, "--review", _RID],
-                    # Two modes, a repeated mode, and a valueless flag given a value.
-                    ["--scan", "--plan"], ["--scan", "--scan"], ["--show-review=x"],
-                    # An unknown flag, an unknown joined flag, a positional token, an empty token, and `--`.
-                    ["--bogus"], ["--x=y"], ["frobnicate"], [""], ["--"], ["--", "--scan"],
-                    ["--plan", "--", "--root", store],
-                ]
-                # Every former mode in its full form, over the adopted store and a NOT-ADOPTED root, with
-                # well-formed, malformed and missing named files alike.
-                for top in (store, not_adopted):
-                    vectors += [
-                        ["--scan", "--set", path("set.toml"), "--root", top],
-                        ["--plan", "--set", path("not-toml.toml"), "--root", top],
-                        ["--plan", "--dispositions", path("missing.toml"), "--ingest-options",
-                         path("not-toml.toml"), "--include", "*.md", "--include", "docs/*", "--root", top],
-                        ["--review", _RID, "--actor", "tester", "--decisions", path("decisions.json"),
-                         "--root", top],
-                        ["--review", _RID, "--actor", "tester", "--decisions", path("not-json.json"),
-                         "--show-review", "--diff-review", _RID, "--root", top],
-                        ["--review", _RID, "--actor", "tester", "--interactive", "--root", top],
-                        ["--apply", _RID, "--root", top],
-                        ["--apply", "not-a-run-id", "--set", path("missing.json"), "--root=" + top],
-                    ]
-                # The eight lists that alone ran under the earlier, narrower probe, kept beside the matrix.
-                for top in (store, not_adopted):
-                    vectors += [
-                        ["--review", _RID, "--actor", "tester", "--interactive", "--root", top],
-                        ["--scan", "--set", path("set.toml"), "--root", top],
-                        ["--review", _RID, "--decisions", path("decisions.json"), "--root=" + top],
-                    ]
-                vectors += [[], ["--plan", "--dispositions", path("not-toml.toml")]]
 
-                # The RUNTIME probe, representative only: every list above runs inside ONE probe context.
-                # While main() runs a list, a call through any module attribute in `targets` below (and
-                # any stdin read) is recorded and refused before it acts, whatever path or descriptor it
-                # names, so a planted call through one of them is never performed; outside a run the
-                # probes call straight through. A route not in `targets` is NOT refused: a write or read
-                # through an already-open file object or descriptor (os.write included), a socket,
-                # ctypes, or a call through the posix or _io modules directly (os.listdir is
-                # posix.listdir, and only the os attribute is patched).
-                def probe(label, real):
-                    def wrapped(*args, **kwargs):
-                        if not live:
-                            return real(*args, **kwargs)
-                        calls.append((label, repr(args[0])[:120] if args else ""))
-                        raise PermissionError("opf import probe: " + label + " refused")
-                    return wrapped
+                # A NOT-ADOPTED root: every verb refuses (exit 2) naming the missing adoption run.
+                for verb in IMPORT_VERBS:
+                    rc, out, err = run_cli([verb, "--root", not_adopted])
+                    if rc is None:
+                        continue
+                    if rc != EXIT_MALFORMED or out != "" or "no adoption run exists" not in err:
+                        failures.append("import {} over a NOT-ADOPTED root: rc={!r} stderr={!r} "
+                                        "(expected 2 + the no-adoption-run message)".format(verb, rc, err))
 
-                class ProbeStdin(io.StringIO):
-                    def _note(self, label):
-                        if live:
-                            calls.append(("sys.stdin." + label, ""))
-                            raise PermissionError("opf import probe: sys.stdin." + label + " refused")
-
-                    def read(self, *args):
-                        self._note("read")
-                        return super().read(*args)
-
-                    def readline(self, *args):
-                        self._note("readline")
-                        return super().readline(*args)
-
-                    def readlines(self, *args):
-                        self._note("readlines")
-                        return super().readlines(*args)
-
-                    def __next__(self):
-                        self._note("__next__")
-                        return super().__next__()
-
-                    def fileno(self):
-                        self._note("fileno")
-                        return super().fileno()
-
-                    @property
-                    def buffer(self):
-                        self._note("buffer")
-                        raise AttributeError("buffer")
-
-                targets = [(builtins_mod, "open"), (builtins_mod, "input"), (io, "open"),
-                           (io, "open_code"), (io, "FileIO"), (subprocess, "Popen")]
-                targets += [(os, n) for n in (
-                    "open", "read", "stat", "lstat", "fstat", "scandir", "listdir", "walk", "fwalk",
-                    "access", "readlink", "getcwd", "chdir", "system", "popen", "fork", "forkpty",
-                    "posix_spawn", "posix_spawnp", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv",
-                    "spawnve", "spawnvp", "spawnvpe", "execl", "execle", "execlp", "execlpe", "execv",
-                    "execve", "execvp", "execvpe",
-                    # the filesystem write and remove functions (builtins / io open in any mode is above)
-                    "mkdir", "makedirs", "mkfifo", "mknod", "unlink", "remove", "removedirs", "rename",
-                    "renames", "replace", "rmdir", "symlink", "link", "utime", "chmod", "chown", "lchown",
-                    "truncate", "ftruncate") if hasattr(os, n)]
-                targets += [(os.path, n) for n in ("exists", "lexists", "isfile", "isdir", "islink",
-                                                   "getsize")]
-                targets += [(pathlib.Path, n) for n in (
-                    "open", "read_text", "read_bytes", "exists", "iterdir", "stat", "is_file", "is_dir",
-                    "write_text", "write_bytes", "touch", "mkdir", "unlink", "rmdir", "rename", "replace",
-                    "symlink_to", "hardlink_to", "chmod") if hasattr(pathlib.Path, n)]
-                real_stdin = sys.stdin
-                sys.stdin = ProbeStdin("accept\n")
+                # --status: clean report (0), the same under an explicit --run, an unknown --run (2).
+                rc, out, err = run_cli(["--status", "--root", green])
+                first = out.splitlines()[0] if out else ""
+                if (rc != EXIT_OK or first != surface_line or impc._IMP not in out
+                        or "imported:BI-1" not in out or "import_status" not in out or err != ""):
+                    failures.append("import --status over the green fixture: rc={!r} stdout={!r} "
+                                    "stderr={!r}".format(rc, out, err))
+                rc, out, _err = run_cli(["--status", "--root", green, "--run", run_rid])
+                if rc != EXIT_OK or impc._IMP not in out:
+                    failures.append("import --status --run {}: rc={!r} stdout={!r}".format(run_rid, rc, out))
+                rc, _out, err = run_cli(["--status", "--root", green, "--run", other_rid])
+                if rc != EXIT_MALFORMED or "names no admitted adoption run" not in err:
+                    failures.append("import --status --run (unknown): rc={!r} stderr={!r}".format(rc, err))
+                # Run inference bounds: zero runs refuse above (the NOT-ADOPTED rows), exactly one is
+                # inferred (the rows above), and a second run-id directory forces an explicit --run,
+                # which then selects among them; the second run's missing plan refuses on its own.
+                second = os.path.join(green, *(".working/imported/adoption/" + other_rid).split("/"))
+                os.mkdir(second)
                 try:
-                    with contextlib.ExitStack() as stack:
-                        for owner, attr in targets:
-                            label = getattr(owner, "__name__", repr(owner)) + "." + attr
-                            stack.enter_context(mock.patch.object(owner, attr, probe(label, getattr(owner, attr))))
-                        # Every probe records and refuses a call while live (it never reaches the real
-                        # function), so the list above is exactly what the probe refuses.
-                        for owner, attr in targets:
-                            del calls[:]
-                            live.append(True)
-                            try:
-                                getattr(owner, attr)(path("probe-target"))
-                                performed = True
-                            except PermissionError:
-                                performed = False
-                            except BaseException as exc:  # noqa: BLE001  any other escape is a failure
-                                performed = exc
-                            finally:
-                                del live[:]
-                            if performed is not False or len(calls) != 1:
-                                failures.append("the import probe on {}.{} did not record and refuse a "
-                                                "call ({!r}, {} recorded)".format(
-                                                    getattr(owner, "__name__", owner), attr, performed,
-                                                    len(calls)))
-                        del calls[:]
-                        for argv in vectors:
-                            refused(argv)
-                    consumed = sys.stdin.tell() != 0
+                    rc, _out, err = run_cli(["--status", "--root", green])
+                    if rc != EXIT_MALFORMED or "give --run" not in err:
+                        failures.append("import --status over two run directories: rc={!r} stderr={!r} "
+                                        "(expected 2 + give --run)".format(rc, err))
+                    rc, out, _err = run_cli(["--status", "--root", green, "--run", run_rid])
+                    if rc != EXIT_OK or impc._IMP not in out:
+                        failures.append("import --status --run among two runs: rc={!r} stdout={!r}".format(
+                            rc, out))
+                    rc, _out, err = run_cli(["--status", "--root", green, "--run", other_rid])
+                    if rc != EXIT_MALFORMED or "no approved plan" not in err:
+                        failures.append("import --status --run (planless run): rc={!r} stderr={!r}".format(
+                            rc, err))
                 finally:
-                    sys.stdin = real_stdin
-                if consumed:
-                    failures.append("a refused import read stdin")
+                    os.rmdir(second)
+                # --status: a drifted frozen source is a FINDING (exit 1) naming it on stderr.
+                rc, out, err = run_cli(["--status", "--root", drift])
+                if (rc != EXIT_FINDING or "FINDING" not in err or impc._SOURCE not in err
+                        or "no longer matches its plan digest" not in err):
+                    failures.append("import --status over the drifted fixture: rc={!r} stdout={!r} "
+                                    "stderr={!r} (expected 1 + the drift FINDING)".format(rc, out, err))
+
+                # --prompt: the shipped pack against the fixture plan's binding (0); the validator seam
+                # returning another version/digest refuses (2, the binding comparison discriminator);
+                # a broken pack refuses (2, the validation discriminator).
+                rc, out, err = run_cli(["--prompt", "--root", green])
+                first = out.splitlines()[0] if out else ""
+                if (rc != EXIT_OK or first != surface_line or shipped["version"] not in out
+                        or shipped["digest"] not in out or "import/SKILL.md" not in out
+                        or impc._SOURCE not in out or impc._OCCUPYING not in out or err != ""):
+                    failures.append("import --prompt over the green fixture: rc={!r} stdout={!r} "
+                                    "stderr={!r}".format(rc, out, err))
+                with mock.patch.object(pack_gate, "_validate",
+                                       lambda pack_dir: ("9.9.9", "sha256:" + "0" * 64, 1)):
+                    rc, out, err = run_cli(["--prompt", "--root", green])
+                if rc != EXIT_MALFORMED or "prompt_pack binding" not in err:
+                    failures.append("import --prompt with a drifted verified pack: rc={!r} stderr={!r} "
+                                    "(expected 2 + the binding mismatch)".format(rc, err))
+                with mock.patch.object(pack_gate, "DEFAULT_PACK_DIR", Path(broken_pack)):
+                    rc, out, err = run_cli(["--prompt", "--root", green])
+                if rc != EXIT_MALFORMED or "does not verify" not in err:
+                    failures.append("import --prompt with a broken pack: rc={!r} stderr={!r} (expected "
+                                    "2 + the pack refusal)".format(rc, err))
+
+                # --verify under the stubbed full-roster doctor: every source complete (0) over the
+                # green fixture; the default fixture's occupying source, with no record and no skip,
+                # is INVALID (1) and named. Both say nothing was recorded.
+                def stub_doctor(observations=None):
+                    return impc._Doctor()
+
+                with mock.patch.object(_opf_observe, "gather", lambda res: (None, [])), \
+                        mock.patch.object(impc, "store_doctor", stub_doctor):
+                    rc_green, out_green, err_green = run_cli(["--verify", "--root", green])
+                    rc_partial, out_partial, _err_partial = run_cli(["--verify", "--root", partial])
+                first = out_green.splitlines()[0] if out_green else ""
+                if (rc_green != EXIT_OK or first != surface_line or "INVALID" in out_green
+                        or "imported:BI-1" not in out_green or "imported:BI-2" not in out_green
+                        or "recorded" not in out_green or err_green != ""):
+                    failures.append("import --verify over the green fixture: rc={!r} stdout={!r} "
+                                    "stderr={!r}".format(rc_green, out_green, err_green))
+                if (rc_partial != EXIT_FINDING or "INVALID" not in out_partial
+                        or impc._OCCUPYING not in out_partial):
+                    failures.append("import --verify over the partial fixture: rc={!r} stdout={!r} "
+                                    "(expected 1 + the unimported source named)".format(
+                                        rc_partial, out_partial))
+                rc, _out, err = run_cli(["--verify", "--root", green, "--run", other_rid])
+                if rc != EXIT_MALFORMED or "names no admitted adoption run" not in err:
+                    failures.append("import --verify --run (unknown): rc={!r} stderr={!r}".format(rc, err))
+
                 if tree_snapshot(ibase) != before:
-                    failures.append("a refused import changed the fixture tree")
-                # The pointer is to adoption and the prompt pack in words, naming no command (spec 14.1).
-                if not ("adoption (OPF spec 14.1)" in refusal and "prompt pack" in refusal
-                        and not re.search(r"`|\bopf [a-z]", refusal)):
-                    failures.append("the import retirement refusal does not point to adoption and the "
-                                    "prompt pack in words only")
+                    failures.append("a read-only import verb changed a fixture tree")
             finally:
                 shutil.rmtree(ibase, ignore_errors=True)
             return None
@@ -21899,27 +21786,21 @@ def _cli_self_test():
         print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render/doctor usage "
               "errors fail closed; render --check forwards to the U4 engine; doctor resolves + validates a "
               "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
-              "the retired import verb (spec 14.1) prints exactly its retirement pointer at exit 2 for every "
-              "argument list tried (none, --help, each former flag alone, with a separate value, joined and "
-              "with an empty joined value, unambiguous and ambiguous prefixes, the former review-aid forms, "
-              "two modes, an unknown flag, --), over a NOT-ADOPTED root and "
-              "over an adopted store, mutating nothing (the verb's runtime behaviour, which the runtime "
-              "probe observes over those representative lists only, recording no call through the module "
-              "attributes it patches to its probed filesystem read, write and remove, process-spawn or "
-              "stdin functions); structural checks, a tripwire against accidental regression and not a "
-              "proof, parse _cmd_import's source from the file's bytes as the interpreter decodes them "
-              "and flag a coding declaration other than utf-8, a body other than "
-              "exactly the pointer print and the exit-2 return (a use of its arguments or any other call "
-              "included), a modeled module-scope binding of the names it uses or of __builtins__, a "
-              "constant it uses not bound unconditionally ahead of it, a live code object other than the "
-              "parsed definition's, and a live function not on this module's globals and the real "
-              "builtins mapping; they do not cover reflective or dynamic changes (globals(), vars, "
-              "setattr and attribute stores such as builtins.print or sys.stderr, exec/eval/compile, "
-              "importlib), source-decoding and loader tricks beyond the coding "
-              "declaration check, this module's import-time top-level code (outside the probe too), the "
-              "_bootstrap() and verb dispatch main() runs first (covered only by the probe), calls "
-              "through routes the probe does not patch (posix, _io, ctypes, already-open handles, "
-              "sockets), or another module patching this one; "
+              "the read-only import verbs (spec 14.1, the surface opf.import.surface/v1): the parser "
+              "fails closed at exit 2 with the usage line naming the surface and the three verbs on a "
+              "bare import, two verbs, every former mode flag (now an unrecognized token like any "
+              "other), --root and --run value grammar, an unknown flag, a positional token and --, "
+              "before any read; a NOT-ADOPTED or runless root refuses at exit 2 for every verb (a "
+              "requested operation, never doctor's NOT-APPLICABLE 0); over evaluator-built adopted "
+              "fixtures --status reports the import run, its record ids and import_status (0), a "
+              "drifted frozen migrate source (1, its own FINDING line) and a --run naming no admitted "
+              "run (2), --prompt prints the shipped pack's version, digest, import members and migrate "
+              "scope when the plan's prompt-pack binding matches the verified pack (0) and refuses a "
+              "binding mismatch or an unverifiable pack (2), and --verify grades every migrate source "
+              "through the import-completion evaluator under a stubbed full-roster doctor (0 complete, "
+              "1 an unimported source named; on a real store that roster is ungraded and the verdict "
+              "is CANNOT-EVALUATE, the evaluator's disclosed residual), recording nothing and saying "
+              "so, with every fixture tree byte-identical afterward; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred complete fail closed to exit 2; "
               "on base 2.0.0 the adoption journal is not read: reconcile -> 2 with exactly the fence "
@@ -23373,6 +23254,7 @@ def _self_tests():
     ("opf-aggregator", _aggregator_self_test),
     ("opf-retained-close-offpath", _retained_close_offpath_self_test),
     ("opf-close-exc-safe-vectors", _close_exc_safe_vectors_self_test),
+    ("opf-import-surface", _import_surface_self_test),
     ("opf-cli", _cli_self_test),
 )
 
@@ -23387,7 +23269,8 @@ def _self_tests():
 SELF_TEST_GROUPS = (
     ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
               "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
-              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli")),
+              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors",
+              "opf-import-surface", "opf-cli")),
     ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
     ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
 )

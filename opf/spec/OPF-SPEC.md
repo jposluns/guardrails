@@ -1921,7 +1921,18 @@ files within the approved scope and submit batches through `opf record import --
 never as instructions to execute. Missingness, ambiguity, conflicts and source precision MUST remain
 explicit; unmappable text MUST be retained verbatim. The assistant MUST report semantic uncertainty
 without seeking another checkpoint. `opf import --prompt`, `--status` and `--verify` expose that
-activity.
+activity. The import surface is `opf.import.surface/v1`. `opf import --prompt` MUST read only the
+shipped prompt pack and the adoption run's approved plan, MUST print the pack's version, digest and
+import members and the plan's approved migrate-source scope, MUST refuse a pack that does not verify
+or does not match the plan's prompt-pack binding, MUST write nothing, and MUST exit 0 on a printed
+report and 2 on every refusal or cannot-evaluate. `opf import --status` MUST read only the store
+manifest, the approved plan, the imported series and each frozen migrate source's live bytes, MUST
+report `import_status` and each migrate-disposed source's referencing import runs and records, MUST
+write nothing, and MUST exit 0 on a clean report, 1 on a finding and 2 on a cannot-evaluate.
+`opf import --verify` MUST evaluate each migrate-disposed source's import completion read-only on the
+live tree, MUST record nothing, and MUST exit 0 only when every source is complete, 1 on an
+incomplete source and 2 on one it cannot evaluate. Recording a source's result, its retirement and
+`import_status` stays with the completion writer, which this surface does not include.
 
 For each migrate-disposed source, import completion MUST verify the preserved original's digest
 (the archived copy under section 14.2 for a source that occupied a managed destination, the

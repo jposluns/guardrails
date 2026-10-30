@@ -9,9 +9,10 @@ policy, and doctor VALID over both the strict store and the imported series, eva
 tree"); 14.1's homes-1 clause (the completion checks re-read inventories and payload digests themselves,
 because C-EVIDENCE-ENUM is inactive until homes 2), whose re-reads this evaluator keeps on homes 2 as well,
 as defence in depth; and 8.8's correction chain ("Such a corrected import is a fresh run ... and source
-completion (section 14.1) evaluates the correcting run"). Recording the result in the receipt's
-outcome-event chain, the retirement transaction, `import_status` and the `opf import` modes are later units;
-this module decides and records nothing.
+completion (section 14.1) evaluates the correcting run"). The read-only `opf import --verify` verb calls
+evaluate_source and reports its verdicts; recording the result in the receipt's outcome-event chain, the
+retirement transaction and `import_status` are a later completion writer's, and this module decides and
+records nothing.
 
 evaluate_source(product_root, run_id, source, doctor=...) grades ONE migrate-disposed source of the
 adoption run `run_id`, in four legs, each reporting under one SourceResult:

@@ -1980,9 +1980,8 @@ Build the import writer of sections 8.8 (`opf record import --batch FILE [--root
 Section 14.1 says
 "Post-adoption import MUST use the approved, versioned prompt pack, with an example for every
 record type in the section 8.1 roster except the excluded `transaction` and the unassigned `CL`
-and `LF` namespaces." The pinned prompt pack lists no import prompt ("Read the specification
-first"), so report that gap to the maintainer before your import runs against a real source; your
-tests use synthetic batches.
+and `LF` namespaces." The pinned prompt pack ships that import member (`import/SKILL.md` with one
+example per baseline record type under `import/examples/`); your tests use synthetic batches.
 
 - Imported records take `imported:<NS>-<n>` IDs on their own counter rows, claimed through
   reservations under `journals/<kind>/allocations/` with an `imp-` run ID (sections 4.2 and 8.2).
