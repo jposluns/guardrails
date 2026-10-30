@@ -79,8 +79,15 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        Its value must be a commit of 7 to 40 or of
                        64 hex digits not followed by a letter, digit, `_` or `-`; a pin line with any other
                        value (6, 41, 63 or 65 hex digits, a non-hex character, no value) is CANNOT_EVALUATE
-                       (exit 2) for every family, never ignored. A lower-case label (Reviewed head:) or a
-                       label later in a line is not a pin line. A valid pin pins a revision, and a relative path the brief
+                       (exit 2) for every family, never ignored. Pin lines must agree: every BRIEF-PIN line
+                       holds the first one's value, character for character, and, where the brief has a
+                       BRIEF-PIN line, every REVIEWED HEAD line holds that value, a prefix of it or a value it
+                       is a prefix of, character for character (so a full 40-hex REVIEWED HEAD is the BRIEF-PIN
+                       value itself, and the same commit in upper case disagrees); pin lines that disagree,
+                       wherever they stand (in a fence, indented, after a cure), are CANNOT_EVALUATE (exit 2)
+                       for every family, and the message names both lines. A lower-case label (Reviewed head:)
+                       or a label later in a line is not a pin line. A valid pin pins a revision, and a
+                       relative path the brief
                        names (`./` and `..` folded with posixpath.normpath; a path that then climbs out of the
                        repository is not repository-relative and is skipped) does not exist at it in the
                        repository the lint is pointed at (--repo, default this repository), read with
@@ -143,25 +150,37 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        after it on its line) cures it, and a cure is a closed shape that reads no English: nothing
                        else is one. Its COMMAND is, word for word on whitespace, git checkout --detach P or git
                        switch --detach P, either with -C and one word D between git and the subcommand, or git -C
-                       D checkout P; P is the value of a BRIEF-PIN line of exactly 40 hex digits, compared
-                       character for character (a REVIEWED HEAD line, a confirm clause, a pin of fewer than 40 or
-                       of 64 digits, a prefix, another case, FETCH_HEAD and every other word are not P), and D is
-                       one word with no backtick. The command cures only on a CURE LINE, one physical line (a line
-                       joined by a backslash or after a git word is none) that is either (a) the command alone,
-                       bare or as the whole of one code span of single backticks, after only whitespace and at
-                       most one of a list marker (-, *, +, N. or N)), a `$` prompt or the word then (any case),
-                       in a fence or not; or (b) a line that opens, after whitespace and at most one list marker,
-                       with the words Make a scratch clone:, Clone or Run (as written) and whose whole rest is one
-                       code span of single backticks that holds the command alone or ends with && (a word of its
-                       own, after another word) and the command. So `git -C w checkout --detach <pin>` on a line
-                       of its own, then git switch --detach <pin>, a fence line $ git checkout --detach <pin> and
-                       "Make a scratch clone: `git clone <url> w && git -C w checkout --detach <pin>`" cure, and
-                       these cure nothing, whatever the words around them: "Run `git -C w checkout --detach
-                       <pin>`." (a stop after the span), "Then run `git -C w checkout --detach <pin>`", "Clone
-                       with `git clone <url> w && git -C w checkout --detach <pin>`", "Make a scratch clone: git
-                       clone <url> w, then git -C w checkout --detach <pin>; never a worktree.", and git -C w reset
-                       --hard <pin> or git checkout --detach <pin> -- docs on a line of its own; nor does a fetch,
-                       clone, merge, rebase, restore, archive or worktree add of the pin, or a dispatch ref. A
+                       D checkout P; P is the value of the brief's BRIEF-PIN lines (which agree, P3) when it is
+                       exactly 40 hex digits, compared character for character (a REVIEWED HEAD line, a confirm
+                       clause, a pin of fewer than 40 or of 64 digits, a prefix, another case, FETCH_HEAD and
+                       every other word are not P), and D is a closed path: ASCII letters, digits, _ . / and -,
+                       or a <name> placeholder of them, not opening with - (no shell metacharacter, quote, ~ or
+                       $). The command cures only on a CURE LINE, one physical line (a line joined by a backslash
+                       or after a git word is none) whose raw text, read before format characters are removed,
+                       is printable ASCII with only space or tab between words (a format character, a carriage
+                       return, any other control character or any other space makes it none), that holds no part
+                       of an HTML comment (from <!-- to the next -->, in a fence or not; a fence marker inside a
+                       comment opens or closes nothing), and that is either (a) the command alone, bare or as the
+                       whole of one code span of single backticks, after only whitespace and at most one of a
+                       list marker (-, *, +, N. or N)), a `$` prompt or the word then (any case), where a fence
+                       line, literal text, takes only the `$` prompt (a diff's removed or added line, any other
+                       list marker and then open no cure there); or (b) a line that opens, after whitespace and at
+                       most one list marker (none in a fence), with the words Make a scratch clone:, Clone or Run
+                       (as written) and whose whole rest is one code span of single backticks that is exactly a
+                       cure chain: git clone, any of --no-hardlinks, --no-checkout, -q and --quiet, a source (a
+                       closed path that may also hold : and @) and a directory D (a closed path), then && and the
+                       command with -C D, the clone's own directory. So `git -C w checkout --detach <pin>` on a
+                       line of its own, then git switch --detach <pin>, a fence line $ git checkout --detach <pin>
+                       and "Make a scratch clone: `git clone <url> w && git -C w checkout --detach <pin>`" cure,
+                       and these cure nothing, whatever the words around them: "Run `git -C w checkout --detach
+                       <pin>`" (no clone), "Run `git -C w checkout --detach <pin>`." (a stop after the span),
+                       "Then run `git -C w checkout --detach <pin>`", "Clone with `git clone <url> w && git -C w
+                       checkout --detach <pin>`", "Run `git clone <url> w && false && git -C w checkout --detach
+                       <pin>`", "Clone `git clone <url> w && git -C x checkout --detach <pin>`", git -C w;: checkout
+                       --detach <pin>, "Make a scratch clone: git clone <url> w, then git -C w checkout --detach
+                       <pin>; never a worktree.", and git -C w reset --hard <pin> or git checkout --detach <pin> --
+                       docs on a line of its own; nor does a fetch, clone, merge, rebase, restore, archive or
+                       worktree add of the pin, or a dispatch ref. A
                        reach with no git word is printed under the same
                        cure, never refused, in three shapes only: a prose reach (clone, check out, switch to or
                        fetch that is not a git subcommand, followed within three words by --branch, -b, main,
@@ -211,14 +230,21 @@ run git pull or git clone --branch main."), a reach after an introduction ("Neve
 --branch main"), a prohibition with any other verb ("Never type git clone --branch main") and a reach before the
 prohibition that forbids it ("git clone --branch main must never run") refuse; a cure is read by its shape alone,
 so a cure line that a report, a question or a prohibition quotes (on a line of its own, or as a fence line, after
-"The previous worker ran:" or "Never run this:") cures, because the shape is a whole line of the canonical
-command, and a cure in any other place (inside a sentence, after any other word, or with a stop or any word
-after it) cures nothing and refuses whatever the words around it, as does every cure in a brief whose pins are
-only REVIEWED HEAD lines, confirm clauses or BRIEF-PIN values of fewer than 40 or of 64 hex digits (a brief
-pinned in a SHA-256 repository has no cure and refuses); a cure the worker cannot reach passes (a shallow or
---single-branch clone may not hold the pin; git is expected, not verified for every version, to fail the checkout
-then); a cure in another repository (another -C path, or none) is not told apart, since a cure is matched by its
-words, and FETCH_HEAD takes the last fetch in the brief whatever its repository; a FETCH_HEAD with no fetch or
+"The previous worker ran:" or "Never run this:", or as a diff's context line, which opens with a space) cures,
+because the shape is a whole line of the canonical command, and a cure in any other place (inside a sentence,
+after any other word, or with a stop or any word after it) cures nothing and refuses whatever the words around it,
+as does every cure in a brief whose pins are only REVIEWED HEAD lines, confirm clauses or BRIEF-PIN values of
+fewer than 40 or of 64 hex digits (a brief pinned in a SHA-256 repository has no cure and refuses) and every cure
+line in a brief with CRLF line ends (its carriage return is no cure character); REVIEWED HEAD lines with no
+BRIEF-PIN line are not compared with each other, and a confirm clause is not compared with the pin lines (the pin
+lines govern); an HTML comment is read by its markers alone, so a <!-- in a code span or a fence opens one too,
+and the lines up to the next --> hold no cure, and a fence that opens inside that stretch and holds the --> is
+read as prose after it, so a list marker or then opens a cure on its lines; a <name> placeholder in a cure's
+directory or source is not runnable as written (bash reads <scratch>/r as two redirections), so the brief must
+tell the worker to put a path in its place; a cure the worker cannot reach passes (a shallow or --single-branch
+clone may not hold the pin; git is expected, not verified for every version, to fail the checkout then); outside a
+cure chain a cure in another repository (another -C path, or none) is not told apart, since a cure is matched by
+its words, and FETCH_HEAD takes the last fetch in the brief whatever its repository; a FETCH_HEAD with no fetch or
 pull before it in the brief (filled outside it, or by a fetch that is a prohibition's object) is not judged; a
 branch or tag named with hex digits alone is read as a commit id where a word may be either (a checkout, reset,
 worktree add, merge, rebase, restore, archive or fetch refspec: git checkout 1234567abc takes the branch when one
@@ -235,9 +261,10 @@ is read as two lines; a tag force-moved after the lint runs is not seen; a dispa
 helps only where the sender refuses to send on exit 1 or 2.
 
 TEXT. Format characters (Unicode category Cf: a byte order mark, zero-width and bidirectional
-controls) are removed first; a brief that is then empty or only whitespace and control characters is
-blank. Every list item (a line opening with `-`, `*`, `+`, `N.` or `N)`, at any indentation) is its own
-paragraph, so it starts a sentence. A fence opens at any indentation.
+controls) are removed first, for every rule but the P5 cure, which reads each cure line as written; a brief
+that is then empty or only whitespace and control characters is blank. Every list item (a line opening with `-`,
+`*`, `+`, `N.` or `N)`, at any indentation) is its own paragraph, so it starts a sentence. A fence opens at any
+indentation.
 
 BLOCKING RULES (HARD; one hit refuses):
 
@@ -1718,23 +1745,40 @@ REACH_PROHIBITION_RE = re.compile(r"(?<![\w/.=-])" + P5_PROHIBITION_WORDS + r"[*
                                   r"(?:[*_]*+(?:run|use|execute|follow)[*_]*+\s++)?+", re.I)
 OBJECT_MARKUP = "*_\"'"
 # a CURE is a closed shape that reads no English (cure_line): its command (cure_command) is git, optionally -C and
-# one word, then one of CURE_SUBCOMMANDS, --detach and the pin, or git -C, one word, checkout and the pin; the pin
-# is the value of a BRIEF-PIN line of CURE_PIN_DIGITS hex digits, compared exactly (cure_pins, cure_matches). The
-# command cures only as the whole of one physical line, after at most one list marker or CURE_PREFIXES word, bare or
-# as one code span, or as the end of one code span that is the whole rest of a line opening with one of CURE_LEADS,
-# alone or after CURE_CHAIN
+# one word, then one of CURE_SUBCOMMANDS, --detach and the pin, or git -C, one word, checkout and the pin; the -C word
+# is a closed path (CURE_PATH_RE) and the pin is the one BRIEF-PIN value, of CURE_PIN_DIGITS hex digits, compared
+# exactly (cure_pins, cure_matches; pin lines that disagree are CannotEvaluate, rule_p3). The command cures only on
+# one physical line whose raw text is CURE_CHARACTERS alone (cure_characters, read before format characters are
+# removed) and that holds no part of an HTML comment: as the whole line, after at most one list marker or
+# CURE_PREFIXES word (in a fence only one of FENCE_PREFIXES), bare or as one code span; or as the end of one code
+# span that is the whole rest of a line opening with one of CURE_LEADS and is exactly a closed clone, CURE_CHAIN and
+# the command in the clone's directory (clone_chain)
 CURE_SUBCOMMANDS = frozenset(("checkout", "switch"))
 CURE_PIN_DIGITS = 40
 CURE_PREFIXES = frozenset(("$", "then"))   # compared in lower case
+FENCE_PREFIXES = frozenset(("$",))   # a fence line is literal text: no list marker and no then opens a cure there
 CURE_LEADS = (("Make", "a", "scratch", "clone:"), ("Clone",), ("Run",))
 CURE_CHAIN = "&&"
+# a cure line's raw characters: printable ASCII, with space or tab between words (no other control character, no
+# format character and no other space)
+CURE_CHARACTERS = frozenset(chr(code) for code in range(0x20, 0x7F)) | frozenset("\t")
+# a -C word or a clone's directory: letters, digits and _ . / -, or a <name> placeholder, not opening with -; a clone's
+# source may also hold : and @ (a URL); neither holds a shell metacharacter, a quote, ~ or $
+CURE_PATH_RE = re.compile(r"(?!-)(?:[A-Za-z0-9_./-]|<[A-Za-z0-9_-]++>)++")
+CURE_SOURCE_RE = re.compile(r"(?!-)(?:[A-Za-z0-9_./:@-]|<[A-Za-z0-9_-]++>)++")
+# the only options the clone of a cure chain may carry: none names a branch, a depth or another ref
+CURE_CLONE_OPTIONS = frozenset(("--no-hardlinks", "--no-checkout", "-q", "--quiet"))
+HTML_COMMENT_OPEN, HTML_COMMENT_CLOSE = "<!--", "-->"
 # the line a refusal tells the author to copy, after the reach, and the cure shape it states
 CURE_EXAMPLE = "git -C <dir> checkout --detach {}"
 CURE_SHAPE = ("a cure is a later line that is only `git -C <dir> checkout --detach <pin>` (or git checkout or switch "
-              "--detach <pin>, with or without -C <dir>, or git -C <dir> checkout <pin>), <pin> the full 40-hex "
-              "BRIEF-PIN value, bare or as one code span, after at most one list marker, `$ ` or then, in a fence or "
-              "not; or a line that opens with Make a scratch clone:, Clone or Run and whose whole rest is one code "
-              "span ending in that command, alone or after &&; nothing else cures")
+              "--detach <pin>, with or without -C <dir>, or git -C <dir> checkout <pin>), <pin> the brief's one "
+              "full 40-hex BRIEF-PIN value and <dir> letters, digits, _ . / - or a <name> placeholder, bare or as one "
+              "code span, after at most one list marker, `$ ` or then (in a fence only `$ `); or a line that opens "
+              "with Make a scratch clone:, Clone or Run and whose whole rest is one code span holding exactly `git "
+              "clone <source> <dir> && ` and that command with -C <dir> (the clone may add --no-hardlinks, "
+              "--no-checkout, -q or --quiet); a cure line is printable ASCII with only spaces or tabs between words "
+              "and is not inside an HTML comment; nothing else cures")
 
 
 def _path_token(token):
@@ -1828,16 +1872,20 @@ class PreflightText:
     such as `.py`) or open with `./` or `../`; the declared workdirs (see _declaration_rest) and the
     declarations that name none clearly, with every line that opens with a workdir label (WORKDIR_LABEL_RE) but
     is not a declaration; the pinned revisions (a line that opens, once markup is skipped, with REVIEWED HEAD or
-    BRIEF-PIN, plain or in bold, and a commit of 7 to 40 or 64 hex digits; the BRIEF-PIN ones also apart, for the
-    P5 cure) and the lines that open with such a label but carry no such commit (bad_pins); and whether a hand-back
-    file is named (the words hand-back file or path and an absolute path on one line)."""
+    BRIEF-PIN, plain or in bold, and a commit of 7 to 40 or 64 hex digits; the BRIEF-PIN ones and the REVIEWED HEAD
+    ones also apart, for pin agreement (rule_p3) and the P5 cure) and the lines that open with such a label but carry
+    no such commit (bad_pins); and whether a hand-back file is named (the words hand-back file or path and an
+    absolute path on one line). `raw` is the brief's text before decode_brief removes format characters, which the P5
+    cure reads (cure_lines); None stands for `text` itself."""
 
-    def __init__(self, text):
+    def __init__(self, text, raw=None):
         self.text = text
+        self.raw = text if raw is None else raw
         self.names_workdir = bool(WORKDIR_WORD_RE.search(text))
         self.absolute, self.unplaced, self.relative, self.workdirs, self.pins = [], [], [], [], []
         self.bad_pins = []   # [line] for a pin label with no valid pin after it
-        self.brief_pins = []   # [pin] for the pin lines labelled BRIEF-PIN, the only pins a cure may name (P5)
+        self.brief_pins = []   # [(line, pin)] for the pin lines labelled BRIEF-PIN, whose value a cure names (P5)
+        self.reviewed_heads = []   # [(line, pin)] for the pin lines labelled REVIEWED HEAD
         self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
         self.handback_named = False
         bare = None   # the line of a bare Workdir (or Workdir:, Workdir is) whose path is on the next line
@@ -1873,8 +1921,8 @@ class PreflightText:
             pin = PIN_RE.match(line, start)
             if pin:
                 self.pins.append((number, pin.group(1)))
-                if line.startswith("BRIEF-PIN", start):
-                    self.brief_pins.append(pin.group(1))
+                (self.brief_pins if line.startswith("BRIEF-PIN", start) else self.reviewed_heads).append(
+                    (number, pin.group(1)))
             elif PIN_LABEL_RE.match(line, start):
                 self.bad_pins.append(number)
             if found and HANDBACK_NAMED_RE.search(line):
@@ -2093,14 +2141,52 @@ def repository_path(path):
     return path
 
 
+def brief_pin_conflict(names):
+    """(line, pin, other line, label, value) for the first BRIEF-PIN line whose value is not the first BRIEF-PIN
+    line's, character for character, else None: a brief pins one revision, and a cure names it (cure_pins)."""
+    for other, value in names.brief_pins[1:]:
+        if value != names.brief_pins[0][1]:
+            return names.brief_pins[0] + (other, "BRIEF-PIN", value)
+    return None
+
+
+def pins_agree(value, pin):
+    """Whether a REVIEWED HEAD value agrees with the BRIEF-PIN value: one is a prefix of the other, character for
+    character, so a full 40-hex value must be the BRIEF-PIN value itself."""
+    return value.startswith(pin) or pin.startswith(value)
+
+
+def reviewed_head_conflict(names):
+    """(line, pin, other line, label, value) for the first REVIEWED HEAD line whose value does not agree with the
+    first BRIEF-PIN line's (pins_agree), else None; with no BRIEF-PIN line, None."""
+    for other, value in names.reviewed_heads:
+        if names.brief_pins and not pins_agree(value, names.brief_pins[0][1]):
+            return names.brief_pins[0] + (other, "REVIEWED HEAD", value)
+    return None
+
+
+def pin_conflict_message(conflict):
+    """The CannotEvaluate message for pin lines that disagree, naming both lines."""
+    line, pin, other, label, value = conflict
+    return ("lines {} and {}: the pin lines disagree (BRIEF-PIN {} on line {}, {} {} on line {}); a brief pins one "
+            "revision, so every BRIEF-PIN line must hold the same value and every REVIEWED HEAD line a value that "
+            "agrees with it, one a prefix of the other, character for character, and a P5 cure names that one "
+            "pin".format(
+                min(line, other), max(line, other), pin, line, label, value, other))
+
+
 def rule_p3(names, row, repo):
     """P3 ADVISORY: the brief pins a revision and a repository-relative path it names (repository_path) does
     not exist at that revision in `repo`; it may be a file the brief asks the worker to create, so it never
-    refuses. A pin label with no valid pin (bad_pins), a pin that does not resolve, or no repository to read is
-    CannotEvaluate, whether or not the brief names a relative path."""
+    refuses. A pin label with no valid pin (bad_pins), pin lines that disagree (brief_pin_conflict,
+    reviewed_head_conflict: the message names both lines, pin_conflict_message), a pin that does not resolve, or no
+    repository to read is CannotEvaluate, whether or not the brief names a relative path."""
     if names.bad_pins:
         raise CannotEvaluate("line {}: a REVIEWED HEAD or BRIEF-PIN line with no pin of 7 to 40 or 64 hex "
                              "digits".format(names.bad_pins[0]))
+    conflict = brief_pin_conflict(names) or reviewed_head_conflict(names)
+    if conflict is not None:
+        raise CannotEvaluate(pin_conflict_message(conflict))
     if not names.pins:
         return []
     if repo is None:
@@ -2264,10 +2350,12 @@ def _unspanned(words, bare):
 
 def cure_command(words):
     """Whether whitespace-split `words` are exactly the CURE COMMAND: git, optionally -C and one word, then checkout
-    or switch (CURE_SUBCOMMANDS), --detach and one word; or git -C, one word, checkout and one word. The last word is
-    the pin argument, which rule_p5 compares with the pins (cure_matches); no other word, option, subcommand or
-    prompt is part of it."""
+    or switch (CURE_SUBCOMMANDS), --detach and one word; or git -C, one word, checkout and one word. The -C word is a
+    closed path (CURE_PATH_RE: no shell metacharacter, quote, ~ or $). The last word is the pin argument, which
+    rule_p5 compares with the pins (cure_matches); no other word, option, subcommand or prompt is part of it."""
     if words[:1] != ["git"]:
+        return False
+    if words[1:2] == ["-C"] and not (len(words) > 2 and CURE_PATH_RE.fullmatch(words[2])):
         return False
     rest = words[3:] if words[1:2] == ["-C"] else words[1:]
     if len(rest) == 3:
@@ -2275,44 +2363,104 @@ def cure_command(words):
     return len(rest) == 2 and words[1:2] == ["-C"] and rest[0] == "checkout"
 
 
-def cure_line(line):
+def same_directory(command, directory):
+    """Whether a cure command runs in a clone's directory: its -C word is that directory, character for character."""
+    return command[1:3] == ["-C", directory]
+
+
+def clone_chain(words):
+    """The cure command of a cure chain, else None: whitespace-split `words` are exactly git clone, any number of
+    CURE_CLONE_OPTIONS, a source (CURE_SOURCE_RE) and a directory (CURE_PATH_RE), then CURE_CHAIN and a cure command
+    (cure_command) in that directory (same_directory). No other word, command, option or chain is part of it, and a
+    cure command alone is no chain."""
+    if CURE_CHAIN not in words:
+        return None
+    at = words.index(CURE_CHAIN)
+    clone, command = words[:at], words[at + 1:]
+    if clone[:2] != ["git", "clone"] or len(clone) < 4 or not all(word in CURE_CLONE_OPTIONS for word in clone[2:-2]):
+        return None
+    if not (CURE_SOURCE_RE.fullmatch(clone[-2]) and CURE_PATH_RE.fullmatch(clone[-1])):
+        return None
+    return command if cure_command(command) and same_directory(command, clone[-1]) else None
+
+
+def cure_line(line, fenced=False):
     """(start, pin argument) of the CURE COMMAND (cure_command) on one physical line that is a CURE LINE, else None;
     `start` is the offset of the command's git word. Split on whitespace, a cure line is (a) the command alone, bare
     or as one code span (_unspanned), after at most one list marker (_list_marker) or one CURE_PREFIXES word (`$`, or
     then in any case); or (b) at most one list marker, one of CURE_LEADS (Make a scratch clone:, Clone or Run, as
-    written), then one code span that is the whole rest of the line and holds the command alone or ends with
-    CURE_CHAIN (&&, a word of its own, after at least one word) and the command. No other word is read, before the
+    written), then one code span that is the whole rest of the line and is exactly a cure chain (clone_chain: a
+    closed clone, CURE_CHAIN and the command in the clone's directory). A `fenced` line (inside a fence) is literal
+    text: no list marker opens it, and of CURE_PREFIXES only FENCE_PREFIXES (`$`). No other word is read, before the
     command or after it, so no English is."""
     words = [(found.start(), found.group(0)) for found in WORD_RE.finditer(line)]
     texts = [word for _, word in words]
     if not texts:
         return None
-    first = 1 if _list_marker(texts[0]) or texts[0].lower() in CURE_PREFIXES else 0
+    marker = not fenced and _list_marker(texts[0])
+    first = 1 if marker or texts[0].lower() in (CURE_PREFIXES & FENCE_PREFIXES if fenced else CURE_PREFIXES) else 0
     command = _unspanned(texts[first:], True)
     if command is None or not cure_command(command):
-        command, first = None, 1 if _list_marker(texts[0]) else 0
+        command, first = None, 1 if marker else 0
         for lead in CURE_LEADS:
-            if tuple(texts[first:first + len(lead)]) != lead:
-                continue
-            inner = _unspanned(texts[first + len(lead):], False) or []
-            chain = [index for index, word in enumerate(inner) if word == CURE_CHAIN]
-            if chain and chain[-1] == 0:
+            if tuple(texts[first:first + len(lead)]) == lead:
+                command = clone_chain(_unspanned(texts[first + len(lead):], False) or [])
                 break
-            command = inner[chain[-1] + 1:] if chain else inner
-            break
-    if not command or not cure_command(command):
+    if not command:
         return None
     start, word = words[len(words) - len(command)]
     return start + (1 if word.startswith("`") else 0), command[-1]
 
 
-def cure_lines(text):
-    """{line number: (line, (start, pin argument))} for the physical lines of a brief (`\\r` dropped) that are CURE
-    LINES (cure_line), so a line joined from others (p5_lines) is none."""
-    found = dict()
-    for number, line in enumerate(text.split("\n"), 1):
+def cure_characters(line):
+    """Whether a cure line's raw text is CURE_CHARACTERS alone: printable ASCII, with only space or tab between words,
+    so the words read are the bytes bash runs (no format character removed, no other space split on)."""
+    return all(character in CURE_CHARACTERS for character in line)
+
+
+def _comment_held(line, comment):
+    """(whether `line` holds any part of an HTML comment, whether one is open at its end), with `comment` open at its
+    start: a comment opens at HTML_COMMENT_OPEN, wherever it stands on its line, and closes at the next
+    HTML_COMMENT_CLOSE, on its line or a later one. Each marker is looked for once, left to right."""
+    held, position = comment, 0
+    while True:
+        if comment:
+            close = line.find(HTML_COMMENT_CLOSE, position)
+            if close < 0:
+                return held, True
+            comment, position = False, close + len(HTML_COMMENT_CLOSE)
+        else:
+            opening = line.find(HTML_COMMENT_OPEN, position)
+            if opening < 0:
+                return held, False
+            comment, held, position = True, True, opening + len(HTML_COMMENT_OPEN)
+
+
+def cure_lines(text, raw):
+    """{line number: (line, (start, pin argument))} for the physical lines of a brief that are CURE LINES. `text` is
+    the brief as every rule reads it (format characters removed, `\\r` dropped at a line's end) and `raw` the same
+    text before decode_brief removed them, line for line. A line is read on `raw`: it must be cure_characters alone
+    (a carriage return, a format character, a control character or a space other than space or tab makes it no cure
+    line) and a cure_line, read as a fence line inside a fence. A line that holds any part of an HTML comment
+    (_comment_held, fence or not) is none, and so is a line joined from others (p5_lines). The comment and fence
+    structure is read on `text`: a fence opens and closes as parse_blocks reads it, and a fence marker inside a
+    comment opens or closes nothing."""
+    found, opening, comment = dict(), None, False
+    for number, (line, physical) in enumerate(zip(text.split("\n"), raw.split("\n")), 1):
         line = line.rstrip("\r")
-        cure = cure_line(line)
+        held, comment = _comment_held(line, comment)
+        if held:
+            continue
+        if opening is not None:
+            if _fence_closes(line, opening):
+                opening = None
+                continue
+        else:
+            opened = FENCE_OPEN_RE.match(line)
+            if opened and not (opened.group(2)[0] == "`" and "`" in opened.group(3)):
+                opening = opened.group(2)
+                continue
+        cure = cure_line(physical, opening is not None) if cure_characters(physical) else None
         if cure is not None:
             found[number] = (line, cure)
     return found
@@ -2508,18 +2656,19 @@ def confirm_pins(line):
             if hex_ref(word) and any(character.isdecimal() for character in word)]
 
 
-def pin_reaches(text):
+def pin_reaches(text, raw):
     """(pins, reaches) for the whole brief, read over p5_lines. pins are the confirm-clause pins (confirm_pins).
     reaches are [(line, kind, subcommand, refs, cure, excerpt)] in brief order: kind "git" for a git command line
     (option_commands) whose subcommand is in REACH_REFS and whose words, from its argument run (argument_stop) split
     on whitespace (no pattern reads the run), give it refs (reach_refs), `cure` the pin argument when it is the
-    command of a cure line (cure_lines, on a line not joined from others, at the command's git word) and None
+    command of a cure line (cure_lines, read on `raw`, the text before format characters are removed, on a line not
+    joined from others, at the command's git word) and None
     otherwise; kind "submodule" for a submodule update --remote (submodule_remote); kind "prose", subcommand "" and
     refs [(ref, True)] for clone, check out, switch to or fetch that is not a git subcommand, followed within three
     words by a branch word (_prose_branch), for gh pr checkout, and for a web address that names a ref (web_refs). A
     reach that a prohibition governs (prohibition_objects: the code span, command line or prose reach that is its
     object) is not kept; every other reach is."""
-    pins, reaches, cures = [], [], cure_lines(text)
+    pins, reaches, cures = [], [], cure_lines(text, raw)
     for number, line in p5_lines(text):
         spans = code_spans(line)
         governed = prohibition_objects(line, spans)
@@ -2573,9 +2722,10 @@ def dispatch_commit(repo, ref):
 
 
 def cure_pins(names):
-    """The pins a cure must name: the value of each BRIEF-PIN line (names.brief_pins) that is CURE_PIN_DIGITS hex
-    digits. A REVIEWED HEAD line, a confirm clause and a shorter or 64-digit BRIEF-PIN give none."""
-    return [pin for pin in names.brief_pins if len(pin) == CURE_PIN_DIGITS]
+    """The pins a cure must name: the BRIEF-PIN value (names.brief_pins) when it is CURE_PIN_DIGITS hex digits, one
+    value, since rule_p3 refuses BRIEF-PIN lines that disagree (brief_pin_conflict). A REVIEWED HEAD line, a confirm
+    clause and a shorter or 64-digit BRIEF-PIN give none."""
+    return list(dict.fromkeys(pin for _, pin in names.brief_pins if len(pin) == CURE_PIN_DIGITS))
 
 
 def cure_matches(word, pins):
@@ -2596,14 +2746,14 @@ def cure_advice(pins):
 def rule_p5(names, row, repo):
     """P5 moving reach: the brief pins a revision (governing_pins: its pin lines' pins, else its confirm-clause pins
     from pin_reaches) and reaches it through a ref that can move (reach_moves) with no later cure: the command of a
-    cure line (cure_lines) whose pin argument is a cure pin (cure_pins: a 40-hex BRIEF-PIN value, cure_matches),
+    cure line (cure_lines) whose pin argument is the cure pin (cure_pins: the 40-hex BRIEF-PIN value, cure_matches),
     later in brief order. HARD for a git command line, ADVISORY for a prose reach, a web address or a submodule
     update --remote (REACH_SEVERITY); the message gives a line the author can copy (cure_advice). A FETCH_HEAD after
     a fetch or pull (FETCH_REACHES) is first given the last one's ref (its first refspec), so a checkout of it moves
     when that fetch did. Nothing else cures: no other command, place or pin. A dispatch ref that resolves in `repo`
     to a commit that is not a pin (pin_matches) is HARD; one that does not resolve is ADVISORY (dispatch_commit); a
     FETCH_HEAD that inherits a dispatch ref is not read again."""
-    clause_pins, reaches = pin_reaches(names.text)
+    clause_pins, reaches = pin_reaches(names.text, names.raw)
     pins = governing_pins([pin for _, pin in names.pins], clause_pins)
     if not pins:
         return []
@@ -2639,9 +2789,10 @@ def rule_p5(names, row, repo):
     return findings
 
 
-def preflight(text, row, repo):
-    """The preflight findings (P1 to P5) for a brief's text and its family's row; they apply to every family."""
-    names = PreflightText(text)
+def preflight(text, row, repo, raw):
+    """The preflight findings (P1 to P5) for a brief's text and its family's row; they apply to every family. `raw`
+    is the text before decode_brief removed format characters, which the P5 cure reads."""
+    names = PreflightText(text, raw)
     return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
         names, row, repo) + rule_p5(names, row, repo)
 
@@ -2659,7 +2810,7 @@ def evaluate(data, family, table, scoped=True, repo=None):
         raise CannotEvaluate("family {!r} is not in the capability table (known: {})".format(
             family, ", ".join(sorted(table))))
     text = decode_brief(data)
-    early = preflight(text, table[family], repo)
+    early = preflight(text, table[family], repo, data.decode("utf-8"))
     if can_execute(table[family]):
         early.sort(key=lambda finding: finding[2])
         hard = any(severity == "HARD" for _, severity, _, _, _ in early)
@@ -3285,9 +3436,9 @@ P5_SEPARATORS = (P5_PIN + "Do not edit the tree" + chr(0x2014) + "clone with `gi
                  P5_PIN + "Do not edit the tree;clone with `git clone --branch main <url> w`.\n",
                  P5_PIN + "Do not edit the tree and clone with `git clone --branch main <url> w`.\n")
 # a cure is a closed shape that reads no English: each line below follows a moving clone (P5_MOVING). The command
-# with the full 40-hex BRIEF-PIN value cures as the whole of one line, after at most one list marker, `$` or then,
-# bare or as one code span, in a fence or not; or ending one code span that is the whole rest of a line opening
-# with Make a scratch clone:, Clone or Run, alone or after &&
+# with the full 40-hex BRIEF-PIN value cures as the whole of one line, after at most one list marker, `$` or then
+# (in a fence only `$`), bare or as one code span; or ending one code span that is the whole rest of a line opening
+# with Make a scratch clone:, Clone or Run and that is exactly a closed clone, && and the command in its directory
 P5_MOVING = P5_PIN + "Clone with `git clone <url> w`.\n"
 P5_CURE_LINES = ("git -C w checkout --detach {0}\n", "`git -C w checkout --detach {0}`\n",
                  "   git -C w checkout --detach {0}   \n", "- git switch --detach {0}\n",
@@ -3296,7 +3447,63 @@ P5_CURE_LINES = ("git -C w checkout --detach {0}\n", "`git -C w checkout --detac
                  "```\n$ git -C w checkout --detach {0}\n```\n", "```sh\ngit -C w checkout --detach {0}\n```\n")
 P5_CURE_LEADS = ("Make a scratch clone: `git clone --no-hardlinks <url> w && git -C w checkout --detach {0}`\n",
                  "Clone `git clone <url> w && git -C w checkout --detach {0}`\n",
-                 "Run `git -C w checkout --detach {0}`\n", "3. Run `git -C w checkout --detach {0}`\n")
+                 "Run `git clone --quiet <url> w && git -C w switch --detach {0}`\n",
+                 "3. Run `git clone --no-checkout <url> w && git -C w checkout {0}`\n")
+# the words a cure may hold: a tab between words, a <name> placeholder or a relative path as the directory, every
+# clone option, a URL source with : or @, and the canonical line with an absolute source and a placeholder directory
+P5_CURE_WORDS = ("git -C w\tcheckout --detach {0}\n", "git -C <scratch>/r checkout --detach {0}\n",
+                 "git -C ../w.d/x_y-1 switch --detach {0}\n",
+                 "Run `git clone -q --no-hardlinks file:///srv/g.git w && git -C w checkout --detach {0}`\n",
+                 "Clone `git clone git@example.invalid:o/r.git w && git -C w switch --detach {0}`\n",
+                 "Make a scratch clone: `git clone --no-hardlinks /srv/w/repo <scratch>/r && git -C <scratch>/r "
+                 "checkout --detach {0}`\n")
+# a cure line is read on the raw text, printable ASCII with only space or tab between words: a no-break, em,
+# ideographic or other Unicode space, a control character (unit separator, vertical tab, form feed) or a carriage
+# return makes it no cure line (each one a looser reading splits as a space)
+P5_NOT_CURE_CHARACTERS = tuple(line.format(chr(code)) for line, code in (
+    ("git -C w checkout{}--detach {{0}}\n", 0xA0), ("git -C w{}checkout --detach {{0}}\n", 0x2003),
+    ("git{}-C w checkout --detach {{0}}\n", 0x3000), ("git -C w checkout{}--detach {{0}}\n", 0x1F),
+    ("git -C w checkout{}--detach {{0}}\n", 0x0B), ("git -C w checkout --detach{}{{0}}\n", 0x0C),
+    ("git -C w checkout --detach {{0}}{}\n", 0x0D)))
+# and before format characters are removed: a zero-width space, a soft hyphen, a byte order mark or a bidirectional
+# control inside a cure line makes it none (each one the text with format characters removed would cure)
+P5_NOT_CURE_FORMAT = tuple(line.format(chr(code)) for line, code in (
+    ("git -C w checkout --de{}tach {{0}}\n", 0x200B), ("git -C w checkout --detach {}{{0}}\n", 0x200B),
+    ("git -C w check{}out --detach {{0}}\n", 0xAD), ("{}git -C w checkout --detach {{0}}\n", 0xFEFF),
+    ("git -C w checkout --detach {}{{0}}\n", 0x202E)))
+# the -C word is a closed path: a shell metacharacter, a quote, ~, $ or a leading - in it makes the line no cure line
+# (each one the previous reading, any word with no backtick, cures)
+P5_NOT_CURE_DIRECTORIES = ("git -C # checkout --detach {0}\n", "git -C w;: checkout --detach {0}\n",
+                           "git -C w||exit checkout --detach {0}\n", "git -C w&&false checkout --detach {0}\n",
+                           "git -C w>/dev/null checkout --detach {0}\n", "git -C \"w\" checkout --detach {0}\n",
+                           "git -C ~/w checkout --detach {0}\n", "git -C $W checkout --detach {0}\n",
+                           "git -C -w checkout --detach {0}\n",
+                           "Run `git clone <url> w;: && git -C w;: checkout --detach {0}`\n")
+# a cure chain's code span is exactly the clone, && and the command: the command alone, a second chain link, a clone
+# with no directory and a command before another link are no cure chain (each one the previous reading, the command
+# after the last && or alone, cures)
+P5_NOT_CURE_CHAINS = ("Run `git -C w checkout --detach {0}`\n", "3. Run `git -C w checkout --detach {0}`\n",
+                      "Run `git clone <url> w && false && git -C w checkout --detach {0}`\n",
+                      "Make a scratch clone: `git clone <url> && git -C w checkout --detach {0}`\n",
+                      "Run `git clone <url> w && git log && git -C w checkout --detach {0}`\n")
+# the chain's clone carries only the listed options, its source is closed, and the command runs in its directory
+P5_NOT_CURE_CLONE_OPTIONS = ("Run `git clone --depth=1 <url> w && git -C w checkout --detach {0}`\n",
+                             "Run `git clone --single-branch <url> w && git -C w checkout --detach {0}`\n",
+                             "Run `git clone --branch=main <url> w && git -C w checkout --detach {0}`\n")
+P5_NOT_CURE_SOURCES = ("Run `git clone <url>;id w && git -C w checkout --detach {0}`\n",
+                       "Run `git clone ~/g.git w && git -C w checkout --detach {0}`\n",
+                       "Run `git clone $SRC w && git -C w checkout --detach {0}`\n")
+P5_NOT_CURE_ELSEWHERE = ("Clone `git clone <url> w && git -C x checkout --detach {0}`\n",
+                         "Clone `git clone <url> w && git checkout --detach {0}`\n")
+# a line inside an HTML comment is no cure line, and a comment closed on its line hides nothing after it
+P5_NOT_CURE_COMMENT = ("<!--\ngit -C w checkout --detach {0}\n-->\n",
+                       "<!-- the old step:\n`git -C w checkout --detach {0}`\n-->\n")
+P5_CURE_AFTER_COMMENT = "<!-- a note -->\ngit -C w checkout --detach {0}\n"
+# a fence line is literal text: a diff's removed or added line, any other list marker and then open no cure there
+P5_NOT_CURE_FENCE = ("```diff\n- git -C w checkout --detach {0}\n```\n",
+                     "```diff\n+ git -C w checkout --detach {0}\n```\n", "```\n* git -C w checkout --detach {0}\n```\n",
+                     "~~~\n1. git -C w checkout --detach {0}\n~~~\n",
+                     "```sh\nthen git -C w checkout --detach {0}\n```\n")
 # a cure in any other place cures nothing, whatever the words around it: a stop or a word after it, a word or a
 # second prefix before it, emphasis, another quote or a sentence (the first six a looser reading would cure)
 P5_NOT_CURE_LINES = ("git -C w checkout --detach {0}.\n", "Then run `git -C w checkout --detach {0}`\n",
@@ -3324,6 +3531,22 @@ P5_CURE_PIN_DIGITS = "BRIEF-PIN: {0:.12}\nClone with `git clone <url> w`.\ngit -
 P5_CURE_CONFIRM = "Clone with `git clone <url> w`.\ngit -C w checkout --detach {0}\nConfirm HEAD is {0}.\n"
 P5_CURE_EXACT = (P5_MOVING + "git -C w checkout --detach {0:.12}\n", P5_MOVING + "git -C w checkout --detach {2}\n")
 P5_CURE_OTHER = P5_MOVING + "git -C w checkout --detach " + "1" * 40 + "\n"
+# pin lines must agree, so a cure names the brief's one pin ({1} is a second fixture commit): a second BRIEF-PIN value
+# (on a line of its own, in a fence, indented or after the cure) or a REVIEWED HEAD that is neither the BRIEF-PIN value
+# nor a prefix of it, character for character (another commit, a short id of another commit, the pin in upper case),
+# cannot be evaluated; a REVIEWED HEAD that is the value or a prefix of it agrees
+P5_PIN_CONFLICTS = (P5_PIN + "BRIEF-PIN: {1}\nClone with `git clone <url> w`.\ngit -C w checkout --detach {1}\n",
+                    P5_PIN + "```\nBRIEF-PIN: {1}\n```\nClone with `git clone <url> w`.\ngit -C w checkout --detach "
+                             "{1}\n",
+                    P5_PIN + "    BRIEF-PIN: {1}\nClone with `git clone <url> w`.\ngit -C w checkout --detach {1}\n",
+                    P5_MOVING + "git -C w checkout --detach {1}\nBRIEF-PIN: {1}\n")
+P5_REVIEWED_CONFLICTS = ("REVIEWED HEAD: {0}\nBRIEF-PIN: {1}\nClone with `git clone <url> w`.\ngit -C w checkout "
+                         "--detach {1}\n",
+                         "BRIEF-PIN: {1}\nREVIEWED HEAD: {0:.12}\nClone with `git clone <url> w`.\ngit -C w checkout "
+                         "--detach {1}\n",
+                         "REVIEWED HEAD: {2}\n" + P5_MOVING + "git -C w checkout --detach {0}\n")
+P5_REVIEWED_AGREE = ("REVIEWED HEAD: {0:.12}\n" + P5_MOVING + "git -C w checkout --detach {0}\n",
+                     "REVIEWED HEAD: {0}\n" + P5_MOVING + "git -C w checkout --detach {0}\n")
 # merge, rebase, restore --source, archive and a path restore reach a ref and never cure; a reset reaches its commit
 # in any mode; a relative form of HEAD is fixed
 P5_TREE_DENY = (P5_PIN + "Use `git checkout --detach {0} && git merge origin/main`.\n",
@@ -4160,9 +4383,11 @@ def self_test(report_path=None):
              "1234567abc.\n", ""),
             # many prohibited objects; many cure lines, each after a clone, and one cure line whose code span chains
             # many clones; one line joined from many backslash continuations, and one from many git words at line
-            # ends; many quoted option values
+            # ends; many quoted option values; many HTML comment markers on one line and over many lines, with fence
+            # markers between them
             ("perf/p5-prohibition-object-linear", "never run `git clone -b x` and ", "Confirm HEAD is 1234567abc.\n",
              ""),
+            ("perf/p5-cure-comment-linear", "<!-- a --> <!--\n```\n-->\n```\n", "Confirm HEAD is 1234567abc.\n", ""),
             ("perf/p5-cure-line-linear", "git clone x w\n`git -C w checkout --detach 1234567abc`\n", "Confirm HEAD is "
              "1234567abc.\n", ""),
             ("perf/p5-cure-chain-linear", "git clone x w && ", "Confirm HEAD is 1234567abc.\nRun `",
@@ -4805,9 +5030,50 @@ def self_test(report_path=None):
         # the cure: its closed shapes cure, every other place, command and pin cures nothing
         check("preflight/p5-cure-line", [p5(P5_MOVING + text) for text in P5_CURE_LINES],
               [(0, [])] * len(P5_CURE_LINES))
-        check("preflight/p5-cure-lead", ([p5(P5_PIN + text) for text in P5_CURE_LEADS[:2]],
+        check("preflight/p5-cure-lead", ([p5(P5_PIN + text) for text in P5_CURE_LEADS],
                                          [p5(P5_MOVING + text) for text in P5_CURE_LEADS]),
-              ([(0, [])] * 2, [(0, [])] * len(P5_CURE_LEADS)))
+              ([(0, [])] * len(P5_CURE_LEADS), [(0, [])] * len(P5_CURE_LEADS)))
+        check("preflight/p5-cure-words", [p5(P5_MOVING + text) for text in P5_CURE_WORDS],
+              [(0, [])] * len(P5_CURE_WORDS))
+        check("preflight/p5-cure-characters", [p5(P5_MOVING + text) for text in P5_NOT_CURE_CHARACTERS],
+              [refused] * len(P5_NOT_CURE_CHARACTERS))
+        check("preflight/p5-cure-raw", [p5(P5_MOVING + text) for text in P5_NOT_CURE_FORMAT],
+              [refused] * len(P5_NOT_CURE_FORMAT))
+        check("preflight/p5-cure-directory", [p5(P5_MOVING + text) for text in P5_NOT_CURE_DIRECTORIES],
+              [refused] * len(P5_NOT_CURE_DIRECTORIES))
+        check("preflight/p5-cure-chain", [p5(P5_MOVING + text) for text in P5_NOT_CURE_CHAINS],
+              [refused] * len(P5_NOT_CURE_CHAINS))
+        check("preflight/p5-cure-clone-options", [p5(P5_MOVING + text) for text in P5_NOT_CURE_CLONE_OPTIONS],
+              [refused] * len(P5_NOT_CURE_CLONE_OPTIONS))
+        check("preflight/p5-cure-clone-source", [p5(P5_MOVING + text) for text in P5_NOT_CURE_SOURCES],
+              [refused] * len(P5_NOT_CURE_SOURCES))
+        check("preflight/p5-cure-same-directory", [p5(P5_MOVING + text) for text in P5_NOT_CURE_ELSEWHERE],
+              [refused] * len(P5_NOT_CURE_ELSEWHERE))
+        check("preflight/p5-cure-comment", ([p5(P5_MOVING + text) for text in P5_NOT_CURE_COMMENT],
+                                            p5(P5_MOVING + P5_CURE_AFTER_COMMENT)),
+              ([refused] * len(P5_NOT_CURE_COMMENT), (0, [])))
+        check("preflight/p5-cure-fence", [p5(P5_MOVING + text) for text in P5_NOT_CURE_FENCE],
+              [refused] * len(P5_NOT_CURE_FENCE))
+        # pin lines that disagree cannot be evaluated, and the message names both lines
+        check("preflight/p5-pin-conflict", [p5(text) for text in P5_PIN_CONFLICTS],
+              ["CannotEvaluate"] * len(P5_PIN_CONFLICTS))
+        check("preflight/p5-reviewed-head-conflict", ([p5(text) for text in P5_REVIEWED_CONFLICTS],
+                                                      [p5(text) for text in P5_REVIEWED_AGREE]),
+              (["CannotEvaluate"] * len(P5_REVIEWED_CONFLICTS), [(0, [])] * len(P5_REVIEWED_AGREE)))
+
+        def conflict_named():
+            """Whether each pin-conflict message names both lines: the first BRIEF-PIN line and the other one."""
+            named = []
+            for text, lines in ((P5_PIN_CONFLICTS[3], "lines 1 and 4:"), (P5_REVIEWED_CONFLICTS[0], "lines 1 and 2:")):
+                try:
+                    evaluate(text.format(head, other, head.upper()).encode("utf-8"), "alpha",
+                             parse_table(TABLE_FIXTURE.encode("utf-8")), True, repo)
+                    named.append(False)
+                except CannotEvaluate as exc:
+                    named.append(str(exc).startswith(lines))
+            return named
+
+        check("preflight/p5-pin-conflict-named", conflict_named(), [True, True])
         check("preflight/p5-cure-not-line", [p5(P5_MOVING + text) for text in P5_NOT_CURE_LINES],
               [refused] * len(P5_NOT_CURE_LINES))
         check("preflight/p5-cure-not-lead", [p5(P5_MOVING + text) for text in P5_NOT_CURE_LEADS],
@@ -5056,15 +5322,28 @@ def self_test(report_path=None):
         # each element of the cure shape patched out or loosened flips its rows: any git command cures, no `$` or
         # then, no list marker, no code span, no lead, no &&, a cure anywhere on its line, a joined line, a cure
         # before the reach, any pin line's or BRIEF-PIN's value, a prefix or another case, and no line to copy
-        real_cure_line, real_pin_reaches = cure_line, pin_reaches
+        real_cure_line, real_pin_reaches, real_cure_lines = cure_line, pin_reaches, cure_lines
 
-        def cure_anywhere(line):
+        def cure_anywhere(line, fenced=False):
             """A looser reading: the words before the cure command's git and a stop or emphasis after it are
             dropped, so a cure inside a sentence counts."""
             at = line.find("git ")
             at -= 1 if at > 0 and line[at - 1] == "`" else 0
-            found = real_cure_line(line[at:].rstrip(".*")) if at >= 0 else None
+            found = real_cure_line(line[at:].rstrip(".*"), fenced) if at >= 0 else None
             return found and (found[0] + at, found[1])
+
+        def cure_among_words(line, fenced=False):
+            """A looser reading still: the cure command's words anywhere among the line's words, each with backticks,
+            emphasis and closing punctuation dropped, so any words before or after it, and any lead, count."""
+            words = [(found.start(), found.group(0)) for found in WORD_RE.finditer(line)]
+            for index, (start, word) in enumerate(words):
+                if word.strip("`*_.,;:") != "git":
+                    continue
+                for size in (6, 5, 4):
+                    command = [text.strip("`*_.,;:") for _, text in words[index:index + size]]
+                    if len(command) == size and cure_command(command):
+                        return start + word.find("git"), command[-1]
+            return None
 
         check("revert/p5-cure-command-red", *flip(
             [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_COMMANDS],
@@ -5082,24 +5361,86 @@ def self_test(report_path=None):
         check("revert/p5-cure-leads-red", *flip(
             [lambda text=text: p5(P5_MOVING + text) for text in P5_CURE_LEADS], [refused] * 4, CURE_LEADS=()))
         check("revert/p5-cure-chain-red", *flip(
-            [lambda text=text: p5(P5_PIN + text) for text in P5_CURE_LEADS[:2]], [refused] * 2, CURE_CHAIN="\0"))
+            [lambda text=text: p5(P5_PIN + text) for text in P5_CURE_LEADS], [refused] * 4, CURE_CHAIN="\0"))
         check("revert/p5-cure-whole-line-red", *flip(
             [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_LINES[:6]], [(0, [])] * 6,
             cure_line=cure_anywhere))
+        # the rest of the misplaced cures (a word after the command, a space inside its span, a sentence), the
+        # misplaced leads and a confirm-clause pin each cure under a looser reading
+        check("revert/p5-cure-not-line-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_LINES[6:]],
+            [(0, [])] * len(P5_NOT_CURE_LINES[6:]), cure_line=cure_among_words))
+        check("revert/p5-cure-not-lead-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_LEADS],
+            [(0, [])] * len(P5_NOT_CURE_LEADS), cure_line=cure_among_words))
+        check("revert/p5-cure-confirm-red", *flip(
+            [lambda: p5(P5_CURE_CONFIRM)], [(0, [])], cure_pins=lambda names: [
+                pin for pin in real_pin_reaches(names.text, names.raw)[0] if len(pin) == CURE_PIN_DIGITS]))
         check("revert/p5-cure-physical-line-red", *flip(
-            [lambda: p5(P5_CURE_JOINED)], [(0, [])], cure_lines=lambda text: dict(
+            [lambda: p5(P5_CURE_JOINED)], [(0, [])], cure_lines=lambda text, raw: dict(
                 (number, (line, cure_line(line))) for number, line in p5_lines(text) if cure_line(line))))
         check("revert/p5-cure-order-red", *flip(
             [lambda: p5(P5_CURE_BEFORE)], [(0, [])],
-            pin_reaches=lambda text: (lambda found: (found[0], found[1][::-1]))(real_pin_reaches(text))))
+            pin_reaches=lambda text, raw: (lambda found: (found[0], found[1][::-1]))(real_pin_reaches(text, raw))))
         check("revert/p5-cure-brief-pin-red", *flip(
             [lambda: p5(P5_CURE_BRIEF_PIN)], [(0, [])],
             cure_pins=lambda names: [pin for _, pin in names.pins if len(pin) == CURE_PIN_DIGITS]))
         check("revert/p5-cure-pin-digits-red", *flip(
-            [lambda: p5(P5_CURE_PIN_DIGITS)], [(0, [])], cure_pins=lambda names: list(names.brief_pins)))
+            [lambda: p5(P5_CURE_PIN_DIGITS)], [(0, [])], cure_pins=lambda names: [pin for _, pin in names.brief_pins]))
         check("revert/p5-cure-exact-red", *flip(
             [lambda text=text: p5(text) for text in P5_CURE_EXACT], [(0, [])] * 2, cure_matches=pin_matches))
         check("revert/p5-cure-advice-red", *flip([cure_given], [([False], [False] * 2)], cure_advice=lambda pins: ""))
+        # the previous reading of each new element: the text with format characters removed, any character, any -C
+        # word or source with no backtick, the command after the last && or alone, any clone option, any directory,
+        # no HTML comment, a comment that never closes, and a fence line read as any line
+        check("revert/p5-cure-characters-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_CHARACTERS],
+            [(0, [])] * len(P5_NOT_CURE_CHARACTERS), cure_characters=lambda line: True))
+        check("revert/p5-cure-raw-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_FORMAT],
+            [(0, [])] * len(P5_NOT_CURE_FORMAT), cure_lines=lambda text, raw: real_cure_lines(text, text)))
+        check("revert/p5-cure-directory-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_DIRECTORIES],
+            [(0, [])] * len(P5_NOT_CURE_DIRECTORIES), CURE_PATH_RE=re.compile(r"[^`]++")))
+
+        def after_last_chain(words):
+            """The previous reading of a lead's code span: the cure command alone, or after its last &&."""
+            command = words[len(words) - words[::-1].index(CURE_CHAIN):] if CURE_CHAIN in words else words
+            return command if cure_command(command) else None
+
+        check("revert/p5-cure-clone-chain-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_CHAINS],
+            [(0, [])] * len(P5_NOT_CURE_CHAINS), clone_chain=after_last_chain))
+        check("revert/p5-cure-clone-options-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_CLONE_OPTIONS],
+            [(0, [])] * len(P5_NOT_CURE_CLONE_OPTIONS),
+            CURE_CLONE_OPTIONS=CURE_CLONE_OPTIONS | {"--depth=1", "--single-branch", "--branch=main"}))
+        check("revert/p5-cure-clone-source-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_SOURCES],
+            [(0, [])] * len(P5_NOT_CURE_SOURCES), CURE_SOURCE_RE=re.compile(r"[^`]++")))
+        check("revert/p5-cure-same-directory-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_ELSEWHERE],
+            [(0, [])] * len(P5_NOT_CURE_ELSEWHERE), same_directory=lambda command, directory: True))
+        check("revert/p5-cure-comment-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_COMMENT],
+            [(0, [])] * len(P5_NOT_CURE_COMMENT), HTML_COMMENT_OPEN="\0"))
+        check("revert/p5-cure-comment-close-red", *flip(
+            [lambda: p5(P5_MOVING + P5_CURE_AFTER_COMMENT)], [refused], HTML_COMMENT_CLOSE="\0"))
+        check("revert/p5-cure-fence-red", *flip(
+            [lambda text=text: p5(P5_MOVING + text) for text in P5_NOT_CURE_FENCE],
+            [(0, [])] * len(P5_NOT_CURE_FENCE), cure_line=lambda line, fenced=False: real_cure_line(line)))
+        # pin lines that disagree are read as before (every BRIEF-PIN value a cure pin, any REVIEWED HEAD), a
+        # REVIEWED HEAD must equal the BRIEF-PIN value, and the message names neither line
+        check("revert/p5-pin-conflict-red", *flip(
+            [lambda text=text: p5(text) for text in P5_PIN_CONFLICTS], [(0, [])] * len(P5_PIN_CONFLICTS),
+            brief_pin_conflict=lambda names: None))
+        check("revert/p5-reviewed-head-conflict-red", *flip(
+            [lambda text=text: p5(text) for text in P5_REVIEWED_CONFLICTS], [(0, [])] * len(P5_REVIEWED_CONFLICTS),
+            pins_agree=lambda value, pin: True))
+        check("revert/p5-reviewed-head-prefix-red", *flip(
+            [lambda: p5(P5_REVIEWED_AGREE[0])], ["CannotEvaluate"], pins_agree=lambda value, pin: value == pin))
+        check("revert/p5-pin-conflict-named-red", *flip([conflict_named], [[False, False]],
+                                                        pin_conflict_message=lambda conflict: ""))
         real_reach_refs = reach_refs
         check("revert/p5-tree-reaches-red", *flip(
             [lambda text=text: p5(text) for text in P5_TREE_DENY], [(0, [])] * 4,
@@ -5160,7 +5501,7 @@ def self_test(report_path=None):
             CLONE_REVISION_OPTIONS=frozenset()))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 159)
+    check("revert/every-flip-ran", len(flipped), 176)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -5195,10 +5536,14 @@ def self_test(report_path=None):
           "FETCH_HEAD after a moving fetch, a merge, rebase, restore --source, archive or path restore of a "
           "branch, a reset in any mode, a reach split by a backslash or after a git word at a line's end, a "
           "global option quoted with a space) with no later cure line (git checkout or switch --detach, or git -C "
-          "<dir> checkout, of the full 40-hex BRIEF-PIN value, as the whole of one line after at most one list "
-          "marker, `$` or then, bare or as one code span, or ending one code span that is the rest of a line "
-          "opening with Make a scratch clone:, Clone or Run; any other command, place, pin or joined line cures "
-          "nothing, and a cure cures only the reaches before it), gives a cure line to copy in the refusal, judges "
+          "<dir> checkout, with a closed -C path, of the brief's one full 40-hex BRIEF-PIN value, as the whole of "
+          "one line after at most one list marker, `$` or then (in a fence only `$`), bare or as one code span, or "
+          "ending one code span that is the rest of a line opening with Make a scratch clone:, Clone or Run and is "
+          "exactly a closed clone, && and the command in the clone's directory; a line read before format "
+          "characters are removed that is not printable ASCII with space or tab between words, a line in an HTML "
+          "comment, and any other command, place, pin or joined line cure nothing, and a cure cures only the "
+          "reaches before it; pin lines that disagree exit 2 naming both lines), gives a cure line to copy in the "
+          "refusal, judges "
           "every reach that is not the object of a prohibition (the prohibited verb plain or in emphasis; a "
           "negation before another verb, a prohibition word in a code span or after `=`, a second listed command "
           "line and a later clause are judged), and prints one reached from prose, gh pr checkout, a web address "
@@ -5207,7 +5552,7 @@ def self_test(report_path=None):
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
-          "detects the previous revisions' and loses its canary with each guard patched out; 36 repeated shapes "
+          "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
           "each evaluate in linear time at 1 MiB in a capped child that must exit 0; scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
           "missing, non-regular, backwards-range and unknown-family input exits 2); execution set reconciled "
