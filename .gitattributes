@@ -14,6 +14,8 @@
 .aiqt/core/gates/canon-vectors/vectors.toml text eol=lf
 .aiqt/core/gates/manifest.toml text eol=lf
 .aiqt/core/hooks/ORCHESTRATION.md text eol=lf
+.aiqt/core/hooks/githooks/README.md text eol=lf
+.aiqt/core/hooks/githooks/commit-msg text eol=lf
 .aiqt/core/hooks/manifest.toml text eol=lf
 .aiqt/core/hooks/preview.toml text eol=lf
 .aiqt/core/hooks/scripts/aiqt_hooks.py text eol=lf
