@@ -2683,20 +2683,40 @@ _PSM_ORACLE_ROWS = (
     ("(psm-o11) grep -ie with the bracket idiom", "ps -eo pid,args | grep -ie @B@", False),
     ("(psm-o12) grep --regexp= with the bracket idiom", "ps -eo pid,args | grep --regexp=@B@", False),
     ("(psm-o13) pgrep -af with the bracket idiom", "pgrep -af @B@; :", False))
+# Wall seconds each oracle row may run under real bash. _load_bound.run refuses bash as a launcher, so the
+# rows keep this plain bound, and an overrun is reported as cannot-evaluate (exit 2) rather than raised.
+_PSM_ORACLE_BOUND = 30
 
 
-def _psm_oracle(failures, handler):
-    """Run each _PSM_ORACLE_ROWS command under real bash with a fresh random pattern, and require the hook to
-    deny exactly the commands whose check matched its own shell, and each to match as the row states."""
+def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound=_PSM_ORACLE_BOUND):
+    """Run each oracle row (rows, default _PSM_ORACLE_ROWS) under real bash with a fresh random pattern, and
+    require the hook to deny exactly the commands whose check matched its own shell, and each to match as the
+    row states. A row that runs past bound wall seconds is not judged: it goes to cannot_evaluate with its
+    label, never a pass, unless the output captured before the stop already shows a match the hook or the
+    row contradicts (each row prints only when its check matched), which is a failure."""
     if shutil.which("bash") is None or shutil.which("ps") is None or shutil.which("pidwait") is None:
         failures.append("(psm-oracle) the real-bash oracle needs bash, ps and pidwait on PATH")
         return
-    for label, template, expected in _PSM_ORACLE_ROWS:
+    for label, template, expected in rows:
         pattern = "zq" + os.urandom(6).hex()
         command = template.replace("@P@", pattern).replace("@B@", "[" + pattern[0] + "]" + pattern[1:])
         denied = _decision(handler, command) == "deny"
-        run = subprocess.run(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True, timeout=30, check=False)
+        try:
+            run = subprocess.run(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, timeout=bound, check=False)
+        except subprocess.TimeoutExpired as exc:
+            # On POSIX the partial streams are bytes (or None) even under text=True.
+            partial = (exc.stdout or b"").decode("utf-8", "replace")
+            partial_err = (exc.stderr or b"").decode("utf-8", "replace")
+            if partial.strip() != "" and not (denied and expected):
+                failures.append("{}: real bash matched before its {} s bound stopped it, but hook deny {} "
+                                "(expected {}), stdout {!r}, stderr {!r}".format(
+                                    label, bound, denied, expected, partial[:200], partial_err[:200]))
+            else:
+                cannot_evaluate.append("{}: real bash did not finish within its {} s bound, not judged "
+                                       "(hook deny {}), stdout {!r}, stderr {!r}".format(
+                                           label, bound, denied, partial[:200], partial_err[:200]))
+            continue
         matched = run.stdout.strip() != ""
         if denied != matched or matched != expected:
             failures.append("{}: hook deny {} but real bash matched {} (expected {}), exit {}, stdout {!r}, "
@@ -2704,8 +2724,35 @@ def _psm_oracle(failures, handler):
                                                  run.stdout[:200], run.stderr[:200]))
 
 
-def _test_pgrep_self_match(failures):
-    """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command. Each deny row
+def _psm_oracle_overrun_failures(handler, cannot_evaluate):
+    """(psm-overrun) The oracle's overrun handling, with a 3 s bound injected: a silent row past the bound is
+    cannot-evaluate under its own label and no failure; a row that printed its match before the stop, which
+    the hook allows, is a failure; and a completed row whose match contradicts the hook is still a failure.
+    Each long row ends in exec sleep, so the stop kills the sleep itself and leaves no process behind. A row
+    that should fail but whose output had not arrived when the injected bound fired (a loaded host) is
+    itself cannot-evaluate, never a pass and never a failure of the handling."""
+    out = []
+    for label, template, want_failed, want_unjudged in (
+            ("(psm-ov-silent) silent past the bound", "exec sleep 30", 0, 1),
+            ("(psm-ov-match) matched before the bound", "echo MATCHED; exec sleep 30", 1, 0),
+            ("(psm-ov-done) completed and contradicting the hook", "echo MATCHED; :", 1, 0)):
+        failed, unjudged = [], []
+        _psm_oracle(failed, unjudged, handler, rows=((label, template, False),), bound=3)
+        named = all(line.startswith(label + ":") for line in failed + unjudged)
+        if want_failed and (len(failed), len(unjudged), named) == (0, 1, True):
+            cannot_evaluate.append("(psm-overrun-unjudged) {}: the injected bound fired before the row's output "
+                                   "arrived, not judged: {}".format(label, unjudged[0]))
+            continue
+        if (len(failed), len(unjudged), named) != (want_failed, want_unjudged, True):
+            out.append("(psm-overrun) {}: expected {} failure(s) and {} cannot-evaluate entry(ies) under the "
+                       "row label, got failures {!r} and cannot-evaluate {!r}".format(
+                           label, want_failed, want_unjudged, failed, unjudged))
+    return out
+
+
+def _test_pgrep_self_match(failures, cannot_evaluate):
+    """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command, and an oracle row
+    that overruns its bound goes to cannot_evaluate. Each deny row
     must also be red with the hook disabled (its detector _psm_hit patched to find nothing), so the row pins
     this hook's decision, and each bracket idiom row must be red with the idiom exception removed."""
     handler = aiqt_hooks.pgrep_self_match
@@ -2716,7 +2763,8 @@ def _test_pgrep_self_match(failures):
         if got != want or spent > _PSM_TIMED_BOUND:
             failures.append("{}: expected {} within {} s of CPU, got {} in {:.3f} s".format(
                 label, want, _PSM_TIMED_BOUND, got, spent))
-    _psm_oracle(failures, handler)
+    _psm_oracle(failures, cannot_evaluate, handler)
+    failures.extend(_psm_oracle_overrun_failures(handler, cannot_evaluate))
     for label, command in _PSM_DENY_ROWS:
         got = _decision(handler, command)
         if got != "deny":
@@ -25844,7 +25892,7 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
-        _test_pgrep_self_match(failures)
+        _test_pgrep_self_match(failures, cannot_evaluate)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
@@ -26801,8 +26849,8 @@ def _main_isolated(monitor):
         return 1
     if verdict == 2:
         print("SELF-TEST CANNOT-EVALUATE: a load-tolerant bound fired (a heuristic stall or the load-adjusted "
-              "budget, never a proven hang) or the hook production deadline expired on every launch, so "
-              "these cases were not judged:")
+              "budget, never a proven hang), the hook production deadline expired on every launch, or a "
+              "real-bash oracle row ran past its wall-clock bound, so these cases were not judged:")
         for line in cannot_evaluate:
             print("  - " + line)
         return 2
