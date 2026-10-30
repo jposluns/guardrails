@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed applicability gate (GD-99): every rule is tagged, from a controlled vocabulary.
+"""Fail-closed applicability gate: every rule is tagged, from a controlled vocabulary.
 
 The vocabulary (conditions + profiles) is .aiqt/core/applicability.toml; the per-rule assignments
 (corpus-id -> conditions) are .aiqt/core/applies.toml. This gate enforces BIDIRECTIONAL coverage against

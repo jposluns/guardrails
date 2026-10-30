@@ -691,7 +691,7 @@ def main():
 #       each fail closed (exit 2): the load_gates_manifest shape validation,
 #   (p) a roster whose ONLY occurrence of a manifest script is inside an inline comment does not
 #       enumerate that script, so its manifest entry reads as a linkage claim with no roster step and
-#       fails closed (exit 2): proves the F-148 comment strip (the quoted-argument / heredoc residual
+#       fails closed (exit 2): proves the roster inline-comment strip (the quoted-argument / heredoc residual
 #       stays a disclosed limit and is deliberately not asserted here).
 #   (q) a tree with published preview hooks and a matching declaration lists every preview at the top
 #       level and per rule, and a rule named only by a preview stays prose-only (a preview is never a
@@ -1099,7 +1099,7 @@ def self_test_main():
             failures.append("an unknown [[gate]] entry key expected exit 2 (fail-closed)")
 
         # (p) A roster whose ONLY occurrence of a manifest script is inside a TRAILING inline comment does
-        #     not enumerate that script (the F-148 strip), so its manifest entry reads as a linkage claim
+        #     not enumerate that script (the inline-comment strip), so its manifest entry reads as a linkage claim
         #     with no roster step and fails closed (exit 2). Without the strip the commented token would
         #     enumerate and the tree would read clean, so this case proves the tightened parser. Added to
         #     EVERY roster file so the sides stay symmetric and the no-roster (not the asymmetry) check
@@ -1118,7 +1118,7 @@ def self_test_main():
                          encoding="utf-8")
         if run_quiet(pinl, check=True) != 2:
             failures.append("a manifest script named only in a roster inline comment must not enumerate "
-                            "(F-148 strip); expected exit 2 (a linkage claim with no roster step)")
+                            "(inline-comment strip); expected exit 2 (a linkage claim with no roster step)")
         # (q) Published preview hooks with a matching declaration: listed at the top level and per rule,
         #     and a rule named only by a preview keeps its prose-only status.
         qtree = _add_previews(_build(tmp / "previews"))

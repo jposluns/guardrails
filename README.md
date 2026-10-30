@@ -9,7 +9,7 @@ main, and each push to main, against the rules the gates cite, a subset of the s
 and built to be read.
 
 <!-- COUNTS-PROOF:BEGIN (generated) -->
-**132 rules. 120 CI gates that check this repository. 31 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
+**132 rules. 120 CI gates that check this repository. 32 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
 <!-- COUNTS-PROOF:END -->
 
 The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
@@ -27,7 +27,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 | Piece | In one breath | Tag |
 | --- | --- | --- |
 | **The standard** | 132 clear, single-behaviour rules across the four AIQT facets, plus a security floor covering confidentiality, integrity, availability, and privacy. | Rules |
-| **Technical controls** | 120 CI gates that check this repository and 31 Claude Code hooks shipped as an opt-in plugin (23 blocking, 8 warning). Today 41 of the 132 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
+| **Technical controls** | 120 CI gates that check this repository and 32 Claude Code hooks shipped as an opt-in plugin (24 blocking, 8 warning). Today 41 of the 132 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
 | **Generated adapters** | The Claude, AGENTS.md, Gemini, Copilot, and Cursor surfaces are generated from one source and drift-checked in CI. | Generated |
 | **A standards crosswalk** | Mappings from the rules to 17 pinned external control catalogues, for teams that report against a framework. | Mappings |
 <!-- COUNTS-TABLE:END -->
@@ -48,7 +48,7 @@ everything Claude Code loads at the start of a session under 150,000 characters 
 the loader of the pinned Claude Code build the gate models (2.1.287, pinned with its binary hash in
 `.aiqt/core/instruction-budget.toml`) carries its own 120,000-character check on loaded file contents,
 a total limit below that figure (Claude Code behaviour, which can change, not a pack guarantee), so
-budget to 120,000. Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the committed ratchet, 134,499 UTF-16 code units, the unit the budget gate counts.
+budget to 120,000. Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the committed ratchet, 134,991 UTF-16 code units, the unit the budget gate counts.
 The counting rules, the totals the gate prints, and what not to load twice are
 in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
 
