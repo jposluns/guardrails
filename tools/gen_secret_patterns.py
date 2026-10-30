@@ -87,7 +87,7 @@ GENSRC_OUTPUTS = (
 def _load_check_secrets(root):
     """Import tools/check_secrets.py and return a dict of the single-sourced pattern material: the
     (raw_pattern_string, label) list for PREFIXES, the raw .pattern strings of ASSIGN, PLACEHOLDER, and
-    (GD-121) ENTROPY_ASSIGN, the entropy length bounds and threshold, and the credential/metadata
+    ENTROPY_ASSIGN, the entropy length bounds and threshold, and the credential/metadata
     component sets rendered as SORTED TUPLES for determinism. An import failure (an unreadable or broken
     source) raises, and run() maps it to exit 2, so the generator never renders a region from a source it
     could not read."""
