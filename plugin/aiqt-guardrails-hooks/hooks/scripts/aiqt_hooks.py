@@ -9529,8 +9529,13 @@ def _take_snapshot(repo, top, verb):
             return ("fail", "the repository index path could not be resolved to seed the staged snapshot "
                             "(git rev-parse --git-path index failed)")
         real_index = ri.stdout.strip()
-        if real_index and os.path.exists(real_index):
-            shutil.copyfile(real_index, tmp_index)  # else: git creates a fresh temp index on add --all
+        if real_index and os.path.exists(real_index):  # else: git creates a fresh temp index on add --all
+            # The real index is a path the guarded actor can replace, so it is opened by _orch_open_checked:
+            # a FIFO, a device or a directory there fails the snapshot at once. shutil.copyfile refused a FIFO
+            # only at its own stat, so one swapped in after that stat blocked its open until the PreToolUse
+            # deadline failed the guard closed. The temp index is an exclusive create in the fresh tmpdir.
+            with open(_orch_open_checked(real_index, os.O_RDONLY), "rb") as src, open(tmp_index, "xb") as dst:
+                shutil.copyfileobj(src, dst)
         env = {"GIT_INDEX_FILE": tmp_index}
         # ROUND-2 FINDING 5: capture the PURE STAGED (index) tree NOW, BEFORE `git add --all` overlays the
         # worktree over the seeded index. A blob staged but differing from - or absent from - the worktree is
@@ -9650,7 +9655,10 @@ def _write_recovery_ledger(repo, top, verb, info):
     an OSError) is swallowed to False (the ref itself is the recovery point; the ledger is a convenience
     trace read later), so a ledger fault never changes the guard's decision. The containment check anchors on
     `top` (the resolved toplevel), so a per-user path landing inside the worktree ABOVE the session cwd is
-    still refused. Returns True on a successful write, else False."""
+    still refused. The append goes through _orch_write_checked, so a FIFO, a device or a directory at the
+    ledger path (a per-user path the guarded actor can replace) fails it at once, where a plain open() of a
+    FIFO with no reader held the hook until the PreToolUse deadline failed the guard closed. Returns True on
+    a successful write, else False."""
     path = _recovery_ledger_path()
     if not path:
         return False
@@ -9661,8 +9669,7 @@ def _write_recovery_ledger(repo, top, verb, info):
               "classes": info["classes"], "restore": info["restore"]}
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
+        _orch_write_checked(path, (json.dumps(record) + "\n").encode("utf-8"), append=True)
         return True
     except Exception:
         return False
@@ -18036,28 +18043,26 @@ def _load_gensrc_registry(root):
     guard cannot fully read is BAD (it cannot prove no-match). Unknown extra keys within version 1 are
     tolerated: the version field pins the schema, and strictness on additions would break a
     forward-compatibly authored registry. "scope" is the one optional key this guard reads; a guard older
-    than it tolerated the key as unknown, so it honours an authoring-only entry in every tree. This loader
-    is BEST-EFFORT against the ACCIDENTAL case, not a hardened TOCTOU check: it rejects a STATIONARY
-    non-regular registry and fails a delete race safe to
-    BAD, but a registry concurrently SWAPPED to a different file type in the lstat-to-open window is a
-    disclosed residual (see the comment below and the control residue), a sibling of the hard-link,
+    than it tolerated the key as unknown, so it honours an authoring-only entry in every tree. A registry
+    SWAPPED to another file type in the lstat-to-open window is BAD at once too: the open is no-follow and
+    non-blocking and checks the type on the opened descriptor (_orch_read_bytes_checked), so the swapped-in
+    symlink is never followed and the FIFO never blocks the hook. What stays outside this loader (see the
+    control residue) is which regular file holds the name at the open, a sibling of the hard-link,
     case-insensitive-filesystem, and NFC/NFD aliases."""
     path = os.path.join(root, _GENSRC_REGISTRY_REL)
     # A generated-artefact registry must be a trusted REGULAR file. Anything that is NOT a regular file (a
     # symlink dangling or redirecting, a FIFO, a directory, a socket, a device) is BAD: a symlink could
     # make a foreign or nonexistent target read as this repo's registry, and a FIFO at the path would block
-    # the open until the hook timeout. os.lstat is probed BEFORE the open: it does NOT follow a symlink and
-    # does NOT block on a FIFO, so a STATIONARY non-regular registry (a symlink, FIFO, directory, ...) is
-    # rejected as non-regular. A FileNotFoundError from lstat is genuine absence (a non-symlink ENOENT) ->
-    # inert absent (the ONLY inert-absent path); any other lstat OSError is BAD; a path that resolves to
+    # a plain open until the hook timeout. os.lstat is probed BEFORE the open: it does NOT follow a symlink
+    # and does NOT block on a FIFO, so a STATIONARY non-regular registry (a symlink, FIFO, directory, ...)
+    # is rejected as non-regular. A FileNotFoundError from lstat is genuine absence (a non-symlink ENOENT)
+    # -> inert absent (the ONLY inert-absent path); any other lstat OSError is BAD; a path that resolves to
     # something other than a regular file is BAD; and an open-time disappearance (a delete race in the
-    # lstat->open window) fails safe to BAD, handled at the open below. This read is BEST-EFFORT against
-    # the ACCIDENTAL case, not a hardened check: a registry concurrently SWAPPED to a different type in the
-    # lstat->open window (the lstat sees a regular file, the open then binds a substituted symlink/FIFO) is
-    # a DISCLOSED residual OUTSIDE the accidental-case scope - a sibling of the hard-link, case-insensitive
-    # -filesystem, and NFC/NFD normalization residuals. It requires a concurrent writer inside the repo,
-    # who could equally just author the registry, so O_NOFOLLOW/fstat is deliberately NOT added; the
-    # disclosure is the honest resolution.
+    # lstat->open window) fails safe to BAD, handled at the open below. The open itself is O_NOFOLLOW,
+    # non-blocking and fstat-checked (_orch_read_bytes_checked), so a registry concurrently SWAPPED to a
+    # different type in the lstat->open window (the lstat sees a regular file, the open then meets a
+    # substituted symlink, FIFO, directory or device) is BAD at once as well, where the plain open() this
+    # replaces followed the symlink and blocked on the FIFO until the PreToolUse deadline failed it closed.
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -18071,8 +18076,7 @@ def _load_gensrc_registry(root):
         # BINARY read so the size bound is on BYTES, not characters: read one byte past the cap, and if the
         # file exceeds the cap treat it as malformed (a SECA resource bound a multibyte-oversize file must
         # not slip through a char-count read). Decode is done explicitly below so a decode fault is BAD.
-        with open(path, "rb") as handle:
-            raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
+        raw_bytes = _orch_read_bytes_checked(path, _GENSRC_MAX_BYTES, os.O_NOFOLLOW)
     except FileNotFoundError:
         # The lstat above saw a regular file, but it is gone at open: a concurrent DELETE race in the
         # lstat->open window. This is BAD (gensrc_guard denies it fail-closed), never absent: absence is ONLY
@@ -18157,8 +18161,8 @@ def _gensrc_authoring_marker(root):
     is probed BEFORE the open, so a STATIONARY FIFO never blocks), a marker gone at the open (a delete race
     in the lstat->open window, never read as absent), an unreadable, oversized (over _GENSRC_MAX_BYTES, the
     same bound gen_hooks applies), non-UTF-8, unparseable or too deeply nested file, or any other content. A
-    marker SWAPPED to another type in the lstat->open window is the same disclosed residual as the registry
-    read."""
+    marker SWAPPED to another type in the lstat->open window is BAD at once, as for the registry read: the
+    open is no-follow, non-blocking and fstat-checked (_orch_read_bytes_checked)."""
     path = os.path.join(root, _GENSRC_MARKER_REL)
     try:
         st = os.lstat(path)
@@ -18169,8 +18173,7 @@ def _gensrc_authoring_marker(root):
     if not stat.S_ISREG(st.st_mode):
         return ("bad", "the authoring marker is not a regular file (a symlink, FIFO, directory, ...)")
     try:
-        with open(path, "rb") as handle:
-            raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
+        raw_bytes = _orch_read_bytes_checked(path, _GENSRC_MAX_BYTES, os.O_NOFOLLOW)
     except FileNotFoundError:
         return ("bad", "the authoring marker disappeared during the read (a concurrent change); failing safe")
     except OSError as exc:
@@ -18915,24 +18918,27 @@ _ORCH_STATE_MAX_BYTES = 64 << 20  # _orch_read_checked refuses a declared or sta
 
 
 def _orch_open_checked(path, flags, mode=0o666):
-    """The ONE open of a declared or state path in the orchestration hooks (a registry-declared record,
-    register or lease, or a file in the state directory), for a read (O_RDONLY) or a write (O_WRONLY |
-    O_CREAT, with O_APPEND for an append), in the _orch_mode_read pattern: os.open(path, flags | O_NONBLOCK
-    | O_NOCTTY | O_CLOEXEC, mode), so a FIFO with no writer opens for a read at once instead of waiting
-    for one and a FIFO with no reader fails a write open at once (ENXIO); the descriptor is then fstat'ed
-    and anything that is not a regular file (a FIFO, a device, a directory) is closed and refused before
-    any read or write. Returns the descriptor of a regular file, which the caller closes. Every refusal
-    raises an OSError: FileNotFoundError where the open reports not found, IsADirectoryError for a
+    """The ONE open of a path the guarded actor can create or replace that has no descriptor reader of its
+    own: a declared or state path in the orchestration hooks (a registry-declared record, register or
+    lease, or a file in the state directory), the generated-artefact registry and the authoring marker,
+    the write-scope declaration and the frozen floor (those four read with O_NOFOLLOW added), the
+    recovery ledger and the real git index a recovery snapshot copies. For a read (O_RDONLY) or a write
+    (O_WRONLY | O_CREAT, with O_APPEND for an append), in the _orch_mode_read pattern: os.open(path, flags |
+    O_NONBLOCK | O_NOCTTY | O_CLOEXEC, mode), so a FIFO with no writer opens for a read at once instead of
+    waiting for one and a FIFO with no reader fails a write open at once (ENXIO); the descriptor is then
+    fstat'ed and anything that is not a regular file (a FIFO, a device, a directory) is closed and refused
+    before any read or write. Returns the descriptor of a regular file, which the caller closes. Every
+    refusal raises an OSError: FileNotFoundError where the open reports not found, IsADirectoryError for a
     directory (as open() raised for one), and a plain OSError naming the path for any other node that is
-    not a regular file (a socket fails at the open itself), so each caller's existing OSError branch takes
-    the refusal in that hook's documented cannot-evaluate direction; a path holding a NUL character raises
-    ValueError, as open() does. A plain open() here waited on a FIFO with no peer: a Stop, TeammateIdle,
-    SessionStart, UserPromptSubmit or PostToolUse hook, which runs with no deadline, until the platform's hook
-    timeout ended it (whether the platform then lets the event proceed is unverified), and a PreToolUse hook
-    for its whole deadline before failing closed.
-    tools/selftest_orch_hooks.py's source probe fails on any plain open() call in an _orch, _rdp or _rwh
-    function outside its reasoned allowlist. Not bounded here: the path lookup can stall on a hung mount,
-    and what opening a device node does is up to its driver; the hook timeout bounds each such stall."""
+    not a regular file (a socket fails at the open itself, and with O_NOFOLLOW so does a symlink), so each
+    caller's existing OSError branch takes the refusal in that hook's documented cannot-evaluate direction;
+    a path holding a NUL character raises ValueError, as open() does. A plain open() here waited on a FIFO
+    with no peer: a Stop, TeammateIdle, SessionStart, UserPromptSubmit or PostToolUse hook, which runs with
+    no deadline, until the platform's hook timeout ended it (whether the platform then lets the event
+    proceed is unverified), and a PreToolUse hook for its whole deadline before failing closed.
+    tools/selftest_orch_hooks.py's source probe fails on any open of a path anywhere in this file outside
+    its reasoned allowlist. Not bounded here: the path lookup can stall on a hung mount, and what opening a
+    device node does is up to its driver; the hook timeout bounds each such stall."""
     fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
                  | getattr(os, "O_CLOEXEC", 0), mode)
     try:
@@ -18955,20 +18961,29 @@ def _orch_read_checked(path, errors="strict"):
     line endings translated as open() in text mode translates them (\\r\\n and \\r read as \\n), so each
     caller parses the text open(path, encoding="utf-8", errors=errors).read() gave it before. The
     descriptor is closed once on every path."""
-    fd = _orch_open_checked(path, os.O_RDONLY)
+    blob = _orch_read_bytes_checked(path, _ORCH_STATE_MAX_BYTES)
+    if len(blob) > _ORCH_STATE_MAX_BYTES:
+        raise OSError("larger than the {}-byte bound: {!r}".format(_ORCH_STATE_MAX_BYTES, path))
+    return blob.decode("utf-8", errors).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _orch_read_bytes_checked(path, limit, flags=0):
+    """At most limit + 1 bytes of the regular file at path, opened by _orch_open_checked(path, O_RDONLY |
+    flags) (see there) and read through that descriptor, so the caller tells a file longer than limit by
+    the length it gets. Raises what _orch_open_checked raises, and OSError on a failed read; the
+    descriptor is closed once on every path."""
+    fd = _orch_open_checked(path, os.O_RDONLY | flags)
     chunks, total = [], 0
     try:
-        while total <= _ORCH_STATE_MAX_BYTES:
-            chunk = os.read(fd, min(1 << 20, _ORCH_STATE_MAX_BYTES + 1 - total))
+        while total <= limit:
+            chunk = os.read(fd, min(1 << 20, limit + 1 - total))
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
     finally:
         os.close(fd)
-    if total > _ORCH_STATE_MAX_BYTES:
-        raise OSError("larger than the {}-byte bound: {!r}".format(_ORCH_STATE_MAX_BYTES, path))
-    return b"".join(chunks).decode("utf-8", errors).replace("\r\n", "\n").replace("\r", "\n")
+    return b"".join(chunks)
 
 
 def _orch_write_checked(path, blob, append=False):
@@ -29228,10 +29243,10 @@ def _orch_barrier_write(path, obj):
     the replace raises IsADirectoryError and the directory stays until someone removes it. What it writes
     always fits the reader's bound (_orch_barrier_fit): a finding list too long for it is stored as its
     first findings plus one line counting the rest, and an object that still cannot fit raises ValueError
-    before any file is created. Its "x" open is the one plain open() the source probe in
-    tools/selftest_orch_hooks.py allows in an orchestration function: an exclusive create of a fresh name
-    never opens a node already there, so a FIFO or a directory planted at the barrier path cannot block it
-    (the replace puts the new file in a FIFO's place)."""
+    before any file is created. Its "x" open is on the allowlist of the source probe in
+    tools/selftest_orch_hooks.py: an exclusive create of a fresh name never opens a node already there, so
+    a FIFO or a directory planted at the barrier path cannot block it (the replace puts the new file in a
+    FIFO's place)."""
     obj = _orch_barrier_fit(obj, os.path.dirname(path))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = "{}.{}.{}.tmp".format(path, os.getpid(), os.urandom(8).hex())
@@ -32699,7 +32714,10 @@ def _wrtscp_read_json_artifact(path, max_bytes):
     EVERY other fault is BAD, never absent, so an unreadable input can never read as no-coverage
     (integ-check-fails-closed-on-unreadable): a non-regular file (symlink/FIFO/directory/device), a
     stat/read error, an oversize file (byte-bounded), a non-UTF-8 decode, malformed JSON, or a non-object.
-    A delete race in the lstat->open window fails safe to BAD. Read AT DECISION TIME, never cached."""
+    A delete race in the lstat->open window fails safe to BAD, and so does a swap there to a symlink, a FIFO,
+    a directory or a device: the open is no-follow, non-blocking and fstat-checked (_orch_read_bytes_checked),
+    where a plain open() followed the symlink and blocked on the FIFO until the PreToolUse deadline failed it
+    closed. Read AT DECISION TIME, never cached."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -32709,8 +32727,7 @@ def _wrtscp_read_json_artifact(path, max_bytes):
     if not stat.S_ISREG(st.st_mode):
         return ("bad", "is not a regular file (a symlink, FIFO, directory, ...)")
     try:
-        with open(path, "rb") as handle:
-            raw_bytes = handle.read(max_bytes + 1)
+        raw_bytes = _orch_read_bytes_checked(path, max_bytes, os.O_NOFOLLOW)
     except FileNotFoundError:
         return ("bad", "disappeared during the read (a concurrent change); failing safe")
     except OSError as exc:
