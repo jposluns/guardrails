@@ -274,7 +274,7 @@ def parse_frontmatter(fm_text, source_rel):
         data = tomllib.loads(fm_text)
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise SchemaError("{}: frontmatter is not valid TOML: {}".format(source_rel, exc))
     known = set(REQUIRED_FIELDS) | set(OPTIONAL_FIELDS)
@@ -948,7 +948,7 @@ def _self_test():
     # 3. Malformed TOML fails closed.
     _expect_error("bad toml", "+++\ntitle = not valid\n+++\n", "not valid TOML")
     # 3b. An integer literal past CPython's 4300-digit int-string limit makes tomllib raise a BARE ValueError
-    #     (not TOMLDecodeError); it must still fail closed as SchemaError (F-TOML-BARE-VALUEERROR-CLASS). The
+    #     (not TOMLDecodeError); it must still fail closed as SchemaError. The
     #     digit limit is pinned to the default 4300 (test-hermeticity) and restored in finally. A parser
     #     overflow (tomllib raises RecursionError, not a ValueError) must fail closed the same way, with the
     #     overflow in the refusal.

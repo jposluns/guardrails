@@ -190,6 +190,7 @@
 .aiqt/standards/owasp-mcp.toml text eol=lf
 .aiqt/standards/owasp-proactive.toml text eol=lf
 .aiqt/standards/owasp-web.toml text eol=lf
+.aiqt/tracker-label-baseline.toml text eol=lf
 .claude/RULES-INDEX.md text eol=lf
 .claude/rules/README.md text eol=lf
 .claude/rules/aiqt/00-project-integrity.md text eol=lf
@@ -674,6 +675,7 @@ tools/_adapter_compose.py text eol=lf
 tools/_close_selftest.py text eol=lf
 tools/_gen_common.py text eol=lf
 tools/_git_fixture_env.py text eol=lf
+tools/_load_bound.py text eol=lf
 tools/_qa_adapter.py text eol=lf
 tools/_release_schema.py text eol=lf
 tools/_selftest_exit_report.py text eol=lf
