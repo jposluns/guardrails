@@ -673,6 +673,7 @@ tools/_adapter_compose.py text eol=lf
 tools/_close_selftest.py text eol=lf
 tools/_gen_common.py text eol=lf
 tools/_git_fixture_env.py text eol=lf
+tools/_input_declarations.py text eol=lf
 tools/_load_bound.py text eol=lf
 tools/_qa_adapter.py text eol=lf
 tools/_release_schema.py text eol=lf

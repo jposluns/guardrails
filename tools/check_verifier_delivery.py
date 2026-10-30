@@ -144,15 +144,25 @@ Rules:
      question copied back and "Q2. Confirmed." under a quote question are not answered, and findings
      text never answers the last question. One UNVERIFIABLE answer among answered ones is legitimate,
      except over a declared input: under the clean verdict (VERDICT: NO BLOCKERS), an UNVERIFIABLE answer
-     whose text (its "QN." line and body, outside fenced blocks and blockquotes) holds a path the brief
-     declares on an INPUT line, as a substring, makes the delivery NO_VOTE (exit 1, the reason naming the
+     whose text (its "QN." line and body, outside fenced blocks and blockquotes) names a path the brief
+     declares on an INPUT line, makes the delivery NO_VOTE (exit 1, the reason naming the
      answer, the path and its brief line): a clean verdict over a required input the verifier did not read
-     counts as not-passed. The brief is the --brief file already read for its pin and questions. An INPUT
-     line is any brief line (a fenced one included) that opens, once leading spaces, tabs and the
-     characters > * _ # + - . ) and digits are stripped, with INPUT: or INPUT**:, then, past any
-     asterisks and whitespace, one path: the text inside a " or ` quote, else the first word. The path is
-     compared as text and never opened. A BLOCKERS FOUND or any other verdict is unchanged, and an
-     UNVERIFIABLE answer that names no declared input is legitimate as above.
+     counts as not-passed. An answer NAMES a declared input when it holds the path as a substring (a
+     prefix match: a longer path the declared one starts, /abs/in.md of /abs/in.md.bak or a file under a
+     declared directory, still names it), or when it holds an ancestor directory of the path as its own
+     token (not extended by a path character into a sibling, and not glued to another word): a verifier
+     that could not read the parent did not read the input. A declared INPUT: / has no ancestor and, as a
+     one-character substring, is named by any answer text holding a slash. The brief is the --brief file
+     already read for its pin and questions. INPUT declarations are read by the SAME parser as the brief
+     lint's P6 (tools/_input_declarations.py): a declaration is one canonical shape at a line's start
+     OUTSIDE fenced code blocks (optional spaces or tabs, at most one bullet list marker, then INPUT:,
+     **INPUT:** or **INPUT**:, then one path, quoted with " or ` when it holds a space); a fenced INPUT
+     line declares nothing and is NOT checked; and a brief holding a line separator other than LF
+     anywhere, a format character outside a fence, a malformed declaration or a look-alike label (the
+     folded token INPUT and a colon-like character or table pipe, anywhere in a line outside fences) is
+     CANNOT_EVALUATE, exactly what the brief lint refuses before a brief is sent, so the two readings
+     cannot disagree. The path is compared as text and never opened. A BLOCKERS FOUND or any other verdict
+     is unchanged, and an UNVERIFIABLE answer that names no declared input is legitimate as above.
      Coverage n/m is reported: n answered answers, m the brief's numbered questions.
   C2 verbatim. Every fenced code block, every blockquote run and every inline double-quoted span must
      appear byte for byte (UTF-8) as a contiguous span of one file of the pinned tree (a tree file stored
@@ -306,12 +316,18 @@ over-refusal this grammar accepts; the escape-aware reading is kept beside the w
 reading as a further refusal branch, a stated union, never a replacement);
 the UNVERIFIABLE and quote-question tests are word tests, so a stray
 mention moves an answer toward NO_VOTE, never toward a pass. The declared-input reading of C1 matches a
-declared path as a substring of the UNVERIFIABLE answer's text: an answer that names the input another way
-(a relative path, its basename, another spelling, a link to it) passes as before, and a declared path that
+declared path as a substring of the UNVERIFIABLE answer's text, or an ancestor directory of it as a token:
+an answer that names the input another way
+(a relative path, its basename, another spelling, a link to it) passes as before; a declared path that
 starts another named path (/a/in.md of /a/in.md.bak, a directory of a file under it) reads as named, toward
-NO_VOTE; INPUT lines are read leniently and the brief lint (check_brief_capability P6) refuses any other
-shape and every look-alike label before the brief is sent, so here a look-alike or malformed declaration
-declares nothing; a verifier that skips a declared input without answering UNVERIFIABLE for it is not
+NO_VOTE, and so does an ancestor named with only a sentence stop or an extension dot after it (/a/b.txt
+beside the ancestor /a/b), an accepted over-withholding, while an ancestor extended by a path character
+(/a/b2, /a/b/other.md) is a sibling and does not name it; INPUT lines are read by the brief lint's own
+parser (tools/_input_declarations.py), so a brief the lint would refuse (a non-LF line separator, a format
+character outside a fence, a malformed declaration, a look-alike label) is CANNOT_EVALUATE here rather
+than read another way, a fenced INPUT line declares nothing and is not checked, and the two tools cannot
+disagree on what a brief declares; a verifier that skips a declared input without answering UNVERIFIABLE
+for it is not
 caught (that needs a per-input acknowledgement in the delivery format); and an UNVERIFIABLE answer naming
 an absolute path outside the repository that its question does not name already fails on that absent file
 reference (C2), and FAIL wins over NO_VOTE. Object reads: commit and tree objects are
@@ -323,7 +339,9 @@ cannot be evaluated.
 SELF-TEST COVERAGE. Each rule has a fixture that changes result when the rule is removed; a flip/ check
 patches a rule out in the suite and shows its fixture's result change for C1 (no answered item, answer
 content, a quote question needs a quote, findings evidence is no answer, a clean verdict over an
-UNVERIFIABLE answer that names a declared input), C2 (verbatim, inline, fenced,
+UNVERIFIABLE answer that names a declared input or its parent directory, and the shared declaration
+parser seam, whose removal reads a look-alike label past as the legacy per-tool reading did), C2
+(verbatim, inline, fenced,
 list-item fences, blockquotes, the answer's names, absent references in an answer and in a question,
 the findings section and its names, quoted text naming nothing, bare-name binding, absolute repository
 paths, excerpts, indentation, examples and their closing ")", the example openers, CRLF tree files),
@@ -410,6 +428,14 @@ import unicodedata
 import zlib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _input_declarations  # noqa: E402
+
+# the ONE reading of the brief's INPUT declarations, shared with check_brief_capability's P6 so the two
+# cannot disagree; bound here so the self-test can patch each seam out
+_brief_forbidden = _input_declarations.forbidden
+_read_declared = _input_declarations.read
+
 TIMEOUT = 120
 MAX_INPUT_BYTES = 16 * 1024 * 1024
 MAX_TREE_BYTES = 512 * 1024 * 1024
@@ -422,10 +448,13 @@ HARNESS_FIRST_RE = re.compile(r"WORKER_STATUS: [A-Z][A-Z_]*+ \(account=[^\s,()]+
                               r"model=[^\s,()]++, effort=[^\s,()]++\)")
 HARNESS_LAST_LINE = "WORKER_STATUS: COMPLETE"
 CLEAN_VERDICT = "NO BLOCKERS"
-# C1: a brief line that opens, once the characters of INPUT_MARKUP are stripped, with a label of INPUT_LABELS
-# declares one input path (_declared_inputs)
-INPUT_LABELS = ("INPUT:", "INPUT**:")
-INPUT_MARKUP = " \t>*_#+-.)0123456789"
+# C1: the brief's INPUT declarations are read by the shared parser (tools/_input_declarations.py, bound
+# above as _read_declared), the same reading the brief lint's P6 takes (_declared_inputs). For the
+# ancestor-directory reading (_names_input): a character of INPUT_NAME_CONTINUES after an ancestor's
+# occurrence extends it into a deeper or longer path (a sibling), so that occurrence does not name the
+# directory itself, and a character of INPUT_NAME_GLUED before it glues it to another word
+INPUT_NAME_CONTINUES = frozenset("/_-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+INPUT_NAME_GLUED = frozenset("._~-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 ANSWER_HEAD_RE = re.compile(r"Q([0-9]+)\.(?=[ \t]|$)")
 # U+2800 BRAILLE PATTERN BLANK is no space and no format character, yet renders as a blank glyph.
 MARKER_DECORATION = " \t*_#>+-\\\u2800"
@@ -2044,34 +2073,57 @@ def _rule_all_unverifiable(verdict, answered, total):
     return None
 
 
-def _declared_inputs(lines):
-    """(brief line, path) for the first declaration of each input the brief declares on an INPUT line: a line
-    (a fenced one included) that opens, once the characters of INPUT_MARKUP are stripped, with a label of
-    INPUT_LABELS, then, past any asterisks and whitespace, one path: the text inside a " or ` quote, else the
-    first word. The path is text, never opened; the brief lint's P6 refuses a declaration of any other shape."""
+def _declared_inputs(text):
+    """(brief line, path) for the first declaration of each input the brief declares on an INPUT line,
+    read by the SAME parser as the brief lint's P6 (tools/_input_declarations.py): one canonical shape at
+    a line's start outside fences declares, a fenced INPUT line declares nothing and is not checked, and
+    the brief is CANNOT_EVALUATE when it holds a line separator other than LF anywhere, a format
+    character outside a fence, a malformed declaration or a look-alike label (the brief lint refuses such
+    a brief before it is sent, so a delivery over one proves nothing). The path is text, never opened."""
+    found = _brief_forbidden(text)
+    if found is not None:
+        raise CannotEvaluate("brief line {}: {}".format(*found))
+    inputs, bad = _read_declared(text)
+    if bad:
+        raise CannotEvaluate("brief line {}: {}".format(*bad[0]))
     declared, seen = [], set()
-    for number, line in lines:
-        rest = line.lstrip(INPUT_MARKUP)
-        label = next((label for label in INPUT_LABELS if rest.startswith(label)), None)
-        if label is None:
-            continue
-        rest = rest[len(label):].lstrip("* \t")
-        if rest[:1] in ('"', "`"):
-            end = rest.find(rest[0], 1)
-            path = rest[1:end] if end > 0 else ""
-        else:
-            words = rest.split(None, 1)
-            path = words[0] if words else ""
-        if path and path not in seen:
+    for number, path in inputs:
+        if path not in seen:
             seen.add(path)
             declared.append((number, path))
     return declared
 
 
+def _names_input(text, path):
+    """Whether an answer's text names the declared input `path`: the path as a plain substring (so a
+    longer path the declared one starts, /abs/in.md of /abs/in.md.bak, still names it), or an ANCESTOR
+    directory of it (each prefix cut at a /, the root alone excluded) as its own token: an occurrence
+    extended by a character of INPUT_NAME_CONTINUES is a deeper or longer path (a sibling, not the
+    directory), and one glued after a character of INPUT_NAME_GLUED is part of another word; a sentence
+    stop directly after an ancestor still counts, so a sibling FILE whose name adds only an extension
+    (/abs/b.txt beside the ancestor /abs/b) is read as naming it, an accepted over-withholding."""
+    if path in text:
+        return True
+    parts = path.rstrip("/").split("/")
+    for depth in range(2, len(parts)):
+        ancestor = "/".join(parts[:depth])
+        start = text.find(ancestor)
+        while start >= 0:
+            end = start + len(ancestor)
+            glued = start > 0 and text[start - 1] in INPUT_NAME_GLUED
+            extended = end < len(text) and text[end] in INPUT_NAME_CONTINUES
+            if not glued and not extended:
+                return True
+            start = text.find(ancestor, start + 1)
+    return False
+
+
 def _rule_unread_input(verdict, answers, inputs):
-    """C1: the clean verdict with an UNVERIFIABLE answer whose text (its QN. line and body) holds a declared input
-    path (_declared_inputs) as a substring is no vote: a clean verdict over a required input the verifier did not
-    read counts as not-passed. Any other verdict, and an UNVERIFIABLE answer naming no declared input, is as
+    """C1: the clean verdict with an UNVERIFIABLE answer whose text (its QN. line and body) names a declared input
+    path (_declared_inputs) is no vote: a clean verdict over a required input the verifier did not
+    read counts as not-passed. An answer names an input when it holds the path as a substring, or an ancestor
+    directory of it as its own token (_names_input): a verifier that could not read the parent did not read the
+    input. Any other verdict, and an UNVERIFIABLE answer naming no declared input, is as
     before."""
     if verdict != CLEAN_VERDICT or not inputs:
         return None
@@ -2080,7 +2132,7 @@ def _rule_unread_input(verdict, answers, inputs):
         if item["unverifiable"]:
             text = "\n".join([item["heading"]] + item["body"])
             unread.extend("Q{} names {} (brief line {})".format(item["item"], path, line)
-                          for line, path in inputs if path in text)
+                          for line, path in inputs if _names_input(text, path))
     if not unread:
         return None
     return ("verdict {!r} with an UNVERIFIABLE answer over an input the brief declares ({}): a clean verdict over a "
@@ -2105,7 +2157,7 @@ def evaluate(brief_path, delivery_path, repo):
         report["pin"] = pin
         body = _delivery_body(delivery, pin)
         questions = _parse_questions(_lines(brief))
-        inputs = _declared_inputs(_lines(brief))
+        inputs = _declared_inputs(brief)
         if not questions:
             raise CannotEvaluate("the brief numbers no question; the closed delivery shape answers a numbered "
                                  "question list")
@@ -2368,12 +2420,49 @@ def _self_test_cases(fx):
         (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n**INPUT:** /abs/in.md\n")),
         (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n**INPUT**: /abs/in.md\n")),
         (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n- INPUT: /abs/in.md\n")),
-        (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n```\nINPUT: /abs/in.md\n```\n")),
         (_mixed(sha, {3: "Q3. UNVERIFIABLE: cannot read " + in_repo}),
          BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: " + in_repo + "\n")),
         (_mixed(sha, {3: "Q3. UNVERIFIABLE: " + spaced + " could not be listed."}),
          BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: \"" + spaced + "\"\n")))],
-          ["NO_VOTE"] * 6)
+          ["NO_VOTE"] * 5)
+    # a fenced INPUT line declares nothing (the same parser as the brief lint's P6 reads), so the clean
+    # verdict stands over an UNVERIFIABLE answer naming its path
+    check("c1/fenced-input-declares-nothing", verdict(fx.run(
+        unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n```\nINPUT: /abs/in.md\n```\n"))),
+        "PASS")
+    # a brief the lint would refuse is CANNOT_EVALUATE here, never read another way
+    check("c1/brief-separator-cannot-evaluate", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "INPUT: /abs/in.md\r\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "x" + chr(0x2028) + "y\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "x" + chr(0x0085) + "y\n"))],
+        ["CANNOT_EVALUATE"] * 3)
+    check("c1/brief-format-cannot-evaluate", verdict(fx.run(
+        unread, BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: /abs/i" + chr(0x200B) + "n.md"))),
+        "CANNOT_EVALUATE")
+    check("c1/malformed-declaration-cannot-evaluate", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "Step 1 - INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2013) + " INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2014) + " INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "| INPUT | /abs/in.md |"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: relative/in.md"))],
+        ["CANNOT_EVALUATE"] * 5)
+    # the declarations come from the shared parser seam: with it patched to declare nothing, the en-dash
+    # look-alike is read past (the legacy per-tool reading) and the clean verdict stands
+    endash = BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2013) + " INPUT: /abs/in.md")
+    check("flip/c1-shared-parser",
+          verdict(_patched("_read_declared", lambda text: ([], []), lambda: fx.run(unread, endash))), "PASS")
+    # an UNVERIFIABLE answer naming the PARENT DIRECTORY of a declared input withholds the vote too (a
+    # sentence stop after the ancestor included); a sibling path or a longer non-ancestor word does not
+    parent = _mixed(sha, {3: "Q3. UNVERIFIABLE: cannot list /abs."})
+    report = fx.run(parent, BRIEF_INPUT_DECLARED)
+    check("c1/parent-directory-no-vote",
+          (verdict(report), "/abs/in.md (brief line 3)" in " ".join(report["reasons"])), ("NO_VOTE", True))
+    check("flip/c1-parent-directory", verdict(_patched(
+        "_names_input", lambda text, path: path in text, lambda: fx.run(parent, BRIEF_INPUT_DECLARED))), "PASS")
+    check("c1/sibling-path-vote-stands", [verdict(fx.run(_mixed(sha, {3: answer}), BRIEF_INPUT_DECLARED))
+          for answer in ("Q3. UNVERIFIABLE: /abs/other could not be read.",
+                         "Q3. UNVERIFIABLE: /ab could not be listed.",
+                         "Q3. UNVERIFIABLE: /absolute could not be listed.")], ["PASS"] * 3)
     # an answer naming an absolute path its question does not name already fails on that absent reference
     report = fx.run(unread, BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: /abs/in.md\n"))
     check("c1/declared-input-absent-reference-fail-wins",
