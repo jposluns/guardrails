@@ -2386,7 +2386,8 @@ def _behaviour(probe, base):
             ("behaviour/import-complete-refuses", "opf/tools/_opf_import_complete.py", ()),
             ("behaviour/import-complete-self-test-refuses", "opf/tools/_opf_import_complete.py", ("--self-test",)),
             ("behaviour/gitleaks-pin-refuses", "tools/check_gitleaks_pin.py", ()),
-            ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ())):
+            ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ()),
+            ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ())):
         got = via("ignore", python + [str(ROOT / rel)] + list(args), cwd=str(ROOT))
         out.append((check_id, refused(got, Path(rel).name), got))
     for check_id, rel, marker in (("control/opf-cli-default-runs", "opf/tools/opf.py", "opf: the OPFiles"),
@@ -2602,6 +2603,7 @@ def self_test(lane, report_path=None):
                                 ("behaviour/import-complete-refuses", 0),
                                 ("behaviour/import-complete-self-test-refuses", 0),
                                 ("behaviour/gitleaks-pin-refuses", 0), ("behaviour/must-deliver-refuses", 0),
+                                ("behaviour/verifier-delivery-refuses", 0),
                                 ("control/opf-cli-default-runs", 0),
                                 ("control/launcher-cli-default-runs", 0), ("control/coverage-gate-default-runs", 0),
                                 ("behaviour/pretool-refuses", 0), ("behaviour/plugin-pretool-refuses", 0),
