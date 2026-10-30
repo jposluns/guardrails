@@ -2388,7 +2388,7 @@ def _test_coauthor_guards(failures, tmp):
             [str(base / "no-such-msg.txt")], 2, "fail-closed")
     # the shipped script itself never spells the token and stays executable
     script_text = script.read_text(encoding="utf-8")
-    if aiqt_hooks._CAB_RE.search(script_text) or re.search("(?i)co[- ]?authored[- ]?by", script_text):
+    if aiqt_hooks._CAB_RE.search(script_text) or re.search("co[- ]?authored[- ]?by", script_text, re.IGNORECASE):
         failures.append("(cab-g7) the shipped commit-msg hook spells the trailer token; build it at run time")
     if not os.access(script, os.X_OK):
         failures.append("(cab-g8) the shipped commit-msg hook is not executable")
