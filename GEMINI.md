@@ -22,9 +22,7 @@ the assistant actually read, so a quotation is an excerpt, never a reconstructio
 Before delivering, re-open each cited range at its stated lines and confirm that it starts and ends
 on lines that carry the cited content, not on a blank line, a comment banner, or a closing delimiter.
 
-This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the
-specific reference captured when the claim is made, never reconstructed from memory, and the
-obligations above scope that capture to a file opened this session at the commit under review.
+This rule narrows the reference-capture rule (refcap) to a file opened this session at the commit under review.
 
 ## Claims about the work rest on observation
 
@@ -89,9 +87,8 @@ silently re-deriving a different one; where no such basis is available, the stat
 figure cannot be reconciled and is re-measured under the same predicate rather than carried forward as
 though it were.
 
-This complements the measured-and-estimated-figures-stay-separate rule on an orthogonal axis:
-that rule attaches a figure's grade, measured or estimated; this one attaches its definition, the
-predicate that selected it; a sound figure carries both. It differs from the
+This complements the measured-and-estimated-figures-stay-separate rule: that rule attaches a
+figure's grade, this one its predicate; a sound figure carries both. It differs from the
 completeness-claim-enumerates-its-set rule, which governs completion-class quantifiers over a whole
 set and already holds that the assistant's count is not that set's authoritative index; this rule governs any
 reported count, claiming completeness or not.
@@ -218,8 +215,7 @@ zero sits in a total as though it were measured. Any figure derived from an esti
 percentage, or a total that an estimated input feeds, is itself an estimate and is labelled as one.
 
 This does not forbid estimates, forecasts, or a combined figure whose composition is stated, such as a
-measured 40 plus an estimated 25 reported as roughly 65. It forbids the unlabelled blend: an estimate
-folded into a measured total, the whole presented as measured. The label is the release. A figure that
+measured 40 plus an estimated 25 reported as roughly 65. A figure that
 carries its grade honestly is sound however uncertain; one that hides it misreports precision it does
 not have.
 
@@ -241,8 +237,7 @@ Either observe the behaviour and quote what you saw, or state the claim as an in
 configuration it rests on and the observation that would confirm it. The same holds for a status a document,
 test, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the
 system, or generate it from an observation, and refresh it before relying on it as current; hand-written
-prose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact. A
-confident assertion of unobserved behaviour is not made.
+prose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact.
 
 A claim that a shared or external resource has failed, or that you are blocked because it has, is a
 behavioural claim about the resource's live state; a symptom seen only in your own dependent work, a killed
@@ -300,7 +295,7 @@ Validate an inferred premise before taking an action that depends on it.
 
 ## Verify a fix is in its commit
 
-Applying a fix on disk is not the same as landing it. Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state. A commit message that asserts a fix, with no matching change in the commit, is an inaccurate record; verify the artefact before the claim.
+Applying a fix on disk is not the same as landing it. Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state.
 
 The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs. The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate. The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit. The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing. This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content. The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below. The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass. The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read. A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make. Uncommitted work outside the declared review set does not block the dispatch.
 
@@ -703,9 +698,7 @@ to the same inspection as any call site. Where the timer's own semantics cannot 
 reproduced on restore, including a countdown the borrower cannot measure or an already-due
 notification the platform cannot make promptly deliverable, the code uses a timeout mechanism
 that is not process-global, or refuses the borrow, rather than approximating and corrupting the
-caller's deadline, most dangerously a watchdog's. This is the companion of the kill-timeout rule:
-that one keeps a wrapper's bound from cutting a correctly-waiting callee short, while this one
-keeps a borrower's restore from silently moving or losing the deadline the caller had already set.
+caller's deadline, most dangerously a watchdog's. This is the companion of the kill-timeout rule (kltwat).
 
 ## A verification finding is fixed, not argued away
 
@@ -745,10 +738,7 @@ callee. An environment override meant to grant a longer wait can be silently str
 privilege boundary, for instance when it is placed on the wrong side of a privilege-elevation command,
 so the intended wait never reaches the callee and its default applies unseen; the override is confirmed
 to land where the callee reads it rather than assumed to have carried across. This is the companion of
-the bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this
-one keeps a bound that is meant to allow completion from being set below the callee's own end-to-end
-budget, so a command that is waiting correctly is not cut short and then misread as the failure it was
-tolerating.
+the bounded-consumption rule, which sets a ceiling so a runaway cannot exhaust resources.
 
 ## Isolate verifiers and judge by their result signal
 
@@ -939,8 +929,7 @@ terminal condition that blocks it; the next action meets the human-oversight thr
 authorization that threshold requires, or that authorization is in doubt; a decision reserved to a
 human, not covered by standing authorization and determining the next action, must be answered
 first; or a validation finding reveals a process-integrity or systemic lapse, of which a concrete,
-quotable self-inconsistency is one instance. These triggers are not mutually exclusive; a single
-situation may satisfy more than one, and any one of them suffices.
+quotable self-inconsistency is one instance. Any one trigger suffices, and one situation may satisfy several.
 A systemic-lapse trigger licenses only a recorded wind-down: the lapse is recorded as a fact the
 moment it is confirmed, the work is parked behind the human decision it now awaits or exits through
 the project's bounded, recorded exit, and the maintainer's later confirmation or refutation settles

@@ -28,6 +28,4 @@ to the same inspection as any call site. Where the timer's own semantics cannot 
 reproduced on restore, including a countdown the borrower cannot measure or an already-due
 notification the platform cannot make promptly deliverable, the code uses a timeout mechanism
 that is not process-global, or refuses the borrow, rather than approximating and corrupting the
-caller's deadline, most dangerously a watchdog's. This is the companion of the kill-timeout rule:
-that one keeps a wrapper's bound from cutting a correctly-waiting callee short, while this one
-keeps a borrower's restore from silently moving or losing the deadline the caller had already set.
+caller's deadline, most dangerously a watchdog's. This is the companion of the kill-timeout rule (kltwat).
