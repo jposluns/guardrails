@@ -887,6 +887,58 @@ The hook reads labels only from the brief, only at column 0, and only as the exa
 one space. The value is the rest of that line. The brief must be UTF-8 with no NUL and no line
 boundary other than a physical newline.
 
+Every line of the brief is screened, a line inside a fenced code block included. The dispatch is
+withheld as `UNVERIFIABLE:`, with a reason naming the first line at fault, when either of two rules
+holds:
+
+- The brief holds a control character (Unicode category Cc: the C0 controls, DEL and the C1 controls)
+  other than a newline or a tab, or a format character (category Cf: a bidirectional control, a zero
+  width character, a soft hyphen, a byte-order mark other than one that opens the file, a tag
+  character). A carriage return is a control character, so a brief saved with CRLF line ends is
+  withheld. The reason names the character and its column.
+- A line holds a label's name with a colon after it. A line read as a label is screened by its value
+  alone. The hook first folds the line: canonical decomposition, case folding, compatibility
+  decomposition (NFKD), case folding and NFKD again, so a fullwidth or mathematical letter or colon
+  becomes its ASCII form and an accented letter its base letter. The line holds the name when the
+  name's ASCII letters and digits stand in it in order, with no other ASCII letter or digit between
+  them, and a colon stands after it on the same line. A colon is an ASCII colon or any character
+  outside ASCII that is not a letter or digit (a Unicode category other than L and N: a punctuation
+  mark, a symbol, a mark, a space, a private-use or unassigned code point). Every other character
+  between the name's letters is passed over: punctuation, spaces, markup with no letter or digit, and
+  a letter or digit outside ASCII. So is everything between the name and the colon, unless an ASCII
+  letter or digit follows the name's last letter directly, which makes the name the start of a longer
+  word (`Review-paths`, `preview/pathfinder`). A letter or digit outside ASCII that stands next to an
+  ASCII letter or digit, once the characters that are not letters or digits are passed over, may also
+  stand for one letter of the name, so `Review-path:` with its first `e` written as the Cyrillic
+  U+0435 matches. A label with no letter or digit, one outside ASCII, or no colon after its last one
+  is read only in its exact form.
+
+Each rule makes a fixed number of passes over the brief and uses no backtracking pattern, so the time
+the screen takes grows linearly with the brief.
+
+So a label is withheld behind any prefix (a list marker, a checkbox, a quote marker, an HTML tag,
+another label's value), in any case, in fullwidth or accented letters, with look-alike letters outside
+ASCII in runs of one or two, with any character but an ASCII letter or digit inside its name (a blank
+letter such as U+3164 or U+13441, a mark such as U+0903, a modifier letter such as U+0640, markup with
+no letter or digit), with anything between its name and its colon that does not begin with an ASCII
+letter or digit (a Markdown link destination or reference such as `[Review-path](x):`, an HTML tag that
+holds letters such as `<span hidden>x</span>`), with no space, a tab or a no-break space after its
+colon, and with a look-alike colon that is a punctuation mark, a symbol, a mark (U+0903 DEVANAGARI SIGN
+VISARGA) or a space. A terminal escape, a backspace, a carriage return, a bidirectional control or an
+invisible format character withholds the brief wherever it stands. So does every line that holds a
+label's name, other than as the start of a longer word, with a colon anywhere after it (a URL or a time
+included) in prose, a list, a table, a heading, a code span, a quote or a fenced code block, and a line
+where a label's name is followed by a curly quote, a dash, an arrow or a mark. To mention a label, drop
+the colon and keep any other colon off that line (`the Review-path lines`).
+
+A label is neither read nor refused when an ASCII letter or digit stands inside its name (an HTML tag
+that holds letters inside it, a character reference such as `Review&#45;path:`) or right after its last
+letter (`Review-pathx:`, which reads as another word); when a letter of its name is written as another
+ASCII letter or digit (`Rev1ew-path:`, `&#82;eview-path:`) or as a letter outside ASCII with no ASCII
+letter or digit next to it, colons and spaces passed over (three look-alikes in a row); when its colon
+is missing or written as a character reference (`Review-path&#58;`) or is a look-alike letter (U+02D0
+MODIFIER LETTER TRIANGULAR COLON); and when it is split across lines.
+
 - `Review-target:` is required, once. It must be `revision`, `working-tree` or `not-a-review`. A
   `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row; where
   that row cannot be written, the note says so (the allow stands).
