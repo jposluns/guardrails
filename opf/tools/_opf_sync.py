@@ -80,11 +80,21 @@ core.hooksPath to the null device (no repository pre-push or other hook runs), c
 protocol.allow=never with only file, https and ssh re-allowed (a remote-helper or ext:: transport
 cannot run even where repository config allows it), and core.sshCommand pinned to the adopter's own
 global-or-system value (or plain `ssh` where none is set), so a repository-local core.sshCommand
-never executes while a global one is honoured as the adopter's own setting. A repository-local
-url.*.insteadOf / pushInsteadOf rewrite, credential helper, core.askpass or core.gitProxy is
-enumerated first and REFUSED by name (fail-closed): a rewrite would silently redirect the verified
-URL and a repository-planted helper is a program launch, and neither can be neutralized by an
-override without also discarding the adopter's own global configuration.
+never executes while a global one is honoured as the adopter's own setting. Two enumerations then
+gate every fetch and push, both fail-closed. First, the repository scopes (--local and --worktree)
+are listed by name, and a credential helper, core.askpass, core.gitProxy, an http.sslVerify /
+sslCAInfo / sslCAPath server-trust override, a url.*.insteadOf / pushInsteadOf rewrite, and
+include.path / includeIf.*.path are each REFUSED: a repository-planted helper is a program launch,
+a repository trust override can authenticate an interposed https server, and a repository-local
+include is read by the transport but not expanded by a scoped listing, so its keys could not be
+verified by name. Second, the EFFECTIVE url.* rewrites are read under the exact environment and
+override pairs the transport call runs with, so every source git would honour (global, system,
+local, worktree, include, command) is the source checked, and any insteadOf or pushInsteadOf whose
+prefix matches the verified URL refuses: the URL the destination agreement verified is then, byte
+for byte, the URL the transport uses. Refusal is chosen over an override in both gates because a
+GIT_CONFIG_* pair appends to a multi-valued key rather than resetting it (an empty insteadOf value
+is itself a match-everything rewrite), while an unrelated rewrite of the adopter's own matches
+nothing here and keeps working.
 
 DISCLOSED RESIDUALS: the lease is NOT made observable at the sync target in this build; the planned
 mechanism for the writes sync itself makes is a lock ref at the target (for example refs/opf/lease)
@@ -99,7 +109,19 @@ store that is its repository's toplevel (`rev-parse --show-prefix` empty): a fas
 moves the WHOLE repository, so a store nested below the toplevel of a shared repository refuses with
 exit 2 rather than moving content outside the store. The push runs the TARGET repository's own
 receive-side hooks, as any git push does: the target is the adopter's recorded companion repository
-and its receive side is its own trust domain. The destination agreement compares by exact string
+and its receive side is its own trust domain. Repository-scope configuration that stays effective
+on the transport after the refusals above is routing and shaping only: http.proxy (and
+http.<url>.proxy) can route the https connection, but the server is still authenticated against the
+adopter's own trust roots (the repository-scope trust overrides are refused), so the verified
+destination cannot be silently replaced and a wrong proxy fails the transport closed;
+http.extraHeader and the tuning keys (http.postBuffer, the pack and fetch sizing family,
+protocol.version) shape an already-authenticated connection to the verified URL and can at worst
+fail it; ssh.variant shapes the arguments of the pinned ssh and names no program; remote.<name>.*
+is never consulted (fetch and push go by explicit URL, never by remote name); and a per-protocol
+protocol.<name>.allow at repository scope can re-widen a protocol, but the verified URL is already
+restricted to file, https and ssh before any launch and URL rewriting is refused, so a widened
+protocol is reachable only through the verified target's own redirect, inside that trust domain.
+The destination agreement compares by exact string
 where a form (a file path, a file:// URL) has no canonical host+path, so two spellings of one
 filesystem target (a path and its symlink) read as disagreement and over-refuse, never under-refuse.
 A branch at the target is assumed to carry the store's current branch name (the spec names no
@@ -144,12 +166,18 @@ _USAGE = "usage: opf sync [--pull | --push] [--root DIR] (bare sync is the read-
 _ALLOWED_SCHEMES = ("file", "https", "ssh")
 # A remote-helper transport (`<helper>::<address>`, ext:: included) names a program for git to run.
 _HELPER_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9+.]*::")
-# Repository-LOCAL config keys the transport refuses by name (section/key folded, the subsection
-# kept): a URL rewrite silently redirects the verified destination, and a repository-planted
-# credential helper, askpass or git proxy is a program launch on fetch or push. Overriding these
-# would also discard the adopter's own global configuration, so presence refuses instead.
+# Repository-SCOPE config keys the transport refuses by name, over both the --local and --worktree
+# listings (section/key folded, the subsection kept): a URL rewrite silently redirects the verified
+# destination; a repository-planted credential helper, askpass or git proxy is a program launch on
+# fetch or push; a repository-scope https trust override can authenticate an interposed server; and
+# a repository-local include is read by the transport but not expanded by a scoped listing, so its
+# keys could not be verified by name. Overriding these would also discard the adopter's own global
+# configuration, so presence refuses instead; the effective url.* rewrites of EVERY scope are
+# additionally matched against the verified URL before each transport call.
 _LOCAL_REDIRECT_SUFFIXES = (".insteadof", ".pushinsteadof")
 _LOCAL_EXEC_KEYS = ("credential.helper", "core.askpass", "core.gitproxy")
+_LOCAL_TRUST_SUFFIXES = (".sslverify", ".sslcainfo", ".sslcapath")
+_LOCAL_INCLUDE_KEYS = ("include.path", "includeif.<condition>.path")
 _TRANSPORT_TIMEOUT_S = 120
 _TRANSPORT_MAX_OUTPUT = 8 << 20
 # The one fast-forward command; --ff-only is load-bearing (a divergence must never merge).
@@ -506,45 +534,111 @@ def _transport_overrides(git):
 
 
 def _refuse_local_redirect_config(git, store_root):
-    """Refuse, by name, a repository-LOCAL config key that would redirect or exec on the transport
-    call: url.*.insteadOf / pushInsteadOf (a silent rewrite of the verified URL), a credential
-    helper, core.askpass, core.gitProxy. Enumerated through the scrubbed read-only boundary
-    (--name-only: no value, so a malicious command body is never read); an unreadable local
-    configuration is a cannot-evaluate, never read as empty."""
-    listing = _opf_observe._run_git(git, store_root, ["config", "--local", "-z", "--name-only", "--list"])
-    if not listing.completed:
-        raise SyncError("could not enumerate the store repository's local git configuration ({}); "
-                        "the transport cannot be verified (fail-closed)".format(listing.err.strip()))
-    if listing.rc != 0:
-        raise SyncError("git config --local --list failed (rc {}); the store repository's local "
-                        "configuration is unreadable, so the transport cannot be verified "
-                        "(fail-closed)".format(listing.rc))
-    raw = listing.out
+    """Refuse, by name, a repository-scope config key that would redirect, exec or weaken the trust
+    decision on the transport call: url.*.insteadOf / pushInsteadOf (a silent rewrite of the
+    verified URL), a credential helper, core.askpass, core.gitProxy, an http.sslVerify / sslCAInfo
+    / sslCAPath server-trust override, and include.path / includeIf.*.path (the transport reads the
+    included file, but a scoped listing does not expand it, so the included keys could not be
+    verified by name). Both repository scopes are enumerated, --local and --worktree (without the
+    worktreeConfig extension the latter reads the same .git/config), through the scrubbed read-only
+    boundary (--name-only: no value, so a malicious command body is never read); an unreadable
+    scope is a cannot-evaluate, never read as empty."""
+    for scope in ("--local", "--worktree"):
+        listing = _opf_observe._run_git(git, store_root,
+                                        ["config", scope, "-z", "--name-only", "--list"])
+        if not listing.completed:
+            raise SyncError("could not enumerate the store repository's {} git configuration ({}); "
+                            "the transport cannot be verified (fail-closed)".format(
+                                scope.lstrip("-"), listing.err.strip()))
+        if listing.rc != 0:
+            raise SyncError("git config {} --list failed (rc {}); the store repository's {} "
+                            "configuration is unreadable, so the transport cannot be verified "
+                            "(fail-closed)".format(scope, listing.rc, scope.lstrip("-")))
+        raw = listing.out
+        if raw and not raw.endswith(b"\x00"):
+            raise SyncError("git config --list returned a payload that is not NUL-terminated; the "
+                            "store repository's configuration cannot be trusted (fail-closed)")
+        for kb in raw.split(b"\x00"):
+            if not kb:
+                continue
+            low = kb.lower()
+            key = kb.decode("utf-8", "replace")
+            if low.startswith(b"url.") and (low.endswith(b".insteadof")
+                                            or low.endswith(b".pushinsteadof")):
+                raise SyncError("the store repository's git configuration carries {!r}, a URL "
+                                "rewrite that would silently redirect the verified destination "
+                                "(spec 5.6); remove it from the repository config and re-run "
+                                "(fail-closed)".format(key))
+            if (low == b"credential.helper"
+                    or (low.startswith(b"credential.") and low.endswith(b".helper"))
+                    or low in (b"core.askpass", b"core.gitproxy")):
+                raise SyncError("the store repository's git configuration carries {!r}, a "
+                                "repository-planted program launch on fetch or push; credentials "
+                                "belong in the adopter's own global configuration (spec 5.6); "
+                                "remove it and re-run (fail-closed)".format(key))
+            if low == b"include.path" or (low.startswith(b"includeif.") and low.endswith(b".path")):
+                raise SyncError("the store repository's git configuration carries {!r}: the "
+                                "transport reads the included file, but this scoped enumeration "
+                                "does not expand it, so the included keys cannot be verified by "
+                                "name; move the settings you own into your global configuration or "
+                                "inline them here, remove the include, and re-run "
+                                "(fail-closed)".format(key))
+            if low.startswith(b"http.") and low.endswith((b".sslverify", b".sslcainfo",
+                                                          b".sslcapath")):
+                raise SyncError("the store repository's git configuration carries {!r}, a "
+                                "repository-scope override of the https server trust; the trust "
+                                "decision belongs to the adopter's own global or system "
+                                "configuration (spec 5.6); remove it and re-run "
+                                "(fail-closed)".format(key))
+
+
+def _refuse_effective_url_rewrite(git, store_root, env, url):
+    """Refuse any url.<base>.insteadOf / pushInsteadOf whose recorded prefix matches the verified
+    URL, read from the EFFECTIVE configuration under the exact environment and override pairs the
+    transport call runs with, so every source git would honour (global, system, local, worktree,
+    include, command) is the source checked, and the URL the destination agreement verified is,
+    byte for byte, the URL the transport uses. Refusal is chosen over an override because a
+    GIT_CONFIG_* pair appends to a multi-valued key rather than resetting it, and an empty
+    insteadOf value is itself a match-everything rewrite; a rewrite whose prefix matches nothing
+    here is left alone, so the adopter's own unrelated rewrites keep working. pushInsteadOf refuses
+    the fetch too (one gate for the one transport boundary, over-refusing, never under-refusing).
+    An enumeration that does not complete at git's documented match/no-match codes refuses."""
+    cmd = [git, "--no-pager", "--no-replace-objects", "-C", str(store_root),
+           "config", "-z", "--get-regexp", r"^url\."]
+    out = _opf_observe._capture_bounded(cmd, env, 30, 1 << 20)
+    if not out.completed:
+        raise SyncError("could not enumerate the url.* configuration the transport would honour "
+                        "({}); the verified URL cannot be confirmed as the transport URL "
+                        "(fail-closed)".format(out.err.strip()))
+    if out.rc not in (0, 1):
+        raise SyncError("git config --get-regexp over the transport configuration failed (rc {}): "
+                        "{}; the verified URL cannot be confirmed as the transport URL "
+                        "(fail-closed)".format(out.rc, out.err.strip()))
+    raw = out.out
     if raw and not raw.endswith(b"\x00"):
-        raise SyncError("git config --list returned a payload that is not NUL-terminated; the store "
-                        "repository's local configuration cannot be trusted (fail-closed)")
-    for kb in raw.split(b"\x00"):
-        if not kb:
+        raise SyncError("git config returned a payload that is not NUL-terminated; the transport "
+                        "configuration cannot be trusted (fail-closed)")
+    url_b = os.fsencode(url)
+    for record in raw.split(b"\x00"):
+        if not record:
             continue
-        low = kb.lower()
-        key = kb.decode("utf-8", "replace")
-        if low.startswith(b"url.") and (low.endswith(b".insteadof") or low.endswith(b".pushinsteadof")):
-            raise SyncError("the store repository's local git configuration carries {!r}, a URL "
-                            "rewrite that would silently redirect the verified destination (spec "
-                            "5.6); remove it from the repository config and re-run "
-                            "(fail-closed)".format(key))
-        if (low == b"credential.helper"
-                or (low.startswith(b"credential.") and low.endswith(b".helper"))
-                or low in (b"core.askpass", b"core.gitproxy")):
-            raise SyncError("the store repository's local git configuration carries {!r}, a "
-                            "repository-planted program launch on fetch or push; credentials belong "
-                            "in the adopter's own global configuration (spec 5.6); remove it and "
-                            "re-run (fail-closed)".format(key))
+        name, _sep, value = record.partition(b"\n")
+        low = name.lower()
+        if not (low.endswith(b".insteadof") or low.endswith(b".pushinsteadof")):
+            continue
+        if url_b.startswith(value):
+            raise SyncError("the git configuration the transport honours carries {!r} whose prefix "
+                            "{!r} matches the verified URL, a rewrite that would silently redirect "
+                            "the fetch or push away from the agreed destination (spec 5.6); remove "
+                            "or re-scope the rewrite, or record the rewritten URL as the "
+                            "sync_target, and re-run (fail-closed)".format(
+                                name.decode("utf-8", "replace"), value.decode("utf-8", "replace")))
 
 
-def _run_transport(git, store_root, args, timeout=_TRANSPORT_TIMEOUT_S):
-    """Run ONE fetch or push under the transport environment and overrides, bounded. Every other git
-    call this module makes goes through the read-only scrubbed boundary instead."""
+def _run_transport(git, store_root, args, url, timeout=_TRANSPORT_TIMEOUT_S):
+    """Run ONE fetch or push of the verified URL under the transport environment and overrides,
+    bounded, after the repository-scope refusals and the effective-rewrite gate over that URL.
+    Every other git call this module makes goes through the read-only scrubbed boundary instead."""
     _refuse_local_redirect_config(git, store_root)
     overrides = _transport_overrides(git)
     env = _transport_env()
@@ -552,6 +646,7 @@ def _run_transport(git, store_root, args, timeout=_TRANSPORT_TIMEOUT_S):
     for i, (key, value) in enumerate(overrides):
         env["GIT_CONFIG_KEY_{}".format(i)] = key
         env["GIT_CONFIG_VALUE_{}".format(i)] = value
+    _refuse_effective_url_rewrite(git, store_root, env, url)
     cmd = [git, "--no-pager", "--no-replace-objects", "-C", str(store_root)] + list(args)
     return _opf_observe._capture_bounded(cmd, env, timeout, _TRANSPORT_MAX_OUTPUT)
 
@@ -560,7 +655,7 @@ def fetch_target(git, store_root, url, branch):
     """Fetch the store's current branch from the verified URL (never a remote name), recording only
     FETCH_HEAD. A fetch that does not complete at rc 0 is a cannot-evaluate, never read as equal."""
     out = _run_transport(git, store_root, ["fetch", "--no-tags", "--no-recurse-submodules", url,
-                                           "refs/heads/{}".format(branch)])
+                                           "refs/heads/{}".format(branch)], url)
     if not out.completed:
         raise SyncError("could not fetch the sync target ({}); the store's freshness cannot be "
                         "evaluated, and a failed fetch is never read as equal (fail-closed)".format(
@@ -778,7 +873,7 @@ def _push_pending(git, res, sync_target, tgt, url, branch, local, fetched):
     _require_destination_agreement(sync_target, tgt, url, res.target, _actual_remote(git, res.store_root))
 
     def body():
-        return _run_transport(git, res.store_root, _push_args(url, branch))
+        return _run_transport(git, res.store_root, _push_args(url, branch), url)
 
     out = _under_guard(res.store_root, body)
     if not out.completed:
@@ -887,7 +982,9 @@ def self_test():
     local and the fetched manifest, the equal/behind/ahead/divergent classification, the read-only
     bare report, the fast-forward pull with its doctor gate, the authorized push with its
     destination agreement, the held-lease refusal (never seized), the hostile-repository-config
-    neutralization, the pre-git target validation, and the fetch/detached/unborn refusals. The
+    neutralization, the effective URL-rewrite refusal over every config scope, the
+    repository-scope include/helper/trust refusals, the pre-git target validation, and the
+    fetch/detached/unborn refusals. The
     load-bearing guards are each also run with the guard dropped (an attribute-patched flip), so the
     vector that watches it is shown to go red. Judged on exit codes, repository state and lease
     bytes, never by output grepping alone. Returns 0 clean, 1 on a failure, 2 on a harness error."""
@@ -914,7 +1011,8 @@ def self_test():
         return 1
     print("opf-sync self-test: PASS ({} checks: grammar, pattern refusals, admission, "
           "classification, pull, push, destination agreement, lease, transport neutralization, "
-          "target validation, fetch and HEAD refusals, dropped-guard flips)".format(checked[0]))
+          "URL-rewrite and repository-config refusals, target validation, fetch and HEAD "
+          "refusals, dropped-guard flips)".format(checked[0]))
     return EXIT_OK
 
 
@@ -1316,6 +1414,113 @@ def _self_test_units(check):
                 run(["--push", "--root", x_root])
             check("dropping the transport neutralization runs the repository hook (shown red)",
                   os.path.exists(sentinel))
+
+            # -- a URL rewrite anywhere in the transport's effective config refuses (spec 5.6) ----
+            ins_root, ins_bare = _paired("rewrite")
+            ins_other = os.path.join(base, "rewrite-other.git")
+            _git(base, "init", "--bare", ins_other)
+            _git(ins_root, "push", ins_other, "main:main")
+            _local_commit(ins_root, "data.txt", "nine\n")
+            ins_head = _head(ins_root)
+            ins_tip = _tip(ins_bare)
+            gcfg = Path(home) / ".gitconfig"
+            gcfg.write_text('[url "{}"]\n\tinsteadOf = {}\n'.format(ins_other, ins_bare),
+                            encoding="utf-8")
+            for argv in ([], ["--pull"], ["--push"]):
+                rc, out = run(argv + ["--root", ins_root])
+                check("a global insteadOf matching the verified URL refuses ({})".format(
+                    " ".join(argv) or "bare"),
+                    rc == EXIT_MALFORMED and "rewrite" in out and _head(ins_root) == ins_head
+                    and _tip(ins_bare) == ins_tip and _tip_or_none(ins_other) == ins_tip)
+            # the named flip: with the rewrite gate dropped, the push reports success while it
+            # lands at the REWRITTEN repository and the verified target never moves
+            with patch.object(module, "_refuse_effective_url_rewrite", lambda *a, **k: None):
+                rc, _out = run(["--push", "--root", ins_root])
+            check("dropping the rewrite gate lands the push at the rewritten repository (shown red)",
+                  rc == EXIT_OK and _tip(ins_other) == ins_head and _tip(ins_bare) == ins_tip)
+            # pushInsteadOf: the push-side rewrite refuses too, and its flip shows the same redirect
+            ins_other2 = os.path.join(base, "rewrite-other2.git")
+            _git(base, "init", "--bare", ins_other2)
+            gcfg.write_text('[url "{}"]\n\tpushInsteadOf = {}\n'.format(ins_other2, ins_bare),
+                            encoding="utf-8")
+            rc, out = run(["--push", "--root", ins_root])
+            check("a global pushInsteadOf matching the verified URL refuses the push",
+                  rc == EXIT_MALFORMED and "rewrite" in out and _tip(ins_bare) == ins_tip
+                  and _tip_or_none(ins_other2) is None)
+            with patch.object(module, "_refuse_effective_url_rewrite", lambda *a, **k: None):
+                rc, _out = run(["--push", "--root", ins_root])
+            check("dropping the gate reports success while pushInsteadOf redirects the push "
+                  "(shown red)",
+                  rc == EXIT_OK and _tip_or_none(ins_other2) == ins_head
+                  and _tip(ins_bare) == ins_tip)
+            # the match is a prefix match, judged at both edges: a recorded prefix just inside the
+            # verified URL still matches and refuses; a value just past it matches nothing and the
+            # run proceeds to the ordinary report
+            gcfg.write_text('[url "{}"]\n\tinsteadOf = {}\n'.format(ins_other2, ins_bare[:-1]),
+                            encoding="utf-8")
+            rc, out = run(["--root", ins_root])
+            check("an insteadOf prefix just inside the verified URL refuses",
+                  rc == EXIT_MALFORMED and "rewrite" in out)
+            gcfg.write_text('[url "{}"]\n\tinsteadOf = {}x\n'.format(ins_other2, ins_bare),
+                            encoding="utf-8")
+            rc, out = run(["--root", ins_root])
+            check("an insteadOf value just past the verified URL matches nothing and sync runs",
+                  rc == EXIT_MALFORMED and "AHEAD" in out and "rewrite" not in out)
+            gcfg.unlink()
+
+            # -- a repository-local include cannot put a planted program on the transport ---------
+            inc_root, _inc_bare = _paired("include")
+            planted_helper = Path(base) / "include-helper"
+            inc_sentinel = os.path.join(base, "include-sentinel")
+            planted_helper.write_text("#!/bin/sh\n: > {}\nexit 0\n".format(inc_sentinel),
+                                      encoding="utf-8")
+            os.chmod(str(planted_helper), 0o755)
+            cred_inc = Path(base) / "include-credential"
+            cred_inc.write_text("[credential]\n\thelper = !{}\n".format(planted_helper),
+                                encoding="utf-8")
+            _git(inc_root, "config", "--local", "include.path", str(cred_inc))
+            inc_head = _head(inc_root)
+            rc, out = run(["--root", inc_root])
+            check("a repository-local include carrying a credential helper refuses before any "
+                  "transport",
+                  rc == EXIT_MALFORMED and "include" in out and not os.path.exists(inc_sentinel)
+                  and _head(inc_root) == inc_head)
+            ap_root, _ap_bare = _paired("askpass")
+            ap_inc = Path(base) / "include-askpass"
+            ap_inc.write_text("[core]\n\taskpass = {}\n".format(planted_helper), encoding="utf-8")
+            _git(ap_root, "config", "--local", "include.path", str(ap_inc))
+            rc, out = run(["--root", ap_root])
+            check("a repository-local include carrying core.askpass refuses before any transport",
+                  rc == EXIT_MALFORMED and "include" in out and not os.path.exists(inc_sentinel))
+            # the named flip: with the repository-config refusal dropped the runs report clean and
+            # the planted keys are live in the exact configuration the transport reads (the file
+            # transport never prompts for credentials, so liveness is judged on that effective
+            # configuration rather than on a prompt the fixture cannot force)
+            with patch.object(module, "_refuse_local_redirect_config", lambda *a, **k: None):
+                rc1, _out = run(["--root", inc_root])
+                rc2, _out = run(["--root", ap_root])
+            teff = _transport_env()
+            eff1 = _opf_observe._capture_bounded([git, "-C", inc_root, "config", "-z",
+                                                  "--name-only", "--list"], teff, 30, 1 << 20)
+            eff2 = _opf_observe._capture_bounded([git, "-C", ap_root, "config", "-z",
+                                                  "--name-only", "--list"], teff, 30, 1 << 20)
+            check("dropping the repository-config refusal leaves the include-planted helper and "
+                  "askpass live for the transport (shown red)",
+                  rc1 == EXIT_OK and rc2 == EXIT_OK
+                  and eff1.completed and b"credential.helper" in eff1.out
+                  and eff2.completed and b"core.askpass" in eff2.out)
+            # includeIf and a repository-scope https trust override refuse by the same enumeration
+            ii_root, _ii_bare = _paired("includeif")
+            _git(ii_root, "config", "--local", "includeIf.gitdir:{}/.path".format(ii_root),
+                 str(ap_inc))
+            rc, out = run(["--root", ii_root])
+            check("a repository-local includeIf refuses before any transport",
+                  rc == EXIT_MALFORMED and "include" in out)
+            sv_root, _sv_bare = _paired("trust")
+            _git(sv_root, "config", "--local", "http.sslVerify", "false")
+            rc, out = run(["--root", sv_root])
+            check("a repository-scope https trust override refuses before any transport",
+                  rc == EXIT_MALFORMED and "trust" in out)
 
             # -- a dangerous or typed sync_target refuses before any git launch ------------------
             bad_targets = (("git:--upload-pack=/bin/false", "begins with"),
