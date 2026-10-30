@@ -6863,9 +6863,11 @@ def _test_deadline_posture(failures, tmp):
 # comment, and '}' for '${ cmd; }'), rule (a); V3 has no exact delimiter line either, rule (b) too; V8 ends a
 # backquote substitution at a backquote in the body, rule (c). V7's '<<' and glued-eof's sit inside an open
 # '${', so the lexer now refuses each at that operator (_HD_DOLLAR_BRACE_ROWS) before any body is read; glued-eof
-# was this table's rule (b) row. rule-b is a '<<' inside an arithmetic command, a shift to bash (which reports
-# the arithmetic error and runs the next line), where the lexer reads a here-document that no line ends, so only
-# rule (b) holds there. brace-word is an untrusted body only through
+# was this table's rule (b) row. rule-b is a '<<' inside an array assignment's parentheses, where bash 5.3.9
+# opens no here-document (it reports a syntax error at the '<<' and runs the next line) and the lexer reads one
+# that no line ends, so only rule (b) holds there; its earlier '<<' inside an arithmetic command is now refused
+# at that operator (_HD_ARITH_ROWS).
+# brace-word is an untrusted body only through
 # the '${' element of the trust test: the '}' after echo is a word to bash, so the '${ ' substitution stays
 # open, but the lexer's nesting stack pops its '${' there, and nothing else marks the body untrusted.
 _HD_EARLY_END_HIDDEN = "git -c core.hooksPath=/dev/null commit -m x"
@@ -6880,7 +6882,7 @@ _HD_EARLY_END_ROWS = (
     ("V7", "x=${ cat <<'EOF'\nEOF}; ", "\nEOF\n}", _HD_DOLLAR_BRACE_REFUSED),
     ("V8", "x=`cat <<'EOF'\nfoo`; ", "; y=`\nEOF\n`", _HD_EARLY_END_REFUSED),
     ("glued-eof", "echo ${x:-<<'EOF'}\n", "\nEOF", _HD_DOLLAR_BRACE_REFUSED),
-    ("rule-b", "(( 1 <<'EOF' ))\n", "", _HD_EARLY_END_REFUSED),
+    ("rule-b", "x=( 1 <<'EOF' )\n", "", _HD_EARLY_END_REFUSED),
     ("brace-word", "x=${ echo }; cat <<'EOF'\nEOF }; ", "\nEOF\n}", _HD_EARLY_END_REFUSED),
 )
 # The exact reading the rule keeps, each with the hidden command after the body as a visible segment: a body
@@ -7013,6 +7015,97 @@ def _heredoc_dollar_brace_failures():
         lexed = _hd_lex_outcome(command)
         if lexed != want + [hidden.split()]:
             out.append("(hd-dollar-brace-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
+
+
+# A HERE-DOCUMENT WHILE A '((' IS OPEN (THE ARITHMETIC MARK above aiqt_hooks._HEREDOC_ARITH_OPEN, and the two
+# raises of _HEREDOC_ARITH_OPEN in _lex_pass). Inside an arithmetic command or expansion bash reads '<<' as a
+# shift and a newline as text, so it opens no here-document there and starts no body; bash 5.3.9 runs
+# _HD_EARLY_END_HIDDEN in every _HD_ARITH_ROWS row (a fake git first on PATH recorded its arguments, under bash -c
+# and under eval alike), while the lexer at f1248b31 read it as body and protected_line allowed it, as every
+# other PreToolUse handler did. command, expansion and assignment are the three shapes; for-arith is a
+# 'for ((...))' loop; nested holds the expansion inside a '$(...)'; paren-inner puts an unmarked '(' innermost
+# at the '<<', so it is refused only because the mark counts wherever it sits on the stack; comsub is a '$(('
+# that bash reads as a command substitution, where only the mark on its first '(' is still open at the '<<';
+# subshells is a '((' that bash reads again as nested subshells and still runs the line after; continued puts a
+# backslash-newline between the two '('; late-open opens the expansion after the '<<', so only the newline raise
+# holds there, and hides the command in a substitution inside the arithmetic text, which bash expands
+# (hd-arith-control-subst is its bare control). In each _HD_ARITH_UNCERTAIN row bash 5.3.9 reads a here-document
+# and the hidden command as its body (nested subshells, and a command substitution a '$((' opens): the mark
+# cannot tell those from arithmetic, so the lexer refuses them too (a disclosed over-refusal). _HD_ARITH_KEPT rows
+# keep their exact read: '( (' and '$( (', which are never arithmetic, and a '((' or '$((' closed before the
+# '<<' (by a '))' run, a single ')', a 'for' loop's '))') or before the newline.
+_HD_ARITH_REFUSED = "ValueError: uncertain here-document while a '((' is open"
+_HD_ARITH_ROWS = (
+    ("command", "(( 1 <<'EOF' ))\n", "\nEOF"),
+    ("expansion", "echo $(( 1 <<'EOF' ))\n", "\nEOF"),
+    ("assignment", "x=$(( 1 <<'EOF' ))\n", "\nEOF"),
+    ("for-arith", "for (( i=0; i<1<<'EOF'; i++ )); do :; done\n", "\nEOF"),
+    ("nested", "y=$(echo $(( 1 <<'EOF' )))\n", "\nEOF"),
+    ("paren-inner", "echo $(( (1 <<'EOF') ))\n", "\nEOF"),
+    ("comsub", "echo $(( 1 ) <<'EOF' )\n", "\nEOF"),
+    ("subshells", "((cat <<'EOF'\n", "\nEOF\n) )"),
+    ("continued", "(\\\n( 1 <<'EOF' ))\n", "\nEOF"),
+    ("late-open", "cat <<'EOF' $(( 1 +\n$(", ") ))\nEOF\n"),
+)
+_HD_ARITH_UNCERTAIN = (
+    ("closed-early", "(( 1 ) <<'EOF' )\n", "\nEOF"),
+    ("subst-subshell", "echo $((cat <<'EOF'\n", "\nEOF\n) )"),
+)
+_HD_ARITH_KEPT = (
+    ("spaced", "( (cat <<'EOF'\nbody\nEOF\n) )\n", [[], [], ["cat"], [], [], []]),
+    ("subst-spaced", "echo $( (cat <<'EOF'\nbody\nEOF\n) )\n", [["echo", "$"], [], ["cat"], [], [], []]),
+    ("closed-run", "(( 1 )) && cat <<'EOF'\nbody\nEOF\n", [[], [], ["1"], [], [], ["cat"]]),
+    ("closed-single", "echo $(( 1 ) ); cat <<'EOF'\nbody\nEOF\n", [["echo", "$"], [], ["1"], [], [], ["cat"]]),
+    ("closed-for", "for ((;;)); do break; done; cat <<'EOF'\nbody\nEOF\n",
+     [["for"], [], [], [], [], [], [], ["do", "break"], ["done"], ["cat"]]),
+    ("closed-on-line", "cat <<'EOF'; (( 1 ))\nbody\nEOF\n", [["cat"], [], [], ["1"], [], []]),
+)
+
+
+def _heredoc_arith_failures():
+    """(hd-arith-*) Each row of _HD_ARITH_ROWS beside its bare control: the shared lexer refuses the row
+    (_HD_ARITH_REFUSED) and protected_line denies it, as it denies the hidden command alone (hd-arith-control,
+    and hd-arith-control-subst for late-open's substitution). Every row fails on f1248b31, where the lex read
+    the hidden command as body and protected_line allowed it; command, expansion, assignment, for-arith, nested,
+    paren-inner, comsub and continued also fail where the raise at the '<<' is removed (subshells and late-open
+    still meet the newline raise, a mark open at their newline), late-open where the raise at the newline is,
+    every row but comsub where both raises read only the innermost entry of the stack, comsub and continued
+    where the mark goes on the second '(' of a run instead of the first, and continued where the mark's
+    look-ahead does not skip backslash-newlines. hd-arith-uncertain-*: the lexer refuses each
+    _HD_ARITH_UNCERTAIN row rather than read its body either way. hd-arith-kept-*: the lexer reads each
+    _HD_ARITH_KEPT command as before, the hidden command a visible segment after it (REGRESSION GUARDS that pass on
+    f1248b31 too; closed-run, closed-for and closed-on-line fail where a ')' run does not pop a mark, and
+    closed-single where a single ')' does not)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    for tag, control in (("control", hidden), ("control-subst", "x=$(" + hidden + ")")):
+        got = _decision(aiqt_hooks.protected_line, control)
+        if got != "deny":
+            out.append("(hd-arith-{}) protected_line must deny the bare hidden command {!r}, got {}".format(
+                tag, control, got))
+    for name, before, after in _HD_ARITH_ROWS:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_ARITH_REFUSED:
+            out.append("(hd-arith-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_ARITH_REFUSED, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-arith-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, after in _HD_ARITH_UNCERTAIN:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_ARITH_REFUSED:
+            out.append("(hd-arith-uncertain-{}) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_ARITH_REFUSED, lexed))
+    for name, before, want in _HD_ARITH_KEPT:
+        command = before + hidden
+        lexed = _hd_lex_outcome(command)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-arith-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
                 name, command, want + [hidden.split()], lexed))
     return out
 
@@ -15219,6 +15312,7 @@ def _main_isolated(monitor):
                            exact=_hdn in ("apostrophe", "five-headings"))
         failures.extend(_heredoc_early_end_failures())
         failures.extend(_heredoc_dollar_brace_failures())
+        failures.extend(_heredoc_arith_failures())
         # MAIN'S DECISION AS A FLOOR (the comment above _MainHashReading). Main's lex fails on the commit
         # message form whose body holds an apostrophe, and its guards then take their failed-lex path, whose raw
         # scans read the whole text, a command inside a string included; reading that body made the lex clean,

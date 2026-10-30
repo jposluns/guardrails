@@ -690,14 +690,14 @@ class _LexStops:
 class _NestStack(list):
     """A comment-rule nesting stack (_nest_track) that counts its entries, so the tests the scanners make for
     a word or a backquote ("${" in nest, "`" in nest) take the same time however deep the stack is, where a
-    plain list's test reads every entry: a list of "(", "${" and "`" entries changed only through append,
+    plain list's test reads every entry: a list of "(", "((", "${" and "`" entries changed only through append,
     extend, pop and clear."""
 
     def __init__(self):
         super().__init__()
         # Each entry kind starts at zero, so a test for one never opened (the common "`" in nest) is a plain
         # dictionary read, not a call to Counter.__missing__.
-        self._open = collections.Counter(dict.fromkeys(("(", "${", "`"), 0))
+        self._open = collections.Counter(dict.fromkeys(("(", "((", "${", "`"), 0))
 
     def append(self, item):
         super().append(item)
@@ -729,24 +729,27 @@ class _NestStack(list):
         return out
 
 
-def _nest_track(nest, c, after_dollar):
+def _nest_track(nest, c, after_dollar, arith=False):
     """Record one UNQUOTED, unescaped character on a comment-rule nesting stack (a list, or a _NestStack). A
-    '(' opens a parenthesis and a ')' closes the innermost one when it is on top; a ')' with no parenthesis on
+    '(' opens a parenthesis, an "((" entry where arith is True (the shared lexer's ARITHMETIC MARK, above
+    _HEREDOC_ARITH_OPEN; every other scanner leaves it False) and a "(" entry otherwise, and a ')' closes the
+    innermost one of either kind when it is on top; a ')' with no parenthesis on
     top (an unmatched one, or one met while a '${' or backquote is innermost) pops nothing. A '{' directly
     after a '$' opens a '${' parameter expansion and a '}' closes it when it is on top (bash ends a '${...}'
     at its first unquoted '}'). A backquote closes the innermost open backquote substitution, with anything
     still open inside it, or else opens one; closing pops each entry it removes, so it costs time in the
     entries removed, not in the stack's depth. Any other character leaves the stack unchanged. The stack only
-    has to tell whether ANYTHING is open: a case pattern's ')' inside an open parenthesis pops that
+    has to tell whether ANYTHING is open (and, for the shared lexer's here-document raises, whether a "(("
+    entry is open anywhere on it): a case pattern's ')' inside an open parenthesis pops that
     parenthesis, which can hide only a subshell or substitution parenthesis (inside which bash reads a
     word-start '#' as a comment too), never an open '${' or backquote. That pop is safe for the '#'
     rule only: the out-of-scope note scan's here-document rule keeps its OWN count of open command and
     process substitutions (_orch_note_scan), because for that rule a substitution parenthesis popped
     at a case pattern's ')' is exactly the body misread the rule exists to note."""
     if c == "(":
-        nest.append("(")
+        nest.append("((" if arith else "(")
     elif c in ")}":
-        if nest and nest[-1] == ("(" if c == ")" else "${"):
+        if nest and nest[-1] in (("(", "((") if c == ")" else ("${",)):
             nest.pop()
     elif c == "{" and after_dollar:
         nest.append("${")
@@ -1822,6 +1825,23 @@ _HEREDOC_NESTING_RE = re.compile(r"[(`]|\$(?:\\\n)*\{")
 # The lexer's refusal of a here-document while a '${' is open on its nesting stack: a '<<' read there, or the
 # newline that would start the bodies of a line's here-documents read there (the raises in _lex_pass).
 _HEREDOC_DOLLAR_BRACE_OPEN = "uncertain here-document while a '${' is open"
+# THE ARITHMETIC MARK. Inside an arithmetic command '((...))' (a 'for ((...))' included) or an arithmetic
+# expansion '$((...))' bash reads '<<' as the shift operator and a newline as text, so it opens no
+# here-document there and starts no body: bash 5.3.9 runs the git in (( 1 <<'EOF' )), git commit -m x, EOF on
+# three lines, and in the same lines with echo $(( 1 <<'EOF' )) or x=$(( 1 <<'EOF' )) first, where a body
+# skipped from the '<<' hid it. Bash takes a '((' as arithmetic only where its two '(' are adjacent (a
+# backslash-newline between them aside, since bash removes it first; '( (' is two subshells), and then only by
+# how the text closes: a '((' whose inner ')' is not followed by a ')' is read again as nested subshells, and
+# a '$((' whose text does not close with '))' is a command substitution, read as text first and parsed only
+# when it expands (bash 5.3.9 runs the git after ((cat <<'EOF', git commit -m x, EOF, ') )' and after
+# echo $(( 1 ) <<'EOF' ), but reads a body after (( 1 ) <<'EOF' )). The nesting stack cannot place that close
+# before it reads it, so the lexer marks the frame instead of deciding it: a '(' whose next character, past any
+# backslash-newlines, is another '(' is pushed as an "((" entry (_nest_track), which covers '((' wherever it
+# sits and the '$(' of every '$((' up to the ')' that closes it, and a '<<', or the newline that would start
+# the bodies of a line's here-documents, read while such an entry is anywhere on the stack is UNCERTAIN (the
+# raises in _lex_pass): the lex fails and every guard takes its fail-closed fallback. That refuses a
+# here-document bash does read in such a frame (a disclosed over-refusal), never a reading either way.
+_HEREDOC_ARITH_OPEN = "uncertain here-document while a '((' is open"
 
 
 def _heredoc_body_ends_early(command, body_at, body_end, heredocs, backquoted):
@@ -2332,7 +2352,9 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     escape, a NUL, an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), or a quoted here-document whose reading is uncertain (a '<<',
     or the newline that would start its body, read while a '${' is open on the nesting stack, where bash may
-    read the '<<' as text; or a body read inside a substitution or group whose end _heredoc_body_ends_early
+    read the '<<' as text, or while a '((' that may open an arithmetic command or expansion is open on it, where
+    bash may read the '<<' as a shift and the newline as text (THE ARITHMETIC MARK, above _HEREDOC_ARITH_OPEN);
+    or a body read inside a substitution or group whose end _heredoc_body_ends_early
     cannot place), so the caller falls back conservatively rather than acting on a partially-cleaned command.
     A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal body is EXCLUDED from analysis
     (round-2 finding 17) so a guard never fires on shell syntax quoted inside heredoc prose. This quoting model is a best-effort reading of bash, not a guarantee (a
@@ -2689,6 +2711,14 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         # is UNCERTAIN, as at a '<<' read while a '${' is open (the raise at that operator
                         # below): raise so the whole lex fails.
                         raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
+                    if "((" in nest:
+                        # A '((' marked after the '<<' on this line is still open at this newline. Inside
+                        # arithmetic the newline is text to bash, which starts the bodies only at the newline
+                        # after the arithmetic closes (bash 5.3.9 runs the git in cat <<'EOF' $(( 1 +, then
+                        # $(git commit -m x) )), then EOF, where a body skipped from here hid it), while in
+                        # nested subshells it is a line end; the mark cannot tell which (THE ARITHMETIC MARK,
+                        # above _HEREDOC_ARITH_OPEN), so the reading is UNCERTAIN: raise so the whole lex fails.
+                        raise ValueError(_HEREDOC_ARITH_OPEN)
                     body_at = i
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
                     # The exact-delimiter-line skip above ends each body where bash ends it only
@@ -2704,8 +2734,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     # as bash reads it) ONLY when nothing is open on the stack AND no '(', backquote
                     # or '${' appears anywhere before the body, quoted or not (_HEREDOC_NESTING_RE,
                     # searched once per pass, so the test stays linear however many bodies follow).
-                    # No body opened while a '${' was still open on the stack reaches here: the lex
-                    # already failed at that '<<' (the uncertain operator raise below).
+                    # No body opened while a '${' or a marked '((' was still open on the stack reaches
+                    # here: the lex already failed at that '<<' (the uncertain operator raises below).
                     if nesting_at is None:
                         nesting = _HEREDOC_NESTING_RE.search(command)
                         nesting_at = n if nesting is None else nesting.start()
@@ -2768,7 +2798,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 op, kind, oplen = _match_operator(command, i, n)
                 if kind == "sep":
                     if op in ("(", ")"):
-                        _nest_track(nest, op, False)
+                        # A '(' whose next character, past any backslash-newlines, is another '(' is marked: it
+                        # may open an arithmetic command or expansion (THE ARITHMETIC MARK, above
+                        # _HEREDOC_ARITH_OPEN).
+                        _nest_track(nest, op, False, op == "(" and command.startswith(
+                            "(", _skip_line_continuations(command, i + 1, n)))
                         before = "paren"
                         if op == ")":
                             glued_at = i + 1
@@ -2791,10 +2825,14 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                             run += 1
                         count = run - i
                         if op == "(":
-                            nest.extend("(" * count)
+                            # Each '(' of the run but its last has a '(' right after it, so it is marked; the
+                            # last is marked where a '(' follows the run past backslash-newlines.
+                            nest.extend(["(("] * (count - 1))
+                            _nest_track(nest, op, False, command.startswith(
+                                "(", _skip_line_continuations(command, run, n)))
                         elif op == ")":
                             pops = count
-                            while pops and nest and nest[-1] == "(":
+                            while pops and nest and nest[-1] in ("(", "(("):
                                 nest.pop()
                                 pops -= 1
                             glued_at = run
@@ -2832,6 +2870,13 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         # here-document in such a substitution). The newline that would start a body
                         # follows the same rule (the raise above, where the bodies are skipped).
                         raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
+                    if op == "<<" and "((" in nest:
+                        # A '<<' read while a marked '((' is open anywhere on the stack: a shift to bash inside
+                        # arithmetic, where it opens no here-document, and an operator in nested subshells; the
+                        # mark cannot tell which (THE ARITHMETIC MARK, above _HEREDOC_ARITH_OPEN), so the
+                        # reading is UNCERTAIN: raise so the whole lex fails and every guard takes its
+                        # fail-closed fallback. The newline that would start a body follows the same rule.
+                        raise ValueError(_HEREDOC_ARITH_OPEN)
                     if op == "<<":
                         parsed = _parse_heredoc_delim(command, i + oplen, n)
                         if parsed is not None and parsed[0]:
