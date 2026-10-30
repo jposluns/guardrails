@@ -438,7 +438,7 @@ def render_json(reg, rows):
             "ids_cited": r["ids_cited"],
         }
         # A full-edition manifest carries its edition denominator; a curated subset carries
-        # ids_total = null (GD-73): the KEY stays for schema compatibility, and null means no computable
+        # ids_total = null: the KEY stays for schema compatibility, and null means no computable
         # edition denominator, because the manifest cannot state how many identifiers the whole edition
         # holds (the catalogue invariant). catalogue + this null tell a consumer it is a curated subset;
         # the HTML registry and reverse view show no denominator for a subset.

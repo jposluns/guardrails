@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a04953043c8d6f8b523ac8820954366ea7880ad68ab0856d26d9b59605ef5e24"
+tree-sha256 = "0626d4c7ccea3293895cd84e9d9579a355dbb5e979b90e6c8a777c331f897a19"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -36,13 +36,13 @@ sha256 = "a2188250b031d6168937b6857d01fe48bdc7f5ed5e93fbc682908b0415a1453f"
 
 [[sources]]
 path = ".aiqt/core/clause-exemptions.toml"
-bytes = 25676
-sha256 = "1fc6c75488748e4deb0e04272dc8de4905a1202209518c73224547fc21c4f5a9"
+bytes = 24207
+sha256 = "e8206a17458f86b423d9c17f84145a13ceb485d52e38d11769cc89976acbf552"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 310464
-sha256 = "2cc288aa8cbdb52102109a4949f9ec395b35e7d6bc87d65db7d3904840ef19a6"
+bytes = 311668
+sha256 = "91a8a88fdccfd6394f698d34130ed90eb901ec3003d26963f84302cf99fbb750"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -56,8 +56,8 @@ sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
 path = ".aiqt/core/enforcement-roadmap.toml"
-bytes = 12492
-sha256 = "1624e6dabaa05d107a66a6bfc5a87d5d7f086da9fbf48b4f7350afe1e439c782"
+bytes = 12517
+sha256 = "ecb7701a4aa5eded26cedca5b3cdbb5539d2778987c37972246546f49b4570e6"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 501422
-sha256 = "428e2b2ce4e9c7522025750601c90184da16c521ebdb7bf5e2e1a79bb9ad1c7a"
+bytes = 506921
+sha256 = "5af48fe549879d79764f269248514f18f3b297e4a4cec3a4e4d04670bbf75e8b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -81,8 +81,8 @@ sha256 = "f4399e6b85a8e3a246f239293ff863e708ad9acfb4ff3a8a3887c589910efdc9"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 441590
-sha256 = "c6d3bf431c106a8c1e4ea86528e3bd3e3bea1dd398f92c788da25d336b33fddb"
+bytes = 449327
+sha256 = "5bd4e6c89536f6a5f3f93612184bff9ace7f116c9b0619ba6c6fc6f4f3db0365"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
@@ -91,18 +91,18 @@ sha256 = "5abcd3d73c58dad02c8bc2bdf6bfd297c01ee14dd6fc3aa672b9f372d146f084"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 2275546
-sha256 = "88a9f1908645bfc23ad016aa357f6bbfc825ce42d7dafe2d5b0eceda60329070"
+bytes = 2299516
+sha256 = "84af94e92ea08c43f9b82c5bfd7d695d71c8b02824dcc7067e2c89065f455835"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 38720
-sha256 = "ae4148923b48a3867c69d898efb1608da7367445cdeb818aa2a5c86d78bd8ce0"
+bytes = 38819
+sha256 = "17e6aa247693e115bba2f9959e801effc7ae80ef9f7b4c391fd4a4352f38d080"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
-bytes = 7954
-sha256 = "c2dbaeb125a815a1d972e6e842e34ef43fe0c0f2ce91359d7a5383f92b08bbb0"
+bytes = 9336
+sha256 = "96c990fb17f48e1cd12ce3be2f87065a6c5cd064d7411fb7e8d7ddd742073ca2"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 19721
-sha256 = "0a3a31e28daae1b0d60c30c05456cfa710809663fc88f4f5b831ff96f819c9f0"
+bytes = 20439
+sha256 = "855800c7588ee1a295ce40f80326c3e57f844e7722035360743e0a42a8f80531"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -131,8 +131,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9046
-sha256 = "be35c15118414371953b6a7bccc713fe674a3de2acc38c77ad8fdd31467f75ca"
+bytes = 9074
+sha256 = "8ece5b9945b924840d6ef7a0bed68b523c8af16b38894f7553a4b02ab05cbb07"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "50438819e41294867dd544c26ec8f27211552c915c003601fd17856adfb89eda"
+sha256 = "1d79fc36dba2d02482a9422804b910e4ffea50362c61e1b0c081240f4ac3630d"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -156,8 +156,8 @@ sha256 = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
-bytes = 1079
-sha256 = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
+bytes = 905
+sha256 = "8f10de006546da9103ddb49c6cabaf6497ca18a8ef1c2aef91bfbb258fdea3c2"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-claims-rest-on-observation.md"
@@ -176,8 +176,8 @@ sha256 = "14ecc6a4fa419a3b0b8223c9442b0f9c5ab7c32adeaa4e4a2b1fec1cf26b1fb9"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
-bytes = 1832
-sha256 = "2563a03b33981c517e231da672d197b54ad005507207e00efb3eef3b9f8513b7"
+bytes = 1745
+sha256 = "0acbd49e4173c33393cb9fd2e31b9e1665e425fd7b5442f7e2ed327daf7445aa"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-disclose-guard-residuals.md"
@@ -186,8 +186,8 @@ sha256 = "3b8bbb1a920a8c38d7763f6433eb457139c5dd814926559662dc8ffc0409271e"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
-bytes = 3925
-sha256 = "48567686953dd4a0e7a54140f184df811c7de7273904fd06cfab9ef0101971d3"
+bytes = 4279
+sha256 = "a98b09f42c472d707ac1b7eee98594593d181def80bfebfda57780cd9e9afe87"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-guard-input-soundness.md"
@@ -196,8 +196,8 @@ sha256 = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separate.md"
-bytes = 1289
-sha256 = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
+bytes = 1155
+sha256 = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-no-fabrication.md"
@@ -206,8 +206,8 @@ sha256 = "45e14b4c516cbe6969867102c239f895e9047794a90231cf6a18b1db489f4a26"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
-bytes = 2194
-sha256 = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+bytes = 2135
+sha256 = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-partial-read-is-not-the-whole.md"
@@ -241,8 +241,8 @@ sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
-bytes = 6555
-sha256 = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+bytes = 6416
+sha256 = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[sources]]
 path = ".aiqt/core/rules/cost-tier.md"
@@ -361,8 +361,8 @@ sha256 = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[sources]]
 path = ".aiqt/core/rules/progr-decision.md"
-bytes = 448
-sha256 = "29b1c64bcb19fe0b05134db59c44a7cf8e15f2c0f8fa31a453cd54e678257cba"
+bytes = 847
+sha256 = "dae06196008c0bf9f98c4c82961af2943e601b8374abf2717d0fba38ef78f476"
 
 [[sources]]
 path = ".aiqt/core/rules/progr-repeated-failure-triggers-premise-review.md"
@@ -396,8 +396,8 @@ sha256 = "869083e9ef683c85b8eb380961c656ce727214fa20b1d599c559559904c4e0d6"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
-bytes = 2174
-sha256 = "62886e96c50d5d0728ef077f52115ef4806fd0eb1887e78270191451b970a3fc"
+bytes = 1989
+sha256 = "a3e63913a6c51a518b4dcd6d64451eaf08202fa134d1e7ab6af35b0327214ad2"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
@@ -416,8 +416,8 @@ sha256 = "5f97f7ebd69a8b825747c384fbc0ac5717a3ccfecb86641c672b93afb32b96fa"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
-bytes = 1963
-sha256 = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
+bytes = 1732
+sha256 = "b5abc8e7aff81715c11ed49241607a5063adbdf933f215609d5060f4b7418756"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-lightweight-verifier-workers.md"
@@ -756,8 +756,8 @@ sha256 = "20c201093daf82185da0b45339bfa565acc96a9d81b327580804c7976b99c2ae"
 
 [[sources]]
 path = ".aiqt/core/rules/trust-continue-by-default.md"
-bytes = 10286
-sha256 = "58e4611231a23d3d58849c2b42f4f2030f19749d45b38c3439adaa3f8cbd3741"
+bytes = 10232
+sha256 = "2d26e8dee5c542079bae6930b50ef07d8232094c44dd1b033bbb7514b0b3d28c"
 
 [[sources]]
 path = ".aiqt/core/rules/trust-human-oversight.md"
@@ -821,8 +821,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 956474
-sha256 = "9ac780eec8a184540b8d55d5fc3cd0f4f15eb0e68b682885763b960f329a9595"
+bytes = 964696
+sha256 = "6852017b43fb96726cb5fd4960fa73bc680e9f8dbfc7aadf1358b352f3cb5054"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -842,7 +842,7 @@ sha256 = "0fca72838333bd7d207d0430cbd416691e3dcd23dd71cb9fe9d0eed0da7d6608"
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
 bytes = 1104
-sha256 = "4ea91fe941bd2c87411e0a64f1e662e7cd3c3bb91e94b7badb53add47d81d570"
+sha256 = "ab0b9b7b85b35135f6b8535dd6a568f08b88be62e110278049beeabbeedf8121"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -935,6 +935,11 @@ bytes = 1077
 sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 
 [[sources]]
+path = ".aiqt/tracker-label-baseline.toml"
+bytes = 5110
+sha256 = "768317cd267fb8dc48206d87b2b8f74bbf69fccd2d34eab287dbabe2c117765b"
+
+[[sources]]
 path = ".claude/RULES-INDEX.md"
 bytes = 12327
 sha256 = "f3a6ac48f1a45652d7358119491d191612e47c8b2683ee5a1ba4695934ff36d5"
@@ -951,8 +956,8 @@ sha256 = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-citation-from-opened-file.md"
-bytes = 1079
-sha256 = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
+bytes = 905
+sha256 = "8f10de006546da9103ddb49c6cabaf6497ca18a8ef1c2aef91bfbb258fdea3c2"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-claims-rest-on-observation.md"
@@ -971,8 +976,8 @@ sha256 = "14ecc6a4fa419a3b0b8223c9442b0f9c5ab7c32adeaa4e4a2b1fec1cf26b1fb9"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-count-carries-its-predicate.md"
-bytes = 1832
-sha256 = "2563a03b33981c517e231da672d197b54ad005507207e00efb3eef3b9f8513b7"
+bytes = 1745
+sha256 = "0acbd49e4173c33393cb9fd2e31b9e1665e425fd7b5442f7e2ed327daf7445aa"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-disclose-guard-residuals.md"
@@ -981,8 +986,8 @@ sha256 = "3b8bbb1a920a8c38d7763f6433eb457139c5dd814926559662dc8ffc0409271e"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md"
-bytes = 3925
-sha256 = "48567686953dd4a0e7a54140f184df811c7de7273904fd06cfab9ef0101971d3"
+bytes = 4279
+sha256 = "a98b09f42c472d707ac1b7eee98594593d181def80bfebfda57780cd9e9afe87"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-guard-input-soundness.md"
@@ -991,8 +996,8 @@ sha256 = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md"
-bytes = 1289
-sha256 = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
+bytes = 1155
+sha256 = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-no-fabrication.md"
@@ -1001,8 +1006,8 @@ sha256 = "45e14b4c516cbe6969867102c239f895e9047794a90231cf6a18b1db489f4a26"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-observe-before-asserting-behaviour.md"
-bytes = 2194
-sha256 = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+bytes = 2135
+sha256 = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-partial-read-is-not-the-whole.md"
@@ -1036,8 +1041,8 @@ sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
-bytes = 6555
-sha256 = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+bytes = 6416
+sha256 = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md"
@@ -1176,8 +1181,8 @@ sha256 = "869083e9ef683c85b8eb380961c656ce727214fa20b1d599c559559904c4e0d6"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md"
-bytes = 2174
-sha256 = "62886e96c50d5d0728ef077f52115ef4806fd0eb1887e78270191451b970a3fc"
+bytes = 1989
+sha256 = "a3e63913a6c51a518b4dcd6d64451eaf08202fa134d1e7ab6af35b0327214ad2"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md"
@@ -1196,8 +1201,8 @@ sha256 = "5f97f7ebd69a8b825747c384fbc0ac5717a3ccfecb86641c672b93afb32b96fa"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md"
-bytes = 1963
-sha256 = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
+bytes = 1732
+sha256 = "b5abc8e7aff81715c11ed49241607a5063adbdf933f215609d5060f4b7418756"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md"
@@ -1281,8 +1286,8 @@ sha256 = "20c201093daf82185da0b45339bfa565acc96a9d81b327580804c7976b99c2ae"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-TRUST-continue-by-default.md"
-bytes = 10286
-sha256 = "58e4611231a23d3d58849c2b42f4f2030f19749d45b38c3439adaa3f8cbd3741"
+bytes = 10232
+sha256 = "2d26e8dee5c542079bae6930b50ef07d8232094c44dd1b033bbb7514b0b3d28c"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md"
@@ -1341,8 +1346,8 @@ sha256 = "ca2a29d56f95091c3f50db083deae2655f01b54d7d44e2686f8d29b45ada76ff"
 
 [[sources]]
 path = ".claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
-bytes = 448
-sha256 = "29b1c64bcb19fe0b05134db59c44a7cf8e15f2c0f8fa31a453cd54e678257cba"
+bytes = 847
+sha256 = "dae06196008c0bf9f98c4c82961af2943e601b8374abf2717d0fba38ef78f476"
 
 [[sources]]
 path = ".claude/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md"
@@ -1616,8 +1621,8 @@ sha256 = "9b22893404024e0a99b3dce84fe4973a348243564297b379858d6b6d8ce47ad6"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-citation-from-opened-file.mdc"
-bytes = 980
-sha256 = "8a2ae18980f657a684cd611b7adb5a5b3912eb2c3f35cba4c96e96368ad6fea5"
+bytes = 806
+sha256 = "746aecbc4ffd97467021bda3a7f662bbae6d08f7b9af156414f6f45fae0f3aad"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-claims-rest-on-observation.mdc"
@@ -1636,8 +1641,8 @@ sha256 = "81e58a0b18b0f90819aab1b516f0bb78283136bfac8ab9e804a5f1e6a6cf8826"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-count-carries-its-predicate.mdc"
-bytes = 1731
-sha256 = "8c373292eb6e853d0de28625117abd53b553cebfe4e95a98b16baa4f647fc99f"
+bytes = 1644
+sha256 = "c9f3ef1c05bc0d369e36bc01e3e4f761bd0cc2e6dbea7db011355368cab9de46"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-disclose-guard-residuals.mdc"
@@ -1646,8 +1651,8 @@ sha256 = "9677a66d941c8626f38fffcffc02e4ab8c780e33dcea080626c1d1143c9fe47e"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-evidence-grounded-completion.mdc"
-bytes = 3753
-sha256 = "f60c11dcfe1c92672500f41c4320bf25dbf73d5c32b8ccc77047cf9808763c96"
+bytes = 4107
+sha256 = "a6b0f5ee19260fc95ae9bc980517a88fd36edbcb94369c61362ad55b509ba2b3"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-guard-input-soundness.mdc"
@@ -1656,8 +1661,8 @@ sha256 = "31711042b10244ae04fdb28149180af06ea1119f0f1528d8694dc70f9d83effe"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.mdc"
-bytes = 1126
-sha256 = "669e69e1fd6fa0a35143396e609453282c7f0c5c225c7187a2da306abedd2c0f"
+bytes = 992
+sha256 = "63a4bd9df13847ee58a0fed47d98a2e5903985c24ed64d253c9dfcad028d3e14"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-no-fabrication.mdc"
@@ -1666,8 +1671,8 @@ sha256 = "6e6ab3f2fabbbd5d2aa559fb7b7afc2eba8d3d40005ec96209d0797c365720dc"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-observe-before-asserting-behaviour.mdc"
-bytes = 2086
-sha256 = "d41d1b5004d7cb725e80ea8be2591cfea57e4d0802a30bb8dac66b69299af4d7"
+bytes = 2027
+sha256 = "542d3a4c139de91de6ecaaf86cd16c95dc3b7f88b11817c381d43081edf609c6"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-partial-read-is-not-the-whole.mdc"
@@ -1701,8 +1706,8 @@ sha256 = "39450a642d366c83c20ca4e9d345afb163a2e76742bf758cbf11285f4866464d"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc"
-bytes = 6461
-sha256 = "b44277ea2b1907ef0e3fcfe208f4edb9334bea43bb7d16930eaed0747a9d4abc"
+bytes = 6322
+sha256 = "ab6c217f51f55eff350fdc6bce64b821d28beae71e91fccc2ddbc80bd1665065"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-anything-wrong-fixed-first.mdc"
@@ -1841,8 +1846,8 @@ sha256 = "1702534c0d49b5dbb98d95b6092a6059e4cca1f2950bc4ab009c8c2311e47918"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-elapsed-aware-timer-restore.mdc"
-bytes = 2073
-sha256 = "f963bf34c949a022dadadafd013160b54e00b51f91983521760f236ae173204a"
+bytes = 1888
+sha256 = "f35b63e37e90ea3df7b7ee1781b04ef434370e5bcc691185eced469539dec845"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-findings-are-fixed-not-argued.mdc"
@@ -1861,8 +1866,8 @@ sha256 = "b83fc8fb2e04501a60bd5ff5983f98128028245bfb54f0f68d0dd3acb7ec6a1d"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.mdc"
-bytes = 1857
-sha256 = "3f185f9c0611d49654af255e6f56b5991e477bfcaf3814b8719953272a7fdec8"
+bytes = 1626
+sha256 = "b726471e7db415343c919a351b65c68bcd5c57f7f5259cb5ac88dfd54ce28507"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-lightweight-verifier-workers.mdc"
@@ -1946,8 +1951,8 @@ sha256 = "dd16a709bbbc41e71a6d0364f685c647f7d0a8153bf07d65f636a75dd6945c29"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-TRUST-continue-by-default.mdc"
-bytes = 10166
-sha256 = "391f078c9a65112e6430c3a760914474ff6d77515c2db559a0e7f7508a43bfba"
+bytes = 10112
+sha256 = "d6202c8161a5cc5ef5f25b22be1933876555cb542454d84c1af8157d95aba4f9"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-TRUST-express-authorization-before-execution.mdc"
@@ -2006,8 +2011,8 @@ sha256 = "8bee98cee9477ac40263ff07811fcd3278e1c4fa28eba1eed4c747ea89601a41"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc"
-bytes = 230
-sha256 = "32ac32bbe00c58309c46be0193304f7a77af1067880db36fa6c790b90507c716"
+bytes = 629
+sha256 = "ea1765720a8b6c9ca474caf56a56a75b37264b086bba05186e1df330c5028aa1"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-repeated-failure-triggers-premise-review.mdc"
@@ -2271,13 +2276,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 44376
-sha256 = "fd71b56d55e1037cc5e4c29ae53c399445e4ce2586d086139ea801f3ce2f50a1"
+bytes = 44455
+sha256 = "d6d376f83a058862d661256494d70fa27235ebf877764a744b08b81b869660f3"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 117805
-sha256 = "8c5831a6be432ba033d696b660c5d8e0d82ced104fa8ecfcf659d638e8a557a4"
+bytes = 117495
+sha256 = "e0f1516338779dd8fd6f38634b1fad53518c898a67aafa44fca0eac22e1b4928"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2341,8 +2346,8 @@ sha256 = "35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 117766
-sha256 = "d416945f207434a80906d90d14458a70cf5be4f7bc6e8b8cd69228d155ccdc7f"
+bytes = 117456
+sha256 = "4a2ad8bf22dba8007c627693fc41a267a62348666e91686a97b72d57d3440db7"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2356,18 +2361,18 @@ sha256 = "a774875eea19a3157fea5127bcd61fbc659d1d56679592bcd3d6e2d2c0d196b1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 575734
-sha256 = "19a0c2711a7f000406cf9f3ecdcc79802c305b9a4dc7367412b4182ab01bfaa6"
+bytes = 583518
+sha256 = "738a2bc035cc75e48e9dab3e058d6cc70674af74a9497a017adb34ed6d100478"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 117801
-sha256 = "23c742f8ed32d7e9349fb10c67d41a9096cda6af7b534336999688f81a0cd8f6"
+bytes = 117491
+sha256 = "ed62da35f715892beb295cb665d5f530be3402c82a8ca4838ac0461572c77d41"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
-bytes = 3792
-sha256 = "f49d83cf5733528bf5b4c5db03cc44f8283ee2fa50b96c2fc77fbd8f9f0b42cb"
+bytes = 3839
+sha256 = "410047d8c2555f3c3a82ddb3a23d8f64a682bd1016cec9a2e65eeae905b7702f"
 
 [[sources]]
 path = "LICENSE"
@@ -2382,7 +2387,7 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 [[sources]]
 path = "README.md"
 bytes = 5215
-sha256 = "54ec3b94e41ceb80626153b5a3d1dbb849d2a125d7b5fd2be129523484fe1cd2"
+sha256 = "f056a33d7abe919fd0c59721150669b37d3f9f48f7e22837f36cde60f037e031"
 
 [[sources]]
 path = "RELEASING.md"
@@ -2621,13 +2626,13 @@ sha256 = "44fabb8f383a49b5344a6d3e1ff0b4e2ef3afe2411e3d2f0c0b00829bafecccb"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 43605
-sha256 = "428bf3b16088d1de267f2ce14f06a272d02b07f7079aac9bf2e085b237d37ab7"
+bytes = 44617
+sha256 = "d9b62d59b227bf6f4bed793d2b978012888e8b908a0643dc68840b6574b2a479"
 
 [[sources]]
 path = "opf/site/adopt.md"
-bytes = 8137
-sha256 = "3364b175835637ed64c6ed42a7c41aca272d09b3f4656086f10dc965eced4281"
+bytes = 8947
+sha256 = "bf0355135a2d4d8f51f9a67d32815bd70119e5abb9bc84863ff0a4b2702d8b7f"
 
 [[sources]]
 path = "opf/site/aiqt.html"
@@ -2746,8 +2751,8 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 
 [[sources]]
 path = "opf/tools/_journal.py"
-bytes = 204615
-sha256 = "df6003e07efcbbaac476e4ca78c467eac60f7618bf55238cae39fac1db3725a3"
+bytes = 203951
+sha256 = "96aec84315c6bd3090fe1e6cdb558e9dd73b61e0b7e4ebdeb06e4740702218a2"
 
 [[sources]]
 path = "opf/tools/_opf_absorb.py"
@@ -2756,13 +2761,13 @@ sha256 = "652f6d15ec58b5b6211434d3b676e00babaf49c126405c061d4d1570a2e6f462"
 
 [[sources]]
 path = "opf/tools/_opf_adopt.py"
-bytes = 254524
-sha256 = "14915726de58bba6eaa33d7d05427f86d8b0e82f4b5f41b79ee163a0f8d9d2d0"
+bytes = 254581
+sha256 = "2efb26e11dcc25049792ce7f0a2adaf4dccef94caa888390b69875f32983068a"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 1219003
-sha256 = "f2a803d7a8cd24aa7a4956b368729fc018f110a578dddf9ed1237304ccbbab36"
+bytes = 1386246
+sha256 = "3d70e8f5a117d4a75b3bf3080dccc03bab881d8e441bb1f9e119ac8650414f62"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
@@ -2786,13 +2791,13 @@ sha256 = "2eba52d47cf14d63aabed5b6d0ad24ba734fc1846c0e82aebbb32f6e0e172ba1"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_plan.py"
-bytes = 128961
-sha256 = "515d200963061c6e4858db8e91b23ad58be02dfaf06cdae26021febe7f93b5ca"
+bytes = 129907
+sha256 = "38628927450207fe2ba5908f44f580182cbb6e0b1c56b43594237005a1f1de3e"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_state.py"
-bytes = 115864
-sha256 = "2ee5bf636a1fc1522054f2cb707878bff2aa9e87a59da53dde165d94655a217b"
+bytes = 115873
+sha256 = "e03c1641aa90483c903250e634fb707a519c778f15ff644439b065fc97738d3b"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"
@@ -2801,8 +2806,8 @@ sha256 = "46fc281172a82ade8fe5915f6b3a4db47e3929f05efef1ea4964bb97553b0e7d"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 802460
-sha256 = "f2fd92438918efde91d068f5ec6ea9ee7600afaa0acf78db508af22ceaa2fe27"
+bytes = 804080
+sha256 = "e761e1e106a0c3142923bfd1b8ce89fd539c1b10a11e552f7687b908ef3ee000"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2841,8 +2846,8 @@ sha256 = "04db95a8471c0792ee73a3731eed9a28e4516155fe74b3290b262145a2a5a8db"
 
 [[sources]]
 path = "opf/tools/_opf_init_operation.py"
-bytes = 309295
-sha256 = "36c93cd3a7ddfbb4c183488cd30313c51ce8d2879fad69b9e9d4c3462b86361f"
+bytes = 313936
+sha256 = "51c050cfedc14b1f4db92234128137497c9d2bc94a70da0812c74dd89f87255e"
 
 [[sources]]
 path = "opf/tools/_opf_init_p0.py"
@@ -2871,8 +2876,8 @@ sha256 = "2fd57e0be2ebb7f191424dbc2704ad74c72b9c8f20d2cc22ecb4fd33a04f24b1"
 
 [[sources]]
 path = "opf/tools/_opf_oplock.py"
-bytes = 562791
-sha256 = "5bcb05d93f30ad75387cd6682c657b0652b0b674bb6df958ef70565373814e01"
+bytes = 562066
+sha256 = "56bcc541af754e230a861e80a6c4b73f5f750213cb68effd36b5742bb42fa445"
 
 [[sources]]
 path = "opf/tools/_opf_pack_manifest.py"
@@ -3086,8 +3091,8 @@ sha256 = "e7bb0f23a85e5966a3dca0da5cba18fbc075ec54f24b4ae302734cb00f9cf57c"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 700683
-sha256 = "be70d876c2c94dd66a084b556618f5de66200f1e2332aae831b7d9e91bf86498"
+bytes = 706150
+sha256 = "a347bdddf2859f48967e68615b5ed10834b904a3ac4f1126d50ce005b8a7f1cb"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
@@ -3126,8 +3131,8 @@ sha256 = "e074940f4dfa8faf47f45d894db6af8ed5a9d54c1ac089e6aac53e6c2a56c5f7"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1362549
-sha256 = "94b883850bb4ad43128d768f51c08bb4ab1c04d0fcb0dde3796b36b80121668c"
+bytes = 1349853
+sha256 = "5c829dc6ef166a6fe8b560c3f4ea5dc49d3d7d9e656f735b73ffee7f1aba289c"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3151,13 +3156,13 @@ sha256 = "d0a878cceb8a33d2baa4c0f658e1cac39b92fbdccdf859e6bc73eedfb49f2915"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
-bytes = 10380
-sha256 = "4b43a109b5981f5afebf458dc84465f86a2a7afda8007baa283fa5efe22710be"
+bytes = 10725
+sha256 = "ed348e99916ab4c55917dba6f039937233fdac380f4d23ef5c013caf356fc001"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 2275546
-sha256 = "88a9f1908645bfc23ad016aa357f6bbfc825ce42d7dafe2d5b0eceda60329070"
+bytes = 2299516
+sha256 = "84af94e92ea08c43f9b82c5bfd7d695d71c8b02824dcc7067e2c89065f455835"
 
 [[sources]]
 path = "roadmap.toml"
@@ -3227,12 +3232,12 @@ sha256 = "02833e4ed8c6d11f75f9e8511a524927f4d64859e4003c59f325706d000297bc"
 [[sources]]
 path = "site/downloads/aiqt/manifest.json"
 bytes = 820
-sha256 = "4535854a67a410f2e64011f44786e46a1387e3fed3fe4d17ab27891111e41c4d"
+sha256 = "815712ee0186edbaf995ca58cd08804229e4e07cd73fc1aef76e5dcc23af043d"
 
 [[sources]]
 path = "site/downloads/aiqt/provenance.md"
 bytes = 1079
-sha256 = "34355e0aac1ef006bb0b0a03ab811aa563de5743cfe084d8d1f9ba5b1e5db2e9"
+sha256 = "37549ccbe14abd79880d0d939d9fec59e749fac35b7b97987259e53f77a330e0"
 
 [[sources]]
 path = "site/downloads/mappings.csv"
@@ -3246,8 +3251,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 634462
-sha256 = "90bcecf49a0a48a07805cdc0df1d55a7ae85e228a6ca889903f352333679db8c"
+bytes = 642808
+sha256 = "54ada436061831665104c94db5eca225903e1b0c99dc5c854bd2d2346e833e66"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3336,23 +3341,28 @@ sha256 = "b99e870e87b7003ba8ab1e1b86de3f4be97ea19571bc8c81e04105c73b98e164"
 
 [[sources]]
 path = "tools/_close_selftest.py"
-bytes = 35470
-sha256 = "385dc36013a49036e40c8b2c9f26db811ae20189ff6a49508988bf0ffe6a0468"
+bytes = 35436
+sha256 = "c342654c983f84d9c2fbe56e2fb61a93fd2ecacc5f3227cfa463f50dc09aa0f1"
 
 [[sources]]
 path = "tools/_gen_common.py"
-bytes = 13820
-sha256 = "ed1dc59ad754691674c582a551eabd609a721cc1b8e479b19ba742ef85ba81fe"
+bytes = 13842
+sha256 = "f2fce877697cd18092c161418214980cb151d262daa3fb31a0b00e9bf26888cd"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
-bytes = 10600
-sha256 = "58e6a5fca74d2c4ff43aecaabc186f8c3482826b418d80ac8d2034c28cb62146"
+bytes = 10632
+sha256 = "f96440610c978d5138acf597d202323a5c661f90816452c03a38b3e3bf660978"
+
+[[sources]]
+path = "tools/_load_bound.py"
+bytes = 200804
+sha256 = "e0c35587f4c6f13238f36a2ae33889ac5f179e84769f9b016061c63969a48503"
 
 [[sources]]
 path = "tools/_qa_adapter.py"
-bytes = 140235
-sha256 = "7c43bd7fbc32011f85e56c19a750a84dbe07a0ffa4dbaf2eb47d1ec346d70f06"
+bytes = 139801
+sha256 = "967d3b93cb5f2320e2be8234cf577d1507323a654d44e7fed38f9e0cba4b1fa1"
 
 [[sources]]
 path = "tools/_release_schema.py"
@@ -3366,8 +3376,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 55566
-sha256 = "0ffe8b30b91bbc70e3dc958161ecbd3b0c4be1b093d4d1cce21fab6cefd83c28"
+bytes = 55565
+sha256 = "c7284de23d101ff75f937699fbf2e2ccac786b767a95c657865cf38623cf1416"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3376,8 +3386,8 @@ sha256 = "aee0148730f5f32b7cc0c85c82f7eff7c0b5e0d652673bc4047b4c8eb3474f62"
 
 [[sources]]
 path = "tools/aei_backlog_md.py"
-bytes = 20055
-sha256 = "d497fa33bf800160e1206bcb28ccf41599e41528b2b9635f0cbdbe7bfb3bf778"
+bytes = 20039
+sha256 = "7d280b167418e3c7e47161ba7f670dac8cc65fab277a4f966d0afa3d0496f2da"
 
 [[sources]]
 path = "tools/aiqt_corpus.py"
@@ -3391,13 +3401,13 @@ sha256 = "44ae9d88638f5a962b7826a6c1e713f9fa143ac16eb7329f57af404fb94e00dc"
 
 [[sources]]
 path = "tools/check_applies.py"
-bytes = 10954
-sha256 = "5998a2d86d27082feb1b000238e8e737d339afe31d983bee76ed79cfb1bd2597"
+bytes = 10946
+sha256 = "2938f2c7fd0aba7e5a56468771e03f1e75ae5af159f0e01bb5b1aa29607add4d"
 
 [[sources]]
 path = "tools/check_artifact_checksums.py"
-bytes = 26388
-sha256 = "39ad0e3965b8dd39f0f763771d05394bd81d8b124905c748bbc00e74707771c9"
+bytes = 26351
+sha256 = "670497debf8f21b516b24f4d4647f9ac0f2b165a7cd930f7a5d67e3c8f7b5ed0"
 
 [[sources]]
 path = "tools/check_branch_root.py"
@@ -3411,13 +3421,13 @@ sha256 = "3ae4e648048c19b254110b7a31917bc2f73f5c9dd904852190c2ec9af300683b"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
-bytes = 49404
-sha256 = "844fdc5cbe91d0d2697f71c81363406c754d02391aecea5a55311fe90171e643"
+bytes = 49303
+sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 158419
-sha256 = "944e45e0d9ea47e6d7ed477a79bc80e365a122df116f5de9b26989e9c3a2a2e7"
+bytes = 158490
+sha256 = "c3bd103f28aa5c8cf482c5aadb4bb00b3c8470bf1ff81a3a2d85ee9a196b5b83"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3436,18 +3446,18 @@ sha256 = "1e2a372431a7ae2e44fd5e3542be2c38c9bf6c4b966cfec9f446a24c76e0c9bb"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
-bytes = 88006
-sha256 = "d7d7614791529f4ba2fc961b84e7a8dee7fcc832fd6c2d034c682fcfc1b7549c"
+bytes = 87690
+sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 128649
-sha256 = "ab9b8b9996a606fba507c115bf0d192509416a67f18746eb20a80f418699411f"
+bytes = 130343
+sha256 = "ef2218eac1dd0c248d458b16bfbe1fbf59170ce61db0b196f4c4c4fdffaa2e30"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
-bytes = 55870
-sha256 = "7c1f3fb068415aeefcbe2b71d473c24bb33778a269ff9d33fa60b6a1e037213c"
+bytes = 55838
+sha256 = "f8cb45999cd9d47bcf0537cf68805bcb1ccc1893024458ea75f96569c0642b5c"
 
 [[sources]]
 path = "tools/check_entry_guard.py"
@@ -3461,8 +3471,8 @@ sha256 = "8c578441c15293559780a1bbdbd193e6bf3940a7862d9e94671cc70913f168a7"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 134734
-sha256 = "0106ebe1bb9ffcabc485ab6cc8bb814276470c61330c507252cc047cba2c27cf"
+bytes = 154413
+sha256 = "5dae8058ad6d43c61a4f8767ed4500a6eccb2b4d83f20d667738912b3bf6088d"
 
 [[sources]]
 path = "tools/check_git_option_table.py"
@@ -3476,8 +3486,8 @@ sha256 = "034c0c5acd6ebf7916e7c72ae184e86d0a70ea1baafc93cb86015461fd18f2d8"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
-bytes = 38397
-sha256 = "0654e4cf843c93090b7158269a67e2c032da21b5df07b780395972c9ddbbc687"
+bytes = 49992
+sha256 = "8dfc2f59805c973c295196b7bf618cb6c938da109e7a0fc3544449a8ab99fc49"
 
 [[sources]]
 path = "tools/check_install_page.py"
@@ -3491,8 +3501,8 @@ sha256 = "073ba2947543f513f682660ad59eb85a7614665184db50b44d9ebddb8f9da3d5"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 129485
-sha256 = "370b87022d9c10e22ee7b10c4e3052f7e940495b2f3e800a498602f33859bf4d"
+bytes = 190157
+sha256 = "f79f8c76fc26ddaa457167021d0b682c0fda2b08021ee1663594ff13b11418ca"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -3501,8 +3511,8 @@ sha256 = "413dc3c80615481c4d69bd95e03338555ae84f86fe0786e80bb012b4d5029e67"
 
 [[sources]]
 path = "tools/check_license_qualification.py"
-bytes = 134704
-sha256 = "5500611633d1714bd639c35385e2c33d3eea8209cf3a1e26be672ac3c2ae78c9"
+bytes = 134690
+sha256 = "3ea2a730b0db77fa92869a20454869ea240d0010f9e11a89a7f0ef22f57224b6"
 
 [[sources]]
 path = "tools/check_links.py"
@@ -3511,8 +3521,8 @@ sha256 = "13656efcd050e81dd108897731553da740d372d002ebcdf5bc96681b8f9e3b6b"
 
 [[sources]]
 path = "tools/check_manifest.py"
-bytes = 38507
-sha256 = "5e9fea84bc99de85ee4b74dcdab522f8602a0eb6bd0c6d05cad44887e52aa25c"
+bytes = 38321
+sha256 = "4a9ecb52c9a333bb728fd90d29e457106690f9a404af78ac6f70304a16f9e90e"
 
 [[sources]]
 path = "tools/check_mappings.py"
@@ -3521,23 +3531,23 @@ sha256 = "2e9512a80f2aa279f6fb49875f8efdc49df2457e253b29bebcf7b45b4f77ea8b"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
-bytes = 147538
-sha256 = "8770f3dad7d891c1f2f136854498f1de8d77c8051e54cdd18e7c5e40aa415cdd"
+bytes = 147493
+sha256 = "3994b3446d75345ebc28ba3d5f6d7bed114fb3f8a4899f5cebad030b81d290d3"
 
 [[sources]]
 path = "tools/check_msg_leaks.py"
-bytes = 17620
-sha256 = "17d927027bc83bf78540085dd174e9ad0ab05f0547b6459bb8cbc292e750f1aa"
+bytes = 17612
+sha256 = "ba8f58183c65755ae9e162ade7d35d3678ff2a77723a091eac230aca193fe24b"
 
 [[sources]]
 path = "tools/check_must_deliver.py"
-bytes = 34805
-sha256 = "beb92ba654d85998bd7f4f1599ed83efff31bb506e58fe8caf24c9a45af26068"
+bytes = 34804
+sha256 = "364fa1ae985ac82df157a1e4eb73e8697dbef7da2b714def085a3f72235ae9ae"
 
 [[sources]]
 path = "tools/check_newtab.py"
-bytes = 34497
-sha256 = "9f325088b6d3f2a4daff8dc9b7b2b9d9d2569bceb2ed33ef3a51418f8d3a82f7"
+bytes = 34480
+sha256 = "a9b028a2452a04f3a087bd505a3b459ef972b15734015d3c4e2172e38120d7d9"
 
 [[sources]]
 path = "tools/check_no_dashes.py"
@@ -3581,8 +3591,8 @@ sha256 = "ce538e0eb326029347223915c4f85b81ac19e99beff0916bd5269acb9e2170c6"
 
 [[sources]]
 path = "tools/check_record_drift.py"
-bytes = 20881
-sha256 = "fb55c662fc9a98c41ef3ccbf8cded6b4f5426a277eed0c6073918a8ec63ac241"
+bytes = 20860
+sha256 = "e9a26e4b48c6fac266a2e7686d35508954a85743a70f62bfb1d820f762fc6a7e"
 
 [[sources]]
 path = "tools/check_record_sections.py"
@@ -3616,8 +3626,8 @@ sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 101190
-sha256 = "a7aee4a4c218a76bb776140fccc16123bd338e01d5bb4307a7c191ddd609ace2"
+bytes = 101171
+sha256 = "80cc4d8c10d85882146128e224672ee87f30047db04139b1bafc56b07171d979"
 
 [[sources]]
 path = "tools/check_secrets.py"
@@ -3626,8 +3636,8 @@ sha256 = "c0d9a5e781bf854528450d7baf1a4377a632c0492a21a3516cedb4f971bcd267"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
-bytes = 157902
-sha256 = "eb190bbea85c73c4f2bcdea564e416dae17b95d56ac881baffa7786cbeb867f0"
+bytes = 158431
+sha256 = "cd4f9e05ec6d743a5551448ec44141ef51ca0b5c42334ddebf41fe699e9093d5"
 
 [[sources]]
 path = "tools/check_site.py"
@@ -3646,8 +3656,8 @@ sha256 = "df2a9de523bf1ea7c1ba1bdd4aa53050d5a67bffae362df6b52573f437b648cd"
 
 [[sources]]
 path = "tools/check_standards_currency.py"
-bytes = 28049
-sha256 = "19c07ca3d47554aad38f69ab38db1b98595af8714ea4bf5f876dcea5d9b71eed"
+bytes = 28019
+sha256 = "b513dcf7351531d7c358f4aa6edc5b608424dd83a41cdc8ffa0802bc7ac6db80"
 
 [[sources]]
 path = "tools/check_standards_urls_live.py"
@@ -3676,13 +3686,13 @@ sha256 = "0eb34c0b00ca261d6a9a242df1edf8f7b6cbcbb3e416a2cea02581d4296cde3a"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 98489
-sha256 = "95fcd50b2a181cca6951f9378f1026755f5626be5577dbe67edfd1117d2093e0"
+bytes = 98474
+sha256 = "5372e39d67b2393a0bd9f32910e57a750e1cfdf053d26ae832fb53a56e5d31d4"
 
 [[sources]]
 path = "tools/doctor.py"
-bytes = 33754
-sha256 = "2d23f8a3a84790a84f24c383c6b5a6ce9bcea4a94711f5e1045db86699d25b15"
+bytes = 33694
+sha256 = "230d565106563d57e02769f666f1a62ae9ae3c858a4025419c5b53fc9dbedbde"
 
 [[sources]]
 path = "tools/gen_adapters.py"
@@ -3711,13 +3721,13 @@ sha256 = "9f130090b2cd71faa1326cfbc85b0978a6ef7f65bf00e744bc0955bfb47b07da"
 
 [[sources]]
 path = "tools/gen_crosswalk.py"
-bytes = 68468
-sha256 = "36739d1586637a0abb2642e740e9575b207187ac50b9e2d7897dfd9337269ee8"
+bytes = 68307
+sha256 = "6b9efb3ba80f02352fa2f84fe37daaaaa697163f17d155edf86dbf2c0c8b1ce5"
 
 [[sources]]
 path = "tools/gen_cursor.py"
-bytes = 19931
-sha256 = "553ecf2cb9261d991ff593821a389f1e8d6f6291236a0b5f8dd2bbf3d23f46ac"
+bytes = 19923
+sha256 = "70246325789acca1a97298fcfb3fd16a0e610d051390a527cb380d3304dbeb71"
 
 [[sources]]
 path = "tools/gen_disclosure.py"
@@ -3726,28 +3736,28 @@ sha256 = "ee37d7b4db8fb441ddb3fb07e4003c94a5b36124e9714bca2f84ad4e7bb1b199"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
-bytes = 88661
-sha256 = "5295404415f0b1250deed7369668c8ae03634a2bcbd957d8a6147e9268ee5afc"
+bytes = 88687
+sha256 = "86d55d3f474a61803df772ded86a9f9d1ffe74bc9f83b2f36fb1a643bf706ab5"
 
 [[sources]]
 path = "tools/gen_enforcement_register.py"
-bytes = 94864
-sha256 = "74a3f5eef5dfedcbb423bc91757e8e6542a16a274f6a9e91f03623e19ab9653a"
+bytes = 94799
+sha256 = "3316a3abc01801f7e7b3ac59ae2e30f653b537014b220b08a889b6df2d6663fc"
 
 [[sources]]
 path = "tools/gen_first_pin_demo.py"
-bytes = 39421
-sha256 = "297c6d86aceea38176bd7e2b0efa17ef6553a3dbe7261a8df1dfa51d7fc81d75"
+bytes = 39390
+sha256 = "56ae8c00690f4b14e6b95b9e8503ba6340d9f20fe80ab03cb731d3cf5a37cd12"
 
 [[sources]]
 path = "tools/gen_gensrc.py"
-bytes = 68879
-sha256 = "5e582232c86475f63837c36aff06cc7eae25259e55fb854e1a860da031332e17"
+bytes = 68856
+sha256 = "b271355400adf6c11e6404da30edd1b38ad3c1cd2174bc7155a972bc462ffb2d"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 256501
-sha256 = "122b50b6c9b0cd1f81c5b5678bfa79a730cccfd7902e880055746d2b37f17e04"
+bytes = 256493
+sha256 = "445bcef3dd2e80173c4d042e1398a4c1d9e77b9dec52894362049138f108327c"
 
 [[sources]]
 path = "tools/gen_install.py"
@@ -3756,13 +3766,13 @@ sha256 = "686bd14a80481d924639c34e2350c654395ab3ad24aecaa03763b3a8a701a38d"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 102004
-sha256 = "a108385febd57f670ec584ed2c0e5d933fa3aa8a2234df53b5ee9b5c8c6534a5"
+bytes = 101567
+sha256 = "9db150c0db7251b9a3bfb591484fb1322f09fde82b8c8e2bcd08762f8cd366ce"
 
 [[sources]]
 path = "tools/gen_mappings.py"
-bytes = 31191
-sha256 = "459d1b977ab8cd42cc1bebe707b4aaaa5c26afc32c1d6f5c5aba231a68919043"
+bytes = 31183
+sha256 = "45b0a4ec64083f496fba7bf051c1f5eac3bf5207aa4ed901d9bfe4947f3292c6"
 
 [[sources]]
 path = "tools/gen_notice.py"
@@ -3786,23 +3796,23 @@ sha256 = "c59e2c19b2cb65c877d9600bd688f1e6984146f0145dad92cb559aa863978ba2"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 28187
-sha256 = "4f17f864097424705d05ad69950de19fd056d6f6edec0292ecac39e77583db7a"
+bytes = 28237
+sha256 = "ea42990eff26b48a7b596d0910afbc93e752a018086e1c1b543dfe14ba187b3b"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
-bytes = 14868
-sha256 = "af5b443439288e2ce9d1f6970168299b5ca15df7ddd30befe5edfeffb19fcf68"
+bytes = 14859
+sha256 = "5765bfa41902a4d9455c44b1ad0ddba692333fed3ff2c6704230cd1dc360d46b"
 
 [[sources]]
 path = "tools/gen_site.py"
-bytes = 79199
-sha256 = "71692d7d0845bdd3c6a5eac332747bec58afab74b1f0f19de7d09e0bb3585900"
+bytes = 79167
+sha256 = "4f5c6d77b2e8cc55525586942d5f1075b95ce1d791f1cd905de420ce7aba21e1"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 136013
-sha256 = "862c2518da9163ad999fbb2e50856b79eccd497c78016a4867ea20f5e296e3cd"
+bytes = 135901
+sha256 = "4de6e2f03054de6c56e13ebd3ddd69457a8829ef56bd90db731977ba25bec00e"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"
@@ -3841,28 +3851,28 @@ sha256 = "4d5067573022ee9bb62a6eaf7a92e8ae0ba978de502407e199cb458dc90299f3"
 
 [[sources]]
 path = "tools/orch_doctor.py"
-bytes = 6235
-sha256 = "5c5ec1adcb03b4bc9eb5a3b486942d7d331a7bfca10d65bfcfd36d83a6c8f0f9"
+bytes = 6216
+sha256 = "16c936108031c74a7cc2aa17726ce8780f1b469211af7592cbc4d7f00366e6dc"
 
 [[sources]]
 path = "tools/orch_preflight.py"
-bytes = 2880
-sha256 = "26b2e951fe7c452e19c919e04bbc2cf3854eefd085fe3f10399678b84b4d5b9a"
+bytes = 2868
+sha256 = "115085f6d441f82bded7bb867df053e05ac3499ff184bc8e37ecadc3d7dec4c3"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 316186
-sha256 = "216900989fb5d6843ca83ee485b7963d60bae9f0494803d0a5a0fb27e8bad84d"
+bytes = 316154
+sha256 = "638d00c75327faadbffdc5ac9d902ca0e22adb76f91b612260dc66766f24062d"
 
 [[sources]]
 path = "tools/pin.py"
-bytes = 115868
-sha256 = "437cee6111bc3f7bb14b283b3e5764b29a5b3b703a923e714b131e38187838d0"
+bytes = 115525
+sha256 = "285900b1c1f1459b723346fa16fe6e34270a1a8eff834b44dffcc4681082096c"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 27221
-sha256 = "adc962d18b17ca481a64524bcde956b9082317f823f3236047a9671b68d73e9d"
+bytes = 27245
+sha256 = "1b3a19458c1ca10d13de5a757e671dad25f157b476516876fa6bb4cfa35cd486"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -3871,13 +3881,13 @@ sha256 = "5a3e5f98d9e3ecd5ecb430c756b32878cf742defbdc2410169b234fabe39a6c3"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 1975316
-sha256 = "a325eb09619f7d275c02b27488ca6d838fbc83482c1fb14c8242401421bc7bfd"
+bytes = 2018199
+sha256 = "77c2c9372d92837203a8a9c9fb1055d1af5de2a126b87d5065fe237c4bc1bb4b"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 154132
-sha256 = "b8fffddf6f2546181a6ec2ac405a704b80b61c667c62852d323fb33b5e456f2d"
+bytes = 156650
+sha256 = "d5d2a740c78fa07d7c8a504ec33ffcf7770f1ce70ee2a822289f8da9770041d0"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3886,8 +3896,8 @@ sha256 = "8d11b8cd543f2ca5da0fa0788d05b476a94635c9919df4e66ff8a19affbc7caa"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 429186
-sha256 = "afe23cba0162c49dea9dafdf47d9fcb445251867ead5f5b98830d14959242cfd"
+bytes = 440517
+sha256 = "ee378994ed3bbf44cb1595d34a76fc9bd89ada4824e03f4a5c50067915cc2e41"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
@@ -3926,8 +3936,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 28377
-sha256 = "9d5e3f280abf1166f9184b36851bd716d9461015eff4215ba8db395820ece25f"
+bytes = 28548
+sha256 = "cead26796e69733b70162232082c18c4be88408664702497ed79130b2bebb53f"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
@@ -3945,7 +3955,7 @@ sha256 = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-citation-from-opened-file.md"
 path = ".claude/rules/aiqt/10-ACCUR-citation-from-opened-file.md"
 kind = "file"
-sha256 = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
+sha256 = "8f10de006546da9103ddb49c6cabaf6497ca18a8ef1c2aef91bfbb258fdea3c2"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-claims-rest-on-observation.md"
@@ -3969,7 +3979,7 @@ sha256 = "14ecc6a4fa419a3b0b8223c9442b0f9c5ab7c32adeaa4e4a2b1fec1cf26b1fb9"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-count-carries-its-predicate.md"
 path = ".claude/rules/aiqt/10-ACCUR-count-carries-its-predicate.md"
 kind = "file"
-sha256 = "2563a03b33981c517e231da672d197b54ad005507207e00efb3eef3b9f8513b7"
+sha256 = "0acbd49e4173c33393cb9fd2e31b9e1665e425fd7b5442f7e2ed327daf7445aa"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-disclose-guard-residuals.md"
@@ -3981,7 +3991,7 @@ sha256 = "3b8bbb1a920a8c38d7763f6433eb457139c5dd814926559662dc8ffc0409271e"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md"
 path = ".claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md"
 kind = "file"
-sha256 = "48567686953dd4a0e7a54140f184df811c7de7273904fd06cfab9ef0101971d3"
+sha256 = "a98b09f42c472d707ac1b7eee98594593d181def80bfebfda57780cd9e9afe87"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-guard-input-soundness.md"
@@ -3993,7 +4003,7 @@ sha256 = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md"
 path = ".claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md"
 kind = "file"
-sha256 = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
+sha256 = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-no-fabrication.md"
@@ -4005,7 +4015,7 @@ sha256 = "45e14b4c516cbe6969867102c239f895e9047794a90231cf6a18b1db489f4a26"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-observe-before-asserting-behaviour.md"
 path = ".claude/rules/aiqt/10-ACCUR-observe-before-asserting-behaviour.md"
 kind = "file"
-sha256 = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+sha256 = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-partial-read-is-not-the-whole.md"
@@ -4047,7 +4057,7 @@ sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
 path = ".claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
 kind = "file"
-sha256 = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+sha256 = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md"
@@ -4215,7 +4225,7 @@ sha256 = "869083e9ef683c85b8eb380961c656ce727214fa20b1d599c559559904c4e0d6"
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md"
 path = ".claude/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md"
 kind = "file"
-sha256 = "62886e96c50d5d0728ef077f52115ef4806fd0eb1887e78270191451b970a3fc"
+sha256 = "a3e63913a6c51a518b4dcd6d64451eaf08202fa134d1e7ab6af35b0327214ad2"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md"
@@ -4239,7 +4249,7 @@ sha256 = "5f97f7ebd69a8b825747c384fbc0ac5717a3ccfecb86641c672b93afb32b96fa"
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md"
 path = ".claude/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md"
 kind = "file"
-sha256 = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
+sha256 = "b5abc8e7aff81715c11ed49241607a5063adbdf933f215609d5060f4b7418756"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md"
@@ -4341,7 +4351,7 @@ sha256 = "20c201093daf82185da0b45339bfa565acc96a9d81b327580804c7976b99c2ae"
 artifact-id = "rules:.claude/rules/aiqt/10-TRUST-continue-by-default.md"
 path = ".claude/rules/aiqt/10-TRUST-continue-by-default.md"
 kind = "file"
-sha256 = "58e4611231a23d3d58849c2b42f4f2030f19749d45b38c3439adaa3f8cbd3741"
+sha256 = "2d26e8dee5c542079bae6930b50ef07d8232094c44dd1b033bbb7514b0b3d28c"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md"
@@ -4413,7 +4423,7 @@ sha256 = "ca2a29d56f95091c3f50db083deae2655f01b54d7d44e2686f8d29b45ada76ff"
 artifact-id = "rules:.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
 path = ".claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
 kind = "file"
-sha256 = "29b1c64bcb19fe0b05134db59c44a7cf8e15f2c0f8fa31a453cd54e678257cba"
+sha256 = "dae06196008c0bf9f98c4c82961af2943e601b8374abf2717d0fba38ef78f476"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md"
@@ -4743,7 +4753,7 @@ sha256 = "9b22893404024e0a99b3dce84fe4973a348243564297b379858d6b6d8ce47ad6"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-citation-from-opened-file.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-citation-from-opened-file.mdc"
 kind = "file"
-sha256 = "8a2ae18980f657a684cd611b7adb5a5b3912eb2c3f35cba4c96e96368ad6fea5"
+sha256 = "746aecbc4ffd97467021bda3a7f662bbae6d08f7b9af156414f6f45fae0f3aad"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-claims-rest-on-observation.mdc"
@@ -4767,7 +4777,7 @@ sha256 = "81e58a0b18b0f90819aab1b516f0bb78283136bfac8ab9e804a5f1e6a6cf8826"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-count-carries-its-predicate.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-count-carries-its-predicate.mdc"
 kind = "file"
-sha256 = "8c373292eb6e853d0de28625117abd53b553cebfe4e95a98b16baa4f647fc99f"
+sha256 = "c9f3ef1c05bc0d369e36bc01e3e4f761bd0cc2e6dbea7db011355368cab9de46"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-disclose-guard-residuals.mdc"
@@ -4779,7 +4789,7 @@ sha256 = "9677a66d941c8626f38fffcffc02e4ab8c780e33dcea080626c1d1143c9fe47e"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-evidence-grounded-completion.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-evidence-grounded-completion.mdc"
 kind = "file"
-sha256 = "f60c11dcfe1c92672500f41c4320bf25dbf73d5c32b8ccc77047cf9808763c96"
+sha256 = "a6b0f5ee19260fc95ae9bc980517a88fd36edbcb94369c61362ad55b509ba2b3"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-guard-input-soundness.mdc"
@@ -4791,7 +4801,7 @@ sha256 = "31711042b10244ae04fdb28149180af06ea1119f0f1528d8694dc70f9d83effe"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.mdc"
 kind = "file"
-sha256 = "669e69e1fd6fa0a35143396e609453282c7f0c5c225c7187a2da306abedd2c0f"
+sha256 = "63a4bd9df13847ee58a0fed47d98a2e5903985c24ed64d253c9dfcad028d3e14"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-no-fabrication.mdc"
@@ -4803,7 +4813,7 @@ sha256 = "6e6ab3f2fabbbd5d2aa559fb7b7afc2eba8d3d40005ec96209d0797c365720dc"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-observe-before-asserting-behaviour.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-observe-before-asserting-behaviour.mdc"
 kind = "file"
-sha256 = "d41d1b5004d7cb725e80ea8be2591cfea57e4d0802a30bb8dac66b69299af4d7"
+sha256 = "542d3a4c139de91de6ecaaf86cd16c95dc3b7f88b11817c381d43081edf609c6"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-partial-read-is-not-the-whole.mdc"
@@ -4845,7 +4855,7 @@ sha256 = "39450a642d366c83c20ca4e9d345afb163a2e76742bf758cbf11285f4866464d"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc"
 kind = "file"
-sha256 = "b44277ea2b1907ef0e3fcfe208f4edb9334bea43bb7d16930eaed0747a9d4abc"
+sha256 = "ab6c217f51f55eff350fdc6bce64b821d28beae71e91fccc2ddbc80bd1665065"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-anything-wrong-fixed-first.mdc"
@@ -5013,7 +5023,7 @@ sha256 = "1702534c0d49b5dbb98d95b6092a6059e4cca1f2950bc4ab009c8c2311e47918"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-elapsed-aware-timer-restore.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-elapsed-aware-timer-restore.mdc"
 kind = "file"
-sha256 = "f963bf34c949a022dadadafd013160b54e00b51f91983521760f236ae173204a"
+sha256 = "f35b63e37e90ea3df7b7ee1781b04ef434370e5bcc691185eced469539dec845"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-findings-are-fixed-not-argued.mdc"
@@ -5037,7 +5047,7 @@ sha256 = "b83fc8fb2e04501a60bd5ff5983f98128028245bfb54f0f68d0dd3acb7ec6a1d"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.mdc"
 kind = "file"
-sha256 = "3f185f9c0611d49654af255e6f56b5991e477bfcaf3814b8719953272a7fdec8"
+sha256 = "b726471e7db415343c919a351b65c68bcd5c57f7f5259cb5ac88dfd54ce28507"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-lightweight-verifier-workers.mdc"
@@ -5139,7 +5149,7 @@ sha256 = "dd16a709bbbc41e71a6d0364f685c647f7d0a8153bf07d65f636a75dd6945c29"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-TRUST-continue-by-default.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-TRUST-continue-by-default.mdc"
 kind = "file"
-sha256 = "391f078c9a65112e6430c3a760914474ff6d77515c2db559a0e7f7508a43bfba"
+sha256 = "d6202c8161a5cc5ef5f25b22be1933876555cb542454d84c1af8157d95aba4f9"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-TRUST-express-authorization-before-execution.mdc"
@@ -5211,7 +5221,7 @@ sha256 = "8bee98cee9477ac40263ff07811fcd3278e1c4fa28eba1eed4c747ea89601a41"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc"
 kind = "file"
-sha256 = "32ac32bbe00c58309c46be0193304f7a77af1067880db36fa6c790b90507c716"
+sha256 = "ea1765720a8b6c9ca474caf56a56a75b37264b086bba05186e1df330c5028aa1"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/20-PROGR-repeated-failure-triggers-premise-review.mdc"
@@ -5529,13 +5539,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "8c5831a6be432ba033d696b660c5d8e0d82ced104fa8ecfcf659d638e8a557a4"
+sha256 = "e0f1516338779dd8fd6f38634b1fad53518c898a67aafa44fca0eac22e1b4928"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "d416945f207434a80906d90d14458a70cf5be4f7bc6e8b8cd69228d155ccdc7f"
+sha256 = "4a2ad8bf22dba8007c627693fc41a267a62348666e91686a97b72d57d3440db7"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -5548,7 +5558,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "23c742f8ed32d7e9349fb10c67d41a9096cda6af7b534336999688f81a0cd8f6"
+sha256 = "ed62da35f715892beb295cb665d5f530be3402c82a8ca4838ac0461572c77d41"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
@@ -5578,10 +5588,10 @@ sha256 = "02833e4ed8c6d11f75f9e8511a524927f4d64859e4003c59f325706d000297bc"
 artifact-id = "skill:site/downloads/aiqt/manifest.json"
 path = "site/downloads/aiqt/manifest.json"
 kind = "file"
-sha256 = "4535854a67a410f2e64011f44786e46a1387e3fed3fe4d17ab27891111e41c4d"
+sha256 = "815712ee0186edbaf995ca58cd08804229e4e07cd73fc1aef76e5dcc23af043d"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt/provenance.md"
 path = "site/downloads/aiqt/provenance.md"
 kind = "file"
-sha256 = "34355e0aac1ef006bb0b0a03ab811aa563de5743cfe084d8d1f9ba5b1e5db2e9"
+sha256 = "37549ccbe14abd79880d0d939d9fec59e749fac35b7b97987259e53f77a330e0"
