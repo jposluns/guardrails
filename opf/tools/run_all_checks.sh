@@ -14,8 +14,10 @@ here="$(cd "$(dirname "$0")" && pwd)" || exit 2
 export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
-# Name each failing gate as it happens and list the names again before the FAILED line, so a failing
-# subset never needs a hand re-run to find which gate failed.
+# Name each failing gate as it happens and, when the run reaches the end, list the names again
+# before the FAILED line, so a failing subset never needs a hand re-run to find which gate failed. A
+# failure at or before the special-file precheck instead stops the run at a STOP line (exit 2) right
+# after its GATE FAILED line.
 failed_names=""
 
 run_gate() {
@@ -56,11 +58,13 @@ run_gate "child-status"                python3 -I -B "$here/_child_status.py"
 # each followed by the STOP line, which ends the run there with exit 2 once any gate has failed (both
 # steps are gate lines, so the first line after the probe that names Python is a gate line). The
 # first step is the BOOTSTRAP, a shell test only: python3 would block LOADING the precheck script
-# itself if that path were a FIFO, so a non-regular or symlinked script fails this named step and the
-# run stops before python3 touches it; a failed probe above already stops the run at the first STOP
+# itself if that path were a FIFO, so a missing, symlinked or non-regular script fails this named step
+# and the run stops before python3 touches it. The step runs the authoring repository's CI bootstrap
+# test under sh -c (never python3), so a failure prints the same error line before GATE FAILED. A
+# failed probe above already stops the run at the first STOP
 # line. Residual: the interpreter binary, THIS runner script and the probe script above are read
 # before the bootstrap step can run.
-run_gate "special-file-precheck-bootstrap" test -f "$here/_containment.py" -a ! -h "$here/_containment.py"
+run_gate "special-file-precheck-bootstrap" sh -c '[ -f "$1" ] && ! [ -h "$1" ] || { echo "error: $1: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 1; }' sh "$here/_containment.py"
 [ "$failed" -eq 0 ] || exit 2
 run_gate "special-file-precheck"       python3 -I -B "$here/_containment.py" --precheck
 [ "$failed" -eq 0 ] || exit 2

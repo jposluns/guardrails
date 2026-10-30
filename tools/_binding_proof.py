@@ -5,19 +5,18 @@ tools/check_manifest.py holds the D-400 special-file precheck copies (tools/_gen
 opf/tools/_containment.py) to this predicate as DEFENCE IN DEPTH ONLY: a module NAME whose value a
 syntactic scan wants to trust is trusted only while the module holds NO reference through which a
 binding could change invisibly to that scan, and no spelling list makes that trust COMPLETE (the
-RESIDUAL below). Extracted in the #400 re-cut (round 3, codex MAJOR 1 =
-claude MAJOR 1: the two statements of the same rule had already diverged once), widened in
-round 4, made POSITIVE in round 5 (codex MAJOR 1 = claude MAJOR 1 again: rounds 1 to 4
-each enumerated bad spellings, and each review found siblings outside the list -- aliases of
+RESIDUAL below). Extracted into this one module because two statements of the same rule had
+already diverged once; then widened; then made POSITIVE (each earlier version
+enumerated bad spellings, and each review found siblings outside the list -- aliases of
 the banned callables, mapping methods such as __dict__.update, frame globals, getattr on
-builtins, from-imports and accessor calls -- so round 5 inverts the rule instead of extending
-the list), and DEMOTED in round 6 (codex MAJOR 1 = claude MAJOR 1 a third time: both round-5
-reviews reached the same capability through attribute chains and source evaluators the
+builtins, from-imports and accessor calls -- so the rule was inverted instead of extending
+the list); and then DEMOTED (reviews of the positive rule
+reached the same capability through attribute chains and source evaluators the
 inverted rule still does not name, so tools/check_release_cut.py no longer rests ANY
 exemption or package-member proof on this predicate; it counts every os.open site and
 refuses every package-member proof instead, and only this gate's copy comparison keeps the
 predicate, as one defensive layer among its others, never as a proof).
-The round-5 rule set, applied in EVERY scope, Load positions included:
+The positive rule set, applied in EVERY scope, Load positions included:
 - no Load, in ANY position (not only as a call), of a REFLECTION NAME
   (REFLECTION_NAME_LOADS below);
 - no Load of an attribute named __dict__, __setattr__, __delattr__, f_globals, f_locals,
@@ -29,7 +28,7 @@ The round-5 rule set, applied in EVERY scope, Load positions included:
 - no store or delete to an ATTRIBUTE of anything (an os.O_NONBLOCK patch, an os.walk swap);
 - no store or delete through a __dict__ or sys.modules subscript (subsumed by the
   attribute-Load rule, kept for its specific message).
-RESIDUAL, stated plainly (#400 re-cut round 6, codex MAJOR 1 = claude MAJOR 1): this is a
+RESIDUAL, stated plainly: this is a
 refusal of reflection SPELLINGS, never a proof of their absence at runtime. SAME-MODULE
 reflection that reaches a namespace through an ATTRIBUTE CHAIN this list does not name
 (os.__builtins__, site.builtins, f.__globals__, object.__getattribute__ among them) or that

@@ -324,7 +324,7 @@ def _self_test():
         if got != 2:
             failures.append("h: page-less site/ expected exit 2 got {}".format(got))
 
-    # F-CORPUS-FIFO-HANG (QA round 4): a FIFO at an .html page (the shape a git-ignored plant takes,
+    # F-CORPUS-FIFO-HANG: a FIFO at an .html page (the shape a git-ignored plant takes,
     # which the D-400 precheck deliberately does not walk) must be the named refusal (exit 2), never a
     # blocking read. MUTATION: reverting the page read to Path.read_text blocks here; the alarm turns
     # that into a recorded failure. POSIX only (os.mkfifo, SIGALRM).
@@ -353,7 +353,7 @@ def _self_test():
                 failures.append("y: a FIFO site page expected the named refusal exit 2, got {}".format(got))
 
     else:
-        # #400 re-cut (codex MEDIUM 4, claude MINOR 11): a capability-gated vector is an
+        # A capability-gated vector is an
         # explicit NOT RUN and a recorded failure, never a silent pass.
         print("NOT RUN: the FIFO site-page refusal vector (os.mkfifo or signal.SIGALRM "
               "unavailable); failing closed")

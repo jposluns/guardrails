@@ -99,7 +99,7 @@ def _git_lines(root, args):
     belongs to another uid) is a named refusal, exit 2, never None, so the root cross-check is never
     silently skipped there."""
     import subprocess
-    # QA round 7 (codex M4 = claude M2): every GIT_* variable is scrubbed from the child
+    # Every GIT_* variable is scrubbed from the child
     # environment, as check_portability and scrub_git_environment already do. An inherited
     # GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE (or any other GIT_ control) can redirect
     # rev-parse, ls-files and the ignore list to a repository that is NOT the tree this walk
@@ -157,7 +157,7 @@ def _git_lines(root, args):
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
-        # D-400 fixture env, QA round 2 (MINOR-1): on an owned root whose git dir another uid owns,
+        # D-400 fixture env: on an owned root whose git dir another uid owns,
         # the pinned git refuses as dubious ownership (a caller's safe.directory is pinned away
         # here), while the gates' own git reads may still answer under the caller's configuration.
         # Reading that refusal as git-absent would silently skip the root cross-check, so it is
@@ -294,25 +294,26 @@ def precheck_special_files(root):
     regular file on a local filesystem does not block; on a FUSE or network filesystem it can,
     which this walk does not detect); a symlink to a directory INSIDE the root,
     whose contents are walked UNDER THE LINK'S OWN LOGICAL PATH with the link path's ignore
-    classification (QA round 11 codex MAJOR: the ignore status follows
+    classification (the ignore status follows
     the path AS GIT NAMES IT, never the target's spelling; substituting the target's path let a
     second link regain the ignored-only leniencies under that spelling, so a tracked path through
     two chained links reached an uncertified tree; the target's own subtree is independently
-    walked under its own path and classification, which keeps QA round 9 claude MD1 and QA round
-    10 claude MD2 covered in both directions), at most 64 link-walks per run (a directory-link
+    walked under its own path and classification, which keeps the own-path classification covered
+    in both directions, an ignored link into a non-ignored directory and a non-ignored link into
+    an ignored one), at most 64 link-walks per run (a directory-link
     cycle, a link to its own ancestor, or a heavier aliasing is refused by name, fail-closed,
     never walked forever or certified in part), so linked-in contents, which a gate can reach
-    through the link's own certified path, are checked rather than trusted. QA round 12 (claude
-    m3): an in-root directory link at a GIT-IGNORED logical path (the link ignored, or under an
+    through the link's own certified path, are checked rather than trusted. An in-root directory
+    link at a GIT-IGNORED logical path (the link ignored, or under an
     ignored directory) is NOT walked under that path and does not count toward the bound: every
     rule below that path is already the lenient ignored one, its target (a target that is, lies
     inside or holds a directory in the unwalked set is refused instead; THE RULE, SCOPE below)
     is walked under its own
     path and classification, and every tracked path through it is resolved by the tracked-path
     layer, so walking it again adds no refusal (a pnpm-style ignored node_modules with many
-    in-root links passes). QA round 13 (claude MEDIUM 1): that skip applies ONLY when git can list
+    in-root links passes). That skip applies ONLY when git can list
     the tracked paths; when it cannot (the index query ls-files fails, or HEAD's ls-tree fails on a
-    HEAD not proven unborn, while the ignore query answers; QA round 14, below) the tracked-path
+    HEAD not proven unborn, while the ignore query answers; see below) the tracked-path
     layer does not run, so such a link is walked under its logical path and counted like any
     other, and what the physical walk prunes (the root .git entry, SCOPE below) is still
     examined through it. The bound still refuses more than 64 link-walks at non-ignored logical
@@ -333,11 +334,11 @@ def precheck_special_files(root):
     is resolved COMPONENT BY COMPONENT, lstat and readlink only (nothing is opened, so the
     classification itself cannot block), and REFUSED BY THE LOGICAL PATH when any link step leaves
     the root, when resolution exceeds 40 link steps (a loop), or when the object it resolves to is
-    a special file (QA round 11, codex MAJOR: the object a tracked path resolves to is always
+    a special file (the object a tracked path resolves to is always
     classified, however many directory links re-spell the route); a tracked path with a missing or
     dangling component stays accepted (every read open of it fails at once) when no link step on its
     route has left the root. That tracked-path layer runs only when git can list the tracked
-    paths. QA round 14 (codex MEDIUM 1 and 2): the list is unavailable when the index query
+    paths. The list is unavailable when the index query
     (ls-files) fails, when HEAD's ls-tree fails and HEAD is not PROVEN unborn (a failed or timed-out
     query never stands for an unborn HEAD; only two queries that succeed prove it: symbolic-ref
     names one branch ref and for-each-ref on that name answers empty), or when either answer is
@@ -345,8 +346,8 @@ def precheck_special_files(root):
     path with no empty, '.' or '..' component; records are decoded with os.fsdecode, which
     does not fail on POSIX, so decodability itself is not a separate check). Without the list the walk still refuses
     every special file a tracked path reaches (an ignored in-root directory link is then walked
-    under its own path, QA round 13 above, and every symlink to a special file is refused, ignored
-    or not), but the stricter route rule for tracked paths lapses (QA round 14, claude MINOR 1):
+    under its own path, as above, and every symlink to a special file is refused, ignored
+    or not), but the stricter route rule for tracked paths lapses:
     a tracked path through a link leaving the root to a REGULAR file or a DANGLING target is then
     accepted, as for any other path, and so is a tracked path routed through an IGNORED link
     loop (the walk accepts an ignored unresolvable link un-walked; the 40-step loop refusal
@@ -378,9 +379,9 @@ def precheck_special_files(root):
     its target walked under its own path; an in-root directory link git does not ignore, and any
     such link while the list is unavailable, is walked under its own logical path instead. Every
     OTHER entry named .git, at any depth, is
-    DESCENDED like any directory (QA round 6, claude B1: a gate's tree scan reads into a nested
+    DESCENDED like any directory (a gate's tree scan reads into a nested
     tools/qa/.git like any other path, so a special file there is refused by name), and INCLUDING
-    the contents of every git-ignored directory (QA round 5): the walk DESCENDS into ignored
+    the contents of every git-ignored directory: the walk DESCENDS into ignored
     directories too (scandir and lstat only; the one open is the nested-gitfile
     screen's single O_NONBLOCK, fstat-checked read of each gitfile, and no link is followed
     out of the root), so a special file is refused BY NAME wherever it sits. A socket or FIFO a
@@ -393,7 +394,7 @@ def precheck_special_files(root):
     outside the root is refused whether or not git ignores it, so a developer's .venv kept as
     such a link stops the checks by name too; keep it as a real directory, or outside the tree
     with no link to it in the tree.
-    DEFENCE IN DEPTH, PARTIAL IN THIS TREE (QA round 9, codex 2 = claude m1): a second layer of
+    DEFENCE IN DEPTH, PARTIAL IN THIS TREE: a second layer of
     NON-BLOCKING, fstat-checked readers (_walk.read_text_nonblocking, read_source_bytes, or a
     gate's own O_NONBLOCK or stat-before-open reader) covers only the reads ALREADY CONVERTED to
     it, not every gate-reachable read: the raw-read lint in tools/check_release_cut.py --self-test
@@ -414,12 +415,12 @@ def precheck_special_files(root):
     ignore list, a first pass refuses any in-tree .gitignore that is, or resolves to, a special file,
     or is a symlink git cannot resolve other than a dangling one: git computes the ignore list by
     OPENING those files with a plain blocking read, so they are screened ahead of the one git query
-    that reads them. The same pass screens every nested .git entry (QA round 11, claude m2): a
+    that reads them. The same pass screens every nested .git entry: a
     .git that is, or resolves to, a special file, and a .git directory whose HEAD is, or resolves
     to, one, are refused by name BEFORE that query, because git's ignore probe opens a nested .git
     file and .git/HEAD with plain blocking reads while deciding whether the directory is a nested
     repository; without this screen the refusal still came, but only after the query's 60-second
-    bound had expired. QA round 12 (codex MINOR = claude m2): git's probe also reads a nested
+    bound had expired. Git's probe also reads a nested
     .git directory's commondir, and FOLLOWS a nested gitfile ('gitdir: <path>') to read its
     target's HEAD and commondir (it reads nothing else there: no refs, no config, not the
     commondir's own target). So the same pass reads each nested gitfile itself (one bounded,
@@ -441,7 +442,8 @@ def precheck_special_files(root):
     module file must derive the same real root, so a tools/ or opf/tools/ directory replaced by a
     symlink cannot move the walk out of the invoked tree; and the root must be confirmed by
     _git_toplevel whenever git can answer. BOOTSTRAP: the
-    runners first test, in a shell-only run_gate step (test -f ... -a ! -h ...) whose STOP line ends
+    runners first test, in a shell-only run_gate step (the CI bootstrap test under sh -c, which
+    prints the same error line on a failure) whose STOP line ends
     the run on a failure, and the CI steps in shell, that the precheck module
     itself is a regular non-symlink file, because python3 would block LOADING a FIFO planted at the
     script path before any line of this code could run. Residuals that remain OUTSIDE the precheck:
@@ -494,7 +496,7 @@ def precheck_special_files(root):
                 own_git_dir = None
 
     def _own_git(path):
-        # QA round 7 (claude m-b): the exemption is applied ONLY at the repository root (the
+        # The exemption is applied ONLY at the repository root (the
         # canonical <root>/.git location, asked once below; both prune sites act on that one
         # answer, and only at that position). A root
         # .git FILE (a gitfile with gitdir: tools/qa/.git) must not exempt an IN-TREE nested
@@ -526,7 +528,7 @@ def precheck_special_files(root):
         return checked
 
     def _gitfile_target(path, dirpath):
-        # QA round 12 (codex MINOR = claude m2): the real path of the git dir a nested gitfile
+        # The real path of the git dir a nested gitfile
         # names, parsed as git's read_gitfile parses it ('gitdir: ' first, trailing CR and LF
         # dropped, the path ending at a NUL, a relative path joined to the gitfile's own
         # directory), or None when git would not follow it. One open, O_NONBLOCK and fstat-checked
@@ -612,7 +614,7 @@ def precheck_special_files(root):
                                     "an ignore-control file (git reads it to compute the "
                                     "ignore list)")
                 elif name == ".git":
-                    # QA round 11 (claude m2): git's ignore query (ls-files --others) probes
+                    # Git's ignore query (ls-files --others) probes
                     # every nested .git while deciding whether its directory is a nested
                     # repository: it OPENS a .git file (a gitfile) and a .git/HEAD with plain
                     # blocking reads, so both are screened BEFORE the one git query that reads
@@ -628,7 +630,7 @@ def precheck_special_files(root):
                         gitdir = path
                     elif (mode is not None and stat.S_ISREG(mode)
                           and os.path.realpath(dirpath) != real_root):
-                        # QA round 12 (codex MINOR = claude m2): git follows a nested gitfile
+                        # Git follows a nested gitfile
                         # to its target and reads that target's HEAD and commondir.
                         gitdir = _gitfile_target(path, dirpath)
                     if gitdir is not None:
@@ -640,16 +642,16 @@ def precheck_special_files(root):
         tracked_state = []
 
         def _tracked():
-            # QA round 6 (claude M3): a path is tracked when it has entries in the INDEX or in
+            # A path is tracked when it has entries in the INDEX or in
             # HEAD; asking the index alone lets a staged removal (git rm --cached) take a path
             # out of the tracked-path layer, so both are unioned. An unborn HEAD (no commit yet)
             # contributes nothing; any other ls-tree failure is git-cannot-answer (None), on
-            # which every caller fails closed. QA round 14 (codex MEDIUM 1): _git_lines answers
+            # which every caller fails closed. _git_lines answers
             # None for a timeout or any error as well as for a missing HEAD, so a failed query
             # never stands for an unborn HEAD. HEAD is unborn only when two queries that SUCCEED
             # prove it: symbolic-ref names exactly one branch ref (a detached HEAD always names a
             # commit), and for-each-ref on that name answers empty (a ref whose commit or tree
-            # object is missing is still listed). QA round 14 (codex MEDIUM 2): each answer is a
+            # object is missing is still listed). Each answer is a
             # list only when framed as git frames it (NUL-terminated records, no unterminated
             # tail, each a relative path with no empty, '.' or '..' component (os.fsdecode
             # does not fail on POSIX, so decodability itself is not a separate check);
@@ -690,7 +692,7 @@ def precheck_special_files(root):
             return tracked_state[0]
 
         def _classify_tracked(spec):
-            # QA round 11 (codex MAJOR): resolve root/<spec> COMPONENT BY COMPONENT with lstat
+            # Resolve root/<spec> COMPONENT BY COMPONENT with lstat
             # and readlink only (nothing is opened, so the classification itself cannot block).
             # Returns the mode of the object the tracked path resolves to, or None when a
             # component is missing or dangles (every read open of that path fails at once). Refuses,
@@ -789,14 +791,14 @@ def precheck_special_files(root):
                     if stat.S_ISDIR(mode):
                         stack.append((path, rel, skipped))
                     continue
-                # QA round 7 (claude B1): the INTERPRETER itself reads __pycache__/<module>.pyc
+                # The INTERPRETER itself reads __pycache__/<module>.pyc
                 # with a plain blocking open when a gate imports an in-tree module (-B stops only
                 # the WRITES), and that read sits outside every gate reader, so a SYMLINK named
                 # __pycache__ is refused by NAME, ignored or not, wherever it sits and whatever it
                 # resolves to (a real __pycache__ directory stays walked like any directory, and a
                 # special file inside it is already refused by name; a FIFO planted AFTER this
                 # walk at an existing __pycache__/<module>.pyc stays the disclosed race residual).
-                # #400 re-cut (claude MEDIUM 2): this walk protects only runs that EXECUTE IT
+                # This walk protects only runs that EXECUTE IT
                 # FIRST as a separate process (the runners and every CI job do). A DIRECTLY
                 # invoked gate imports its modules before any in-process precheck call can run,
                 # so a FIFO already planted at that gate's own __pycache__/<module>.pyc hangs
@@ -828,12 +830,12 @@ def precheck_special_files(root):
                     real = os.path.realpath(path)
                     if (skipped and (real == real_root or real.startswith(real_root + os.sep))
                             and _tracked() is not None):
-                        # QA round 12 (claude m3): an in-root directory link at an IGNORED
+                        # An in-root directory link at an IGNORED
                         # logical path is not walked under that path, and so not counted: below
                         # it every rule is already the lenient ignored one, its target is walked
                         # under its own path and classification, and every tracked path through
-                        # it is resolved by the tracked-path layer after this walk. QA round 13
-                        # (claude MEDIUM 1): that layer runs only when git can list the tracked
+                        # it is resolved by the tracked-path layer after this walk. That layer
+                        # runs only when git can list the tracked
                         # paths, so the skip applies only then; without the list (ls-files
                         # fails, or ls-tree fails on a HEAD not proven unborn, or an answer is
                         # malformed, while the ignore query answers) the link is walked and
@@ -850,16 +852,16 @@ def precheck_special_files(root):
                                           "it".format(real, reached))
                         continue
                     if real == real_root or real.startswith(real_root + os.sep):
-                        # QA round 11 (codex MAJOR): descend through an in-root directory link
+                        # Descend through an in-root directory link
                         # by the link's OWN LOGICAL path and ignore classification, never the
-                        # target's spelling: substituting the target's path (round 10) let a
+                        # target's spelling: substituting the target's path let a
                         # second link, ignored only under that spelling, regain the
                         # ignored-only leniencies while the shadow test saw only the
                         # target-relative rel, so a tracked path through two chained links
                         # reached an uncertified tree. The target's own subtree is still
                         # walked under its own path and classification by the physical
-                        # descent, which keeps QA round 9 claude MD1 and QA round 10 claude
-                        # MD2 covered in both directions. Link-walks are COUNTED, never
+                        # descent, which keeps the own-path classification covered in both
+                        # directions. Link-walks are COUNTED, never
                         # deduplicated (a dedup keyed on the target identity is exactly what
                         # lost the logical spelling): a directory-link cycle (a link to its
                         # own ancestor above all) or a tree aliased through more than 64 links
@@ -880,17 +882,17 @@ def precheck_special_files(root):
                                       "{}), git-ignored or not; its contents cannot be certified "
                                       "from this root, and a tree copy follows the link into "
                                       "them".format(real))
-        # QA round 11 (codex MAJOR), the independent layer the walk's leniencies cannot blunt:
+        # The independent layer the walk's leniencies cannot blunt:
         # every TRACKED logical path is resolved component by component and the OBJECT it
         # resolves to is classified, however many directory links re-spell the route. When git
         # cannot list the tracked paths (ls-files fails, ls-tree fails on a HEAD not proven
-        # unborn, or either answer is malformed; QA round 14) this layer does not run. The walk
+        # unborn, or either answer is malformed) this layer does not run. The walk
         # above still refuses every special file a tracked path can reach: an ignored in-root
-        # directory link is then walked under its own path (the round-12 skip needs the tracked
-        # list; QA round 13, claude MEDIUM 1), every symlink to a special file is refused,
+        # directory link is then walked under its own path (the ignored-link skip needs the
+        # tracked list), every symlink to a special file is refused,
         # ignored or not, and every out-of-root directory link is refused outright, ignored or
         # not. What lapses is the
-        # stricter route rule for tracked paths (QA round 14, claude MINOR 1): a tracked path
+        # stricter route rule for tracked paths: a tracked path
         # through a link leaving the root to a regular file or a dangling target is accepted,
         # the residual the docstring names (neither can block). The ignore filter is independent
         # of the tracked list: ls-files or ls-tree can fail while the ignore query answers.

@@ -135,9 +135,9 @@ import _git_fixture_env  # noqa: E402
 import _selftest_exit_report  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
 import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
-from _walk import read_text_nonblocking  # noqa: E402  QA r5: tree scans must refuse a special
-# file (for example a FIFO at tools/__pycache__/x.py) by name instead of blocking on it; QA r6
-# (claude B1): EVERY tree scan in this module reads through it, including the nested-.git paths
+from _walk import read_text_nonblocking  # noqa: E402  tree scans must refuse a special
+# file (for example a FIFO at tools/__pycache__/x.py) by name instead of blocking on it, so
+# EVERY tree scan in this module reads through it, including the nested-.git paths
 # the precheck walk formerly pruned, and the repo-content byte reads go through read_source_bytes.
 from _gen_common import load_toml, read_source_bytes  # noqa: E402
 

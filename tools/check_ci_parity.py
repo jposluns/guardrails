@@ -598,7 +598,7 @@ REQUIRED_STATUS_JOB = (
     '          echo "Quality gates: PASS, every needed job concluded success"',
 )
 
-# #400 re-cut (codex MEDIUM 3 = claude MAJOR 1): the ONE checkout-less job the order question
+# The ONE checkout-less job the order question
 # accepts, bound to the reviewed aggregate by NAME and PINNED RUN BODY. The retired acceptance
 # (no uses: step and no TOOL_RE run line) let any checkout-less job in any workflow file pass
 # the order question, including one whose literal run block fetches a tree by another spelling
@@ -616,16 +616,21 @@ REQUIRED_STATUS_RUN_BODY = tuple(
 # followed directly by PRECHECK_STOP_LINE. Both steps are gate lines, so the first line after the
 # probe that names Python is a gate line, the shape that gate's first-gate rule compares.
 # The BOOTSTRAP gate is a shell test only: python3 would block LOADING the precheck module if the
-# script path were a FIFO, so it fails on a non-regular or symlinked script first (the residual that
-# remains is the interpreter binary, the runner script and the probe script, all read before it can
-# run). It is accepted only at top level with the probe as the one member before it
-# (PRECHECK_PRIOR_MEMBERS) and registers NO roster member; the value is the tools path the shadow scan
-# must see accounted for on that line.
+# script path were a FIFO, so it fails on a missing, non-regular or symlinked script first (the
+# residual that remains is the interpreter binary, the runner script and the probe script, all read
+# before it can run). It runs the CI bootstrap line's test (PRECHECK_BOOTSTRAP_LINES) under sh -c with
+# the script path as $1, never python3, so a failure prints the same error line as CI and then exits
+# 1 (run_gate names the failure and the STOP line ends the run). It is accepted only at top level with
+# the probe as the one member before it (PRECHECK_PRIOR_MEMBERS) and registers NO roster member; the
+# value is the tools path the shadow scan must see accounted for on that line.
+_PRECHECK_BOOTSTRAP_TEST = ("sh -c '[ -f \"$1\" ] && ! [ -h \"$1\" ] || { echo \"error: $1: not a "
+                            "regular non-symlink file; cannot run the special-file precheck; "
+                            "fail-closed\" >&2; exit 1; }' sh ")
 PRECHECK_BOOTSTRAP_GATE_LINES = dict((
-    ('run_gate "special-file-precheck-bootstrap" test -f tools/_gen_common.py -a ! -h tools/_gen_common.py',
+    ('run_gate "special-file-precheck-bootstrap" ' + _PRECHECK_BOOTSTRAP_TEST + "tools/_gen_common.py",
      "tools/_gen_common.py"),
-    ('run_gate "special-file-precheck-bootstrap" test -f "opf/tools/_containment.py" -a ! -h '
-     '"opf/tools/_containment.py"',
+    ('run_gate "special-file-precheck-bootstrap" ' + _PRECHECK_BOOTSTRAP_TEST
+     + '"opf/tools/_containment.py"',
      "opf/tools/_containment.py"),
 ))
 
@@ -1169,7 +1174,7 @@ def _operator(token):
     return bool(token) and all(char in "|&;<>()`" for char in token)
 
 
-# QA round 7 (claude B1): the ONE reviewed -X option pair the normalizer ACCEPTS when a
+# The ONE reviewed -X option pair the normalizer ACCEPTS when a
 # launch carries it. CPython reads __pycache__/<module>.pyc with a plain blocking open at
 # import time (-B stops only the writes), so a hostile pyc behind an accepted ignored link
 # could park a gate; this option redirects that read to a path under /dev/null, where NOTHING
@@ -1797,8 +1802,7 @@ def adapt_standalone_runner(text):
 
 
 def standalone_runner_diagnostics():
-    """Diagnostics for the LIVE standalone OPF runner under the shared grammar (claude m2, QA
-    round 5): raw-byte read, the shared adaptation, then extract_local with source=
+    """Diagnostics for the LIVE standalone OPF runner under the shared grammar: raw-byte read, the shared adaptation, then extract_local with source=
     STANDALONE_SOURCE. main() fails closed (exit 2) on any of them, so deleting the OPF runner's
     bootstrap line turns the LIVE gate red, not only the self-test's adapted copy."""
     runner, read_diagnostic = read_runner_text(
@@ -1812,7 +1816,7 @@ def standalone_runner_diagnostics():
 
 
 def extract_local(text, source=LOCAL_SOURCE):
-    """Extract normalized members from tools/run_all_checks.sh, or (claude m2, QA round 5) from
+    """Extract normalized members from tools/run_all_checks.sh, or from
     the ADAPTED standalone OPF runner when the caller passes source=STANDALONE_SOURCE, so a
     diagnostic on that runner names opf/tools/run_all_checks.sh, never the tools runner."""
     diagnostics = []
@@ -2064,7 +2068,7 @@ def extract_local(text, source=LOCAL_SOURCE):
                 ))
             if stripped in PRECHECK_BOOTSTRAP_GATE_LINES:
                 # SPECIAL-FILE-PRECHECK bootstrap gate: a shell test only, matched by exact
-                # spelling here because its "!" word is outside the gate-word alphabet below.
+                # spelling here because its sh -c test is outside the gate-word alphabet below.
                 # Accepted once, only at top level with the child-status probe gate as the one
                 # member before it (PRECHECK_PRIOR_MEMBERS); it registers no member, and the
                 # shadow scan sees its tools path through origins. Anywhere else it stays
@@ -4359,7 +4363,7 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
         (root / "tools").mkdir()
         runner = root / "tools" / "run_all_checks.sh"
         runner.write_text(text, encoding="utf-8")
-        # The live runner's precheck BOOTSTRAP gate tests this path with test -f ... -a ! -h ... before
+        # The live runner's precheck BOOTSTRAP gate tests this path with sh -c '[ -f ... ] ...' before
         # the precheck stub can run; give the scratch tree a regular file there. Data only: the stub
         # python3 never reads its script argument, and nothing executes this file.
         (root / "tools" / "_gen_common.py").write_text("", encoding="utf-8")
@@ -5677,7 +5681,7 @@ def self_test():
                         "26 adapted standalone runner: {!r}".format(
                             adapted_diagnostics))
                 else:
-                    # claude m2 (QA round 5): deleting the OPF runner's bootstrap gate must be a
+                    # Deleting the OPF runner's bootstrap gate must be a
                     # missing-bootstrap diagnostic NAMING opf/tools/run_all_checks.sh, and the
                     # LIVE gate path (standalone_runner_diagnostics, which main() fails closed
                     # on) must extract the real runner cleanly. Fails without the source
@@ -8002,7 +8006,7 @@ def self_test():
             "34c the precheck steps with no child-status probe gate before them must be "
             "unclassified, got {!r}".format(got.diagnostics))
 
-    # SPECIAL-FILE-PRECHECK bootstrap (runner side, QA round 4): the bootstrap gate is REQUIRED
+    # SPECIAL-FILE-PRECHECK bootstrap (runner side): the bootstrap gate is REQUIRED
     # ahead of the precheck gate, not merely accepted; DELETING it must be a missing-bootstrap
     # diagnostic (set parity alone cannot see the deletion, the bootstrap registers no member). This
     # vector fails without the requirement.
@@ -8013,6 +8017,23 @@ def self_test():
         failures.append(
             "34b deleting the bootstrap gate must be a missing-bootstrap diagnostic, got {!r}".format(
                 got.diagnostics))
+
+    # SPECIAL-FILE-PRECHECK bootstrap, accepted ONCE: a second bootstrap step (the bootstrap gate
+    # and its STOP line, doubled in place right after the first) is unclassified at the second
+    # gate line, never a clean pass. Every other rule accepts the doubled step (the bootstrap
+    # registers no member, so the probe is still the one member before it, and each copy has its
+    # STOP line), so this vector is red without the once rule alone.
+    count += 1
+    doubled = bootstrap_fixture.replace(bootstrap_step, bootstrap_step + bootstrap_step, 1)
+    second_line = (doubled.count("\n", 0, doubled.index(bootstrap_gate + "\n", doubled.index(
+        bootstrap_gate + "\n") + 1)) + 1 if doubled.count(bootstrap_gate + "\n") == 2 else None)
+    got = extract_local(doubled)
+    if second_line is None or not any(
+            diagnostic.code == "unclassified-line" and diagnostic.line == second_line
+            for diagnostic in got.diagnostics):
+        failures.append(
+            "34f a doubled bootstrap gate must be unclassified at its second line {}, got "
+            "{!r}".format(second_line, got.diagnostics))
 
     # SPECIAL-FILE-PRECHECK STOP lines: each precheck step must be followed DIRECTLY by the STOP
     # line, or a failed step would not stop the run (set parity cannot see a STOP line, which
@@ -8327,7 +8348,7 @@ def self_test():
         failures.append("36m the host-patch exemption must be disclosed as a residual naming "
                         "every exempt job id and the guard that holds those jobs whole")
 
-    # SPECIAL-FILE-PRECHECK order (QA round 4): a step key the parse does not model can disable
+    # SPECIAL-FILE-PRECHECK order: a step key the parse does not model can disable
     # or soften the precheck step while its run body still matches the canonical lines (if: and
     # continue-on-error: above all), so each such key, on the precheck step or any other, must be a
     # step-key diagnostic (cannot-evaluate), never a clean order pass. An env:/with: mapping stays
@@ -8388,7 +8409,7 @@ def self_test():
             failures.append("36b {} must be a step-key diagnostic, got {!r} {!r}".format(
                 label, got_problems, got_diagnostics))
 
-    # SPECIAL-FILE-PRECHECK order (QA round 5, claude M1): GitHub applies workflow- and
+    # SPECIAL-FILE-PRECHECK order: GitHub applies workflow- and
     # job-level env: and defaults: to every step, so a BASH_ENV, PATH or defaults.run.shell value
     # there (or an env: mapping on the precheck step itself) neuters the canonical precheck step
     # while its run body still matches. Each inherited execution control must be refused. These
@@ -8438,7 +8459,7 @@ def self_test():
         failures.append("36c an env: mapping on the precheck step must be refused, got "
                         "{!r} {!r}".format(got_problems, got_diagnostics))
 
-    # QA round 6 (codex M3 = claude M1, claude M4): quoted and space-before-colon spellings are
+    # Quoted and space-before-colon spellings are
     # the SAME YAML key, so the workflow- and job-level checks are an allowlist over the
     # NORMALIZED key, and ANY env: on a step at or before the precheck is refused (a NODE_OPTIONS
     # on actions/setup-python runs committed code before the precheck). Each vector fails without
@@ -8490,7 +8511,7 @@ def self_test():
             failures.append("36d {} must be refused, got {!r} {!r}".format(
                 label, got_problems, got_diagnostics))
 
-    # QA round 7 (codex M2 = claude M1; claude m-a, m-c): the job SET comes only from canonical
+    # The job SET comes only from canonical
     # plain job ids, so EVERY other line above the job-content indent inside jobs: is a job-id
     # refusal (a quoted or spaced id, a flow-style mapping, an anchor, an alias or a merge key
     # could carry a WHOLE JOB the parse cannot see, and a duplicate id re-opens an ordered one);
@@ -8544,7 +8565,7 @@ def self_test():
         failures.append("36e the plain python-version: input must stay modelled, got "
                         "{!r} {!r}".format(got_problems, got_diagnostics))
 
-    # QA round 7 (claude B1): the ONE reviewed -X pair is identity-neutral like -I and -B, and
+    # The ONE reviewed -X pair is identity-neutral like -I and -B, and
     # any other -X value stays cannot-evaluate. Fails without the PYCACHE_PREFIX_ARGS handling.
     count += 1
     with_x = normalize(("python3", "-I", "-B", "-X", "pycache_prefix=/dev/null/aiqt-pycache",
@@ -8558,7 +8579,7 @@ def self_test():
         failures.append("36f an unreviewed -X value must be cannot-evaluate, got "
                         "{!r}".format(rogue_x))
 
-    # QA round 8 (codex 7 = claude M1): DUPLICATE keys at every modelled level, and a value this
+    # DUPLICATE keys at every modelled level, and a value this
     # parse cannot read on a modelled line (a multi-line quoted scalar, a tag, a flow mapping on
     # a repeated jobs: key, an anchor inside a with: entry), are refusals: each form below made
     # the round-7 guard and the YAML engine read DIFFERENT workflows (the guard credited a
@@ -8612,7 +8633,7 @@ def self_test():
             failures.append("36g duplicate or unreadable YAML structure not refused ({}): "
                             "{!r} {!r}".format(label, got_problems, got_diagnostics))
 
-    # QA round 9 (codex 1 = claude MJ1, claude m2): the strict scalar allowlist, the
+    # The strict scalar allowlist, the
     # inline-comment refusal and the post-precheck action refusal. In YAML a trailing doubled
     # single quote is an ESCAPED QUOTE, not a close, so a step name ending in an escaped quote
     # pair is an OPEN scalar that swallows the following lines (the round-8 endswith test called
@@ -8666,7 +8687,7 @@ def self_test():
         if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
             failures.append("36h unmodelled scalar, comment or step form not refused ({}): "
                             "{!r} {!r}".format(label, got_problems, got_diagnostics))
-    # QA round 10: inside a literal block a '#' is CONTENT, so a run body line is kept
+    # Inside a literal block a '#' is CONTENT, so a run body line is kept
     # VERBATIM (never comment-stripped); a disguised precheck line therefore no longer matches
     # the canonical body and the job fails the order question, in agreement with what the shell
     # actually runs.
@@ -8687,7 +8708,7 @@ def self_test():
         failures.append("36h a post-precheck action (a second checkout above all) must be "
                         "refused, got {!r} {!r}".format(got_problems, got_diagnostics))
 
-    # QA round 9 (codex 1 and claude MJ1, the filed reproduction shapes): a currency-shaped job
+    # The filed reproduction shapes: a currency-shaped job
     # whose precheck-looking lines sit INSIDE an open single-quoted step name must be refused,
     # never a clean order pass; the clean currency shape must still pass. Both reproductions
     # pass the round-8 guard (0 problems, 0 diagnostics) and fail without the round-9 change.
@@ -8737,7 +8758,7 @@ def self_test():
             failures.append("36i round-9 reproduction ({}) not refused: {!r} {!r}".format(
                 label, got_problems, got_diagnostics))
 
-    # QA round 10 (codex 1 and claude MJ1 of round 10, the whole-file line grammar): an
+    # The whole-file line grammar: an
     # env:/with: entry with NO colon used to receive an empty-value pass, so a quoted scalar
     # opened there (or an escaped mapping key decoding to BASH_ENV, an anchored key, a quoted or
     # exact duplicate key, a double-quoted value) let the round-9 guard and the YAML engine read
@@ -8806,7 +8827,7 @@ def self_test():
                         "the plain spelling, got {!r} {!r}".format(got_problems,
                                                                    got_diagnostics))
 
-    # QA round 11 (claude m1, m3): setup-python at or before the precheck must carry EXACTLY ONE
+    # Setup-python at or before the precheck must carry EXACTLY ONE
     # non-empty, literal python-version: input (with none, or an expression that evaluates
     # empty, setup-python falls back to reading the checkout's .python-version file BEFORE the
     # precheck step runs), and the KNOWN-REFUSED disclosure names the most common refused forms,
@@ -8866,7 +8887,7 @@ def self_test():
         failures.append("36k a flow sequence padded inside its brackets must be refused "
                         "loudly, got {!r} {!r}".format(got_problems, got_diagnostics))
 
-    # QA round 12 (codex MEDIUM = claude m1): the grammar stores a PLAIN scalar as its text, so a
+    # The grammar stores a PLAIN scalar as its text, so a
     # plain null, Null or NULL reached the round-11 rule as a non-empty string, while YAML reads
     # each as null and the Actions runner hands a null string input to setup-python as an empty
     # one (its .python-version fallback, a read of the checkout before the precheck). The one
@@ -9620,7 +9641,7 @@ def self_test():
 
 
 
-# SPECIAL-FILE-PRECHECK order, QA round 10 (premise change): rounds 8, 9 and 10 each
+# SPECIAL-FILE-PRECHECK order (premise change): successive reviews each
 # found a YAML form the piecemeal per-line value allowlist accepted while a real YAML parser read
 # it differently (escaped-quote names, escaped mapping keys decoding to BASH_ENV, a with: entry
 # with no colon opening a multi-line scalar that hid the precheck step). Extending that allowlist
@@ -9667,7 +9688,7 @@ REVIEWED_WORKFLOW_LINES = frozenset((CONCURRENCY_BLOCK[1], CONCURRENCY_BLOCK[2],
 # scalar item the grammar reads; the step model admits it only under a job-level needs: key).
 _GRAMMAR_NEEDS_ITEM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
-# QA round 12 (codex MEDIUM = claude m1): the setup-python python-version: value the order guard
+# The setup-python python-version: value the order guard
 # accepts at or before the precheck: a literal version string (a letter or digit first, at least
 # one digit, then only letters, digits, '.', '_', '+' and '-'), such as 3.14, 3.x, 3.13t or
 # pypy3.10. No YAML null spelling (null, Null, NULL, ~, an empty value) and no boolean matches.
@@ -9708,7 +9729,7 @@ def _grammar_context_code(indent):
 
 
 def _workflow_line_grammar(text, source):
-    """(root, diagnostics) for one workflow file under the QA round 10 LINE GRAMMAR. Every line
+    """(root, diagnostics) for one workflow file under the whole-file LINE GRAMMAR. Every line
     of the file must match exactly ONE production, or it is refused with its line number and a
     named reason. The productions:
 
@@ -10140,7 +10161,7 @@ def _workflow_step_model(text, source):
     line grammar accepted. Semantic allowlists on top of the grammar, kept from the earlier
     rounds: workflow-level keys must be the plain spellings of WORKFLOW_LEVEL_KEYS (an env: or
     defaults: there is an inherited execution control that can neuter the precheck step without
-    touching its run body; QA round 5 claude M1, round 6 codex M3), and a workflow-level
+    touching its run body), and a workflow-level
     concurrency: is admitted only as exactly the LANES rule's pinned block (CONCURRENCY_BLOCK:
     its group: and cancel-in-progress: entries, in that order, each its pinned value; it can
     only cancel a run, never neuter a step); jobs: must be a bare key
@@ -10265,10 +10286,10 @@ def workflow_precheck_order_problems(text, source):
     opf/tools/_child_status.py blocks that step until the job times out instead of being
     refused by name). After the checkout step
     and before the precheck only actions/setup-python and that probe may appear (setup-python with EXACTLY ONE non-empty,
-    literal python-version: input and no other input; QA round 11, claude m1: with no explicit
+    literal python-version: input and no other input: with no explicit
     version, or an expression that can evaluate empty, setup-python falls back to READING the
-    checkout's .python-version file, a read of the checkout before the precheck step runs; QA
-    round 12, codex MEDIUM = claude m1: that value must be a literal VERSION STRING,
+    checkout's .python-version file, a read of the checkout before the precheck step runs;
+    that value must be a literal VERSION STRING,
     _SETUP_PYTHON_VERSION_RE, plain or simply single-quoted, because the grammar keeps a plain
     scalar as its text and a plain null, Null or NULL is YAML null, which the Actions runner
     passes to setup-python as an empty input; ~ and a bare key are refused by the grammar; and
@@ -10276,7 +10297,7 @@ def workflow_precheck_order_problems(text, source):
     NODE_OPTIONS or BASH_ENV value there runs uncertified code or poisons the environment
     first; QA rounds 5 to 7); before checkout only PRE_CHECKOUT_RUN_LINES may run and no action
     other than checkout itself; the precheck step itself may carry no env: mapping at all; and
-    after the precheck no ACTION step at all is modelled (QA round 9, claude m2: a second
+    after the precheck no ACTION step at all is modelled (a second
     actions/checkout above all replaces the certified tree; an actions/upload-artifact step
     would be refused the same way and needs a reviewed guard change to adopt).
     RE-CUT ADDITIONS (round 13 part B): checkout inputs at or before the precheck are an
@@ -10292,7 +10313,7 @@ def workflow_precheck_order_problems(text, source):
     value, and needs: likewise, a plain scalar, a one-line flow sequence or a block list of
     plain job ids); every other checkout-less job is refused by name, as at the #400 head.
 
-    QA round 10 (premise change; the round 8 to 10 codex and claude majors): the per-line value
+    PREMISE CHANGE: the per-line value
     allowlist of rounds 8 and 9 is REPLACED by the whole-file line grammar in
     _workflow_line_grammar. Every line of the file must match exactly one production there
     (blank; full-line comment; plain-keyed mapping line carrying a restricted plain scalar, a
@@ -10307,7 +10328,7 @@ def workflow_precheck_order_problems(text, source):
     content kept verbatim (never comment-stripped), so a disguised precheck run line simply
     does not match the canonical body, in agreement with what the shell runs.
 
-    KNOWN-REFUSED COMMON FORMS (QA round 10 claude m1; QA round 11 claude m3): the grammar
+    KNOWN-REFUSED COMMON FORMS: the grammar
     refuses forms real-world workflows commonly use; this repository's own workflows use none
     of them (quality.yml's pinned concurrency: and heavy-job if: lines carry quotes, and are
     read by exact bytes instead) and every refusal is loud and named. The most common first: an inline comment on a
@@ -10330,7 +10351,7 @@ def workflow_precheck_order_problems(text, source):
     line under a non-jobs subtree can carry a job-key or step-key code; the quoted line text in
     the diagnostic is the authoritative locator.
 
-    INHERITED EXECUTION CONTROLS (QA round 5, claude M1; round 6, codex M3 = claude M1): GitHub
+    INHERITED EXECUTION CONTROLS: GitHub
     applies workflow- and job-level env: and defaults: (and a job-level if: or
     continue-on-error:) to every step, so those levels are ALLOWLISTS over the grammar's plain
     keys: a workflow-level key outside WORKFLOW_LEVEL_KEYS (workflow-key), a job-level key
@@ -10342,7 +10363,7 @@ def workflow_precheck_order_problems(text, source):
     execution-control variable that list does not name, and semantics GitHub adds later, stay
     outside this parse (the canonical step body itself is pinned by PRECHECK_STEP_RUN_LINES);
     and a post-precheck run: line that rewrites the tree before a later gate reads it stays
-    outside this ORDER question (QA round 9, claude m2). Full structural validation of
+    outside this ORDER question. Full structural validation of
     quality.yml stays extract_ci's job; this pass answers order, across every workflow file,
     and the whole-file shadow scan (TOOL_RE over every line not captured as a run line) still
     refuses a tools path wherever the model did not capture it.
@@ -10385,7 +10406,7 @@ def workflow_precheck_order_problems(text, source):
                     and len(job_steps) == 1
                     and job_steps[0]["uses"] is None
                     and tuple(job_steps[0]["run"]) == REQUIRED_STATUS_RUN_BODY):
-                # #400 re-cut (codex MEDIUM 3 = claude MAJOR 1): ONLY the reviewed
+                # ONLY the reviewed
                 # required-status aggregate passes the order question without a checkout: the
                 # job's name: equals the REQUIRED_STATUS_JOB pinned name and its single
                 # step's run body equals the pinned aggregate body line for line, which
@@ -10411,7 +10432,7 @@ def workflow_precheck_order_problems(text, source):
                             "that does not exist yet")
             continue
         for s in job_steps[:precheck + 1]:
-            # QA round 7 (claude m-a, m-c): setup-python inputs at or before the precheck are an
+            # Setup-python inputs at or before the precheck are an
             # ALLOWLIST (the plain python-version: entry only). An unmodelled input (pip-install:,
             # python-version-file:, ...) can install and run committed code or read the checkout
             # before the precheck step runs.
@@ -10442,7 +10463,7 @@ def workflow_precheck_order_problems(text, source):
                                         "the precheck runs".format(with_key, with_number))
                     else:
                         versions.append((with_number, with_value, with_quoted))
-                # QA round 11 (claude m1): the one modelled input must be PRESENT, non-empty and
+                # The one modelled input must be PRESENT, non-empty and
                 # literal. With no explicit version (or an expression that evaluates empty),
                 # setup-python falls back to READING THE CHECKOUT'S .python-version file, a read
                 # of the checkout before the precheck step runs, which is exactly what this
@@ -10461,7 +10482,7 @@ def workflow_precheck_order_problems(text, source):
                                     "before the precheck runs".format(versions[0][1],
                                                                       versions[0][0]))
                 elif not _SETUP_PYTHON_VERSION_RE.match(versions[0][1]):
-                    # QA round 12 (codex MEDIUM = claude m1): the grammar keeps a plain scalar
+                    # The grammar keeps a plain scalar
                     # as its text, so a plain null, Null or NULL arrives here as a non-empty
                     # string while YAML reads it as null, and the Actions runner turns a null
                     # string input into an empty one. Only a literal version string passes.
@@ -10494,7 +10515,7 @@ def workflow_precheck_order_problems(text, source):
                                 "precheck step; a BASH_ENV, ENV or PATH value there can neuter "
                                 "the precheck without touching its run body")
             else:
-                # QA round 6 (claude M4): a NODE_OPTIONS value on actions/setup-python (or any
+                # A NODE_OPTIONS value on actions/setup-python (or any
                 # variable on a pre-precheck step) can run committed code or poison GITHUB_ENV /
                 # GITHUB_PATH before the precheck step runs, so NO env: at all is modelled there.
                 problems.append(where + " carries an env: mapping on a step at or before the "
@@ -10533,7 +10554,7 @@ def workflow_precheck_order_problems(text, source):
                 problems.append("{} runs action {!r} between checkout and the special-file "
                                 "precheck".format(where, s["uses"]))
         for s in job_steps[precheck + 1:]:
-            # QA round 9 (claude m2): an ACTION step after the precheck can replace or rewrite
+            # An ACTION step after the precheck can replace or rewrite
             # the certified tree (a second actions/checkout with another ref above all), so no
             # action at all is modelled there; the steps after the precheck are the run: gates,
             # whose command lines the parity extraction classifies (the residual is named in
@@ -10605,7 +10626,7 @@ def main(argv=None):
     report = run_paths(LOCAL_PATH, CI_PATH, extra_ci_paths=CI_WORKFLOWS[1:])
     print(render(report))
     code = report.code
-    # claude m2 (QA round 5): the LIVE gate also holds the standalone OPF runner to the shared
+    # The LIVE gate also holds the standalone OPF runner to the shared
     # grammar (bootstrap REQUIRED ahead of its precheck invocation), so deleting the bootstrap
     # line of opf/tools/run_all_checks.sh is a live exit 2, not only a self-test finding.
     standalone = standalone_runner_diagnostics()

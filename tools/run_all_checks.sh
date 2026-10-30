@@ -19,8 +19,11 @@ export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
 notrun=0
-# Gate output does not carry the runner's gate label, so each failure is named as it happens and the
-# names are listed again before RESULT: FAIL; a failing suite never needs a hand re-run to find it.
+# Gate output does not carry the runner's gate label, so each failure is named as it happens and,
+# when the run reaches the end, the names are listed again before RESULT: FAIL; a failing suite
+# never needs a hand re-run to find it. A failure at or before the special-file precheck instead
+# stops the run at a STOP line (exit 2) right after its GATE FAILED line, with neither the list nor
+# RESULT: FAIL.
 failed_names=""
 
 run_gate() {
@@ -38,8 +41,8 @@ run_gate() {
 # Child exit status first: with SIGCHLD ignored by whatever started this runner, every Python gate below
 # would read its own failed children as passes. bash reads the probe's refusal correctly but cannot reset
 # the inherited ignore for its children, so the probe is a gate member, not a reset: its exit 2 sets
-# failed, and the run ends RESULT: FAIL whatever later gates print. check_child_status_coverage.py holds
-# this line first.
+# failed, and the first STOP line below (after the special-file precheck bootstrap gate) then ends the
+# run with exit 2 before any later gate runs. check_child_status_coverage.py holds this line first.
 run_gate "child-status" python3 -I -B opf/tools/_child_status.py
 
 # SPECIAL-FILE-PRECHECK: ONE walk of the repository tree right after the child-status probe and
@@ -61,7 +64,7 @@ run_gate "child-status" python3 -I -B opf/tools/_child_status.py
 # git-ignored in-root directory link is not walked under its own path (its target is walked under
 # the target's path). The walk
 # DESCENDS git-ignored directories (a stray .venv, editor or build output) and every nested .git directory that
-# is not the repository's own git dir (and, QA round 7, the own git dir is exempt only at the
+# is not the repository's own git dir (and the own git dir is exempt only at the
 # repository ROOT: a root gitfile naming an in-tree directory gets that directory walked), refusing
 # a special file by name wherever it sits; a SYMLINK named __pycache__ is refused by name, ignored
 # or not (the interpreter itself reads through it at import time); every GIT_* variable is scrubbed
@@ -70,13 +73,15 @@ run_gate "child-status" python3 -I -B opf/tools/_child_status.py
 # line, which ends the run there with exit 2 once any gate has failed, so no later gate runs (both steps
 # are gate lines, so the first line after the probe that names Python is a gate line, never a launch
 # outside run_gate). The first step is the BOOTSTRAP, a shell test only: python3 would block LOADING
-# the precheck script itself if that path were a FIFO, so a non-regular or symlinked script fails this
-# named step and the run stops before python3 touches it. The second step is the precheck. It
+# the precheck script itself if that path were a FIFO, so a missing, symlinked or non-regular script
+# fails this named step and the run stops before python3 touches it. The step runs the CI bootstrap
+# line's test under sh -c (never python3), so a failure prints the same error line as CI before
+# GATE FAILED. The second step is the precheck. It
 # carries the inline child-status guard, so under an ignored SIGCHLD it refuses (exit 2) and the run
 # STOPS here too; a failed probe above already stops the run at the first STOP line. Residual: the
 # interpreter binary, THIS runner script and the probe script above are read before the bootstrap step
 # can run. Every gate and self-test below then acts on a checked tree.
-run_gate "special-file-precheck-bootstrap" test -f tools/_gen_common.py -a ! -h tools/_gen_common.py
+run_gate "special-file-precheck-bootstrap" sh -c '[ -f "$1" ] && ! [ -h "$1" ] || { echo "error: $1: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 1; }' sh tools/_gen_common.py
 [ "$failed" -eq 0 ] || exit 2
 run_gate "special-file-precheck" python3 -I -B tools/_gen_common.py --precheck
 [ "$failed" -eq 0 ] || exit 2

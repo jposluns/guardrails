@@ -161,8 +161,7 @@ def run(root):
     try:
         # read_source_text: the registry may DECLARE a findings path outside the tree (an absolute
         # path, a path through an ignored link), which the D-400 precheck walk can never certify;
-        # the fstat-checked reader refuses a non-regular file by name instead of blocking on it
-        # (QA round 6, codex B1).
+        # the fstat-checked reader refuses a non-regular file by name instead of blocking on it.
         text = read_source_text(path)
     except OSError as exc:
         print("error: the DECLARED findings register is unreadable ({}); a declared input "
@@ -303,7 +302,7 @@ def self_test():
         register.write_text("- F-2 :: OPEN :: merge_pending :: refs=decision:GD-110 :: title\n",
                             encoding="utf-8")
         _case("recorded-decision-detected", run(repo), 1)
-        # QA round 6 (codex B1): a DECLARED findings path that is a FIFO -- outside the tree
+        # A DECLARED findings path that is a FIFO -- outside the tree
         # (an absolute path the precheck walk can never certify) or inside it -- is refused by
         # the fstat-checked reader, exit 2, never a blocking read. Fails without the
         # read_source_text conversion (the raw read hangs; the timeout alarm is not needed
@@ -326,7 +325,7 @@ def self_test():
                 {"version": 1, "record": {"findings": str(register)},
                  "truth": {"changelog": "truth/releases.toml"}}), encoding="utf-8")
         else:
-            # #400 re-cut (codex MEDIUM 4, claude MINOR 11): a capability-gated vector is an
+            # A capability-gated vector is an
             # explicit NOT RUN and a recorded failure, never a silent pass.
             print("NOT RUN: the declared-external-fifo-refused and declared-in-root-fifo-refused "
                   "vectors (os.mkfifo unavailable); failing closed")

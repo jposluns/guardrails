@@ -383,7 +383,7 @@ def main():
 
 def _copy_live_tree(src, dst):
     """Copy a checked tree for a self-test fixture, leaving out .git, __pycache__ and every symlink
-    that resolves to a directory OUTSIDE src (QA round 6, claude M5): the precheck refuses such a
+    that resolves to a directory OUTSIDE src: the precheck refuses such a
     link, ignored or not, so a tree it certified holds none, but a self-test run directly, without
     the precheck first, can still meet one (a developer's .venv link); copying it, or resolving it,
     into the fixture would make the fixture's own precheck refuse the copy. Every other symlink is
@@ -922,7 +922,7 @@ def _self_test_main_isolated():
                 failures.append("F-CORPUS-FIFO-HANG: load_toml on a FIFO expected the named refusal ('not a "
                                 "regular file') within the alarm, got {!r}".format(outcome))
         else:
-            # #400 re-cut (codex MEDIUM 4, claude MINOR 11): a capability-gated vector is an
+            # A capability-gated vector is an
             # explicit NOT RUN and a recorded failure, never a silent pass.
             print("NOT RUN: the F-CORPUS-FIFO-HANG vectors (l) and (m) (os.mkfifo or "
                   "signal.SIGALRM unavailable); failing closed")
@@ -1018,7 +1018,7 @@ def _self_test_main_isolated():
             finally:
                 stray.unlink()
         else:
-            # #400 re-cut (codex MEDIUM 4, claude MINOR 11): a capability-gated vector is an
+            # A capability-gated vector is an
             # explicit NOT RUN and a recorded failure, never a silent pass.
             print("NOT RUN: the live-tree precheck subprocess vectors (os.mkfifo unavailable); "
                   "failing closed")
@@ -1037,7 +1037,7 @@ def _self_test_main_isolated():
         if not _precheck_copies_problems(gen_text, opf_text.replace("raise SystemExit(2)", "raise SystemExit(1)", 1)):
             failures.append("SPECIAL-FILE-PRECHECK: a changed exit code in the OPF precheck copy was not "
                             "caught by the copy comparison")
-        # #400 re-cut round 5 (claude MEDIUM 1): every mutation fixture is inserted BEFORE
+        # Every mutation fixture is inserted BEFORE
         # the __main__ block, never appended after it, so the independent __main__-last rule
         # cannot absorb the vector; and each vector asserts the SPECIFIC problem text of the
         # rule it names, so it goes red when that rule (not a sibling rule) is removed.
@@ -1148,7 +1148,7 @@ def _self_test_main_isolated():
                 failures.append("{}: a NUL root must be git-cannot-answer (None), got {!r} and {!r}"
                                 .format(_label, got, got_ignored))
 
-        # D-400 fixture env, QA round 2 (MINOR-3), both precheck copies: the ownership branch of
+        # D-400 fixture env, both precheck copies: the ownership branch of
         # _git_lines, driven directly with subprocess.run patched to record the child environment.
         # OWNED (a scratch root this user owns): the caller's global and system configuration are
         # pinned away (HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM at os.devnull,
@@ -1387,7 +1387,7 @@ def _self_test_main_isolated():
                 _entry_expect("the neutered-refusal mutant (vector sensitivity)",
                               mutant2_tree, "gen", 0)
 
-            # (s) QA round 4: hazard-scoped ignore handling and root-redirect refusal, each --precheck
+            # (s) Hazard-scoped ignore handling and root-redirect refusal, each --precheck
             # entry point as a subprocess against hostile trees.
             # (s1) an ignored SYMLINK to a FIFO is classified by its target and refused by name (the
             # ignore exemption must never skip a link a gate would follow).
@@ -1428,7 +1428,7 @@ def _self_test_main_isolated():
                 _entry_expect("an ignored out-of-root directory link", igext_tree, which, 2,
                               ".venvx: refused, a symlink to a directory outside the repository "
                               "root")
-            # (s5) QA round 5: the walk DESCENDS into ignored directories, so a FIFO inside one
+            # (s5) The walk DESCENDS into ignored directories, so a FIFO inside one
             # (the committed __pycache__/ rule is enough to plant one in a live tree) is refused by
             # name. Fails without the descent (the round-4 walk skipped ignored directories, exit 0).
             igfifo_tree = _mini_tree("ignored-dir-fifo")
@@ -1438,7 +1438,7 @@ def _self_test_main_isolated():
                 os.mkfifo(igfifo_tree / "__pycache__" / "x.fifo")
             _entry_expect("a FIFO inside an ignored directory", igfifo_tree, "gen", 2, "x.fifo")
             _entry_expect("a FIFO inside an ignored directory", igfifo_tree, "opf", 2, "x.fifo")
-            # (s6) QA round 5 (claude M2): an ignored out-of-root directory link that SHADOWS
+            # (s6) An ignored out-of-root directory link that SHADOWS
             # tracked content (git ls-files under the link's path is non-empty) is refused by name,
             # as every out-of-root directory link is (s3 above).
             shadow_tree = _mini_tree("ignored-shadow-dirlink")
@@ -1474,7 +1474,7 @@ def _self_test_main_isolated():
                     named_root = os.path.realpath(ext_home if which == "gen" else ext_home / "opf")
                 _entry_expect("a symlinked {}/ directory".format(moved), redirect_tree, which, 2,
                               named_root)
-            # (s7) QA round 6 (claude B1): the walk prunes ONLY the repository's own git dir, so a
+            # (s7) The walk prunes ONLY the repository's own git dir, so a
             # FIFO inside a NESTED .git directory (tools/qa/.git/x.py, invisible to git status) is
             # refused by name. Fails without the own-git-dir narrowing (the round-5 walk pruned
             # every entry named .git, exit 0).
@@ -1536,7 +1536,7 @@ def _self_test_main_isolated():
                                       "{}: refused, a tracked path that resolves through a link "
                                       "leaving the repository root".format(
                                           headonly_tree / "notes.md"))
-            # (s9) QA round 6 (claude M5): the live-tree fixture copy (_copy_live_tree) leaves out
+            # (s9) The live-tree fixture copy (_copy_live_tree) leaves out
             # an ignored out-of-root directory link (a developer's .venv ignored via
             # info/exclude, whose ignore status the copy loses), which a self-test run directly,
             # without the precheck first, can meet, so the copy neither fails nor carries the
@@ -1567,7 +1567,7 @@ def _self_test_main_isolated():
                             failures.append("(s9) the copy of a tree with an ignored "
                                             "out-of-root link must pass the precheck, got {!r} "
                                             "{!r}".format(got_rc, got_out[-300:]))
-            # (s10) QA round 7 (claude B1): a SYMLINK named __pycache__ is refused BY NAME even
+            # (s10) A SYMLINK named __pycache__ is refused BY NAME even
             # when it is ignored, out-of-root and shadows nothing: the interpreter itself opens
             # __pycache__/*.pyc with a plain blocking read when a gate imports an in-tree module,
             # outside every gate reader. Fails without the name refusal (the round-6 walk
@@ -1584,7 +1584,7 @@ def _self_test_main_isolated():
                           "__pycache__")
             _entry_expect("an ignored out-of-root __pycache__ symlink", pyclink_tree, "opf", 2,
                           "__pycache__")
-            # (s11) QA round 7 (codex M4 = claude M2): an inherited GIT_DIR (with GIT_WORK_TREE)
+            # (s11) An inherited GIT_DIR (with GIT_WORK_TREE)
             # naming a real nested repository must not designate that directory as the exempt own
             # git dir: every GIT_* variable is scrubbed from the precheck's git queries. Fails
             # without the scrub (the redirected identity exits 0 and the nested FIFO goes
@@ -1603,7 +1603,7 @@ def _self_test_main_isolated():
                               extra_env=(None if gitdirred_tree is None else dict(
                                   GIT_DIR=str(gitdirred_tree / "tools" / "qa2" / ".git"),
                                   GIT_WORK_TREE=str(gitdirred_tree))))
-            # (s12) QA round 7 (codex M4 = claude M2): a decoy GIT_DIR (an empty repository whose
+            # (s12) A decoy GIT_DIR (an empty repository whose
             # exclude file ignores the planted link) cannot exempt an out-of-root directory link:
             # it is refused by name whether or not git ignores it (s3 above), and the scrub (s11
             # above) keeps the walk on the tree's own repository.
@@ -1636,7 +1636,7 @@ def _self_test_main_isolated():
                               which, 2, "outside the repository root",
                               extra_env=(None if decoyshadow_tree is None else dict(
                                   GIT_DIR=str(decoy_repo / ".git"))))
-            # (s13) QA round 7 (claude m-b): a root .git FILE (gitfile) pointing at an IN-TREE
+            # (s13) A root .git FILE (gitfile) pointing at an IN-TREE
             # directory must not exempt that directory from the walk: the own-git-dir exemption
             # applies only at the repository root, so the nested target is descended and a
             # special file inside it is refused by name. Fails without the root-position rule
@@ -1652,7 +1652,7 @@ def _self_test_main_isolated():
                           "x.py")
             _entry_expect("a root gitfile naming an in-tree git dir", gitfile_tree, "opf", 2,
                           "x.py")
-            # (s14) QA round 9 (claude MD1): the walk classifies a directory by ITS OWN path,
+            # (s14) The walk classifies a directory by ITS OWN path,
             # never by the ignore status of a link that led there. An IGNORED in-root link whose
             # name sorts AFTER its tracked target directory used to enter that directory FIRST
             # (the stack is LIFO) under the ignored-only leniencies, and the visited set then
@@ -1675,7 +1675,7 @@ def _self_test_main_isolated():
             _entry_expect("an ignored link, sorting after its tracked target directory, over a "
                           "non-ignored out-of-root link", orderlink_tree, "opf", 2,
                           "outside the repository root")
-            # (s15) QA round 10 (claude MD2): the CONVERSE of s14. A NON-ignored (here
+            # (s15) The CONVERSE of s14. A NON-ignored (here
             # tracked) link into an IGNORED directory must walk that directory STRICTLY: its
             # contents are reachable under the link's own non-ignored path, so the ignored-only
             # leniencies (an out-of-root directory link above all) must not apply there. The
@@ -1697,7 +1697,7 @@ def _self_test_main_isolated():
                           md2link_tree, "gen", 2, "outside the repository root")
             _entry_expect("a tracked link into an ignored directory over an out-of-root link",
                           md2link_tree, "opf", 2, "outside the repository root")
-            # (s16) QA round 11 (codex MAJOR): a tracked path that resolves to a FIFO through
+            # (s16) A tracked path that resolves to a FIFO through
             # TWO chained directory links. The round-10 walk replaced a walked link's logical
             # path with its target's spelling, so the second link regained ignored status (the
             # ignore list names only /build/ext) and the shadow test saw only that spelling:
@@ -1805,7 +1805,7 @@ def _self_test_main_isolated():
                           loop_tree / "l1" / "f.md" if loop_tree else None)
             _entry_expect("a tracked path through an ignored link loop", loop_tree, "opf", 2,
                           loop_tree / "l1" / "f.md" if loop_tree else None)
-            # (s20) QA round 11 (claude m2): a FIFO planted at a NESTED .git/HEAD is screened
+            # (s20) A FIFO planted at a NESTED .git/HEAD is screened
             # BEFORE the ignore query: git's ls-files probe opens that HEAD with a plain
             # blocking read while deciding whether docs/sub is a nested repository, so without
             # the screen the refusal came only after the probe's 60-second bound expired.
@@ -1822,7 +1822,7 @@ def _self_test_main_isolated():
                           nestedhead_tree / "docs" / "sub" / ".git" / "HEAD"
                           if nestedhead_tree else None)
 
-            # (s21) QA round 12 (codex MINOR = claude m2): a nested GITFILE naming a git dir
+            # (s21) A nested GITFILE naming a git dir
             # OUTSIDE the tree, whose HEAD is a FIFO. git's ignore query follows the gitfile and
             # opens that HEAD with a plain blocking read, so the round-11 screen (which classified
             # only the gitfile itself) stalled 60 seconds and then PASSED. The gitfile is now
@@ -1884,7 +1884,7 @@ def _self_test_main_isolated():
             for which in ("gen", "opf"):
                 _entry_expect("a nested gitfile naming a well-formed in-tree git dir",
                               gitfile_ok_tree, which, 0)
-            # (s25) QA round 12 (claude m3): 70 in-root directory links inside an IGNORED
+            # (s25) 70 in-root directory links inside an IGNORED
             # directory (a pnpm-style node_modules) pass: an in-root directory link at an ignored
             # logical path is not walked under that path, so it does not count toward the bound
             # of 64. The same 70 links at a NON-ignored path stay refused by the bound. The first
@@ -1902,7 +1902,7 @@ def _self_test_main_isolated():
                     _entry_expect("70 in-root directory links at an {} path".format(label),
                                   links_tree, which, want_rc,
                                   "bound of 64" if want_rc else None)
-            # (s26) QA round 13 (claude MEDIUM 1): the round-12 skip of an ignored in-root
+            # (s26) The skip of an ignored in-root
             # directory link leans on the tracked-path layer, which does not run when git cannot
             # list HEAD's tree. Here HEAD's root tree object is missing (ls-tree fails while
             # rev-parse, ls-files and the ignore query answer), the tracked directory docs/ is
@@ -1942,7 +1942,7 @@ def _self_test_main_isolated():
                     _entry_expect("an ignored in-root link over a tracked directory into .git, "
                                   "with HEAD's tree missing", notree_tree, which, 2,
                                   notree_tree / "docs" / "x.md")
-            # (s27) QA round 14 (codex MEDIUM 1 and 2), both copies in process: the s26 layout (an
+            # (s27) Both copies in process: the s26 layout (an
             # ignored link docs -> .git, a FIFO at .git/x.md) with _git_lines answering the ignore
             # and own-git-dir queries and each case's tracked-list answers. A HEAD-query failure
             # (every HEAD query None, or for-each-ref None) is not an unborn HEAD, a branch ref
@@ -2159,7 +2159,7 @@ def _self_test_main_isolated():
                     _entry_expect("a git-ignored link {} an in-tree git dir a root gitfile "
                                   "names".format(label), gitfile_tree, which, 0)
         else:
-            # #400 re-cut (codex MEDIUM 4, claude MINOR 11): a capability-gated vector is an
+            # A capability-gated vector is an
             # explicit NOT RUN and a recorded failure, never a silent pass.
             print("NOT RUN: the per-entry precheck mini-tree vectors (s1 and following) "
                   "(os.mkfifo unavailable); failing closed")

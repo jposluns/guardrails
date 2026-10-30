@@ -7842,7 +7842,7 @@ def _self_test_vectors():
 
         def fifo_spec_read_refused():
             if not hasattr(signal, "SIGALRM"):
-                # #400 re-cut (codex MEDIUM 4): a missing capability is an explicit NOT RUN
+                # A missing capability is an explicit NOT RUN
                 # and a FAILURE, never a silent pass claiming the FIFO read was refused.
                 print("NOT RUN: special-file-nonblocking-spec-read (signal.SIGALRM "
                       "unavailable); failing closed")
@@ -7872,7 +7872,7 @@ def _self_test_vectors():
                     signal.signal(signal.SIGALRM, previous)
         check("special-file-nonblocking-spec-read", fifo_spec_read_refused)
     else:
-        # #400 re-cut (codex MEDIUM 4, claude MINOR 11): without os.mkfifo neither FIFO
+        # Without os.mkfifo neither FIFO
         # vector can run; say so by name and fail closed rather than passing silently.
         print("NOT RUN: special-file-precheck-fifo-spec and special-file-nonblocking-spec-read "
               "(os.mkfifo unavailable); failing closed")

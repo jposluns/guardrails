@@ -378,11 +378,13 @@ RUNNER_PATH_PIN = "readonly PATH\n"
 # registration like any other, so it reaches the executable fixture in roster order.
 PRECHECK_LINE = 'run_gate "special-file-precheck"       python3 -I -B "$here/_containment.py" --precheck'
 
-# The D-400 BOOTSTRAP gate ahead of the precheck gate: a pure shell test that fails on a
-# non-regular or symlinked precheck script BEFORE python3 could block loading it (the
-# runner's STOP line then ends the run). It calls no python3, so it adds no roster entry;
-# any other spelling that names the precheck module is refused below.
-PRECHECK_BOOTSTRAP_LINE = 'run_gate "special-file-precheck-bootstrap" test -f "$here/_containment.py" -a ! -h "$here/_containment.py"'
+# The D-400 BOOTSTRAP gate ahead of the precheck gate: a pure shell test under sh -c that fails
+# on a missing, non-regular or symlinked precheck script BEFORE python3 could block loading it,
+# printing why (the runner's STOP line then ends the run). It calls no python3, so it adds no
+# roster entry; any other spelling that names the precheck module is refused below.
+PRECHECK_BOOTSTRAP_LINE = ('run_gate "special-file-precheck-bootstrap" sh -c \'[ -f "$1" ] && ! [ -h "$1" ] '
+                           '|| { echo "error: $1: not a regular non-symlink file; cannot run the '
+                           'special-file precheck; fail-closed" >&2; exit 1; }\' sh "$here/_containment.py"')
 
 def runner_check(expected, text=None, *, fail_own=0):
     import errno

@@ -631,8 +631,8 @@ def local_report(root, protected=None, before=None):
 # its in-tree imports (syntactic, transitive), is held to the SHARED
 # non-blocking readers for file reads: a raw read call (Path.read_text / Path.read_bytes, builtin
 # or io open in a read mode, any other .open(...) in a read mode, or os.open under ANY flags)
-# outside RAW_READ_ALLOWLIST fails the self-test. EVERY os.open site counts since round 6
-# (codex MAJOR 1 = claude MAJOR 1): rounds 3 to 5 exempted a PROVEN O_NONBLOCK flags chain in
+# outside RAW_READ_ALLOWLIST fails the self-test. EVERY os.open site counts: an earlier rule
+# exempted a PROVEN O_NONBLOCK flags chain in
 # a module that passed the shared reflection predicate (tools/_binding_proof.py), and each
 # round's reviews reached the same mutation capability through spellings the predicate did
 # not name -- round 5 through attribute chains (os.__builtins__, site.builtins, f.__globals__,
@@ -650,14 +650,13 @@ def local_report(root, protected=None, before=None):
 # per line, so a SECOND finding on a line drifts its pinned count. Neither
 # write side reads as safe: a write-only open of a FIFO blocks until a reader appears, and a
 # read-write open, whose OPEN does not block on Linux (fifo(7) DESCRIPTION), still blocks at
-# the first READ while no writer sends bytes (#400 re-cut round 3, claude MEDIUM 3). The
+# the first READ while no writer sends bytes. The
 # allowlist pins module::enclosing-def::kind -> site count, so REVERTING a converted read, or
 # ADDING a raw read anywhere gate-reachable, adds a key or changes a count and turns this gate
 # red; an entry whose sites vanish is STALE and turns it red too, so the list can only shrink
 # truthfully, and every allowlisted module carries a one-line reason in RAW_READ_REASONS.
 # LIMITS, the residue BY KIND: the walk is syntactic (ast), so (1) DYNAMIC EXECUTION:
-# _raw_read_dynamic_edge_scan is fail-closed ON REFERENCES since round 4 (codex 5 = claude
-# MAJOR 3), narrowed on CONSUMPTION in round 5 (codex MAJOR 2 = claude MAJOR 2), and since
+# _raw_read_dynamic_edge_scan is fail-closed ON REFERENCES, narrowed on CONSUMPTION, and since
 # round 9 (decided 1) carries NO TAINT FLOW AT ALL: rounds 6 to 8 modelled how a watched
 # name flows through bindings (first-wins in round 7, a union over a list of modelled
 # forms in round 8), and each pre-commit review found more forms that drop taint (round
@@ -828,7 +827,7 @@ _RAW_READ_SUITE_MANIFEST = "tools/selftest_checks.toml"
 # enumerated read set, which the raw-read-lint-dynamic-edges self-test vector pins, and a
 # target that stops existing fails declare() by name. A NEW dynamic edge inside an enumerated
 # module fails _raw_read_dynamic_edge_scan when its shape is one the scan recognizes
-# (#400 re-cut round 2, claude MINOR 2: the edge list only pinned its own rows); a shape the
+# (the edge list once pinned only its own rows); a shape the
 # scan could not see stayed residue; since round 4 the scan is fail-closed on references,
 # and what remains residue is named in the LIMITS comment above.
 _RAW_READ_DYNAMIC_EDGES = (
@@ -2052,7 +2051,7 @@ _RAW_READ_GETATTR_LITERAL_ATTRS = (_RAW_READ_SITE_REFLECTIVE_ATTRS
 
 def _raw_read_dynamic_edge_hits(tree, findings=None, source=None):
     """Shape token -> count for every dynamic execution shape in tree, fail-closed on
-    REFERENCES (#400 re-cut round 4, codex 5 = claude MAJOR 3) and, since round 9
+    REFERENCES and, since round 9
     (decided 1), with NO taint flow at all: rounds 6 to 8 modelled how a watched name
     flows through bindings, and each pre-commit review of rounds 7 and 8 found more forms
     that drop taint (round 8: a class-body binding, a for target, a with-as and an
@@ -2474,8 +2473,8 @@ def _raw_read_dynamic_edge_hits(tree, findings=None, source=None):
 def _raw_read_dynamic_edge_scan(modules):
     """Failures holding every recognized dynamic execution shape in the enumerated modules to
     _RAW_READ_DYNAMIC_SHAPES and _RAW_READ_DYNAMIC_EDGES: an unreviewed shape, a drifted
-    count, an edge disposition without its row, and a stale key each fail by name (#400
-    re-cut round 2, claude MINOR 2: the edge list pinned only its own rows, so a new
+    count, an edge disposition without its row, and a stale key each fail by name (the edge
+    list once pinned only its own rows, so a new
     launch-by-path or import-by-string site inside an enumerated module drifted in
     silently). A star-import: shape is REFUSED outright, pinned or not (#400 re-cut round
     6): a star import from subprocess, importlib or builtins binds a name set no review can
@@ -2525,8 +2524,8 @@ def _raw_read_dynamic_edge_scan(modules):
 
 
 def _raw_read_entry_modules(root):
-    """(modules, failures): every Python module a REGISTERED gate executes (QA round 6, codex M2 =
-    claude M2), from FOUR registration surfaces: (1) every (opf/)tools/*.py or .github/*.py named
+    """(modules, failures): every Python module a REGISTERED gate executes, from
+    FOUR registration surfaces: (1) every (opf/)tools/*.py or .github/*.py named
     on a non-comment line of the two runners and the two workflow files (the dollar-here spelling
     resolves to opf/tools/); (2) every `runner` of tools/selftest_checks.toml, the suites
     check_selftest_execution.py dispatches as DATA, which the runner-text regex can never see;
@@ -2536,11 +2535,11 @@ def _raw_read_entry_modules(root):
     importer is itself declared, tools/orch_register.py and tools/orch_doctor.py (both reached
     by tools/selftest_orch_hooks.py) and opf/enforcement/claude/pretooluse_deny.py (loaded by
     tools/check_opf_enforce_platforms.py and by opf/tools/check_opf_doctor.py) among them. A path a runner or workflow line NAMES is
-    declared whether or not it exists (#400 re-cut, codex MAJOR 2: an os.path.lexists gate
+    declared whether or not it exists (an os.path.lexists gate
     silently skipped a declared module that did not exist, so a missing module named by a
     registered runner now refuses through declare). A DECLARED module that is missing,
     unreadable, or not a regular file is a lint FAILURE, never silently dropped: dropping one
-    would silently shrink the enumerated read set (codex M2's FIFO-at-a-module probe)."""
+    would silently shrink the enumerated read set (a FIFO planted at a module path)."""
     import tomllib
     found, failures = set(), []
 
@@ -2566,7 +2565,7 @@ def _raw_read_entry_modules(root):
             code = line.split("#", 1)[0]
             for token in _RAW_READ_ENTRY_RE.findall(code):
                 token = token.replace("$here/", "opf/tools/")
-                # #400 re-cut (codex MAJOR 2): every named path is a declaration, a message
+                # Every named path is a declaration, a message
                 # line included; a module a runner or workflow names that does not exist
                 # refuses through declare() rather than dropping out of the lint silently.
                 declare(token, rel)
@@ -2611,14 +2610,14 @@ def _raw_read_entry_modules(root):
 
 def _raw_read_resolve_dotted(root, base, parts):
     """(rels, leaf_dir, failure): resolve the dotted module parts under the rel directory
-    base, traversing PACKAGES (#400 re-cut, codex MAJOR 2: a package was resolution-only, so a
+    base, traversing PACKAGES (a package was once resolution-only, so a
     raw read in its __init__.py sat silently outside the enumerated set). rels lists every
     in-tree file the import executes: each package prefix's __init__.py, then the leaf module
     file or the leaf package's __init__.py (a directory with no __init__.py is a namespace
     package and executes nothing itself). A module FILE and a same-named package DIRECTORY
     beside it (x.py next to x/, with or without __init__.py) is an AMBIGUOUS layout: rather
-    than guess the path finder's precedence, this lint refuses it by name (#400 re-cut round
-    2, codex MAJOR 2 = claude MINOR 6: the module file was resolved first, hiding every raw
+    than guess the path finder's precedence, this lint refuses it by name (resolving the
+    module file first hid every raw
     read a package of the same name carries). leaf_dir is the leaf package directory when the leaf
     is a package (so a from-import can resolve submodules), else None. failure carries a text
     when the first part resolves here but the import still cannot succeed (a non-regular file
@@ -2673,7 +2672,7 @@ def _raw_read_modules(root):
     directories, mirroring the sys.path the gates build. A PACKAGE import executes (and is
     parsed as) its __init__.py plus each dotted prefix's; a from-import resolves a package
     submodule when one exists; and a RELATIVE import resolves against the importer's own
-    package directory (#400 re-cut, codex MAJOR 2 and claude MEDIUM 3: packages, vendored
+    package directory (packages, vendored
     modules and relative imports were resolution-only, silently outside the enumerated set)."""
     seen = dict()
     entries, failures = _raw_read_entry_modules(root)
@@ -2704,7 +2703,7 @@ def _raw_read_modules(root):
         elif os.path.lexists(root / member_rel):
             drop_failure(member_rel + ": imported but not a regular file", rel)
         else:
-            # #400 re-cut round 6 (codex MAJOR 1 = claude MAJOR 1): the package-member
+            # The package-member
             # proof is REMOVED, never refined: the round-5 structural-plus-predicate proof
             # was defeated by same-module reflection through attribute chains the predicate
             # does not name (f.__globals__.pop, os.__builtins__["globals"]()), a spelling
@@ -2793,14 +2792,14 @@ def _raw_read_sites(tree, findings=None, source=None):
     name: the aliasing statement is the accepted acquisition position and stays a counted
     site), attr.open (any other .open(...) in a read mode: Path.open, tarfile.open, ...),
     and unsupported-use (round 9, decided 1: ANY other appearance of a watched name; see
-    below). EVERY os.open site counts since round 6 (codex MAJOR 1 = claude MAJOR 1):
+    below). EVERY os.open site counts:
     rounds 3 to 5 exempted a PROVEN O_NONBLOCK pure chain behind a reflection predicate,
     and each round's reviews reached the same capability through spellings the predicate
     did not name, so round 6 REMOVED the exemption: a spelling list cannot be closed.
     NEITHER write side reads as safe: a write-only open of a FIFO blocks until a reader
     appears, and a read-write open, which itself does not block on Linux (fifo(7)
     DESCRIPTION), still blocks at the first READ through the descriptor while no writer
-    sends bytes (#400 re-cut round 3, claude MEDIUM 3).
+    sends bytes.
     Round 9 (decided 1) REMOVES the taint flow model: rounds 7 and 8 modelled how a
     watched name flows through bindings, and each pre-commit review found more forms that
     drop taint (round 8: a class-body binding, a for target, a with-as and an augmented
@@ -4481,7 +4480,7 @@ RAW_READ_REASONS = dict((
 ))
 
 
-# QA round 6 (codex B1 family, claude m2): PER-SITE reasons from a closed vocabulary -- (a) a
+# PER-SITE reasons from a closed vocabulary -- (a) a
 # temporary fixture or scratch path the same tool or test created; (b) /proc or another kernel
 # interface; (c) the site itself cannot block or reads nothing through the descriptor: it
 # opens O_NONBLOCK / O_DIRECTORY, fstat-checks S_ISREG on what it opened, creates fresh with
@@ -4493,7 +4492,7 @@ RAW_READ_REASONS = dict((
 # overrides the module-level RAW_READ_REASONS line. Every key in the three suite manifest
 # runners (selftest_orch_hooks, selftest_git_fixture_env, selftest_ci_status) and in
 # opf/tools/_opf_adopt.py carries a per-site reason and those modules carry NO module-level
-# blanket (#400 re-cut, claude MEDIUM 4), as do the .preview modules, the hook scripts and
+# blanket, as do the .preview modules, the hook scripts and
 # the dynamic-edge modules tools/orch_register.py and
 # opf/enforcement/claude/pretooluse_deny.py (tools/orch_doctor.py has no raw read site).
 RAW_READ_SITE_REASONS = dict((
@@ -5249,7 +5248,7 @@ RAW_READ_SITE_REASONS = dict((
      "the descriptor read is counted since round 11 (decided 2: read and pread left the inert "
      "table because a held descriptor of unknown type can block)"),
     ("opf/tools/_containment.py::_gitfile_target::os.open",
-     "(c) the D-400 precheck's nested-gitfile screen (QA round 12): the entry was already "
+     "(c) the D-400 precheck's nested-gitfile screen: the entry was already "
      "classified a regular file by lstat and stat, the open is O_NONBLOCK, the opened descriptor "
      "is fstat-checked S_ISREG before any read, the read stops past 1 MiB, and the descriptor is "
      "closed in a finally"),
@@ -5523,15 +5522,15 @@ RAW_READ_SITE_REASONS = dict((
     ("opf/tools/_opf_write_guard.py::lease_held_message::os.open",
      "(c) O_RDONLY | O_NOFOLLOW | O_NONBLOCK with an fstat S_ISREG refusal before any read, "
      "composing the held-lease message: the open cannot block on a planted FIFO and a non-regular "
-     "lease is refused unread. Counted since round 6 (#400 re-cut round 6, codex MAJOR 1 = claude "
-     "MAJOR 1): the proven-O_NONBLOCK exemption is REMOVED (the shared predicate it rested on was "
+     "lease is refused unread. Counted as a site because the proven-O_NONBLOCK exemption is "
+     "REMOVED (the shared predicate it rested on was "
      "defeated through attribute chains and source evaluators in both round-5 reviews), so this "
      "previously exempt pure chain is pinned here with its reason instead"),
     ("opf/tools/_opf_write_guard.py::read_lease_payload::os.open",
      "(c) O_RDONLY | O_NOFOLLOW | O_NONBLOCK with an fstat S_ISREG refusal before any read and a "
      "64 KiB bound, reading the lease payload for an ownership compare: the open cannot block on a "
-     "planted FIFO and a non-regular lease reads as None. Counted since round 6 (#400 re-cut round "
-     "6, codex MAJOR 1 = claude MAJOR 1): the proven-O_NONBLOCK exemption is REMOVED, so this "
+     "planted FIFO and a non-regular lease reads as None. Counted as a site because the "
+     "proven-O_NONBLOCK exemption is REMOVED, so this "
      "previously exempt pure chain is pinned here with its reason instead"),
     ("opf/tools/check_opf_doctor.py::_install_seen::read_text",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
@@ -5761,7 +5760,7 @@ RAW_READ_SITE_REASONS = dict((
      "is outside the registered gate roster; conversion to a local non-blocking reader is pending "
      "and tracked by this pin"),
     ("tools/_gen_common.py::_gitfile_target::os.open",
-     "(c) the D-400 precheck's nested-gitfile screen (QA round 12): the entry was already "
+     "(c) the D-400 precheck's nested-gitfile screen: the entry was already "
      "classified a regular file by lstat and stat, the open is O_NONBLOCK, the opened descriptor "
      "is fstat-checked S_ISREG before any read, the read stops past 1 MiB, and the descriptor is "
      "closed in a finally"),
@@ -5807,8 +5806,8 @@ RAW_READ_SITE_REASONS = dict((
     ("tools/check_no_dashes.py::load_policy::os.open",
      "(c) O_RDONLY | O_NOFOLLOW | O_NONBLOCK after an lstat S_ISREG refusal, with an fstat S_ISREG "
      "re-check on the opened descriptor and a POLICY_CAP-bounded read, loading the "
-     "character-policy file: the open cannot block on a planted FIFO. Counted since round 6 (#400 "
-     "re-cut round 6, codex MAJOR 1 = claude MAJOR 1): the proven-O_NONBLOCK exemption is REMOVED, "
+     "character-policy file: the open cannot block on a planted FIFO. Counted as a site because "
+     "the proven-O_NONBLOCK exemption is REMOVED, "
      "so this previously exempt pure chain is pinned here with its reason instead"),
     ("tools/check_no_dashes.py::load_policy::os.read",
      "(c) a bounded os.read loop over a descriptor this function opened itself with "
@@ -17132,7 +17131,7 @@ def _self_test_isolated(red_on_revert):
                           "handle = open(p, \"w\")\n")
         check("raw-read-lint-counts-nonblocking-and-exempts-write",
               _raw_read_sites(probe) == dict([(("<module>", "os.open"), 1)]))
-        # #400 re-cut round 6 (codex MAJOR 1 = claude MAJOR 1): EVERY os.open site counts;
+        # EVERY os.open site counts;
         # naming or even PROVING O_NONBLOCK no longer exempts (the predicate the rounds-3-to-5
         # proof rested on was defeated through attribute chains and source evaluators in both
         # round-5 reviews, so the exemption is removed, not refined). The probes below stay as
@@ -17151,7 +17150,7 @@ def _self_test_isolated(red_on_revert):
                           "FLAGS = os.O_RDONLY | os.O_NONBLOCK\nfd = os.open(p, FLAGS)\n")
         check("raw-read-lint-counts-rebound-constant",
               _raw_read_sites(probe) == dict([(("<module>", "os.open"), 1)]))
-        # #400 re-cut round 2 (codex MAJOR 1 = claude MAJOR 1) kept as round-6 regression
+        # Kept as regression
         # guards: every shadowing or rebinding shape from both round-2 review tables COUNTS
         # (trivially so now that every os.open site counts; these probes pin that no later
         # rule set may exempt them again).
@@ -17190,7 +17189,7 @@ def _self_test_isolated(red_on_revert):
                           "fd = os.open(p, F)\n")
         check("raw-read-lint-counts-conditional-only-binding",
               _raw_read_sites(probe) == dict([(("<module>", "os.open"), 1)]))
-        # #400 re-cut round 3 (codex MAJOR 1 = claude MAJOR 1) kept as round-6 regression
+        # Kept as regression
         # guards: the star import, the namespace-mapping subscript write, the rebound os and
         # the patched os.O_NONBLOCK each COUNT (round 6 removed the predicate gate these once
         # exercised; counting is now unconditional and must stay so).
@@ -17213,7 +17212,7 @@ def _self_test_isolated(red_on_revert):
         check("raw-read-lint-counts-os-attribute-store",
               _raw_read_sites(probe) == dict([(("<module>", "os.open"), 1),
                                               (("<module>", "unsupported-use"), 1)]))
-        # #400 re-cut round 3 (claude MEDIUM 3; round 2, claude MINOR 3): NEITHER write side
+        # NEITHER write side
         # exempts now. Proven O_WRONLY blocks on a FIFO until a reader appears (fifo(7)),
         # and proven O_RDWR, whose OPEN does not block on Linux (fifo(7) DESCRIPTION),
         # still blocks at the first READ through the descriptor while no writer sends
@@ -17267,7 +17266,7 @@ def _self_test_isolated(red_on_revert):
         check("raw-read-lint-enumerates-hook-modules",
               all(rel in lint_modules for rel in (".preview/clock-inject.py",
                                                   *_RAW_READ_HOOK_SCRIPTS)))
-        # #400 re-cut (codex MAJOR 2, claude MEDIUM 3): every reviewed dynamic edge is
+        # Every reviewed dynamic edge is
         # enumerated on the live tree; dropping a row from _RAW_READ_DYNAMIC_EDGES, or an
         # edge target falling out of the enumerated set, fails this vector. Round 2 pins
         # the full (importer, target) pair set, the check_opf_doctor row included.
@@ -17281,7 +17280,7 @@ def _self_test_isolated(red_on_revert):
                    "opf/enforcement/claude/pretooluse_deny.py")}
               and all(target in lint_modules
                       for _importer, target in _RAW_READ_DYNAMIC_EDGES))
-        # #400 re-cut round 2 (claude MINOR 2): the recognized dynamic execution shapes.
+        # The recognized dynamic execution shapes.
         # The hits vector goes red with the recognizer gutted; the unreviewed vector goes
         # red with the scan not reporting an unlisted shape; the live vector goes red with
         # a _RAW_READ_DYNAMIC_SHAPES row dropped, a count drifted, an edge disposition
@@ -17370,12 +17369,12 @@ def _self_test_isolated(red_on_revert):
             _entries, entry_failures = _raw_read_entry_modules(lint_root)
             check("raw-read-lint-declared-missing-runner-fails",
                   any("selftest_missing" in failure for failure in entry_failures))
-            # QA round 8 (codex 3): a TRANSITIVELY imported local module that is deleted
+            # A TRANSITIVELY imported local module that is deleted
             # fails the lint BY NAME; a stdlib import does not. Fails without the fail-closed
             # resolution (the round-7 walk dropped a missing transitive module silently,
             # shrinking the enumerated read set). No FIFO is needed here, so these vectors
-            # run on every platform (#400 re-cut, claude MINOR 11: they sat under the mkfifo
-            # guard and skipped silently where it was absent).
+            # run on every platform (under the mkfifo guard they would skip silently where
+            # it is absent).
             (lint_root / "tools" / "run_all_checks.sh").write_text(
                 "python3 -I -B tools/entry_a.py\n", encoding="utf-8")
             manifest_path.write_text("", encoding="utf-8")
@@ -17393,7 +17392,7 @@ def _self_test_isolated(red_on_revert):
                   "tools/entry_b.py" in modules_ok
                   and not any("entry_b" in failure or "'os'" in failure
                               for failure in failures_ok))
-            # #400 re-cut (codex MAJOR 2): a PACKAGE import is traversed, not skipped: the
+            # A PACKAGE import is traversed, not skipped: the
             # package's __init__.py and the module its relative import names are enumerated
             # and their raw read sites counted. Fails without the package traversal (the
             # round-6 resolution-only branch left both modules out of the set).
@@ -17405,7 +17404,7 @@ def _self_test_isolated(red_on_revert):
                   == dict([(("peek", "open"), 1)])
                   and _raw_read_sites(modules_ok["tools/review_pkg/sub.py"])
                   == dict([(("peek", "read_text"), 1)]))
-            # #400 re-cut round 2 (codex MAJOR 2 = claude MINOR 6): a module file beside a
+            # A module file beside a
             # same-named package directory refuses as AMBIGUOUS, in the dotted resolver
             # and in the from-import member walk alike; red with either precedence guess
             # restored.
@@ -17423,8 +17422,7 @@ def _self_test_isolated(red_on_revert):
                   any("tools/review_pkg/sub.py and tools/review_pkg/sub/ are both present"
                       in failure for failure in failures_member))
             (lint_root / "tools" / "review_pkg" / "sub").rmdir()
-            # #400 re-cut round 6 (codex MAJOR 1 = claude MAJOR 1; supersedes the round-2
-            # member proof, codex MEDIUM 3): a from-import member that is neither a
+            # This replaces the earlier member proof: a from-import member that is neither a
             # submodule nor a subpackage is REFUSED by name, whatever its initializer
             # binds. The deletion vector removes sub.py while the initializer keeps
             # `from . import sub`; the plain-binding vector (helper = 1) was ACCEPTED in
@@ -17500,7 +17498,7 @@ def _self_test_isolated(red_on_revert):
             check("raw-read-lint-missing-transitive-module-fails",
                   any("entry_b" in failure and "never drops out" in failure
                       for failure in failures_missing))
-            # #400 re-cut (codex MAJOR 2): a module a registered runner NAMES that does not
+            # A module a registered runner NAMES that does not
             # exist refuses through declare(); the retired os.path.lexists gate skipped it
             # silently. Fails with that gate restored.
             (lint_root / "tools" / "run_all_checks.sh").write_text(
@@ -17526,7 +17524,7 @@ def _self_test_isolated(red_on_revert):
                       any("entry_b" in failure and "not a regular file" in failure
                           for failure in failures_special))
             else:
-                # #400 re-cut (codex MEDIUM 4, claude MINOR 11): a capability-gated vector
+                # A capability-gated vector
                 # is an explicit NOT RUN and a recorded failure, never a silent pass.
                 print("NOT RUN: raw-read-lint-declared-fifo-runner-fails and "
                       "raw-read-lint-special-transitive-module-fails (os.mkfifo "

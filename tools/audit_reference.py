@@ -203,7 +203,7 @@ def _child_acceptance_chain_failure(source):
 
 
 def _exact_child_verdict(proc):
-    # #400 re-cut round 9 (round-8 claude MINOR 1): the ONE wiring that BOTH the
+    # The ONE wiring that BOTH the
     # sibling-child acceptance branch and the mutant rejection evaluate, so weakening
     # the parent predicate (for example to rc 1 plus a NOT RUN substring anywhere) is
     # the same mutation the child-mutant vector rejects: the weakened verdict ACCEPTS
@@ -323,7 +323,7 @@ def _self_test():
                 for hostile in ("json.py", "hashlib.py"):
                     (sib / hostile).write_text("raise SystemExit(0)\n", encoding="utf-8")
                 try:
-                    # #400 re-cut round 9 (round-8 claude MINOR 2): a hanging child is a
+                    # A hanging child is a
                     # recorded failure, never a stalled suite
                     proc = subprocess.run([sys.executable, "-I", "-B",
                                            str(sib / "audit_reference.py"),
@@ -341,7 +341,7 @@ def _self_test():
                                     "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
                 # #400 re-cut round 6 (codex 4): the copy ran with the child marker set, so
                 # its own --self-test must RECORD the omitted subprocess cases as a NOT RUN
-                # failure (rc 1); round 7 (codex MEDIUM 4) compares the child's EXACT failure
+                # failure (rc 1); the parent compares the child's EXACT failure
                 # set, so an additional independent child failure turns this parent red; this
                 # doubles as the vector for the inherited-marker branch below.
                 elif not _exact_child_verdict(proc):
@@ -365,7 +365,7 @@ def _self_test():
                 shutil.copy(str(srcdir / "_qa_adapter.py"), str(mutsib / "_qa_adapter.py"))
                 shutil.copy(str(srcdir / "_gen_common.py"), str(mutsib / "_gen_common.py"))
                 original = (srcdir / "audit_reference.py").read_text(encoding="utf-8")
-                # round 10 (#400 re-cut, r8 claude MINOR 1 closed at the CALL SITE too): the
+                # The same wiring is held at the CALL SITE too: the
                 # recursion guard keeps a call-site mutant from exercising itself (a copy
                 # runs with the child marker set and spawns nothing), so the acceptance arm
                 # at case 7 is pinned STRUCTURALLY by AST (round 11, decided 7): the
@@ -431,7 +431,7 @@ def _self_test():
                                          + "'injected independent child regression')"),
                         encoding="utf-8")
                     try:
-                        # #400 re-cut round 9 (round-8 claude MINOR 2): a hanging mutant
+                        # A hanging mutant
                         # child is a recorded failure, never a stalled suite
                         proc = subprocess.run(
                             [sys.executable, "-I", "-B",
