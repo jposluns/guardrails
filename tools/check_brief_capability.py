@@ -8,8 +8,9 @@ can only come back as an asserted value that nobody measured, or as UNVERIFIABLE
 brief before it is sent. It REFUSES (exit 1) only on a structural signal: for such a family, an executable
 fence, or a command line in the text the family is addressed by (S1 to S3), unless a closed shape demotes it;
 and for every family, a path outside a declared workdir when the family's row says it cannot read outside one
-(P2), or a pinned revision that a git command line reaches through a ref that can move, or through a dispatch
-ref that resolves to another commit (P5). The
+(P2), or a pinned revision that a git command line of the listed subcommands (P5: clone, checkout, switch,
+reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
+no later cure, or through a dispatch ref that resolves to another commit (P5). The
 signal is structural, not certain: the lint fails closed, so some text a human would pass refuses (see
 RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
@@ -105,54 +106,83 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
   P5 moving reach      HARD on a git command line, ADVISORY in prose. The brief pins a revision: a pin line (P3),
                        or a confirm clause, a word of 7 to 40 or 64 hex digits holding a digit on a line that also
                        holds upper-case HEAD as a word and confirm, verify, check, assert, ensure, starts, matches
-                       or equals. The PINS a reach is matched against are the pin lines' where the brief has one,
-                       else the confirm clauses'. A REACH is a git command line (the COMMAND LINE grammar below)
-                       whose subcommand is clone (its ref: the value of --revision, else of -b or --branch, else
-                       the remote's default branch), checkout (the first word that is not an option, which after
-                       -b or -B and the new branch is the start point and after --detach is its value; none, not
-                       a reach; a tree-ish followed by -- and a path restores paths and leaves HEAD where it is,
-                       not a reach, while a tree-ish followed by a bare -- is one), switch (the same, after -c or
-                       -C), fetch (the source side of each refspec after the remote; with no refspec, the
-                       remote's branch tips), pull (always the remote's branch), worktree add (the commit-ish
-                       after the path) or reset with --hard, --keep or --merge (the commit). Its arguments run to
-                       the first `;`, `&&`, `||`, `|` or backtick, the next command line or the line's end, and are
-                       walked word by word: no pattern reads them, and `--` ends the options; the words after it
-                       are still a fetch's remote and refspecs and a worktree add's path and commit-ish, they are
-                       a checkout's paths, and a clone, switch or reset does not read them. A ref MOVES when its
-                       word names a branch or tag by its place, whatever its spelling: a clone's -b or --branch
-                       value (git clone --branch 20261029 moves), the remote's default branch, a fetch's or pull's
-                       branch tips, and the word of a switch with no --detach, -d, -c or -C (git refuses a commit
-                       there). Any other ref is FIXED when it is 7 to 40 or 64 hex digits, a refs/dispatch/ ref, or
-                       HEAD, ORIG_HEAD or @ (each names a commit HEAD already held, so the reach that put it there
-                       is the one judged). FETCH_HEAD takes the ref of the last fetch or pull before it in brief
-                       order (its first refspec), so git fetch origin && git checkout FETCH_HEAD reaches the
-                       remote's branch tips and moves, and git fetch <url> <pin> && git checkout FETCH_HEAD reaches
-                       the pin; with no fetch or pull before it, it is fixed. Every other ref moves (a branch,
-                       origin/main, a tag, main~3, a placeholder such as <branch>). Only a reach that moves HEAD
-                       (checkout, switch, reset or worktree add) can CURE: a moving reach refuses unless a later
-                       such reach in brief order has a fixed hex ref, or a FETCH_HEAD holding one, that is a prefix
-                       of a pin or has a pin as its prefix (any case). `git clone <url> && git checkout --detach
-                       <pin>` passes; a fetch or a clone --revision of the pin, a path restore from it, a checkout
-                       of another commit (one a confirm clause names included, where a pin line names the pin) and
-                       a dispatch ref cure nothing. A prose reach (clone, check out, switch to or fetch that is not
-                       a git subcommand, followed within three words by --branch, -b, main, master, trunk, develop
-                       or "the branch") is printed under the same cure, never refused, so a brief that only tells
-                       of an old brief's branch clone still passes. A dispatch ref that resolves in the repository
-                       the lint is pointed at (--repo; main passes this repository when --repo is absent) to a
-                       commit that is no pin is HARD; one that does not resolve there (or, for an evaluate() caller,
-                       with no repository) is ADVISORY, since that repository need not be the server the worker
-                       fetches from; a FETCH_HEAD that inherits a dispatch ref is not read again. A PROHIBITION
-                       (never, do not, don't, must not, not to, as a whole word, in any case) silences only the
-                       reaches of its own clause: a reach that starts after the end of a prohibition and before
-                       the first clause stop after it is not judged, and every reach in a later clause or sentence
-                       is. A clause stop is `;`, `,`, `:`, `.`, `!` or `?` outside a code span, followed, once
-                       closing markup and quotes (* _ " ' ) ] }) are skipped, by whitespace or the line's end (so
-                       the dots of ./x and x.org, the colon of https://h and a `;` inside a code span stop
-                       nothing). "Never run `git clone --branch main <url>`; read the workdir.", "Never run `git
-                       pull; git clone --branch main <url>`." and "Do not run git pull or git clone --branch main."
-                       pass; "Do not edit the tree; clone with `git clone --branch main <url>`.", "Do not edit the
-                       tree, clone with ...", "**Do not edit the tree.** Clone with ..." and "Remember not to
-                       push. Run `git clone --branch main <url>`." refuse. With no pin the rule does not fire.
+                       or equals (the commit id of a reach on that line included). The PINS a reach is matched
+                       against are the pin lines' where the brief has one, else the confirm clauses'. P5 reads the
+                       brief line by line, a line that ends in an odd run of backslashes (a shell continuation in
+                       a fence, or a Markdown hard break) or inside a git command line before its subcommand (Run
+                       git, git -C w) joined with the next. A REACH is a git command line (the COMMAND LINE grammar
+                       below) whose subcommand is clone (its ref: the value of --revision, else of -b or --branch,
+                       else the remote's default branch), checkout (the first word that is not an option, which
+                       after -b or -B and the new branch is the start point and after --detach is its value; none,
+                       not a reach), switch (the same, after -c or -C), reset in any mode (its first word: a soft
+                       or mixed reset moves HEAD, and a later checkout or reset of the tree puts the commit in it),
+                       fetch (the source side of each refspec after the remote; with no refspec, the remote's
+                       branch tips), pull (always the remote's branch), worktree add (the commit-ish after the
+                       path), merge (its first word; with none, the upstream branch), rebase (the value of --onto
+                       and its first word; with neither word nor --root, the upstream branch), restore (the value
+                       of -s or --source; with none, not a reach) or archive (its first word, local or --remote);
+                       a merge or rebase with --abort, --continue, --quit, --skip, --edit-todo or
+                       --show-current-patch is not one. A checkout or reset of a commit followed by -- and a path
+                       restores paths from it: it reaches the commit but moves no HEAD (a commit followed by a bare
+                       -- does). Its arguments run to the first `;`, `&&`, `||`, `|` or backtick, the next command
+                       line or the line's end, and are walked word by word: no pattern reads them, and `--` ends
+                       the options; the words after it are still a fetch's remote and refspecs and a worktree add's
+                       path and commit-ish, they are a checkout's or reset's paths, and no other reach reads them.
+                       A ref MOVES when its word names a branch or tag by its place, whatever its spelling: a
+                       clone's -b or --branch value (git clone --branch 20261029 moves), the remote's default
+                       branch, a fetch's or pull's branch tips, the upstream branch of a merge or rebase with no
+                       word, and the word of a switch with no --detach, -d, -c or -C (git refuses a commit there).
+                       Any other ref is FIXED when it is 7 to 40 or 64 hex digits, a refs/dispatch/ ref, or HEAD,
+                       ORIG_HEAD or @, alone or followed by ~N or ^N steps (each names a commit HEAD already held,
+                       so the reach that put it there is the one judged). FETCH_HEAD takes the ref of the last
+                       fetch or pull before it in brief order (its first refspec), so git fetch origin && git
+                       checkout FETCH_HEAD reaches the remote's branch tips and moves, and git fetch <url> <pin> &&
+                       git checkout FETCH_HEAD reaches the pin; with no fetch or pull before it, it is fixed. Every
+                       other ref moves (a branch, origin/main, a tag, main~3, @{u}, a placeholder such as
+                       <branch>). Only a HEAD reach (checkout, switch, reset or worktree add; a path restore is not
+                       one) can CURE, and only as an INSTRUCTION: a moving reach refuses unless a later cure in
+                       brief order has a fixed hex ref, or a FETCH_HEAD holding one, that is a prefix of a pin or
+                       has a pin as its prefix (any case). A cure is an instruction when no prohibition word and no
+                       word of a past report or a quotation (ran, used, executed, tried, did, failed, had, was,
+                       were, last, previous, previously, earlier, example, e.g, such as, quote, quoted, told, said,
+                       wrote) stands outside a code span between its sentence's start (after `.`, `!` or `?`,
+                       whitespace and an upper-case letter) and its opening (the code span that holds it, when it
+                       opens the span), and either it is LED, preceded by at most four lead words and markers (and,
+                       then, next, now, first, finally, also, please, run, use, execute, a list number or marker,
+                       `$`, emphasis) back to the line's start, a clause stop (`;`, `,`, `:`, `.`, `!` or `?`
+                       outside a code span with whitespace after it) or a word followed by and or then, or it is
+                       CHAINED, right after the `&&` or `;` that ends the arguments of an instruction before it on
+                       its line. Anything else is not a cure: "The last round ran `git checkout --detach <pin>`.",
+                       "Do not run this, `git checkout --detach <pin>`, it is stale." and "The fix `git checkout
+                       --detach <pin>` is stale." cure nothing, while `git clone <url> w && git -C w checkout
+                       --detach <pin>`, "Clone with `git clone <url> w`, then `git -C w checkout --detach <pin>`."
+                       and a fence with the clone on one line and the checkout on the next cure. A fetch, a clone
+                       --revision, a merge, a rebase, a restore, an archive or a path restore of the pin, a
+                       checkout of another commit (one a confirm clause names included, where a pin line names the
+                       pin) and a dispatch ref cure nothing. A reach with no git word is printed under the same
+                       cure, never refused, in three shapes only: a prose reach (clone, check out, switch to or
+                       fetch that is not a git subcommand, followed within three words by --branch, -b, main,
+                       master, trunk, develop or "the branch"), gh pr checkout, and a web address (http:// or
+                       https://) whose path holds archive, tree, blob or raw followed by a ref that is not fixed
+                       (refs/heads/ or refs/tags/ and an archive suffix dropped). A git submodule update --remote
+                       moves submodule content, not the pinned tree, so it is printed the same way, never refused.
+                       A dispatch ref that resolves in the repository the lint is pointed at (--repo; main passes
+                       this repository when --repo is absent) to a commit that is no pin is HARD; one that does not
+                       resolve there (or, for an evaluate() caller, with no repository) is ADVISORY, since that
+                       repository need not be the server the worker fetches from; a FETCH_HEAD that inherits a
+                       dispatch ref is not read again. A PROHIBITION governs only its own OBJECT, the closed shape
+                       the S rules use: a prohibition word (never, do not, don't, must not, not to, as a whole word,
+                       in any case, outside a code span and not glued to `=`), closing emphasis, whitespace and at
+                       most one prohibited verb (run, use, execute or follow), then, once emphasis and quotes are
+                       skipped, the code span that opens there (every reach in it) or the one git command line or
+                       prose reach that starts there. Every other reach is judged. "Never run `git clone --branch
+                       main <url>`; read the workdir.", "Never run `git pull; git clone --branch main <url>`." and
+                       "Do not run git clone --branch main; read the workdir." pass; "Do not forget to run `git
+                       clone --branch main <url>`.", "It is important not to skip `git clone ...`.", "Run `git log
+                       --color=never` and `git clone ...`.", "Never run git pull or git clone --branch main.", "Do
+                       not edit the tree and clone with ...", "Do not edit the tree; clone with ..." and "Remember
+                       not to push. Run `git clone --branch main <url>`." refuse. A refusal names the cure: clone,
+                       then git -C <dir> checkout --detach and the pin. With no pin the rule does not fire.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -163,27 +193,40 @@ path, a path in an http:// or https:// word, and a path spelt with look-alike sl
 unquoted path with a space is read as separate words, so /w/repo x/y is /w/repo and the relative word x/y); a
 prohibition is read lexically, so every word after the first negation word on its line is never judged by P2;
 and reads-outside-workdir is what the table declares, not a measurement. P5 misses or over-refuses: a reach
-phrased with no git word is only ADVISORY, so a brief that asks for a branch clone in prose is printed, not
-refused; a brief that quotes an old brief's git clone --branch main as a git command line refuses (the sender
-writes "the branch clone" instead), the accepted cost of reading command lines structurally, and so does one
-quoted on a later line or in a later clause than the prohibition that introduces it ("Do not follow the old
-instruction quoted below." then an indented git clone --branch main <url>); a prohibition is read lexically and
-governs only its clause, so a reach after a clause stop inside one prohibited list or after an introduction ("Never
-run git pull, git clone --branch main." or "Never run the following: git clone --branch main") refuses, a reach
-before the prohibition that forbids it ("git clone --branch main must never run") refuses, and a reach joined to
-an unrelated prohibited clause with no stop ("Do not edit the tree and clone with git clone --branch main") is not
-judged; a cure the worker cannot reach passes (a shallow or --single-branch clone may not hold the pin; git is
-expected, not verified for every version, to fail the checkout then); a cure in another repository (another -C
-path) is not told apart, since cures are matched lexically, and FETCH_HEAD takes the last fetch in the brief
-whatever its repository; a FETCH_HEAD with no fetch or pull before it in the brief (filled outside it) is not
+with no git word is read only in the three ADVISORY shapes above, so a brief that asks for a branch clone in prose
+is printed, not refused, and any other phrasing (a raw.githubusercontent.com path, a download link that names no
+ref, a reach told in other words) is not read at all; a git command line quoted as an example (in quotes, after
+such as or for example, or in a code span in a sentence that is no instruction) refuses, since those markers also
+introduce real instructions (the sender writes "the branch clone" instead), the accepted cost of reading command
+lines structurally, and so does one quoted on a later line or after the object of the prohibition that introduces
+it ("Do not follow the old instruction quoted below." then an indented git clone --branch main <url>); a
+prohibition is read lexically and governs only its object, so the second command line of a prohibited list ("Never
+run git pull or git clone --branch main."), a reach after an introduction ("Never run the following: git clone
+--branch main"), a prohibition with any other verb ("Never type git clone --branch main") and a reach before the
+prohibition that forbids it ("git clone --branch main must never run") refuse; a cure is read by closed word
+lists and by what precedes it, so a past report phrased with no listed word before a clause stop, and or then
+("Round 2 produced this and `git checkout --detach <pin>`.") cures, a cure that opens a line (a fence line
+included) is read as an instruction whatever the text before the fence says, the words after a cure are not read
+("`git checkout --detach <pin>` was the last round's step." cures), and a cure led by any other word ("Check out
+the pin with `git checkout --detach <pin>`.") or after a prohibition in its sentence ("Do not edit the tree;
+clone ..., then `git checkout --detach <pin>`.") cures nothing and refuses; a cure the worker cannot reach passes
+(a shallow or --single-branch clone may not hold the pin; git is expected, not verified for every version, to
+fail the checkout then); a cure in another repository (another -C path) is not told apart, since cures are
+matched lexically, and FETCH_HEAD takes the last fetch in the brief whatever its repository; a FETCH_HEAD with no
+fetch or pull before it in the brief (filled outside it, or by a fetch that is a prohibition's object) is not
 judged; a branch or tag named with hex digits alone is read as a commit id where a word may be either (a checkout,
-reset, worktree add or fetch refspec: git checkout 1234567abc takes the branch when one has that name), so it
-passes and can cure; a path restore with no -- (git checkout <pin> docs) is read as a checkout of its first word,
-so from the pin it cures, while a path restore with -- is no reach, so one from a moving ref (git checkout main --
-docs) is not judged; a reach through an alias, a shell variable, `-c alias...` or a script is outside its reading;
-a tag force-moved after the lint runs is not seen; a dispatch ref written by hand that --repo cannot resolve is
-only ADVISORY, and the worker then fails closed at the fetch; and, like every rule, it helps only where the sender
-refuses to send on exit 1 or 2.
+reset, worktree add, merge, rebase, restore, archive or fetch refspec: git checkout 1234567abc takes the branch
+when one has that name), so it passes and can cure; a path restore with no -- (git checkout <pin> docs) is read as
+a checkout of its first word, so from the pin it cures; a reset with no -- reads its first word as the commit, so
+git reset <path> to unstage refuses where the path is not hex (git reset -- <path> does not); a merge's words
+after its first, a rebase's second word (the branch it switches to first), cherry-pick, revert, am, apply,
+read-tree, stash, bisect, a git diff or git show piped to apply, and a reach through an alias, a shell variable,
+`-c alias...` or a script are outside its reading; an option value quoted with a space after the subcommand is
+read as several words, so its later words can be read as refs; a reach whose own arguments wrap onto the next line
+with no backslash (git checkout --detach at a line's end, main on the next) is read without them, so it is not
+judged, and a code span across a line break is read as two lines; a tag force-moved after the lint runs is not
+seen; a dispatch ref written by hand that --repo cannot resolve is only ADVISORY, and the worker then fails closed
+at the fetch; and, like every rule, it helps only where the sender refuses to send on exit 1 or 2.
 
 TEXT. Format characters (Unicode category Cf: a byte order mark, zero-width and bidirectional
 controls) are removed first; a brief that is then empty or only whitespace and control characters is
@@ -212,7 +255,9 @@ BLOCKING RULES (HARD; one hit refuses):
 
 A COMMAND LINE, in prose or in a code span, is: git (optionally behind a directory path), any number of
 global options (`-C` or `-c` with a value, `--git-dir`, `--work-tree`, `--namespace`, `--config-env` or
-`--attr-source` with a separate value, or any other option word), then a git subcommand (GIT_SUBCOMMANDS:
+`--attr-source` with a separate value, or any other option word, with or without `=` and a value; a value is one
+shell word, whose "..." or '...' spans closed on the line may hold a space: git -C "/w/a b" log), then a git
+subcommand (GIT_SUBCOMMANDS:
 show, diff, log, blame, status, rev-parse, show-ref, show-branch, annotate, checkout, commit, push, ...);
 python, python3 or python3.N (optionally behind a directory path), any number of options (value-less flag
 clusters such as `-I -B`, `-W` or `-X` with an attached or a separate value, long options), then `-c`,
@@ -300,7 +345,8 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
   exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2 or P5). Rewrite the brief, or send the item
                            to a family that can execute (S1 to S3), name paths it can read (P2) or reach the pin by its
-                           commit id or a dispatch ref (P5). When a hit is a command line (S2 or S3), the REFUSE line
+                           commit id in an instruction (clone, then checkout --detach <pin>) or a dispatch ref (P5).
+                           When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
   exit 2  CANNOT_EVALUATE  the brief is missing, not a regular file, larger than MAX_BYTES, not UTF-8, or
@@ -1098,9 +1144,13 @@ GIT_SUBCOMMANDS = (r"add|am|annotate|apply|archive|bisect|blame|branch|cat-file|
                    r"switch|symbolic-ref|tag|var|verify-commit|verify-tag|whatchanged|worktree")
 # git or python (optionally behind a directory path) as a command word, at a token start, case-sensitive
 COMMAND_WORD_RE = re.compile(r"(?<![\w./~-])(?:[\w.~-]*/)*+(?:(git)|python(?:3(?:\.\d+)?)?)(?=\s)")
+# a global git option's value: one shell word, its "..." and '...' spans closed on the line (which may hold a space)
+# and its other characters but whitespace, glued together
+GIT_OPTION_VALUE = r"""(?:"[^"\n]*+"|'[^'\n]*+'|\S)++"""
 # one global git option: -C or -c and a value, a long option that takes a separate value, or any other option
-GIT_OPTION_RE = re.compile(r"\s+(?:-[Cc]\s+\S+|--(?:git-dir|work-tree|namespace|config-env|attr-source)\s+\S+"
-                           r"|--?[A-Za-z][\w-]*(?:=\S+)?)")
+GIT_OPTION_RE = re.compile(r"\s+(?:-[Cc]\s+" + GIT_OPTION_VALUE + r"|--(?:git-dir|work-tree|namespace|config-env|"
+                           r"attr-source)\s+" + GIT_OPTION_VALUE + r"|--?[A-Za-z][\w-]*(?:="
+                           + GIT_OPTION_VALUE + r")?)")
 GIT_SUBCOMMAND_RE = re.compile(r"\s+(?:" + GIT_SUBCOMMANDS + r")(?![\w-])")
 PY_FLAG = r"[A-VYZabd-lnoq-z]"   # a python flag letter that takes no value: every letter but c, m, W and X
 # one python option: -W or -X with its value (attached or the next word), a cluster of value-less flags, or a
@@ -1595,8 +1645,9 @@ DELIVER_RE = re.compile(r"(?<![\w-])(?:return|give|paste|print|send|deliver|hand
                         r"attach|provide|reply\s+with|quote)(?![\w-])", re.I)
 GIT_READ_TIMEOUT = 10
 # P5: the git subcommands that reach a ref (a reach), each with the options whose value is a separate word (or
-# follows `=`); a reset is a reach only in one of RESET_MODES, and worktree only as worktree add
-REACH_REFS = frozenset(("clone", "checkout", "switch", "fetch", "pull", "worktree", "reset"))
+# follows `=`); worktree is a reach only as worktree add
+REACH_REFS = frozenset(("clone", "checkout", "switch", "fetch", "pull", "worktree", "reset", "merge", "rebase",
+                        "restore", "archive"))
 REACH_VALUE_OPTIONS = dict(
     clone=frozenset(("-b", "--branch", "--revision", "-o", "--origin", "-u", "--upload-pack", "-c", "--config", "-j",
                      "--jobs", "--depth", "--reference", "--reference-if-able", "--separate-git-dir",
@@ -1608,31 +1659,43 @@ REACH_VALUE_OPTIONS = dict(
                      "--refmap", "-o", "--server-option", "--negotiation-tip", "--filter",
                      "--recurse-submodules-default", "--submodule-prefix")),
     worktree=frozenset(("-b", "-B", "--reason")),
-    reset=frozenset(),
+    reset=frozenset(("--pathspec-from-file",)),
+    merge=frozenset(("-m", "-F", "--file", "-s", "--strategy", "-X", "--strategy-option", "--into-name", "--cleanup")),
+    rebase=frozenset(("--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec", "-C")),
+    restore=frozenset(("-s", "--source", "--pathspec-from-file")),
+    archive=frozenset(("--format", "-o", "--output", "--prefix", "--remote", "--exec", "--add-file",
+                       "--add-virtual-file", "--mtime")),
 )
-RESET_MODES = frozenset(("--hard", "--keep", "--merge"))
 # a clone's option whose value is the commit or ref it checks out, read as written (a value option above)
 CLONE_REVISION_OPTIONS = frozenset(("--revision",))
+# a rebase's option whose value is the commit it replays onto, and a restore's whose value is the tree it reads
+REBASE_ONTO_OPTIONS = frozenset(("--onto",))
+RESTORE_SOURCE_OPTIONS = frozenset(("-s", "--source"))
+# a merge or rebase with one of these goes on with, or ends, one already started: it reaches no new ref
+SEQUENCE_OPTIONS = frozenset(("--abort", "--continue", "--quit", "--skip", "--edit-todo", "--show-current-patch"))
 # a switch reads its word as a commit only after one of these; with none, the word names a branch
 SWITCH_COMMIT_OPTIONS = frozenset(("-c", "-C", "--create", "--force-create", "-d", "--detach"))
 # the reaches whose words after `--` are still their operands (a fetch's remote and refspecs, a worktree add's path
-# and commit-ish); a checkout's words after `--` are paths
+# and commit-ish); a checkout's or reset's words after `--` are paths
 OPERANDS_AFTER_DASHDASH = frozenset(("fetch", "worktree"))
-# the reaches that restore paths, not HEAD, when a tree-ish is followed by `--` and a path
-PATH_RESTORE_REACHES = frozenset(("checkout",))
-# the reaches that move HEAD, the only ones that can cure: a fetch, a pull or a clone of the pin cures nothing
+# the reaches that restore paths, not HEAD, when a commit is followed by `--` and a path: they reach the commit,
+# and cannot cure
+PATH_RESTORE_REACHES = frozenset(("checkout", "reset"))
+# the reaches that move HEAD, the only ones that can cure: a fetch, a pull, a clone, a merge, a rebase, a restore,
+# an archive or a path restore of the pin cures nothing
 CURE_REACHES = frozenset(("checkout", "switch", "reset", "worktree"))
 # the reaches that fill FETCH_HEAD, which a later reach of FETCH_HEAD inherits
 FETCH_REACHES = frozenset(("fetch", "pull"))
 # an argument run ends at the first of these (`||` holds `|`), at the next command line or at the line's end
 ARGUMENT_STOPS = (";", "&&", "|", "`")
-# a prohibition governs its own clause: up to the first of these followed by whitespace or the line's end, outside
-# a code span
+# a clause stop: one of these outside a code span, followed by whitespace once closing markup is skipped
 CLAUSE_STOPS = frozenset(";,:.!?")
-# refs that do not move by their spelling: a commit id (hex_ref), a dispatch ref, and HEAD, ORIG_HEAD, @ and a
-# FETCH_HEAD with no fetch before it (rule_p5 gives a FETCH_HEAD after a fetch or pull that reach's ref)
+# refs that do not move by their spelling: a commit id (hex_ref), a dispatch ref, HEAD, ORIG_HEAD and @ (alone or
+# followed by ~N or ^N steps) and a FETCH_HEAD with no fetch before it (rule_p5 gives a FETCH_HEAD after a fetch or
+# pull that reach's ref)
 DISPATCH_PREFIX = "refs/dispatch/"
 INHERITED_REFS = frozenset(("HEAD", "FETCH_HEAD", "ORIG_HEAD", "@"))
+RELATIVE_BASES = ("ORIG_HEAD", "HEAD", "@")
 HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 # a confirm clause: a line with upper-case HEAD as a word and one of these words gives its commit ids as pins
 HEAD_WORD_RE = re.compile(r"(?<![\w-])HEAD(?![\w-])")
@@ -1640,8 +1703,33 @@ CONFIRM_RE = re.compile(r"(?<![\w-])(?:confirm|verify|check|assert|ensure|starts
 # a prose reach: one of these verbs with no git before it, then a branch word within three words (ADVISORY)
 PROSE_REACH_RE = re.compile(r"(?<![\w-])(?:clone|check\s++out|switch\s++to|fetch)(?![\w-])", re.I)
 PROSE_BRANCH_WORDS = frozenset(("--branch", "-b", "main", "master", "trunk", "develop"))
-# a moving reach on a git command line refuses; one inferred from prose is printed, as every prose rule is
-REACH_SEVERITY = dict(git="HARD", prose="ADVISORY")
+# the other reaches named with no git word (ADVISORY): gh pr checkout, and a web address whose path names a ref
+# after one of WEB_REF_SEGMENTS (refs/heads/ or refs/tags/ and an archive suffix dropped)
+GH_CHECKOUT_RE = re.compile(r"(?<![\w./-])gh\s++pr\s++checkout(?![\w-])")
+WEB_REF_SEGMENTS = frozenset(("archive", "tree", "blob", "raw"))
+ARCHIVE_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tar", ".zip")
+# a moving reach on a git command line refuses; one inferred from prose or a web address, and a submodule update
+# --remote (which moves submodule content, not the pinned tree), are printed, as every prose rule is
+REACH_SEVERITY = dict(git="HARD", prose="ADVISORY", submodule="ADVISORY")
+# a prohibition governs only its own object: a prohibition word (outside a code span, not glued to `=`), closing
+# emphasis, whitespace and at most one prohibited verb (run, use, execute or follow), then, once OBJECT_MARKUP is
+# skipped, one code span (every reach in it), one git command line or one prose reach that opens there
+P5_PROHIBITION_WORDS = r"(?:never|do\s++not|don['" + chr(0x2019) + r"]t|must\s++not|not\s++to)"
+REACH_PROHIBITION_RE = re.compile(r"(?<![\w/.=-])" + P5_PROHIBITION_WORDS + r"[*_]*+\s++"
+                                  r"(?:(?:run|use|execute|follow)[*_]*+\s++)?+", re.I)
+OBJECT_MARKUP = "*_\"'"
+# a cure counts only as an INSTRUCTION (cure_instructions): led from its clause start by at most CURE_LEAD_MAX of
+# these words and markers (a list number, emphasis), or chained after `&&` or `;` to an instruction, with no
+# CURE_VOID_RE word (a prohibition, or a word of a past report or a quotation) before it in its sentence
+CURE_LEAD_WORDS = frozenset(("and", "then", "next", "now", "first", "finally", "also", "please", "run", "use",
+                             "execute"))
+CURE_LEAD_MARKERS = frozenset(("-", "+", ">", "$"))
+CURE_LEAD_MAX = 4
+# after any other word, a clause opens after one of these
+CURE_JOINERS = frozenset(("and", "then"))
+CURE_VOID_RE = re.compile(r"(?<![\w/.=-])(?:" + P5_PROHIBITION_WORDS + r"|ran|used|executed|tried|did|failed|had|"
+                          r"was|were|last|previous(?:ly)?+|earlier|examples?+|e\.g|such\s++as|quot(?:e|es|ed|ing)|"
+                          r"told|said|wrote)(?![\w/=-])", re.I)
 
 
 def _path_token(token):
@@ -2054,14 +2142,24 @@ def pin_matches(ref, pins):
     return any(ref.startswith(pin.lower()) or pin.lower().startswith(ref) for pin in pins)
 
 
+def relative_ref(ref):
+    """Whether a ref is HEAD, ORIG_HEAD or @ followed by one or more ~N or ^N steps (HEAD~1, @^2, HEAD~), read
+    without a pattern; @{u} and every other suffix are not."""
+    base = next((base for base in RELATIVE_BASES if ref.startswith(base)), None)
+    steps = ref[len(base):] if base else ""
+    return bool(steps) and steps[0] in "~^" and all(
+        character in "~^" or character.isdecimal() for character in steps) and steps.isascii()
+
+
 def fixed_ref(ref):
-    """Whether a reach's ref, read by its spelling alone, cannot move: a commit id (hex_ref), a dispatch ref, or
-    HEAD, FETCH_HEAD, ORIG_HEAD or @ (INHERITED_REFS). HEAD, ORIG_HEAD and @ name a commit HEAD already held, so the
-    reach that put it there is the one judged; rule_p5 first replaces a FETCH_HEAD that follows a fetch or pull with
-    that reach's ref, so only a FETCH_HEAD with none before it in the brief is read here. A branch, a tag, a
-    relative form (main~3), a placeholder (<branch>) and the remote's branch ("") all move, and so does a word that
-    names a branch or tag by its place, whatever its spelling (reach_moves)."""
-    return hex_ref(ref) or ref.startswith(DISPATCH_PREFIX) or ref in INHERITED_REFS
+    """Whether a reach's ref, read by its spelling alone, cannot move: a commit id (hex_ref), a dispatch ref,
+    HEAD, FETCH_HEAD, ORIG_HEAD or @ (INHERITED_REFS), or a relative form of HEAD, ORIG_HEAD or @ (relative_ref:
+    HEAD~1). HEAD, ORIG_HEAD and @ name a commit HEAD already held, so the reach that put it there is the one
+    judged; rule_p5 first replaces a FETCH_HEAD that follows a fetch or pull with that reach's ref, so only a
+    FETCH_HEAD with none before it in the brief is read here. A branch, a tag, a relative form of anything else
+    (main~3), @{u}, a placeholder (<branch>) and the remote's branch ("") all move, and so does a word that names a
+    branch or tag by its place, whatever its spelling (reach_moves)."""
+    return hex_ref(ref) or ref.startswith(DISPATCH_PREFIX) or ref in INHERITED_REFS or relative_ref(ref)
 
 
 def reach_moves(ref, named):
@@ -2078,56 +2176,159 @@ def governing_pins(line_pins, clause_pins):
     return line_pins or clause_pins
 
 
-def prohibition_scopes(line):
-    """Sorted, disjoint [start, end) spans of `line` that a prohibition governs: each runs from the end of a
-    prohibition (PROHIBITION_RE) to the first clause stop after it, or to the line's end when none follows. A
-    clause stop is a mark of CLAUSE_STOPS (`;`, `,`, `:`, `.`, `!` or `?`) outside a code span (code_spans),
-    followed, once closing markup and quotes (* _ " ' ) ] }) are skipped, by whitespace or the line's end; so ./x,
-    x.org, a:b and a `;` inside a code span stop nothing. The marks are walked once (a run of closing characters
-    follows one mark at most), and each prohibition finds its stop by bisection."""
-    prohibitions = list(PROHIBITION_RE.finditer(line))
-    if not prohibitions:
-        return []
-    spans, stops, index = code_spans(line), [], 0
-    for position, character in enumerate(line):
-        if character not in CLAUSE_STOPS:
-            continue
-        after = position + 1
-        while after < len(line) and line[after] in "*_\"')]}":
-            after += 1
-        if after < len(line) and not line[after].isspace():
-            continue
-        while index < len(spans) and spans[index][1] <= position:
-            index += 1
-        if index == len(spans) or position < spans[index][0]:
-            stops.append(position)
-    scopes = []
-    for found in prohibitions:
-        after = bisect.bisect_left(stops, found.end())
-        end = stops[after] if after < len(stops) else len(line)
-        if scopes and found.end() <= scopes[-1][1]:
-            scopes[-1] = (scopes[-1][0], max(end, scopes[-1][1]))
+def _span_at(spans, starts, position):
+    """The code span of `spans` (sorted, disjoint [start, end); `starts` their starts) that holds `position`, or
+    None, by bisection."""
+    index = bisect.bisect_right(starts, position) - 1
+    return spans[index] if index >= 0 and position < spans[index][1] else None
+
+
+def prohibitions(line, spans):
+    """The REACH_PROHIBITION_RE matches on a P5 line that are prohibitions: a prohibition word inside a code span
+    (`never run x` quoted as text) is not one, and neither is one glued to `=` (--color=never; the pattern's
+    look-behind)."""
+    starts = [start for start, _ in spans]
+    return [found for found in REACH_PROHIBITION_RE.finditer(line) if _span_at(spans, starts, found.start()) is None]
+
+
+def prohibition_objects(line, spans):
+    """Sorted, disjoint [start, end) ranges of a P5 line that a prohibition governs: the OBJECT of each prohibition
+    (prohibitions), the closed shape the S rules use. After the prohibition word and at most one prohibited verb
+    (REACH_PROHIBITION_RE: Never run, Do not use, must not execute, Don't follow, or Never alone) and any
+    OBJECT_MARKUP, the object is the code span that opens there (every reach inside it), or else the one reach (a
+    git command line or a prose reach) that starts exactly there, as (position, position + 1). Nothing else is
+    governed: a negation before another verb (Do not forget to run, not to skip), a second command line of a list
+    (Never run git pull or git clone ...), and every reach after the object in its clause or sentence are judged."""
+    by_start = dict(spans)
+    ranges = []
+    for found in prohibitions(line, spans):
+        position = found.end()
+        while position < len(line) and line[position] in OBJECT_MARKUP:
+            position += 1
+        ranges.append((position, by_start.get(position, position + 1)))
+    ranges.sort()
+    merged = []
+    for start, end in ranges:
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
         else:
-            scopes.append((found.end(), end))
-    return scopes
+            merged.append((start, end))
+    return merged
 
 
-def _governed(scopes, position):
-    """Whether `position` lies in one of the sorted, disjoint [start, end) spans prohibition_scopes gives."""
-    index = bisect.bisect_right(scopes, (position, float("inf"))) - 1
-    return index >= 0 and position < scopes[index][1]
+def _governed(ranges, position):
+    """Whether `position` lies in one of the sorted, disjoint [start, end) ranges prohibition_objects gives."""
+    index = bisect.bisect_right(ranges, (position, float("inf"))) - 1
+    return index >= 0 and position < ranges[index][1]
 
 
-def argument_run(line, end, limit):
-    """The arguments of the git command line whose subcommand ends at `end`: the text up to the first `;`, `&&`,
-    `||`, `|` or backtick, the next command line (`limit`) or the line's end. Each mark is looked for once, between
-    `end` and the stop found so far, so the runs of all the command lines on a line cost one pass in total."""
+def argument_stop(line, end, limit):
+    """Where the arguments of the command line whose subcommand (or python target) ends at `end` stop: at the
+    first `;`, `&&`, `||`, `|` or backtick, the next command line (`limit`) or the line's end. Each mark is looked
+    for once, between `end` and the stop found so far, so the runs of all the command lines on a line cost one pass
+    in total."""
     stop = limit
     for mark in ARGUMENT_STOPS:
         found = line.find(mark, end, stop)
         if found >= 0:
             stop = found
-    return line[end:stop]
+    return stop
+
+
+def sentence_starts(line, spans):
+    """[0] and every offset of a P5 line where a sentence opens: after `.`, `!` or `?` outside a code span,
+    closing markup and quotes (* _ " ' ) ] }) and whitespace, when opening markup and quotes (* _ " ' ( [) then
+    lead to an upper-case letter; so "e.g. `x`" and "./x" open none. Each character is walked a bounded number of
+    times."""
+    starts, found = [start for start, _ in spans], [0]
+    for position, character in enumerate(line):
+        if character not in ".!?":
+            continue
+        after = position + 1
+        while after < len(line) and line[after] in "*_\"')]}":
+            after += 1
+        if after == len(line) or not line[after].isspace():
+            continue
+        while after < len(line) and line[after].isspace():
+            after += 1
+        opening = after
+        while opening < len(line) and line[opening] in "*_\"'([":
+            opening += 1
+        if opening < len(line) and line[opening].isupper() and _span_at(spans, starts, position) is None:
+            found.append(after)
+    return found
+
+
+def led(line, spans, starts, opening):
+    """Whether a command line whose OPENING is at `opening` is LED as an instruction: walking back over the
+    whitespace-separated tokens before it, each a lead word (CURE_LEAD_WORDS) or a marker (CURE_LEAD_MARKERS, a list
+    number, a token of markup only), at most CURE_LEAD_MAX of them, it reaches the line's start, a token closed by a
+    clause stop (CLAUSE_STOPS outside a code span, whitespace after it), or any other token followed by `and` or
+    `then` (CURE_JOINERS). So `Run x`, `, then x`, `: x`, `and x` and `2. x` are led, and `The fix x`, `ran x`
+    and `(x` are not. At most CURE_LEAD_MAX + 1 tokens are read."""
+    position, previous = opening, None
+    for _ in range(CURE_LEAD_MAX + 1):
+        end = position
+        while end and line[end - 1].isspace():
+            end -= 1
+        if not end:
+            return True
+        start = end
+        while start and not line[start - 1].isspace():
+            start -= 1
+        token = line[start:end]
+        closed = token.rstrip("*_\"')]}")
+        if (end < position and closed and closed[-1] in CLAUSE_STOPS
+                and _span_at(spans, starts, start + len(closed) - 1) is None):
+            return True
+        word = token.strip("*_\"'()[]{}").lower()
+        if not word or word in CURE_LEAD_WORDS or word in CURE_LEAD_MARKERS or word.isdecimal():
+            previous, position = word, start
+            continue
+        return previous in CURE_JOINERS
+    return False
+
+
+def cure_instructions(line, spans, runs):
+    """[bool] for the command lines of a P5 line (runs: [(start, end, stop)] in order, `stop` where each one's
+    arguments stop, argument_stop): whether each is an INSTRUCTION, the only place a cure counts. Its OPENING is the
+    start of the code span that holds it when only whitespace and a `$` prompt come before it in the span, else its
+    own start. It is an instruction when no CURE_VOID_RE word (a prohibition; ran, used, last, example, such as,
+    quoted and the other words of a past report or a quotation) stands outside a code span between the start of
+    its sentence (sentence_starts) and its opening, and either it is led (led) or it is CHAINED: right after the `&&`
+    or `;` that stops the arguments of the command line before it on the line (only whitespace between), which is
+    itself an instruction. Anything else is not an instruction: a past report, a forbidden step, a quoted example
+    and a command line inside a sentence's subject do not cure."""
+    starts = [start for start, _ in spans]
+    opens = sentence_starts(line, spans)
+    voids = [found.start() for found in CURE_VOID_RE.finditer(line) if _span_at(spans, starts, found.start()) is None]
+    found, firsts = [], dict()
+    for index, (start, end, stop) in enumerate(runs):
+        span, opening = _span_at(spans, starts, start), start
+        if span is not None:
+            if span not in firsts:   # where a command line opening the span starts, walked once per span
+                first = span[0]
+                while first < span[1] and line[first] in "` \t":
+                    first += 1
+                if line.startswith("$", first):
+                    first += 1
+                    while first < span[1] and line[first] in " \t":
+                        first += 1
+                firsts[span] = first
+            if firsts[span] == start:
+                opening = span[0]
+        sentence = opens[bisect.bisect_right(opens, opening) - 1]
+        void = bisect.bisect_left(voids, sentence)
+        if void < len(voids) and voids[void] < opening:
+            found.append(False)
+            continue
+        chained = False
+        if index and found[index - 1]:
+            mark = runs[index - 1][2]
+            width = 2 if line.startswith("&&", mark) else 1 if line.startswith(";", mark) else 0
+            chained = bool(width) and not line[mark + width:opening].strip()
+        found.append(chained or led(line, spans, starts, opening))
+    return found
 
 
 def reach_arguments(words, value_options):
@@ -2158,46 +2359,69 @@ def reach_arguments(words, value_options):
 
 
 def reach_refs(subcommand, words):
-    """[(ref, named)] for the refs a git command line reaches (REACH_REFS), or [] when it is not a reach; `named`
-    is True for a word that names a branch or tag by its place, whatever its spelling (reach_moves). clone: the
-    value of --revision, else of -b or --branch (named), else the remote's default branch ("", named). checkout and
-    switch: the first positional word (the start point after -b, -B, -c or -C and their branch, X after --detach),
-    none when there is none; a switch with none of SWITCH_COMMIT_OPTIONS reads it as a branch (named), since git
-    refuses a commit there; a checkout of a tree-ish followed by `--` and a path (PATH_RESTORE_REACHES) restores
-    paths and leaves HEAD where it is, so it is not a reach (a tree-ish followed by a bare `--` still is). fetch:
-    the source side of each refspec after the remote, the words after `--` included (OPERANDS_AFTER_DASHDASH), and
-    with no refspec the remote's branch tips ("", named). pull: always the remote's branch ("", named). worktree
-    add: the commit-ish after the path, the words after `--` included. reset: the commit with --hard, --keep or
-    --merge."""
+    """[(ref, named, head)] for the refs a git command line reaches (REACH_REFS), or [] when it is not a reach;
+    `named` is True for a word that names a branch or tag by its place, whatever its spelling (reach_moves), and
+    `head` for a reach that moves HEAD to its ref (only such a reach of CURE_REACHES can cure). clone: the value of
+    --revision, else of -b or --branch (named), else the remote's default branch ("", named). checkout and switch:
+    the first positional word (the start point after -b, -B, -c or -C and their branch, X after --detach), none
+    when there is none; a switch with none of SWITCH_COMMIT_OPTIONS reads it as a branch (named), since git refuses
+    a commit there. reset, in any mode (a soft or mixed reset moves HEAD, and a later checkout or reset of the tree
+    puts the commit in it): its first positional word. A checkout or reset of a commit followed by `--` and a path
+    (PATH_RESTORE_REACHES) restores paths from it and leaves HEAD where it is: it reaches the commit but is no head
+    reach (a commit followed by a bare `--` still is one). fetch: the source side of each refspec after the remote,
+    the words after `--` included (OPERANDS_AFTER_DASHDASH), and with no refspec the remote's branch tips ("",
+    named). pull: always the remote's branch ("", named). worktree add: the commit-ish after the path, the words
+    after `--` included. merge: its first positional word, or with none the upstream branch ("", named). rebase:
+    the value of --onto and its first positional word (the upstream), or with neither positional nor --root the
+    upstream branch ("", named). A merge or rebase with one of SEQUENCE_OPTIONS reaches nothing. restore: the
+    value of -s or --source (none: it reads the index, not a ref). archive: its first positional word (the
+    tree-ish, local or --remote)."""
     if subcommand == "pull":
-        return [("", True)]
+        return [("", True, False)]
     if subcommand == "worktree":
         if words[:1] != ["add"]:
             return []
         words = words[1:]
     options, positional, after = reach_arguments(words, REACH_VALUE_OPTIONS[subcommand])
+    flags = set(option for option, _ in options)
     if subcommand in OPERANDS_AFTER_DASHDASH:
         positional, after = positional + (after or []), None
     if subcommand == "clone":
         revisions = [value for option, value in options if option in CLONE_REVISION_OPTIONS]
         branches = [value for option, value in options if option in ("-b", "--branch")]
-        return [(revisions[-1], False)] if revisions else [(branches[-1] if branches else "", True)]
+        return [(revisions[-1], False, False)] if revisions else [(branches[-1] if branches else "", True, False)]
     if subcommand == "fetch":
         sources = [refspec.lstrip("+").partition(":")[0] for refspec in positional[1:]]
-        return [(source, False) for source in sources if source] or [("", True)]
+        return [(source, False, False) for source in sources if source] or [("", True, False)]
     if subcommand == "worktree":
-        return [(ref, False) for ref in positional[1:2]]
-    if subcommand == "reset" and not any(option in RESET_MODES for option, _ in options):
+        return [(ref, False, True) for ref in positional[1:2]]
+    if subcommand in ("merge", "rebase") and flags & SEQUENCE_OPTIONS:
         return []
+    if subcommand == "merge":
+        return [(ref, False, False) for ref in positional[:1]] or [("", True, False)]
+    if subcommand == "rebase":
+        onto = [(value, False, False) for option, value in options if option in REBASE_ONTO_OPTIONS]
+        upstream = [(ref, False, False) for ref in positional[:1]]
+        return onto + (upstream or ([] if "--root" in flags else [("", True, False)]))
+    if subcommand == "restore":
+        return [(value, False, False) for option, value in options if option in RESTORE_SOURCE_OPTIONS]
+    if subcommand == "archive":
+        return [(ref, False, False) for ref in positional[:1]]
     if subcommand in PATH_RESTORE_REACHES and positional and after:
-        return []
-    named = subcommand == "switch" and not any(option in SWITCH_COMMIT_OPTIONS for option, _ in options)
-    return [(ref, named) for ref in positional[:1]]
+        return [(positional[0], False, False)]
+    named = subcommand == "switch" and not (flags & SWITCH_COMMIT_OPTIONS)
+    return [(ref, named, True) for ref in positional[:1]]
 
 
 def _reach_word(word):
-    """A word of an argument run with opening markup and quotes, and closing punctuation, dropped (_word_end)."""
-    return _word_end(word.lstrip("\"'*_([{<"))
+    """A word of an argument run with opening markup and quotes, and closing punctuation, dropped (_word_end); a
+    closing brace that closes one the word opens is part of the ref (@{u}, main@{1}), not markup."""
+    word = word.lstrip("\"'*_([{<")
+    end = len(_word_end(word))
+    opened = word.count("{", 0, end) - word.count("}", 0, end)
+    while opened > 0 and end < len(word) and word[end] == "}":
+        end, opened = end + 1, opened - 1
+    return word[:end]
 
 
 def _subcommand(line, end):
@@ -2225,45 +2449,126 @@ def _prose_branch(line, position):
         pair == ["the", "branch"] for pair in (words[0:2], words[1:3]))
 
 
-def pin_reaches(text):
-    """(pins, reaches) for the whole brief, line by line. pins are the confirm-clause pins: on a line that holds
-    upper-case HEAD as a word and a confirm word (CONFIRM_RE), each word of 7 to 40 or 64 hex digits holding a
-    digit that is not the ref of a reach on that line. reaches are [(line, kind, subcommand, refs, excerpt)] in
-    brief order: kind "git" for a git command line (option_commands) whose subcommand is in REACH_REFS and whose
-    words, from argument_run split on whitespace (no pattern reads the run), give it refs (reach_refs); kind
-    "prose", subcommand "" and refs [("", True)] for clone, check out, switch to or fetch that is not a git
-    subcommand, followed within three words by a branch word (_prose_branch). A reach that starts in the span a
-    prohibition governs (prohibition_scopes: from the prohibition to the end of its clause) is not kept; one in a
-    later clause or sentence of the line is."""
-    pins, reaches = [], []
-    for number, line in enumerate(text.split("\n"), 1):
+def _git_open_at_end(line):
+    """Whether a line ends inside a git command line before its subcommand: its last git command word
+    (COMMAND_WORD_RE) is followed only by global options (GIT_OPTION_RE) and whitespace, as `Run git` or
+    `git -C w` at a line's end."""
+    text = line.rstrip() + " "
+    last = None
+    for word in COMMAND_WORD_RE.finditer(text):
+        if word.group(1) is not None:
+            last = word
+    return last is not None and not text[_option_end(text, last.end(), GIT_OPTION_RE, dict()):].strip()
+
+
+def p5_lines(text):
+    """[(number, line)] for P5: the brief's lines, `\\r` dropped, with a line that ends in an odd run of
+    backslashes (a shell continuation, or a Markdown hard break; the last backslash dropped) or inside a git
+    command line before its subcommand (_git_open_at_end) joined with the next by a space, so a reach split across
+    lines is read whole; `number` is the first joined line's. Each line is tested once, on its own text."""
+    lines, joined, parts = text.split("\n"), [], []
+    for number, line in enumerate(lines, 1):
         line = line.rstrip("\r")
-        scopes = prohibition_scopes(line)
+        if (len(line) - len(line.rstrip("\\"))) % 2:
+            parts.append((number, line[:-1]))
+            continue
+        parts.append((number, line))
+        if number < len(lines) and _git_open_at_end(line):
+            continue
+        joined.append((parts[0][0], " ".join(part for _, part in parts)))
+        parts = []
+    if parts:
+        joined.append((parts[0][0], " ".join(part for _, part in parts)))
+    return joined
+
+
+def web_refs(line):
+    """[(start, ref)] for the web addresses of a P5 line that name a ref: a word that opens, after opening markup,
+    with http:// or https:// (WEB_URL_RE) and whose path holds a segment of WEB_REF_SEGMENTS (archive, tree, blob,
+    raw) followed by a ref (refs/heads/ or refs/tags/ skipped, an ARCHIVE_SUFFIXES suffix dropped) that is not
+    fixed (fixed_ref). Each word is split once."""
+    found = []
+    for word in WORD_RE.finditer(line):
+        if not WEB_URL_RE.match(word.group(0)):
+            continue
+        segments = _word_end(word.group(0).lstrip("\"'`*_([{<")).split("/")
+        for index in range(3, len(segments) - 1):
+            if segments[index] not in WEB_REF_SEGMENTS:
+                continue
+            rest = segments[index + 1:]
+            if rest[:1] == ["refs"] and rest[1:2] in (["heads"], ["tags"]):
+                rest = rest[2:]
+            ref = rest[0] if rest else ""
+            for suffix in ARCHIVE_SUFFIXES:
+                if ref.endswith(suffix):
+                    ref = ref[:-len(suffix)]
+                    break
+            if ref and not fixed_ref(ref):
+                found.append((word.start(), ref))
+            break
+    return found
+
+
+def submodule_remote(subcommand, words):
+    """Whether a git command line is a submodule update --remote, which moves each submodule to its remote's branch
+    tip: an ADVISORY reach (REACH_SEVERITY), since it moves submodule content, not the pinned tree."""
+    return subcommand == "submodule" and "update" in words and "--remote" in words
+
+
+def confirm_pins(line):
+    """The confirm-clause pins of one P5 line: on a line that holds upper-case HEAD as a word and a confirm word
+    (CONFIRM_RE), each word of 7 to 40 or 64 hex digits holding a digit, the commit id of a reach on that line
+    included."""
+    if not (HEAD_WORD_RE.search(line) and CONFIRM_RE.search(line)):
+        return []
+    return [word for word in (_reach_word(word) for word in line.split())
+            if hex_ref(word) and any(character.isdecimal() for character in word)]
+
+
+def pin_reaches(text):
+    """(pins, reaches) for the whole brief, read over p5_lines. pins are the confirm-clause pins (confirm_pins).
+    reaches are [(line, kind, subcommand, refs, instruction, excerpt)] in brief order: kind "git" for a git command
+    line (option_commands) whose subcommand is in REACH_REFS and whose words, from its argument run (argument_stop)
+    split on whitespace (no pattern reads the run), give it refs (reach_refs), `instruction` from
+    cure_instructions; kind "submodule" for a submodule update --remote (submodule_remote); kind "prose",
+    subcommand "" and refs [(ref, True, False)] for clone, check out, switch to or fetch that is not a git
+    subcommand, followed within three words by a branch word (_prose_branch), for gh pr checkout, and for a web
+    address that names a ref (web_refs). A reach that a prohibition governs (prohibition_objects: the code span,
+    command line or prose reach that is its object) is not kept; every other reach is."""
+    pins, reaches = [], []
+    for number, line in p5_lines(text):
+        spans = code_spans(line)
+        governed = prohibition_objects(line, spans)
         commands = sorted(dict((end, start) for start, end in option_commands(line)).items())
-        found, subcommand_starts = [], set()
+        runs = []
         for index, (end, start) in enumerate(commands):
+            limit = max(end, commands[index + 1][1]) if index + 1 < len(commands) else len(line)
+            runs.append((start, end, argument_stop(line, end, limit)))
+        found, subcommand_starts = [], set()
+        for (start, end, stop), instruction in zip(runs, cure_instructions(line, spans, runs)):
             subcommand = _subcommand(line, end)
             subcommand_starts.add(end - len(subcommand))
-            if subcommand not in REACH_REFS or _governed(scopes, start):
+            if _governed(governed, start):
                 continue
-            limit = max(end, commands[index + 1][1]) if index + 1 < len(commands) else len(line)
-            run = argument_run(line, end, limit)
-            words = [_reach_word(word) for word in run.split()]
-            refs = reach_refs(subcommand, [word for word in words if word])
+            words = [word for word in (_reach_word(word) for word in line[end:stop].split()) if word]
+            kind, refs = "git", []
+            if submodule_remote(subcommand, words):
+                kind, refs = "submodule", [("", True, False)]
+            elif subcommand in REACH_REFS:
+                refs = reach_refs(subcommand, words)
             if refs:
-                excerpt = _excerpt(line[start:min(end, start + EXCERPT_CHARS)] + run[:EXCERPT_CHARS])
-                found.append((start, "git", subcommand, refs, excerpt))
-        for match in PROSE_REACH_RE.finditer(line):
-            if (match.start() not in subcommand_starts and not _governed(scopes, match.start())
-                    and _prose_branch(line, match.end())):
-                found.append((match.start(), "prose", "", [("", True)],
-                              _excerpt(line[match.start():match.end() + EXCERPT_CHARS])))
+                excerpt = _excerpt(line[start:min(end, start + EXCERPT_CHARS)] + line[end:stop][:EXCERPT_CHARS])
+                found.append((start, kind, subcommand, refs, instruction, excerpt))
+        prose = [match.start() for match in PROSE_REACH_RE.finditer(line)
+                 if match.start() not in subcommand_starts and _prose_branch(line, match.end())]
+        prose = [(start, "") for start in prose] + [(match.start(), "") for match in GH_CHECKOUT_RE.finditer(line)]
+        for start, ref in sorted(prose + web_refs(line)):
+            if not _governed(governed, start):
+                found.append((start, "prose", "", [(ref, True, False)], False,
+                              _excerpt(line[start:start + EXCERPT_CHARS])))
         found.sort(key=lambda reach: reach[0])
         reaches.extend((number,) + reach[1:] for reach in found)
-        if HEAD_WORD_RE.search(line) and CONFIRM_RE.search(line):
-            refs = set(ref for reach in found for ref, _ in reach[3])
-            pins.extend(word for word in (_reach_word(word) for word in line.split())
-                        if hex_ref(word) and word not in refs and any(character.isdecimal() for character in word))
+        pins.extend(confirm_pins(line))
     return pins, reaches
 
 
@@ -2283,33 +2588,37 @@ def dispatch_commit(repo, ref):
 
 def rule_p5(names, row, repo):
     """P5 moving reach: the brief pins a revision (governing_pins: its pin lines' pins, else its confirm-clause pins
-    from pin_reaches) and reaches it through a ref that can move (reach_moves) with no later reach that moves HEAD
-    (CURE_REACHES: checkout, switch, reset, worktree add) to a commit id that matches a pin (pin_matches): HARD for a
-    git command line, ADVISORY for a prose reach. A FETCH_HEAD after a fetch or pull (FETCH_REACHES) is first given
-    the last one's ref (its first refspec), so a checkout of it moves when that fetch did and cures when it fetched
-    the pin. A fetch, pull or clone of the pin, a commit id that matches no pin and a dispatch ref cure nothing. A
-    dispatch ref that resolves in `repo` to a commit that is not a pin is HARD; one that does not resolve is
-    ADVISORY (dispatch_commit); a FETCH_HEAD that inherits a dispatch ref is not read again."""
+    from pin_reaches) and reaches it through a ref that can move (reach_moves) with no later cure: a head reach of
+    CURE_REACHES (checkout, switch, reset, worktree add; a path restore is not one) to a commit id that matches a
+    pin (pin_matches), written as an instruction (cure_instructions). HARD for a git command line, ADVISORY for a
+    prose reach, a web address or a submodule update --remote (REACH_SEVERITY); the message names the cure: clone,
+    then git -C <dir> checkout --detach and the first pin. A FETCH_HEAD after a fetch or pull (FETCH_REACHES) is
+    first given the last one's ref (its first refspec), so a checkout of it moves when that fetch did and cures when
+    it fetched the pin. A fetch, pull, clone, merge, rebase, restore, archive or path restore of the pin, a commit
+    id that matches no pin, a cure that is not an instruction and a dispatch ref cure nothing. A dispatch ref that
+    resolves in `repo` to a commit that is not a pin is HARD; one that does not resolve is ADVISORY
+    (dispatch_commit); a FETCH_HEAD that inherits a dispatch ref is not read again."""
     clause_pins, reaches = pin_reaches(names.text)
     pins = governing_pins([pin for _, pin in names.pins], clause_pins)
     if not pins:
         return []
     judged, fetched = [], None
-    for line, kind, subcommand, refs, excerpt in reaches:
-        for ref, named in refs:
+    for line, kind, subcommand, refs, instruction, excerpt in reaches:
+        for ref, named, head in refs:
             inherited = ref == "FETCH_HEAD" and fetched is not None
-            judged.append((line, kind, subcommand) + (fetched if inherited else (ref, named)) + (inherited, excerpt))
+            judged.append((line, kind, subcommand) + (fetched if inherited else (ref, named))
+                          + (head, instruction, inherited, excerpt))
         if subcommand in FETCH_REACHES:
-            fetched = refs[0]
+            fetched = refs[0][:2]
     findings, cured = [], False
-    for line, kind, subcommand, ref, named, inherited, excerpt in reversed(judged):
+    for line, kind, subcommand, ref, named, head, instruction, inherited, excerpt in reversed(judged):
         if reach_moves(ref, named):
             if not cured:
                 findings.append(("P5", REACH_SEVERITY[kind], line, "the brief pins a revision but reaches it through "
                                  "{}{}, which can move before the worker reaches it; reach the pin by its commit id "
-                                 "(checkout --detach <pin>) or by a dispatch ref".format(
-                                     "FETCH_HEAD, filled from " if inherited else "",
-                                     "the ref " + ref if ref else "a branch"), excerpt))
+                                 "in an instruction (clone, then git -C <dir> checkout --detach {}) or by a dispatch "
+                                 "ref".format("FETCH_HEAD, filled from " if inherited else "",
+                                              "the ref " + ref if ref else "a branch", pins[0]), excerpt))
         elif ref.startswith(DISPATCH_PREFIX) and not inherited:
             commit = dispatch_commit(repo, ref)
             if commit is None:
@@ -2319,7 +2628,7 @@ def rule_p5(names, row, repo):
             elif not pin_matches(commit, pins):
                 findings.append(("P5", "HARD", line, "dispatch ref {} resolves to {}, which is not a pinned "
                                  "revision".format(ref, commit), excerpt))
-        elif hex_ref(ref) and subcommand in CURE_REACHES:
+        elif hex_ref(ref) and subcommand in CURE_REACHES and head and instruction:
             cured = cured or pin_matches(ref, pins)
     findings.reverse()
     return findings
@@ -2412,7 +2721,8 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
                   "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else ""))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
-              "{}); reach the pin by its commit id or by a dispatch ref{}".format(
+              "{}); reach the pin by its commit id in an instruction (clone, then checkout --detach <pin>) or by a "
+              "dispatch ref{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   ", and name paths under the declared workdir" if "P2" in hard else ""))
     elif code == EXIT_REFUSE:
@@ -2939,13 +3249,81 @@ P5_DISPATCH_MISSING = P5_ALLOW[1].replace("refs/dispatch/1/a1", "refs/dispatch/1
 # the dispatch ref resolves to the fixture commit, and the only pin (a confirm clause) is another commit
 P5_DISPATCH_MISMATCH = ("Use `git -C w fetch <url> refs/dispatch/1/a1 && git -C w checkout --detach FETCH_HEAD`.\n"
                         "Confirm HEAD equals 1234567abc.\n")
-# a prohibition governs only its own clause: a reach in a later clause or sentence (after closing markup too) is
-# judged, and one inside the prohibited clause, a `;` in a code span or a word such as https://h/g.git included, is not
+# a prohibition governs only its own object: a reach in a later clause or sentence (after closing markup too) is
+# judged, and the code span (a `;` inside it included) or the one command line that is the object is not
 P5_CLAUSE_DENY = (P5_PIN + "Do not edit the tree; clone with `git clone --branch main <url> w` and review w.\n",
                   P5_PIN + "Remember not to push. Run `git clone --branch main <url> w` and review w.\n",
                   P5_PIN + "**Do not edit the tree.** Clone with `git clone --branch main <url> w`.\n")
 P5_CLAUSE_ALLOW = (P5_PIN + "Never run `git pull; git clone --branch main <url>`.\n",
-                   P5_PIN + "Never run git pull or git clone --branch main https://h/g.git w.\n")
+                   P5_PIN + "Never run git clone --branch main https://h/g.git w; read the workdir.\n")
+# a negation before another verb, a prohibition word in a code span or glued to `=`, and the second command line
+# of a prohibited list govern nothing; the object of a prohibited verb, plain or in bold, is governed
+P5_OBJECT_DENY = (P5_PIN + "Do not forget to run `git clone --branch main <url> w` first.\n",
+                  P5_PIN + "Don't hesitate to run `git clone --branch main <url> w`.\n",
+                  P5_PIN + "It is important not to skip `git clone --branch main <url> w`.\n",
+                  P5_PIN + "Run `git log --color=never` and `git clone --branch main <url> w`.\n",
+                  P5_PIN + "Run git -c color.ui=never log and git clone --branch main <url> w.\n",
+                  P5_PIN + "Never run git pull or git clone --branch main <url> w.\n")
+P5_OBJECT_GUARD = (P5_PIN + "Paste `never run git clone --branch main <url> w` into the log.\n",
+                   P5_PIN + "Run git log --color=never `git clone --branch main <url> w`.\n")
+P5_OBJECT_ALLOW = (P5_PIN + "You must not use `git clone --branch main <url> w`.\n",
+                   P5_PIN + "Do not clone --branch main, and read the workdir.\n",
+                   P5_PIN + "**Never** run **`git clone --branch main <url> w`**.\n")
+# a clause separator a stop does not cover joins nothing to a prohibition: the reach after it is judged
+P5_SEPARATORS = (P5_PIN + "Do not edit the tree" + chr(0x2014) + "clone with `git clone --branch main <url> w`.\n",
+                 P5_PIN + "Do not edit the tree (clone with `git clone --branch main <url> w` first).\n",
+                 P5_PIN + "Do not edit the tree/clone with `git clone --branch main <url> w`.\n",
+                 P5_PIN + "Do not edit the tree;clone with `git clone --branch main <url> w`.\n",
+                 P5_PIN + "Do not edit the tree and clone with `git clone --branch main <url> w`.\n")
+# a cure counts only as an instruction: a past report, a forbidden step, a quoted example, a sentence's subject and
+# a chain whose head is none of these do not cure; led (then, and, a clause stop, a list item) and chained cures do
+P5_CURE_DENY = (P5_PIN + "Clone with `git clone --branch main <url> w`.\nThe last round ran `git -C w checkout "
+                         "--detach {0}`.\n",
+                P5_PIN + "Clone with `git clone --branch main <url> w`. Do not run this, `git -C w checkout --detach "
+                         "{0}`, it is stale.\n",
+                P5_PIN + "Clone with `git clone --branch main <url> w`; for example, `git -C w checkout --detach "
+                         "{0}`.\n",
+                P5_PIN + "Clone with `git clone --branch main <url> w`. The fix `git -C w checkout --detach {0}` is "
+                         "stale.\n",
+                P5_PIN + "Clone with `git clone --branch main <url> w`. The fix `git -C w fetch origin {0} && git -C w "
+                         "checkout --detach {0}` is stale.\n")
+P5_CURE_ALLOW = (P5_PIN + "Make a scratch clone: git clone --no-hardlinks <url> w, then git -C w checkout --detach "
+                          "{0}; never a worktree.\n",
+                 P5_PIN + "`git clone --no-hardlinks <url> w` it into your scratch and `git -C w checkout --detach "
+                          "{0}` (the pin).\n",
+                 P5_PIN + "```\ngit clone --no-hardlinks <url> w\ngit -C w checkout --detach {0}\n```\n",
+                 P5_PIN + "1. Clone: `git clone <url> w`.\n2. `git -C w checkout --detach {0}`\n")
+# merge, rebase, restore --source, archive and a path restore reach a ref and never cure; a reset reaches its commit
+# in any mode; a relative form of HEAD is fixed
+P5_TREE_DENY = (P5_PIN + "Use `git checkout --detach {0} && git merge origin/main`.\n",
+                P5_PIN + "Use `git checkout --detach {0} && git rebase origin/main`.\n",
+                P5_PIN + "Use `git restore --source=origin/main --worktree .`.\n",
+                P5_PIN + "Use `git archive --remote=<url> main | tar -x -C w`.\n")
+P5_RESET_DENY = (P5_PIN + "Use `git reset origin/main && git checkout -- .`.\n",
+                 P5_PIN + "Use `git reset --soft origin/main && git reset --hard`.\n")
+P5_TREE_ALLOW = (P5_PIN + "Use `git archive --remote=<url> {0} | tar -x -C w`.\n",
+                 P5_PIN + "Use `git reset --soft HEAD~1`, then review.\n",
+                 P5_PIN + "Use `git restore --source={0} --worktree docs`.\n",
+                 P5_PIN + "Use `git merge --abort` if it stops.\n")
+# a reach split by a backslash continuation, or after a git word at a line's end, is read whole
+P5_LINE_JOIN = (P5_PIN + "```\ngit -C w \\\n  checkout main\n```\n",
+                P5_PIN + "```\ngit \\\n  clone --branch main <url> w\n```\n",
+                P5_PIN + "Run git\nclone --branch main <url> w.\n")
+# a reach with no git word: gh pr checkout and a web address that names a branch are printed; one naming the pin is not
+P5_NO_GIT = (P5_PIN + "Use gh pr checkout 42 and review it.\n",
+             P5_PIN + "Fetch https://example.invalid/o/r/archive/refs/heads/main.tar.gz and unpack it.\n",
+             P5_PIN + "Read https://example.invalid/o/r/tree/main/tools first.\n",
+             P5_PIN + "Read https://example.invalid/o/r/tree/{0}/tools first.\n")
+# a global option's quoted value may hold a space
+P5_QUOTED_OPTION = P5_PIN + "Use `git -C \"/w/a b\" checkout main`.\n"
+# a confirm-clause commit is a pin even where it is also a reach's commit on the same line
+P5_CONFIRM_REACH = "Confirm HEAD is 1234567abc after `git fetch origin 1234567abc && git checkout main`.\n"
+# a closing brace that closes the ref's own is kept in the message
+P5_BRACE_REF = P5_PIN + "Use `git reset --hard @{{u}}`.\n"
+# a submodule update --remote moves submodule content: printed, never refused
+P5_SUBMODULE = P5_PIN + "Use `git submodule update --init --remote` and review w.\n"
+# a reach quoted as an example still refuses (the choice for quoted examples)
+P5_QUOTED_EXAMPLE = P5_PIN + "For example, `git clone --branch main <url> w` is what P5 refuses.\n"
 # a fetch with no refspec reaches the remote's branch tips, and FETCH_HEAD after it holds them
 P5_FETCH_TIPS = (P5_PIN + "Use `git fetch origin && git checkout --detach FETCH_HEAD` and review the tree.\n",
                  P5_PIN + "Use `git fetch origin && git reset --hard FETCH_HEAD`.\n")
@@ -2960,7 +3338,7 @@ P5_FETCH_NO_CURE = P5_PIN + "Use `git clone --branch main <url> w && git -C w fe
 P5_FETCH_DASHDASH = (P5_PIN + "Use `git fetch -- origin main && git checkout --detach FETCH_HEAD`.\n",
                      P5_PIN + "Use `git fetch -- origin {0} && git checkout --detach FETCH_HEAD`.\n")
 # a checkout of a tree-ish followed by `--` and a path restores paths: from the pin it cures nothing, and from a
-# branch it is not a reach
+# branch it is a moving reach
 P5_PATH_RESTORE = (P5_PIN + "Use `git clone --branch main <url> w && git -C w checkout {0} -- docs`.\n",
                    P5_PIN + "Use `git checkout main -- docs`, then review docs.\n")
 # a word that only names a branch or tag moves however it is spelt: a clone's --branch value, a plain switch's word
@@ -3734,7 +4112,16 @@ def self_test(report_path=None):
             ("perf/p5-prohibition-scope-linear", "never git clone -b x.** `a; b.` ", "Confirm HEAD is 1234567abc.\n",
              ""),
             ("perf/p5-fetch-head-linear", "git fetch o x && git checkout FETCH_HEAD && ", "Confirm HEAD is "
-             "1234567abc.\n", "")):
+             "1234567abc.\n", ""),
+            # many prohibited objects; many sentences with void words, each followed by a led cure; one line joined
+            # from many backslash continuations, and one from many git words at line ends; many quoted option values
+            ("perf/p5-prohibition-object-linear", "never run `git clone -b x` and ", "Confirm HEAD is 1234567abc.\n",
+             ""),
+            ("perf/p5-cure-lead-linear", "The last one ran. Then git checkout 1234567abc, and ", "Confirm HEAD is "
+             "1234567abc.\n", ""),
+            ("perf/p5-line-join-linear", "git -C w \\\n", "Confirm HEAD is 1234567abc.\n", "checkout main\n"),
+            ("perf/p5-git-word-join-linear", "Run git\n", "Confirm HEAD is 1234567abc.\n", "clone x\n"),
+            ("perf/p5-quoted-option-linear", "git -C \"a b\" checkout x && ", "Confirm HEAD is 1234567abc.\n", "")):
         check(check_id, _linear(unit, prefix, suffix), True)
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
@@ -4354,10 +4741,50 @@ def self_test(report_path=None):
         check("preflight/p5-fetch-head", [p5(text) for text in P5_FETCH_HEAD], [refused, (0, [])])
         check("preflight/p5-fetch-no-cure", p5(P5_FETCH_NO_CURE), refused)
         check("preflight/p5-fetch-dashdash", [p5(text) for text in P5_FETCH_DASHDASH], [refused, (0, [])])
-        check("preflight/p5-path-restore", [p5(text) for text in P5_PATH_RESTORE], [refused, (0, [])])
+        check("preflight/p5-path-restore", [p5(text) for text in P5_PATH_RESTORE], [refused, refused])
         check("preflight/p5-named-ref", [p5(text) for text in P5_NAMED_REF], [refused] * 2)
         check("preflight/p5-governing-pin", [p5(text) for text in P5_GOVERNING_PIN], [refused, (0, [])])
         check("preflight/p5-clone-revision", [p5(text) for text in P5_CLONE_REVISION], [(0, []), (0, []), refused])
+        advised = (0, [("P5", "ADVISORY")])
+        check("preflight/p5-prohibition-object", ([p5(text) for text in P5_OBJECT_DENY],
+                                                  [p5(text) for text in P5_OBJECT_ALLOW]),
+              ([refused] * 6, [(0, [])] * 3))
+        check("preflight/p5-prohibition-guard", [p5(text) for text in P5_OBJECT_GUARD], [refused] * 2)
+        check("preflight/p5-prohibition-separators", [p5(text) for text in P5_SEPARATORS], [refused] * 5)
+        check("preflight/p5-cure-instruction", ([p5(text) for text in P5_CURE_DENY],
+                                                [p5(text) for text in P5_CURE_ALLOW]),
+              ([refused] * 5, [(0, [])] * 4))
+        check("preflight/p5-tree-reaches", ([p5(text) for text in P5_TREE_DENY], [p5(text) for text in P5_TREE_ALLOW]),
+              ([refused] * 4, [(0, [])] * 4))
+        check("preflight/p5-reset-any-mode", [p5(text) for text in P5_RESET_DENY], [refused] * 2)
+        check("preflight/p5-line-join", [p5(text) for text in P5_LINE_JOIN], [refused] * 3)
+        check("preflight/p5-no-git-advisory", [p5(text) for text in P5_NO_GIT], [advised] * 3 + [(0, [])])
+        check("preflight/p5-quoted-option", p5(P5_QUOTED_OPTION), refused)
+        check("preflight/p5-confirm-pin-reach", p5(P5_CONFIRM_REACH), refused)
+
+        def p5_messages(text):
+            """The P5 finding messages for a brief, read in the fixture repository."""
+            table = parse_table(TABLE_FIXTURE.encode("utf-8"))
+            return [message for rule, _, _, message, _ in evaluate(text.format(head).encode("utf-8"), "alpha",
+                                                                   table, True, repo)[1] if rule == "P5"]
+
+        def brace_named():
+            return ["through the ref @{u}, which" in message for message in p5_messages(P5_BRACE_REF)]
+
+        check("preflight/p5-brace-ref", (p5(P5_BRACE_REF), brace_named()), (refused, [True]))
+        check("preflight/p5-submodule-remote", p5(P5_SUBMODULE), advised)
+        # the quoted-example choice: a reach quoted as an example refuses, as every git command line does
+        check("preflight/p5-quoted-example", p5(P5_QUOTED_EXAMPLE), refused)
+        # the refusal names the cure: the finding with the pin, and the REFUSE line in its general shape
+        printed = io.StringIO()
+        with open(base / "p5.md", "w", encoding="utf-8") as handle:
+            handle.write(P5_DENY[0].format(head))
+        with contextlib.redirect_stdout(printed):
+            main([str(base / "p5.md"), "--family", "alpha", "--table", str(base / "table.toml"), "--repo", str(repo)])
+        cure_named = [("clone, then git -C <dir> checkout --detach " + head) in message
+                      for message in p5_messages(P5_DENY[0])]
+        check("preflight/p5-cure-named", (cure_named, "(clone, then checkout --detach <pin>)" in printed.getvalue()),
+              ([True], True))
         # red on revert: each preflight rule, and each guard of its clean shape, patched out flips its fixture
         check("revert/p1-red", *flip([lambda: _outcome(P1_RELATIVE, "alpha")], [(0, [])], rule_p1=nothing))
         check("revert/p1-file-name-red", *flip([lambda: _outcome(P1_NOT_A_PATH, "alpha")],
@@ -4515,7 +4942,7 @@ def self_test(report_path=None):
         check("revert/p5-cure-red", *flip([lambda: p5(P5_ALLOW[0])], [refused], pin_matches=lambda ref, pins: False))
         # a commit id that is not the pin does not cure: with any commit id curing, the other checkout passes
         check("revert/p5-cure-pin-red", *flip([lambda: p5(P5_DENY[4])], [(0, [])], pin_matches=lambda ref, pins: True))
-        check("revert/p5-prohibition-red", *flip([lambda: p5(P5_ALLOW[4])], [refused], PROHIBITION_RE=never))
+        check("revert/p5-prohibition-red", *flip([lambda: p5(P5_ALLOW[4])], [refused], REACH_PROHIBITION_RE=never))
         check("revert/p5-fixed-ref-red", *flip([lambda: p5(P5_ALLOW[2])], [refused], hex_ref=lambda word: False))
         check("revert/p5-pin-clause-red", *flip([lambda: p5(P5_DENY[2])], [(0, [])], CONFIRM_RE=never))
         check("revert/p5-prose-advisory-red", *flip([lambda: p5(P5_ALLOW[5])], [refused],
@@ -4530,19 +4957,87 @@ def self_test(report_path=None):
         # pin beside the pin line's, and --revision is a flag
         check("revert/p5-prohibition-scope-red", *flip(
             [lambda text=text: p5(text) for text in P5_CLAUSE_DENY], [(0, [])] * 3,
-            prohibition_scopes=lambda line: [(found.end(), len(line)) for found in PROHIBITION_RE.finditer(line)][:1]))
+            prohibition_objects=lambda line, spans: [
+                (found.end(), len(line)) for found in PROHIBITION_RE.finditer(line)][:1]))
+
+        def clause_scopes(line, spans):
+            """The previous reading: a prohibition governs from its end to the first clause stop after it."""
+            stops = [position for position, character in enumerate(line) if character in CLAUSE_STOPS
+                     and line[position + 1:].lstrip("*_\"')]}")[:1] in ("", " ", "\t")
+                     and all(not start <= position < end for start, end in spans)]
+            return sorted((found.end(), next((stop for stop in stops if stop >= found.end()), len(line)))
+                          for found in PROHIBITION_RE.finditer(line))
+
+        check("revert/p5-prohibition-object-red", *flip(
+            [lambda text=text: p5(text) for text in P5_OBJECT_DENY], [(0, [])] * 6, prohibition_objects=clause_scopes))
+        check("revert/p5-prohibition-separators-red", *flip(
+            [lambda text=text: p5(text) for text in P5_SEPARATORS], [(0, [])] * 5, prohibition_objects=clause_scopes))
+        # with a prohibition word read inside a code span and after `=`, the quoted words and the value govern
+        check("revert/p5-prohibition-guard-red", *flip(
+            [lambda text=text: p5(text) for text in P5_OBJECT_GUARD], [(0, [])] * 2,
+            prohibitions=lambda line, spans: list(re.finditer(REACH_PROHIBITION_RE.pattern.replace("=", "", 1),
+                                                              line, re.I))))
+        # with every cure an instruction (any later commit id cures), or with no void word, the reports cure
+        check("revert/p5-cure-void-red", *flip(
+            [lambda text=text: p5(text) for text in P5_CURE_DENY[1:3]], [(0, [])] * 2, CURE_VOID_RE=never))
+        check("revert/p5-cure-shape-red", *flip(
+            [lambda text=text: p5(text) for text in P5_CURE_DENY[3:]], [(0, [])] * 2,
+            led=lambda line, spans, starts, opening: True))
         real_reach_refs = reach_refs
+        check("revert/p5-tree-reaches-red", *flip(
+            [lambda text=text: p5(text) for text in P5_TREE_DENY], [(0, [])] * 4,
+            REACH_REFS=REACH_REFS - {"merge", "rebase", "restore", "archive"}))
+        check("revert/p5-reset-mode-red", *flip(
+            [lambda text=text: p5(text) for text in P5_RESET_DENY], [(0, [])] * 2,
+            reach_refs=lambda subcommand, words: [] if subcommand == "reset" and not {
+                "--hard", "--keep", "--merge"} & set(words) else real_reach_refs(subcommand, words)))
+        check("revert/p5-path-restore-reach-red", *flip(
+            [lambda: p5(P5_PATH_RESTORE[1])], [(0, [])],
+            reach_refs=lambda subcommand, words: [ref for ref in real_reach_refs(subcommand, words)
+                                                  if subcommand not in PATH_RESTORE_REACHES or ref[2]]))
+        check("revert/p5-line-join-red", *flip(
+            [lambda text=text: p5(text) for text in P5_LINE_JOIN], [(0, []), (0, [("P5", "ADVISORY")])] + [
+                (0, [("P5", "ADVISORY")])],
+            p5_lines=lambda text: [(number, line.rstrip("\r")) for number, line in enumerate(text.split("\n"), 1)]))
+        check("revert/p5-no-git-advisory-red", *flip(
+            [lambda text=text: p5(text) for text in P5_NO_GIT[:3]], [(0, [])] * 3, GH_CHECKOUT_RE=never,
+            web_refs=nothing))
+        check("revert/p5-quoted-option-red", *flip(
+            [lambda: p5(P5_QUOTED_OPTION)], [(0, [])], GIT_OPTION_RE=re.compile(
+                r"\s+(?:-[Cc]\s+\S+|--(?:git-dir|work-tree|namespace|config-env|attr-source)\s+\S+"
+                r"|--?[A-Za-z][\w-]*(?:=\S+)?)")))
+        real_confirm_pins = confirm_pins
+
+        def confirm_but_reaches(line):
+            """The previous reading: a confirm-clause commit that is a reach's ref on its line is no pin."""
+            refs = set()
+            for start, end in option_commands(line):
+                if _subcommand(line, end) in REACH_REFS:
+                    words = [word for word in (_reach_word(word) for word in line[end:argument_stop(
+                        line, end, len(line))].split()) if word]
+                    refs.update(ref for ref, _, _ in reach_refs(_subcommand(line, end), words))
+            return [pin for pin in real_confirm_pins(line) if pin not in refs]
+
+        check("revert/p5-confirm-pin-reach-red", *flip([lambda: p5(P5_CONFIRM_REACH)], [(0, [])],
+                                                       confirm_pins=confirm_but_reaches))
+        check("revert/p5-brace-ref-red", *flip([brace_named], [[False]],
+                                               _reach_word=lambda word: _word_end(word.lstrip("\"'*_([{<"))))
+        check("revert/p5-submodule-remote-red", *flip([lambda: p5(P5_SUBMODULE)], [(0, [])],
+                                                      submodule_remote=lambda subcommand, words: False))
         check("revert/p5-fetch-tips-red", *flip(
             [lambda text=text: p5(text) for text in P5_FETCH_TIPS], [(0, [])] * 2,
             reach_refs=lambda subcommand, words: [ref for ref in real_reach_refs(subcommand, words)
                                                   if subcommand != "fetch" or ref[0]]))
         check("revert/p5-fetch-head-red", *flip([lambda text=text: p5(text) for text in P5_FETCH_HEAD],
                                                 [(0, []), refused], FETCH_REACHES=frozenset()))
-        check("revert/p5-cure-reach-red", *flip([lambda: p5(P5_FETCH_NO_CURE)], [(0, [])], CURE_REACHES=REACH_REFS))
+        check("revert/p5-cure-reach-red", *flip(
+            [lambda: p5(P5_FETCH_NO_CURE)], [(0, [])], CURE_REACHES=REACH_REFS,
+            reach_refs=lambda subcommand, words: [(ref, named, True) for ref, named, _ in real_reach_refs(
+                subcommand, words)]))
         check("revert/p5-fetch-dashdash-red", *flip([lambda: p5(P5_FETCH_DASHDASH[1])], [refused],
                                                     OPERANDS_AFTER_DASHDASH=frozenset()))
-        check("revert/p5-path-restore-red", *flip([lambda text=text: p5(text) for text in P5_PATH_RESTORE],
-                                                  [(0, []), refused], PATH_RESTORE_REACHES=frozenset()))
+        check("revert/p5-path-restore-red", *flip([lambda: p5(P5_PATH_RESTORE[0])], [(0, [])],
+                                                  PATH_RESTORE_REACHES=frozenset()))
         check("revert/p5-named-ref-red", *flip([lambda text=text: p5(text) for text in P5_NAMED_REF], [(0, [])] * 2,
                                                reach_moves=lambda ref, named: not fixed_ref(ref)))
         check("revert/p5-governing-pin-red", *flip(
@@ -4554,7 +5049,7 @@ def self_test(report_path=None):
             CLONE_REVISION_OPTIONS=frozenset()))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 135)
+    check("revert/every-flip-ran", len(flipped), 149)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -4586,14 +5081,19 @@ def self_test(report_path=None):
           "path missing at a pinned revision of 7 to 40 or 64 hex digits read with git cat-file after `..` is folded (P3; an unresolved pin, or a pin label with any "
           "other value, exits 2), P1 and P4 as ADVISORY, refuses a pin reached by a git command line through a "
           "ref that can move (a branch, a clone's --branch value however it is spelt, a fetch with no refspec, "
-          "FETCH_HEAD after a moving fetch) with no later checkout, switch, reset or worktree add of a commit id "
-          "matching the pin (a pin line's where there is one; a fetch or clone of the pin and a path restore cure "
-          "nothing), judges a "
-          "reach in a later clause or sentence than a prohibition, and prints one reached from prose (P5), and "
+          "FETCH_HEAD after a moving fetch, a merge, rebase, restore --source, archive or path restore of a "
+          "branch, a reset in any mode, a reach split by a backslash or after a git word at a line's end, a "
+          "global option quoted with a space) with no later checkout, switch, reset or worktree add of a commit id "
+          "matching the pin written as an instruction (a pin line's where there is one; a fetch or clone of the pin, "
+          "a path restore, a past report, a forbidden step and a quoted example cure nothing), names that cure in "
+          "the refusal, judges every reach that is not the object of a prohibition (a negation before another "
+          "verb, a prohibition word in a code span or after `=`, a second listed command line and a later clause "
+          "are judged), and prints one reached from prose, gh pr checkout, a web address naming a branch or a "
+          "submodule update --remote (P5), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
-          "detects the previous revisions' and loses its canary with each guard patched out; 30 repeated shapes "
+          "detects the previous revisions' and loses its canary with each guard patched out; 35 repeated shapes "
           "each evaluate in linear time at 1 MiB in a capped child that must exit 0; scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
           "missing, non-regular, backwards-range and unknown-family input exits 2); execution set reconciled "
