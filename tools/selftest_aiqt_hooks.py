@@ -23417,9 +23417,10 @@ def _main_isolated(monitor):
         # Real paths, so a change through no link reads the same lexically and physically wherever the
         # temporary directory lives (a linked /tmp would make every physical reading differ).
         gcs, gct = os.path.realpath(str(gs_cds)), os.path.realpath(str(gs_cdt))
-        # The guard reads an inherited CDPATH (_gensrc_cd_context), so every gb case is judged with none; the
-        # (gb-cd-env*) cases set one for themselves.
+        # The guard reads an inherited CDPATH and POSIXLY_CORRECT (_gensrc_cd_context), so every gb case is judged
+        # with neither; the (gb-cd-env*) and (gb-posix-env*) cases set one for themselves.
         os.environ.pop("CDPATH", None)
+        os.environ.pop("POSIXLY_CORRECT", None)
 
         def bdata(command, cwd):
             data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
@@ -23744,6 +23745,41 @@ def _main_isolated(monitor):
              "time \\time cd " + gct + " && echo x > GEN.md", gcs),
             ("(gb-cd27-flip) the same with a sink no reachable directory registers notes", "allow-note",
              "time \\time cd " + gct + " && echo x > notes.txt", gcs),
+            # bash in posix mode does not read time as its keyword before a word starting with - (time -p, time --,
+            # time -o FILE), so where a word of the command may turn posix mode on (one holding posix or
+            # POSIXLY_CORRECT), such a time is the time program and runs cd as a child; a time with no such word
+            # after it stays the keyword
+            ("(gb-cd28) after set -o posix, time -p is the time program, so GEN.md is judged where it was", "deny",
+             "set -o posix\ntime -p cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd28-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "set -o posix\ntime -p cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd29) after a POSIXLY_CORRECT assignment, time -- is the time program", "deny",
+             "POSIXLY_CORRECT=1\ntime -- cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd29-flip) in posix mode a time with no word starting with - after it is still the keyword",
+             "allow", "set -o posix\ntime cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd30) in posix mode time -o FILE is the time program too", "deny",
+             "set -o posix\ntime -o /dev/null cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd30-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "set -o posix\ntime -o /dev/null cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd31) a posix-mode time -p in a brace group after && is the time program", "deny",
+             "set -o posix\ntrue && { time -p cd " + gct + " && echo x > GEN.md; }", gcs),
+            ("(gb-cd31-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "set -o posix\ntrue && { time -p cd " + gct + " && echo x > notes.txt; }", gcs),
+            ("(gb-cd32) a set -o posix on the line of the time is read the same way, though bash parsed that time "
+             "before the mode changed (a disclosed over-denial)", "deny",
+             "set -o posix; time -p cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd32-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "set -o posix; time -p cd " + gct + " && echo x > notes.txt", gcs),
+            # a cd command word spelled other than cd (a path, another case) names no builtin: bash runs a program
+            # for it, a child process that never moves the shell
+            ("(gb-cd33) a cd spelled as a path is a program, so GEN.md is judged where it was", "deny",
+             "/usr/bin/cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd33-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "/usr/bin/cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd34) a cd spelled in capitals names no builtin either", "deny",
+             "CD " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd34-flip) the builtin cd spelled exactly cd moves the shell", "allow",
+             "cd " + gct + " && echo x > GEN.md", gcs),
             # the cannot-evaluate posture (decision d): an uncleared write denies on a registered name, notes otherwise
             ("(gb-m1) an opaque redirect naming nothing notes", "allow-note", "echo x > \"$F\"", gr),
             ("(gb-m2) an opaque redirect in a command naming GEN.md denies", "deny", "F=GEN.md; echo x > \"$F\"", gr),
@@ -23890,6 +23926,17 @@ def _main_isolated(monitor):
         finally:
             os.environ.pop("CDPATH", None)
         bexpect("(gb-cd-env2) with no CDPATH the same cd is certain", "allow", "cd ogen && echo x > b.txt", gcs)
+        # (gb-posix-env*) a POSIXLY_CORRECT this process inherits (the one the shell is assumed to inherit, which
+        # starts bash in posix mode) makes time -p the time program as a spelled one does; with none, the
+        # (gb-cd21-flip) case keeps it the keyword.
+        try:
+            os.environ["POSIXLY_CORRECT"] = "1"
+            bexpect("(gb-posix-env1) an inherited POSIXLY_CORRECT makes time -p the time program", "deny",
+                    "time -p cd " + gct + " && echo x > GEN.md", gcs)
+            bexpect("(gb-posix-env1-flip) the same with a sink no reachable directory registers notes",
+                    "allow-note", "time -p cd " + gct + " && echo x > notes.txt", gcs)
+        finally:
+            os.environ.pop("POSIXLY_CORRECT", None)
         # (gb-home*) a word spelling HOME steers a ~: a ~ cd operand or ~ sink is then read from every value HOME may
         # hold (each literal HOME=VALUE, the HOME of this process, and one the guard cannot name), never from the
         # HOME of this process alone; with no such word, ~ is that HOME (the empty self-test home unless a case
@@ -23912,6 +23959,26 @@ def _main_isolated(monitor):
                 "HOME=" + gct + "; tee ~/notes.txt < /dev/null", gcs)
         bexpect("(gb-home5-flip) a HOME prefix on cd ~ under an inherited HOME no registry covers notes",
                 "allow-note", "HOME=" + gcs + " cd ~ && echo x > OTHER.md", gcs)
+        # (gb-home7, gb-home9 to gb-home11) a ~ right after = or : in a word is a tilde bash may expand (it does in
+        # an assignment-shaped argument or redirection target outside posix mode), never a literal ~ path: such a
+        # sink is uncleared, a dd of=~ value is also judged as a leading ~ is, and such a cd operand reaches no
+        # directory the guard names.
+        bexpect("(gb-home7) a HOME assignment steers the ~ of dd of=~/x onto the sibling repo's OTHER.md", "deny",
+                "HOME=" + gct + "; dd if=/dev/null of=~/OTHER.md", gcs)
+        bexpect("(gb-home7-flip) the same dd onto a file nothing registers notes", "allow-note",
+                "HOME=" + gct + "; dd if=/dev/null of=~/notes.txt", gcs)
+        bexpect("(gb-home9) a ~ after = in a tee operand is uncleared, so naming GEN.md denies", "deny",
+                "tee x=~/GEN.md < /dev/null", gcs)
+        bexpect("(gb-home9-flip) the same tee naming nothing registered notes", "allow-note",
+                "tee x=~/notes.txt < /dev/null", gcs)
+        bexpect("(gb-home10) a ~ after = in a redirection target is uncleared, so naming GEN.md denies", "deny",
+                "echo x > x=~/GEN.md", gcs)
+        bexpect("(gb-home10-flip) the same redirect naming nothing registered notes", "allow-note",
+                "echo x > x=~/notes.txt", gcs)
+        bexpect("(gb-home11) a cd operand with a ~ after = leaves the directory unknown, so naming GEN.md denies",
+                "deny", "cd x=~ && echo x > GEN.md", gcs)
+        bexpect("(gb-home11-flip) the same cd then a sink naming nothing registered notes", "allow-note",
+                "cd x=~ && echo x > notes.txt", gcs)
         _gb_home = os.environ["HOME"]
         try:
             os.environ["HOME"] = gct
@@ -23921,11 +23988,15 @@ def _main_isolated(monitor):
                     "cd ~ && echo x > OTHER.md", gcs)
             bexpect("(gb-home6-flip) the same certain cd then a sink nothing registers allows", "allow",
                     "cd ~ && echo x > notes.txt", gcs)
+            bexpect("(gb-home8) with no word spelling HOME, the ~ of dd of=~/x is read as the HOME of this process",
+                    "deny", "dd if=/dev/null of=~/OTHER.md", gcs)
+            bexpect("(gb-home8-flip) the same dd onto a file nothing registers notes (a ~ after = stays uncleared)",
+                    "allow-note", "dd if=/dev/null of=~/notes.txt", gcs)
         finally:
             os.environ["HOME"] = _gb_home
         # (gb-hb*) the HOME reading budget at both ends, pinned at the size of one ~ segment (two words and one
         # redirect): within it the segment is read under each value of the spelled HOME, so a value landing on a
-        # registered target denies; past it the ~ is read as unknown alone, an uncleared write naming no registered
+        # registered target denies; past it the ~ is read under no value, an uncleared write naming no registered
         # target of a consulted registry, so it notes.
         _gb_real_home = aiqt_hooks._GENSRC_MAX_HOME
         try:
@@ -23933,8 +24004,15 @@ def _main_isolated(monitor):
             bexpect("(gb-hb1) a ~ segment within the HOME budget is judged under each value, so OTHER.md denies",
                     "deny", "HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
             aiqt_hooks._GENSRC_MAX_HOME = 2
-            bexpect("(gb-hb1-flip) the same segment past the HOME budget is read as unknown alone, so it notes",
+            bexpect("(gb-hb1-flip) the same segment past the HOME budget is read under no value, so it notes",
                     "allow-note", "HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
+            # (gb-hb1-names) the past-budget note says the budget applies to each reading of the command and that
+            # HOME may hold a literal value the command sets, never only that its value cannot be named.
+            _gb_code, _gb_obj, _gb_err = aiqt_hooks.gensrc_guard(bdata("HOME=" + gct + "; echo x > ~/OTHER.md", gcs))
+            _gb_note = str((_gb_obj or {}).get("systemMessage"))
+            if "applies to each reading" not in _gb_note or "a literal value the command sets" not in _gb_note:
+                failures.append("(gb-hb1-names) the past-budget note must say the budget applies to each reading "
+                                "and that HOME may hold a literal value, got {!r}".format(_gb_note))
         finally:
             aiqt_hooks._GENSRC_MAX_HOME = _gb_real_home
         # (gb-01-names) the incident deny names the source and the regenerate command; (gb-s2-names) the
