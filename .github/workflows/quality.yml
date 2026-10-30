@@ -265,9 +265,10 @@ jobs:
         run: python3 -I -B tools/selftest_opf_render.py
 
   # The OPF tooling gates and direct self-tests run in the three '3.14' jobs opf-tooling-a, opf-tooling-b
-  # and opf-tooling-c: every step kept exactly once, split between the jobs by measured step cost so the
-  # jobs' wall times stay close, each job's steps in their original relative order and a drift or live
-  # gate always right after its own self-test. The opf.py self-test itself runs in CI once, whole, in the
+  # and opf-tooling-c: every step kept exactly once, spread between the jobs by a local timing that stops
+  # each step at 20 seconds (whether the jobs' wall times come out close is still to be seen on a live
+  # run), each job's steps in their original relative order and a drift or live gate always right after
+  # its own self-test. The opf.py self-test itself runs in CI once, whole, in the
   # opf-host-patch job below; no '3.14' job runs it or any opf.py --self-test-group step. The local runner
   # runs it as its named groups (SELF_TEST_GROUPS in opf/tools/opf.py; the selector runs nothing unless
   # they hold every registered self-test exactly once). tools/check_ci_parity.py holds, in its self-test,

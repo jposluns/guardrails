@@ -270,37 +270,42 @@ subset: block mappings with plain keys, block sequences (a mapping may
 open on an item's line), one-line plain, single-quoted and backslash-free
 double-quoted scalars, one-line flow sequences of plain words, literal (|)
 block scalars and comments; a workflow outside that subset is
-cannot-evaluate (exit 2), never skipped. The workflows directory itself
-is read through lstat: a symlinked one can point this rule at another
-tree, so it is cannot-evaluate, never followed. A workflow entry that is
-not a regular file (a symlink, directory, FIFO or device, refused before
-any read, so none is followed or blocks the gate), a workflow it cannot
-read (a stat or read error or a byte outside printable ASCII plus tab and
-newline) or parse (an empty file, a tab, a document marker or directive,
-an anchor, alias or tag, a flow mapping, a folded scalar, a multi-line
-plain or quoted scalar, an indentless or one-line nested sequence, a
-repeated key, a key that is not plain, a line the indentation does not
-place, nesting past the interpreter's recursion limit), a uses: that is
-not one string, a step's uses: key spelled in another letter case (a step
-is a sequence-item mapping; whether a workflow reader folds key case is
-not modelled, and a key of an env: or other non-step mapping is data,
-never held to this rule), a with: or persist-credentials key of a
-checkout step spelled in another letter case, a step uses: starting with
-./ that does not name a file directly under .github/workflows/ (a local
-composite action's steps are not in these files; a file there is one this
-rule already reads whole), a checkout's with: that is not a mapping, a
-directory that cannot be listed and one holding no workflow file are each
-cannot-evaluate (exit 2), never skipped. The rules are CHECKOUT_RULES
-(persist-credentials and fail-closed); the self-test removes each from the
-running module and shows every case of it red without it, and the main
-wiring vectors run main([]) itself, so the checkout leg cannot be cut out
-of the process exit. Not read: a checkout inside a remote action or a
-remote reusable workflow, whose steps are not in these files (a step's
-local uses: is cannot-evaluate instead, unless it names a file directly
-under .github/workflows/, which this rule already reads); another action
-that writes credentials; an INPUT_PERSIST-CREDENTIALS value set through
-env:; and any other route by which a step obtains the job token (an
-action input that defaults to it among them).
+cannot-evaluate (exit 2), never skipped. Every component from the
+repository root to the workflows directory (.github and workflows; the
+root itself is resolved when the module loads) is read through lstat: a
+symlinked one can point this rule at another tree, so it is
+cannot-evaluate, never followed. A workflow entry that is not a regular
+file (a symlink, directory, FIFO or device, refused before any read, so
+none is followed or blocks the gate), a workflow it cannot read (a stat
+or read error or a byte outside printable ASCII plus tab and newline) or
+parse (an empty file, a tab, a document marker or directive, an anchor,
+alias or tag, a flow mapping, a folded scalar, a multi-line plain or
+quoted scalar, an indentless or one-line nested sequence, a repeated key,
+a key that is not plain, a line the indentation does not place, nesting
+past the interpreter's recursion limit), a uses: that is not one string,
+a step's uses: key spelled in another letter case (a step is a
+sequence-item mapping; whether a workflow reader folds key case is not
+modelled, and a key of an env: or other non-step mapping is data, never
+held to this rule), a with: or persist-credentials key of a checkout step
+spelled in another letter case, a step uses: starting with ./ once its
+surrounding whitespace is stripped, whatever path it names (a step cannot
+call a reusable workflow, which is a job-level uses:, so it runs a local
+action, a composite one among them, whose steps are not in these files; a
+path under .github/workflows/ is no exception), a checkout's with: that
+is not a mapping, a directory that cannot be listed and one holding no
+workflow file are each cannot-evaluate (exit 2), never skipped. The rules
+are CHECKOUT_RULES (persist-credentials and fail-closed); the self-test
+removes each from the running module and shows every case of it red
+without it, and the main wiring vectors run main([]) itself, so the
+checkout leg cannot be cut out of the process exit. Not read: a checkout
+inside a remote action or a remote reusable workflow, whose steps are not
+in these files (a step's local uses: is cannot-evaluate instead); the
+target of a job-level uses:, which is not resolved (a local reusable
+workflow it calls is read only as a workflow file directly under
+.github/workflows/, like every other); another action that writes
+credentials; an INPUT_PERSIST-CREDENTIALS value set through env:; and any
+other route by which a step obtains the job token (an action input that
+defaults to it among them).
 
 Exit convention (the higher of the parity leg's and the checkout-credentials
 leg's exit):
@@ -4395,15 +4400,23 @@ def _exact_key(mapping, key, line):
     return mapping.get(key, _ABSENT)
 
 
+def _local_step(uses):
+    """True when a step's uses: value names a local path: it starts with ./
+    once its surrounding whitespace is stripped, so a quoted ' ./tools/act'
+    is not read as a remote action."""
+    return uses.strip().startswith("./")
+
+
 def _checkout_steps(node, found, item=False):
     """Append (line, uses, mapping) to found for every mapping in the parsed
     tree whose uses: names actions/checkout (the part before @, letter case
     aside), wherever it sits. Only a sequence-item mapping (a step) is held
     to the uses: letter-case rule: a key of an env: or other non-step
-    mapping is data, not a step property. A step uses: starting with ./ is
-    cannot-evaluate unless it names a file directly under .github/workflows/
-    (a file this rule already reads whole): a local composite action's steps
-    are not in these files."""
+    mapping is data, not a step property. A step uses: naming a local path
+    (_local_step) is cannot-evaluate whatever it names: a step cannot call a
+    reusable workflow, so it runs a local action, whose steps are not in
+    these files. A job-level uses: (a reusable workflow call) is not held to
+    that rule."""
     if isinstance(node, dict):
         if item:
             uses = _exact_key(node, "uses", 0)
@@ -4419,15 +4432,11 @@ def _checkout_steps(node, found, item=False):
             if (name == CHECKOUT_ACTION
                     or name.startswith(CHECKOUT_ACTION + "/")):
                 found.append((line, uses, node))
-            elif item and uses.startswith("./"):
-                parts = uses[2:].split("/")
-                if not (parts[:2] == [".github", "workflows"]
-                        and len(parts) == 3 and parts[2]):
-                    raise WorkflowShapeError(
-                        line, "a step uses: of a local action ({!r}): its "
-                        "steps are not in these files, and only a file "
-                        "directly under .github/workflows/, which this rule "
-                        "already reads, stays readable".format(uses))
+            elif item and _local_step(uses):
+                raise WorkflowShapeError(
+                    line, "a step uses: of a local action ({!r}): a step "
+                    "cannot call a reusable workflow, and a local action's "
+                    "steps are not in these files".format(uses))
         for value in node.values():
             _checkout_steps(value, found)
     elif isinstance(node, list):
@@ -4466,24 +4475,31 @@ def checkout_credentials(directory=WORKFLOWS_PATH, reader=None):
     diagnostics = []
     findings = []
     files = steps = 0
-    # The directory itself is read through lstat: a symlinked workflows
-    # directory can point this rule at another tree, so it is refused,
-    # never followed.
+    # Every component from the repository root to the workflows directory
+    # (.github and workflows; ROOT itself is resolved) is read through
+    # lstat, the outermost first: a symlinked one can point this rule at
+    # another tree, so it is refused, never followed.
     names = ()
+    components = [directory, *directory.parents][
+        :len(Path(WORKFLOWS_SOURCE).parts)]
+    linked = None
     try:
-        linked = stat.S_ISLNK(directory.lstat().st_mode)
+        for component in reversed(components):
+            if stat.S_ISLNK(component.lstat().st_mode):
+                linked = component
+                break
     except OSError as exc:
         if fail_closed:
             diagnostics.append(_diagnostic(
                 WORKFLOWS_SOURCE, 0, "workflow-directory",
                 "cannot list {} ({})".format(directory, type(exc).__name__)))
     else:
-        if linked:
+        if linked is not None:
             if fail_closed:
                 diagnostics.append(_diagnostic(
                     WORKFLOWS_SOURCE, 0, "workflow-directory",
-                    "a symlinked workflows directory is not read: "
-                    "{}".format(directory)))
+                    "a symlink on the path from the repository root to the "
+                    "workflows directory is not read: {}".format(linked)))
         else:
             try:
                 names = sorted(
@@ -8756,10 +8772,43 @@ def self_test():
     env_uses = checkout_file(persist_as("false") + (
         "      - name: Note", "        shell: bash", "        env:",
         "          Uses: actions/checkout@v4", "        run: echo ok"))
-    local_action = checkout_file(persist_as("false") + (
-        "      - uses: ./local/action",))
-    local_workflow = checkout_file(persist_as("false") + (
-        "      - uses: ./.github/workflows/other.yml",))
+
+    def local_step(uses):
+        return checkout_file(persist_as("false") + ("      - uses: " + uses,))
+    local_action = local_step("./local/action")
+    job_call = (
+        "name: F\non: push\njobs:\n  call:\n"
+        "    uses: ./.github/workflows/other.yml\n"
+        "  one:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n        with:\n"
+        "          persist-credentials: false\n").encode("ascii")
+    leading_space = (("ci.yml", local_step("' ./tools/act'")),)
+    # Each step uses: below names a local path a step can only run as a
+    # local action, so each is cannot-evaluate; the files value carries an
+    # act directory or a regular other.yml where the vector names one. The
+    # third member is true where the one-part rule (one_part_local_step)
+    # accepted the vector; the nested path and the trailing space were
+    # refused under it too.
+    local_cases = (
+        ("a step uses: of a directory under .github/workflows/ is "
+         "cannot-evaluate", (("ci.yml", local_step("./.github/workflows/act")),
+                             ("act", None)), True),
+        ("a step uses: of .. under .github/workflows/ is cannot-evaluate",
+         (("ci.yml", local_step("./.github/workflows/..")),), True),
+        ("a step uses: of . under .github/workflows/ is cannot-evaluate",
+         (("ci.yml", local_step("./.github/workflows/.")),), True),
+        ("a step uses: of a nested path under .github/workflows/ is "
+         "cannot-evaluate", (("ci.yml", local_step(
+             "./.github/workflows/act/action.yml")), ("act", None)), False),
+        ("a step uses: of a regular .yml under .github/workflows/ is "
+         "cannot-evaluate", (("ci.yml", local_step(
+             "./.github/workflows/other.yml")), ("other.yml", other)), True),
+        ("a step uses: of a local path after a quoted leading space is "
+         "cannot-evaluate", leading_space, True),
+        ("a step uses: of a local path before a quoted trailing space is "
+         "cannot-evaluate", (("ci.yml", local_step("'./tools/act '")),),
+         False),
+    )
     persist = "persist-credentials"
     closed = "fail-closed"
 
@@ -8829,12 +8878,19 @@ def self_test():
         ("a local-action step uses: is cannot-evaluate",
          (("ci.yml", local_action),), 2,
          "a step uses: of a local action", closed),
-        ("a local uses: of a file under .github/workflows/ stays read",
-         (("ci.yml", local_workflow),), 0,
-         "PASS: 1 actions/checkout step(s) in 1 workflow file(s)", None),
+    ) + tuple(
+        (label, files, 2, "a step uses: of a local action", closed)
+        for label, files, _ in local_cases) + (
+        ("a job-level uses: of a local reusable workflow is not held to "
+         "the step rule", (("ci.yml", job_call), ("other.yml", other)), 0,
+         "PASS: 2 actions/checkout step(s) in 2 workflow file(s)", None),
         ("a symlinked workflows directory is cannot-evaluate, never "
-         "followed", "symlink", 2, "a symlinked workflows directory",
-         closed),
+         "followed", "symlink", 2, "a symlink on the path from the "
+         "repository root to the workflows directory", closed),
+        ("a symlinked ancestor of the workflows directory is "
+         "cannot-evaluate, never followed", "ancestor-symlink", 2,
+         "a symlink on the path from the repository root to the "
+         "workflows directory", closed),
         ("a workflow that cannot be read is cannot-evaluate",
          (("ci.yml", compliant),), 2, "[read-error]", closed, unreadable),
         ("a workflow entry that is a directory is cannot-evaluate",
@@ -8910,27 +8966,41 @@ def self_test():
         ("a missing workflow directory is cannot-evaluate", None, 2,
          "cannot list", closed),
     )
+
+    def checkout_directory(case, files):
+        # The files value "ancestor-symlink" makes the workflows
+        # directory's parent a symlink to a directory holding a compliant
+        # one, the workflows directory itself a real directory.
+        directory = case / "workflows"
+        if files == "symlink":
+            real = case / "real"
+            real.mkdir(parents=True)
+            (real / "ci.yml").write_bytes(compliant)
+            directory.symlink_to(real)
+        elif files == "ancestor-symlink":
+            real = case.parent / (case.name + "-real")
+            (real / "workflows").mkdir(parents=True)
+            (real / "workflows" / "ci.yml").write_bytes(compliant)
+            case.symlink_to(real)
+        elif files is not None:
+            directory.mkdir(parents=True)
+            for name, data in files:
+                if data is None:
+                    (directory / name).mkdir()
+                elif isinstance(data, str):
+                    (directory / name).symlink_to(data)
+                else:
+                    (directory / name).write_bytes(data)
+        return directory
+
     rules_shown = set()
     with tempfile.TemporaryDirectory(prefix="ci-parity-checkout-") as tmp:
         for number, (label, files, want, fragment, rule, *reader) in enumerate(
                 checkout_cases):
             count += 1
             reader = reader[0] if reader else None
-            directory = Path(tmp) / "case{}".format(number) / "workflows"
-            if files == "symlink":
-                real = directory.parent / "real"
-                real.mkdir(parents=True)
-                (real / "ci.yml").write_bytes(compliant)
-                directory.symlink_to(real)
-            elif files is not None:
-                directory.mkdir(parents=True)
-                for name, data in files:
-                    if data is None:
-                        (directory / name).mkdir()
-                    elif isinstance(data, str):
-                        (directory / name).symlink_to(data)
-                    else:
-                        (directory / name).write_bytes(data)
+            directory = checkout_directory(
+                Path(tmp) / "case{}".format(number), files)
             report = checkout_credentials(directory, reader=reader)
             rendered = render_checkout(report)
             if report.code != want or fragment not in rendered:
@@ -8952,6 +9022,41 @@ def self_test():
         failures.append(
             "42 checkout: a rule with no case shown red without it: "
             "{}".format(sorted(CHECKOUT_RULES - rules_shown)))
+
+    # Each flip restores an earlier acceptance in the running module, and
+    # every vector it reopens must pass there, so each is red without the
+    # change: the one-part rule that read a step uses: of
+    # ./.github/workflows/<name> as a workflow file this rule reads, the
+    # local check without whitespace stripping, and an lstat of the
+    # workflows directory alone (a one-component WORKFLOWS_SOURCE).
+    def one_part_local_step(uses):
+        parts = uses[2:].split("/")
+        return uses.startswith("./") and not (
+            parts[:2] == [".github", "workflows"] and len(parts) == 3
+            and parts[2])
+
+    flips = tuple(
+        (label, files, "_local_step", one_part_local_step)
+        for label, files, reopened in local_cases if reopened) + (
+        ("a step uses: of a local path after a quoted leading space is "
+         "cannot-evaluate", leading_space, "_local_step",
+         lambda uses: uses.startswith("./")),
+        ("a symlinked ancestor of the workflows directory is "
+         "cannot-evaluate, never followed", "ancestor-symlink",
+         "WORKFLOWS_SOURCE", "workflows"),
+    )
+    with tempfile.TemporaryDirectory(prefix="ci-parity-flip-") as tmp:
+        for number, (label, files, name, value) in enumerate(flips):
+            count += 1
+            directory = checkout_directory(
+                Path(tmp) / "case{}".format(number), files)
+            with patch.object(sys.modules[__name__], name, value):
+                flipped = checkout_credentials(directory)
+            if flipped.code != 0:
+                failures.append(
+                    "42 checkout {}: not red on the flip of {} (the flip "
+                    "exits {}, not 0)\n{}".format(
+                        label, name, flipped.code, render_checkout(flipped)))
 
     # 43 MAIN WIRING: these vectors run main([]) itself, with WORKFLOWS_PATH
     # pointed at a scratch directory, so the checkout-credentials leg cannot
