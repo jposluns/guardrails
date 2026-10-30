@@ -1747,23 +1747,25 @@ def _moved_row_types(mid, mtype, enabled_types):
 
 def _dest_index_has_id(root_fd, machine_rel, dest, target_id, rep):
     """True when the store-relative index `dest` (an `archive.toml` moved destination) actually carries a
-    row for `target_id`. A dest that escapes the store, is unreadable, or is absent is fail-closed: it
-    records a finding / cannot-evaluate and returns False, so an enumerated id whose destination cannot be
-    confirmed is never read as present."""
+    row for `target_id`; False when it was read, or is absent, and carries none; None when it could not be
+    read. A dest that escapes the store, is unreadable, or is absent is fail-closed: it records a finding /
+    cannot-evaluate and returns False or None, so an enumerated id whose destination cannot be confirmed is
+    never read as present. The caller tells the two apart: a destination read without the row leaves its
+    type unconfirmed, while one never read leaves a record source unread."""
     if not _is_contained_relpath(dest):
         rep.finding("C-ARCHIVE-ENUM: archive destination {!r} is not a contained store-relative path "
                     "(spec 14.2); NEVER opened".format(dest))
-        return False
+        return None
     full = _rel(machine_rel, dest)
     data, st = _read_toml(root_fd, full, rep)
     if st == "error":
-        return False
+        return None
     if st == "absent":
         rep.finding("C-ARCHIVE-ENUM: archive destination {!r} does not exist".format(dest))
         return False
     rows = _index_rows(data, full, rep)
     if rows is None:
-        return False
+        return None
     for row in rows:
         if isinstance(row, dict) and row.get("id") == target_id:
             return True
@@ -1907,26 +1909,32 @@ def _archive_triaged_dir(archive_rel, path):
 
 
 def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1,
-                      unread=None):
+                      unread=None, unconfirmed=None):
     """Walk the archive tree, validating each bucket's archive.toml, its archived non-worklog records, and
     its archived worklog, and reconciling the enumeration BIDIRECTIONALLY against what is actually present
     (OPF-SPEC 12/13). Enumeration and record-schema faults attribute to the caller's C-ARCHIVE-ENUM focus;
     the rotation-eligibility (F4) findings are collected into a returned list for C-ROTATION. Returns
     (archive_recs, archive_worklogs, rotatable) where archive_worklogs maps a year to its WL-number -> entry
     map. Archive absent means no rotation (clean); a present bucket with no archive.toml is CANNOT-EVALUATE,
-    never 'no rotation happened'. No loop is sized by a declared span endpoint. Every type whose
-    archived records could not all be seated joins `unread` (when given): an archived index that is
+    never 'no rotation happened'. No loop is sized by a declared span endpoint. Every type with an
+    archived record source that could not be read joins `unread` (when given): an archived index that is
     unreadable or malformed or a row that is skipped adds its type, a bucket or archive tree that
-    cannot be walked adds every enabled type, and a moved row that cannot be reconciled adds the types
-    _moved_row_types names for it: a row dropped as malformed (its id, type or destination), a row
-    whose declared type is not a roster type or disagrees with its id's namespace, and an enumerated
-    moved id whose declared destination is wrong or cannot confirm the record (that record is then
-    confirmed seated nowhere, so its type's population is incomplete for the current-state joins). The
-    archived worklog adds "worklog" when the bucket's worklog.toml is listed but cannot be read, when an
-    entry is left out of its map, and when a worklog_moved row is dropped as malformed or its span
-    enumerates an entry the bucket's worklog does not hold."""
+    cannot be walked adds every enabled type, a moved id whose destination cannot be read adds the types
+    _moved_row_types names for it, and the archived worklog adds "worklog" when the bucket's worklog.toml
+    is listed but cannot be read or an entry is left out of its map. Every type whose population a
+    rotation leaves unconfirmed though its sources were read joins `unconfirmed` (when given; `unread`
+    otherwise): a moved row that cannot be reconciled adds the types _moved_row_types names for it, for a
+    row dropped as malformed (its id, type or destination), a row whose declared type is not a roster type
+    or disagrees with its id's namespace, and an enumerated moved id whose declared destination is wrong or
+    was read without the record (that record is then confirmed seated nowhere, so its type's population is
+    incomplete for the current-state joins), and the archived worklog adds "worklog" when a worklog_moved
+    row is dropped as malformed or its span is malformed or enumerates an entry the bucket's worklog does
+    not hold. The record ids that were read stand either way, so only the `unread` types leave an id's
+    presence unknown."""
     if unread is None:
         unread = set()
+    if unconfirmed is None:
+        unconfirmed = unread
     archive_recs = []
     archive_worklogs = {}
     rotatable = []
@@ -1978,7 +1986,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
         for mid, mtype in dropped:
             # A row dropped as malformed names a rotation that cannot be reconciled: the population of
             # each type it could stand for is incomplete.
-            unread.update(_moved_row_types(mid, mtype, enabled_types))
+            unconfirmed.update(_moved_row_types(mid, mtype, enabled_types))
         if moved and not wl_moved:
             # Per-bucket rotation binding: a bucket that rotates non-worklog records MUST carry an archived
             # worklog span to bind them to a released period (spec 12). archive_wl_ids aggregates GLOBALLY,
@@ -2075,13 +2083,13 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                             "(spec 8.1)".format(mid, mtype))
                 # No type index can seat the record under a type the roster does not have: the type its
                 # id binds is incomplete.
-                unread.update(row_types)
+                unconfirmed.update(row_types)
             elif id_ns is not None and id_ns != norm_ns:
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r} (namespace {}) but the id "
                             "namespace is {} (spec 8.1)".format(mid, mtype, norm_ns, id_ns))
                 # Whatever the destination holds, the record is not seated as the type its id binds, and
                 # which of the two it is cannot be told: both populations are incomplete.
-                unread.update(row_types)
+                unconfirmed.update(row_types)
             want_base = "{}{}".format(mtype, INDEX_SUFFIX)
             expected_dest = _rel(bucket_rel, want_base)
             if dest != expected_dest:
@@ -2091,15 +2099,22 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} destination {!r} is not this bucket's type index "
                             "{!r} (a rotation lands in its declaring bucket; spec 12)".format(
                                 mid, dest, expected_dest))
-                unread.update(row_types)
-            elif not _dest_index_has_id(root_fd, machine_rel, dest, mid, rep):
-                rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination {!r} "
-                            "(a rotation must land where it says; spec 12:981-982)".format(mid, dest))
-                # The store says this record was rotated here, yet no read confirmed it seated anywhere
-                # (an absent, unreadable or malformed destination, or one without the row): the type's
-                # record population is incomplete, so its current-state join must not read as a pass
-                # over the records that were found (spec 8.5).
-                unread.update(row_types)
+                unconfirmed.update(row_types)
+            else:
+                seated = _dest_index_has_id(root_fd, machine_rel, dest, mid, rep)
+                if not seated:
+                    rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination {!r} "
+                                "(a rotation must land where it says; spec 12:981-982)".format(mid, dest))
+                    # The store says this record was rotated here, yet no read confirmed it seated anywhere
+                    # (an absent, unreadable or malformed destination, or one without the row): the type's
+                    # record population is incomplete, so its current-state join must not read as a pass
+                    # over the records that were found (spec 8.5). A destination read without the row (or
+                    # absent) leaves the ids that were read standing; one that could not be read is a
+                    # record source not read.
+                    if seated is None:
+                        unread.update(row_types)
+                    else:
+                        unconfirmed.update(row_types)
             found_type = present_types.get(mid)
             if found_type is not None and found_type != mtype:
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r} but the archived record found "
@@ -2130,7 +2145,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             if a is None or b is None or a > b:
                 rep.finding("C-ARCHIVE-ENUM: worklog_moved span {} in {} is not a well-formed [WL-a, WL-b] "
                             "range (spec 8.2/12)".format(_safe_display(span), bucket))
-                unread.add("worklog")      # the entries it names cannot be reconciled
+                unconfirmed.add("worklog")      # the entries it names cannot be reconciled
                 continue
             spans.append((a, b, dest))
         spans.sort()
@@ -2166,7 +2181,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 # The store says those entries were rotated here, yet the bucket's worklog does not hold
                 # them: the worklog population is not confirmed complete, as for a moved record its
                 # destination cannot confirm.
-                unread.add("worklog")
+                unconfirmed.add("worklog")
     return archive_recs, archive_worklogs, rotatable
 
 
@@ -2195,8 +2210,8 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
     is not reported here: the driver runs _check_importer_receipts beside this join on every store, and
     that arm reports it, or accepts in its place the remedy spec 8.6 defines (a maintainer-authored
     `corrects` decision), so the one defect is reported once and the remedy is never refused. When the
-    backlog_item or done records could not all be read, or a seated one's status or links could not be
-    interpreted (`unread` from the collectors, widened by _make_rec's `unparsed`), the join is
+    backlog_item or done records could not all be read or confirmed, or a seated one's status or links
+    could not be interpreted (`unread` from the collectors, widened by _make_rec's `unparsed`), the join is
     CANNOT-EVALUATE and is not run: a missing or unreadable receipt or target could hide a defect or report
     a false one."""
     clean = [r for r in recs if r.location != "imported"]
@@ -2208,9 +2223,9 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
                      _partial_causes(frozenset(), frozenset(), "", no_kind)))
     unread = unread | {r.rtype for r in clean if r.unparsed - {"actor"}}
     if unread & {"backlog_item", "done"}:
-        rep.cant("C-RECEIPTS: the backlog_item and done records could not all be read or interpreted (see "
-                 "C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the receipt join is not evaluated "
-                 "over a partial set (spec 8.5)")
+        rep.cant("C-RECEIPTS: the backlog_item and done records could not all be read, confirmed or "
+                 "interpreted (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the receipt join is "
+                 "not evaluated over a partial set (spec 8.5)")
         return
     joined = [r for r in recs if r.location != "imported" and r.actor_kind != "importer"]
     bi_state = {r.id: (r.state, r.qual) for r in joined if r.rtype == "backlog_item" and isinstance(r.id, str)}
@@ -2280,8 +2295,8 @@ def _check_handoff(recs, rep, unread=frozenset()):
     a prefix or an extension) the schema does not admit, reads as None and counts, fail-closed
     (validate_record already names the unknown or unreadable actor), never a silent pass; its "actor"
     entry in _make_rec's `unparsed` is therefore not a cause here, since counting it can only add to the
-    count. When the handoff records could not all be read (`unread`, from the collectors), or a seated
-    handoff's status or links could not be interpreted (_make_rec's `unparsed`: a record read as 'not
+    count. When the handoff records could not all be read or confirmed (`unread`, from the collectors), or
+    a seated handoff's status or links could not be interpreted (_make_rec's `unparsed`: a record read as 'not
     current' only because its status is unreadable is a partial count, never a pass), the check is
     CANNOT-EVALUATE; a count above one is still reported, since a record not read or not interpreted can
     only add to it."""
@@ -2294,8 +2309,8 @@ def _check_handoff(recs, rep, unread=frozenset()):
                     "most one current handoff exists among clean records not authored by a known "
                     "importer (spec 8.5/8.6)".format(len(current)))
     if "handoff" in unread:
-        rep.cant("C-HANDOFF: the handoff records could not all be read or interpreted (see C-RECORDS, "
-                 "C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); "
+        rep.cant("C-HANDOFF: the handoff records could not all be read, confirmed or interpreted (see "
+                 "C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); "
                  "the at-most-one-current count is not evaluated over a partial set (spec 8.5)")
 
 
@@ -2384,9 +2399,9 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
     the count-only-over-one form missed (F14). A wholly-undecided chain legitimately has zero and is not
     flagged. The section 8.6 provenance firewall lives in decision_chains itself, so the writer's
     pre-publication chain check applies it identically. When the pending_decision records could not all
-    be read (`unread`, from the collectors), or a seated one's status or links could not be interpreted
-    (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run: a member not read or not
-    interpreted can split, join or resolve a chain. A pending_decision whose actor kind is absent,
+    be read or confirmed (`unread`, from the collectors), or a seated one's status or links could not be
+    interpreted (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run: a member not read or
+    not interpreted can split, join or resolve a chain. A pending_decision whose actor kind is absent,
     unreadable or a lookalike the schema does not admit (`unparsed` "actor") is not known to be
     importer-authored or not, so the check is then CANNOT-EVALUATE naming it, never a pass; it still runs,
     decision_chains reading such a record as not importer-authored, and a finding it raises over them
@@ -2400,9 +2415,9 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
                      _partial_causes(frozenset(), frozenset(), "", no_kind)))
     unread = unread | {r.rtype for r in clean if r.unparsed - {"actor"}}
     if "pending_decision" in unread:
-        rep.cant("C-DECISION-CHAINS: the pending_decision records could not all be read or interpreted "
-                 "(see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the chains are not evaluated "
-                 "over a partial set (spec 8.5)")
+        rep.cant("C-DECISION-CHAINS: the pending_decision records could not all be read, confirmed or "
+                 "interpreted (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the chains are not "
+                 "evaluated over a partial set (spec 8.5)")
         return
     for _members, current in decision_chains(recs, by_id):
         if len(current) != 1:
@@ -2429,20 +2444,20 @@ def _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets, unr
     of their own leaf series (spec 8.2), so a row C-ID-SPACE refuses as outside its series (a clean id, or
     another type's namespace, in an imported leaf) never makes a link or scope resolve. This check reads
     every record of BOTH series as a link source and as a target, so its source set is complete only when
-    every collection was: when any record type could not be read in full (`unread`, from the collectors),
-    the imported-row collection skipped an unreadable, absent or malformed leaf or an unidentifiable row
-    (`imported_complete` False), or a record of either series carries a links or scopes value that could
-    not be interpreted (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run, and its
-    message names every one of those causes that holds. A target could lie in the unread population (a
-    false dangling finding) and an unread or uninterpreted record's own links or scopes could dangle
-    unseen (a false pass), so neither direction is evaluated over a partial set."""
+    every collection was: when any record type could not be read or confirmed in full (`unread`, from the
+    collectors), the imported-row collection skipped an unreadable, absent or malformed leaf or an
+    unidentifiable row (`imported_complete` False), or a record of either series carries a links or scopes
+    value that could not be interpreted (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not
+    run, and its message names every one of those causes that holds. A target could lie in the unread
+    population (a false dangling finding) and an unread or uninterpreted record's own links or scopes could
+    dangle unseen (a false pass), so neither direction is evaluated over a partial set."""
     link_fields = {"links", "scopes"}
     uninterpreted = {r.rtype for r in recs if r.unparsed & link_fields}
     imported_uninterpreted = any(r.unparsed & link_fields for r in imported_recs)
     if unread or uninterpreted or not imported_complete or imported_uninterpreted:
         causes = []
         if unread:
-            causes.append("the records of {} could not all be read".format(
+            causes.append("the records of {} could not all be read or confirmed".format(
                 ", ".join(repr(t) for t in sorted(unread))))
         if uninterpreted:
             causes.append("the links or scopes of {} records could not be interpreted".format(
@@ -3113,11 +3128,11 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
 
 def _partial_causes(unread, uninterpreted, fields, no_kind=frozenset()):
     # The causes a fail-closed rule names, in the C-LINKS wording: the types whose records were not all
-    # read, the types whose records carry a `fields` value that could not be interpreted, then the types
-    # whose records carry an actor kind that is absent, unreadable or not one ACTOR_KINDS holds.
+    # read or confirmed, the types whose records carry a `fields` value that could not be interpreted, then
+    # the types whose records carry an actor kind that is absent, unreadable or not one ACTOR_KINDS holds.
     causes = []
     if unread:
-        causes.append("the records of {} could not all be read".format(
+        causes.append("the records of {} could not all be read or confirmed".format(
             ", ".join(repr(t) for t in sorted(unread))))
     if uninterpreted:
         causes.append("the {} of {} records could not be interpreted".format(
@@ -3270,7 +3285,7 @@ def _verify_immutable_body(rid, cur, prior_digests, rep):
                     "snapshot (a created-terminal record does not change; spec 8.5)".format(rid))
 
 
-def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, unread=frozenset()):
+def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, source_unread=frozenset()):
     """C-HISTORY-RESURRECTION: for every id in the prior committed snapshot, confirm it did not resurrect
     across time (OPF-SPEC 8.4/13). A prior unqualified-terminal state now in any other state is a definite
     finding (actor-independent). A created-terminal record's BODY is additionally checked for preservation
@@ -3280,13 +3295,17 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, unrea
     the envelope, is CANNOT-EVALUATE (never accept-if-any-actor; codex-6); a rejection-shaped transition
     needing a pre-proposal state the snapshot cannot supply is likewise CANNOT-EVALUATE. Every durable prior
     id must remain present in active or archive (the across-time complement of the no-deletion check). A prior
-    id absent from a type whose records could not all be read or confirmed (`unread`, from the collectors) is
-    not read as vanished: the presence check is CANNOT-EVALUATE for that type, never a false finding."""
-    unconfirmed = set()
+    id absent from a type with a record source that could not be read (`source_unread`, from the collectors)
+    is not read as vanished: the presence check is CANNOT-EVALUATE for that type, never a false finding. A
+    type whose sources were all read is graded even where a rotation left it unconfirmed, since an id absent
+    from every source read is absent. Reachability: `opf doctor` builds its prior from git, and that prior
+    never carries a worklog id (the worklog is a ledger, not a type index), so the worklog half of this
+    gate is reached only by a caller that supplies the observations itself."""
+    unknown = set()
     for rid in sorted(prior_records):
         ptype, pstatus = prior_records[rid]
-        if rid not in all_ids and ptype in unread:
-            unconfirmed.add(ptype)
+        if rid not in all_ids and ptype in source_unread:
+            unknown.add(ptype)
             continue
         if rid not in all_ids:
             rep.finding("C-HISTORY-RESURRECTION: prior record {!r} is absent from both the active store and "
@@ -3335,10 +3354,10 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, unrea
         rep.cant("C-HISTORY-RESURRECTION: prior record {!r} transition {!r} -> {!r} is legal for some actor "
                  "kinds but illegal for others (actor-dependent); the last-transition actor is not "
                  "identifiable from the prior snapshot (spec 8.4/8.5)".format(rid, pstatus, cur_status))
-    if unconfirmed:
-        rep.cant("C-HISTORY-RESURRECTION: the records of {} could not all be read or confirmed (see C-RECORDS "
-                 "and C-ARCHIVE-ENUM); prior record presence is not evaluated over a partial set (spec "
-                 "12/13)".format(", ".join(repr(t) for t in sorted(unconfirmed))))
+    if unknown:
+        rep.cant("C-HISTORY-RESURRECTION: the records of {} could not all be read (see C-RECORDS and "
+                 "C-ARCHIVE-ENUM); prior record presence is not evaluated over a partial set (spec "
+                 "12/13)".format(", ".join(repr(t) for t in sorted(unknown))))
 
 
 # Homes-2 durable evidence (C-EVIDENCE-ENUM, spec 4.2). Each imported/<kind>/<run-id>/ bundle carries
@@ -4664,7 +4683,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-RECORDS: gather + validate every active record; collect per-record reconciliation ----------
     rep.ran("C-RECORDS")
-    unread = set()          # the record types whose population a collector could not read in full
+    unread = set()          # the record types whose population a collector could not read or confirm in full
     active_recs, recon = _gather_active_records(root_fd, machine_rel, enabled_types, layout,
                                                 registered_vendors, rep, unread=unread)
     try:
@@ -4703,12 +4722,20 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-ARCHIVE-ENUM: walk + reconcile the archive; collect rotation-eligibility for C-ROTATION -----
     rep.ran("C-ARCHIVE-ENUM")
-    # The walk records into its own set, joined to `unread` below, so C-ROTATION, which reads the archived
-    # worklog alone, can tell an archived worklog left unread from an active ledger that was not read.
-    archive_unread = set()
+    # The walk records into its own sets, joined to `unread` below, so C-ROTATION, which reads the archived
+    # worklog alone, can tell an archived worklog left unread or unconfirmed from an active ledger that was
+    # not read.
+    archive_unread, archive_unconfirmed = set(), set()
     archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, enabled_types,
                                                                   registered_vendors, import_status, rep,
-                                                                  homes=homes, unread=archive_unread)
+                                                                  homes=homes, unread=archive_unread,
+                                                                  unconfirmed=archive_unconfirmed)
+    # The record types with a record source (an index, a worklog, a bucket or a destination) that could not
+    # be read: an id of one may be held where nothing was read. `unread` also holds the types a rotation
+    # leaves unconfirmed though every source was read, so a current-state join over one is not a pass,
+    # while the ids that were read still decide whether a durable id is present.
+    source_unread = unread | archive_unread
+    archive_unread |= archive_unconfirmed
     unread |= archive_unread
 
     # --- C-EVIDENCE-ENUM (homes 2 only): reconcile the evidence homes against their inventories -------
@@ -4983,10 +5010,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         hw = high.get(ns)
         if not (isinstance(hw, int) and not isinstance(hw, bool) and hw >= 0):
             continue     # an absent / malformed counter is C-COUNTERS' finding, not this check's
-        ns_unread = sorted(t for t, p in enabled_types.items() if p == ns and t in unread)
+        ns_unread = sorted(t for t, p in enabled_types.items() if p == ns and t in source_unread)
         if ns_unread:
-            # A record not read reads as deleted, so the namespace's line is not scanned.
-            rep.cant("C-NO-DELETION: the records of {} could not all be read or confirmed (see C-RECORDS and "
+            # A record not read reads as deleted, so the namespace's line is not scanned. A type a rotation
+            # left unconfirmed is still scanned: every source was read, so an id absent from them is absent.
+            rep.cant("C-NO-DELETION: the records of {} could not all be read (see C-RECORDS and "
                      "C-ARCHIVE-ENUM); {}-<n> no-deletion is not evaluated over a partial set (spec "
                      "12/13)".format(", ".join(repr(t) for t in ns_unread), ns))
             continue
@@ -5355,7 +5383,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.cant("C-HISTORY-RESURRECTION: {}; no-resurrection across time (spec 8.4) is not "
                  "evaluated".format(prior_reason))
     else:
-        _check_resurrection(prior["records"], prior.get("digests") or {}, by_id, all_ids, rep, unread)
+        _check_resurrection(prior["records"], prior.get("digests") or {}, by_id, all_ids, rep, source_unread)
 
     return evaluated_profiles, unevaluated_profiles
 
@@ -7426,9 +7454,9 @@ def self_test():
             _xl_run = xs_run(_xl)
             check("r4-links-message-names-clean-and-imported-causes",
                   _xl_run is not None and _xl_run.by_check.get("C-LINKS") == [
-                      "C-LINKS: the records of 'finding' could not all be read; the imported series could "
-                      "not all be read (see C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM and "
-                      "C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over a partial set "
+                      "C-LINKS: the records of 'finding' could not all be read or confirmed; the imported "
+                      "series could not all be read (see C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM "
+                      "and C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over a partial set "
                       "(spec 8.5/8.6)"])
             # The writer/doctor agreement on a declaration-only activation: a 1.3.0 store on homes 1
             # whose [unmanaged] names an imported-leaf name certifies, the name not being a
@@ -9673,8 +9701,8 @@ def self_test():
         _r4_two = run(f)
         check("r4-links-message-names-every-cause",
               _r4_two is not None and _r4_two.by_check.get("C-LINKS") == [
-                  "C-LINKS: the records of 'reference' could not all be read; the links or scopes of "
-                  "'finding' records could not be interpreted (see C-RECORDS, C-PERRECORD-RECONCILE, "
+                  "C-LINKS: the records of 'reference' could not all be read or confirmed; the links or "
+                  "scopes of 'finding' records could not be interpreted (see C-RECORDS, C-PERRECORD-RECONCILE, "
                   "C-ARCHIVE-ENUM and C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over "
                   "a partial set (spec 8.5/8.6)"])
         # The worklog collectors feed the same completeness: every worklog entry is a link source and a
@@ -9807,15 +9835,15 @@ def self_test():
         f = _wl_unique_buckets()
         f[_wl_gone] = "garbage = ["
         check("worklog-readers-cannot-evaluate-when-archived-unique-entry-unread", _wl_readers_unread(run(f), True))
-        # C-HISTORY-RESURRECTION and C-NO-DELETION read a prior or allocated id absent from a type whose
-        # records could not all be read or confirmed as CANNOT-EVALUATE naming that type, never as vanished
-        # (red when either gate is removed): a prior worklog id beside an unread bucket worklog, and the
-        # handoff line beside an unread handoff index. A type that was read is still graded beside it: BI-3,
+        # C-HISTORY-RESURRECTION and C-NO-DELETION read a prior or allocated id absent from a type with a
+        # record source that could not be read as CANNOT-EVALUATE naming that type, never as vanished (red
+        # when either gate is removed): a prior worklog id beside an unread bucket worklog, and the handoff
+        # line beside an unread handoff index. A type that was read is still graded beside it: BI-3,
         # allocated and named by the prior but held nowhere, is reported by both checks (red when either
         # gate widens to every type).
         def _unread_type_cant(res, cid, tname):
             return (res is not None and res.checks.get(cid) == "CANNOT-EVALUATE"
-                    and any(m.startswith(cid + ": the records of {!r} could not all be read or confirmed"
+                    and any(m.startswith(cid + ": the records of {!r} could not all be read (see"
                                          .format(tname)) and "not evaluated over a partial set" in m
                             for m in res.by_check.get(cid, []))
                     and not any(m in res.findings for m in res.by_check.get(cid, [])))
@@ -9844,6 +9872,29 @@ def self_test():
                       for m in _ho_read.findings)
               and not any("HO-" in m for m in _ho_read.findings
                           if m.startswith(("C-NO-DELETION", "C-HISTORY-RESURRECTION"))))
+        # A rotation whose destination was read without the row leaves its type unconfirmed for the
+        # current-state joins, yet every source was read, so the presence gates still grade the type:
+        # BI-1 enumerated as moved to an archived index that parses but lacks it, and BI-3 deleted
+        # outright, beside counters BI=3 and a prior naming BI-3, report BI-3 under both checks while
+        # C-RECEIPTS stays CANNOT-EVALUATE (red when the presence gates read the types left unconfirmed).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([bi(2, "open")])
+        f["archive/2026/archive.toml"]["moved"] = [
+            {"id": "BI-1", "type": "backlog_item", "destination": "archive/2026/backlog_item.index.toml"}]
+        f["archive/2026/backlog_item.index.toml"] = idx([])
+        f["counters.toml"]["counters"]["BI"] = 3
+        _mv_read = run(f, obs=_prior_bi)
+        check("no-deletion-and-resurrection-graded-beside-destination-read-without-row",
+              _mv_read is not None
+              and any("enumerated moved id 'BI-1' is absent from its destination" in m
+                      for m in _mv_read.findings)
+              and _mv_read.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
+              and any(m.startswith("C-NO-DELETION: 1 allocated BI-<n> id(s) above BI-2")
+                      for m in _mv_read.findings)
+              and any(m.startswith("C-HISTORY-RESURRECTION: prior record 'BI-3' is absent")
+                      for m in _mv_read.findings)
+              and not any(m.startswith(cid + ": the records of") for m in _mv_read.cannot_evaluate
+                          for cid in ("C-NO-DELETION", "C-HISTORY-RESURRECTION")))
         # A moved row that cannot be reconciled leaves the population of every type it could stand for
         # incomplete, for each check that joins through moved rows (red when its branch alone stops
         # recording that population unread). A row dropped as malformed still names a record through its
