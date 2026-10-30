@@ -448,11 +448,12 @@ OPERATION = "adopt-apply"
 # resolution (see the module docstring; the self-test pins the literal spelling).
 JOURNAL_REL = store.journal_root("adoption")
 # The refusal of apply and reconcile on base 2.0.0 (adoption_journal_fenced).
-ADOPTION_FENCE = "adoption on base 2.0.0 lands with the adoption-journal move; nothing was read or written"
-# What status says on base 2.0.0 (adoption_journal_fenced): the journal is not read there, so its state
-# is unknown, never clean. Plan and approve run there without reading it (_capture_approval_journal_free).
-JOURNAL_UNREAD = ("the adoption journal state on base 2.0.0 is unknown: the adoption journal is not "
-                  "read, and its homes-2 home lands with the adoption-journal move")
+ADOPTION_FENCE = "adopt apply and reconcile are not enabled at base 2.0.0; nothing was read or written"
+# What status says on base 2.0.0 (adoption_journal_fenced): the journal at JOURNAL_REL is not read there,
+# so its state is unknown, never clean. Plan and approve run there without reading it
+# (_capture_approval_journal_free).
+JOURNAL_UNREAD = ("the adoption journal state on base 2.0.0 is unknown: this build does not read the "
+                  "adoption journal at " + JOURNAL_REL)
 # The only plan format apply may take (spec 14.1), the schema's own marker.
 PLAN_V2_FORMAT = schema.PLAN_FORMAT
 # The run's evidence-bundle members apply persists: the approved plan, its captured approval and the
@@ -16570,7 +16571,7 @@ def _self_test_reconcile_shapes(check):
 def _self_test_fence(check):
     """The base 2.0.0 adoption fence (adoption_journal_fenced). Every engine step a fenced call must not
     reach is replaced by a recorder that refuses under its own name, so a step reached is named, never
-    run. apply and reconcile refuse with ADOPTION_FENCE before any of them and leave no .aiqt entry;
+    run. apply and reconcile refuse with ADOPTION_FENCE before any of them and leave the root empty;
     approve issues its approval through its journal-free body, reaching none of the journal reads. Each
     of the three is the fence and then one call of its engine body, the body the engine vectors drive, so
     the two differ only by the fence."""
@@ -16638,6 +16639,9 @@ def _self_test_fence(check):
               observed="{!r} reached {} issued {!r}; engine {!r} reached {}".format(
                   said, reached, issued, body_said, body_reached))
         check("adopt-fence-unconditional", adoption_journal_fenced() is True)
+        # status names the journal it does not read by its literal home (red when the line stops naming it).
+        check("adopt-status-names-unread-journal", JOURNAL_UNREAD.endswith(
+            ": this build does not read the adoption journal at .working/journals/adoption/journal"))
 
         # The engine seam: each fenced entry is the fence, then one call of its engine body with its own
         # parameters, and nothing else, so the two paths differ only by the fence (approve's fence returns

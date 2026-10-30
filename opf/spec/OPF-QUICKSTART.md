@@ -184,9 +184,8 @@ so. The specification defines one implementation model, with no conformance clas
 section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
 defines, and the reference tooling initializes and validates base 2.0.0 stores with `homes = 2`.
 Its `opf adopt plan`, `approve` and `status` run at base 2.0.0 without reading the adoption journal,
-and `status` says the journal is not read; `opf adopt apply` and `reconcile` refuse at base 2.0.0
-until the adoption journal moves to its specification section 4.2 home. The reference tooling
-defines no store upgrade: `opf upgrade`
+and `status` says the journal is not read; `opf adopt apply` and `reconcile` refuse at base 2.0.0.
+The reference tooling defines no store upgrade: `opf upgrade`
 refuses every invocation with exit 2, reading and writing nothing.
 
 The reference tooling requires Python 3.14 or newer.

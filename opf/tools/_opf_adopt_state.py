@@ -845,7 +845,7 @@ def _self_test_checks():
             return st.frozen[path].grade if path in st.frozen else None
 
         home_cannot = ("C-CONTAINMENT: the adoption home {}/ exists, and adoption grading on base 2.0.0 is not "
-                       "yet implemented (spec 4.2; lands with the adoption-journal move)".format(ADOPTION_HOME))
+                       "yet implemented (spec 4.2)".format(ADOPTION_HOME))
         state_fn = reader.adoption_state
 
         def spied():

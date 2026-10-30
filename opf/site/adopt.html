@@ -136,8 +136,8 @@
       </div>
       <div class="card">
         <h3>What it does not run yet</h3>
-        <p><code>opf adopt apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0
-          until the adoption journal moves to its homes-2 home, and <code>complete</code> refuses
+        <p><code>opf adopt apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0,
+          and <code>complete</code> refuses
           with exit 2, so no approval is recorded, nothing is applied, and nothing is retired. Installing the enforcement pack through adoption, and
           post-adoption import, are not available either. An assistant following the pack stops at
           the approval step and reports, rather than doing the missing stages by hand.</p>
@@ -198,8 +198,7 @@
     <p><b style="color:var(--ink)">Status.</b> Partly implemented. The read-only <code>plan</code>,
       <code>approve</code> and <code>status</code> subcommands run; at base 2.0.0
       <code>apply</code> and <code>reconcile</code> refuse with exit 2 before reading anything,
-      until the adoption journal moves to its homes-2 home, and <code>complete</code> refuses with
-      exit 2.</p>
+      and <code>complete</code> refuses with exit 2.</p>
     <p><b style="color:var(--ink)">Purpose.</b> Guide setup and wiring of an existing project:
       investigate, plan, one approval, apply, and completion (specification section 14).</p>
     <p><b style="color:var(--ink)">How it works.</b> <code>plan --inputs FILE</code> reads a

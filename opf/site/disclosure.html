@@ -109,8 +109,8 @@
         adoption investigation, <code>opf adopt plan</code> and <code>opf adopt approve</code>
         read-only; at base 2.0.0 they and <code>opf adopt status</code> run without reading the
         adoption journal, and <code>status</code> says the journal is not read. <code>opf adopt
-        apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0 until the adoption
-        journal moves to its homes-2 home, and <code>complete</code> refuses with exit 2, so no
+        apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0, and
+        <code>complete</code> refuses with exit 2, so no
         approval, receipt, completion check, or retirement is recorded, and
         adoption cannot install the enforcement pack. A frozen plan is an inert proposal, not
         permission to apply. Investigation covers only its detection roots, the declared

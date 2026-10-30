@@ -43,7 +43,7 @@ Three rules govern everything else:
 | Approve | `opf adopt approve` | runs; re-checks the frozen plan against the live tree and prints the approval; writes nothing |
 | Apply | `opf adopt apply` | not yet executable: refuses with exit 2 |
 | Complete | `opf adopt complete` | not yet executable: refuses with exit 2 |
-| Reconcile | `opf adopt reconcile [--root DIR]` | not yet executable: refuses with exit 2, reading and writing nothing, until the adoption journal moves to its homes-2 home (section 2) |
+| Reconcile | `opf adopt reconcile [--root DIR]` | not yet executable: not enabled at base 2.0.0, so it refuses with exit 2, reading and writing nothing (section 2) |
 | Import | `opf record import --batch`; `opf import --prompt`, `--status`, `--verify` (procedure: `import/SKILL.md`) | not yet executable: `opf record` has no `import` subcommand, and `opf import` refuses every argument with exit 2 |
 
 Inside the apply engine, each of the ten plan operations has an executor, but `opf adopt apply`
@@ -69,12 +69,14 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    run.
 3. Run `opf adopt status --root <product root>`. Exit 0 with "no adoption run exists" is the
    expected first-adoption result. Every report also says that the adoption journal state is
-   unknown: this build does not read the adoption journal under `.aiqt`, so status never reports
-   a held journal lock or an interrupted transaction there. Exit 0 listing an adoption run, exit 1
+   unknown: the adoption journal is at `.working/journals/adoption/journal`, and this build does
+   not read it, so status never reports a held journal lock or an interrupted transaction there.
+   Exit 0 listing an adoption run, exit 1
    (an evidence bundle that does not verify, or a directory at the adoption evidence home whose
    name is not a run id) or exit 2 means stop and report what it printed. No command resumes a
-   run, and in this build no command recovers one: `opf adopt reconcile` refuses with exit 2,
-   reading and writing nothing, until the adoption journal moves to its homes-2 home. If the
+   run, and in this build no command recovers one: `opf adopt reconcile` is not enabled at base
+   2.0.0 and refuses with exit 2, reading and writing nothing. `.working/journals/adoption/` is
+   recovery state: never delete it, or the `.working/` that holds it. If the
    adopter knows of an earlier adoption run that stopped partway, stop and report it; never
    recover it by hand.
 4. Keep every working file of this procedure (the worksheet, saved observations and plans)

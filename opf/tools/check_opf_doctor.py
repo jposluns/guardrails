@@ -2180,7 +2180,7 @@ def _self_test_isolated():
             # Base 2.0.0 keeps an applied run's evidence in the adoption home .working/imported/adoption/,
             # whose grading has not landed (spec 4.2): doctor over the snapshot is C-CONTAINMENT
             # CANNOT-EVALUATE, so the run's commit is refused with HEAD unmoved, and the archive-stray
-            # probe, which needs that run committed, waits for the adoption-journal move.
+            # probe, which needs that run committed, does not run here.
             _applied_run(made)
             _git(made, home, "add", "-A")
             expect("commit-applied-run-cannot-evaluate",

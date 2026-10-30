@@ -58,10 +58,10 @@ nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readines
 none present it reports that no adoption run exists, and every report says the adoption journal is
 not read, so its state is unknown). The stage driver adds `opf adopt approve --inputs FILE --plan FILE
 --actor NAME`, the one approval, printed and writing nothing. On base 2.0.0, the only base this build
-implements, the adoption journal is not read, so
-`opf adopt apply --inputs FILE --plan FILE --approval FILE` and `opf adopt reconcile [--root DIR]` refuse
-with exit 2 before the root is resolved or anything is read or written: nothing is applied and no
-interrupted adoption transaction is recovered until the journal moves to its homes-2 home. `complete` is
+implements, the adoption journal (.working/journals/adoption/journal) is not read, and
+`opf adopt apply --inputs FILE --plan FILE --approval FILE` and `opf adopt reconcile [--root DIR]` are not
+enabled: they refuse with exit 2 before the root is resolved or anything is read or written, so nothing is
+applied and no interrupted adoption transaction is recovered. `complete` is
 recognized and refuses (exit 2) until the completion stage lands in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
@@ -20891,7 +20891,7 @@ def _cli_self_test():
                         ("status", "a malformed evidence home", EXIT_MALFORMED, ("is not a directory",),
                          (unread,)),
                         ("reconcile", "journal debris", EXIT_MALFORMED, (fence,), ("nothing to reconcile",)),
-                        ("apply", "journal debris", EXIT_MALFORMED, (fence,), ("reconcile",)),
+                        ("apply", "journal debris", EXIT_MALFORMED, (fence,), gate),
                         ("approve", "journal debris", EXIT_MALFORMED, ("opf adopt approve: cannot evaluate: ",),
                          gate + ("approved_at",))):
                     rc, out = fenced[sub, where]

@@ -1019,7 +1019,7 @@ _CONTRACT = {
         "The base defines one implementation model and no implementation conformance classes: a declared scope, exclusion, profile, or posture MUST NOT waive a base requirement, and current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind every implementation.",
         _D('An implementation supports base spec_version 2.0.0 and homes generation 2, the only ones this specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and initializes stores directly at them.'),
         _D('The reference tooling initializes and validates base 2.0.0 stores with homes = 2, and it makes no claim of conformance to this specification.'),
-        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0 until its adoption journal moves to its section 4.2 home, and it does not yet implement post-adoption import.'),
+        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0, and it does not yet implement post-adoption import.'),
         _D('The reference tooling defines no store upgrade: its opf upgrade refuses every invocation with exit 2, reading and writing nothing.'),
         'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
@@ -1452,7 +1452,7 @@ _SURFACE = {
         "The reference tooling's opf init scaffolds this store: base 2.0.0 with homes = 2.",
         'The specification defines one implementation model, with no conformance classes (OPF-SPEC section 16.1).',
         'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling initializes and validates base 2.0.0 stores with homes = 2.',
-        'Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; opf adopt apply and reconcile refuse at base 2.0.0 until the adoption journal moves to its specification section 4.2 home.',
+        'Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; opf adopt apply and reconcile refuse at base 2.0.0.',
         'This supersedes the earlier aiqt-opf token; the interim devprocess token and [devprocess] table are retired by the OPFiles rebrand.',
         "opf init also refuses when the git history of HEAD's first-parent line shows a prior store (specification section 8.2: counters never restart, so record ids are never reissued).",
         'opf adopt is the path for re-adopting any prior ancestry.',
@@ -1461,7 +1461,7 @@ _SURFACE = {
     DISCLOSURE: (
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
         'at base 2.0.0 they and opf adopt status run without reading the adoption journal, and status says the journal is not read.',
-        'opf adopt apply and reconcile refuse with exit 2 at base 2.0.0 until the adoption journal moves to its homes-2 home, and complete refuses with exit 2,',
+        'opf adopt apply and reconcile refuse with exit 2 at base 2.0.0, and complete refuses with exit 2,',
         'A rename would be a store-breaking change the specification gives no path: every base-schema version bump stays additive and keeps the exact token, so no bump the specification permits renames it (specification sections 4.5 and 9.2).',
         'Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.',
         'The reference tooling initializes and validates base 2.0.0 stores with homes = 2, and it makes no claim of conformance to the specification.',
@@ -1475,7 +1475,7 @@ _SURFACE = {
         'The imported leaves: one &lt;type&gt;.imported.index.toml beside each of those eleven indexes, plus worklog.imported.toml for the worklog, each empty to start. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).',
         'The reference tooling initializes and validates spec 2.0.0 stores with homes = 2, the only base version the standard defines, as described above.',
         'At base 2.0.0, opf adopt plan, approve and status run without reading the adoption journal, and status says the journal is not read.',
-        'opf adopt apply and reconcile refuse with exit 2 at base 2.0.0 until the adoption journal moves to its homes-2 home, and complete refuses with exit 2,',
+        'opf adopt apply and reconcile refuse with exit 2 at base 2.0.0, and complete refuses with exit 2,',
         'spec_version = "2.0.0" # the base spec version this store conforms to homes = 2 # the homes generation; required, and 2 is the only value',
         'The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with opf render --write for a supported store or your own renderer, and then work records-first.',
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
@@ -1486,7 +1486,7 @@ _SURFACE = {
         'Create the machine store at .working/toml/: manifest.toml (the control document: an [opf] table declaring standard = "opf", the base spec_version ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status, plus a [types.] registration for every enabled type, the declared [views], and the other tables the standard defines; see section 9 of OPF-SPEC.md, linked from /standard), counters.toml (the per-namespace ID high-water marks), version.toml (the version and release ledger, numbers, dates, spans, and digests, never release prose), worklog.toml (the durable operational record: one entry per change, correctable before its span is released, frozen afterward, never deleted), and the eleven baseline typed indexes as .index.toml, empty to start, plus the imported leaves the standard requires in every store: one .imported.index.toml beside each of those indexes and worklog.imported.toml for the worklog, each empty to start, with the imported counter row of each enabled type (the quoted key "imported:", at zero) beside its clean row in counters.toml (OPF-SPEC.md sections 4.2 and 8.2).',
         'It initializes and validates spec 2.0.0 stores with homes = 2, the only base version the standard defines.',
         'At base 2.0.0, opf adopt plan, approve and status run without reading the adoption journal, and status says the journal is not read.',
-        'What it does not run yet: opf adopt apply and reconcile refuse with exit 2 at base 2.0.0 until the adoption journal moves to its homes-2 home, and complete refuses with exit 2,',
+        'What it does not run yet: opf adopt apply and reconcile refuse with exit 2 at base 2.0.0, and complete refuses with exit 2,',
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
@@ -1515,8 +1515,10 @@ _SURFACE = {
 # description of a store upgrade the reference tooling no longer defines, and each surface's
 # tooling-status sentences from before the tooling initialized and validated base 2.0.0 stores (its
 # 1.2.0 scaffold and grading, the adoption subcommands that read or refused over the adoption
-# journal, and the adopt page's claim that approval did not run). Each sentence present in its
-# file's normalized text is a finding.
+# journal, and the adopt page's claim that approval did not run), and the claim on the quickstart, the
+# disclosure page, the adopt page and the adoption guide that apply and reconcile refuse until the
+# adoption journal moves, which already sits at its homes-2 home. Each sentence present in its file's
+# normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
@@ -1525,6 +1527,7 @@ _SURFACE_RETIRED = {
         "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the specification's validation refuses (specification section 9.2).",
         'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling does not yet implement it.',
         'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
+        'until the adoption journal moves',
     ),
     DISCLOSURE: (
         'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name an older store or one in which its admission check detects an item on the closed legacy-state list.',
@@ -1541,6 +1544,7 @@ _SURFACE_RETIRED = {
         'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification.',
         'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
         'opf adopt approve, apply, complete, and reconcile refuse with exit 2,',
+        'until the adoption journal moves',
     ),
     ADOPT_PAGE: (
         "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
@@ -1553,6 +1557,7 @@ _SURFACE_RETIRED = {
         'The read-only plan and status subcommands run; approve, apply, complete, and reconcile refuse with exit 2 before reading anything.',
         'reports any open transaction or held lock in the adoption journal.',
         'The reference CLI runs investigation and planning today; approval, apply and completion are not executable yet, so the assistant stops there and reports.',
+        'until the adoption journal moves',
     ),
     ADOPT_GUIDE: (
         "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
@@ -1561,6 +1566,7 @@ _SURFACE_RETIRED = {
         'It validates spec 1.2.0 stores in either layout,',
         'opf adopt status, which reports adoption runs and the adoption journal and writes nothing.',
         'What it does not run yet: opf adopt approve, apply, complete and reconcile refuse with exit 2,',
+        'until the adoption journal moves',
     ),
     RECORD_INDEXES: (
         'Importer-only (no module toggle)',
@@ -3698,44 +3704,14 @@ def boundary_self_test():
     def graded(report, path):
         return any(repr(path) in message for message in report.findings)
 
-    # This tooling's adoption journal home. Containment decides a legacy store has started an adoption
-    # from ONE probe of it (an lstat in the shipped helper, answered here from the fixture), never by
-    # listing journals/ (the listing mock above refuses that).
-    adoption_journal = store.journal_root("adoption").rsplit("/", 1)[0]
-    probed = []
-
-    def journal_probe(_fd):
-        probed.append(adoption_journal)
-        return adoption_journal in directories
-
-    def drop(path, depth):
-        # Remove one fixture file and the `depth` directories beneath it that add() created for it.
-        del files[path]
-        directories.difference_update(path.rsplit("/", n)[0] for n in range(1, depth + 1))
-
     with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", read_toml), \
-            patch.object(doctor, "_read_bytes", read_bytes), \
-            patch.object(doctor, "_adoption_journal_present", journal_probe):
+            patch.object(doctor, "_read_bytes", read_bytes):
         stage = ".working/staging/import/" + run + "/plan.toml"
         add(stage)
         add(".working/journals/import/journal/inflight/frames.log", b"torn")
-        # A legacy store that has started no adoption keeps its legacy grading (spec 4.2): each homes-2
-        # name, journals/ included, is one unregistered path.
+        # A legacy store keeps its legacy grading: each homes-2 name is one unregistered path.
         check("legacy-staging-graded", lambda: graded(containment(), ".working/staging"))
         check("legacy-journals-graded", lambda: graded(containment(), ".working/journals"))
-        # Once this tooling's adoption journal home is a directory the store has started an adoption: its
-        # journals/ is left out unlisted, decided by the probe alone. The same name as a FILE is no
-        # journal home, so journals/ is graded again.
-        txn = adoption_journal + "/journal/" + adopt_run + "/frames.log"
-        add(txn, b"torn")
-        del probed[:]
-        check("legacy-adoption-journal-excluded", lambda: not graded(containment(), ".working/journals")
-              and not any("journals" in m for m in containment().cannot)
-              and probed != [] and ".working/journals" not in listed)
-        drop(txn, 3)
-        add(adoption_journal, b"not a journal home")
-        check("legacy-adoption-journal-file-graded", lambda: graded(containment(), ".working/journals"))
-        drop(adoption_journal, 0)
         check("legacy-staging-not-partial", lambda: not containment(True).triage
               and any("no active" in message for message in containment(True).findings))
         check("staging-steady-finding", lambda: any(stage in s for s in containment(model=manifest2).findings))
@@ -3995,8 +3971,10 @@ def boundary_self_test():
     full_manifest["views"] = {}
     reset()
     add(".working/imported/import/" + run + "/sources/notes.txt")
-    # A journal on disk: legacy grades it as an ordinary path, homes 2 must skip it unread.
+    # Journals on disk, an import and an adoption transaction: legacy grades them as ordinary paths, homes 2
+    # must skip them unread.
     add(".working/journals/import/journal/" + run + "/frames.log", b"torn")
+    add(".working/journals/adoption/journal/" + adopt_run + "/frames.log", b"torn")
 
     def dispatch(model):
         def doctor_toml(_fd, rel, _rep):
@@ -4022,8 +4000,7 @@ def boundary_self_test():
         with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", doctor_toml), \
                 patch.object(store, "_read_toml_contained", side_effect=worklog_toml), \
                 patch.object(journal, "_lstat_contained", side_effect=worklog_stat), \
-                patch.object(doctor, "_read_bytes", read_bytes), \
-                patch.object(doctor, "_adoption_journal_present", journal_probe):
+                patch.object(doctor, "_read_bytes", read_bytes):
             report = doctor._Report()
             doctor._validate_opened_store(0, None, machine, None, {}, None, "default", True, report)
         return report.result(), list(listed)
@@ -4052,59 +4029,6 @@ def boundary_self_test():
                       and p not in allocation_homes for p in homes2_listed))
     check("doctor-lists-allocation-homes", lambda: sorted(
         p for p in homes2_listed if p.startswith(".working/journals/")) == sorted(allocation_homes))
-    # The shipped probe over a real tree: one no-follow lstat of the adoption journal home, never a listing,
-    # True only for a real directory there (a file, a symlink to a directory, a sibling kind and an absent
-    # journals/ each read False, so journals/ keeps its legacy grading).
-    def probe_tree(plant):
-        with tempfile.TemporaryDirectory(prefix="opf-homes-probe-") as tmp:
-            plant(Path(tmp))
-            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
-            seen = []
-            real_lstat = journal._lstat_contained
-            try:
-                with patch.object(journal, "_lstat_contained", lambda f, rel: seen.append(rel) or real_lstat(f, rel)), \
-                        patch.object(doctor, "_list_contained", side_effect=AssertionError("journals listed")):
-                    return doctor._adoption_journal_present(fd), seen
-            finally:
-                os.close(fd)
-
-    def home_dir(root):
-        (root / adoption_journal / "journal").mkdir(parents=True)
-
-    def home_file(root):
-        (root / adoption_journal).parent.mkdir(parents=True)
-        (root / adoption_journal).write_bytes(b"not a journal home\n")
-
-    def home_symlink(root):
-        (root / ".working/elsewhere").mkdir(parents=True)
-        (root / adoption_journal).parent.mkdir(parents=True)
-        os.symlink("../elsewhere", str(root / adoption_journal))
-
-    def sibling_kind(root):
-        (root / ".working/journals/import/journal").mkdir(parents=True)
-
-    for label, plant, want in (("directory", home_dir, True), ("file", home_file, False),
-                               ("symlink", home_symlink, False), ("sibling-kind", sibling_kind, False),
-                               ("absent", lambda root: (root / ".working").mkdir(), False)):
-        check("adoption-journal-probe-" + label, lambda p=plant, w=want: probe_tree(p) == (w, [adoption_journal]))
-
-    # A probe that cannot observe the home reads False even over a real home directory, so journals/ keeps
-    # its legacy grading: a fault grades, never exempts (red against a probe that reads its fault as present).
-    def probe_faulting(fault):
-        def faulty(_fd, rel):
-            raise fault
-        with tempfile.TemporaryDirectory(prefix="opf-homes-probe-") as tmp:
-            home_dir(Path(tmp))
-            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                with patch.object(journal, "_lstat_contained", faulty):
-                    return doctor._adoption_journal_present(fd)
-            finally:
-                os.close(fd)
-
-    for label, fault in (("oserror", PermissionError(13, "an injected EACCES")),
-                         ("journal-error", journal.JournalError("an injected containment refusal"))):
-        check("adoption-journal-probe-unobservable-grades-" + label, lambda f=fault: probe_faulting(f) is False)
     # The render source gate is the one roster's source checks: a homes-2 evidence finding refuses it,
     # and a report that ran only the pre-homes checks is still gated on the homes-2 and imported checks.
     flagged = dict.fromkeys(doctor.DOCTOR_ROSTER, "PASS")
@@ -6638,7 +6562,7 @@ def _self_test_vectors():
           tuple(map(len, _SURFACE.values())) == (10, 7, 12, 7, 7, 4))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (6, 14, 10, 6, 7, 1) and
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (7, 15, 11, 7, 7, 1) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
@@ -7676,8 +7600,8 @@ def _self_test_vectors():
             ('Its opf adopt plan, approve and status', (
              ('run at base 2.0.0 without reading the adoption journal,',
               'run at base 2.0.0 and read the adoption journal,'),
-             ('refuse at base 2.0.0 until its adoption journal moves to its section 4.2 home,',
-              'run at base 2.0.0,'),
+             ('refuse at base 2.0.0, and it does not yet implement',
+              'run at base 2.0.0, and it does not yet implement'),
             )),
     ))
     spec_vectors("17", (
