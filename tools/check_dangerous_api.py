@@ -435,6 +435,10 @@ ALLOWLIST = (
     ("tools/check_entry_guard.py", "_load_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
      " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
+    ("tools/check_internal_names.py", "_load_ratchet_mutant", "code", 1,
+     "self-test mutant loader: exec_module of a scratch copy of this gate's own source (read from"
+     " __file__ by its one caller, with one ratchet-comparison branch disabled by a reviewed literal"
+     " substitution), written under the self-test's temporary directory; no external input"),
     ("tools/check_child_status_coverage.py", "_canonical_module", "code", 1,
      "authority loader: exec_module of the repository's own opf/tools/_child_status.py under ROOT,"
      " the equivalent of an import; no external input"),
@@ -583,6 +587,23 @@ ALLOWLIST = (
      _MUTANT + " (each route mutant, written to the self-test's temporary directory first)"),
     ("opf/tools/check_opf_init.py", "_suite_isolated.load_plain", "code", 1,
      _MUTANT + " (each boot mutant, written to the self-test's temporary directory first)"),
+    ("tools/_load_bound.py", "_acquiring_popen", "shell", 1,
+     "ownership spawn: subclasses the current subprocess.Popen so run() holds the handle before the"
+     " fork; the subclass forwards run()'s own argv list and keywords, and no call in this file"
+     " turns shell on"),
+    ("tools/_load_bound.py", "_acquiring_popen.Acquiring._execute_child", "code", 1,
+     "pid capture: types.FunctionType rebuilds the standard library's own Popen._execute_child code"
+     " object with its globals copied and only _fork_exec wrapped to record the pid; no external"
+     " code"),
+    ("tools/_load_bound.py", "vector_failures", "shell", 14,
+     _SAVED + " (the real Popen each vector's fault or recording double subclasses, set back in a"
+     " finally; the fork-window vector also reads its _execute_child through that saved class)"),
+    ("tools/_load_bound.py", "vector_failures.bounded", "shell", 1,
+     _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
+    ("tools/_load_bound.py", "vector_failures.mid_read_fault", "shell", 1,
+     _SAVED + " (the real Popen the mid-read fault double subclasses, restored in a finally)"),
+    ("tools/_load_bound.py", "vector_failures.drained_stop", "shell", 1,
+     _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
 )
 
 
@@ -2189,7 +2210,7 @@ TREE_VECTORS = (
     # allowance leaves both reported plus the count drift.
     ("two sites on one line", {"tools/a.py": _TWO_ON_ONE_LINE},
      (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-column", 0),
-    # Round 6: two chained calls start at one position, so the end position keeps them apart.
+    # Two chained calls start at one position, so the end position keeps them apart.
     ("two chained sites on one line", {"tools/a.py": _TWO_CHAINED},
      (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-end", 0),
     ("allowlist entry without reason", {"tools/a.py": _SITE}, (_ENTRY[:4] + (" ",),),

@@ -831,7 +831,7 @@ def load_manifests(std_dir, *, root, search_only=False):
                 data = tomllib.loads(_read_manifest(std_fd, path).decode("utf-8"))
             # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
             # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-            # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS). Content that is not
+            # on a deeply nested array or inline table; neither is a TOMLDecodeError. Content that is not
             # UTF-8 raises a ValueError too.
             except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
                 raise ManifestError("{}: invalid TOML: {}".format(path.name, exc))
