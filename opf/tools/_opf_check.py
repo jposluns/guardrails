@@ -3270,7 +3270,7 @@ def _verify_immutable_body(rid, cur, prior_digests, rep):
                     "snapshot (a created-terminal record does not change; spec 8.5)".format(rid))
 
 
-def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
+def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, unread=frozenset()):
     """C-HISTORY-RESURRECTION: for every id in the prior committed snapshot, confirm it did not resurrect
     across time (OPF-SPEC 8.4/13). A prior unqualified-terminal state now in any other state is a definite
     finding (actor-independent). A created-terminal record's BODY is additionally checked for preservation
@@ -3279,9 +3279,15 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
     but illegal for others is actor-DEPENDENT and, since the last-transition actor is not identifiable from
     the envelope, is CANNOT-EVALUATE (never accept-if-any-actor; codex-6); a rejection-shaped transition
     needing a pre-proposal state the snapshot cannot supply is likewise CANNOT-EVALUATE. Every durable prior
-    id must remain present in active or archive (the across-time complement of the no-deletion check)."""
+    id must remain present in active or archive (the across-time complement of the no-deletion check). A prior
+    id absent from a type whose records could not all be read or confirmed (`unread`, from the collectors) is
+    not read as vanished: the presence check is CANNOT-EVALUATE for that type, never a false finding."""
+    unconfirmed = set()
     for rid in sorted(prior_records):
         ptype, pstatus = prior_records[rid]
+        if rid not in all_ids and ptype in unread:
+            unconfirmed.add(ptype)
+            continue
         if rid not in all_ids:
             rep.finding("C-HISTORY-RESURRECTION: prior record {!r} is absent from both the active store and "
                         "the archive (a durable id cannot vanish; spec 12/13)".format(rid))
@@ -3329,6 +3335,10 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
         rep.cant("C-HISTORY-RESURRECTION: prior record {!r} transition {!r} -> {!r} is legal for some actor "
                  "kinds but illegal for others (actor-dependent); the last-transition actor is not "
                  "identifiable from the prior snapshot (spec 8.4/8.5)".format(rid, pstatus, cur_status))
+    if unconfirmed:
+        rep.cant("C-HISTORY-RESURRECTION: the records of {} could not all be read or confirmed (see C-RECORDS "
+                 "and C-ARCHIVE-ENUM); prior record presence is not evaluated over a partial set (spec "
+                 "12/13)".format(", ".join(repr(t) for t in sorted(unconfirmed))))
 
 
 # Homes-2 durable evidence (C-EVIDENCE-ENUM, spec 4.2). Each imported/<kind>/<run-id>/ bundle carries
@@ -4587,8 +4597,8 @@ def validate_store(resolution, supported_profiles=None, *, observations=None, an
 
 # The cause each check that reads the worklog entries names when "worklog" is in the collectors' `unread` set:
 # an entry not read could hide a defect from it or make it report a false one.
-_WORKLOG_UNREAD = ("the worklog entries (active + archive) could not all be read (see C-RECORDS and "
-                   "C-ARCHIVE-ENUM)")
+_WORKLOG_UNREAD = ("the worklog entries (active + archive) could not all be read or confirmed (see C-RECORDS "
+                   "and C-ARCHIVE-ENUM)")
 
 
 def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target,
@@ -4783,8 +4793,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     if "worklog" in archive_unread:
         # An archived entry not read could lie beyond the released end; an archived id read beyond it is
         # still reported.
-        rep.cant("C-ROTATION: the archived worklog entries could not all be read (see C-ARCHIVE-ENUM); "
-                 "released-only rotation is not evaluated over a partial set (spec 12)")
+        rep.cant("C-ROTATION: the archived worklog entries could not all be read or confirmed (see "
+                 "C-ARCHIVE-ENUM); released-only rotation is not evaluated over a partial set (spec 12)")
     if archive_wl_ids:
         if version_data is None:
             rep.cant("C-ROTATION: the version ledger did not evaluate; released-only rotation is not "
@@ -4973,6 +4983,13 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         hw = high.get(ns)
         if not (isinstance(hw, int) and not isinstance(hw, bool) and hw >= 0):
             continue     # an absent / malformed counter is C-COUNTERS' finding, not this check's
+        ns_unread = sorted(t for t, p in enabled_types.items() if p == ns and t in unread)
+        if ns_unread:
+            # A record not read reads as deleted, so the namespace's line is not scanned.
+            rep.cant("C-NO-DELETION: the records of {} could not all be read or confirmed (see C-RECORDS and "
+                     "C-ARCHIVE-ENUM); {}-<n> no-deletion is not evaluated over a partial set (spec "
+                     "12/13)".format(", ".join(repr(t) for t in ns_unread), ns))
+            continue
         base = floor.get(ns, 0)
         # A present id at or below the ancestral floor is NOT reported by C-NO-DELETION: a
         # re-adoption restores no ancestral record, so such an id is id-REUSE (spec 8.2), not a
@@ -5338,7 +5355,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.cant("C-HISTORY-RESURRECTION: {}; no-resurrection across time (spec 8.4) is not "
                  "evaluated".format(prior_reason))
     else:
-        _check_resurrection(prior["records"], prior.get("digests") or {}, by_id, all_ids, rep)
+        _check_resurrection(prior["records"], prior.get("digests") or {}, by_id, all_ids, rep, unread)
 
     return evaluated_profiles, unevaluated_profiles
 
@@ -9718,18 +9735,24 @@ def self_test():
         # full, it is a partition, frozen-coverage, id-space and changelog-gate finding, so a pass over the
         # unread bucket would hide a real defect. Removing any one check's unread branch turns red every case
         # that asserts that check, and the active-ledger case is red when C-ROTATION reads the active ledger's
-        # state too.
+        # state too. A cannot-evaluate outranks a finding in a check's state, so the checks that skip their
+        # scan over a partial set are also asserted to report no finding, and a third case leaves unread a
+        # bucket holding the only copy of WL-2, which a scan of the entries read would report missing: each
+        # case is red when a check runs its scan beside its cannot-evaluate.
         _wl_readers = ("C-ID-SPACE", "C-FROZEN-COVERAGE", "C-NO-DELETION", "C-PARTITION", "C-CONTIGUITY",
                        "C-CHANGELOG-GATES")
+        _wl_skipped = ("C-FROZEN-COVERAGE", "C-NO-DELETION", "C-CONTIGUITY", "C-CHANGELOG-GATES")
 
         def _wl_readers_unread(res, archived):
             cids = _wl_readers + (("C-ROTATION",) if archived else ())
             return (res is not None and res.status == CANNOT_EVALUATE
                     and all(res.checks.get(cid) == "CANNOT-EVALUATE"
                             and any(m.startswith(cid + ": the ") and "worklog entries" in m
-                                    and "could not all be read" in m and "not evaluated over a partial set" in m
+                                    and "could not all be read or confirmed" in m
+                                    and "not evaluated over a partial set" in m
                                     for m in res.by_check.get(cid, []))
                             for cid in cids)
+                    and not any(m in res.findings for cid in _wl_skipped for m in res.by_check.get(cid, []))
                     and (archived or res.checks.get("C-ROTATION") == "PASS"))
 
         def _wl_second_bucket():
@@ -9769,6 +9792,58 @@ def self_test():
         f = clean_machine()
         f["worklog.toml"] = "garbage = ["
         check("worklog-readers-cannot-evaluate-when-active-ledger-unreadable", _wl_readers_unread(run(f), False))
+
+        def _wl_unique_buckets():
+            m = clean_machine()
+            m["archive/2026/archive.toml"]["worklog_moved"] = [{"span": ["WL-1", "WL-1"],
+                                                                "destination": "archive/2026/worklog.toml"}]
+            m["archive/2026/worklog.toml"] = {"schema": 1, "entry": [wl(1)]}
+            m["archive/2025/archive.toml"] = {"schema": 1, "moved": [], "worklog_moved": [
+                {"span": ["WL-2", "WL-2"], "destination": "archive/2025/worklog.toml"}]}
+            m["archive/2025/worklog.toml"] = {"schema": 1, "entry": [wl(2)]}
+            return m
+        _wl_uniq = run(_wl_unique_buckets())
+        check("worklog-unique-entry-buckets-read-in-full-valid", _wl_uniq is not None and _wl_uniq.status == VALID)
+        f = _wl_unique_buckets()
+        f[_wl_gone] = "garbage = ["
+        check("worklog-readers-cannot-evaluate-when-archived-unique-entry-unread", _wl_readers_unread(run(f), True))
+        # C-HISTORY-RESURRECTION and C-NO-DELETION read a prior or allocated id absent from a type whose
+        # records could not all be read or confirmed as CANNOT-EVALUATE naming that type, never as vanished
+        # (red when either gate is removed): a prior worklog id beside an unread bucket worklog, and the
+        # handoff line beside an unread handoff index. A type that was read is still graded beside it: BI-3,
+        # allocated and named by the prior but held nowhere, is reported by both checks (red when either
+        # gate widens to every type).
+        def _unread_type_cant(res, cid, tname):
+            return (res is not None and res.checks.get(cid) == "CANNOT-EVALUATE"
+                    and any(m.startswith(cid + ": the records of {!r} could not all be read or confirmed"
+                                         .format(tname)) and "not evaluated over a partial set" in m
+                            for m in res.by_check.get(cid, []))
+                    and not any(m in res.findings for m in res.by_check.get(cid, [])))
+        _prior_wl = clean_prior()
+        _prior_wl["prior"]["records"]["WL-1"] = ("worklog", "added")
+        f = clean_machine()
+        f["archive/2026/worklog.toml"] = "garbage = ["
+        check("history-resurrection-cannot-evaluate-when-worklog-unread",
+              _unread_type_cant(run(f, obs=_prior_wl), "C-HISTORY-RESURRECTION", "worklog"))
+        f = clean_machine()
+        f["handoff.index.toml"] = "garbage = ["
+        _ho_unread = run(f)
+        check("no-deletion-and-resurrection-cannot-evaluate-when-handoff-unread",
+              _unread_type_cant(_ho_unread, "C-NO-DELETION", "handoff")
+              and _unread_type_cant(_ho_unread, "C-HISTORY-RESURRECTION", "handoff"))
+        f = clean_machine()
+        f["handoff.index.toml"] = "garbage = ["
+        f["counters.toml"]["counters"]["BI"] = 3
+        _prior_bi = clean_prior()
+        _prior_bi["prior"]["records"]["BI-3"] = ("backlog_item", "open")
+        _ho_read = run(f, obs=_prior_bi)
+        check("no-deletion-and-resurrection-graded-for-read-type-beside-unread-handoff",
+              _ho_read is not None
+              and any(m.startswith("C-NO-DELETION: 1 allocated BI-<n> id(s)") for m in _ho_read.findings)
+              and any(m.startswith("C-HISTORY-RESURRECTION: prior record 'BI-3' is absent")
+                      for m in _ho_read.findings)
+              and not any("HO-" in m for m in _ho_read.findings
+                          if m.startswith(("C-NO-DELETION", "C-HISTORY-RESURRECTION"))))
         # A moved row that cannot be reconciled leaves the population of every type it could stand for
         # incomplete, for each check that joins through moved rows (red when its branch alone stops
         # recording that population unread). A row dropped as malformed still names a record through its
