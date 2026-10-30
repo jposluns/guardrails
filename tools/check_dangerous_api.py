@@ -95,9 +95,10 @@ never importing or running the file, and reports:
                then p.fullmatch); a getattr in its file with a name it is stored to, with a name
                that is not a literal, or read other than as the function a call calls (g =
                getattr, getattr.__call__, functools.partial(getattr, x), a conditional expression
-               of it), and any other use (match or fullmatch, an argument, a return, a container,
-               any other attribute) report it there. \\A, \\Z and \\z anchor the whole input
-               under MULTILINE too.
+               of it), one called with the literal name "getattr" (getattr(builtins, "getattr")
+               returns getattr itself), and any other use (match or fullmatch, an argument, a
+               return, a container, any other attribute) report it there. \\A, \\Z and \\z anchor
+               the whole input under MULTILINE too.
                A compiled pattern is an re.compile call, the value of a walrus, either branch of a
                conditional expression, any operand of a boolean expression (cache or
                re.compile(...)), or a name every binding of which is one of these or a copy of
@@ -124,7 +125,8 @@ Names resolve PER SCOPE as Python binds them: a binding in a function is local t
 declared global or nonlocal), a nested function sees its enclosing functions but not a class
 body, and a module, class or comprehension scope that binds a name may still see the outer
 binding, so every binding it could have is a candidate and the reference is a finding if any
-candidate is a sink. An unbound name falls back to the builtin of that name, where one exists.
+candidate is a sink. An unbound name falls back to the builtin of that name, where one exists,
+and an unbound __builtins__ to the builtins module (__builtins__.getattr is builtins.getattr).
 A sink module reached as an attribute of another module names that module (shutil.os.system
 is os.system, and from logging.handlers import pickle binds pickle), except an attribute named
 like the module that holds it (timeit.timeit is a function). getattr(x, "name") is read as
@@ -178,9 +180,9 @@ name, sys.modules[...]; a literal import of a sink module is a finding, but the 
 returns is not followed), getattr with a computed name or a sink module followed by an
 adjacent string literal (f(os, "x") and (pickle, "x")[0] read the module as an attribute base,
 not an escape, and getattr(shutil, "os") is not read as the os module), __builtins__ aliasing
-(m = __builtins__, __builtins__.exec, __builtins__[...]), a rewritten module attribute
-(ssl.PROTOCOL_TLS_CLIENT = 2 still proves the protocol) and dunder access (__getattribute__,
-__setattr__, object.__setattr__, __dict__).
+(m = __builtins__, __builtins__[...]; __builtins__.exec is builtins.exec), a rewritten module
+attribute (ssl.PROTOCOL_TLS_CLIENT = 2 still proves the protocol) and dunder access
+(__getattribute__, __setattr__, object.__setattr__, __dict__).
 
 Residuals (not seen): dynamic dispatch (getattr with a non-literal name on an object that is
 not a sink module, setattr with a non-literal name, globals() or vars() lookups); a numpy.load
@@ -229,12 +231,16 @@ used only to scan lines, so a line validator that admits non-ASCII digits in eac
 seen, and a line scan matched from its start only in another module (mod.LINE.fullmatch) or
 only through a read that is not a name, an attribute or a getattr (vars(self)["P"],
 operator.attrgetter("P"), self.__getattribute__("P"), inspect.getattr_static(self, "P")); a
-comprehension's own target named like a name a line scan is stored to is read through the
-outer binding of that name, so its use is followed (a false report), and a module-level
-function named getattr is read as the builtin (a conservative false report); a lookaround,
-conditional or backreference group at either end is not entered (^\\d+(?=$) is not read as
-anchored), nor is a group that closes the pattern with a
-quantifier after it (^(\\d+$)? is not read as anchored); a top-level alternation is read by its
+getattr reached through a subscript (builtins.__dict__['getattr'],
+sys.modules['builtins'].getattr) or other deliberate indirection to the builtins module is not
+followed: the lint guards ordinary code, not code written to evade it; a comprehension's own
+target named like a name a line scan is stored to is read through the outer binding of that
+name, so its use is followed (a false report), and a module-level function named getattr is
+read as the builtin (a conservative false report), as is a module-level import, assignment,
+loop, except or with target, class-body binding, comprehension target or annotation named
+getattr; a lookaround, conditional or backreference group at either end is not entered
+(^\\d+(?=$) is not read as anchored), nor is a group that closes the pattern with a quantifier
+after it (^(\\d+$)? is not read as anchored); a top-level alternation is read by its
 first and last tokens only, and neither it nor a group holding its own alternation is entered
 at an end (^a|b$ reads as anchored; (^a)|b$, ^a(?:b|$) and a|^\\d+$ do not); \\D, \\W, \\s, \\S
 and \\b, which change meaning with re.ASCII too, are not judged, so the \\b detector false
@@ -399,7 +405,13 @@ STAR_MODULES = _sink_modules(SINK_INVENTORY)
 # An unbound name falls back to the builtin of that name only where one exists (any other
 # unbound name is a NameError when run, so it names nothing).
 BUILTIN_NAMES = frozenset(builtins.__dict__)
+# An unbound __builtins__ falls back to the builtins module (what it is in __main__), so
+# __builtins__.getattr is builtins.getattr.
+_BUILTINS_MODULE = {"__builtins__": "builtins"}
 _GETATTR = frozenset({"getattr", "builtins.getattr"})
+# A getattr called with one of these literal names returns getattr itself (getattr(builtins,
+# "getattr")), so it is held like g = getattr and may be given any name.
+_GETATTR_NAMES = frozenset({"getattr"})
 _HASATTR = frozenset({"hasattr", "builtins.hasattr"})
 _DELATTR = frozenset({"delattr", "builtins.delattr"})
 _SETATTR = frozenset({"setattr", "builtins.setattr"})
@@ -1331,6 +1343,8 @@ class _Scanner(ast.NodeVisitor):
             scope = scope.parent
         if fallback and name in BUILTIN_NAMES:
             out.add(name)
+        elif fallback and name in _BUILTINS_MODULE:
+            out.add(_BUILTINS_MODULE[name])
         return out
 
     def resolve(self, node):
@@ -1522,8 +1536,10 @@ class _Scanner(ast.NodeVisitor):
                 call = parents.get(id(read))
                 if isinstance(call, ast.Call) and call.func is read:
                     attr = _positional(call, 1)
-                    getattrs.add(attr.value if isinstance(attr, ast.Constant)
-                                 and isinstance(attr.value, str) else None)
+                    name = attr.value if isinstance(attr, ast.Constant) \
+                        and isinstance(attr.value, str) else None
+                    # getattr(builtins, "getattr") returns getattr itself, held like g = getattr.
+                    getattrs.add(None if name in _GETATTR_NAMES else name)
                 else:
                     # Held, passed or wrapped before it is called (g = getattr, getattr.__call__,
                     # functools.partial(getattr, x)), it may be given any name.
@@ -2241,6 +2257,21 @@ _REGEX_SCOPE_U = (
     "import re\nre.compile(r'(?a)^(?u:\\d+)$')\n",
     "import re\nre.compile(r'^(?u:\\d+)$', re.A)\n",
 )
+# The vectors whose getattr is held only as one called with the name "getattr", and those that
+# reach getattr or exec only through __builtins__: the self-test also reads each with that
+# reading removed, where each must pass.
+_GETATTR_BY_NAME = tuple(
+    "import builtins, re\nclass Ids:\n    def __init__(self):\n"
+    "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t, c):\n"
+    + local + "        return " + read + ".fullmatch(t)\n"
+    for local, read in (("        g = getattr(builtins, 'getattr')\n", "g(self, 'P')"),
+                        ("", "getattr(c, 'getattr')(self, 'P')")))
+_BUILTINS_DUNDER = (
+    "import re\nclass Ids:\n    def __init__(self):\n"
+    "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
+    "        g = __builtins__.getattr\n        return g(self, 'P').fullmatch(t)\n",
+    "__builtins__.exec(text)\n",
+)
 
 # Positive vectors: (source, checks). Each must yield a finding with all checks on, and NO
 # finding with any one of its checks disabled, so every vector fails without its check. That
@@ -2481,6 +2512,7 @@ POSITIVE_VECTORS = (
     ("def f(text):\n    exec(text)\n", ("code-ref",)),
     ("run = exec\n", ("code-ref",)),
     ("import builtins as b\nb.exec(text)\n", ("alias", "code-ref")),
+    (_BUILTINS_DUNDER[1], ("alias", "code-ref")),
     ("import types\ntypes.FunctionType(compile(text, 'x', 'exec'), {})()\n", ("code-ref",)),
     ("import pydoc\npydoc.builtins.exec(text)\n", ("chain", "code-ref")),
     ("spec.loader.exec_module(module)\n", ("code-loader",)),
@@ -2623,6 +2655,9 @@ POSITIVE_VECTORS = (
           ("", "", "getattr.__call__(self, 'P')"),
           ("", "", "functools.partial(getattr, self)('P')"),
           ("", "", "(getattr if c else hasattr)(self, 'P')"))),
+    # So is one called with the name "getattr", or reached through __builtins__.
+    *((source, ("regex-ascii", "regex-lines", "regex-stores"))
+      for source in _GETATTR_BY_NAME + _BUILTINS_DUNDER[:1]),
     ("import re\nclass Ids:\n    def __init__(self):\n"
      "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
      "        (p := self.P).finditer(t)\n        return p.fullmatch(t)\n",
@@ -3194,6 +3229,24 @@ def self_test():
                 failures.append("flagged with a scoped u not clearing ASCII: " + repr(source))
     finally:
         _SCOPE_UNICODE = unicode
+    # getattr called with the name "getattr" is held, and an unbound __builtins__ is the builtins
+    # module: with either reading removed, its vectors pass.
+    global _GETATTR_NAMES, _BUILTINS_MODULE
+    names, _GETATTR_NAMES = _GETATTR_NAMES, frozenset()
+    try:
+        for source in _GETATTR_BY_NAME:
+            if scan_source(source):
+                failures.append("flagged with getattr(x, \"getattr\") not held: " + repr(source))
+    finally:
+        _GETATTR_NAMES = names
+    dunder, _BUILTINS_MODULE = _BUILTINS_MODULE, {}
+    try:
+        for source in _BUILTINS_DUNDER:
+            if scan_source(source):
+                failures.append("flagged with __builtins__ not the builtins module: "
+                                + repr(source))
+    finally:
+        _BUILTINS_MODULE = dunder
     drift = _roster_drift()
     if drift:
         failures.append("sink sets differ from the pinned roster: " + ", ".join(drift))
@@ -3212,10 +3265,11 @@ def self_test():
           " vectors (each changes outcome without its check), 4 admission vectors, {} \\z vectors"
           " that pass without \\z as an end anchor, {} leading comment-group vectors that flip"
           " with only flag groups read as leading, {} scoped u vectors that pass with u not"
-          " clearing ASCII.".format(
+          " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
+          " without that reading.".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
-              len(_REGEX_SCOPE_U)))
+              len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME), len(_BUILTINS_DUNDER)))
     return 0
 
 
