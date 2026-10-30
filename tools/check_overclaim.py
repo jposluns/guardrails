@@ -268,7 +268,7 @@ from urllib.parse import urlsplit, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
-from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 import gen_gensrc  # noqa: E402  build_registry: the in-memory gensrc recomputation (collector 3)
 import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster (collector 3 skip set)
 import gen_enforceability  # noqa: E402  build_ledger: recompute the residual map for the source-side residue-cleanliness leg
@@ -1460,7 +1460,7 @@ def _md_row_cells(line):
 # The exact header cells and the separator shape render_md emits for the '## Rules' table. A data row is a
 # 4-cell '| ... |' row (its interior pipes escaped by _md_cell); the separator '|---|---|---|---|' carries no
 # interior ' | ' so _md_row_cells rejects it, hence the dedicated separator pattern below.
-_MD_RULES_HEADER = ["Rule", "Corpus ID", "Status", "How enforced or intended"]
+_MD_RULES_HEADER = ["Rule", "Corpus ID", "Status", gen_enforcement_register.COLUMN_HEADING]  # single-sourced
 _MD_SEP_RE = re.compile(r"\|(?:\s*:?-+:?\s*\|)+")
 
 

@@ -15,7 +15,7 @@ Modes per operation class (3.6a to 3.6c):
   cutover / repin-swap / recovery / unadopt: "contained" with the primitive, else "fail-closed"
 
 It also carries precheck_special_files, the OPF copy of the special-file precheck
-(D-400-SPECIAL-FILE-PRECHECK; see its docstring).
+(SPECIAL-FILE-PRECHECK; see its docstring).
 """
 import sys
 
@@ -178,7 +178,7 @@ def _git_toplevel(root):
     answer. This never searches upward for a .git marker itself: whether a .git entry is a real
     repository is git's judgement (git skips an invalid planted marker such as an empty tools/.git
     directory), and the answer is used only to CONFIRM a root already derived from a fixed location,
-    never to choose one (D-400-SPECIAL-FILE-PRECHECK root derivation). An answer that is not one
+    never to choose one (SPECIAL-FILE-PRECHECK root derivation). An answer that is not one
     NUL-free absolute path (empty, several lines, an embedded NUL or other undecodable bytes, a
     relative path) is cannot-evaluate, exit 2, by name: never a raw ValueError out of the path call,
     and never read as git-absent, which would skip the confirmation. On a root the effective user
@@ -266,7 +266,7 @@ def _derive_precheck_root(entry):
 
 def precheck_special_files(root):
     """Refuse a tree that holds a BLOCKING-READ hazard, before any tool reads from it
-    (D-400-SPECIAL-FILE-PRECHECK): a gate that opens a FIFO, socket or device, directly or through a
+    (SPECIAL-FILE-PRECHECK): a gate that opens a FIFO, socket or device, directly or through a
     symlink, waits forever (a FIFO with no writer above all). Plain errors (an unlistable directory,
     an unresolvable symlink) stay loud, exit 2. Runs once per process per root (cached); returns root
     so a caller can wrap the expression that computes it.
@@ -441,10 +441,11 @@ def precheck_special_files(root):
     module file must derive the same real root, so a tools/ or opf/tools/ directory replaced by a
     symlink cannot move the walk out of the invoked tree; and the root must be confirmed by
     _git_toplevel whenever git can answer. BOOTSTRAP: the
-    runners and the CI steps first test, in shell ([ -f ] && [ ! -h ]), that the precheck module
+    runners first test, in a shell-only run_gate step (test -f ... -a ! -h ...) whose STOP line ends
+    the run on a failure, and the CI steps in shell, that the precheck module
     itself is a regular non-symlink file, because python3 would block LOADING a FIFO planted at the
     script path before any line of this code could run. Residuals that remain OUTSIDE the precheck:
-    the interpreter binary and the runner script itself (both are read before the bootstrap line can
+    the interpreter binary and the runner script itself (both are read before the bootstrap can
     run); a DIRECT tool invocation that did not run this precheck first (the interpreter imports
     the tool's modules, their __pycache__/<module>.pyc above all, before any in-process precheck
     call can run, so a FIFO already planted there hangs a direct invocation at import time; the
@@ -937,8 +938,70 @@ def _precheck_entry(argv):
     return 0
 
 
+def main(argv=None):
+    """The --precheck entry the __main__ block calls after the child-status guard: _precheck_entry
+    on argv (by default this process's arguments)."""
+    return _precheck_entry(sys.argv[1:] if argv is None else argv)
+
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. The --precheck entry reads the
+# exit status of its git queries, so under an ignored SIGCHLD it would read a failed query as
+# git's answer; it refuses at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    # Runner/CI entry (D-400-SPECIAL-FILE-PRECHECK): precheck the tree BEFORE any gate runs.
+    # Runner/CI entry (SPECIAL-FILE-PRECHECK): precheck the tree right after the
+    # child-status probe and BEFORE any other gate runs; the child-status guard runs first.
     # Usage: python3 -I -B <this module> --precheck
     # The root comes from this module's own FIXED location (_derive_precheck_root), never from an
     # upward .git search a planted marker could narrow. The INVOKED location (os.path.abspath, no
@@ -950,4 +1013,4 @@ if __name__ == "__main__":
     # filter. On a root this user owns, a dubious-ownership refusal is exit 2 (_git_lines), never
     # read as git-absent. Exit 0 when the walk finds nothing to refuse; exit 2 on a refusal, a root
     # disagreement, or an unknown argument.
-    raise SystemExit(_precheck_entry(sys.argv[1:]))
+    sys.exit(_child_status_refusal_exit("_containment.py") or main())

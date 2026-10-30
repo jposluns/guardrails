@@ -124,6 +124,8 @@ FIXTURE_REPO = "fixture/repository"
 FIXTURE_ORIGIN = "https://github.com/fixture/repository.git"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 SUITE_ID = "ci-status-behaviour-selftest"
+# The workflow file every read of ci-status.sh requires a completed successful run of.
+QUALITY_PATH = ".github/workflows/quality.yml"
 # The fixture commit's committer date and the fixture clock. The script scans the unfiltered listing
 # back to min(committer date, now) minus its 24-hour margin; these mirror that arithmetic.
 COMMIT_TIME = 1789990000
@@ -154,10 +156,46 @@ import sys
 # documents), and "record_errors" makes a number's read fail with the diagnostic given. The read of
 # the pull requests associated with a commit serves "associated" (its records, on one page; none when
 # absent), or "associated_raw" as text, or fails with "associated_error".
+# A --match-tree case serves "tree" instead: "runs" (the unfiltered listing's pages, read one page per
+# request), "commits" (each Git Data API commit read by SHA) and "jobs" (each run's jobs listing by run
+# id, read with --paginate --slurp). Each served entry is {"body": JSON} or {"raw": text} or
+# {"error": diagnostic}; an absent page, commit or run is Not Found.
 args = sys.argv[1:]
 with open(os.environ["MOCK_GH_ARGV_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(args) + "\n")
 endpoint = next((arg for arg in args if arg.startswith("repos/")), "")
+with open(os.environ["MOCK_GH_RESPONSE"], "r", encoding="utf-8") as handle:
+    tree_served = json.load(handle).get("tree")
+if tree_served is not None:
+    repo_prefix = "repos/" + os.environ["MOCK_GH_REPO"] + "/"
+    paged = "--paginate" in args and "--slurp" in args
+    tail = endpoint[len(repo_prefix):] if endpoint.startswith(repo_prefix) else ""
+    entry = None
+    if tail.startswith("actions/runs?per_page=100&page=") and not paged:
+        number = tail[len("actions/runs?per_page=100&page="):]
+        pages = tree_served["runs"]
+        if number.isdigit() and 1 <= int(number) <= len(pages):
+            entry = pages[int(number) - 1]
+    elif tail.startswith("git/commits/") and not paged:
+        entry = tree_served["commits"].get(tail[len("git/commits/"):])
+    elif (tail.startswith("actions/runs/") and tail.endswith("/jobs?filter=latest&per_page=100")
+            and paged):
+        entry = tree_served["jobs"].get(tail[len("actions/runs/"):-len("/jobs?filter=latest&per_page=100")])
+    else:
+        print("gh fixture: a tree-match read must be one unfiltered runs page, one commit, or one run's "
+              "latest jobs with --paginate --slurp", file=sys.stderr)
+        sys.exit(1)
+    if entry is None:
+        print("gh: Not Found (HTTP 404)", file=sys.stderr)
+        sys.exit(1)
+    if "error" in entry:
+        print(entry["error"], file=sys.stderr)
+        sys.exit(1)
+    if "raw" in entry:
+        sys.stdout.write(entry["raw"])
+    else:
+        print(json.dumps(entry["body"]))
+    sys.exit(0)
 listing = "repos/" + os.environ["MOCK_GH_REPO"] + "/actions/runs"
 scan_prefix = listing + "?per_page=100&page="
 pulls = "repos/" + os.environ["MOCK_GH_REPO"] + "/pulls"
@@ -383,9 +421,10 @@ def iso(epoch):
 
 
 def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME + 600,
-                 event=None, pull_requests=None, path=None):
-    # event, pull_requests and path appear only when given: without --require-base the script never
-    # reads them, and the pre-option fixtures prove that by omitting them entirely.
+                 event=None, pull_requests=None, path=QUALITY_PATH):
+    # event and pull_requests appear only when given: without --require-base the script never reads
+    # them, and the pre-option fixtures prove that by omitting them entirely. Every read requires a
+    # completed successful quality.yml run, so path defaults to that file; path=None omits the key.
     run = {
         "created_at": iso(created),
         "id": run_id,
@@ -438,6 +477,24 @@ def probe_read(*pulls, records=None, raw_records=None, record_errors=None, assoc
             "record_errors": record_errors or {}, "associated": associated or []}
 
 
+def commit_record(sha, tree):
+    # A Git Data API commit read as --match-tree serves it: the commit asked for and its tree.
+    return {"body": {"sha": sha, "tree": {"sha": tree}}}
+
+
+def jobs_listing(*jobs):
+    # One run's jobs listing on one page, from (name, status, conclusion) triples.
+    return {"body": [{"total_count": len(jobs),
+                      "jobs": [{"name": name, "status": status, "conclusion": conclusion}
+                               for name, status, conclusion in jobs]}]}
+
+
+def tree_listing(runs, commits, jobs=None):
+    # What gh serves a --match-tree read (see FAKE_GH): the runs on one page of the unfiltered listing,
+    # the commit records by SHA and the jobs listings by run id.
+    return {"runs": [{"body": page(runs)}], "commits": commits, "jobs": jobs or {}}
+
+
 def jq_program():
     source = read_text_nonblocking(SCRIPT)
     prefix = "CI_STATUS_JQ='\n"
@@ -460,7 +517,7 @@ def run_jq(program, pages, requested_sha, scan_pages=None, mode="verdict"):
     return subprocess.run(
         [JQ, "-s", "-r", "--arg", "mode", mode, "--arg", "requested_sha", requested_sha,
          "--argjson", "lower_bound", str(LOWER_BOUND), "--argjson", "max_pages", str(MAX_PAGES),
-         "--arg", "require_base", "", "--arg", "require_workflow", "",
+         "--arg", "require_base", "", "--arg", "require_workflow", QUALITY_PATH,
          program],
         input=stdin, text=True,
         capture_output=True, timeout=10,
@@ -539,6 +596,28 @@ class Fixture:
                            + ["remote", "set-url", "--add", name, url],
                            check=True, capture_output=True, timeout=30, env=self.base_env)
 
+    def side_commit(self, message, seed=None):
+        # A commit beside HEAD, which does not move: with HEAD's tree, or, given seed, with seed.txt
+        # holding that text instead, so its tree differs from HEAD's by exactly one blob. Returns the
+        # commit and its tree.
+        def git(*args, stdin=None):
+            return subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + list(args),
+                                  input=stdin, check=True, capture_output=True, text=True,
+                                  timeout=30, env=self.base_env).stdout.strip()
+        tree = git("rev-parse", "HEAD^{tree}")
+        if seed is not None:
+            blob = git("hash-object", "-w", "--stdin", stdin=seed)
+            tree = git("mktree", stdin="100644 blob {}\tseed.txt\n".format(blob))
+        commit = git("-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
+                     "commit-tree", tree, "-p", "HEAD", "-m", message)
+        return commit, tree
+
+    def gh_reads(self, prefix):
+        # How many gh calls of the last invocation read an endpoint of the fixture repository starting
+        # with prefix.
+        start = "repos/{}/{}".format(FIXTURE_REPO, prefix)
+        return sum(any(arg.startswith(start) for arg in argv) for argv in self.gh_argv)
+
     def reads_only(self, repo):
         # True when the last invocation ran gh at least once and every gh call read repo's runs.
         prefix = "repos/{}/actions/runs?".format(repo)
@@ -546,14 +625,19 @@ class Fixture:
             any(arg.startswith(prefix) for arg in argv) for argv in self.gh_argv)
 
     def invoke(self, polls, wait=False, timeout="900", clock=NOW, override=FIXTURE_REPO,
-               served=FIXTURE_REPO, git_remote=None, extra_args=(), probes=None):
+               served=FIXTURE_REPO, git_remote=None, extra_args=(), probes=None, tree=None,
+               rev="HEAD"):
         # override is CI_STATUS_REPO (None leaves it unset); served is the only repository gh answers for;
         # git_remote, when given, is the (stdout, exit status) the fixture git gives for the origin's URLs.
         # probes are the pull-request probe's reads (see FAKE_GH); by default every read finds one open
-        # pull request at this head into main that GitHub reports MERGEABLE.
+        # pull request at this head into main that GitHub reports MERGEABLE. tree, when given, is what gh
+        # serves a --match-tree read instead (see FAKE_GH); rev=None passes no positional rev.
         if probes is None:
             probes = [probe_read(pull(1, self.head_sha))]
-        self.response.write_text(json.dumps({"polls": polls, "probes": probes}), encoding="utf-8")
+        response = {"polls": polls, "probes": probes}
+        if tree is not None:
+            response["tree"] = tree
+        self.response.write_text(json.dumps(response), encoding="utf-8")
         self.counter.write_text("0\n", encoding="utf-8")
         self.probe_counter.write_text("0\n", encoding="utf-8")
         self.scan_log.write_text("", encoding="utf-8")
@@ -580,7 +664,7 @@ class Fixture:
         if override is not None:
             env["CI_STATUS_REPO"] = override
         env["CI_STATUS_TIMEOUT"] = timeout
-        command = [str(SCRIPT), "HEAD"]
+        command = [str(SCRIPT)] + ([] if rev is None else [rev])
         if wait:
             command.append("--wait")
         command.extend(extra_args)
@@ -656,8 +740,8 @@ def _run_checks():
                                 [page(other_commits, 101), page([success_a], 101)])
             scan_short = run_jq(program, [page([])], head_sha, [page(other_commits, 101)])
             expected_rows = "\n".join(
-                "completed\tsuccess\t-\t-\t-\t-\t{}\t{}\t{}".format(
-                    run["id"], run["name"], run["html_url"])
+                "completed\tsuccess\t-\t-\tmatch\t{}\t{}\t{}\t{}".format(
+                    QUALITY_PATH, run["id"], run["name"], run["html_url"])
                 for run in (success_a, success_b)
             ) + "\n"
             direct_result = (
@@ -673,7 +757,7 @@ def _run_checks():
                 wrong_target.returncode != 0
                 and "malformed workflow run record" in wrong_target.stderr,
                 (scan_found.returncode, scan_found.stdout)
-                == (0, "completed\tsuccess\t-\t-\t-\t-\t101\tWeb generator health\t"
+                == (0, "completed\tsuccess\t-\t-\tmatch\t" + QUALITY_PATH + "\t101\tWeb generator health\t"
                     "https://example.invalid/runs/101\n"),
                 scan_short.returncode != 0
                 and "incomplete unfiltered workflow-runs listing" in scan_short.stderr,
@@ -1135,7 +1219,7 @@ def _run_checks():
         # against another base still passes a plain check.
         require = ("--require-base", "main")
         on_main = [{"base": {"ref": "main"}}]
-        quality_path = ".github/workflows/quality.yml"
+        quality_path = QUALITY_PATH
         leaks_path = ".github/workflows/msg-leaks.yml"
         pr_quality = workflow_run(901, "completed", "success", "Quality", head_sha,
                                   event="pull_request", pull_requests=on_main,
@@ -1232,7 +1316,8 @@ def _run_checks():
         # is unmet (exit 1, naming the missing workflow file) in one-shot and --wait mode alike.
         # Report-once refuses on its single snapshot; --wait keeps polling through
         # the settle window first (a qualifying run can be registered late on this same head; a
-        # reopen schedules one), so the refusal comes only once the run set has been stable for
+        # re-applying the merge-train label schedules one), so the refusal comes only once the run
+        # set has been stable for
         # five observations and still holds no qualifying run.
         missing_quality = ("no completed successful run of the workflow file "
                            + quality_path)
@@ -1275,7 +1360,7 @@ def _run_checks():
                             "--require-workflow", quality_path), "needs a workflow path"),
                 (require + ("--require-workflow", quality_path,
                             "--require-workflow", quality_path), "more than once"),
-                (("--require-workflow", quality_path), "only under --require-base")):
+                (("--require-workflow", quality_path), "only with --require-base")):
             rc, output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=extra)
             wf_refused.append((rc, fixture.gh_argv == [], fixture.git_argv == [],
                                needle in output))
@@ -1360,12 +1445,12 @@ def _run_checks():
         check("ci/require-workflow-file-binding", bound,
               [(1, 1, True), (1, 5, True), (0, 5, False)])
 
-        # Under --require-base a run record whose workflow path is missing, empty
+        # Under --require-base, as in every mode, a run record whose workflow path is missing, empty
         # or not a string is a malformed run record (exit 2), in one-shot and --wait mode
         # alike: without a usable path the required-workflow match cannot be evaluated, and
         # reading such a run as some other file would be the name-collision fail-open again.
         no_path = workflow_run(914, "completed", "success", "Quality", head_sha,
-                               event="pull_request", pull_requests=on_main)
+                               event="pull_request", pull_requests=on_main, path=None)
         pathless = []
         for run in (no_path,
                     workflow_run(915, "completed", "success", "Quality", head_sha,
@@ -1382,7 +1467,8 @@ def _run_checks():
 
         # A required-workflow run REGISTERED LATE must not
         # end the wait at once: the first poll holds only the conforming msg-leaks run, the
-        # qualifying Quality run appears from the second poll on (the shape a reopen produces
+        # qualifying Quality run appears from the second poll on (the shape re-applying the
+        # merge-train label produces
         # on the SAME head), and the wait settles green instead of refusing on poll one.
         polls = [[page([pr_leaks])]] + [[page([pr_leaks, pr_quality])]] * 5
         rc, _output, calls = fixture.invoke(polls, wait=True, extra_args=require)
@@ -1423,7 +1509,7 @@ def _run_checks():
         # would let a broken scan-source (or filtered-source) validation hide behind the other
         # source's.
         bad_sibling = workflow_run(919, "completed", "success", "Sibling", head_sha,
-                                   event="pull_request", pull_requests=on_main)
+                                   event="pull_request", pull_requests=on_main, path=None)
         single_source = []
         for polls in (
                 [{"filtered": [page([no_path])], "scan": [page([])]}],
@@ -1439,19 +1525,77 @@ def _run_checks():
         check("ci/require-base-single-source-malformed", single_source,
               [(2, 1, True, False)] * 8)
 
-        # Without --require-base the path column is
-        # display-only and unvalidated, so a path that is not a nonempty string reads as "-"
-        # rather than collapsing the TSV row (IFS=tab folds an empty field, shifting every later
-        # column) or aborting it (@tsv refuses an object). Status, conclusion, name and URL must
-        # all land in their own columns.
-        plain_rows = []
-        for raw_path in ("", {"x": 1}):
+        # Without --require-base too, a run of the commit whose workflow path is missing, empty or
+        # not a string (an object, a number) is a malformed run record (exit 2, one read, never a
+        # timeout) naming the run, in one-shot and --wait mode alike, even beside a valid quality.yml
+        # run: whether it is the required workflow file cannot be evaluated. A plain read formerly
+        # validated no path, so such a sibling beside a valid Quality run read green (exit 0).
+        pathless_note = "malformed workflow run record: run(s) 920 of this commit record no workflow path"
+        plain_pathless = []
+        for raw_path in (None, "", {"x": 1}, 7):
             pathological = workflow_run(920, "completed", "success", "Web generator health",
                                         head_sha, path=raw_path)
-            rc, output, _calls = fixture.invoke([[page([pathological])]])
-            plain_rows.append((rc, "Web generator health: completed / success" in output,
-                               "  https://example.invalid/runs/920" in output))
-        check("ci/plain-mode-path-column-inert", plain_rows, [(0, True, True)] * 2)
+            for wait in (False, True):
+                rc, output, calls = fixture.invoke([[page([pathological, success_b])]], wait=wait)
+                plain_pathless.append((rc, calls, pathless_note in output, "TIMEOUT" in output))
+        check("ci/plain-mode-path-malformed-refused", plain_pathless, [(2, 1, True, False)] * 8)
+
+        # The plain-mode path refusal holds from EITHER listing alone, and names every such run once:
+        # the vectors above feed the malformed run through both listings at once, so they alone would
+        # let a path check on one listing (or one confined to --require-base again) hide behind the
+        # other listing's.
+        empty_path = workflow_run(920, "completed", "success", "Web generator health", head_sha,
+                                  path="")
+        object_path = workflow_run(921, "completed", "success", "Sibling", head_sha, path={"x": 1})
+        single_pathless = []
+        for polls, note in (
+                ([{"filtered": [page([success_b, empty_path])], "scan": [page([success_b])]}],
+                 pathless_note),
+                ([{"filtered": [page([success_b])], "scan": [page([success_b, empty_path])]}],
+                 pathless_note),
+                ([{"filtered": [page([success_b, object_path, empty_path])],
+                   "scan": [page([empty_path, success_b, object_path])]}],
+                 "malformed workflow run record: run(s) 920, 921 of this commit record no workflow path")):
+            for wait in (False, True):
+                rc, output, calls = fixture.invoke(polls, wait=wait)
+                single_pathless.append((rc, calls, note in output, "TIMEOUT" in output))
+        check("ci/plain-mode-path-single-source-refused", single_pathless,
+              [(2, 1, True, False)] * 6)
+
+        # Without --require-base too, a head whose only run is its msg-leaks.yml run (a member head,
+        # which the merge lane never labels) has no Quality evidence: it reads as missing (exit 1,
+        # naming quality.yml), never as passing, in one-shot mode on its single read and under --wait
+        # once the settle window still holds no qualifying run. So does a head whose run named
+        # Quality comes from another workflow file.
+        plain_leaks = workflow_run(922, "completed", "success", "Message/metadata leaks", head_sha,
+                                   path=leaks_path)
+        plain_impostor = workflow_run(923, "completed", "success", "Quality", head_sha,
+                                      path=".github/workflows/unrelated.yml")
+        required = []
+        for runs in ([plain_leaks], [plain_impostor, plain_leaks]):
+            for wait in (False, True):
+                rc, output, calls = fixture.invoke([[page(runs)]], wait=wait)
+                required.append((rc, calls, missing_quality + " on this head" in output))
+        check("ci/plain-quality-run-required", required, [(1, 1, True), (1, 5, True)] * 2)
+
+        # A push run of quality.yml (a commit on main) satisfies the plain read, and so does a
+        # quality.yml run that only the unfiltered listing shows beside the leaks run the head_sha
+        # filter returned: the scan keeps each run's path. A quality.yml run registered after the
+        # first --wait poll settles green on the same head.
+        plain_push = workflow_run(924, "completed", "success", "Quality", head_sha,
+                                  event="push", pull_requests=[])
+        missing_refusal = "RESULT: " + missing_quality
+        satisfied = []
+        rc, output, calls = fixture.invoke([[page([plain_push, plain_leaks])]])
+        satisfied.append((rc, calls, missing_refusal in output))
+        rc, output, calls = fixture.invoke([{"filtered": [page([plain_leaks])],
+                                             "scan": [page([plain_leaks, success_b])]}])
+        satisfied.append((rc, calls, missing_refusal in output))
+        polls = [[page([plain_leaks])]] + [[page([plain_leaks, success_b])]] * 5
+        rc, output, calls = fixture.invoke(polls, wait=True)
+        satisfied.append((rc, calls, missing_refusal in output))
+        check("ci/plain-quality-run-satisfied", satisfied,
+              [(0, 1, False), (0, 1, False), (0, 6, False)])
 
         # A second positional rev is refused (exit 2) before any git or API
         # read, never read last-wins: a stray positional that resolves (a branch name, say)
@@ -2134,6 +2278,370 @@ def _run_checks():
                                     merged_only in output))
         check("ci/wait-pr-probe-merged-at-timestamp", merged_at_cases,
               [(2, 0, 1, True, False)] * 11 + [(0, 5, 1, False, True)] * 3)
+
+        # THE TREE MATCH (--match-tree). same_sha is a commit beside HEAD with HEAD's tree; other_sha
+        # has a tree that differs from HEAD's by one blob. Every case reads through --match-tree with
+        # the rev taken from --head (or HEAD by default), never a positional rev, and never reads the
+        # head_sha-filtered query (calls stays 0).
+        same_sha, head_tree = fixture.side_commit("same tree")
+        other_sha, other_tree = fixture.side_commit("one blob differs", seed="seed changed\n")
+        commits = {sha: commit_record(sha, tree)
+                   for sha, tree in ((head_sha, head_tree), (same_sha, head_tree),
+                                     (other_sha, other_tree))}
+        match = ("--match-tree",)
+        gates = ("--require-job-success", "Quality gates")
+        all_green = jobs_listing(("Quality gates", "completed", "success"),
+                                 ("OPF standalone closure", "completed", "success"),
+                                 ("opf", "completed", "success"))
+        quality_same = workflow_run(701, "completed", "success", "Quality", same_sha)
+        quality_other = workflow_run(702, "completed", "success", "Quality", other_sha)
+        quality_head = workflow_run(703, "completed", "success", "Quality", head_sha)
+        matched = "RESULT: completed successful run "
+        unmatched = "RESULT: no completed successful run of the workflow file " + QUALITY_PATH
+        cannot = "ERROR: cannot evaluate the tree match of "
+
+        # A completed successful quality.yml run on ANOTHER commit with the same tree passes (exit 0),
+        # with and without per-job requirements, and a newer run on another tree is passed over.
+        identical = []
+        for runs, extra, jobs, run_id in (
+                ([quality_same], (), None, 701),
+                ([quality_same], gates + ("--require-job-success", "OPF standalone closure"),
+                 {"701": all_green}, 701),
+                ([quality_other, quality_same], (), None, 701)):
+            rc, output, calls = fixture.invoke([], rev=None, extra_args=match + extra,
+                                               tree=tree_listing(runs, commits, jobs))
+            identical.append((rc, calls, fixture.gh_reads("git/commits/" + same_sha),
+                              fixture.gh_reads("actions/runs/{}/jobs".format(run_id)),
+                              "{}{} ".format(matched, run_id) in output))
+        check("ci/match-tree-identical-green", identical,
+              [(0, 0, 1, 0, True), (0, 0, 1, 1, True), (0, 0, 1, 0, True)])
+
+        # The deliberate break the later skip relies on: the only successful run's head commit has a
+        # tree that differs by one blob, so the read refuses (exit 1) after reading that commit, and
+        # never reads its jobs, however green they are.
+        mismatch = []
+        for extra in ((), gates):
+            rc, output, calls = fixture.invoke([], rev=None, extra_args=match + extra,
+                                               tree=tree_listing([quality_other], commits,
+                                                                 {"702": all_green}))
+            mismatch.append((rc, calls, fixture.gh_reads("git/commits/" + other_sha),
+                             fixture.gh_reads("actions/runs/702/jobs"), unmatched in output))
+        check("ci/match-tree-mismatch-exit1", mismatch, [(1, 0, 1, 0, True)] * 2)
+
+        # No run at all (an empty listing) refuses (exit 1), with and without a job requirement,
+        # reading no commit and no jobs.
+        no_run = []
+        for extra in ((), gates):
+            rc, output, _calls = fixture.invoke([], rev=None, extra_args=match + extra,
+                                                tree=tree_listing([], commits))
+            no_run.append((rc, fixture.gh_reads("git/commits/"), fixture.gh_reads("actions/runs/7"),
+                           unmatched in output))
+        check("ci/match-tree-no-run-exit1", no_run, [(1, 0, 0, True)] * 2)
+
+        # Runs of quality.yml on the same tree that are not completed and successful (failed,
+        # cancelled, skipped, timed out, still running, or completed with no conclusion) never stand,
+        # alone or together: exit 1, and no commit is read for them.
+        not_green = [workflow_run(710, "completed", "failure", "Quality", same_sha),
+                     workflow_run(711, "completed", "cancelled", "Quality", same_sha),
+                     workflow_run(712, "completed", "skipped", "Quality", same_sha),
+                     workflow_run(713, "completed", "timed_out", "Quality", same_sha),
+                     workflow_run(714, "in_progress", None, "Quality", same_sha),
+                     workflow_run(715, "completed", None, "Quality", same_sha)]
+        nonsuccess = []
+        for runs in [[run] for run in not_green] + [not_green]:
+            rc, output, _calls = fixture.invoke([], rev=None, extra_args=match,
+                                                tree=tree_listing(runs, commits))
+            nonsuccess.append((rc, fixture.gh_reads("git/commits/"), unmatched in output))
+        check("ci/match-tree-nonsuccess-run-refused", nonsuccess, [(1, 0, True)] * 7)
+
+        # A successful run named Quality from another workflow FILE, and a successful msg-leaks.yml
+        # run, on the same tree never stand (exit 1, no commit read); beside them the quality.yml run
+        # does (exit 0), so the refusal is the path's, not the listing's.
+        impostor = workflow_run(720, "completed", "success", "Quality", same_sha,
+                                path=".github/workflows/unrelated.yml")
+        leaks = workflow_run(721, "completed", "success", "Message/metadata leaks", same_sha,
+                             path=".github/workflows/msg-leaks.yml")
+        wrong_file = []
+        for runs in ([impostor], [leaks], [impostor, leaks, quality_same]):
+            rc, output, _calls = fixture.invoke([], rev=None, extra_args=match,
+                                                tree=tree_listing(runs, commits))
+            wrong_file.append((rc, fixture.gh_reads("git/commits/"), unmatched in output))
+        check("ci/match-tree-wrong-workflow-file-refused", wrong_file,
+              [(1, 0, True), (1, 0, True), (0, 1, False)])
+
+        # A successful same-tree run whose named job concluded skipped, ran none of that name, has one
+        # of two same-named jobs skipped, or has it still running, never stands as that job's evidence
+        # (exit 1, naming why). The requirement is per run: an older same-tree run whose job concluded
+        # success still passes beside a newer one that skipped it.
+        skipped_opf = jobs_listing(("Quality gates", "completed", "success"),
+                                   ("opf", "completed", "skipped"))
+        required = []
+        for runs, jobs, extra, marker in (
+                ([quality_same], {"701": skipped_opf}, ("--require-job-success", "opf"),
+                 "opf: completed/skipped"),
+                ([quality_same], {"701": skipped_opf}, ("--require-job-success", "opf-adopt"),
+                 "opf-adopt: no job of that name"),
+                ([quality_same], {"701": jobs_listing(("opf", "completed", "success"),
+                                                      ("opf", "completed", "skipped"))},
+                 ("--require-job-success", "opf"), "opf: completed/success, completed/skipped"),
+                ([quality_same], {"701": jobs_listing(("opf", "in_progress", None))},
+                 ("--require-job-success", "opf"), "opf: in_progress/-"),
+                ([quality_same, quality_head], {"701": skipped_opf, "703": all_green},
+                 ("--require-job-success", "opf"), matched + "703 ")):
+            rc, output, _calls = fixture.invoke([], rev=None, extra_args=match + extra,
+                                                tree=tree_listing(runs, commits, jobs))
+            required.append((rc, marker in output))
+        check("ci/match-tree-required-job-skipped-refused", required, [(1, True)] * 4 + [(0, True)])
+
+        # A malformed jobs listing (not JSON, no page, no jobs array, a job with no name, an empty
+        # conclusion, fewer jobs than its total_count) or a failed jobs read is cannot-evaluate (exit
+        # 2), never a pass or a refusal; so are the reads before it: a runs page or any record on it
+        # that is malformed (a run of another workflow with no path included), a commit record with no
+        # tree, one naming another commit (whose tree is HEAD's), one that is not JSON, and a failed
+        # commit or listing read.
+        def broken(jobs=None, commit=None, runs=None):
+            served = tree_listing([quality_same], dict(commits), {"701": jobs or all_green})
+            if commit is not None:
+                served["commits"][same_sha] = commit
+            if runs is not None:
+                served["runs"] = [runs]
+            return served
+        malformed = []
+        for served in (
+                broken(jobs={"raw": "not json"}),
+                broken(jobs={"body": []}),
+                broken(jobs={"body": [{"total_count": 1}]}),
+                broken(jobs={"body": [{"total_count": 1,
+                                       "jobs": [{"status": "completed", "conclusion": "success"}]}]}),
+                broken(jobs={"body": [{"total_count": 1,
+                                       "jobs": [{"name": "Quality gates", "status": "completed",
+                                                 "conclusion": ""}]}]}),
+                broken(jobs={"body": [dict(all_green["body"][0], total_count=4)]}),
+                broken(jobs={"error": "gh: HTTP 502"}),
+                broken(commit={"body": {"sha": same_sha}}),
+                broken(commit=commit_record(head_sha, head_tree)),
+                broken(commit={"raw": "not json"}),
+                broken(commit={"error": "gh: HTTP 502"}),
+                broken(runs={"body": page([quality_same, workflow_run(
+                    730, "completed", "success", "Other", "e" * 40, path=None)])}),
+                broken(runs={"body": {"total_count": "1", "workflow_runs": [quality_same]}}),
+                broken(runs={"error": "gh: HTTP 502"})):
+            rc, output, _calls = fixture.invoke([], rev=None, extra_args=match + gates, tree=served)
+            malformed.append((rc, cannot in output, matched in output))
+        check("ci/match-tree-jobs-read-malformed-fail-closed", malformed, [(2, True, False)] * 14)
+
+        # --head takes the rev, validated as it is consumed before any git or API read: missing, empty,
+        # whitespace-only and hyphen-led values are refused (exit 2) even when a valid one follows, and
+        # so are --head or --require-job-success without --match-tree, a bad --require-job-success
+        # value, a positional rev, --wait and --require-base under --match-tree. The value given is the
+        # rev whose tree is compared: --head other_sha passes on the run whose tree is other_sha's and
+        # refuses on the one whose tree is HEAD's.
+        consumed = []
+        for extra, rev, needle in (
+                (match + ("--head",), None, "--head needs a rev and none was given"),
+                (match + ("--head", ""), None, "--head needs a rev; an empty"),
+                (match + ("--head", " \t "), None, "--head needs a rev; an empty"),
+                (match + ("--head", "--require-job-success", "opf"), None,
+                 "--head needs a rev; a hyphen-led"),
+                (match + ("--head", "", "--head", "HEAD"), None, "--head needs a rev; an empty"),
+                (("--head", "HEAD"), None, "accepted only with --match-tree"),
+                (("--require-job-success", "opf"), "HEAD", "accepted only with --match-tree"),
+                (match + ("--require-job-success", " "), None, "needs a job name; an empty"),
+                (match + ("--require-job-success", "-opf"), None, "needs a job name; a hyphen-led"),
+                (match, "HEAD", "a positional rev is refused"),
+                (match + ("--wait",), None, "are refused with it"),
+                (match + ("--require-base", "main"), None, "are refused with it")):
+            rc, output, _calls = fixture.invoke([], rev=rev, extra_args=extra,
+                                                tree=tree_listing([quality_same], commits))
+            consumed.append((rc, fixture.gh_argv == [], fixture.git_argv == [], needle in output))
+        for runs, want in (([quality_other], matched + "702 "), ([quality_same], unmatched)):
+            rc, output, _calls = fixture.invoke([], rev=None,
+                                                extra_args=match + ("--head", other_sha),
+                                                tree=tree_listing(runs, commits))
+            consumed.append((rc, fixture.gh_reads("git/commits/"), want in output, other_tree in output))
+        check("ci/match-tree-head-flag-consumed", consumed,
+              [(2, True, True, True)] * 12 + [(0, 1, True, True), (1, 1, True, True)])
+
+        # A repeated --match-tree or --head (the same value or another) and a --require-job-success
+        # naming a job already named are refused (exit 2) before any git or API read, never read
+        # last-wins; two different job names are accepted (ci/match-tree-identical-green).
+        repeated = []
+        for extra in (match + match,
+                      match + ("--head", "HEAD", "--head", "HEAD"),
+                      match + ("--head", same_sha, "--head", other_sha),
+                      match + ("--require-job-success", "opf", "--require-job-success", "opf")):
+            rc, output, _calls = fixture.invoke([], rev=None, extra_args=extra,
+                                                tree=tree_listing([quality_same], commits))
+            repeated.append((rc, fixture.gh_argv == [], fixture.git_argv == [],
+                             "more than once" in output))
+        check("ci/match-tree-repeated-flag-refused", repeated, [(2, True, True, True)] * 4)
+
+        # A later pass never erases an earlier failure: a completed quality.yml run on the same tree
+        # that concluded failure, cancelled or timed_out refuses the tree (exit 1, naming the run)
+        # beside a successful one, whether it is older or newer, and before any jobs listing is read.
+        # A failed run on another tree, a failed run of another workflow file and a same-tree run
+        # still in progress never veto (exit 0). The window ends: a veto on page 5, the last page
+        # read, refuses and one on page 6 is never read; a veto on the 19th or 20th distinct head
+        # commit refuses and one on the 21st is never resolved (its commit is not read). Past the
+        # commit bound the scan goes on: a veto listed after the 21st distinct head commit still
+        # refuses when its own commit's tree is already known, on the matched run's own commit (with
+        # 20, 21 or 22 distinct head commits listed, or with 21 listed and the veto alone on page 2
+        # or page 5 behind full pages) or on another same-tree commit an earlier success resolved,
+        # and one on a resolved commit with another tree never does.
+        def filler(count, start):
+            return [workflow_run(start + k, "completed", "failure", "Other", same_sha,
+                                 path=".github/workflows/unrelated.yml") for k in range(count)]
+
+        def paged(veto_page):
+            pages = []
+            for number in range(1, 7):
+                runs = [quality_same] if number == 1 else []
+                if number == veto_page:
+                    runs.append(workflow_run(760, "completed", "failure", "Quality", head_sha))
+                runs += filler(100 - len(runs), 10000 * number)
+                pages.append({"body": page(runs)})
+            return {"runs": pages, "commits": commits, "jobs": {}}
+
+        def late_veto(sha):
+            return workflow_run(769, "completed", "failure", "Quality", sha)
+
+        def far_commits(fillers, late=None, early=(), after=()):
+            # quality_same, then early, then fillers successful runs each on its own commit with
+            # other_tree, then late (by default a failed run on head_sha), then after, all on one page.
+            shas = ["{:040x}".format(0xc0ffee000 + k) for k in range(fillers)]
+            served = tree_listing([quality_same] + list(early)
+                                  + [workflow_run(770 + k, "completed", "success", "Quality", sha)
+                                     for k, sha in enumerate(shas)]
+                                  + [late or late_veto(head_sha)] + list(after),
+                                  dict(commits))
+            served["commits"].update((sha, commit_record(sha, other_tree)) for sha in shas)
+            return served
+
+        def far_paged(veto_page):
+            # far_commits(20, late_veto(same_sha)) with its late veto alone on page veto_page: the runs
+            # before it stay on page 1, and every page before veto_page is filled up with filler.
+            served = far_commits(20, late_veto(same_sha))
+            listed = served["runs"][0]["body"]["workflow_runs"]
+            pages = [listed[:-1]] + [[] for _ in range(veto_page - 1)]
+            pages[-1].append(listed[-1])
+            served["runs"] = [{"body": page(runs if number == veto_page
+                                            else runs + filler(100 - len(runs), 10000 * number))}
+                              for number, runs in enumerate(pages, 1)]
+            return served
+
+        failed_same = workflow_run(740, "completed", "failure", "Quality", same_sha)
+        failed_head = workflow_run(741, "completed", "failure", "Quality", head_sha)
+        vetoes = "did not conclude success, and a success on that tree never erases it"
+        failed_run = []
+        for served, extra, veto_run, page_six in (
+                (tree_listing([quality_same, failed_head], commits), (), 741, 0),
+                (tree_listing([failed_same, quality_head], commits), (), 740, 0),
+                (tree_listing([quality_same, workflow_run(742, "completed", "cancelled", "Quality",
+                                                          head_sha)], commits), (), 742, 0),
+                (tree_listing([quality_head, workflow_run(743, "completed", "timed_out", "Quality",
+                                                          same_sha)], commits), (), 743, 0),
+                (tree_listing([quality_same, failed_head], commits, {"701": all_green}), gates,
+                 741, 0),
+                (tree_listing([quality_same, workflow_run(744, "completed", "failure", "Quality",
+                                                          other_sha)], commits), (), None, 0),
+                (tree_listing([quality_same, workflow_run(745, "completed", "failure", "Quality",
+                                                          head_sha, path=".github/workflows/"
+                                                          "unrelated.yml")], commits), (), None, 0),
+                (tree_listing([quality_same, workflow_run(746, "in_progress", None, "Quality",
+                                                          head_sha)], commits), (), None, 0),
+                (paged(4), (), 760, 0),
+                (paged(5), (), 760, 0),
+                (paged(6), (), None, 0),
+                (far_commits(17), (), 769, 0),
+                (far_commits(18), (), 769, 0),
+                (far_commits(19), (), None, 0),
+                (far_commits(19, late_veto(same_sha)), (), 769, 0),
+                (far_commits(20, late_veto(same_sha)), (), 769, 0),
+                (far_commits(21, late_veto(same_sha)), (), 769, 0),
+                (far_commits(20, late_veto(head_sha), [quality_head]), (), 769, 0),
+                (far_commits(20, late_veto(other_sha), [quality_other]), (), None, 0),
+                (far_paged(2), (), 769, 0),
+                (far_paged(5), (), 769, 0)):
+            rc, output, _calls = fixture.invoke([], rev=None, extra_args=match + extra, tree=served)
+            named = veto_run is not None and "run {} on ".format(veto_run) in output
+            failed_run.append((rc, vetoes in output, named, matched + "701 " in output,
+                               fixture.gh_reads("actions/runs/701/jobs"),
+                               fixture.gh_reads("actions/runs?per_page=100&page=6"),
+                               fixture.gh_reads("git/commits/" + head_sha)))
+        check("ci/match-tree-failed-run-on-same-tree-refused", failed_run,
+              [(1, True, True, False, 0, 0, 1), (1, True, True, False, 0, 0, 1),
+               (1, True, True, False, 0, 0, 1), (1, True, True, False, 0, 0, 1),
+               (1, True, True, False, 0, 0, 1),
+               (0, False, False, True, 0, 0, 0), (0, False, False, True, 0, 0, 0),
+               (0, False, False, True, 0, 0, 0),
+               (1, True, True, False, 0, 0, 1), (1, True, True, False, 0, 0, 1),
+               (0, False, False, True, 0, 0, 0),
+               (1, True, True, False, 0, 0, 1), (1, True, True, False, 0, 0, 1),
+               (0, False, False, True, 0, 0, 0),
+               (1, True, True, False, 0, 0, 0), (1, True, True, False, 0, 0, 0),
+               (1, True, True, False, 0, 0, 0), (1, True, True, False, 0, 0, 1),
+               (0, False, False, True, 0, 0, 0),
+               (1, True, True, False, 0, 0, 0), (1, True, True, False, 0, 0, 0)])
+
+        # Every result line but a veto's states the window it read: the listing pages read, each in
+        # full, and whether the listing ended or the page bound did; how many head commits' trees were
+        # read, of the bound; and how many completed quality.yml runs sit on a further head commit and
+        # so were not compared, adding, when any is, that no successful run listed after the first of
+        # them is accepted. So no run that passes is older than an uncompared one. A successful run on
+        # a resolved commit listed just before the first uncompared run stands where a newer one lacks
+        # a required job; one listed after it never does, whether the uncompared runs before it are a
+        # pass on another tree, a failed run on a commit with the queried tree (the 21st distinct head
+        # commit), or both (that commit then the 22nd); and one on a further commit with the same tree
+        # is never read, never stands and is counted.
+        pages_end = "listing pages read, each in full: {} of at most 5, to the listing's end; "
+        pages_cut = "listing pages read, each in full: 5 of at most 5, any later page unread; "
+        trees_read = "head commits whose tree was read: {} of at most 20, newest first; "
+        uncompared = "completed runs of that file on a further head commit, not compared: {})"
+        stopped = ("completed runs of that file on a further head commit, not compared: {}, and no "
+                   "successful run listed after the first of them is accepted)")
+        no_tree = ("head commits whose tree was read: none, as no completed successful run of that file "
+                   "is listed)")
+        far_sha = "d" * 40
+        late_green = workflow_run(704, "completed", "success", "Quality", same_sha)
+        far_failed = workflow_run(900, "completed", "failure", "Quality", far_sha)
+
+        def skipped_then_green(served):
+            served["jobs"] = {"701": skipped_opf, "704": all_green, "705": all_green}
+            served["commits"][far_sha] = commit_record(far_sha, head_tree)
+            return served
+
+        inside_pass = skipped_then_green(far_commits(19, late_green, after=[far_failed]))
+        late_pass = skipped_then_green(far_commits(20, late_green))
+        after_failed = skipped_then_green(far_commits(19, far_failed, after=[late_green]))
+        after_far_failed = skipped_then_green(far_commits(20, far_failed, after=[late_green]))
+        far_pass = skipped_then_green(far_commits(20, workflow_run(705, "completed", "success",
+                                                                   "Quality", far_sha)))
+        opf = ("--require-job-success", "opf")
+        window = []
+        for served, extra, want, needles in (
+                (tree_listing([quality_same], commits), (), matched + "701 ",
+                 [pages_end.format(1), trees_read.format(1), uncompared.format(0)]),
+                (paged(6), (), matched + "701 ", [pages_cut, trees_read.format(1), uncompared.format(0)]),
+                (far_commits(19), (), matched + "701 ",
+                 [pages_end.format(1), trees_read.format(20), stopped.format(1)]),
+                (inside_pass, opf, matched + "704 ",
+                 [pages_end.format(1), trees_read.format(20), stopped.format(1)]),
+                (late_pass, opf, unmatched,
+                 [pages_end.format(1), trees_read.format(20), stopped.format(1)]),
+                (after_failed, opf, unmatched,
+                 [pages_end.format(1), trees_read.format(20), stopped.format(1)]),
+                (after_far_failed, opf, unmatched,
+                 [pages_end.format(1), trees_read.format(20), stopped.format(2)]),
+                (far_pass, opf, unmatched,
+                 [pages_end.format(1), trees_read.format(20), stopped.format(2)]),
+                (tree_listing([failed_same], commits), (), unmatched, [pages_end.format(1), no_tree])):
+            rc, output, _calls = fixture.invoke([], rev=None, extra_args=match + extra, tree=served)
+            window.append((rc, want in output, [needle for needle in needles if needle not in output],
+                           fixture.gh_reads("git/commits/" + far_sha),
+                           fixture.gh_reads("actions/runs/705/jobs"),
+                           fixture.gh_reads("actions/runs/704/jobs")))
+        check("ci/match-tree-window-disclosed", window,
+              [(0, True, [], 0, 0, 0)] * 3 + [(0, True, [], 0, 0, 1)] + [(1, True, [], 0, 0, 0)] * 5)
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.

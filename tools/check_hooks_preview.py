@@ -733,7 +733,7 @@ def main():
     if "--self-test" in argv:
         return self_test_main()
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+    from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
     return run(precheck_special_files(_repo_root()))
 
 

@@ -24,9 +24,14 @@ jobs:
         with:
           python-version: '3.14'
 
-      # The special-file precheck runs first here as in every job of every workflow
-      # (check_ci_parity holds every job to that order); the first job of quality.yml states what
-      # it refuses and why the shell test on its first run line comes before the interpreter.
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      # The special-file precheck runs right after the child-status probe here as in every job of
+      # every workflow (check_ci_parity holds every job to that order); the first job of quality.yml
+      # states what it refuses, why the shell test on its first run line comes before the
+      # interpreter, and what the probe step reads before it.
       - name: Special-file precheck
         shell: bash
         run: |

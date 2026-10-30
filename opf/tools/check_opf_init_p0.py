@@ -186,25 +186,82 @@ def vectors(f):
     add("compat/bad-provenance",
         lambda m: m.validate_compatibility(manifest, provenance=b"not toml"),
         "REFUSED", "COMPATIBILITY")
-    add("compat/old-needs-upgrade", lambda m: m.validate_compatibility(old[p0.MANIFEST_PATH]),
-        "REFUSED", "VERSION")
-    add("compat/version-only-upgrade", lambda m: m.validate_upgrade_delta(old, d2a))
-    invented = dict(d2a, **{operation.PROVENANCE_RELPATH: provenance})
-    add("compat/no-invented-provenance",
-        lambda m: m.validate_upgrade_delta(old, invented), "REFUSED", "UPGRADE")
-    changed = dict(d2a)
-    changed[operation.COUNTERS_RELPATH] += b"# changed\n"
-    add("compat/no-counter-change",
-        lambda m: m.validate_upgrade_delta(old, changed), "REFUSED", "UPGRADE")
-    other = dict(d2a)
-    other[p0.MANIFEST_PATH] = manifest.replace(b'posture = "required"', b'posture = "optional"')
-    add("compat/no-other-field", lambda m: m.validate_upgrade_delta(old, other), "REFUSED", "UPGRADE")
+    def older_version_refused(m):
+        # The refusal names the manifest path and the declared spec_version, states that no store
+        # upgrade reaches spec_version 2.0.0, and states the hand step (spec 9.2), pinned whole:
+        # rewording it, dropping any of them, or offering an upgrade again, is red.
+        got = m.validate_compatibility(old[p0.MANIFEST_PATH])
+        check([f[2] for f in got.findings] == [
+            "{0} declares spec_version '1.1.0'; this bootstrap requires 1.2.0: no store upgrade "
+            "reaches spec_version 2.0.0, and this bootstrap does not operate on a store at another "
+            "version; to adopt its tree instead, "
+            "first move {0} aside by hand: its files are then ordinary foreign content for a first "
+            "adoption".format(p0.MANIFEST_PATH)],
+            "compat/older-version-refused/message")
+        return got
+    add("compat/older-version-refused", older_version_refused, "REFUSED", "VERSION")
+
+    def version_refusal(name, variant, message):
+        # Pinned whole, like compat/older-version-refused: collapsing these refusals back into one
+        # shared hand-step message is red.
+        def case(m, variant=variant, message=message):
+            got = m.validate_compatibility(variant)
+            check([f[2] for f in got.findings] == [message], "compat/" + name + "/message")
+            return got
+        add("compat/" + name, case, "REFUSED", "VERSION")
+
+    # Each non-1.2.0 declaration gets its own pinned refusal: only a declaration below 2.0.0 is an
+    # older store and gets the hand step (spec 9.2); a newer, malformed or missing declaration is
+    # never offered it.
+    check(manifest.count(b'spec_version = "1.2.0"\n') == 1, "fixture/manifest-version-line")
+    version_refusal("newer-no-hand-step", manifest.replace(b'"1.2.0"', b'"2.0.0"'),
+                    "{} declares spec_version '2.0.0'; this bootstrap requires 1.2.0: a store "
+                    "declaring 2.0.0 or above is a store at a later version, never foreign "
+                    "content; use the tooling that implements it (fail-closed)".format(
+                        p0.MANIFEST_PATH))
+    version_refusal("between-gets-hand-step", manifest.replace(b'"1.2.0"', b'"1.3.0"'),
+                    "{0} declares spec_version '1.3.0'; this bootstrap requires 1.2.0: no store "
+                    "upgrade reaches spec_version 2.0.0, and this bootstrap does not operate on a "
+                    "store at another version; to "
+                    "adopt its tree instead, first move {0} aside by hand: its files are then "
+                    "ordinary foreign content for a first adoption".format(p0.MANIFEST_PATH))
+    version_refusal("malformed-version", manifest.replace(b'"1.2.0"', b'"x.y"'),
+                    "{} declares spec_version 'x.y', which is not a bare SemVer; this bootstrap "
+                    "requires 1.2.0 (fail-closed)".format(p0.MANIFEST_PATH))
+    version_refusal("missing-version", manifest.replace(b'spec_version = "1.2.0"\n', b''),
+                    "{} declares no spec_version; this bootstrap requires 1.2.0 "
+                    "(fail-closed)".format(p0.MANIFEST_PATH))
+    version_refusal("missing-opf-table", manifest.replace(b'[opf]\n', b'[other]\n'),
+                    "{} has no [opf] table; this bootstrap requires spec_version 1.2.0 "
+                    "(fail-closed)".format(p0.MANIFEST_PATH))
     def homes(m):
         # Verify the generation fence even if a later resolver activates generation 2.
         from unittest.mock import patch
         with patch.object(m.store, "SUPPORTED_HOMES", 2):
             return m.validate_compatibility(manifest)
     add("compat/homes-fence", homes, "REFUSED", "HOMES")
+
+    def generation2(change=None, spec=True, homes2=True):
+        # A generation-2 plan exists only under raised gates, patched inside the case and restored
+        # on exit, so the shared fixture and every default case stay at the shipped constants.
+        def case(m):
+            from unittest.mock import patch
+            with patch.object(m.store, "SUPPORTED_HOMES", 2), patch.object(
+                    m.store, "SUPPORTED_SPEC_VERSION",
+                    m.store.IMPORTED_SPEC_VERSION if spec else m.store.SUPPORTED_SPEC_VERSION):
+                built, data = operation.build_init_plan(
+                    operation_id=OP_ID, binding=plan["binding"], head=plan["head"],
+                    inventory_digest_value=plan["inventory_digest"],
+                    application_time=plan["application_time"], homes2=homes2)
+                return m.validate_plan(data if change is None else altered(change, built))
+        return case
+    add("accept/homes2-plan", generation2())
+    add("refuse/homes2-missing-gitignore", generation2(
+        lambda d: d["sets"]["S"].pop(0) if d["sets"]["S"][0]["path"] == ".working/.gitignore"
+        else None), "REFUSED", "UNCLASSIFIED")
+    add("refuse/gen1-imported-leaf", generation2(
+        lambda d: d["sets"]["S"].insert(-3, {"path": ".working/toml/backlog_item.imported.index.toml"}),
+        spec=False, homes2=False), "REFUSED", "UNCLASSIFIED")
     for name, value in (("missing", None), ("empty", b""), ("not-object", b"[]\n"),
                         ("duplicate", b'{"schema":1,"schema":1}\n'), ("truncated", raw[:-4])):
         add("input/" + name, lambda m, v=value: m.validate_plan(v),
@@ -246,6 +303,9 @@ REVERSIONS = (
     ("overlap", 'len(paths) == len(set(paths))', 'True', "refuse/overlap"),
     ("source-roster", 'set(sources) == roster and len(sources) == len(roster)',
      'True', "refuse/unclassified-S"),
+    ("generation-roster",
+     'set(operation.bootstrap_source_roster(operation._plan_manifest_model(plan)))',
+     'set(operation.BOOTSTRAP_SOURCE_ROSTER)', "accept/homes2-plan"),
     ("view-roster", 'sets["V"] == views', 'True', "refuse/unclassified-V"),
     ("plan-version", '_version(doc, PLAN_FORMATS, "plan")', 'pass', "refuse/plan-version-unknown"),
     ("outcome-version", '_version(doc, OUTCOME_FORMATS, "outcome")', 'pass',
@@ -261,15 +321,10 @@ REVERSIONS = (
      'True', "refuse/coupled-as-source"),
     ("F19", 'set(staged_paths) <= sources', 'True', "refuse/staged-V"),
     ("optional-provenance", 'if provenance is not None:', 'if True:', "compat/d2a-retained"),
-    ("upgrade-files", 'set(before) == set(after)\n             and all(before[p] == after[p] for p in before if p != MANIFEST_PATH)',
-     'True', "compat/no-invented-provenance"),
-    ("upgrade-field", 'new == expected', 'True', "compat/no-other-field"),
     ("homes", 'store.SUPPORTED_HOMES == 1 and store.homes_generation(manifest) == 1',
      'True', "compat/homes-fence"),
     ("source-result", 'type(value) is int and value in (0, 2)',
      'False', "accept/source-only-zero"),
-    ("upgrade-dispatch", 'return new', 'raise _Refusal("DISPATCH", "upgrade", "removed")',
-     "compat/version-only-upgrade"),
     ("completed-generator", 'if completed:', 'if False:', "accept/completed-recorded-generator"),
     ("coupled-type", 'type(value) is operation.InitResult and type(getattr(value, "status", None)) is str\n                 and value.status in RESULT_STATUSES',
      'True', "refuse/zero-as-coupled"),
@@ -288,7 +343,6 @@ def red_on_revert(source, f):
                                       if s != "VIEWS-READY"),
             "coupled-type": ("refuse/result-status", "refuse/result-missing-status"),
             "F19": ("refuse/staged-K", "refuse/staged-E", "refuse/staged-C"),
-            "upgrade-files": ("compat/no-counter-change",),
             "pins": ("refuse/pin-spec_version", "refuse/pin-provenance_format",
                      "refuse/pin-views_generator", "refuse/interrupted-recorded-generator",
                      "refuse/completed-spec-pin"),
@@ -319,15 +373,16 @@ def red_on_revert(source, f):
 RUNNER_PATH_PIN = "readonly PATH\n"
 
 
-# The exact precheck abort line opf/tools/run_all_checks.sh carries before its first
-# run_gate registration (D-400-SPECIAL-FILE-PRECHECK).
-PRECHECK_LINE = 'python3 -I -B "$here/_containment.py" --precheck || exit 2'
+# The exact precheck gate line opf/tools/run_all_checks.sh carries right after its
+# child-status probe gate and bootstrap gate (SPECIAL-FILE-PRECHECK): a run_gate
+# registration like any other, so it reaches the executable fixture in roster order.
+PRECHECK_LINE = 'run_gate "special-file-precheck"       python3 -I -B "$here/_containment.py" --precheck'
 
-# The D-400 BOOTSTRAP line ahead of the precheck: a pure shell test-and-abort that refuses a
-# non-regular or symlinked precheck script by name BEFORE python3 could block loading it. It
-# calls no python3, so it adds no roster entry; any other spelling that names the precheck
-# module is refused below.
-PRECHECK_BOOTSTRAP_LINE = '[ -f "$here/_containment.py" ] && [ ! -h "$here/_containment.py" ] || { echo "error: opf/tools/_containment.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }'
+# The D-400 BOOTSTRAP gate ahead of the precheck gate: a pure shell test that fails on a
+# non-regular or symlinked precheck script BEFORE python3 could block loading it (the
+# runner's STOP line then ends the run). It calls no python3, so it adds no roster entry;
+# any other spelling that names the precheck module is refused below.
+PRECHECK_BOOTSTRAP_LINE = 'run_gate "special-file-precheck-bootstrap" test -f "$here/_containment.py" -a ! -h "$here/_containment.py"'
 
 def runner_check(expected, text=None, *, fail_own=0):
     import errno
@@ -388,25 +443,18 @@ def runner_check(expected, text=None, *, fail_own=0):
     roster = []
     try:
         for line in runner.read_text(encoding="utf-8").splitlines():
-            if line.strip() == PRECHECK_LINE:
-                # D-400-SPECIAL-FILE-PRECHECK: the runner's first python3 call is the
-                # tree precheck, outside run_gate; it reaches the same executable
-                # fixture, so the recorded roster carries it in order.
-                roster.append(tuple(os.fsencode(word) for word in
-                                    ("-I", "-B", str(here / "_containment.py"),
-                                     "--precheck")))
-                continue
             if line.strip() == PRECHECK_BOOTSTRAP_LINE:
-                # D-400 bootstrap: shell-only, calls no python3, so no roster entry.
+                # D-400 bootstrap gate: shell-only, calls no python3, so no roster entry.
                 continue
             if line.strip().startswith("python3 "):
-                # Any OTHER bare python3 line (including a mutated precheck
-                # spelling) is an unrecognized invocation the fixture would
-                # record outside the roster: refuse before launch.
+                # Any bare python3 line is an unrecognized invocation the
+                # fixture would record outside the roster: refuse before launch.
                 raise ValueError(line)
-            if "_containment.py" in line and not line.lstrip().startswith("#"):
+            if ("_containment.py" in line and not line.lstrip().startswith("#")
+                    and line.strip() != PRECHECK_LINE):
                 # Any OTHER non-comment spelling that names the precheck module (a mutated
-                # bootstrap, a braced or renamed expansion) is unrecognized: refuse before launch.
+                # bootstrap or precheck gate, a braced or renamed expansion) is unrecognized:
+                # refuse before launch. The exact precheck gate line is registered below.
                 raise ValueError(line)
             if line.lstrip().startswith("run_gate "):
                 words = [word.replace("$here", str(here)) for word in shlex.split(line)]

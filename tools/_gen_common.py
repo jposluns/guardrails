@@ -1,4 +1,5 @@
-"""Shared helpers for the single-source generators (roadmap, changelog). Stdlib only.
+"""Shared helpers for the single-source generators (roadmap, changelog). Stdlib only, plus _standards.py beside
+it for the generated-file directory probe (target_dir_present).
 
 Requires Python 3.14 or newer, the floor in .aiqt/core/python-floor.toml, which CI pins.
 run_all_checks.sh runs these locally.
@@ -205,7 +206,7 @@ def _git_toplevel(root):
     answer. This never searches upward for a .git marker itself: whether a .git entry is a real
     repository is git's judgement (git skips an invalid planted marker such as an empty tools/.git
     directory), and the answer is used only to CONFIRM a root already derived from a fixed location,
-    never to choose one (D-400-SPECIAL-FILE-PRECHECK root derivation). An answer that is not one
+    never to choose one (SPECIAL-FILE-PRECHECK root derivation). An answer that is not one
     NUL-free absolute path (empty, several lines, an embedded NUL or other undecodable bytes, a
     relative path) is cannot-evaluate, exit 2, by name: never a raw ValueError out of the path call,
     and never read as git-absent, which would skip the confirmation. On a root the effective user
@@ -293,7 +294,7 @@ def _derive_precheck_root(entry):
 
 def precheck_special_files(root):
     """Refuse a tree that holds a BLOCKING-READ hazard, before any tool reads from it
-    (D-400-SPECIAL-FILE-PRECHECK): a gate that opens a FIFO, socket or device, directly or through a
+    (SPECIAL-FILE-PRECHECK): a gate that opens a FIFO, socket or device, directly or through a
     symlink, waits forever (a FIFO with no writer above all). Plain errors (an unlistable directory,
     an unresolvable symlink) stay loud, exit 2. Runs once per process per root (cached); returns root
     so a caller can wrap the expression that computes it.
@@ -468,10 +469,11 @@ def precheck_special_files(root):
     module file must derive the same real root, so a tools/ or opf/tools/ directory replaced by a
     symlink cannot move the walk out of the invoked tree; and the root must be confirmed by
     _git_toplevel whenever git can answer. BOOTSTRAP: the
-    runners and the CI steps first test, in shell ([ -f ] && ! [ -h ]), that the precheck module
+    runners first test, in a shell-only run_gate step (test -f ... -a ! -h ...) whose STOP line ends
+    the run on a failure, and the CI steps in shell ([ -f ] && ! [ -h ]), that the precheck module
     itself is a regular non-symlink file, because python3 would block LOADING a FIFO planted at the
     script path before any line of this code could run. Residuals that remain OUTSIDE the precheck:
-    the interpreter binary and the runner script itself (both are read before the bootstrap line can
+    the interpreter binary and the runner script itself (both are read before the bootstrap can
     run); a DIRECT tool invocation that did not run this precheck first (the interpreter imports
     the tool's modules, their __pycache__/<module>.pyc above all, before any in-process precheck
     call can run, so a FIFO already planted there hangs a direct invocation at import time; the
@@ -943,7 +945,7 @@ def repo_root():
     (its FIXED location), confirmed by `git rev-parse --show-toplevel` whenever git can answer; a
     disagreement is cannot-evaluate, exit 2 (never a silently substituted root), and without git (an
     exported tree) the fixed location stands alone. Never an upward search for a .git marker: a
-    planted empty tools/.git must not narrow the root (D-400-SPECIAL-FILE-PRECHECK). The returned
+    planted empty tools/.git must not narrow the root (SPECIAL-FILE-PRECHECK). The returned
     root has passed precheck_special_files."""
     root = Path(__file__).resolve().parents[1]
     confirmed = _git_toplevel(root)
@@ -1023,9 +1025,29 @@ def read_source_text(path, encoding="utf-8"):
     return io.TextIOWrapper(io.BytesIO(read_source_bytes(path)), encoding=encoding).read()
 
 
+def _links_to_null_device(path):
+    """True when path is a symlink whose target resolves to the null device itself (os.devnull, the same
+    character device by st_rdev): a read of it returns end-of-file at once and can never block."""
+    try:
+        if not os.path.islink(path):
+            return False
+        target, null = os.stat(path), os.stat(os.devnull)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISCHR(target.st_mode) and stat.S_ISCHR(null.st_mode) and target.st_rdev == null.st_rdev
+
+
 def load_toml(path):
-    # read_source_bytes, not open(): a FIFO at a TOML record must be refused, never block the gate.
-    raw = read_source_bytes(path)
+    # read_source_bytes, not open(): a FIFO at a TOML record must be refused, never block the gate. The one
+    # entry read through a link is a symlink to the null device, which reads as empty (as open() reads it), so
+    # a caller still judges that record by its own rule (an empty register refused by name); every other link
+    # and every special file stays refused.
+    try:
+        raw = read_source_bytes(path)
+    except SourceReadRefused:
+        if not _links_to_null_device(path):
+            raise
+        raw = b""
     with io.BytesIO(raw) as handle:
         try:
             return tomllib.load(handle)
@@ -1059,16 +1081,44 @@ def replace_block(html_text, name, inner):
     return html_text[:i] + begin + "\n" + inner + "\n      " + html_text[j:]
 
 
-def reconcile(path, new_text, check):
+def target_dir_present(path, root=None):
+    """dir_chain_or_absent (tools/_standards.py) for the directory holding the generated file at path, judged
+    at every component under root (by default repo_root()), before the first read, write or delete of that
+    file: a component that is there but cannot be read as a directory (a regular file, or a symbolic link
+    that is dangling, whose target is not a directory or resolves outside the repository), one that cannot be
+    examined, or a path not under root exits 2 with a message, so nothing is read through it, written to it
+    or reported clean from it. A symbolic link to a directory inside root is followed. Returns True when the
+    directory is there and False when it is absent (a write creates it). A component retargeted between this
+    probe and the access (by another writer at the same moment) is not detected."""
+    # Imported here, not at module level: a caller that never reaches a generated file needs only this
+    # module, and _standards.py sits beside it in tools/.
+    from _standards import dir_chain_or_absent
+    parent = Path(path).parent
+    try:
+        present, problem = dir_chain_or_absent(parent, Path(repo_root() if root is None else root))
+    except OSError as exc:
+        present, problem = False, "cannot be examined ({})".format(exc)
+    if problem is not None:
+        print("error: {} {} (cannot evaluate); fail-closed".format(parent, problem), file=sys.stderr)
+        raise SystemExit(2)
+    return present
+
+
+def reconcile(path, new_text, check, root=None, make_parents=False):
     """Write new_text to path, or (check mode) return True if it would change. Fail-closed: an OSError
     reading the current file or writing the new one exits 2 with a message rather than a raw traceback,
     so a drift gate or a regeneration never dies unhandled on a read-only fs, a permission error, or a
     full disk. An invalid-UTF-8 (non-decodable) existing target is mapped to the same exit 2: read_text
     decodes as UTF-8, so a corrupt target raises UnicodeDecodeError, and that is fail-closed too rather
-    than a raw traceback. The current target is read through read_source_text, so a target that is a
-    symlink (even a dangling one) or not a regular file (a FIFO, a directory) is refused, exit 2, in both
-    modes: check never compares through a link and write never writes through one."""
+    than a raw traceback. Before the first read, the directory holding path is judged under root by
+    target_dir_present (exit 2 on one that is there but cannot be read as a directory inside the
+    repository); a caller that renders a tree other than repo_root() passes that tree as root. With
+    make_parents, a write first creates the absent directories above path, only after that probe. The
+    current target is read through read_source_text, so a target that is a symlink (even a dangling one)
+    or not a regular file (a FIFO, a directory) is refused, exit 2, in both modes: check never compares
+    through a link and write never writes through one."""
     path = Path(path)
+    target_dir_present(path, root)
     try:
         try:
             current = read_source_text(path)
@@ -1076,11 +1126,86 @@ def reconcile(path, new_text, check):
             current = None
         if check:
             return current != new_text
+        if make_parents:
+            path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new_text, encoding="utf-8")
         return False
     except (OSError, UnicodeError) as exc:
         print("error: cannot read or write {} ({}); fail-closed".format(path, exc), file=sys.stderr)
         raise SystemExit(2)
+
+
+_PAST_NS = 10 ** 9  # a fixed modification time a write always moves
+
+
+def linked_dir_failures(tmp, label, build, run, link_rel, target_rel, drift=None, unread=None):
+    """Self-test vectors shared by the generators that write target_rel through reconcile (and
+    target_dir_present). For each of two trees, build(base) makes one that run(base, False) generates; then the
+    directory link_rel above target_rel is moved, replaced by a symbolic link to it, the target edited by
+    drift(path) when given (for a generator that writes only on a difference), and its modification time set
+    to a fixed past value. Moved outside the tree, run(base, True) and run(base, False) must each exit 2
+    (returned, or raised as SystemExit) with the target untouched there, never read through, reported drifted
+    or clean, or written out of the repository; moved elsewhere inside the tree, run(base, False) must exit 0
+    having rewritten the target there and run(base, True) then exit 0. unread(path), when given, rewrites the
+    target moved outside so that reading it fails on its own (a page without its markers, say), and each
+    outside run must then print the link refusal (LINK_OUTSIDE_ROOT), so a generator that reads the target
+    before the probe fails with its own error instead and goes red. Returns one failure line per case that
+    does not hold, so a revert of the probe goes red in the caller's self-test."""
+    import io
+    import shutil
+    from contextlib import redirect_stderr, redirect_stdout
+    from _standards import LINK_OUTSIDE_ROOT
+
+    def quiet(base, check):
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            try:
+                code = run(base, check)
+            except SystemExit as exc:
+                code = exc.code
+        return code, out.getvalue()
+
+    failures = []
+    for where in ("outside", "in-root"):
+        base = Path(tmp) / "{}-linked-{}".format(label, where)
+        base.mkdir(parents=True)
+        build(base)
+        first = quiet(base, False)[0]
+        if first != 0:
+            failures.append("{}: the tree for the {} {} link did not generate (exit {})".format(
+                label, where, link_rel, first))
+            continue
+        link = base / link_rel
+        held = Path(tmp) / "{}-held-{}".format(label, where) if where == "outside" else base / "shared" / "held"
+        held.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(link), str(held))
+        link.symlink_to(held if where == "outside" else os.path.relpath(held, link.parent))
+        target = held / Path(target_rel).relative_to(link_rel)
+        if drift is not None:
+            drift(target)
+        if unread is not None and where == "outside":
+            unread(target)
+        os.utime(target, ns=(_PAST_NS, _PAST_NS))
+        if where == "outside":
+            runs = (quiet(base, True), quiet(base, False))
+            got, want = tuple(code for code, _out in runs), (2, 2)
+            moved = os.stat(target).st_mtime_ns != _PAST_NS
+            if got != want or moved:
+                failures.append("{}: {} symlinked outside the root expected --check and write exit {} with {} "
+                                "not written there, got exit {}, written {}".format(label, link_rel, want,
+                                                                                     target_rel, got, moved))
+            elif unread is not None and not all(LINK_OUTSIDE_ROOT in out for _code, out in runs):
+                failures.append("{}: {} symlinked outside the root with {} there unreadable expected --check and "
+                                "write to print the link refusal, so the target is never read through it, got "
+                                "{!r}".format(label, link_rel, target_rel, [out for _code, out in runs]))
+        else:
+            got, want = (quiet(base, False)[0], quiet(base, True)[0]), (0, 0)
+            moved = os.stat(target).st_mtime_ns != _PAST_NS
+            if got != want or not moved:
+                failures.append("{}: {} symlinked inside the root expected write and --check exit {} with {} "
+                                "rewritten there, got exit {}, written {}".format(label, link_rel, want,
+                                                                                   target_rel, got, moved))
+    return failures
 
 
 def _precheck_entry(argv):
@@ -1109,8 +1234,70 @@ def _precheck_entry(argv):
     return 0
 
 
+def main(argv=None):
+    """The --precheck entry the __main__ block calls after the child-status guard: _precheck_entry
+    on argv (by default this process's arguments)."""
+    return _precheck_entry(sys.argv[1:] if argv is None else argv)
+
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. The --precheck entry reads the
+# exit status of its git queries, so under an ignored SIGCHLD it would read a failed query as
+# git's answer; it refuses at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    # Runner/CI entry (D-400-SPECIAL-FILE-PRECHECK): precheck the tree BEFORE any gate runs.
+    # Runner/CI entry (SPECIAL-FILE-PRECHECK): precheck the tree right after the
+    # child-status probe and BEFORE any other gate runs; the child-status guard runs first.
     # Usage: python3 -I -B <this module> --precheck
     # The root comes from this module's own FIXED location (_derive_precheck_root), never from an
     # upward .git search a planted marker could narrow. The INVOKED location (os.path.abspath, no
@@ -1122,4 +1309,4 @@ if __name__ == "__main__":
     # filter. On a root this user owns, a dubious-ownership refusal is exit 2 (_git_lines), never
     # read as git-absent. Exit 0 when the walk finds nothing to refuse; exit 2 on a refusal, a root
     # disagreement, or an unknown argument.
-    raise SystemExit(_precheck_entry(sys.argv[1:]))
+    sys.exit(_child_status_refusal_exit("_gen_common.py") or main())

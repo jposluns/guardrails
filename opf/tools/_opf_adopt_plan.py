@@ -6,10 +6,12 @@ Only explicit source roots, .working, and DETECTION_ROOTS are inventoried.
 are exclusions, recorded in the inventory; foreign content inside those excluded
 subtrees is NOT covered. Companion stores refuse in this slice. Detection is by
 path only: a candidate is neither a parsed registration nor a working pipeline.
-Ancestry marks re-adoption when a pointer, a resolved store manifest, or unresolved
-content at an OPF-reserved .working name (ANCESTRY_RESERVED) is present, so store
-debris never reads as a zero-seedable first adoption. first-adoption only means none
-of these: git history is not read, and a manifestless store under any other .working
+Ancestry marks re-adoption when a pointer or a resolved store manifest is present.
+first-adoption means neither is: the pointers and the manifest alone decide, because a
+tree whose refused manifest the operator has moved aside by hand is ordinary foreign
+content for a section 14 first adoption (spec 4.5/9.2), and nothing distinguishes such
+a tree from other manifestless content at a reserved .working name. git history is not
+read, and a manifestless store under any .working
 name reads as foreign content. Durable OPF history outside .working also reads as
 first-adoption on its own, including: root import-promotion state (.aiqt/import,
 .aiqt/import/journal, .aiqt/import-archive), the record journal (.aiqt/record/journal)
@@ -37,8 +39,13 @@ its store base must be observed (an excluded or unobserved nearest ancestor is
 cannot-evaluate) and an occupied default destination is a collision. A declared
 destination whose file name is an enforcement launcher's (opf.yml, opf-ci.sh, pre-commit
 or install.sh, compared case-insensitively) refuses unless it lies beneath that Move
-archive: no enforcement row can name a moved file, so the frozen plan would refuse it as
-an uninspected launcher (_opf_adopt._launcher_writes). Every move
+archive, because the frozen plan refuses it whether or not an enforcement row names it
+(_opf_adopt._enforcement_launch_refusal). Named in no row, it is an uninspected launcher
+(cannot-evaluate, exit 2, once every op row is valid and every row's member list is well
+formed and installed).
+Named in a row, it is a member no install op installs (invalid, exit 1); where an install
+op does install that path, the move and the install write it twice (invalid, exit 1),
+unless a launch check refuses the installed launcher first (cannot-evaluate, exit 2). Every move
 destination and archive preservation copy is checked against the one
 protected-destination predicate the apply shell shares (_opf_adopt.protected_destination).
 DISCLOSED-STRICTER (disclose-guard-residuals): spec 14.2 requires only the default Move
@@ -98,11 +105,6 @@ DETECTION_ROOTS = (
     ".github/workflows", ".gitlab-ci.yml", "Jenkinsfile", ".circleci", "azure-pipelines.yml",
     "VERSION", "CHANGELOG.md", "release-notes.toml",
 )
-# OPF-reserved .working names, from the store module's own constants: the standard machine
-# subdirectory and every reserved store control subdirectory. Content at any is ancestry.
-ANCESTRY_RESERVED = tuple(sorted(
-    store.WORKING_DIRNAME + "/" + name
-    for name in (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS))
 RESIDUALS = (
     "Only the enumerated scope is covered; detection is by path, not semantics.",
     "Machine-store and unmanaged exclusions are not inspected for foreign files.",
@@ -111,8 +113,8 @@ RESIDUALS = (
     "Resolver reads retain the resolver limits; inventory caps are not a process sandbox.",
     "No coherent snapshot; apply must recheck inventory, preimages and absences.",
     "No commit, merge, network, journal, import staging, rendering or hook effects.",
-    "Ancestry reads pointers, the resolved manifest and reserved .working names; git history "
-    "and a manifestless store under another .working name are not read as ancestry. "
+    "Ancestry reads the pointers and the resolved manifest; git history and manifestless "
+    ".working content, a reserved name included, are not read as ancestry. "
     "Durable OPF history outside .working also reads as first-adoption on its own, including: "
     "root import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive), "
     "the record journal (.aiqt/record/journal) and the .gitignore opf-managed block.",
@@ -166,6 +168,282 @@ def _under(path, parent):
     return path == parent or path.startswith(parent + "/")
 
 
+# The observation's closed entry-kind vocabulary, and the exact fields _inventory records for each kind.
+ENTRY_KINDS = ("absent", "directory", "excluded", "file")
+_ENTRY_FIELDS = {"file": ("digest", "kind", "path", "size")}
+
+
+def entry_row_problem(row, exclusions):
+    """Why `row` is not an observation entry row _inventory records, or None when it is one. _inventory calls
+    it on every row it walks and the completion evaluator on every row it accounts, so both hold one rule:
+    a table whose path passes _path, whose kind is in ENTRY_KINDS and whose fields are exactly the ones that
+    kind records; a file row records its byte size (len of the bytes read, 0 to MAX_FILE_BYTES, never a
+    bool) and a well-formed digest; a row under a recorded exclusion (`exclusions`, the observation's
+    exclusion rows) is recorded excluded and never read, so a directory or file row there, or an excluded
+    row under no exclusion, is a contradictory record. An absent row records only that stat found nothing."""
+    if not (isinstance(row, dict) and isinstance(row.get("path"), str) and row["path"]):
+        return "entry is not a table with a non-empty string path"
+    path = row["path"]
+    try:
+        _path(path)
+    except (PlanError, TypeError, ValueError) as exc:
+        return "entry path {!r} is not a path the planner records ({})".format(path, exc)
+    kind = row.get("kind")
+    if kind not in ENTRY_KINDS:
+        return "entry {!r} kind {!r} is not one of {}".format(path, kind, "/".join(ENTRY_KINDS))
+    fields = _ENTRY_FIELDS.get(kind, ("kind", "path"))
+    if tuple(sorted(map(str, row))) != fields:
+        return "entry {!r} ({}) records fields {} where the planner records exactly {}".format(
+            path, kind, ", ".join(sorted(map(str, row))), ", ".join(fields))
+    if kind == "file":
+        if type(row["size"]) is not int or not 0 <= row["size"] <= MAX_FILE_BYTES:
+            return "file entry {!r} size {!r} is not the byte count of a file the planner reads (0 to {})".format(
+                path, row["size"], MAX_FILE_BYTES)
+        if not schema._is_digest(row["digest"]):
+            return "file entry {!r} carries no well-formed digest".format(path)
+    under = any(_under(path, item["path"]) for item in exclusions)
+    if kind == "excluded" and not under:
+        return "entry {!r} is recorded excluded but lies under no recorded exclusion".format(path)
+    if kind in ("directory", "file") and under:
+        return ("entry {!r} is recorded {} but lies under a recorded exclusion, where the planner records "
+                "excluded and reads nothing".format(path, kind))
+    return None
+
+
+def _require_entry(row, exclusions):
+    problem = entry_row_problem(row, exclusions)
+    if problem is not None:
+        raise PlanError(problem)
+
+
+def candidate_files(rows, roots):
+    """The observation's candidates, derived from its entry rows (_inventory and the completion evaluator
+    both call this): every file row under a candidate root (`roots`; None for every root) outside the store
+    control area, sorted."""
+    return sorted(row["path"] for row in rows
+                  if row["kind"] == "file"
+                  and (roots is None or any(_under(row["path"], prefix) for prefix in roots))
+                  and not schema._in_control_area(row["path"]))
+
+
+def empty_directories(rows, roots):
+    """The observation's empty directories, derived from its entry rows (_inventory and the completion
+    evaluator both call this): every directory row other than .working under a candidate root (`roots`;
+    None for every root), outside the store control area, that no other row lies beneath, sorted."""
+    rows = list(rows)
+    paths = [row["path"] for row in rows]
+    return sorted(row["path"] for row in rows
+                  if row["kind"] == "directory" and row["path"] != ".working"
+                  and (roots is None or any(_under(row["path"], prefix) for prefix in roots))
+                  and not schema._in_control_area(row["path"])
+                  and not any(p.startswith(row["path"] + "/") for p in paths))
+
+
+def _exclusion_rows(rows):
+    """The exclusion rows as _inventory records them: path and reason rows, each path one _path accepts,
+    sorted by path and reason."""
+    if type(rows) not in (list, tuple):
+        raise PlanError("the exclusions are not a list of path and reason rows")
+    for row in rows:
+        if not (isinstance(row, dict) and sorted(map(str, row)) == ["path", "reason"]
+                and isinstance(row["path"], str) and isinstance(row["reason"], str)):
+            raise PlanError("exclusion {!r} is not a path and reason row".format(row))
+        _path(row["path"])
+    return sorted((dict(row) for row in rows), key=lambda row: (row["path"], row["reason"]))
+
+
+def manifest_budget(size, manifest_path):
+    """The byte budget the resolved manifest read opens the walk with (0 when nothing resolved): its bytes,
+    held to the per-file and total byte bounds."""
+    if size > MAX_FILE_BYTES:
+        raise PlanError("file exceeds byte bound: {!r}".format(manifest_path))
+    if size > MAX_TOTAL_BYTES:
+        raise PlanError("inventory exceeds byte bounds")
+    return size
+
+
+def build_observation(listing, *, sources, targets, exclusions, walk):
+    """The observation _inventory records, built from `listing` (the one rule set, which the completion
+    evaluator also calls over a listing rebuilt from a sealed inventory's rows), or PlanError naming the
+    first rule it breaks. `walk` holds what the rows alone do not: the deliverable destinations (from the
+    resolved or default manifest), whether a store manifest resolved, and its path and byte count.
+
+    Every rule is applied here, in the walk's own order: the roots (_roots), the exclusion rows, no root
+    beneath an exclusion, the manifest's byte budget, then each requested root walked shortest first (an
+    excluded root skipped; one whose parent is missing recorded absent and unreached), each path visited
+    once with its path bytes, the entry count and the depth below the root that walk began from bounded
+    BEFORE it is looked up; a path under an exclusion recorded excluded and never read; a directory's
+    names bounded and its children walked in name order; a file under no resolved store at a store manifest
+    name refused, its size and the running total byte bound checked; a symlink or special entry refused;
+    each recorded row held to entry_row_problem; every declared source available; and the candidate and
+    empty-directory lists derived.
+
+    `listing` is consulted lazily, in exactly this order, through four calls: at_root(path, visit) calls
+    visit(handle) with the root's parent, or visit(None) when a component above it is missing;
+    stat(handle, name) returns None when nothing is there, else a node whose [0] is "directory", "file" or
+    another kind; children(handle, name, node, visit) calls visit(subhandle, names) with the directory's
+    names (it may stop listing after MAX_ENTRIES + 1 names); read(handle, name, node, budget) returns a
+    file's (size, digest), `budget` the bytes read so far. A listing raises on its own only when the tree
+    changes under it, on an entry it cannot represent (a hard-linked file, a non-directory component above
+    a root), or when the bytes it reads cross a bound this function applies to the size it returns, with
+    this function's text."""
+    sources, targets = _roots(sources), _roots(targets)
+    exclusions = _exclusion_rows(exclusions)
+    for source in sources + targets:
+        if any(_under(source, row["path"]) for row in exclusions):
+            raise PlanError("source is in an excluded subtree: {!r}".format(source))
+    deliverables, resolved = walk["deliverables"], walk["resolved"]
+    budget = [manifest_budget(walk["manifest_bytes"], walk["manifest_path"])]
+    entries = {}
+    unreached = []
+    path_bytes = [0]
+
+    def visit(handle, name, path, depth):
+        if path in entries:
+            return
+        _path(path)
+        path_bytes[0] += len(path.encode("utf-8"))
+        if (len(entries) >= MAX_ENTRIES or path_bytes[0] > MAX_PATH_BYTES
+                or depth > MAX_DEPTH):
+            raise PlanError("inventory entry/path/depth bound exceeded")
+        node = listing.stat(handle, name)
+        if node is None:
+            entries[path] = {"path": path, "kind": "absent"}
+            return
+        row = {"path": path, "kind": "excluded"}
+        entries[path] = row
+        if any(_under(path, item["path"]) for item in exclusions):
+            _require_entry(row, exclusions)
+            return
+        if node[0] == "directory":
+            row["kind"] = "directory"
+
+            def walk_children(subhandle, names):
+                if len(names) > MAX_ENTRIES:
+                    raise PlanError("directory exceeds entry bound")
+                for child_name in sorted(names):
+                    visit(subhandle, child_name, path + "/" + child_name, depth + 1)
+
+            listing.children(handle, name, node, walk_children)
+            _require_entry(row, exclusions)
+        elif node[0] == "file":
+            # A malformed/ambiguous store must not be scanned as ordinary foreign
+            # content: a manifest may contain unmanaged exclusions we cannot trust.
+            if (not resolved and path.startswith(".working/")
+                    and path.count("/") == 2 and path.endswith("/" + store.MANIFEST_NAME)):
+                raise PlanError("unresolved store manifest requires repair before investigation")
+            size, digest = listing.read(handle, name, node, budget[0])
+            if size > MAX_FILE_BYTES:
+                raise PlanError("file exceeds byte bound: {!r}".format(name))
+            budget[0] += size
+            if budget[0] > MAX_TOTAL_BYTES:
+                raise PlanError("inventory exceeds byte bounds")
+            row.update(kind="file", size=size, digest=digest)
+            _require_entry(row, exclusions)
+        else:
+            raise PlanError("symlink or special entry refused: {!r}".format(path))
+
+    requested = sorted(set(sources) | set(targets) | set(DETECTION_ROOTS) | set(deliverables))
+    # Walk shortest roots first, avoiding a duplicate read when a source root
+    # encloses one of the fixed detection paths.
+    for path in sorted(requested, key=lambda p: (p.count("/"), p)):
+        if any(_under(path, item["path"]) for item in exclusions):
+            continue
+
+        def walk_root(handle, path=path):
+            if handle is None:
+                entries[path] = {"path": path, "kind": "absent"}
+                unreached.append(path)
+            else:
+                visit(handle, path.rpartition("/")[2], path, 0)
+
+        listing.at_root(path, walk_root)
+    for path in sources:
+        if entries.get(path, {}).get("kind") in (None, "absent", "excluded"):
+            raise PlanError("declared source is unavailable: {!r}".format(path))
+    rows = sorted(entries.values(), key=lambda row: row["path"])
+    # Candidate roots are the explicit sources, .working and the deliverable destinations outside it
+    # (spec 14: each pre-existing file there takes a disposition before init-store), outside
+    # exclusions. The store control area is never adopter content, in any homes generation (spec
+    # 14.2): its entries stay in the inventory with their digests, as OPF control area, and are
+    # never candidates. Empty directories are surfaced separately. They are not file operands.
+    candidate_roots = sources + [".working"] + list(deliverables)
+    return {
+        "scope": requested,
+        "sources": sources,
+        "targets": targets,
+        "exclusions": exclusions,
+        "entries": rows,
+        "candidates": candidate_files(rows, candidate_roots),
+        "empty_directories": empty_directories(rows, candidate_roots),
+        "walk": {
+            "deliverables": list(deliverables),
+            "resolved": resolved,
+            "manifest_path": walk["manifest_path"],
+            "manifest_bytes": walk["manifest_bytes"],
+            "unreached": sorted(unreached),
+        },
+    }
+
+
+# The observation fields build_observation returns, which the completion evaluator compares field for field.
+BUILT_FIELDS = ("scope", "sources", "targets", "exclusions", "entries", "candidates", "empty_directories",
+                "walk")
+
+
+class RowListing:
+    """A listing rebuilt from an observation's entry rows (path to row, each passing entry_row_problem) and
+    its recorded walk, for build_observation, answering each question as _TreeListing answers it over the
+    recorded tree. A directory's names are the rows directly beneath it that record an entry present (a
+    directory, file or excluded row): the walker lists only names that are there, so an absent row is never
+    a name in a listing; it records a requested root that stat found missing, and is reached only as that
+    root (through at_root and stat at depth 0). A file row gives its recorded size and digest, an excluded
+    row stands for an entry present and never read, a missing or absent row reads as absent. A root's parent
+    is missing when the nearest recorded ancestor is absent or an enumerated directory not holding the next
+    component, and present when it holds it; a top-level root's parent (the product root) is always present;
+    for any other root with no recorded ancestor, missing exactly when the walk records the root unreached."""
+
+    def __init__(self, rows, unreached):
+        self.rows = rows
+        self.unreached = set(unreached)
+        self.names = {}
+        for path, row in rows.items():
+            if row["kind"] != "absent":
+                parent, _sep, name = path.rpartition("/")
+                self.names.setdefault(parent, []).append(name)
+
+    def at_root(self, path, visit):
+        parts = path.split("/")
+        for depth in range(len(parts) - 1, 0, -1):
+            ancestor = "/".join(parts[:depth])
+            row = self.rows.get(ancestor)
+            if row is None:
+                continue
+            if row["kind"] == "absent" or (row["kind"] == "directory" and depth < len(parts) - 1
+                                           and "/".join(parts[:depth + 1]) not in self.rows):
+                return visit(None)
+            if row["kind"] != "directory":
+                raise PlanError("cannot open contained directory component {!r} of {!r} (recorded {})".format(
+                    ancestor, path, row["kind"]))
+            return visit(path.rpartition("/")[0])
+        # The product root itself is always there; above any other root no row says, so the walk's record does.
+        return visit(None if "/" in path and path in self.unreached else path.rpartition("/")[0])
+
+    def stat(self, handle, name):
+        path = handle + "/" + name if handle else name
+        row = self.rows.get(path)
+        if row is None or row["kind"] == "absent":
+            return None
+        return (row["kind"], row)
+
+    def children(self, handle, name, node, visit):
+        path = node[1]["path"]
+        visit(path, list(self.names.get(path, ())))
+
+    def read(self, handle, name, node, budget):
+        return node[1]["size"], node[1]["digest"]
+
+
 def _stamp(st):
     return (st.st_dev, st.st_ino, st.st_mode, st.st_nlink, st.st_size,
             st.st_mtime_ns, st.st_ctime_ns)
@@ -199,6 +477,62 @@ def _read(fd, name, before, budget):
         return b"".join(chunks)
     finally:
         store._journal._close_fd_propagating(child)
+
+
+class _TreeListing:
+    """The filesystem walker: the listing build_observation consults while it walks, read beneath the held
+    product root descriptor, no-follow and tied to each opened inode, so a tree changed under it refuses.
+    It refuses on its own only as build_observation's docstring allows: a change under it, a hard-linked
+    file or a non-directory component above a root (which no listing records), or bytes read past a bound
+    build_observation applies to the size returned, with that function's text (_read's)."""
+
+    def __init__(self, root_fd):
+        self.root_fd = root_fd
+
+    def at_root(self, path, visit):
+        try:
+            parent, _name = store._journal._open_parent(self.root_fd, path)
+        except FileNotFoundError:
+            parent = None
+        if parent is None:
+            return visit(None)
+        try:
+            return visit(parent)
+        finally:
+            store._journal._close_fd_propagating(parent)
+
+    def stat(self, parent, name):
+        try:
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISDIR(before.st_mode):
+            return ("directory", before)
+        return ("file" if stat.S_ISREG(before.st_mode) else "other", before)
+
+    def children(self, parent, name, node, visit):
+        before = node[1]
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            if _stamp(os.fstat(child)) != _stamp(before):
+                raise PlanError("directory changed before enumeration")
+            names = []
+            with os.scandir(child) as listing:
+                for entry in listing:
+                    names.append(entry.name)
+                    if len(names) > MAX_ENTRIES:
+                        break  # build_observation refuses a directory listing this long
+            visit(child, names)
+            if _stamp(os.fstat(child)) != _stamp(before):
+                raise PlanError("directory changed during enumeration")
+            if _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _stamp(before):
+                raise PlanError("directory name changed during enumeration")
+        finally:
+            store._journal._close_fd_propagating(child)
+
+    def read(self, parent, name, node, budget):
+        data = _read(parent, name, node[1], [budget])
+        return len(data), _digest(data)
 
 
 def _roots(sources):
@@ -268,7 +602,6 @@ def _resolved_unmanaged(manifest, machine_rel):
 def _inventory(root, sources, targets):
     store._journal.require_containment()
     root_fd = store._open_dir_nofollow(root)
-    budget = [0]
     try:
         root_stat = os.fstat(root_fd)
         # Bind discovery to this product only. Inspect BOTH pointers, even when
@@ -295,13 +628,9 @@ def _inventory(root, sources, targets):
             # brought under the planner's own byte bounds; a fresh by-path read here could read a
             # tree swapped in after the listing (round-5 defect 1).
             raw = manifest_raw
-            if len(raw) > MAX_FILE_BYTES:
-                raise PlanError("file exceeds byte bound: {!r}".format(manifest_path))
-            budget[0] += len(raw)
-            if budget[0] > MAX_TOTAL_BYTES:
-                raise PlanError("inventory exceeds byte bounds")
+            manifest_budget(len(raw), manifest_path)
             manifest = tomllib.loads(raw.decode("utf-8"))
-            checked = store.validate_manifest(manifest)
+            checked = store.validate_manifest(manifest, manifest_rel=manifest_path)
             if checked.status != store.VALID:
                 raise PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
             excluded.append({"path": resolution.machine_rel, "reason": "machine-store"})
@@ -325,107 +654,13 @@ def _inventory(root, sources, targets):
             view_targets = None
             import _opf_init
             deliverables = _deliverable_destinations(tomllib.loads(_opf_init.build_manifest()))
-        exclusions = sorted(excluded, key=lambda row: (row["path"], row["reason"]))
-        for source in sources + targets:
-            if any(_under(source, row["path"]) for row in exclusions):
-                raise PlanError("source is in an excluded subtree: {!r}".format(source))
-
-        entries = {}
-        path_bytes = [0]
-
-        def visit(parent, name, path, depth):
-            if path in entries:
-                return
-            _path(path)
-            path_bytes[0] += len(path.encode("utf-8"))
-            if (len(entries) >= MAX_ENTRIES or path_bytes[0] > MAX_PATH_BYTES
-                    or depth > MAX_DEPTH):
-                raise PlanError("inventory entry/path/depth bound exceeded")
-            try:
-                before = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            except FileNotFoundError:
-                entries[path] = {"path": path, "kind": "absent"}
-                return
-            row = {"path": path, "kind": "excluded"}
-            entries[path] = row
-            if any(_under(path, item["path"]) for item in exclusions):
-                return
-            if stat.S_ISDIR(before.st_mode):
-                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                                dir_fd=parent)
-                try:
-                    if _stamp(os.fstat(child)) != _stamp(before):
-                        raise PlanError("directory changed before enumeration")
-                    row["kind"] = "directory"
-                    names = []
-                    with os.scandir(child) as listing:
-                        for entry in listing:
-                            names.append(entry.name)
-                            if len(names) > MAX_ENTRIES:
-                                raise PlanError("directory exceeds entry bound")
-                    for child_name in sorted(names):
-                        visit(child, child_name, path + "/" + child_name, depth + 1)
-                    if _stamp(os.fstat(child)) != _stamp(before):
-                        raise PlanError("directory changed during enumeration")
-                    if _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _stamp(before):
-                        raise PlanError("directory name changed during enumeration")
-                finally:
-                    store._journal._close_fd_propagating(child)
-            elif stat.S_ISREG(before.st_mode):
-                # A malformed/ambiguous store must not be scanned as ordinary foreign
-                # content: a manifest may contain unmanaged exclusions we cannot trust.
-                if (resolution.status != store.RESOLVED
-                        and path.startswith(".working/")
-                        and path.count("/") == 2 and path.endswith("/" + store.MANIFEST_NAME)):
-                    raise PlanError("unresolved store manifest requires repair before investigation")
-                data = _read(parent, name, before, budget)
-                row.update(kind="file", size=len(data), digest=_digest(data))
-            else:
-                raise PlanError("symlink or special entry refused: {!r}".format(path))
-
-        requested = sorted(set(sources) | set(targets) | set(DETECTION_ROOTS) | set(deliverables))
-        # Walk shortest roots first, avoiding a duplicate read when a source root
-        # encloses one of the fixed detection paths.
-        for path in sorted(requested, key=lambda p: (p.count("/"), p)):
-            if any(_under(path, item["path"]) for item in exclusions):
-                continue
-            try:
-                parent, name = store._journal._open_parent(root_fd, path)
-            except FileNotFoundError:
-                entries[path] = {"path": path, "kind": "absent"}
-                continue
-            try:
-                visit(parent, name, path, 0)
-            finally:
-                store._journal._close_fd_propagating(parent)
-        for path in sources:
-            if entries.get(path, {}).get("kind") in (None, "absent", "excluded"):
-                raise PlanError("declared source is unavailable: {!r}".format(path))
-        if resolution.status != store.RESOLVED:
-            # With no resolved store, content at a reserved name (for example counters and
-            # records, or import runs, left without a manifest) is still prior ancestry.
-            traces += [path for path in ANCESTRY_RESERVED
-                       if entries.get(path, {}).get("kind") in ("file", "directory")]
-        # Candidate roots are the explicit sources, .working and the deliverable destinations outside it
-        # (spec 14: each pre-existing file there takes a disposition before init-store), outside
-        # exclusions. The store control area is never adopter content, in any homes generation (spec
-        # 14.2): its entries stay in the inventory with their digests, as OPF control area, and are
-        # never candidates.
-        candidate_roots = sources + [".working"] + deliverables
-        candidates = [
-            row["path"] for row in entries.values()
-            if row["kind"] == "file"
-            and any(_under(row["path"], prefix) for prefix in candidate_roots)
-            and not schema._in_control_area(row["path"])
-        ]
-        # Empty directories are surfaced separately. They are not file operands.
-        empty = [
-            row["path"] for row in entries.values()
-            if row["kind"] == "directory" and row["path"] != ".working"
-            and any(_under(row["path"], prefix) for prefix in candidate_roots)
-            and not schema._in_control_area(row["path"])
-            and not any(p.startswith(row["path"] + "/") for p in entries)
-        ]
+        walk = {"deliverables": deliverables, "resolved": resolution.status == store.RESOLVED,
+                "manifest_path": manifest_path, "manifest_bytes": len(manifest_raw) if manifest_path else 0}
+        # The walk and every rule over what it finds are build_observation's alone; the walker only lists.
+        observed = build_observation(_TreeListing(root_fd), sources=sources, targets=targets,
+                                     exclusions=excluded, walk=walk)
+        exclusions, requested = observed["exclusions"], observed["scope"]
+        entries = dict((row["path"], row) for row in observed["entries"])
         check_fd = store._open_dir_nofollow(root)
         try:
             if _stamp(os.fstat(check_fd)) != _stamp(root_stat):
@@ -442,9 +677,10 @@ def _inventory(root, sources, targets):
             "sources": sources,
             "targets": targets,
             "exclusions": exclusions,
-            "entries": sorted(entries.values(), key=lambda row: row["path"]),
-            "candidates": sorted(candidates),
-            "empty_directories": sorted(empty),
+            "entries": observed["entries"],
+            "candidates": observed["candidates"],
+            "empty_directories": observed["empty_directories"],
+            "walk": observed["walk"],
             "resolution": {
                 "status": resolution.status,
                 "detail": resolution.detail,
@@ -459,14 +695,16 @@ def _inventory(root, sources, targets):
                 for path in DETECTION_ROOTS if path in entries
             ],
             # Prior-OPF ancestry, from the same pointer and manifest reads that fixed the
-            # exclusions plus the walked reserved names, so the seeded-versus-zero counters
-            # choice is plan-visible. Debris is re-adoption, not a third value that a
-            # consumer testing only for re-adoption could zero-seed.
+            # exclusions, so the seeded-versus-zero counters choice is plan-visible. A tree
+            # with neither is a first adoption: once the spec 4.5/9.2 hand step has moved a
+            # refused manifest aside, its files are ordinary foreign content, and manifestless
+            # content at a reserved .working name is read the same way (an occupying candidate
+            # still takes a disposition and is archived before init-store writes there).
             "ancestry": {
                 "adoption": "re-adoption" if traces else "first-adoption",
                 "traces": traces,
-                "evidence": "live pointers, resolved manifest and reserved .working names; "
-                            "git history and other .working names are not ancestry. "
+                "evidence": "live pointers and the resolved manifest; git history and "
+                            "manifestless .working content are not ancestry. "
                             "Durable OPF history outside .working also reads as first-adoption "
                             "on its own, including: root import-promotion state (.aiqt/import, "
                             ".aiqt/import/journal, .aiqt/import-archive), the record journal "
@@ -591,7 +829,9 @@ def _decisions(observation, decisions, run_id, managed):
     preservation destination alike need observed absence (an occupied destination
     is a collision, never an overwrite). A move without a destination takes the spec
     14.2 default (_default_move_destination); a declared one under a launcher's file
-    name refuses unless it lies beneath the Move archive. A keep's register-unmanaged
+    name refuses unless it lies beneath the Move archive, since the frozen plan refuses
+    it whether or not an enforcement row names it (the module docstring gives each
+    reason and exit code). A keep's register-unmanaged
     row is minted here without its manifest digests, which _bind_registrations adds
     once the program is ordered."""
     if type(decisions) is not list:
@@ -644,17 +884,18 @@ def _decisions(observation, decisions, run_id, managed):
                 destination = _default_move_destination(kinds, path)
             else:
                 destination = _path(row["destination"])
-                # A moved file is never an enforcement member (a member is installed by an install op,
-                # which would write its path twice), so the frozen plan refuses a launcher-named move
-                # destination outside the Move archive as uninspected; refuse it here with the remedy.
+                # The frozen plan refuses a launcher-named move destination outside the Move archive
+                # whether or not an enforcement row names it: named in none, as an uninspected launcher;
+                # named, as a member no install op installs, or, when one does, as a path written twice
+                # unless a launch check refuses it first. Refuse it here with the remedy.
                 if (schema._launcher_of(destination) is not None
                         and not schema._in_move_archive(destination, ".")):
                     raise PlanError(
                         "move destination {!r} of {!r} has an enforcement launcher's file name "
                         "(opf.yml, opf-ci.sh, pre-commit or install.sh, in any case) outside {}/, "
-                        "and no enforcement row can name a moved file, so the plan would refuse it "
-                        "as an uninspected launcher; omit the destination to take the default, or "
-                        "choose another file name".format(
+                        "and the frozen plan refuses one there whether or not an enforcement row "
+                        "names it; omit the destination to take the default, or choose another "
+                        "file name".format(
                             destination, path, schema.ARCHIVE_REL + "/moved"))
                 # Only observed absence is accepted: the destination's own absent entry, or an
                 # absent or walked ancestor. Declare a destination outside the walked roots in
@@ -758,7 +999,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         # preservation homes validate_plan requires (spec 14.2).
         identity = {"store_root": ".", "machine_rel": managed[0],
                     "adoption": doc["ancestry"]["adoption"]}
-        effects = schema.derive_effects(ordered, source_rows, schema.store_manifest(identity))
+        effects = schema.derive_effects(ordered, source_rows, schema.store_manifest(identity), run_id)
         _check_planned_effects(doc, ordered, source_rows, effects, managed)
         proposal = {
             "format": schema.PLAN_FORMAT, "schema": schema.SCHEMA_VERSION,
@@ -914,21 +1155,21 @@ def self_test():
             self.views = sorted(v["target"] for v in views)
 
         def all_targets(self):
-            # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
-            # point) lies outside every walked root, so its absence is a declared target.
+            # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool tree with its
+            # entry point, and the deny hook) lies outside every walked root, so its absence is a declared target.
             return sorted(set(self.targets) | {schema.PACK_MIRROR_ROOT})
 
         def base_ops(self):
             # Scaffold the default store (unless one resolves), render its declared views and plant
-            # every enforcement member.
+            # every enforcement member from its pack source, the settings template among them.
             import _opf_init
             init = {"op": "init-store", "store_root": ".",
                     "members": [{"path": ".working/toml/manifest.toml",
                                  "digest": _digest(_opf_init.build_manifest().encode())}]}
             render = {"op": "render-views", "store_root": ".",
                       "members": [{"path": v, "digest": _digest(v.encode())} for v in self.views]}
-            pack = schema.enforcement_install_op(self.bindings["enforcement"])
-            return ([init] if self.with_init else []) + [render, pack]
+            pack = schema.enforcement_install_ops(self.bindings["enforcement"])
+            return ([init] if self.with_init else []) + [render] + pack
 
         def observation(self):
             result = investigate(self.root, sources=self.sources, targets=self.all_targets())
@@ -942,7 +1183,7 @@ def self_test():
                 expected_observation_digest=tomllib.loads(
                     observation.observation.decode())["observation_digest"],
                 product="opf", decisions=[self.decision] if decisions is None else decisions,
-                ops=self.base_ops(),
+                ops=changes["ops"] if "ops" in changes else self.base_ops(),
                 now=self.now, run_nonce="0123456789abcdef", bindings=self.bindings,
             )
             args.update(changes)
@@ -1038,7 +1279,8 @@ def self_test():
             self.assertIn({"path": preserved, "digest": digest}, p["effects"]["creations"])
             self.assertEqual(p["effects"]["removals"], [{"path": "legacy.md", "digest": digest}])
             self.assertEqual([row["op"] for row in p["ops"]],
-                             ["init-store", "render-views", "install-pack"])
+                             [row["op"] for row in self.base_ops()])
+            self.assertNotIn("install-pack", [row["op"] for row in p["ops"]])
             self.assertEqual(before, self.snapshot())
             self.assertFalse((self.root / ".working").exists())
             # Import references are no longer decision inputs: an old acceptance cannot ride the plan.
@@ -1067,8 +1309,8 @@ def self_test():
             # The exact effects: the preservation copy, the scaffolded manifest and every enforcement
             # member, each tied to the op that writes it, beside the retire removal.
             # (a member two rows share, the mirrored tool entry point, is one creation)
-            pack = schema.enforcement_install_op(self.bindings["enforcement"])["members"]
-            init, render, _ = self.base_ops()
+            init, render, *plants = self.base_ops()
+            pack = [{"path": row["path"], "digest": row["content_digest"]} for row in plants]
             creations = sorted([{"path": preserved, "digest": digest}] + init["members"]
                                + render["members"] + pack, key=lambda r: sorted(r.items()))
             self.assertEqual(p["effects"], {"creations": creations,
@@ -1134,7 +1376,7 @@ def self_test():
                 decide(".working/toml/counters.toml", "migrate")])
             self.assertEqual(result.status, store.VALID, result.findings)
             p = tomllib.loads(result.plan.decode())
-            self.assertEqual(p["store"]["adoption"], "re-adoption")
+            self.assertEqual(p["store"]["adoption"], "first-adoption")
             rows = {row["path"]: row for row in p["sources"]}
             for path, disposition in ((".working/TODO.md", "move"),
                                       (".working/toml/counters.toml", "migrate")):
@@ -1170,8 +1412,8 @@ def self_test():
 
         def test_launcher_named_move_destination(self):
             # A declared move destination whose file name is a launcher's, in any case, refuses before
-            # the plan freezes, naming the remedy: the frozen plan would refuse it as an uninspected
-            # launcher, since no enforcement row can name a moved file. The default destination, a
+            # the plan freezes, naming the remedy: the frozen plan would refuse it whether or not an
+            # enforcement row names it (the adopt self-test pins each case). The default destination, a
             # declared one beneath the Move archive, and another file name still plan.
             (self.root / ".opf/hooks").mkdir(parents=True)
             for name in ("pre-commit", "install.sh"):
@@ -1196,8 +1438,10 @@ def self_test():
                     self.assertTrue(result.findings[0].startswith(
                         "move destination {!r} of {!r} has an enforcement launcher's file name".format(
                             destination, source)), result.findings)
-                    self.assertIn("omit the destination to take the default, or choose another "
-                                  "file name", result.findings[0])
+                    self.assertIn("file name (opf.yml, opf-ci.sh, pre-commit or install.sh, in any case) "
+                                  "outside .working/archive/moved/, and the frozen plan refuses one there "
+                                  "whether or not an enforcement row names it; omit the destination to "
+                                  "take the default, or choose another file name", result.findings[0])
             for destination in (None, moved, "legacy/hooks/pre-commit.old"):
                 with self.subTest(destination=destination):
                     decision = dict(path=".opf/hooks/pre-commit", disposition="move", actor="fixture")
@@ -1328,10 +1572,10 @@ def self_test():
             # retire decision keeps the manifest registration chain out of these store-identity cases.
             self.decision = dict(self.decision, disposition="retire")
             self.targets = self.targets + ["other-product", "receipt.toml"]
-            init, render, pack = self.base_ops()
+            init, render, *pack = self.base_ops()
             receipt = {"op": "record-adoption", "receipt_path": ".working/toml/adoption.toml",
                        "receipt_core_digest": _digest(b"r")}
-            result = self.make_plan(ops=[init, render, pack, receipt])
+            result = self.make_plan(ops=[init, render, *pack, receipt])
             self.assertEqual(result.status, store.VALID, result.findings)
             created = tomllib.loads(result.plan.decode())["effects"]["creations"]
             for row in (init["members"] + render["members"]
@@ -1340,21 +1584,21 @@ def self_test():
             other_machine = [{"path": ".working/data/manifest.toml", "digest": _digest(b"m")}]
             for label, ops, status in (
                     # an op targeting another store contradicts the frozen store identity
-                    ("other-store", [dict(init, store_root="other-product"), render, pack],
+                    ("other-store", [dict(init, store_root="other-product"), render, *pack],
                      store.INVALID),
                     ("receipt-outside-store",
-                     [init, render, pack, dict(receipt, receipt_path="receipt.toml")], store.INVALID),
-                    ("other-machine-store", [dict(init, members=other_machine), render, pack],
+                     [init, render, *pack, dict(receipt, receipt_path="receipt.toml")], store.INVALID),
+                    ("other-machine-store", [dict(init, members=other_machine), render, *pack],
                      store.INVALID),
                     # render-views writes exactly the declared views, at the frozen store
-                    ("other-render-store", [init, pack, dict(render, store_root="other-product")],
+                    ("other-render-store", [init, *pack, dict(render, store_root="other-product")],
                      store.CANNOT_EVALUATE),
-                    ("render-missing-view", [init, pack, dict(render, members=render["members"][1:])],
+                    ("render-missing-view", [init, *pack, dict(render, members=render["members"][1:])],
                      store.CANNOT_EVALUATE),
                     # the required program (spec 14): a store that does not resolve is scaffolded, and
                     # its declared views are rendered
-                    ("no-init-store", [render, pack], store.CANNOT_EVALUATE),
-                    ("no-render-views", [init, pack], store.CANNOT_EVALUATE),
+                    ("no-init-store", [render, *pack], store.CANNOT_EVALUATE),
+                    ("no-render-views", [init, *pack], store.CANNOT_EVALUATE),
                     # an enforcement member no op installs
                     ("enforcement-uninstalled", [init, render], store.INVALID)):
                 with self.subTest(label):
@@ -1364,23 +1608,31 @@ def self_test():
 
         def test_hook_replacement_binds_observed_bytes(self):
             # A deny hook merged into an existing registration is a replacement tied to its enforcement
-            # member, and its old digest must be the observed bytes.
+            # member, and its old digest must be the observed bytes: an observed settings file takes the
+            # enable-hook row registering the fixed command, an absent one takes the template plant, and
+            # each row over the other state refuses.
+            member = self.bindings["enforcement"][2]["members"][0]
+            observed = _digest(b"{}\n")
+            ops = self.base_ops()[:2] + schema.enforcement_install_ops(self.bindings["enforcement"], observed)
+            hook = [row for row in ops if row["op"] == "enable-hook"]
+            self.assertEqual(hook, [{"op": "enable-hook", "registration_path": ".claude/settings.json",
+                                     "plugin_entry": schema.HOOK_COMMAND, "old_digest": observed,
+                                     "new_digest": member["digest"]}])
+            with self.subTest("absent-registration-enable-hook"):
+                self.assertEqual(self.make_plan(ops=ops).status, store.CANNOT_EVALUATE)
             (self.root / ".claude").mkdir()
             (self.root / ".claude/settings.json").write_bytes(b"{}\n")
-            member = self.bindings["enforcement"][2]["members"][0]
-            others = [row for row in self.bindings["enforcement"] if row["platform"] != "claude-code"]
-            hook = {"op": "enable-hook", "registration_path": ".claude/settings.json",
-                    "plugin_entry": "opf", "old_digest": _digest(b"{}\n"),
-                    "new_digest": member["digest"]}
-            ops = self.base_ops()[:2] + [schema.enforcement_install_op(others)]
-            result = self.make_plan(ops=ops + [hook])
+            result = self.make_plan(ops=ops)
             self.assertEqual(result.status, store.VALID, result.findings)
-            replacements = tomllib.loads(result.plan.decode())["effects"]["replacements"]
-            self.assertEqual([row for row in replacements if row["path"] == ".claude/settings.json"], [
-                {"path": ".claude/settings.json", "old_digest": hook["old_digest"],
-                 "new_digest": member["digest"]}])
-            for label, ops in (("stale-old-digest", ops + [dict(hook, old_digest=_digest(b"x"))]),
-                               ("planted-over-existing", self.base_ops())):
+            p = tomllib.loads(result.plan.decode())
+            self.assertEqual([row for row in p["effects"]["replacements"]
+                              if row["path"] == ".claude/settings.json"], [
+                {"path": ".claude/settings.json", "old_digest": observed, "new_digest": member["digest"]}])
+            # the merge archives the observed bytes first, so that copy is a bound creation
+            self.assertIn({"path": store.retire_preimage(p["run_id"], ".claude/settings.json"),
+                           "digest": observed}, p["effects"]["creations"])
+            stale = [dict(row, old_digest=_digest(b"x")) if row["op"] == "enable-hook" else row for row in ops]
+            for label, ops in (("stale-old-digest", stale), ("planted-over-existing", self.base_ops())):
                 with self.subTest(label):
                     self.assertEqual(self.make_plan(ops=ops).status, store.CANNOT_EVALUATE)
 
@@ -1425,18 +1677,14 @@ def self_test():
             # 14.2), so no disposition lets the approved plan rewrite it: neither merging the deny hook
             # into a declared registration file nor repointing a declared consumer. Undeclared, the same
             # hook merge plans (test_hook_replacement_binds_observed_bytes).
-            member = self.bindings["enforcement"][2]["members"][0]
-            others = [row for row in self.bindings["enforcement"] if row["platform"] != "claude-code"]
-            hook = {"op": "enable-hook", "registration_path": ".claude/settings.json",
-                    "plugin_entry": "opf", "old_digest": _digest(b"{}\n"),
-                    "new_digest": member["digest"]}
             repoint = {"op": "repoint-consumer", "path": "legacy.md",
                        "old_digest": _digest(b"legacy\n"), "new_digest": _digest(b"repointed\n")}
-            init, render, pack = self.base_ops()
+            init, render, *pack = self.base_ops()
             for source, rewrite, ops in (
-                    ("legacy.md", "legacy.md", [init, render, pack, repoint]),
+                    ("legacy.md", "legacy.md", [init, render, *pack, repoint]),
                     (".claude", ".claude/settings.json",
-                     [init, render, schema.enforcement_install_op(others), hook])):
+                     [init, render] + schema.enforcement_install_ops(self.bindings["enforcement"],
+                                                                     _digest(b"{}\n")))):
                 if source == ".claude":
                     (self.root / ".claude").mkdir()
                     (self.root / ".claude/settings.json").write_bytes(b"{}\n")
@@ -1474,11 +1722,13 @@ def self_test():
             self.assertEqual(p["effects"]["replacements"], sorted(
                 [{"path": ".working/toml/manifest.toml", "old_digest": old, "new_digest": new}
                  for _, old, new in chain], key=lambda r: sorted(r.items())))
+            self.assertFalse(any(row["path"].startswith(".working/archive/")
+                                 for row in p["effects"]["creations"]))
             # Scaffolded bytes other than the default manifest leave the chain underivable, so it
             # refuses.
-            init, render, pack = self.base_ops()
+            init, render, *pack = self.base_ops()
             odd = dict(init, members=[{"path": ".working/toml/manifest.toml", "digest": _digest(b"m")}])
-            self.assertEqual(self.make_plan(decisions=keeps, ops=[odd, render, pack]).status,
+            self.assertEqual(self.make_plan(decisions=keeps, ops=[odd, render, *pack]).status,
                              store.CANNOT_EVALUATE)
             # A store that already resolves: the chain starts at the observed manifest bytes.
             (self.root / ".working/toml").mkdir(parents=True)
@@ -1489,6 +1739,10 @@ def self_test():
             p = tomllib.loads(result.plan.decode())
             self.assertEqual([(row["entry"], row["old_digest"], row["new_digest"]) for row in p["ops"]
                               if row["op"] == "register-unmanaged"], chain)
+            # Apply archives the live manifest before its first rewrite (spec 14.2), so that copy of
+            # the observed bytes is a bound creation (spec 14.1); a scaffolded manifest has none.
+            preserved = store.retire_preimage(p["run_id"], ".working/toml/manifest.toml")
+            self.assertIn({"path": preserved, "digest": digests[0]}, p["effects"]["creations"])
 
         def test_control_area_never_selected(self):
             # Spec 14.2 carries no homes qualifier: in a legacy (homes 1) layout the store control area,
@@ -1568,9 +1822,13 @@ def self_test():
             # A pre-existing platform file is never overwritten: planting GEMINI.md over it collides,
             # and the same row bound to an absent path beneath the walked .gemini directory plans.
             self.assertEqual(self.make_plan().status, store.CANNOT_EVALUATE)
-            gemini = [{"path": ".gemini/opf.md", "digest": _digest(b"g")}]
-            self.bindings["enforcement"][4]["members"] = gemini
-            self.assertEqual(self.make_plan().status, store.VALID)
+            # (a path outside the opf/ mirror and the destination table has no pack source of its own, so
+            # the row keeps the Gemini member as its source)
+            gemini = {"path": ".gemini/opf.md", "digest": _digest(b"g")}
+            ops = [dict(row, path=gemini["path"], content_digest=gemini["digest"])
+                   if row.get("path") == "GEMINI.md" else row for row in self.base_ops()]
+            self.bindings["enforcement"][4]["members"] = [gemini]
+            self.assertEqual(self.make_plan(ops=ops).status, store.VALID)
 
         def test_ancestry_marks_re_adoption(self):
             def ancestry():
@@ -1592,12 +1850,16 @@ def self_test():
             self.assertEqual((ancestry()["adoption"], ancestry()["traces"]),
                              ("re-adoption", [".working/toml/manifest.toml"]))
 
-        def test_ancestry_store_debris_is_re_adoption(self):
+        def test_ancestry_ignores_manifestless_reserved_content(self):
             import shutil
 
             def ancestry():
                 return tomllib.loads(self.observation().observation.decode())["ancestry"]
-            # Oracle derived from the store constants, not from this module's own set.
+            # Oracle derived from the store constants, not from a set of this module's own.
+            # With no pointer and no resolved manifest, content at a reserved .working name is
+            # ordinary foreign content for a first adoption, exactly as a tree whose refused
+            # manifest the operator moved aside by hand (spec 4.5/9.2); the two are
+            # indistinguishable, so neither reads as ancestry.
             reserved = [store.WORKING_DIRNAME + "/" + name for name in
                         (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS]
             run = ".working/imports/imp-20260102T030405Z-0123456789abcdef"
@@ -1615,10 +1877,10 @@ def self_test():
                         doc = tomllib.loads(self.observation().observation.decode())
                         self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
                         self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
-                                         ("re-adoption", [name]))
+                                         ("first-adoption", []))
                     finally:
                         shutil.rmtree(self.root / ".working")
-            # Reserved files, even empty ones, and empty reserved directories are ancestry.
+            # Reserved files, even empty ones, and empty reserved directories are foreign too.
             name = ".working/toml"
             for kind, content in (("file", b""), ("file", b"[x]\n"), ("directory", None)):
                 with self.subTest(reserved=name, kind=kind, content=content):
@@ -1630,18 +1892,49 @@ def self_test():
                             (self.root / name).mkdir()
                         doc = tomllib.loads(self.observation().observation.decode())
                         self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
-                                         ("re-adoption", [name]))
+                                         ("first-adoption", []))
                     finally:
                         shutil.rmtree(self.root / ".working")
             # Foreign .working content, even a nested reserved-looking name, stays first-adoption.
             (self.root / ".working/notes").mkdir(parents=True)
             (self.root / ".working/notes/toml").write_bytes(b"notes")
             self.assertEqual((ancestry()["adoption"], ancestry()["traces"]), ("first-adoption", []))
-            # A pointer and debris are both traces, pointer first.
+            # A pointer beside manifestless reserved content is ancestry through the pointer alone.
             (self.root / ".working/toml").mkdir()
             (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
             (self.root / ".opf.toml").write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
-            self.assertEqual(ancestry()["traces"], [".opf.toml", ".working/toml"])
+            self.assertEqual(ancestry()["traces"], [".opf.toml"])
+
+        def test_refused_older_manifest_and_hand_step(self):
+            # A resolved manifest declaring a below-supported spec_version refuses investigation
+            # with the finding that names the manifest's own path, states that no store upgrade
+            # reaches spec_version 2.0.0, and states the operator hand step (spec 4.5/9.2); a
+            # refusal that falls back to "the store manifest" or offers an upgrade is red.
+            import _opf_init
+            (self.root / ".working/toml").mkdir(parents=True)
+            old_manifest = _opf_init.build_manifest().replace(
+                'spec_version = "' + store.SUPPORTED_SPEC_VERSION + '"', 'spec_version = "1.1.0"')
+            self.assertIn('spec_version = "1.1.0"', old_manifest)
+            (self.root / ".working/toml/manifest.toml").write_text(old_manifest, encoding="utf-8")
+            (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
+            refused = investigate(self.root, sources=self.sources)
+            self.assertEqual(refused.status, store.CANNOT_EVALUATE)
+            self.assertEqual(list(refused.findings), [
+                "resolved manifest is not valid: '.working/toml/manifest.toml' declares "
+                "[opf].spec_version '1.1.0', older than the {0} this tooling implements; "
+                "no store upgrade reaches spec_version 2.0.0, so the store is refused; "
+                "to adopt this tree instead, first move '.working/toml/manifest.toml' "
+                "aside by hand: its files are then ordinary foreign content for a first "
+                "adoption (spec 9.2; fail-closed)".format(store.SUPPORTED_SPEC_VERSION)])
+            # The hand step, as the refusal words it: the operator moves the manifest aside, a
+            # step no OPF command performs. The remaining files, the reserved-name counters
+            # included, are then ordinary foreign content for a first adoption.
+            (self.root / ".working/toml/manifest.toml").rename(
+                self.root / "manifest.toml.moved-aside")
+            doc = tomllib.loads(self.observation().observation.decode())
+            self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
+            self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                             ("first-adoption", []))
 
         def test_unreadable_declared_source(self):
             with mock.patch.object(sys.modules[__name__], "_read",

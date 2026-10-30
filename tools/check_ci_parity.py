@@ -69,8 +69,10 @@ does not read. defaults (run.shell) and container replace the program or image e
 run: step executes in, so a gate command need not run at all. The other job keys
 cannot turn a failing gate into a success result: if:, needs:, timeout-minutes,
 concurrency and environment can only skip, cancel or fail a job, which Quality gates
-reads as not success; a strategy matrix job's result is failure when any leg fails
-(GitHub behaviour, not observed here); name, runs-on, permissions, outputs, env, services,
+reads as not success (the LANES rule still holds a job-level if: to its pinned
+text and refuses a job-level concurrency:); a strategy matrix job's result is
+failure when any leg fails (GitHub behaviour, not observed here); name, runs-on,
+permissions, outputs, env, services,
 with and secrets do not decide a result (with and secrets apply only under uses).
 The step-level keys that could (continue-on-error, if:, timeout-minutes, and any
 shell: whose value is not the plain bash) are outside the recognized step keys
@@ -143,9 +145,10 @@ or unreadable one is cannot-evaluate (exit 2), never an empty side. The
 job-set, step-shell, result-masking and aggregator rules above apply to each
 file on its own, so the one-job msg-leaks.yml is its own status; that branch
 protection requires it beside Quality gates is not checked here. msg-leaks.yml
-may run only that scan, its self-test and the special-file precheck that every
-job of every workflow runs first (MSG_LEAKS_WORKFLOW_MEMBERS; the precheck-order
-pass holds each quality.yml job to it as well): any other member there is a
+may run only that scan, its self-test, the child-status probe (CHILD_STATUS_PROBE,
+the first step of every job that runs Python) and the special-file precheck that
+every job of every workflow runs right after it (MSG_LEAKS_WORKFLOW_MEMBERS; the
+precheck-order pass holds each quality.yml job to it as well): any other member there is a
 relocation finding (exit 1), because a gate moved from quality.yml into
 msg-leaks.yml leaves the aggregated Quality gates status silently and re-runs
 on every PR metadata edit.
@@ -154,7 +157,15 @@ body, so the workflow that runs it must list opened, synchronize, reopened and
 edited (MSG_LEAKS_PULL_REQUEST_TYPES) in its pull_request types, and a workflow
 that does not run it must not carry edited on pull_request or
 pull_request_target (EDIT_EVENTS), because edited re-runs every job of that
-workflow on a metadata-only change. Each departure is a trigger finding (exit
+workflow on a metadata-only change. quality.yml must list exactly
+QUALITY_PULL_REQUEST_TYPES (labeled) on its pull_request event and carry no
+pull_request_target, because a pull request run of it is scheduled only by the
+label the merge lane applies to the train pull request, so a member head gets
+no Quality run; a quality.yml whose on: block names no pull_request event, and
+one with no top-level on: line at all, is a trigger finding too, because a
+train head then gets no Quality run either (tools/ci-status.sh reads that as
+missing, never as passing, but this rule names the cause). Each departure is a
+trigger finding (exit
 1). The rule reads the top-level on: block: an event key at indent 2 with no
 value reads as GitHub's default types (opened, synchronize, reopened); types:
 at indent 4 is a one-line flow list, one plain scalar, or a block list at
@@ -176,15 +187,79 @@ event or types: key, an item that is not a plain name, or a sequence item at
 indent 4, which YAML reads as an indentless sequence). NOT READ
 (disclosed): the push trigger, and every filter or condition that can keep a
 listed event from scheduling the workflow or a job: branches:,
-branches-ignore:, paths:, paths-ignore:, and a job- or step-level if:. Any of
+branches-ignore:, paths:, paths-ignore:, and a job- or step-level if: (a
+job-level if: is read for its text alone, never for reachability: the LANES
+rule below refuses one on any job outside the heavy jobs of quality.yml, the
+scan's job included, and the REQUIRED STATUS rule holds the quality.yml
+Quality gates job's to always()). Any of
 them can stop the scan workflow on an edited event; reachability is outside
 token-parity scope (the reachability residual below).
+LANES. quality.yml must carry one top-level concurrency: block, exactly
+CONCURRENCY_BLOCK line for line once blank and whole-line comment lines are
+dropped: a pull request run's group is keyed by its pull request number with
+cancel-in-progress on, so a newer run of that pull request cancels the
+superseded one, and every other run's group is keyed by its own run id with
+cancel-in-progress off, so a push-to-main run is never cancelled or queued
+behind another run (GitHub's documented concurrency behaviour, not observed
+here). Every HEAVY_JOBS job must be present in quality.yml (a missing or
+renamed one is a lane finding) and must carry the job-level
+if: HEAVY_JOB_IF_LINE, and a job-level if: on any job but the Quality gates
+job of quality.yml (whose always() the REQUIRED STATUS rule holds) is accepted
+only as that exact
+line with no continuation line, and only on a HEAVY_JOBS job of quality.yml:
+those jobs run on a push and on a pull request whose head is a merge-train-*
+branch of this repository, and are skipped on every other pull request, which
+Quality gates reads as not success, so such a pull request merges only by
+riding a train. The if: value is read whole: every non-blank, non-comment line
+deeper than the key before the job's next property is a continuation line,
+which YAML folds into the condition. Each HEAVY_COMMANDS member (the expensive
+suites, pinned by full identity) is bound to the conditioned jobs: found in
+any job of either file whose if:, read whole, is not exactly
+HEAVY_JOB_IF_LINE, it is a lane finding, so relocating a heavy command into an
+unconditioned job, the Quality gates job included, fails loud. A missing or
+departing concurrency: block
+in quality.yml, a concurrency: block in msg-leaks.yml, a job-level
+concurrency: key on any job of either file, a missing heavy job, a heavy job
+without the if:, a
+departing if: value on a heavy job, a heavy member in a job without the
+pinned if: and the if: on any other job are each a
+lane finding (exit 1). Not read: workflows outside CI_WORKFLOWS (the scheduled
+currency.yml among them, DISCLOSED RESIDUAL), so a heavy command added to a
+workflow outside them is caught only as a parity difference, not as a lane
+finding; heaviness beyond the pinned HEAVY_COMMANDS enumeration (a new
+expensive command outside it can land in an unconditioned job with no lane
+finding until it is added to the set; the check_byte_canon.py identities are
+outside it because the registry job runs them unconditioned, so for the
+byte-canon-matrix job only its presence, its pinned if: and its members'
+parity are held, not a relocation of its commands); whether GitHub
+evaluates the pinned expressions as their text says (this rule compares text);
+and a cancelled run left on a live head (a label added while its run is in
+progress, the merge-train label re-applied included, or a push back to an
+earlier head), which tools/ci-status.sh then refuses until a new head commit.
+OPF GROUPS. The local runner runs the OPF tooling self-test as one
+opf/tools/opf.py --self-test-group NAME line per group of SELF_TEST_GROUPS in
+that file; CI runs the whole opf.py --self-test once, in a heavy job (the
+host-patch job), and no group. Each side is an ALLOWLIST exception: the
+groups local-only, the whole self-test ci-only. The self-test reads
+SELF_TEST_GROUPS from the live file with ast (_opf_group_names, a literal; the
+file is never run) and requires each group's command in HEAVY_COMMANDS, on
+exactly one line of the live local runner and on no line of the live
+quality.yml, and the whole self-test (OPF_WHOLE_COMMAND) in HEAVY_COMMANDS and
+on exactly one line of the live quality.yml, inside a HEAVY_JOBS job, each
+line read back through this gate's own tokenizer and placed in its job by
+the nearest job id above it (_opf_group_lines), and no other group command in
+either file (_opf_group_wiring_faults). So a group removed from the local
+runner, a group run on a second line, a group opf.py adds without a line, a
+group step put back into quality.yml, and the whole self-test removed,
+repeated or moved out of the heavy jobs each turn the self-test red. The rule
+runs in the self-test, which reads the live files, not in the gate's own run.
+Not checked: which HEAVY_JOBS job runs the whole self-test.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
      stale or reversed, and every mandatory member is present on both sides
   1  an evaluated parity finding, stale or reversed exception, missing mandatory
-     member, or required-status finding
+     member, required-status, trigger, relocation or lane finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
      action, circular runner invocation, or shadow-scan discrepancy
@@ -200,14 +275,18 @@ making a harmless reorder fail loud. Coordinated removal of both of this gate's 
 invocations cannot be detected if nobody runs the remaining file manually. The repository
 contracts (REPO_GATES) and the cited-standards contract's --self-test are
 MANDATORY_MEMBERS, so removing one of them from both runners together is a
-missing-mandatory finding, not a silent pass (claude PR #520 round 2 MEDIUM-1). The
+missing-mandatory finding, not a silent pass. The
+child-status probe (CHILD_STATUS_PROBE) and its coverage gate are MANDATORY_MEMBERS for
+the same reason: removing either from both runners together is a missing-mandatory
+finding. Where the probe sits in a roster (first) is held by
+tools/check_child_status_coverage.py, not here. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
 blocks, the top-level directory-binding line before the first gate, or the reviewed
-special-file-precheck abort line (PRECHECK_ABORT_LINES, top level before the first
-gate; it stops the run, exit 2, on a refused tree so no later gate can block on a
-plain read of a FIFO), unbalanced
+special-file-precheck STOP line (PRECHECK_STOP_LINE, top level right after each of the
+two precheck gate lines; it stops the run, exit 2, once a gate has failed, so no later
+gate can block on a plain read of a FIFO), unbalanced
 if/fi nesting in the runner, a duplicate else or an empty then or else branch,
 any character outside printable ASCII (0x20-0x7E) plus tab and newline in
 any input file, job content without a job mapping, a run_gate()
@@ -222,13 +301,18 @@ treated the same way, because bash can assign there.
 The remaining runner scaffold is an ALLOWLIST of the exact line shapes the two real
 runners use (tools/run_all_checks.sh and the adapted opf/tools/run_all_checks.sh),
 not a blocklist of known-bad spellings. The only recognized [ ] tests are
-if [ "$failed" -ne 0 ]; then, if [ "$notrun" -ne 0 ]; then, and the two exact
-gitleaks lookup lines, so a -v operand (whose subscript can assign), any NAME[...]
-subscript operand, a bare [ ] line, and every unlisted test form are unclassified.
-set -uo pipefail or set -euo pipefail, the directory-binding
-cd "$(dirname "$0")/.." || exit 2 line, and the special-file-precheck abort line
-(registered as a roster member, so the CI workflow's matching first step keeps set
-parity), are accepted only at top level before the first gate. A bare then or done is never a runner line, and else is accepted only
+if [ "$failed" -ne 0 ]; then, if [ "$notrun" -ne 0 ]; then, the two exact
+gitleaks lookup lines and the position-checked special-file-precheck STOP line, so
+a -v operand (whose subscript can assign), any NAME[...] subscript operand, any
+other bare [ ] line, and every unlisted test form are unclassified.
+set -uo pipefail or set -euo pipefail and the directory-binding
+cd "$(dirname "$0")/.." || exit 2 line are accepted only at top level before the
+first gate; the special-file-precheck bootstrap and precheck gate lines (the bootstrap
+registering no member, the precheck registered as a roster member, so the CI workflow's
+matching precheck step keeps set parity) only at top level with the child-status probe
+gate as the one member before them (PRECHECK_PRIOR_MEMBERS), in that order and each
+followed directly by the STOP line; the precheck command in any other gate line is
+refused. A bare then or done is never a runner line, and else is accepted only
 inside an open if block that holds at least one then-branch statement and is not
 already in its else branch. Every other assignment, export or echo line must be
 byte-for-byte one of the
@@ -238,7 +322,8 @@ contain is unclassified even when its value looks inert: bash evaluates a value
 assigned to an integer special variable as arithmetic (RANDOM=failed=0 resets
 failed), a compound array subscript assigns (x=([failed=0]=1)), and notrun=0 is
 accepted only at top level before the first gate, where the real runner puts it,
-because a later notrun=0 would hide the NOT RUN disclaimer. Behind that membership,
+because a later notrun=0 would clear the NOT RUN state, so its failure could no
+longer fire. Behind that membership,
 each expansion must still be a plain $NAME, ${NAME} or $? of a name the runner
 itself sets or manages (failed, notrun, failed_names, name, rc, gitleaks_rc, HOME,
 PATH): under set -u, a plain expansion of any other, possibly unset, variable
@@ -345,8 +430,9 @@ the runner inherits, which can change what an accepted literal line resolves
 to at runtime. Three: the runner-internal ORDER of the remaining accepted
 literal lines beyond the position-checked ones. No non-position-checked
 scaffold echo or assignment expands anything that can be unbound, so
-relocating one rewords the log (a stray RESULT: PASS echo or a notrun=1
-mid-roster) without touching an exit code; the recognized [ ] test lines do
+relocating one rewords the log (a stray RESULT: PASS echo) without touching
+an exit code, or (a notrun=1 mid-roster) can only turn a pass into the NOT
+RUN failure; the recognized [ ] test lines do
 expand failure state, so a copy relocated above its initializer still ends
 the runner loudly under set -u before any gate, the same bounded early-exit
 class as the closed HOME, gitleaks_rc and failed_names placements. A
@@ -523,60 +609,91 @@ REQUIRED_STATUS_JOB_NAME = REQUIRED_STATUS_JOB[0].split(": ", 1)[1]
 REQUIRED_STATUS_RUN_BODY = tuple(
     line.strip() for line in REQUIRED_STATUS_JOB[REQUIRED_STATUS_JOB.index("        run: |") + 1:])
 
-# D-400-SPECIAL-FILE-PRECHECK: the ONE accepted abort line outside the terminal summary
-# blocks and the directory binding, keyed by exact spelling (local runner, and the
-# standalone OPF runner AFTER adapt_standalone_runner rebases "$here/ to "opf/tools/).
-# Each runner runs its precheck FIRST and stops (exit 2) on a refusal, so no later gate
-# can block on a plain read of a FIFO. The line is accepted only at top level before any
-# gate, and it registers the mapped normalized command as a roster member, so the CI
-# workflow's matching first step keeps set parity by construction.
-PRECHECK_ABORT_LINES = dict((
-    ("python3 -I -B tools/_gen_common.py --precheck || exit 2",
-     "tools/_gen_common.py --precheck"),
-    ('python3 -I -B "opf/tools/_containment.py" --precheck || exit 2',
-     "opf/tools/_containment.py --precheck"),
-))
-
-# D-400-SPECIAL-FILE-PRECHECK bootstrap: the ONE accepted shell test-and-abort line that must run
-# BEFORE the precheck invocation itself, in each runner and in every CI precheck step: python3 would
-# block LOADING the precheck module if the script path were a FIFO, so a POSIX [ -f ] test plus a
-# negated [ -h ] test refuses a non-regular or symlinked script by name first (the residual that remains is the
-# interpreter binary and the runner script itself, both read before this line can run). Keyed by exact
-# spelling (the local runner and the CI workflow share the tools/ spelling; the standalone OPF runner
-# matches AFTER adapt_standalone_runner rebases "$here/ to "opf/tools/); the value is the tools path
-# the shadow scan must see accounted for on that line. The line registers NO roster member: the member
-# is the precheck invocation itself, which the runners and the workflow carry right after it, and the
-# precheck-ORDER pass below holds every workflow job to the full two-line canonical step.
-# SPELLING: the tools line negates with "! [ -h ... ]", never "[ ! -h ... ]": this line runs in
-# quality.yml jobs that tools/check_python_host_pin.py reads with a line model refusing "[ !" as a
-# YAML anchor, alias or tag opener, so the "[ !" form would make that gate unable to evaluate the
-# file. The OPF containment line appears in no workflow, so its "[ ! -h ]" spelling stays.
-PRECHECK_BOOTSTRAP_LINES = dict((
-    ('[ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+# SPECIAL-FILE-PRECHECK runner steps: each runner runs its precheck right after the child-status
+# probe gate (the first gate, which tools/check_child_status_coverage.py holds first with no line
+# above it naming Python) as TWO run_gate lines, keyed by exact spelling (local runner, and the
+# standalone OPF runner AFTER adapt_standalone_runner rebases "$here/ to "opf/tools/), each
+# followed directly by PRECHECK_STOP_LINE. Both steps are gate lines, so the first line after the
+# probe that names Python is a gate line, the shape that gate's first-gate rule compares.
+# The BOOTSTRAP gate is a shell test only: python3 would block LOADING the precheck module if the
+# script path were a FIFO, so it fails on a non-regular or symlinked script first (the residual that
+# remains is the interpreter binary, the runner script and the probe script, all read before it can
+# run). It is accepted only at top level with the probe as the one member before it
+# (PRECHECK_PRIOR_MEMBERS) and registers NO roster member; the value is the tools path the shadow scan
+# must see accounted for on that line.
+PRECHECK_BOOTSTRAP_GATE_LINES = dict((
+    ('run_gate "special-file-precheck-bootstrap" test -f tools/_gen_common.py -a ! -h tools/_gen_common.py',
      "tools/_gen_common.py"),
-    ('[ -f "opf/tools/_containment.py" ] && [ ! -h "opf/tools/_containment.py" ] || { echo "error: opf/tools/_containment.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+    ('run_gate "special-file-precheck-bootstrap" test -f "opf/tools/_containment.py" -a ! -h '
+     '"opf/tools/_containment.py"',
      "opf/tools/_containment.py"),
 ))
 
-# D-400-SPECIAL-FILE-PRECHECK order: the canonical precheck step body every workflow job must run
-# before any other post-checkout run step, exactly and in order: the bootstrap test-and-abort line,
-# then the precheck invocation.
+# The precheck gate itself: accepted only at top level right after its own bootstrap gate and the
+# STOP line, with the probe still the one member before it; it registers the mapped normalized
+# command as a roster member, so the CI workflow's matching step keeps set parity by construction.
+# The same command on any other gate line (a second spelling, or one out of order) is refused.
+PRECHECK_GATE_LINES = dict((
+    ('run_gate "special-file-precheck" python3 -I -B tools/_gen_common.py --precheck',
+     "tools/_gen_common.py --precheck"),
+    ('run_gate "special-file-precheck"       python3 -I -B "opf/tools/_containment.py" --precheck',
+     "opf/tools/_containment.py --precheck"),
+))
+
+# The ONE accepted abort line outside the terminal summary blocks and the directory binding: it
+# follows each precheck gate line directly (and is accepted nowhere else) and stops the run, exit 2,
+# once any gate has failed, so a refused script or tree stops the run before a later gate can block
+# on a plain read of a FIFO.
+PRECHECK_STOP_LINE = '[ "$failed" -eq 0 ] || exit 2'
+
+# SPECIAL-FILE-PRECHECK bootstrap (CI side): the ONE accepted shell test-and-abort line that must
+# run BEFORE the precheck invocation itself in every CI precheck step, for the same reason as the
+# runners' bootstrap gate. Keyed by exact spelling; the value is the tools path the shadow scan must
+# see accounted for on that line. The line registers NO roster member: the member is the precheck
+# invocation itself, which the workflow carries right after it, and the precheck-ORDER pass below
+# holds every workflow job to the full two-line canonical step.
+# SPELLING: the line negates with "! [ -h ... ]", never "[ ! -h ... ]": this line runs in
+# quality.yml jobs that tools/check_python_host_pin.py reads with a line model refusing "[ !" as a
+# YAML anchor, alias or tag opener, so the "[ !" form would make that gate unable to evaluate the
+# file.
+PRECHECK_BOOTSTRAP_LINES = dict((
+    ('[ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+     "tools/_gen_common.py"),
+))
+
+# SPECIAL-FILE-PRECHECK order: the canonical precheck step body every workflow job must run
+# right after its child-status probe step and before any other post-checkout run step, exactly and
+# in order: the bootstrap test-and-abort line, then the precheck invocation.
 PRECHECK_STEP_RUN_LINES = (
     '[ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
     "python3 -I -B tools/_gen_common.py --precheck",
 )
 
-# The two host-patch jobs of quality.yml, exempt from the precheck-step requirement by EXACT job id
-# and ONLY in that file: tools/check_python_host_pin.py holds each of those two jobs WHOLE (every
+# The child-status probe step as the order pass models it: its name and its one run line, with
+# exactly the keys name, shell and run (the step tools/check_child_status_coverage.py pins as
+# PROBE_STEP and holds as the step right after setup-python in every job that names Python). The
+# precheck step must be the step right after it, and it the step right after setup-python: the
+# first place that gate leaves for a step naming Python. The probe imports only the standard
+# library under -I and reads no file of the tree but its own script, so the precheck still runs
+# before any gate or tool reads the tree.
+CHILD_STATUS_PROBE_STEP_NAME = "Child exit status observable (before any gate)"
+CHILD_STATUS_PROBE_STEP_RUN = "python3 -I -B opf/tools/_child_status.py"
+CHILD_STATUS_PROBE_STEP_KEYS = frozenset(("name", "shell", "run"))
+
+# The five host-patch jobs of quality.yml, exempt from the precheck-step requirement by EXACT job id
+# and ONLY in that file: tools/check_python_host_pin.py holds each of those five jobs WHOLE (every
 # step with exactly name, run and shell: bash, its own gate as the step right after setup-python,
 # then the job's suites in order) and refuses ANY inserted step, the canonical special-file
 # precheck step included, so requiring the step there and keeping that exact job model cannot both
-# hold. The job model is the stricter guard over those two jobs, so it stands unchanged and the
+# hold. The job model is the stricter guard over those five jobs, so it stands unchanged and the
 # order pass exempts exactly these ids; the residual is named in
 # workflow_precheck_order_problems's docstring. The same ids in any other workflow file, and every
 # other job of quality.yml, stay held to the precheck-first order.
 PRECHECK_ORDER_EXEMPT_SOURCE = ".github/workflows/quality.yml"
-PRECHECK_ORDER_EXEMPT_JOBS = frozenset({"opf-host-patch", "git-fixture-env-host-patch"})
+PRECHECK_ORDER_EXEMPT_JOBS = frozenset({
+    "opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
+    "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch",
+})
 
 # The only run line a workflow job may carry BEFORE its checkout step: it configures git ahead of
 # materializing the tree (the byte-canon matrix sets the hostile line-ending conversion before
@@ -586,20 +703,96 @@ PRE_CHECKOUT_RUN_LINES = frozenset({
     "git config --global core.autocrlf true",
 })
 
+# The one top-level concurrency: block quality.yml must carry, compared line for line
+# once blank and whole-line comment lines are dropped (module docstring, LANES). A
+# pull request run's group is keyed by its number with cancel-in-progress on, so a
+# newer run of that pull request cancels the superseded one; every other run's group
+# is keyed by its own run id with cancel-in-progress off, so a push-to-main run is
+# never cancelled or queued behind another run.
+CONCURRENCY_BLOCK = (
+    "concurrency:",
+    "  group: quality-${{ github.event_name == 'pull_request' && "
+    "format('pr-{0}', github.event.pull_request.number) || "
+    "format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+)
+
+# The one job-level if: line a job other than Quality gates may carry, exactly as
+# written, and the quality.yml jobs that must carry it (module docstring, LANES): a
+# heavy job runs on a push and on a pull request whose head is a merge-train-*
+# branch of this repository, and is skipped on every other pull request, which
+# Quality gates reads as not success.
+HEAVY_JOB_IF_LINE = (
+    "    if: github.event_name == 'push' || "
+    "(startsWith(github.head_ref, 'merge-train-') && "
+    "github.event.pull_request.head.repo.full_name == github.repository)")
+HEAVY_JOBS = frozenset({
+    "opf-tooling", "selftest-execution", "git-fixture-env-core",
+    "opf-host-patch", "git-fixture-env-core-host-patch",
+    "git-fixture-env-config-combined-host-patch",
+    "git-fixture-env-config-malformed-host-patch",
+    "git-fixture-env-config-system-host-patch", "byte-canon-matrix",
+})
+
+# The members that may run only in a job carrying the pinned HEAVY_JOB_IF_LINE
+# (module docstring, LANES): each is an expensive suite the lowered-spend lanes
+# keep off ordinary pull requests, named by its full identity so the rule holds
+# wherever the command lands, a renamed or new job included. Heaviness is this
+# pinned enumeration: the check_byte_canon.py identities are absent because the
+# registry job also runs them unconditioned (the byte-canon-matrix job is heavy
+# through its platform matrix, which the heavy-job presence rule holds instead).
+HEAVY_COMMANDS = frozenset({
+    "opf/tools/opf.py --self-test",
+    "opf/tools/opf.py --self-test-group core",
+    "opf/tools/opf.py --self-test-group adopt",
+    "opf/tools/opf.py --self-test-group watchdog",
+    "tools/check_selftest_execution.py --self-test",
+    "tools/check_selftest_execution.py --suite orch-behaviour-selftest",
+    "tools/check_selftest_execution.py --suite ci-status-behaviour-selftest",
+    "tools/check_selftest_execution.py --suite instruction-budget-selftest",
+    "tools/check_selftest_execution.py --suite brief-capability-selftest",
+    "tools/check_selftest_execution.py --suite hook-latency-selftest",
+    "tools/check_selftest_execution.py --suite entry-guard-selftest",
+    "tools/check_selftest_execution.py --suite git-fixture-env-core",
+    "tools/check_selftest_execution.py --suite git-fixture-env-config-combined",
+    "tools/check_selftest_execution.py --suite git-fixture-env-config-malformed",
+    "tools/check_selftest_execution.py --suite git-fixture-env-config-system",
+})
+
+# The opf.py self-test groups (module docstring, OPF GROUPS): the file that names them in its
+# SELF_TEST_GROUPS, the command prefix each group runs as on the local runner, and the whole
+# self-test CI runs instead, once, in a heavy job.
+OPF_TOOL = ROOT / "opf" / "tools" / "opf.py"
+OPF_GROUP_COMMAND = "opf/tools/opf.py --self-test-group "
+OPF_WHOLE_COMMAND = "opf/tools/opf.py --self-test"
+
 MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
-# The special-file precheck invocation as a member: every job of every workflow runs it first (the
-# precheck-order pass holds each quality.yml job to it too), so in msg-leaks.yml it is never a gate
-# moved out of the aggregated Quality gates status.
+# The special-file precheck invocation as a member: every job of every workflow runs it right after
+# the child-status probe (the precheck-order pass holds each quality.yml job to it too), so in
+# msg-leaks.yml it is never a gate moved out of the aggregated Quality gates status.
 PRECHECK_MEMBER = "tools/_gen_common.py --precheck"
+# The child-status probe: the first step of every CI job that runs Python, msg-leaks.yml's one job
+# included, so that workflow admits it beside its own scan.
+CHILD_STATUS_PROBE = "opf/tools/_child_status.py"
+CHILD_STATUS_COVERAGE = "tools/check_child_status_coverage.py"
+# The members a runner may have run when it reaches its precheck bootstrap and precheck gate lines:
+# the child-status probe gate alone (SPECIAL-FILE-PRECHECK runner order; the probe is the first
+# gate, which tools/check_child_status_coverage.py holds, and the precheck steps right after it).
+PRECHECK_PRIOR_MEMBERS = frozenset((CHILD_STATUS_PROBE,))
 # The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan, that
-# scan's self-test and the special-file precheck. Any other member there is a relocation finding,
-# because that workflow's status is separate from the aggregated Quality gates and re-runs on every
-# PR metadata edit, so a gate moved into it would leave the aggregated required check silently.
+# scan's self-test, the child-status probe and the special-file precheck. Any other member there is
+# a relocation finding, because that workflow's status is separate from the aggregated Quality gates
+# and re-runs on every PR metadata edit, so a gate moved into it would leave the aggregated required
+# check silently.
 MSG_LEAKS_WORKFLOW_MEMBERS = frozenset(
-    (MSG_LEAKS_SCAN, MSG_LEAKS_SCAN + " --self-test", PRECHECK_MEMBER))
+    (MSG_LEAKS_SCAN, MSG_LEAKS_SCAN + " --self-test", CHILD_STATUS_PROBE, PRECHECK_MEMBER))
 EDIT_EVENTS = ("pull_request", "pull_request_target")
 DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
 MSG_LEAKS_PULL_REQUEST_TYPES = DEFAULT_PULL_REQUEST_TYPES + ("edited",)
+# The only pull_request types quality.yml may list (module docstring, TRIGGER): a pull request run is
+# scheduled by the label the merge lane applies to the train pull request, never by a member's open,
+# push or reopen.
+QUALITY_PULL_REQUEST_TYPES = ("labeled",)
 
 ALLOWLIST = (
     {
@@ -668,6 +861,70 @@ ALLOWLIST = (
         "backlog": "GD-123",
     },
     {
+        "side": "ci-only",
+        "identity": "opf/tools/opf.py --self-test",
+        "reason": (
+            "The host-patch job runs the whole OPF tooling self-test on the "
+            "host patch release, its one CI run; the local runner runs it as "
+            "its named groups (--self-test-group), which opf.py holds to "
+            "every registered self-test exactly once."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "local-only",
+        "identity": "opf/tools/opf.py --self-test-group core",
+        "reason": (
+            "The local runner runs the OPF tooling self-test as its named "
+            "groups; CI runs the whole opf.py --self-test once, in the "
+            "host-patch job, and no group (module docstring, OPF GROUPS)."
+        ),
+        "backlog": (
+            "documented in the OPF GROUPS rule of tools/check_ci_parity.py "
+            "and the Gates and CI section of CLAUDE.md"
+        ),
+    },
+    {
+        "side": "local-only",
+        "identity": "opf/tools/opf.py --self-test-group adopt",
+        "reason": (
+            "The local runner runs the OPF tooling self-test as its named "
+            "groups; CI runs the whole opf.py --self-test once, in the "
+            "host-patch job, and no group (module docstring, OPF GROUPS)."
+        ),
+        "backlog": (
+            "documented in the OPF GROUPS rule of tools/check_ci_parity.py "
+            "and the Gates and CI section of CLAUDE.md"
+        ),
+    },
+    {
+        "side": "local-only",
+        "identity": "opf/tools/opf.py --self-test-group watchdog",
+        "reason": (
+            "The local runner runs the OPF tooling self-test as its named "
+            "groups; CI runs the whole opf.py --self-test once, in the "
+            "host-patch job, and no group (module docstring, OPF GROUPS)."
+        ),
+        "backlog": (
+            "documented in the OPF GROUPS rule of tools/check_ci_parity.py "
+            "and the Gates and CI section of CLAUDE.md"
+        ),
+    },
+    {
+        "side": "local-only",
+        "identity": "tools/check_gitleaks_pin.py",
+        "reason": (
+            "The local run requires the gitleaks version quality.yml pins on "
+            "PATH; the CI secrets job downloads that pinned binary and verifies "
+            "its checksum before it scans, so only the gate's self-test runs in CI."
+        ),
+        "backlog": (
+            "documented in the gitleaks-pin residue of "
+            ".aiqt/core/gates/manifest.toml and the Gates and CI section of "
+            "CLAUDE.md"
+        ),
+    },
+    {
         "side": "local-only",
         "identity": "tools/check_branch_root.py --max-lag 200",
         "reason": (
@@ -680,7 +937,7 @@ ALLOWLIST = (
 )
 
 MANDATORY_MEMBERS = frozenset({
-    # The repository contracts (claude PR #520 round 2 MEDIUM-1): mandatory, so removing
+    # The repository contracts are mandatory, so removing
     # one from BOTH runners together is a missing-mandatory finding (exit 1), never a
     # silent pass; a one-sided removal is already a local-only or ci-only finding.
     ".github/check_cited_standards_contract.py",
@@ -690,6 +947,10 @@ MANDATORY_MEMBERS = frozenset({
     "tools/check_ci_parity.py --self-test",
     "tools/check_git_option_table.py",
     "tools/check_git_option_table.py --self-test",
+    # The child-status probe and its coverage gate: removing either from both rosters together would
+    # leave every gate reading a lost child exit status as a pass, unseen.
+    CHILD_STATUS_PROBE,
+    CHILD_STATUS_COVERAGE,
 })
 
 INTERPRETERS = frozenset({"python", "python3"})
@@ -714,7 +975,9 @@ EXPECTED_RUN_GATE_BODY = (
 # cannot-evaluate rather than silently ignored (honouring the fail-closed guarantee).
 # Deeper nested non-gate YAML (under on:, env:, with:, strategy:) is not exhaustively
 # schema-validated; the shadow scan still prevents any tools/* gate from hiding there.
-TOP_LEVEL_KEYS = frozenset({"name", "on", "permissions", "jobs"})
+# A top-level concurrency: key is recognized only to be held to CONCURRENCY_BLOCK by
+# the lane rule (_lane_findings).
+TOP_LEVEL_KEYS = frozenset({"name", "on", "permissions", "concurrency", "jobs"})
 JOB_PROPERTY_KEYS = frozenset({
     "name", "runs-on", "steps", "strategy", "needs", "env", "permissions",
     "if", "timeout-minutes", "continue-on-error", "defaults", "outputs",
@@ -1151,10 +1414,12 @@ def normalize(tokens, masked_ok=False, raws=None):
     return Result(True, " ".join(canonical), "", "")
 
 
-def _add_member(members, origins, line_number, normalized):
+def _add_member(members, origins, line_number, normalized, job_members=None):
     members.add(normalized)
     script = normalized.split(" ", 1)[0]
     origins.setdefault(line_number, set()).add(script)
+    if job_members is not None:
+        job_members.add(normalized)
 
 
 def _diagnostic(source, line, code, message):
@@ -1293,7 +1558,7 @@ FAILED_GATES_ECHO = 'echo "FAILED GATES: ${failed_names}"'
 # HISTCMD as arithmetic (RANDOM=failed=0 resets failed), a compound array subscript
 # assigns (x=([failed=0]=1)), and an expansion of an unset variable aborts under
 # set -u (x=$BASH_ENV, echo "$stub_log"). notrun=0 is accepted only at top level
-# before the first gate, because a later reset would hide the NOT RUN disclaimer.
+# before the first gate, because a later reset would clear the NOT RUN failure.
 # The gitleaks-block lines (PATH_APPEND_LINE, GITLEAKS_RC_LINE and
 # GITLEAKS_FAILED_ECHO) and FAILED_GATES_ECHO are deliberately NOT members
 # here: extract_local accepts each of them only inside its real block and
@@ -1305,11 +1570,11 @@ RUNNER_SCAFFOLD_LINES = frozenset({
     "echo",
     'echo "--- secrets (gitleaks) ---"',
     'echo "PASS: gitleaks found no leaks"',
-    'echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"',
-    'echo "  in THIS run only, not in the pipeline. Install it to close the gap:"',
+    'echo "MISSING: gitleaks is not on PATH locally, so its scan cannot run here, and the"',
+    'echo "  gitleaks-pin gate below fails this run. Install the pinned version to fix it:"',
     'echo "  see the pinned version and checksum in .github/workflows/quality.yml"',
     'echo "RESULT: FAIL"',
-    'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
+    'echo "RESULT: FAIL: the gitleaks scan did NOT RUN locally (see above)"',
     'echo "RESULT: PASS"',
     # opf/tools/run_all_checks.sh (adapted): its distinct summary echoes
     'echo "OPF STANDALONE SUBSET: FAILED"',
@@ -1326,8 +1591,8 @@ TERMINAL_SUMMARIES = (
         "exit 1",
         "fi",
         'if [ "$notrun" -ne 0 ]; then',
-        'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
-        "exit 0",
+        'echo "RESULT: FAIL: the gitleaks scan did NOT RUN locally (see above)"',
+        "exit 1",
         "fi",
         'echo "RESULT: PASS"',
     ),
@@ -1592,7 +1857,24 @@ def extract_local(text, source=LOCAL_SOURCE):
     }
     initialized = set()
     gitleaks_updates = set()
-    precheck_bootstraps = set()
+    # SPECIAL-FILE-PRECHECK runner steps: the (line, script) of the accepted bootstrap gate, the
+    # script whose bootstrap gate and STOP line have both run, whether the precheck gate ran, and the
+    # (line, step) of a precheck step line the very next runner line must follow with the STOP line.
+    precheck_bootstrap = None
+    precheck_ready = None
+    precheck_done = False
+    precheck_awaiting_stop = None
+
+    def missing_stop(awaiting):
+        return _diagnostic(
+            source,
+            awaiting[0],
+            "missing-stop",
+            "the special-file precheck {} step is not followed directly by {!r}, so a failed "
+            "step does not stop the run before a later gate can read the tree".format(
+                awaiting[1], PRECHECK_STOP_LINE),
+        )
+
     for line_number, raw in enumerate(text.splitlines(), 1):
         if line_number == 1 and raw == "#!/usr/bin/env bash":
             continue
@@ -1601,6 +1883,10 @@ def extract_local(text, source=LOCAL_SOURCE):
         stripped = code.strip()
         if not stripped:
             continue
+
+        if precheck_awaiting_stop is not None and stripped != PRECHECK_STOP_LINE:
+            diagnostics.append(missing_stop(precheck_awaiting_stop))
+            precheck_awaiting_stop = None
 
         if in_function:
             if stripped == "}":
@@ -1776,6 +2062,28 @@ def extract_local(text, source=LOCAL_SOURCE):
                     "this gate line calls an undefined name and the runner "
                     "continues without recording the gate",
                 ))
+            if stripped in PRECHECK_BOOTSTRAP_GATE_LINES:
+                # SPECIAL-FILE-PRECHECK bootstrap gate: a shell test only, matched by exact
+                # spelling here because its "!" word is outside the gate-word alphabet below.
+                # Accepted once, only at top level with the child-status probe gate as the one
+                # member before it (PRECHECK_PRIOR_MEMBERS); it registers no member, and the
+                # shadow scan sees its tools path through origins. Anywhere else it stays
+                # unclassified.
+                if (not if_stack and members == PRECHECK_PRIOR_MEMBERS
+                        and precheck_bootstrap is None):
+                    script = PRECHECK_BOOTSTRAP_GATE_LINES[stripped]
+                    origins.setdefault(line_number, set()).add(script)
+                    precheck_bootstrap = (line_number, script)
+                    precheck_awaiting_stop = (line_number, "bootstrap")
+                else:
+                    diagnostics.append(_diagnostic(
+                        source,
+                        line_number,
+                        "unclassified-line",
+                        "the special-file precheck bootstrap gate is accepted only once, at top "
+                        "level, right after the child-status probe gate: {!r}".format(stripped),
+                    ))
+                continue
             if len(tokens) < 3:
                 diagnostics.append(_diagnostic(
                     source,
@@ -1817,6 +2125,32 @@ def extract_local(text, source=LOCAL_SOURCE):
                 ))
                 continue
             normalized = normalize(tokens[2:])
+            if normalized.ok and normalized.value in PRECHECK_GATE_LINES.values():
+                # SPECIAL-FILE-PRECHECK gate: the precheck command runs only as its exact gate
+                # line, once, at top level with the child-status probe gate as the one member
+                # before it, and REQUIRES its bootstrap gate and STOP line ahead of it (set parity
+                # alone cannot see the bootstrap, which registers no member). Any other spelling or
+                # position is unclassified and registers nothing.
+                if (stripped not in PRECHECK_GATE_LINES or if_stack
+                        or members != PRECHECK_PRIOR_MEMBERS):
+                    diagnostics.append(_diagnostic(
+                        source,
+                        line_number,
+                        "unclassified-line",
+                        "the special-file precheck runs only as its exact gate line, once, at top "
+                        "level right after its bootstrap gate: {!r}".format(stripped),
+                    ))
+                    continue
+                script = normalized.value.rsplit(" --precheck", 1)[0]
+                if precheck_ready != script:
+                    diagnostics.append(_diagnostic(
+                        source,
+                        line_number,
+                        "missing-bootstrap",
+                        "the precheck gate runs without its bootstrap gate and STOP line ahead "
+                        "of it; python3 would block loading a FIFO planted at {}".format(script)))
+                precheck_done = True
+                precheck_awaiting_stop = (line_number, "precheck")
             if normalized.ok:
                 _add_member(
                     members, origins, line_number, normalized.value)
@@ -1922,44 +2256,19 @@ def extract_local(text, source=LOCAL_SOURCE):
             scaffold = not if_stack and not members
         elif stripped == "notrun=0":
             # Only where the real runner puts it: top level, before any gate. A
-            # later notrun=0 would clear the NOT RUN state and hide its disclaimer.
+            # later notrun=0 would clear the NOT RUN state, so its failure could not fire.
             scaffold = not if_stack and not members
-        elif stripped in PRECHECK_ABORT_LINES:
-            # Only where the real runners put it: top level, before any gate
-            # (D-400-SPECIAL-FILE-PRECHECK). The one accepted abort outside the
-            # terminal summaries: it stops the whole run (exit 2) on a refused tree,
-            # so no later gate can block on a plain read of a FIFO. A second
-            # spelling, or one after a gate, stays unclassified. The command is a
-            # roster member, keeping set parity with the CI workflow's first step.
-            scaffold = not if_stack and not members
+        elif stripped == PRECHECK_STOP_LINE:
+            # Only where the real runners put it: top level, directly after each special-file
+            # precheck gate line (SPECIAL-FILE-PRECHECK). The one accepted abort outside the
+            # terminal summaries: it stops the whole run (exit 2) once any gate has failed, so a
+            # refused script or tree stops the run before a later gate can block on a plain read
+            # of a FIFO. Anywhere else it stays unclassified.
+            scaffold = not if_stack and precheck_awaiting_stop is not None
             if scaffold:
-                _add_member(members, origins, line_number,
-                            PRECHECK_ABORT_LINES[stripped])
-                script = PRECHECK_ABORT_LINES[stripped].rsplit(" --precheck", 1)[0]
-                if script not in precheck_bootstraps:
-                    # The bootstrap is REQUIRED, not merely accepted: without it python3 would block
-                    # LOADING a FIFO planted at the precheck script path before any line of the
-                    # precheck could run, and set parity alone cannot see the deletion (the bootstrap
-                    # registers no member).
-                    diagnostics.append(_diagnostic(
-                        source,
-                        line_number,
-                        "missing-bootstrap",
-                        "the precheck invocation runs without its bootstrap test-and-abort line "
-                        "ahead of it; python3 would block loading a FIFO planted at "
-                        "{}".format(script)))
-        elif stripped in PRECHECK_BOOTSTRAP_LINES:
-            # Only where the real runners put it: top level, before any gate, ahead of the precheck
-            # invocation it guards (D-400-SPECIAL-FILE-PRECHECK bootstrap). The one accepted shell
-            # test-and-abort besides the precheck abort line: python3 would block loading a FIFO at
-            # the precheck script path, so the shell refuses a non-regular or symlinked script by
-            # name first. It registers no member; the shadow scan sees its tools path through
-            # origins. A second spelling, or one after a gate, stays unclassified.
-            scaffold = not if_stack and not members
-            if scaffold:
-                origins.setdefault(line_number, set()).add(
-                    PRECHECK_BOOTSTRAP_LINES[stripped])
-                precheck_bootstraps.add(PRECHECK_BOOTSTRAP_LINES[stripped])
+                if precheck_awaiting_stop[1] == "bootstrap":
+                    precheck_ready = precheck_bootstrap[1]
+                precheck_awaiting_stop = None
         elif stripped == PATH_APPEND_LINE:
             # Only where the real runner puts it: the HOME guard's then branch,
             # which has just proven HOME non-empty. The guard's else branch
@@ -2051,6 +2360,16 @@ def extract_local(text, source=LOCAL_SOURCE):
                 "{!r}".format(stripped),
             ))
 
+    if precheck_awaiting_stop is not None:
+        diagnostics.append(missing_stop(precheck_awaiting_stop))
+    if precheck_bootstrap is not None and not precheck_done:
+        diagnostics.append(_diagnostic(
+            source,
+            precheck_bootstrap[0],
+            "missing-precheck",
+            "the special-file precheck bootstrap gate is not followed by its precheck gate",
+        ))
+
     if in_function:
         diagnostics.append(_diagnostic(
             source,
@@ -2106,7 +2425,8 @@ def _classify_ci_command(
         block,
         members,
         origins,
-        diagnostics):
+        diagnostics,
+        job_members=None):
     stripped = command.strip()
     if not stripped or stripped.startswith("#"):
         return
@@ -2131,7 +2451,7 @@ def _classify_ci_command(
         return
 
     if stripped in PRECHECK_BOOTSTRAP_LINES:
-        # D-400-SPECIAL-FILE-PRECHECK bootstrap: the exact shell test-and-abort line each precheck
+        # SPECIAL-FILE-PRECHECK bootstrap: the exact shell test-and-abort line each precheck
         # step runs ahead of the precheck invocation (python3 would block loading a FIFO at the
         # script path). It registers no member; the shadow scan sees its tools path through origins.
         origins.setdefault(line_number, set()).add(
@@ -2157,7 +2477,8 @@ def _classify_ci_command(
             tokens, raws=_raw_lexemes(stripped, tokens))
         if normalized.ok:
             _add_member(
-                members, origins, line_number, normalized.value)
+                members, origins, line_number, normalized.value,
+                job_members)
         else:
             diagnostics.append(_diagnostic(
                 source,
@@ -2440,8 +2761,141 @@ def _required_status_findings(
     return findings
 
 
+def _top_level_block(lines, key):
+    """Return the raw lines of the first top-level key block, from its key line to
+    the next top-level line, blank and whole-line comment lines dropped; None when
+    the workflow carries no such key."""
+    block = None
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if raw[:1] not in (" ", "\t"):
+            if block is not None:
+                break
+            code = _strip_comment(raw).strip()
+            if (code.split(":", 1)[0] if ":" in code else code) == key:
+                block = [raw]
+            continue
+        if block is not None:
+            block.append(raw)
+    return None if block is None else tuple(block)
+
+
+def _lane_findings(job_ids, job_fields, lines, source, job_members):
+    """Require the pinned concurrency: block in quality.yml, every HEAVY_JOBS
+    job present there with the pinned if: on it, every HEAVY_COMMANDS member in
+    a job carrying that pinned if:, and hold every job-level if: other than the
+    quality.yml Quality gates job's, continuation lines included, to the pinned
+    lane text (module docstring, LANES)."""
+    findings = []
+    block = _top_level_block(lines, "concurrency")
+    if source == CI_SOURCE:
+        for job in sorted(HEAVY_JOBS - set(job_fields)):
+            findings.append(Finding(
+                "lane",
+                job,
+                "heavy job {!r} is missing from {}; every HEAVY_JOBS job must "
+                "be present and carry the pinned HEAVY_JOB_IF_LINE, so no "
+                "removal or rename lets its lane run without the "
+                "if:".format(job, source),
+            ))
+    if block is None and source == CI_SOURCE:
+        findings.append(Finding(
+            "lane",
+            "concurrency",
+            "{} carries no top-level concurrency: block; the pinned "
+            "CONCURRENCY_BLOCK is required, so a newer run of a pull request "
+            "cancels its superseded run".format(source),
+        ))
+    elif block is not None and source != CI_SOURCE:
+        findings.append(Finding(
+            "lane",
+            "concurrency",
+            "{} carries a top-level concurrency: block; only {} carries one, "
+            "the pinned CONCURRENCY_BLOCK, so no other workflow's run is "
+            "cancelled on a live head".format(source, CI_SOURCE),
+        ))
+    elif block is not None and block != CONCURRENCY_BLOCK:
+        findings.append(Finding(
+            "lane",
+            "concurrency",
+            "the top-level concurrency: block of {} departs from the pinned "
+            "CONCURRENCY_BLOCK: got {!r}; only the pinned block is known to "
+            "cancel a pull request run alone and never a push-to-main "
+            "run".format(
+                source, list(block)),
+        ))
+    for job in job_ids:
+        fields = job_fields[job]
+        if "concurrency" in fields["keys"]:
+            findings.append(Finding(
+                "lane",
+                job,
+                "job {!r} of {} carries a job-level concurrency: key, which can "
+                "cancel the job in a push-to-main run; only the pinned "
+                "top-level CONCURRENCY_BLOCK is accepted".format(job, source),
+            ))
+        if "if" in fields:
+            # The whole value: the key's own line and every continuation line.
+            value = [lines[fields["if"][0] - 1]] + [
+                text for _number, text in fields.get("if-continued", ())]
+        else:
+            value = None
+        heavy_members = sorted(
+            identity for identity in job_members.get(job, ())
+            if identity in HEAVY_COMMANDS)
+        if heavy_members and value != [HEAVY_JOB_IF_LINE]:
+            findings.append(Finding(
+                "lane",
+                job,
+                "job {!r} of {} runs heavy member(s) {} without the pinned "
+                "job-level HEAVY_JOB_IF_LINE, so they would run on every "
+                "pull request".format(
+                    job, source, ", ".join(heavy_members)),
+            ))
+        if (source == CI_SOURCE
+                and _unquote(fields.get("name", (0, ""))[1])
+                == REQUIRED_STATUS_NAME):
+            continue
+        if value is None:
+            if source == CI_SOURCE and job in HEAVY_JOBS:
+                findings.append(Finding(
+                    "lane",
+                    job,
+                    "heavy job {!r} of {} carries no job-level if:; the pinned "
+                    "HEAVY_JOB_IF_LINE is required, so the job runs only on a "
+                    "push and on a merge-train-* pull request of this "
+                    "repository".format(job, source),
+                ))
+            continue
+        if source != CI_SOURCE or job not in HEAVY_JOBS:
+            findings.append(Finding(
+                "lane",
+                job,
+                "job {!r} of {} carries a job-level if: at line {}, but it is "
+                "not a heavy job of {} (HEAVY_JOBS), so it would be skipped "
+                "where it must run".format(
+                    job, source, fields["if"][0], CI_SOURCE),
+            ))
+        elif value != [HEAVY_JOB_IF_LINE]:
+            findings.append(Finding(
+                "lane",
+                job,
+                "the job-level if: of heavy job {!r} at line {} departs from "
+                "the pinned HEAVY_JOB_IF_LINE: got {!r}; only the pinned line, "
+                "with no continuation line, is known to run the job on a push "
+                "and on a merge-train-* pull request of this repository "
+                "alone".format(
+                    job, fields["if"][0],
+                    " ".join(text.strip() for text in value)),
+            ))
+    return findings
+
+
 def _edit_event_types(lines, source, diagnostics):
-    """Return {event: types} for each EDIT_EVENTS trigger of the top-level on:.
+    """Return {event: types} for each EDIT_EVENTS trigger of the top-level on:,
+    or None when the file has no top-level on: line at all.
 
     The shapes read are those the module docstring lists (TRIGGER); any
     other shape under an edit event appends a trigger-shape diagnostic."""
@@ -2516,7 +2970,7 @@ def _edit_event_types(lines, source, diagnostics):
         start = index
         break
     if start is None:
-        return events
+        return None
     value = _strip_comment(lines[start]).split(":", 1)[1].strip()
     if value:
         for event in names(start + 1, value):
@@ -2627,17 +3081,66 @@ def _edit_event_types(lines, source, diagnostics):
     return events
 
 
+def _quality_trigger_findings(events, source):
+    """Hold quality.yml's pull_request types to QUALITY_PULL_REQUEST_TYPES
+    and refuse pull_request_target there (module docstring, TRIGGER). An
+    on: block with no pull_request event is a finding too, and so is a file
+    with no top-level on: line (events is None)."""
+    if source != CI_SOURCE:
+        return []
+    if events is None:
+        return [Finding(
+            "trigger",
+            source,
+            "{} has no top-level on: line: the label the merge lane applies "
+            "to the train pull request then schedules no Quality run, so a "
+            "train head gets none".format(source),
+        )]
+    findings = []
+    types = events.get("pull_request")
+    if types is None:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} has no pull_request event: the label the merge lane applies "
+            "to the train pull request then schedules no Quality run, so a "
+            "train head gets none either".format(source),
+        ))
+    elif types != QUALITY_PULL_REQUEST_TYPES:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} lists pull_request types [{}], not exactly [{}]: a pull "
+            "request run of it is scheduled only by the label the merge lane "
+            "applies to the train pull request, so a member head gets no "
+            "Quality run".format(source, ", ".join(types),
+                                 ", ".join(QUALITY_PULL_REQUEST_TYPES)),
+        ))
+    if "pull_request_target" in events:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} carries pull_request_target, which schedules runs outside "
+            "its labeled pull_request trigger".format(source),
+        ))
+    return findings
+
+
 def _trigger_findings(lines, members, source, diagnostics):
     """Require pull_request edited exactly where the message/metadata leak
-    scan runs (module docstring, TRIGGER)."""
+    scan runs, and quality.yml's labeled trigger (module docstring,
+    TRIGGER)."""
     events = _edit_event_types(lines, source, diagnostics)
+    findings = _quality_trigger_findings(events, source)
+    if events is None:
+        events = {}
     if MSG_LEAKS_SCAN in members:
         types = events.get("pull_request", ())
         missing = [kind for kind in MSG_LEAKS_PULL_REQUEST_TYPES
                    if kind not in types]
         if not missing:
-            return []
-        return [Finding(
+            return findings
+        return findings + [Finding(
             "trigger",
             source,
             "{} runs {} but its pull_request types lack {}, so the scan does "
@@ -2645,7 +3148,7 @@ def _trigger_findings(lines, members, source, diagnostics):
             "a PR title/body change)".format(
                 source, MSG_LEAKS_SCAN, ", ".join(missing)),
         )]
-    return [Finding(
+    return findings + [Finding(
         "trigger",
         source,
         "{} carries {} type edited but does not run {}, so a PR title/body "
@@ -2699,6 +3202,7 @@ def extract_ci(text, source=CI_SOURCE):
     saw_jobs = False
     job_ids = []
     job_fields = {}
+    job_members = {}
     last_job_key = None
     top_keys = set()
     refused_job = False
@@ -2904,6 +3408,11 @@ def extract_ci(text, source=CI_SOURCE):
             if last_job_key == "needs" and indent == 6:
                 job_fields[current_job[:-1]].setdefault(
                     "needs-items", []).append((line_number, stripped))
+            if in_jobs and last_job_key == "if":
+                # A deeper line under a job-level if: continues its value (YAML
+                # folds it into the condition), so the lane rule reads it too.
+                job_fields[current_job[:-1]].setdefault(
+                    "if-continued", []).append((line_number, stripped))
             if re.match(r"(?:-\s+)?run:", stripped):
                 diagnostics.append(_diagnostic(
                     source,
@@ -3096,6 +3605,8 @@ def extract_ci(text, source=CI_SOURCE):
                             members,
                             origins,
                             diagnostics,
+                            job_members.setdefault(
+                                current_job[:-1], set()),
                         )
                         index += 1
                     continue
@@ -3116,6 +3627,8 @@ def extract_ci(text, source=CI_SOURCE):
                         members,
                         origins,
                         diagnostics,
+                        job_members.setdefault(
+                            current_job[:-1], set()),
                     )
                 index += 1
                 continue
@@ -3194,6 +3707,8 @@ def extract_ci(text, source=CI_SOURCE):
 
     findings = _required_status_findings(
         job_ids, job_fields, lines, source, diagnostics)
+    findings.extend(
+        _lane_findings(job_ids, job_fields, lines, source, job_members))
     findings.extend(_trigger_findings(lines, members, source, diagnostics))
     findings.extend(_relocation_findings(members, source))
     findings.extend(_step_shell_findings(steps))
@@ -3314,6 +3829,127 @@ def _validate_allowlist(rows):
                 side, identity, reason, backlog))
 
     return tuple(entries), _dedupe_diagnostics(diagnostics)
+
+
+def _opf_group_names(source):
+    """Return the group names of the one top-level SELF_TEST_GROUPS assignment in `source`, the
+    text of opf/tools/opf.py (module docstring, OPF GROUPS), read with ast and never run. Raises
+    ValueError when there is no such assignment or more than one, or when its value is not a
+    literal tuple of (name, labels) pairs, and SyntaxError when `source` does not parse."""
+    import ast
+    values = [node.value for node in ast.parse(source).body
+              if isinstance(node, ast.Assign)
+              and [getattr(target, "id", None) for target in node.targets] == ["SELF_TEST_GROUPS"]]
+    if len(values) != 1:
+        raise ValueError("{} top-level SELF_TEST_GROUPS assignments, not 1".format(len(values)))
+    groups = ast.literal_eval(values[0])
+    if not (isinstance(groups, tuple)
+            and all(isinstance(group, tuple) and len(group) == 2 and isinstance(group[0], str)
+                    for group in groups)):
+        raise ValueError("SELF_TEST_GROUPS is not a tuple of (name, labels) pairs")
+    return tuple(name for name, _labels in groups)
+
+
+def _opf_group_lines(text, extraction, jobs=None):
+    """Map each opf.py group command (OPF_GROUP_COMMAND) and the whole self-test
+    (OPF_WHOLE_COMMAND) that `extraction`, the extraction of `text`, holds to the line numbers
+    that run it. Each line whose origin names opf/tools/opf.py is read back through
+    _strip_comment, _tokenize and normalize, as _registered_selftests in
+    tools/selftest_git_fixture_env.py recovers a member's line; one that does not read back maps
+    under None. The member set keeps no count; this does, so a command run twice is seen. When
+    `jobs` is a dict, each mapped line number is also entered there with the id of the workflow
+    job that holds it (_job_above), or None outside any job."""
+    script = OPF_GROUP_COMMAND.split(" ", 1)[0]
+    lines = text.splitlines()
+    found = {}
+    for number in sorted(extraction.origins):
+        if script not in extraction.origins[number]:
+            continue
+        code = _strip_comment(lines[number - 1]).strip()
+        if code.startswith("run:"):
+            code = code[4:].strip()
+        tokens = _tokenize(code)
+        member = None
+        if tokens.ok:
+            command = tokens.value[2:] if tokens.value[:1] == ["run_gate"] else tokens.value
+            normalized = normalize(command)
+            member = normalized.value if normalized.ok else None
+        if (member is None or member.startswith(OPF_GROUP_COMMAND)
+                or member == OPF_WHOLE_COMMAND):
+            found.setdefault(member, []).append(number)
+            if jobs is not None:
+                jobs[number] = _job_above(lines, number)
+    return found
+
+
+def _job_above(lines, number):
+    """The id of the workflow job whose block holds line `number` of `lines`: the nearest
+    non-blank, non-comment line above it at indent 2, when that is a plain job id key and the
+    top-level key above it is jobs:. None for any other shape, a run_all_checks.sh line among
+    them, so an unplaced line is never read as a heavy job's."""
+    job = None
+    for index in range(number - 2, -1, -1):
+        raw = lines[index]
+        code = _strip_comment(raw).rstrip()
+        if not code.strip():
+            continue
+        indent = len(code) - len(code.lstrip(" "))
+        if indent == 0:
+            return job if code == "jobs:" else None
+        if indent == 2 and job is None:
+            match = re.fullmatch(r"  ([A-Za-z0-9_-]+):", code)
+            if match is None:
+                return None
+            job = match.group(1)
+    return None
+
+
+def _opf_group_wiring_faults(groups, local, ci, heavy=HEAVY_COMMANDS, ci_jobs=None,
+                             heavy_jobs=HEAVY_JOBS):
+    """Return the faults of the opf.py self-test wiring (module docstring, OPF GROUPS) against the
+    _opf_group_lines maps `local` and `ci` and the job of each `ci` line (`ci_jobs`): a group
+    named in `groups` whose command HEAVY_COMMANDS lacks, that the local runner runs on other than
+    exactly one line, or that quality.yml runs on any line; a group command in any of the three
+    for a group `groups` does not name; the whole self-test missing from HEAVY_COMMANDS, or run
+    in quality.yml on other than exactly one line or outside `heavy_jobs`; and an opf.py line
+    that does not read back. No fault means the local runner runs every group once, CI runs no
+    group and the whole self-test once, in a heavy job, and the LANES rule then holds that job to
+    the pinned if:."""
+    wanted = {OPF_GROUP_COMMAND + name for name in groups}
+    faults = [] if wanted else ["opf.py names no self-test group"]
+    faults += ["HEAVY_COMMANDS lacks " + command
+               for command in sorted((wanted | {OPF_WHOLE_COMMAND}) - set(heavy))]
+    faults += ["HEAVY_COMMANDS holds {}, a group opf.py does not name".format(member)
+               for member in sorted(set(heavy) - wanted) if member.startswith(OPF_GROUP_COMMAND)]
+    for where, found in ((LOCAL_SOURCE, local), (CI_SOURCE, ci)):
+        if None in found:
+            faults.append("{} line(s) {} run opf/tools/opf.py in a form that does not read back".format(
+                where, ", ".join(str(number) for number in found[None])))
+        commands = set(found) - {None, OPF_WHOLE_COMMAND}
+        faults += ["{} runs {}, a group opf.py does not name".format(where, member)
+                   for member in sorted(commands - wanted)]
+    local_commands = set(local) - {None, OPF_WHOLE_COMMAND}
+    faults += ["{} runs no {}".format(LOCAL_SOURCE, command)
+               for command in sorted(wanted - local_commands)]
+    faults += ["{} runs {} on {} lines ({}), not once".format(
+                   LOCAL_SOURCE, command, len(local[command]),
+                   ", ".join(str(n) for n in local[command]))
+               for command in sorted(wanted & local_commands) if len(local[command]) != 1]
+    faults += ["{} runs {} on {} line(s) ({}); no CI job runs a group, CI runs the whole {} "
+               "once".format(CI_SOURCE, command, len(ci[command]),
+                             ", ".join(str(n) for n in ci[command]), OPF_WHOLE_COMMAND)
+               for command in sorted(wanted & set(ci))]
+    whole = ci.get(OPF_WHOLE_COMMAND, [])
+    if not whole:
+        faults.append("{} runs no {}".format(CI_SOURCE, OPF_WHOLE_COMMAND))
+    elif len(whole) != 1:
+        faults.append("{} runs {} on {} lines ({}), not once".format(
+            CI_SOURCE, OPF_WHOLE_COMMAND, len(whole), ", ".join(str(n) for n in whole)))
+    jobs = {} if ci_jobs is None else ci_jobs
+    faults += ["{} runs {} at line {} in job {!r}, not a HEAVY_JOBS job".format(
+                   CI_SOURCE, OPF_WHOLE_COMMAND, number, jobs.get(number))
+               for number in whole if jobs.get(number) not in heavy_jobs]
+    return faults
 
 
 def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
@@ -3723,9 +4359,9 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
         (root / "tools").mkdir()
         runner = root / "tools" / "run_all_checks.sh"
         runner.write_text(text, encoding="utf-8")
-        # The live runner's precheck BOOTSTRAP line tests this path with [ -f ] && ! [ -h ] before
-        # any stub can run; give the scratch tree a regular file there. Data only: the stub python3
-        # never reads its script argument, and nothing executes this file.
+        # The live runner's precheck BOOTSTRAP gate tests this path with test -f ... -a ! -h ... before
+        # the precheck stub can run; give the scratch tree a regular file there. Data only: the stub
+        # python3 never reads its script argument, and nothing executes this file.
         (root / "tools" / "_gen_common.py").write_text("", encoding="utf-8")
         log = root / "calls.log"
         log.write_text("", encoding="utf-8")
@@ -3747,10 +4383,14 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
 
 
 def _naming_scenarios(text):
-    """Build the runtime scenarios; the module docstring discloses residual masks."""
+    """Build the runtime scenarios; the module docstring discloses residual masks. The
+    special-file precheck bootstrap gate is a shell test that calls no stub, so no scenario
+    fails it alone; a failed probe ahead of it stops the run at its STOP line instead."""
     registered = []
     for raw in text.splitlines():
         tokens = shlex.split(raw, comments=True)
+        if raw.strip() in PRECHECK_BOOTSTRAP_GATE_LINES:
+            continue
         if tokens[:1] == ["run_gate"] and len(tokens) >= 3:
             registered.append((tokens[1], " ".join(tokens[3:])))
     scenarios = [
@@ -3776,28 +4416,29 @@ def runner_naming_problems(text, first_only=False):
     import tempfile
     from concurrent.futures import ThreadPoolExecutor
 
+    # Each roster entry is (header name, stub call or None, stops): stops marks a special-file
+    # precheck step, whose STOP line ends the run (exit 2) once any gate has failed. The stop
+    # points come from the step lines themselves, never from the STOP lines, so a runner whose
+    # STOP line is gone still expects the stop and is caught.
     roster = []
     registered = []
     for raw in text.splitlines():
         tokens = shlex.split(raw, comments=True)
-        if tokens[:1] == ["run_gate"] and len(tokens) >= 3:
+        stops = raw.strip() in PRECHECK_BOOTSTRAP_GATE_LINES or raw.strip() in PRECHECK_GATE_LINES
+        if raw.strip() in PRECHECK_BOOTSTRAP_GATE_LINES:
+            # The bootstrap gate's shell test passes on the scratch tree's regular
+            # tools/_gen_common.py (_run_runner_copy) and calls no stub: a header, no call.
+            roster.append((tokens[1], None, stops))
+        elif tokens[:1] == ["run_gate"] and len(tokens) >= 3:
             name, command = tokens[1], tokens[2:]
             if command[0] != "python3":
                 return ["runner stub does not support {!r}".format(command)]
             registered.append((name, " ".join(command[1:])))
-            roster.append((name, " ".join(command)))
-        elif raw.strip() in PRECHECK_ABORT_LINES:
-            # The precheck abort line: a stub python3 call with no run_gate header
-            # (D-400-SPECIAL-FILE-PRECHECK); the stub passes it, so the abort stays
-            # un-taken and the roster run continues.
-            roster.append((None, " ".join(raw.strip().split(" ")[:-3])))
+            roster.append((name, " ".join(command), stops))
         elif tokens[:2] == ["if", "gitleaks"]:
-            roster.append(("secrets (gitleaks)", " ".join(tokens[1:-1]).rstrip(";")))
+            roster.append(("secrets (gitleaks)", " ".join(tokens[1:-1]).rstrip(";"), False))
     if not registered:
         return ["runner has no registered gates"]
-    expected_calls = [command for name, command in roster]
-    expected_headers = ["--- {} ---".format(name)
-                        for name, command in roster if name is not None]
     scenarios = _naming_scenarios(text)
     problems = []
     workers = 4
@@ -3820,7 +4461,7 @@ def runner_naming_problems(text, first_only=False):
                     batch = scenarios[start:start + workers]
                     for scenario, outcome in zip(batch, pool.map(run, batch)):
                         problems.extend(_scenario_problems(
-                            scenario, outcome, expected_calls, expected_headers))
+                            scenario, outcome, *_expected_run(roster, scenario[3])))
                     if first_only and problems:
                         break
         finally:
@@ -3828,14 +4469,33 @@ def runner_naming_problems(text, first_only=False):
     return problems
 
 
-def _scenario_problems(scenario, outcome, expected_calls, expected_headers):
-    """Return the problems of one runner_naming_problems scenario's outcome."""
+def _expected_run(roster, failures):
+    """(calls, headers, stopped) one runner_naming_problems scenario must produce: the roster in
+    order, cut after the first special-file precheck step reached once a gate of failures has
+    failed (that step's STOP line ends the run there)."""
+    failing = {name for name, status in failures}
+    calls, headers, failed = [], [], False
+    for name, command, stops in roster:
+        if command is not None:
+            calls.append(command)
+        if name is not None:
+            headers.append("--- {} ---".format(name))
+        failed = failed or name in failing
+        if stops and failed:
+            return calls, headers, True
+    return calls, headers, False
+
+
+def _scenario_problems(scenario, outcome, expected_calls, expected_headers, stopped):
+    """Return the problems of one runner_naming_problems scenario's outcome. A stopped run
+    (_expected_run) exits 2 at a special-file precheck STOP line, after naming its failed
+    gate, with no terminal summary."""
     label, command, gitleaks_rc, failures = scenario
     if isinstance(outcome, Exception):
         return ["{}: runner copy did not complete: {!r}".format(label, outcome)]
     rc, lines, calls = outcome
     problems = []
-    expected_rc = 1 if failures else 0
+    expected_rc = 2 if stopped else 1 if failures else 0
     if rc != expected_rc:
         problems.append("{}: exit {}, expected {}".format(label, rc, expected_rc))
     named = [line for line in lines if line.startswith("GATE FAILED:")]
@@ -3847,14 +4507,19 @@ def _scenario_problems(scenario, outcome, expected_calls, expected_headers):
         problems.append("{}: named {!r}, expected {!r}".format(
             label, named, expected_named))
     summaries = [line for line in lines if line.startswith("FAILED GATES:")]
-    expected_summaries = (
-        ["FAILED GATES: " + ", ".join(name for name, status in failures)]
-        if failures else []
-    )
-    ending = expected_summaries + ["RESULT: FAIL" if failures else "RESULT: PASS"]
-    if summaries != expected_summaries or lines[-len(ending):] != ending:
-        problems.append("{}: unexpected summary or result {!r}".format(
-            label, lines[-len(ending):]))
+    if stopped:
+        if summaries or any(line.startswith("RESULT:") for line in lines):
+            problems.append("{}: a run stopped at the special-file precheck printed a summary "
+                            "or result {!r}".format(label, lines[-2:]))
+    else:
+        expected_summaries = (
+            ["FAILED GATES: " + ", ".join(name for name, status in failures)]
+            if failures else []
+        )
+        ending = expected_summaries + ["RESULT: FAIL" if failures else "RESULT: PASS"]
+        if summaries != expected_summaries or lines[-len(ending):] != ending:
+            problems.append("{}: unexpected summary or result {!r}".format(
+                label, lines[-len(ending):]))
     headers = [line for line in lines if line.startswith("--- ")]
     if calls != expected_calls or headers != expected_headers:
         problems.append("{}: calls or headers differ from the declared roster".format(
@@ -4007,6 +4672,9 @@ def self_test():
         "python3 -I -B .github/check_cited_standards_contract.py --self-test",
         "python3 -I -B .github/check_cited_standards_contract.py",
         "python3 -I -B .github/check_newtab_contract.py",
+        # The child-status probe and its coverage gate, mandatory as the contracts are.
+        "python3 -I -B opf/tools/_child_status.py",
+        "python3 -I -B tools/check_child_status_coverage.py",
     )
 
     def local_fixture(commands=(), tail=()):
@@ -4034,9 +4702,31 @@ def self_test():
         lines.extend(tail)
         return "\n".join(lines) + "\n"
 
-    def ci_fixture(commands=(), extra_steps=()):
-        lines = [
-            "name: Test",
+    # Every HEAVY_JOBS job, each carrying the pinned if:, which the LANES
+    # presence rule requires of every quality.yml fixture.
+    heavy_job_lines = tuple(
+        line
+        for job in sorted(HEAVY_JOBS)
+        for line in (
+            "  " + job + ":",
+            HEAVY_JOB_IF_LINE,
+            "    runs-on: ubuntu-latest",
+            "    steps:",
+            "      - uses: actions/checkout@v4",
+        ))
+
+    # A quality.yml fixture carries the labeled pull_request trigger the
+    # TRIGGER rule requires there and the pinned concurrency: block, which the
+    # LANES rule requires there, plus the heavy jobs and the Quality gates
+    # aggregator the multi-job rules then require; a msg-leaks.yml fixture
+    # passes trigger=(), top=() and heavy=False.
+    labeled_trigger = ("on:", "  pull_request:", "    branches: [main]",
+                       "    types: [labeled]", "  push:",
+                       "    branches: [main]")
+
+    def ci_fixture(commands=(), extra_steps=(), top=CONCURRENCY_BLOCK,
+                   heavy=True, trigger=labeled_trigger):
+        lines = ["name: Test"] + list(trigger) + list(top) + [
             "jobs:",
             "  quality:",
             "    runs-on: ubuntu-latest",
@@ -4050,7 +4740,21 @@ def self_test():
                 "        run: " + command,
             ))
         lines.extend(extra_steps)
+        if heavy:
+            lines.extend(heavy_job_lines)
+            lines.extend(("  gates:",) + REQUIRED_STATUS_JOB[:2])
+            lines.append("    needs:")
+            lines.extend("      - " + job
+                         for job in ["quality"] + sorted(HEAVY_JOBS))
+            lines.extend(REQUIRED_STATUS_JOB[3:])
         return "\n".join(lines) + "\n"
+
+    def without_trigger(text):
+        # A quality.yml fixture's labeled trigger removed, so the vector sets
+        # its own.
+        return text.replace(
+            "name: Test\n" + "\n".join(labeled_trigger) + "\n", "name: Test\n",
+            1)
 
     def case(
             name,
@@ -4140,20 +4844,24 @@ def self_test():
                  "      - name: Run " + repo_gate,
                  "        run: python3 -I -B tools/check_ci_parity.py",
              )), ()), 2)
-    # claude PR #520 round 2 MEDIUM-1: each mandatory repository-contract member removed
+    # Each mandatory repository-contract member removed
     # from BOTH runners together is a missing-mandatory finding, never a silent pass. The
     # member list is spelled out rather than derived from MANDATORY_MEMBERS, so reverting
     # the contracts out of that set turns these vectors red instead of silently skipping.
+    # The child-status probe and its coverage gate are held the same way: either one
+    # removed from both runners together is a missing-mandatory finding.
     for member in (
             ".github/check_cited_standards_contract.py",
             ".github/check_cited_standards_contract.py --self-test",
-            ".github/check_newtab_contract.py"):
+            ".github/check_newtab_contract.py",
+            "opf/tools/_child_status.py",
+            "tools/check_child_status_coverage.py"):
         count += 1
         if member not in MANDATORY_MEMBERS:
             failures.append(
                 "01h {} is not in MANDATORY_MEMBERS; a both-runner removal of a "
-                "repository contract would be undetected again".format(member))
-        case("01h repository contract removed from both runners: " + member,
+                "mandatory member would be undetected again".format(member))
+        case("01h mandatory member removed from both runners: " + member,
              evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
              1, ("missing-mandatory",), (), ())
     unknown = "python3 -I -B .github/unrecognized.py"
@@ -4296,8 +5004,7 @@ def self_test():
 
     local_version = local_fixture(common + (
         "python3 tools/check_version_monotonicity.py",))
-    ci_version_lines = ci_fixture(common).rstrip().splitlines()
-    ci_version_lines.extend((
+    ci_version = ci_fixture(common, (
         "      - name: Version",
         "        shell: bash",
         "        run: |",
@@ -4338,14 +5045,13 @@ def self_test():
         "10 runtime base masking",
         evaluate(
             local_version,
-            "\n".join(ci_version_lines) + "\n",
+            ci_version,
             base_waiver,
         ),
         0,
     )
 
-    protected_ci_lines = ci_fixture(common).rstrip().splitlines()
-    protected_ci_lines.extend((
+    protected_ci = ci_fixture(common, (
         "      - name: Branch root",
         "        shell: bash",
         "        run: |",
@@ -4391,7 +5097,7 @@ def self_test():
         "10b runtime protected/head masking",
         evaluate(
             protected_local,
-            "\n".join(protected_ci_lines) + "\n",
+            protected_ci,
             protected_waivers,
         ),
         0,
@@ -4971,14 +5677,14 @@ def self_test():
                         "26 adapted standalone runner: {!r}".format(
                             adapted_diagnostics))
                 else:
-                    # claude m2 (QA round 5): deleting the OPF runner's bootstrap must be a
+                    # claude m2 (QA round 5): deleting the OPF runner's bootstrap gate must be a
                     # missing-bootstrap diagnostic NAMING opf/tools/run_all_checks.sh, and the
                     # LIVE gate path (standalone_runner_diagnostics, which main() fails closed
                     # on) must extract the real runner cleanly. Fails without the source
                     # parameter and the live check.
                     opf_bootstrap_line = next(
-                        line for line in PRECHECK_BOOTSTRAP_LINES
-                        if PRECHECK_BOOTSTRAP_LINES[line] == "opf/tools/_containment.py")
+                        line for line in PRECHECK_BOOTSTRAP_GATE_LINES
+                        if PRECHECK_BOOTSTRAP_GATE_LINES[line] == "opf/tools/_containment.py")
                     deleted_bootstrap = adapted.replace(opf_bootstrap_line + "\n", "", 1)
                     if deleted_bootstrap == adapted:
                         failures.append("26c standalone bootstrap fixture drift")
@@ -4997,7 +5703,7 @@ def self_test():
                         failures.append(
                             "26c the live standalone runner must extract cleanly on the live "
                             "gate path, got {!r}".format(live_standalone))
-            # codex qa9 MAJOR-1: the adapter screens the RAW text, so a
+            # Raw-text screen: the adapter screens the RAW text, so a
             # forbidden character cannot vanish in its splitlines() and
             # newline rejoin before extract_local's own screen. A form feed
             # after a comment hides the next line from bash (the gate never
@@ -5025,8 +5731,11 @@ def self_test():
                 mutant = mutant.replace(old, new, 1)
             return mutant
 
+        # The special-file precheck bootstrap gate calls no stub, so it is outside the
+        # isolated sweep (_naming_scenarios) and these gate-relative fixtures.
         gate_lines = [line + "\n" for line in live_runner.splitlines()
-                      if line.startswith("run_gate ")]
+                      if line.startswith("run_gate ")
+                      and line.strip() not in PRECHECK_BOOTSTRAP_GATE_LINES]
         registered_names = {shlex.split(line, comments=True)[1] for line in gate_lines}
         registered_commands = {
             " ".join(shlex.split(line, comments=True)[3:]) for line in gate_lines}
@@ -5102,7 +5811,13 @@ def self_test():
             ("summary copied before gates finish",
              mutate((gitleaks, live_runner[live_runner.index(summary):] + gitleaks))),
             ("wrong terminal exit",
-             mutate(("  exit 1\n", "  exit 0\n"))),
+             mutate(('  echo "RESULT: FAIL"\n  exit 1\n',
+                     '  echo "RESULT: FAIL"\n  exit 0\n'))),
+            # The NOT RUN branch fails the run, as the gitleaks-pin gate does:
+            # its earlier exit 0 passed a run whose gitleaks scan did not run.
+            ("NOT RUN branch passing",
+             mutate(('NOT RUN locally (see above)"\n  exit 1\n',
+                     'NOT RUN locally (see above)"\n  exit 0\n'))),
             ("gate after summary",
              live_runner + 'run_gate "late" python3 -I -B tools/check_leaks.py\n'),
         )
@@ -5112,7 +5827,7 @@ def self_test():
             elif not any(item.code == "unclassified-line"
                          for item in extract_local(mutant).diagnostics):
                 failures.append("26 unexpected exit was not rejected: " + name)
-        # qa4/qa5 allowlist rejections: each spelling resets failure state, detects
+        # Allowlist rejections: each spelling resets failure state, detects
         # the harness, or ends the run early through a line no real runner contains;
         # the exact-line allowlist must refuse every one as unclassified. The
         # arithmetic assignments (bash evaluates a value assigned to RANDOM, SRANDOM
@@ -5204,8 +5919,8 @@ def self_test():
                 item.code == "unclassified-line"
                 for item in extract_local(indirect).diagnostics):
             failures.append("26 offset-carried indirect reset was not rejected")
-        # qa6 label rejections: each reported spelling smuggles an assignment or an
-        # abort into the run_gate label, the channel the round-6 review found open.
+        # Label rejections: each spelling smuggles an assignment or an
+        # abort into the run_gate label, a channel that was once open.
         # Each fails without the GATE_LABEL_RE character-allowlist fullmatch.
         label_fixtures = (
             ("assign-default label with arithmetic carrier",
@@ -5239,17 +5954,17 @@ def self_test():
             elif not any(item.code == "run-gate-label"
                          for item in extract_local(mutant).diagnostics):
                 failures.append("26 expanded label was not rejected: " + name)
-        # qa7 label rejections: brace, glob and tilde labels expand with no $
-        # in them, so the previous two-character blocklist was not
+        # Expanding-label rejections: brace, glob and tilde labels expand with
+        # no $ in them, so the previous two-character blocklist was not
         # literal-only; the GATE_LABEL_RE fullmatch refuses each statically.
         # Each fails without the character-allowlist change.
-        qa7_labels = (
+        expanding_labels = (
             ("brace label resetting failed", '{d4,eval,"failed=0;"}'),
             ("brace label splitting into two gates", "{dashes3,true}"),
             ("brace label exiting mid-roster", "{x,exit}"),
             ("tilde label", "~"),
         )
-        for name, label in qa7_labels:
+        for name, label in expanding_labels:
             mutant = mutate((gitleaks,
                              "run_gate " + label + " python3 -I -B "
                              "tools/check_no_dashes.py\n" + gitleaks))
@@ -5267,16 +5982,16 @@ def self_test():
         elif not any(item.code == "run-gate-label"
                      for item in extract_local(glob_label).diagnostics):
             failures.append("26 glob label was not rejected")
-        # qa7 argument rejections: a brace or glob ARGUMENT expands the same
-        # way, so GATE_WORD_RE screens every non-label word too.
-        qa7_words = (
+        # Expanding-argument rejections: a brace or glob ARGUMENT expands the
+        # same way, so GATE_WORD_RE screens every non-label word too.
+        expanding_words = (
             ("brace argument",
              'run_gate "brace-args" python3 -I -B tools/check_secrets.py '
              "{--self-test,}\n"),
             ("glob argument",
              'run_gate "glob-args" python3 -I -B tools/check_secrets.py *\n'),
         )
-        for name, line in qa7_words:
+        for name, line in expanding_words:
             mutant = mutate((gitleaks, line + gitleaks))
             if mutant is None:
                 failures.append("26 word fixture drift: " + name)
@@ -5284,7 +5999,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 expanding argument was not rejected: " + name)
-        # qa7 placement rejections: the gitleaks-block lines are accepted
+        # Placement rejections: the gitleaks-block lines are accepted
         # only in their real blocks; each copy below sits mid-roster, or
         # ahead of the gitleaks_rc capture, and is refused as unclassified.
         placement_fixtures = (
@@ -5309,7 +6024,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 misplaced scaffold was not rejected: " + name)
-        # qa8 MAJOR-1 byte fixtures: Python's splitlines() and strip() see
+        # Byte fixtures: Python's splitlines() and strip() see
         # line and word boundaries bash does not (\v, \f, \x85, U+2028,
         # U+00A0 and friends), so the static grammar formerly judged lines
         # bash never ran; one such spelling hid the NOT RUN result line at
@@ -5351,7 +6066,7 @@ def self_test():
                 failures.append(
                     "26 non-ASCII workflow character was not refused: "
                     + name)
-        # qa8 MINOR-1, qa8 MINOR-2 and codex MINOR-3 branch fixtures:
+        # Branch fixtures:
         # if/else/fi state is tracked per block, so a duplicate else, an
         # empty then or else branch, the PATH append in the HOME guard's
         # else branch (where HOME is unproven) and a gitleaks_rc=$? that is
@@ -5382,7 +6097,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 branch structure was not rejected: " + name)
-        # codex qa9 MINOR-1: bash runs a function definition as one
+        # Function position: bash runs a function definition as one
         # ordinary, successfully-exiting statement, so a definition inside
         # an if branch both fills the branch and replaces $?; skipped
         # uncounted, a copy of the runner's own run_gate() definition ahead
@@ -5411,7 +6126,7 @@ def self_test():
                 failures.append(
                     "26 in-branch function definition was not refused: "
                     + name)
-        # codex qa10 MINOR-1: bash resolves a function name at invocation
+        # Function order: bash resolves a function name at invocation
         # time, so the unchanged run_gate() definition moved BELOW the
         # first gate line leaves that gate calling an undefined name; bash
         # reports the missing command and continues, recording no gate
@@ -5433,7 +6148,7 @@ def self_test():
                 failures.append(
                     "26 run_gate invocation before its definition was not "
                     "refused: " + name)
-        # claude qa9 MINOR-2 (D1): the FAILED GATES echo expands
+        # Echo position: the FAILED GATES echo expands
         # ${failed_names}, so it is position-checked like the
         # gitleaks-block lines: accepted only in the then branch of the
         # terminal failed check, after the top-level initializer. Relocated
@@ -5449,7 +6164,7 @@ def self_test():
         elif not any(item.code == "unclassified-line"
                      for item in extract_local(relocated_echo).diagnostics):
             failures.append("26 relocated FAILED GATES echo was not refused")
-        # claude qa10 MINOR-1: the FAILED GATES echo is bound to the
+        # Terminal frame: the FAILED GATES echo is bound to the
         # TERMINAL failed-check frame, the one whose header sits in the
         # terminal summary tail. A copied frame mid-roster and a frame
         # nested in the gitleaks failure branch spell the same header, are
@@ -5477,7 +6192,7 @@ def self_test():
                 failures.append(
                     "26 FAILED GATES echo in a non-terminal failed-check "
                     "frame was not refused: " + name)
-        # qa6 masked-value rejections, now behind two independent screens. In
+        # Masked-value rejections, behind two independent screens. In
         # the LOCAL runner the word allowlist refuses every $-carrying gate
         # word outright (run-gate-word), so a masked flag value never reaches
         # _mask_value there; those assertions fail without the character
@@ -5525,7 +6240,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 local masked flag word was not refused: " + name)
-        # MINOR-2 (qa7): neither real runner passes a runtime-derived flag
+        # Neither real runner passes a runtime-derived flag
         # value, so even a REVIEWED masked expression is refused in the
         # local runner by the word allowlist; the same spelling still masks
         # in the CI workflow, the only surface MASKED_REF_EXPRESSIONS
@@ -5598,6 +6313,10 @@ def self_test():
                 "26 evaluated sweep incomplete: missing={!r}, extra={!r}".format(
                     sorted(want_executed - evaluated),
                     sorted(evaluated - want_executed)))
+        local_bootstrap_gate = next(line for line in PRECHECK_BOOTSTRAP_GATE_LINES
+                                    if PRECHECK_BOOTSTRAP_GATE_LINES[line] == "tools/_gen_common.py")
+        local_precheck_gate = next(line for line in PRECHECK_GATE_LINES
+                                   if PRECHECK_GATE_LINES[line] == PRECHECK_MEMBER)
         runtime_fixtures = (
             ("reset right after the first gate",
              mutate(after_gate(0, "failed=0\n", alone=False))),
@@ -5612,6 +6331,16 @@ def self_test():
             ("last gate skipped after an earlier failure",
              mutate((gate_lines[-1],
                      'if [ "$failed" -eq 0 ]; then\n' + gate_lines[-1] + "fi\n"))),
+            # SPECIAL-FILE-PRECHECK: each precheck step's STOP line removed. The stop points
+            # come from the step lines (_expected_run), so a failed probe that no longer stops
+            # at the bootstrap step, and a failed precheck that no longer stops the run, are
+            # each caught at run time. Red without the stop modelling in runner_naming_problems.
+            ("bootstrap STOP line removed",
+             mutate((local_bootstrap_gate + "\n" + PRECHECK_STOP_LINE + "\n",
+                     local_bootstrap_gate + "\n"))),
+            ("precheck STOP line removed",
+             mutate((local_precheck_gate + "\n" + PRECHECK_STOP_LINE + "\n",
+                     local_precheck_gate + "\n"))),
         )
         for name, mutant in runtime_fixtures:
             if mutant is None:
@@ -5644,7 +6373,7 @@ def self_test():
             "27 executable stubs prepared before the pool: got {!r}, expected {!r}".format(
                 ordering, want))
 
-    # codex qa10 MAJOR-1: Path.read_text() translates a carriage return
+    # Byte-level reader: Path.read_text() translates a carriage return
     # into a newline (universal newlines) BEFORE any text screen can run,
     # so a forbidden byte planted in a runner ON DISK formerly vanished on
     # its way into the grammar: a CR-hidden gate line read as a clean
@@ -5694,27 +6423,25 @@ def self_test():
                 "28 clean ASCII bytes did not round-trip unchanged "
                 "through the byte-level reader")
 
-    # codex qa10 MAJOR-1 (class closure): every read of runner or workflow
+    # One reader for the whole class: every read of runner or workflow
     # text must go through read_runner_text, the ONE byte-level reader.
     # This structural vector parses this file,
-    # tools/selftest_git_fixture_env.py and its four registered suite
-    # runners and pins EVERY read_text or
-    # splitlines attribute and every text-mode open() call, as spelled, to
-    # an exact per-function site count, so a new, moved or removed read
-    # written through those APIs turns this vector red and forces review
-    # against the reader. Every pinned site reads no runner or workflow
-    # text under the parity guarantee: the sites parse Python sources for
-    # ast (the F-367 maintenance-pin scan included), read harness, stub
-    # call and Trace2 event logs (the F-367 maintenance probe), write the
-    # selftest report, read the config-member timeout control's pid file
-    # and /proc stat, split the timeout controls' captured diagnostics,
-    # or split text the reader or a screen has already
-    # validated. A read
-    # spelled another way (getattr, an alias) is outside this tripwire, as
-    # the module docstring discloses. This vector fails without the
-    # change: the former Path.read_text() calls on the runners and the
-    # workflow (vector 26, _registered_selftests, _roster_checks) are not
-    # in this allowlist.
+    # tools/selftest_git_fixture_env.py and its four registered suite runners
+    # and pins EVERY read_text or splitlines attribute and every text-mode
+    # open() call, as spelled, to an exact per-function site count, so a new,
+    # moved or removed read written through those APIs turns this vector red
+    # and forces review against the reader. Every pinned site reads no runner
+    # or workflow text under the parity guarantee: the sites parse Python
+    # sources for ast (the git auto-maintenance pin scan included), read
+    # harness and stub call logs, write the selftest report, read the
+    # config-member timeout control's pid file and /proc stat, split the
+    # timeout controls' captured diagnostics, split an in-memory citation
+    # string from an in-module table, or split text the reader or a screen
+    # has already validated. A read spelled another way (getattr, an alias)
+    # is outside this tripwire, as the module docstring discloses. This
+    # vector fails without the change: the former Path.read_text() calls on
+    # the runners and the workflow (vector 26, _registered_selftests,
+    # _roster_checks) are not in this allowlist.
     count += 1
     import ast
     def _read_api_sites(tree):
@@ -5756,6 +6483,9 @@ def self_test():
     allowed_read_sites = {
         "tools/check_ci_parity.py": {
             ("_naming_scenarios", "splitlines"): 1,
+            # Splits runner or quality.yml text read_runner_text already
+            # returned, to read back the lines that run an opf.py group.
+            ("_opf_group_lines", "splitlines"): 1,
             ("_run_runner_copy", "read_text"): 1,
             ("_run_runner_copy", "splitlines"): 2,
             ("_shadow_check", "splitlines"): 1,
@@ -5763,15 +6493,9 @@ def self_test():
             ("extract_ci", "splitlines"): 1,
             ("extract_local", "splitlines"): 2,
             ("runner_naming_problems", "splitlines"): 1,
-            ("self_test", "splitlines"): 3,
+            ("self_test", "splitlines"): 1,
         },
         "tools/selftest_git_fixture_env.py": {
-            # QA round 6 (claude B1): the five tree-scanning helpers now read through
-            # read_text_nonblocking, so their Path.read_text sites are gone from this pin; the
-            # two remaining read_text sites read a Trace2 event log and a copied fixture this
-            # suite itself created under tempfile, never the repository tree.
-            ("_auto_maintenance_children", "read_text"): 1,
-            ("_auto_maintenance_children", "splitlines"): 1,
             # The suite's own source, parsed for ast to classify the
             # registry-lock acquisitions in _close_members: no runner
             # text. The path is _close_members.__code__.co_filename, the
@@ -5785,6 +6509,13 @@ def self_test():
             ("_pid_state", "open-text"): 1,
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
+            # Not a read at all: splits an in-memory string, a
+            # later-measurement citation from the in-module table (a
+            # mutable dict meant to grow, not a frozen constant) padded
+            # at both ends, to require exactly one nonblank line. No
+            # file, runner or workflow text is opened or read at this
+            # site.
+            ("_roster_figures", "splitlines"): 1,
             # The suite's own source again, parsed for ast to classify the
             # kill-sweep call sites in _config_results (_sweep_call_sites,
             # the same reviewed pattern as _close_lock_sites above): no
@@ -5830,7 +6561,8 @@ def self_test():
     # without the change.
     def multi_job_ci(aggregator, first=("python3 tools/a.py",),
                      second=("python3 tools/b.py",), run_tail=()):
-        lines = ["name: Test", "jobs:"]
+        lines = (["name: Test"] + list(labeled_trigger)
+                 + list(CONCURRENCY_BLOCK) + ["jobs:"])
         for job, commands in (("one", common + first), ("two", second)):
             lines.extend((
                 "  " + job + ":",
@@ -5845,6 +6577,7 @@ def self_test():
                     "        shell: bash",
                     "        run: " + command,
                 ))
+        lines.extend(heavy_job_lines)
         lines.extend(aggregator)
         lines.extend(REQUIRED_STATUS_JOB[
             REQUIRED_STATUS_JOB.index(REQUIRED_STATUS_NEEDS_SLOT) + 1:])
@@ -5853,7 +6586,8 @@ def self_test():
 
     aggregator_head = ("  quality:", "    name: Quality gates")
     always = ("    if: always()",)
-    needs_both = ("    needs:", "      - one", "      - two")
+    heavy_needs = tuple("      - " + job for job in sorted(HEAVY_JOBS))
+    needs_both = ("    needs:", "      - one", "      - two") + heavy_needs
     multi_local = local_fixture(
         common + ("python3 tools/a.py", "python3 tools/b.py"))
     good_multi = multi_job_ci(aggregator_head + always + needs_both)
@@ -5909,7 +6643,9 @@ def self_test():
     case("30j a one-line flow needs: list is recognized",
          evaluate(multi_local,
                   multi_job_ci(aggregator_head + always
-                               + ("    needs: [one, two]",)), ()),
+                               + ("    needs: [" + ", ".join(
+                                   ["one", "two"] + sorted(HEAVY_JOBS))
+                                   + "]",)), ()),
          0)
     case("30k a needs: entry that is not a plain job id is cannot-evaluate",
          evaluate(multi_local,
@@ -5921,8 +6657,14 @@ def self_test():
                   multi_job_ci(aggregator_head + always + needs_both,
                                run_tail=("          exit 0",)), ()),
          2)
-    case("30m a one-job workflow carries no required-status rule",
-         evaluate(local_fixture(common), ci_fixture(common), ()), 0)
+    one_job = evaluate(
+        local_fixture(common), ci_fixture(common, heavy=False), ())
+    case("30m a one-job workflow carries no required-status rule (its "
+         "missing heavy jobs are lane findings)", one_job, 1, kinds=("lane",))
+    if any(finding.kind == "required-status" for finding in one_job.findings):
+        failures.append(
+            "30m one-job workflow: unexpected required-status finding: "
+            "{!r}".format(one_job.findings))
 
     def diagnostic_case(name, report, want):
         case(name, report, 2)
@@ -6031,7 +6773,8 @@ def self_test():
                  ()),
         "duplicate-key")
     case("31m a key under a later top-level on: is not read as a job",
-         evaluate(multi_local, good_multi + "on:\n  push:\n", ()), 0)
+         evaluate(multi_local, without_trigger(good_multi)
+                  + "on:\n  pull_request:\n    types: [labeled]\n  push:\n", ()), 0)
 
     # 32 RESULT-MASKING KEYS: continue-on-error, uses, defaults and container
     # on any job are each a required-status finding whatever their value,
@@ -6076,8 +6819,9 @@ def self_test():
     finding_case(
         "32h continue-on-error in a one-job workflow is a finding",
         evaluate(local_fixture(common),
-                 mutated(ci_fixture(common), "    runs-on: ubuntu-latest\n",
-                         "    continue-on-error: true\n"
+                 mutated(ci_fixture(common),
+                         "  quality:\n    runs-on: ubuntu-latest\n",
+                         "  quality:\n    continue-on-error: true\n"
                          "    runs-on: ubuntu-latest\n"),
                  ()),
         1, "continue-on-error")
@@ -6344,12 +7088,14 @@ def self_test():
     local_msg = local_fixture(common + (msg_selftest,))
 
     def with_on(text, on_block):
-        return text.replace("name: Test\n", "name: Test\non:\n" + on_block, 1)
+        return without_trigger(text).replace(
+            "name: Test\n", "name: Test\non:\n" + on_block, 1)
 
     def with_on_header(text, header):
         # Insert a raw top-level header (no on: line is added), for vectors
         # that exercise the on: header spelling itself.
-        return text.replace("name: Test\n", "name: Test\n" + header, 1)
+        return without_trigger(text).replace(
+            "name: Test\n", "name: Test\n" + header, 1)
 
     def pr_types(types):
         return ("  pull_request:\n    branches: [main]\n    types: " + types
@@ -6357,8 +7103,11 @@ def self_test():
 
     defaults = pr_types("[opened, synchronize, reopened]")
     edited = pr_types("[opened, synchronize, reopened, edited]")
-    quality_side = with_on(ci_fixture(common), defaults)
-    scan_text = ci_fixture((msg_selftest, msg_scan))
+    # quality.yml lists the labeled type alone (module docstring, TRIGGER).
+    labeled = pr_types("[labeled]")
+    quality_side = with_on(ci_fixture(common), labeled)
+    scan_text = ci_fixture((msg_selftest, msg_scan), top=(), heavy=False,
+                           trigger=())
     msg_side = ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited)),)
 
     def scan_case(name, quality, scan, want_code, kinds=(), local_only=None,
@@ -6394,7 +7143,8 @@ def self_test():
                       block_list + "      - reopened\n      - edited\n"),
               msg_side, 1, ("trigger",))
     scan_case("35g a block list without edited on quality.yml passes",
-              with_on(ci_fixture(common), block_list + "      - reopened\n"),
+              with_on(ci_fixture(common),
+                      "  pull_request:\n    types:\n      - labeled\n"),
               msg_side, 0)
     scan_case("35h a block list with all four types on msg-leaks.yml passes",
               quality_side,
@@ -6410,14 +7160,34 @@ def self_test():
               ((MSG_LEAKS_CI_SOURCE, scan_text.replace(
                   "name: Test\n", "name: Test\non: [push, pull_request]\n", 1)),),
               1, ("trigger",))
-    scan_case("35k a one-line on: list on quality.yml passes (no edited)",
-              ci_fixture(common).replace(
-                  "name: Test\n", "name: Test\non: [push, pull_request]\n", 1),
-              msg_side, 0)
-    scan_case("35l the scan and edited in one workflow pass (the rule follows "
-              "the scan, not a file name)",
-              with_on(ci_fixture(common + (msg_selftest, msg_scan)), edited),
-              (), 0)
+    # 35k: a one-line on: list on quality.yml is read: it lists no edited, so
+    # it draws no edited finding, and it lists no pull_request, so its one
+    # finding is the missing-trigger finding (41i holds that on the block form).
+    one_line_quality = with_on_header(
+        ci_fixture(common), "on: [push, workflow_dispatch]\n")
+    scan_case("35k a one-line on: list on quality.yml with no pull_request draws "
+              "only the missing-trigger finding",
+              one_line_quality, msg_side, 1, ("trigger",))
+    one_line = evaluate(local_msg, one_line_quality, msg_waiver, msg_side)
+    count += 1
+    if [finding.message for finding in one_line.findings
+            if "has no pull_request event" not in finding.message]:
+        failures.append("35k a finding other than the missing trigger: {!r}".format(
+            one_line.findings))
+    # 35l: the edited rule follows the scan, not a file name, so the scan with
+    # edited in quality.yml draws no edited finding; the labeled pin on
+    # quality.yml's own types is then the one finding.
+    together = evaluate(
+        local_msg, with_on(ci_fixture(common + (msg_selftest, msg_scan)), edited),
+        msg_waiver, ())
+    case("35l the scan and edited in one workflow draw only the labeled pin "
+         "(the edited rule follows the scan, not a file name)",
+         together, 1, ("trigger",))
+    count += 1
+    if [finding.message for finding in together.findings
+            if "not exactly [labeled]" not in finding.message]:
+        failures.append("35l a finding other than the labeled pin: {!r}".format(
+            together.findings))
     for label, shape in (
             ("a flow mapping", "  pull_request: {types: [edited]}\n"),
             ("a quoted event key", "  \"pull_request\":\n    types: [edited]\n"),
@@ -6554,9 +7324,10 @@ def self_test():
     # value stays read: a silently skipped on: header flips its exit 0 to 1
     # (its edited goes unread), while every other control reads the same
     # under a skipped header (on quality.yml the scalar and flow list read
-    # as no edited either way, and the block control keeps exit 1 through
-    # the msg-leaks.yml side's own missing-edited finding; on msg-leaks.yml
-    # the scalar and flow list lack edited either way). So the six controls
+    # exit 1 either way: read, through their missing-trigger finding, and
+    # skipped, through the msg-leaks.yml side's own missing-edited finding,
+    # which also keeps the block control at exit 1; on msg-leaks.yml the
+    # scalar and flow list lack edited either way). So the six controls
     # establish NOT REFUSED each, and the skip discrimination rests on the
     # msg-leaks.yml block control (shown red under a skipped-header mutant).
     for label, header, named in (
@@ -6586,12 +7357,13 @@ def self_test():
                   ((MSG_LEAKS_CI_SOURCE, with_on_header(scan_text, header)),),
                   2, diagnostic=named)
     scan_case("35t a plain scalar on: value on quality.yml is not refused "
-              "(no edited: pass)",
-              with_on_header(ci_fixture(common), "on: push\n"), msg_side, 0)
+              "(no pull_request: the missing-trigger finding)",
+              with_on_header(ci_fixture(common), "on: push\n"), msg_side, 1,
+              ("trigger",))
     scan_case("35t a one-line flow list after on: on quality.yml is not "
-              "refused (no edited: pass)",
-              with_on_header(ci_fixture(common), "on: [push, pull_request]\n"),
-              msg_side, 0)
+              "refused (no pull_request: the missing-trigger finding)",
+              with_on_header(ci_fixture(common), "on: [push, workflow_dispatch]\n"),
+              msg_side, 1, ("trigger",))
     scan_case("35t a block on: value on quality.yml stays read (edited there "
               "is still a trigger finding)",
               with_on(ci_fixture(common), edited), msg_side, 1, ("trigger",))
@@ -6674,18 +7446,38 @@ def self_test():
     scan_case("35q a gate moved from quality.yml into msg-leaks.yml is a "
               "relocation finding",
               with_on(ci_fixture(tuple(
-                  item for item in common if item != moved)), defaults),
+                  item for item in common if item != moved)), labeled),
               ((MSG_LEAKS_CI_SOURCE, with_on(
-                  ci_fixture((msg_selftest, msg_scan, moved)), edited)),),
+                  ci_fixture((msg_selftest, msg_scan, moved), top=(),
+                             heavy=False, trigger=()),
+                  edited)),),
               1, ("relocation",))
     precheck_gate = "python3 -I -B " + PRECHECK_MEMBER
+    # The local side runs the precheck as the runner does: the probe as the first gate, then the
+    # exact bootstrap and precheck gate lines, each with its STOP line (the precheck command on any
+    # other gate line is refused), then the other gates; quality.yml carries the probe too.
+    probe_command = "python3 -I -B " + CHILD_STATUS_PROBE
+    local_precheck_steps = (
+        next(line for line in PRECHECK_BOOTSTRAP_GATE_LINES
+             if PRECHECK_BOOTSTRAP_GATE_LINES[line] == "tools/_gen_common.py"),
+        PRECHECK_STOP_LINE,
+        next(line for line in PRECHECK_GATE_LINES if PRECHECK_GATE_LINES[line] == PRECHECK_MEMBER),
+        PRECHECK_STOP_LINE,
+    )
+    local_with_precheck = local_fixture((probe_command,), tail=local_precheck_steps + tuple(
+        'run_gate "later{}" {}'.format(number, command)
+        for number, command in enumerate(common + (msg_selftest,), 1)))
+    # The msg-leaks.yml side is built as every other msg-leaks.yml fixture is (no
+    # concurrency block, no heavy jobs, its own trigger), and quality.yml carries the
+    # labeled trigger, so the LANES and TRIGGER rules hold no finding of their own here.
     case("35q control: the special-file precheck in msg-leaks.yml is not a "
          "relocation finding",
-         evaluate(local_fixture(common + (msg_selftest, precheck_gate)),
-                  with_on(ci_fixture(common + (precheck_gate,)), defaults),
+         evaluate(local_with_precheck,
+                  with_on(ci_fixture(common + (probe_command, precheck_gate)), labeled),
                   msg_waiver,
                   ((MSG_LEAKS_CI_SOURCE, with_on(
-                      ci_fixture((precheck_gate, msg_selftest, msg_scan)),
+                      ci_fixture((precheck_gate, msg_selftest, msg_scan), top=(),
+                                 heavy=False, trigger=()),
                       edited)),)),
          0, active={("ci-only", MSG_LEAKS_SCAN)})
 
@@ -6734,14 +7526,15 @@ def self_test():
                      "        run: |") + block_lines
         if on_quality:
             expr_report = evaluate(
-                local_msg, with_on(ci_fixture(common, expr_step), defaults),
+                local_msg, with_on(ci_fixture(common, expr_step), labeled),
                 msg_waiver, msg_side)
             expr_source = CI_SOURCE
         else:
             expr_report = evaluate(
                 local_msg, quality_side, msg_waiver,
                 ((MSG_LEAKS_CI_SOURCE, with_on(
-                    ci_fixture((msg_selftest, msg_scan), expr_step),
+                    ci_fixture((msg_selftest, msg_scan), expr_step, top=(),
+                               heavy=False, trigger=()),
                     edited)),))
             expr_source = MSG_LEAKS_CI_SOURCE
         case("35x a GitHub expression in a run: shell comment is "
@@ -6755,7 +7548,7 @@ def self_test():
                 "{!r}".format(label, expr_source, expr_report.diagnostics))
     inline_expr = evaluate(
         local_msg,
-        with_on(ci_fixture(common + ("echo " + pr_title,)), defaults),
+        with_on(ci_fixture(common + ("echo " + pr_title,)), labeled),
         msg_waiver, msg_side)
     case("35x control: an inline run: expression stays refused", inline_expr,
          2)
@@ -6962,7 +7755,7 @@ def self_test():
     dedented_comment = evaluate(
         local_msg,
         with_on(ci_fixture(common, block_step(
-            ("            echo ok", "          # " + pr_title))), defaults),
+            ("            echo ok", "          # " + pr_title))), labeled),
         msg_waiver, msg_side)
     case("36 a YAML comment dedented below the run: block content is "
          "outside the scalar (pass)", dedented_comment, 0)
@@ -6979,7 +7772,7 @@ def self_test():
              ("         echo ok", "         # " + pr_title))):
         inside = evaluate(
             local_msg,
-            with_on(ci_fixture(common, block_step(block_lines)), defaults),
+            with_on(ci_fixture(common, block_step(block_lines)), labeled),
             msg_waiver, msg_side)
         case("36 a comment inside the scalar carries the expression: "
              + label, inside, 2)
@@ -6993,7 +7786,7 @@ def self_test():
         local_msg,
         with_on(ci_fixture(common, block_step(
             ("            echo ok", "          # a dedented comment",
-             "            echo again"))), defaults),
+             "            echo again"))), labeled),
         msg_waiver, msg_side)
     case("36 content after a dedented comment is a layout YAML rejects, "
          "refused", reentry, 2)
@@ -7022,7 +7815,7 @@ def self_test():
         over = evaluate(
             local_msg,
             with_on(ci_fixture(common, block_step(
-                (blank, "            echo ok"), indicator)), defaults),
+                (blank, "            echo ok"), indicator)), labeled),
             msg_waiver, msg_side)
         case("37 an over-indented leading blank in a run: block is a "
              "layout YAML rejects, refused: " + label, over, 2)
@@ -7041,7 +7834,7 @@ def self_test():
         at_or_below = evaluate(
             local_msg,
             with_on(ci_fixture(common, block_step(
-                (blank, "            echo ok"), indicator)), defaults),
+                (blank, "            echo ok"), indicator)), labeled),
             msg_waiver, msg_side)
         case("37 control: a leading blank at or below the content "
              "indentation stays inside the scalar: " + label,
@@ -7067,7 +7860,7 @@ def self_test():
         two_blanks = evaluate(
             local_msg,
             with_on(ci_fixture(common, block_step(
-                blanks + ("            echo ok",))), defaults),
+                blanks + ("            echo ok",))), labeled),
             msg_waiver, msg_side)
         case("37 two leading blanks, one past the content indentation, are "
              "refused in either order: " + label, two_blanks, 2)
@@ -7086,7 +7879,7 @@ def self_test():
         local_msg,
         with_on(ci_fixture(common, block_step(
             ("            echo ok", " " * 20, "            echo again"))),
-            defaults),
+            labeled),
         msg_waiver, msg_side)
     case("37 control: a blank after the first content line, indented past "
          "the content indentation, stays inside the scalar", later_blank, 0)
@@ -7139,13 +7932,24 @@ def self_test():
             "38 equals-form glob literal: unexpected diagnostics: "
             "{!r}".format(glob_literal.diagnostics))
 
-    # D-400-SPECIAL-FILE-PRECHECK bootstrap (runner side): the exact test-and-abort line is accepted
-    # only at top level before any gate, registers no member, and satisfies the shadow scan through
-    # origins; moved after the first gate it is unclassified (cannot-evaluate), so a runner that
-    # reorders the bootstrap behind a gate never reads as clean.
+    # SPECIAL-FILE-PRECHECK runner steps: the bootstrap gate, its STOP line, the precheck gate and
+    # its STOP line are accepted only at top level right after the child-status probe gate and
+    # before any other gate (PRECHECK_PRIOR_MEMBERS); the bootstrap gate registers no member and
+    # satisfies the shadow scan through origins, the precheck gate registers its member. Moved
+    # after another gate, the bootstrap gate is unclassified (cannot-evaluate), so a runner that
+    # reorders it behind a gate never reads as clean. The fixture's terminal summary is the live
+    # runner's (TERMINAL_SUMMARIES[0]).
     count += 1
     bootstrap_tools = next(line for line in PRECHECK_BOOTSTRAP_LINES
                            if PRECHECK_BOOTSTRAP_LINES[line] == "tools/_gen_common.py")
+    bootstrap_gate = next(line for line in PRECHECK_BOOTSTRAP_GATE_LINES
+                          if PRECHECK_BOOTSTRAP_GATE_LINES[line] == "tools/_gen_common.py")
+    precheck_gate = next(line for line in PRECHECK_GATE_LINES
+                         if PRECHECK_GATE_LINES[line] == PRECHECK_MEMBER)
+    probe_gate_line = 'run_gate "child-status" python3 -I -B ' + CHILD_STATUS_PROBE
+    bootstrap_step = bootstrap_gate + "\n" + PRECHECK_STOP_LINE + "\n"
+    precheck_step = precheck_gate + "\n" + PRECHECK_STOP_LINE + "\n"
+    later_gate = 'run_gate "a" python3 -I -B tools/a.py'
     bootstrap_fixture = "\n".join((
         "#!/usr/bin/env bash",
         "set -uo pipefail",
@@ -7154,50 +7958,112 @@ def self_test():
         "failed=0",
         'failed_names=""',
         "notrun=0",
-        bootstrap_tools,
-        "python3 -I -B tools/_gen_common.py --precheck || exit 2",
         "run_gate() {",
         *EXPECTED_RUN_GATE_BODY,
         "}",
-        'run_gate "a" python3 -I -B tools/a.py',
-        'if [ "$failed" -ne 0 ]; then',
-        'echo "FAILED GATES: ${failed_names}"',
-        'echo "RESULT: FAIL"',
-        "exit 1",
-        "fi",
-        'if [ "$notrun" -ne 0 ]; then',
-        'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
-        "exit 0",
-        "fi",
-        'echo "RESULT: PASS"',
+        probe_gate_line,
+        bootstrap_gate,
+        PRECHECK_STOP_LINE,
+        precheck_gate,
+        PRECHECK_STOP_LINE,
+        later_gate,
+        *TERMINAL_SUMMARIES[0],
     )) + "\n"
     got = extract_local(bootstrap_fixture)
-    if got.diagnostics or "tools/_gen_common.py --precheck" not in got.members:
+    if got.diagnostics or PRECHECK_MEMBER not in got.members:
         failures.append(
-            "34 the in-place bootstrap line was not accepted cleanly: {!r}".format(
+            "34 the in-place precheck steps were not accepted cleanly: {!r}".format(
                 got.diagnostics))
-    moved = bootstrap_fixture.replace(bootstrap_tools + "\n", "", 1).replace(
-        'run_gate "a" python3 -I -B tools/a.py',
-        'run_gate "a" python3 -I -B tools/a.py\n' + bootstrap_tools, 1)
+    moved = bootstrap_fixture.replace(bootstrap_step, "", 1).replace(
+        later_gate + "\n", later_gate + "\n" + bootstrap_step, 1)
     got = extract_local(moved)
     if not any(diagnostic.code == "unclassified-line" for diagnostic in got.diagnostics):
         failures.append(
-            "30 a bootstrap line after the first gate must be unclassified, got {!r}".format(
+            "30 a bootstrap gate after another gate must be unclassified, got {!r}".format(
                 got.diagnostics))
+    # The precheck steps ahead of the child-status probe gate (before any gate, the order before
+    # main's child-status rule) are unclassified too: the probe is the first gate, which
+    # tools/check_child_status_coverage.py holds with no Python line above it, so this order
+    # fails both gates. Red without the PRECHECK_PRIOR_MEMBERS requirement.
+    count += 1
+    steps = bootstrap_step + precheck_step
+    ahead = bootstrap_fixture.replace(steps, "", 1).replace(
+        "run_gate() {", steps + "run_gate() {", 1)
+    got = extract_local(ahead)
+    if (ahead.count(steps) != 1
+            or sum(diagnostic.code == "unclassified-line" for diagnostic in got.diagnostics) != 4):
+        failures.append(
+            "34c the precheck gate and STOP lines ahead of the child-status probe gate must each "
+            "be unclassified, got {!r}".format(got.diagnostics))
+    # A runner with no probe gate at all ahead of the precheck steps is unclassified the same way.
+    got = extract_local(bootstrap_fixture.replace(probe_gate_line + "\n", "", 1))
+    if not any(diagnostic.code == "unclassified-line" for diagnostic in got.diagnostics):
+        failures.append(
+            "34c the precheck steps with no child-status probe gate before them must be "
+            "unclassified, got {!r}".format(got.diagnostics))
 
-    # D-400-SPECIAL-FILE-PRECHECK bootstrap (runner side, QA round 4): the bootstrap line is REQUIRED
-    # ahead of the precheck invocation, not merely accepted; DELETING it must be a missing-bootstrap
+    # SPECIAL-FILE-PRECHECK bootstrap (runner side, QA round 4): the bootstrap gate is REQUIRED
+    # ahead of the precheck gate, not merely accepted; DELETING it must be a missing-bootstrap
     # diagnostic (set parity alone cannot see the deletion, the bootstrap registers no member). This
     # vector fails without the requirement.
     count += 1
-    deleted = bootstrap_fixture.replace(bootstrap_tools + "\n", "", 1)
+    deleted = bootstrap_fixture.replace(bootstrap_gate + "\n", "", 1)
     got = extract_local(deleted)
     if not any(diagnostic.code == "missing-bootstrap" for diagnostic in got.diagnostics):
         failures.append(
-            "34b deleting the bootstrap line must be a missing-bootstrap diagnostic, got {!r}".format(
+            "34b deleting the bootstrap gate must be a missing-bootstrap diagnostic, got {!r}".format(
                 got.diagnostics))
 
-    # D-400-SPECIAL-FILE-PRECHECK bootstrap (CI side): inside a literal run block the exact line is
+    # SPECIAL-FILE-PRECHECK STOP lines: each precheck step must be followed DIRECTLY by the STOP
+    # line, or a failed step would not stop the run (set parity cannot see a STOP line, which
+    # registers no member). Deleting either one is a missing-stop diagnostic; a STOP line anywhere
+    # else (here, after a later gate) is unclassified. Red without the missing-stop rule and
+    # without the STOP line's position check respectively.
+    count += 1
+    for label, step, gate in (("bootstrap", bootstrap_step, bootstrap_gate),
+                              ("precheck", precheck_step, precheck_gate)):
+        stop_gone = bootstrap_fixture.replace(step, gate + "\n", 1)
+        got = extract_local(stop_gone)
+        if stop_gone == bootstrap_fixture or not any(
+                diagnostic.code == "missing-stop" for diagnostic in got.diagnostics):
+            failures.append(
+                "34d deleting the STOP line after the {} gate must be a missing-stop diagnostic, "
+                "got {!r}".format(label, got.diagnostics))
+    stray_stop = bootstrap_fixture.replace(
+        later_gate + "\n", later_gate + "\n" + PRECHECK_STOP_LINE + "\n", 1)
+    got = extract_local(stray_stop)
+    if stray_stop == bootstrap_fixture or not any(
+            diagnostic.code == "unclassified-line" for diagnostic in got.diagnostics):
+        failures.append(
+            "34d a STOP line after another gate must be unclassified, got {!r}".format(
+                got.diagnostics))
+
+    # SPECIAL-FILE-PRECHECK gate spelling: the precheck command runs only as its exact gate line in
+    # its one place. A respelled precheck gate in place (another label) and a second precheck gate
+    # after a later gate are each unclassified and register nothing; a bootstrap gate left without
+    # its precheck gate is a missing-precheck diagnostic. Red without the exact-line rule and
+    # without the missing-precheck rule respectively.
+    count += 1
+    respelled = bootstrap_fixture.replace(
+        precheck_gate, precheck_gate.replace('"special-file-precheck"', '"precheck"', 1), 1)
+    second = bootstrap_fixture.replace(
+        later_gate + "\n", later_gate + "\n" + precheck_gate + "\n", 1)
+    for label, fixture in (("respelled in place", respelled), ("repeated after a later gate", second)):
+        got = extract_local(fixture)
+        if fixture == bootstrap_fixture or not any(
+                diagnostic.code == "unclassified-line" for diagnostic in got.diagnostics):
+            failures.append(
+                "34e a precheck gate {} must be unclassified, got {!r}".format(
+                    label, got.diagnostics))
+    if PRECHECK_MEMBER in extract_local(respelled).members:
+        failures.append("34e a respelled precheck gate must register no member")
+    got = extract_local(bootstrap_fixture.replace(precheck_step, "", 1))
+    if not any(diagnostic.code == "missing-precheck" for diagnostic in got.diagnostics):
+        failures.append(
+            "34e a bootstrap gate with no precheck gate after it must be a missing-precheck "
+            "diagnostic, got {!r}".format(got.diagnostics))
+
+    # SPECIAL-FILE-PRECHECK bootstrap (CI side): inside a literal run block the exact line is
     # benign and shadow-clean; any respelling of it is unclassified-command, so a weakened CI
     # bootstrap never reads as clean.
     count += 1
@@ -7225,7 +8091,7 @@ def self_test():
             "35 a respelled CI bootstrap line must be unclassified, got {!r}".format(
                 got.diagnostics))
 
-    # D-400-SPECIAL-FILE-PRECHECK bootstrap spelling: the "[ ! -h ...]" negation is exactly the form
+    # SPECIAL-FILE-PRECHECK bootstrap spelling: the "[ ! -h ...]" negation is exactly the form
     # the Python host pin gate's outside-job line model refuses as a YAML opener (see the SPELLING
     # note on PRECHECK_BOOTSTRAP_LINES), so it must stay a refused respelling here: were it accepted,
     # a workflow carrying it would read as parity-clean while that gate cannot evaluate the file.
@@ -7238,7 +8104,7 @@ def self_test():
             "35b the former bracket-first bootstrap spelling must be unclassified, got {!r}".format(
                 got.diagnostics))
 
-    # D-400-SPECIAL-FILE-PRECHECK order: the LIVE workflow files must order-check clean, and each
+    # SPECIAL-FILE-PRECHECK order: the LIVE workflow files must order-check clean, and each
     # mutation class (a missing precheck step, a gate step before the precheck, an unreviewed
     # pre-checkout run line, a precheck ahead of checkout, a tools path outside captured run lines)
     # must be caught. This vector fails without the order pass.
@@ -7259,6 +8125,9 @@ def self_test():
         "      - uses: actions/setup-python@v5",
         "        with:",
         "          python-version: '3.14'",
+        "      - name: " + CHILD_STATUS_PROBE_STEP_NAME,
+        "        shell: bash",
+        "        run: " + CHILD_STATUS_PROBE_STEP_RUN,
         "      - name: Special-file precheck",
         "        run: |",
         "          " + bootstrap_tools,
@@ -7266,6 +8135,8 @@ def self_test():
         "      - name: A gate",
         "        run: python3 -I -B tools/a.py",
     )) + "\n"
+    probe_step_text = ("      - name: " + CHILD_STATUS_PROBE_STEP_NAME + "\n        shell: bash\n"
+                       "        run: " + CHILD_STATUS_PROBE_STEP_RUN + "\n")
     got_problems, got_diagnostics = workflow_precheck_order_problems(order_fixture, "fixture.yml")
     if got_problems or got_diagnostics:
         failures.append("36 the clean order fixture did not pass: {!r} {!r}".format(
@@ -7294,6 +8165,29 @@ def self_test():
                                "      - uses: actions/checkout@v4\n"
                                "      - name: A gate", 1),
          "before checkout"),
+        # The precheck's one position (right after the child-status probe step, itself right
+        # after setup-python): the round-1 order (the precheck ahead of the probe), the probe
+        # gone, the probe respelled, the probe carrying another key, and setup-python not right
+        # before the probe are each a finding. Each is red without the position rule.
+        ("precheck ahead of the probe",
+         order_fixture.replace(probe_step_text, "", 1).replace(
+             "      - name: A gate", probe_step_text + "      - name: A gate", 1),
+         "as the step right after the child-status probe step"),
+        ("probe step gone",
+         order_fixture.replace(probe_step_text, "", 1),
+         "as the step right after the child-status probe step"),
+        ("probe step renamed",
+         order_fixture.replace("      - name: " + CHILD_STATUS_PROBE_STEP_NAME,
+                               "      - name: Child exit status observable", 1),
+         "as the step right after the child-status probe step"),
+        ("probe step with another key",
+         order_fixture.replace(probe_step_text, probe_step_text.replace(
+             "        shell: bash\n", "        shell: bash\n        env:\n          A_VALUE: one\n", 1), 1),
+         "as the step right after the child-status probe step"),
+        ("probe not right after setup-python",
+         order_fixture.replace(probe_step_text, "      - name: Early note\n        run: echo note\n"
+                               + probe_step_text, 1),
+         "as the step right after the child-status probe step"),
     )
     for label, mutated_fixture, needle in order_mutations:
         got_problems, got_diagnostics = workflow_precheck_order_problems(
@@ -7309,11 +8203,49 @@ def self_test():
         failures.append("36 a tools path outside captured run lines must be a diagnostic, got "
                         "{!r}".format(got_diagnostics))
 
-    # The host-patch exemption: in quality.yml alone, the two jobs tools/check_python_host_pin.py
+    # The LANES rule's pinned lines and the aggregate's block needs: list, as quality.yml spells
+    # them: the line grammar reads CONCURRENCY_BLOCK and HEAVY_JOB_IF_LINE by exact bytes
+    # (REVIEWED_WORKFLOW_LINES) and a '- <job id>' item only directly under a job-level needs:.
+    # The clean vector is red without either production; each departure (one byte of a pinned
+    # line, the pinned block with another entry, a job-id item outside needs:, a mapping item in
+    # needs:) is red without its refusal.
+    count += 1
+    lanes_fixture = order_fixture.replace(
+        "jobs:\n", "\n".join(CONCURRENCY_BLOCK) + "\njobs:\n", 1).replace(
+        "    runs-on: ubuntu-latest\n", HEAVY_JOB_IF_LINE + "\n    runs-on: ubuntu-latest\n", 1) + (
+        "  gates:\n    name: Gates\n    if: always()\n    needs:\n      - one\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - name: " + REQUIRED_STATUS_JOB_NAME + "\n")
+    got_problems, got_diagnostics = workflow_precheck_order_problems(lanes_fixture, "fixture.yml")
+    if got_diagnostics:
+        failures.append("36r the pinned concurrency: block, the heavy-job if: line and a block "
+                        "needs: list must be read with no diagnostic, got {!r}".format(
+                            got_diagnostics))
+    lanes_departures = (
+        ("a pinned if: line one byte off",
+         lanes_fixture.replace("'merge-train-'", "'merge-trains-'", 1), "job-key"),
+        ("the pinned concurrency: block with another entry",
+         lanes_fixture.replace(CONCURRENCY_BLOCK[2] + "\n",
+                               CONCURRENCY_BLOCK[2] + "\n  queue: max\n", 1), "workflow-key"),
+        ("a job-id item outside needs:",
+         lanes_fixture.replace("name: Quality\n", "name: Quality\non:\n  push:\n    branches:\n"
+                               "      - main\n", 1), "step-shape"),
+        ("a mapping item in needs:",
+         lanes_fixture.replace("    needs:\n      - one\n", "    needs:\n      - one: two\n", 1),
+         "job-key"),
+    )
+    for label, mutated_fixture, code in lanes_departures:
+        got_problems, got_diagnostics = workflow_precheck_order_problems(mutated_fixture,
+                                                                         "fixture.yml")
+        if mutated_fixture == lanes_fixture or not any(
+                d.code == code for d in got_diagnostics):
+            failures.append("36r {} must be a {} diagnostic, got {!r} {!r}".format(
+                label, code, got_problems, got_diagnostics))
+
+    # The host-patch exemption: in quality.yml alone, the five jobs tools/check_python_host_pin.py
     # holds whole (refusing any inserted step, the canonical precheck step included) are exempt
     # from the precheck-step requirement, by exact job id, and the exemption is disclosed as a
     # residual. The clean vector fails without the exemption; each control fails if the exemption
-    # matches the same ids in another file or more than the two ids in that one file.
+    # matches the same ids in another file or more than the five ids in that one file.
     count += 1
     host_patch_fixture = "\n".join((
         "name: Quality",
@@ -7328,7 +8260,37 @@ def self_test():
         "      - name: Python host pin",
         "        shell: bash",
         "        run: python3 -I -B tools/check_python_host_pin.py",
-        "  git-fixture-env-host-patch:",
+        "  git-fixture-env-core-host-patch:",
+        "    runs-on: ubuntu-24.04",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-python@v5",
+        "        with:",
+        "          python-version: '3.14.4'",
+        "      - name: Python host pin",
+        "        shell: bash",
+        "        run: python3 -I -B tools/check_python_host_pin.py",
+        "  git-fixture-env-config-combined-host-patch:",
+        "    runs-on: ubuntu-24.04",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-python@v5",
+        "        with:",
+        "          python-version: '3.14.4'",
+        "      - name: Python host pin",
+        "        shell: bash",
+        "        run: python3 -I -B tools/check_python_host_pin.py",
+        "  git-fixture-env-config-malformed-host-patch:",
+        "    runs-on: ubuntu-24.04",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-python@v5",
+        "        with:",
+        "          python-version: '3.14.4'",
+        "      - name: Python host pin",
+        "        shell: bash",
+        "        run: python3 -I -B tools/check_python_host_pin.py",
+        "  git-fixture-env-config-system-host-patch:",
         "    runs-on: ubuntu-24.04",
         "    steps:",
         "      - uses: actions/checkout@v4",
@@ -7342,13 +8304,13 @@ def self_test():
     got_problems, got_diagnostics = workflow_precheck_order_problems(
         host_patch_fixture, PRECHECK_ORDER_EXEMPT_SOURCE)
     if got_problems or got_diagnostics:
-        failures.append("36m the two host-patch jobs of quality.yml are exempt from the "
+        failures.append("36m the five host-patch jobs of quality.yml are exempt from the "
                         "precheck-step requirement, got {!r} {!r}".format(got_problems,
                                                                           got_diagnostics))
     got_problems, got_diagnostics = workflow_precheck_order_problems(
         host_patch_fixture, "fixture.yml")
     if sum("has no canonical special-file precheck step" in problem
-           for problem in got_problems) != 2:
+           for problem in got_problems) != 5:
         failures.append("36m the exemption must not reach the same job ids in another workflow "
                         "file, got {!r} {!r}".format(got_problems, got_diagnostics))
     renamed = host_patch_fixture.replace("  opf-host-patch:", "  opf-host-patch-two:", 1)
@@ -7356,16 +8318,16 @@ def self_test():
         renamed, PRECHECK_ORDER_EXEMPT_SOURCE)
     if not any("job opf-host-patch-two has no canonical special-file precheck step" in problem
                for problem in got_problems):
-        failures.append("36m the exemption must match the two job ids exactly, got {!r} "
+        failures.append("36m the exemption must match the five job ids exactly, got {!r} "
                         "{!r}".format(got_problems, got_diagnostics))
     disclosure = " ".join(workflow_precheck_order_problems.__doc__.split())
     if ("opf-host-patch" not in disclosure
-            or "git-fixture-env-host-patch" not in disclosure
+            or any(job not in disclosure for job in PRECHECK_ORDER_EXEMPT_JOBS)
             or "check_python_host_pin" not in disclosure):
         failures.append("36m the host-patch exemption must be disclosed as a residual naming "
-                        "both job ids and the guard that holds those jobs whole")
+                        "every exempt job id and the guard that holds those jobs whole")
 
-    # D-400-SPECIAL-FILE-PRECHECK order (QA round 4): a step key the parse does not model can disable
+    # SPECIAL-FILE-PRECHECK order (QA round 4): a step key the parse does not model can disable
     # or soften the precheck step while its run body still matches the canonical lines (if: and
     # continue-on-error: above all), so each such key, on the precheck step or any other, must be a
     # step-key diagnostic (cannot-evaluate), never a clean order pass. An env:/with: mapping stays
@@ -7426,7 +8388,7 @@ def self_test():
             failures.append("36b {} must be a step-key diagnostic, got {!r} {!r}".format(
                 label, got_problems, got_diagnostics))
 
-    # D-400-SPECIAL-FILE-PRECHECK order (QA round 5, claude M1): GitHub applies workflow- and
+    # SPECIAL-FILE-PRECHECK order (QA round 5, claude M1): GitHub applies workflow- and
     # job-level env: and defaults: to every step, so a BASH_ENV, PATH or defaults.run.shell value
     # there (or an env: mapping on the precheck step itself) neuters the canonical precheck step
     # while its run body still matches. Each inherited execution control must be refused. These
@@ -7740,6 +8702,9 @@ def self_test():
         "      - uses: actions/setup-python@v5",
         "        with:",
         "          python-version: '3.14'",
+        "      - name: " + CHILD_STATUS_PROBE_STEP_NAME,
+        "        shell: bash",
+        "        run: " + CHILD_STATUS_PROBE_STEP_RUN,
         "      - name: Special-file precheck",
         "        run: |",
         "          " + bootstrap_tools,
@@ -7988,12 +8953,21 @@ def self_test():
     if got_problems or got_diagnostics:
         failures.append("37 the required-status aggregate shape must pass the order question, "
                         "got {!r} {!r}".format(got_problems, got_diagnostics))
+    # The block form of needs: (the list quality.yml carries on main) passes the order question
+    # too; before the merge of main it was a step-shape refusal (red without the job-id item
+    # production and the step model's block-list admission).
+    block_needs = aggregate_fixture.replace("    needs: [one]",
+                                            "    needs:" + chr(10) + "      - one", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(block_needs, "fixture.yml")
+    if block_needs == aggregate_fixture or got_problems or got_diagnostics:
+        failures.append("37 a block-sequence needs: list of plain job ids must pass the order "
+                        "question, got {!r} {!r}".format(got_problems, got_diagnostics))
     for label, code_name, mutated_fixture in (
         ("a job-level if: that is not the always-run condition", "job-key",
          aggregate_fixture.replace("    if: always()", "    if: success()", 1)),
-        ("a block-sequence needs: list", "step-shape",
+        ("a block-sequence needs: list carrying a mapping item", "job-key",
          aggregate_fixture.replace("    needs: [one]",
-                                   "    needs:" + chr(10) + "      - one", 1)),
+                                   "    needs:" + chr(10) + "      - one: two", 1)),
         ("an env expression other than the pinned aggregate one", "step-key",
          aggregate_fixture.replace("RESULTS: ${{ join(needs.*.result, ' ') }}",
                                    "RESULTS: ${{ join(needs.*.outputs, ' ') }}", 1)),
@@ -8074,6 +9048,564 @@ def self_test():
         failures.append("38 the fetch-depth and fetch-tags checkout inputs must stay accepted, "
                         "got {!r} {!r}".format(got_problems, got_diagnostics))
 
+    # 39 LANES: the pinned concurrency: block and the pinned heavy-job if:
+    # line pass; a missing block, a heavy job without the if:, any other
+    # concurrency: spelling, a concurrency: block outside quality.yml, a
+    # job-level concurrency: key, a widened if: (a continuation line included)
+    # and the if: on a job outside HEAVY_JOBS are each a lane finding. Without
+    # the rule the pinned block was an unknown top-level key (exit 2) and every
+    # if: passed, so each vector below fails on revert; each red vector names
+    # its finding.
+    def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None,
+                top=CONCURRENCY_BLOCK, job_tail=(),
+                light_commands=None, opf_id="opf-tooling",
+                opf_commands=("python3 tools/b.py",), drop_heavy=()):
+        other_heavy = sorted(HEAVY_JOBS - {"opf-tooling"} - set(drop_heavy))
+        lines = ["name: Test"] + list(labeled_trigger) + list(top) + ["jobs:"]
+        for job, commands, condition in (
+                ("secrets",
+                 common + ("python3 tools/a.py",)
+                 if light_commands is None else light_commands,
+                 light_if),
+                (opf_id, opf_commands, heavy_if)):
+            lines.extend(("  " + job + ":", "    name: Job " + job))
+            if condition is not None:
+                lines.append(condition)
+            lines.extend(job_tail)
+            lines.extend(("    runs-on: ubuntu-latest", "    steps:",
+                          "      - uses: actions/checkout@v4"))
+            for number, command in enumerate(commands, 1):
+                lines.extend((
+                    "      - name: Gate {}".format(number),
+                    "        shell: bash",
+                    "        run: " + command,
+                ))
+        for job in other_heavy:
+            lines.extend((
+                "  " + job + ":",
+                HEAVY_JOB_IF_LINE,
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - uses: actions/checkout@v4",
+            ))
+        lines.extend(aggregator_head + always
+                     + ("    needs:", "      - secrets", "      - " + opf_id)
+                     + tuple("      - " + job for job in other_heavy))
+        lines.extend(REQUIRED_STATUS_JOB[
+            REQUIRED_STATUS_JOB.index(REQUIRED_STATUS_NEEDS_SLOT) + 1:])
+        return "\n".join(lines) + "\n"
+
+    def lane_case(name, report, want_code, needle=None):
+        case(name, report, want_code,
+             kinds=("lane",) if needle is not None else ())
+        if needle is not None and not any(
+                needle in finding.message for finding in report.findings
+                if finding.kind == "lane"):
+            failures.append("{}: no lane finding mentions {!r}: {!r}".format(
+                name, needle, report.findings))
+        if needle is None and any(
+                finding.kind == "lane" for finding in report.findings):
+            failures.append("{}: unexpected lane finding: {!r}".format(
+                name, report.findings))
+
+    pinned_top = CONCURRENCY_BLOCK
+    group_line, cancel_line = CONCURRENCY_BLOCK[1], CONCURRENCY_BLOCK[2]
+    lane_case("39a the pinned concurrency: block and heavy-job if: pass",
+              evaluate(multi_local, lane_ci(), ()), 0)
+    # Both are required: quality.yml as it was before the lane change (no
+    # block, no if: on a heavy job) is red, and so is each removal alone.
+    for label, report, needles in (
+            ("the concurrency: block removed",
+             evaluate(multi_local, lane_ci(top=()), ()),
+             ("carries no top-level concurrency: block",)),
+            ("the pinned if: removed from a heavy job",
+             evaluate(multi_local, lane_ci(heavy_if=None), ()),
+             ("heavy job 'opf-tooling' of {} carries no job-level if:".format(
+                 CI_SOURCE),)),
+            ("both removed, the workflow before the lane change",
+             evaluate(multi_local, lane_ci(heavy_if=None, top=()), ()),
+             ("carries no top-level concurrency: block",
+              "carries no job-level if:"))):
+        for needle in needles:
+            lane_case("39b a missing lane setting is a lane finding: "
+                      + label + " (" + needle + ")", report, 1, needle)
+    lane_case("39c control: a whole-line comment and a blank line inside the "
+              "block are dropped",
+              evaluate(multi_local, lane_ci(top=(
+                  pinned_top[0], "  # superseded pull request runs", "",
+                  group_line, cancel_line)), ()), 0)
+    for label, block in (
+            ("a group keyed by the ref for every event",
+             (pinned_top[0], "  group: quality-${{ github.ref }}",
+              cancel_line)),
+            ("a group keyed by the pull request number for every event",
+             (pinned_top[0],
+              "  group: quality-${{ github.event.pull_request.number }}",
+              cancel_line)),
+            ("the push branch of the group keyed by the ref",
+             (pinned_top[0],
+              group_line.replace("github.run_id", "github.ref"),
+              cancel_line)),
+            ("cancel-in-progress: true",
+             (pinned_top[0], group_line, "  cancel-in-progress: true")),
+            ("cancel-in-progress on for every event",
+             (pinned_top[0], group_line,
+              "  cancel-in-progress: ${{ github.event_name != '' }}")),
+            ("cancel-in-progress dropped", (pinned_top[0], group_line)),
+            ("an extra key", pinned_top + ("  queue: max",)),
+            ("a one-line group name", ("concurrency: quality",)),
+            ("a trailing comment on the group line",
+             (pinned_top[0], group_line + "  # pr or run", cancel_line))):
+        lane_case("39d a departing concurrency: block is a lane finding: "
+                  + label,
+                  evaluate(multi_local, lane_ci(top=block), ()), 1,
+                  "departs from the pinned CONCURRENCY_BLOCK")
+    for label, line in (
+            ("the same-repository check dropped",
+             "    if: github.event_name == 'push' || "
+             "startsWith(github.head_ref, 'merge-train-')"),
+            ("the train prefix dropped",
+             HEAVY_JOB_IF_LINE.replace("'merge-train-'", "''")),
+            ("an appended || true", HEAVY_JOB_IF_LINE + " || true"),
+            ("always()", "    if: always()"),
+            ("the line wrapped in ${{ }}",
+             "    if: ${{ " + HEAVY_JOB_IF_LINE[8:] + " }}"),
+            ("a trailing comment", HEAVY_JOB_IF_LINE + "  # heavy")):
+        lane_case("39e a widened or respelled heavy-job if: is a lane "
+                  "finding: " + label,
+                  evaluate(multi_local, lane_ci(heavy_if=line), ()), 1,
+                  "departs from the pinned HEAVY_JOB_IF_LINE")
+    # A deeper line under the pinned if: continues its value (YAML folds it
+    # into the condition), so the pinned first line with any continuation line
+    # is a departure; a whole-line comment under it is not part of the value.
+    for label, tail in (
+            ("|| true", ("      || true",)),
+            ("== false", ("      == false",)),
+            ("&& false", ("      && false",)),
+            ("a bare trailing operator", ("      ||",)),
+            ("|| true at indent 8", ("        || true",)),
+            ("|| true after a blank line", ("", "      || true")),
+            ("|| true after a whole-line comment",
+             ("      # widened", "      || true"))):
+        lane_case("39e a continuation line under the pinned heavy-job if: is a "
+                  "lane finding: " + label,
+                  evaluate(multi_local, lane_ci(
+                      heavy_if="\n".join((HEAVY_JOB_IF_LINE,) + tail)), ()),
+                  1, "departs from the pinned HEAVY_JOB_IF_LINE")
+    lane_case("39e control: a whole-line comment under the pinned heavy-job if: "
+              "passes",
+              evaluate(multi_local, lane_ci(
+                  heavy_if=HEAVY_JOB_IF_LINE + "\n      # heavy jobs"), ()), 0)
+    # The Quality gates job's if: always() is held by the REQUIRED STATUS pin,
+    # which reads a continuation line under it as a departure.
+    case("39e a continuation line under the Quality gates if: always() is a "
+         "required-status finding",
+         evaluate(multi_local, lane_ci().replace(
+             "\n".join(always) + "\n",
+             "\n".join(always) + "\n      && false\n", 1), ()),
+         1, kinds=("required-status",))
+    lane_case("39f the pinned if: on a job outside HEAVY_JOBS is a lane "
+              "finding",
+              evaluate(multi_local, lane_ci(light_if=HEAVY_JOB_IF_LINE), ()),
+              1, "job 'secrets' of {} carries a job-level if:".format(
+                  CI_SOURCE))
+    lane_case("39g a job-level concurrency: key is a lane finding",
+              evaluate(multi_local, lane_ci(
+                  job_tail=("    concurrency: lane",)), ()),
+              1, "carries a job-level concurrency: key")
+    concurrent_scan = with_on(scan_text, edited).replace(
+        "jobs:\n", "\n".join(pinned_top) + "\njobs:\n", 1)
+    lane_case("39h the pinned concurrency: block in msg-leaks.yml is a lane "
+              "finding",
+              evaluate(local_msg, quality_side, msg_waiver,
+                       ((MSG_LEAKS_CI_SOURCE, concurrent_scan),)),
+              1, "{} carries a top-level concurrency: block".format(
+                  MSG_LEAKS_CI_SOURCE))
+    conditional_scan = with_on(scan_text, edited).replace(
+        "    runs-on:", HEAVY_JOB_IF_LINE + "\n    runs-on:", 1)
+    lane_case("39i the pinned if: in msg-leaks.yml is a lane finding",
+              evaluate(local_msg, quality_side, msg_waiver,
+                       ((MSG_LEAKS_CI_SOURCE, conditional_scan),)),
+              1, "job 'quality' of {} carries a job-level if:".format(
+                  MSG_LEAKS_CI_SOURCE))
+
+    # 39j HEAVY PRESENCE and HEAVY COMMANDS: every HEAVY_JOBS job must be
+    # present in quality.yml, and a HEAVY_COMMANDS member may run only in a
+    # job whose if: is exactly the pinned line. Before the change a heavy job
+    # removed, one renamed with its needs: entry updated and its if: dropped,
+    # and a heavy command relocated into an unconditioned job each passed
+    # with exit 0, so each red vector below fails on revert.
+    heavy_member = "python3 -I -B opf/tools/opf.py --self-test"
+    lane_case("39j control: a heavy member in a heavy job carrying the "
+              "pinned if: passes",
+              evaluate(local_fixture(common + (
+                  "python3 tools/a.py", "python3 tools/b.py", heavy_member)),
+                  lane_ci(opf_commands=("python3 tools/b.py", heavy_member)),
+                  ()), 0)
+    lane_case("39j a removed heavy job is a lane finding",
+              evaluate(multi_local,
+                       lane_ci(drop_heavy=("byte-canon-matrix",)), ()),
+              1, "heavy job 'byte-canon-matrix' is missing")
+    # Each git-fixture-env lane's host-patch job is a heavy job of its own
+    # (the four run as parallel jobs): removing any one of them is a lane
+    # finding. While HEAVY_JOBS named one serial host-patch job for the four
+    # suites, none of these ids was heavy, so each fixture passed with exit 0.
+    for lane_job in ("git-fixture-env-core-host-patch",
+                     "git-fixture-env-config-combined-host-patch",
+                     "git-fixture-env-config-malformed-host-patch",
+                     "git-fixture-env-config-system-host-patch"):
+        lane_case("39j a removed git-fixture-env host-patch job is a lane "
+                  "finding: " + lane_job,
+                  evaluate(multi_local, lane_ci(drop_heavy=(lane_job,)), ()),
+                  1, "heavy job {!r} is missing".format(lane_job))
+    renamed = evaluate(
+        local_fixture(common + ("python3 tools/a.py", heavy_member)),
+        lane_ci(opf_id="opf-renamed", heavy_if=None,
+                opf_commands=(heavy_member,)), ())
+    lane_case("39j a renamed heavy job (needs: updated, if: removed) is a "
+              "missing-heavy-job lane finding",
+              renamed, 1, "heavy job 'opf-tooling' is missing")
+    lane_case("39j the renamed job's heavy member runs without the pinned "
+              "if: and is a lane finding",
+              renamed, 1,
+              "job 'opf-renamed' of {} runs heavy member(s) "
+              "opf/tools/opf.py --self-test without the pinned".format(
+                  CI_SOURCE))
+    lane_case("39j a heavy member relocated into an unconditioned job is a "
+              "lane finding",
+              evaluate(local_fixture(common + (
+                  "python3 tools/a.py", "python3 tools/b.py", heavy_member)),
+                  lane_ci(light_commands=common + (
+                      "python3 tools/a.py", heavy_member)), ()),
+              1, "job 'secrets' of {} runs heavy member(s)".format(CI_SOURCE))
+    # The combined, malformed and system git-fixture-env suites run in CI only
+    # in their host-patch jobs, and the core suite also in the '3.14' canary
+    # job: each stays a heavy command, so a '3.14' copy put back into an
+    # unconditioned job is a lane finding, and in a job carrying the pinned
+    # if: it passes. The suite names are written out here, not read from
+    # HEAVY_COMMANDS, so a revert of that set cannot empty these vectors.
+    for suite in ("git-fixture-env-core", "git-fixture-env-config-combined",
+                  "git-fixture-env-config-malformed",
+                  "git-fixture-env-config-system"):
+        suite_member = ("python3 -I -B tools/check_selftest_execution.py "
+                        "--suite " + suite)
+        suite_local = local_fixture(common + (
+            "python3 tools/a.py", "python3 tools/b.py", suite_member))
+        lane_case("39j control: a git-fixture-env suite in a heavy job "
+                  "carrying the pinned if: passes: " + suite,
+                  evaluate(suite_local, lane_ci(opf_commands=(
+                      "python3 tools/b.py", suite_member)), ()), 0)
+        lane_case("39j a git-fixture-env suite in an unconditioned job is a "
+                  "lane finding: " + suite,
+                  evaluate(suite_local, lane_ci(light_commands=common + (
+                      "python3 tools/a.py", suite_member)), ()),
+                  1, "job 'secrets' of {} runs heavy member(s) "
+                  "tools/check_selftest_execution.py --suite {}".format(
+                      CI_SOURCE, suite))
+    # The jobs the reduction removed are no longer heavy: each id put back
+    # with the pinned if: is a lane finding, so a '3.14' copy of the OPF
+    # tooling shards or of a git-fixture-env config lane cannot return under
+    # its former id without a reviewed change to HEAVY_JOBS. With HEAVY_JOBS
+    # reverted to hold these ids, each fixture declares the id twice (the
+    # renamed job and lane_ci's own heavy job), so each row stays red through
+    # the duplicate-job cannot-evaluate (exit 2) rather than passing.
+    for removed_job in ("opf", "opf-adopt", "opf-init",
+                        "git-fixture-env-config-combined",
+                        "git-fixture-env-config-malformed",
+                        "git-fixture-env-config-system"):
+        lane_case("39j a removed heavy job id carrying the pinned if: is a "
+                  "lane finding: " + removed_job,
+                  evaluate(multi_local, lane_ci(
+                      light_if=HEAVY_JOB_IF_LINE).replace(
+                          "  secrets:\n", "  " + removed_job + ":\n", 1).replace(
+                          "      - secrets\n", "      - " + removed_job + "\n", 1),
+                      ()),
+                  1, "job {!r} of {} carries a job-level if:".format(
+                      removed_job, CI_SOURCE))
+    # 39k the Quality gates exemption is the quality.yml job's alone: the
+    # same job name in another workflow exempts nothing, so an if: on the
+    # scan job stays a lane finding whatever the job is named. Before the
+    # change the name alone exempted the job and this fixture passed.
+    named_scan = with_on(scan_text, edited).replace(
+        "  quality:\n", "  quality:\n    name: Quality gates\n", 1).replace(
+        "    runs-on:", HEAVY_JOB_IF_LINE + "\n    runs-on:", 1)
+    lane_case("39k an if: on a job named Quality gates outside quality.yml "
+              "is a lane finding",
+              evaluate(local_msg, quality_side, msg_waiver,
+                       ((MSG_LEAKS_CI_SOURCE, named_scan),)),
+              1, "job 'quality' of {} carries a job-level if:".format(
+                  MSG_LEAKS_CI_SOURCE))
+
+    # 40 OPF GROUPS: the local runner runs the OPF tooling self-test as its
+    # named groups, and CI runs the whole self-test once, in a heavy job, and
+    # no group. Each opf.py --self-test-group command stays a heavy command, so
+    # a group step moved into an unconditioned job is a lane finding. The
+    # group names are written out here, not read from HEAVY_COMMANDS, so a
+    # revert of that set cannot empty these vectors.
+    for name in ("core", "adopt", "watchdog"):
+        group_member = "python3 -I -B " + OPF_GROUP_COMMAND + name
+        lane_case("40 an opf.py group step moved into an unconditioned job "
+                  "is a lane finding: " + name,
+                  evaluate(local_fixture(common + (
+                      "python3 tools/a.py", "python3 tools/b.py",
+                      group_member)),
+                      lane_ci(light_commands=common + (
+                          "python3 tools/a.py", group_member)), ()),
+                  1, "job 'secrets' of {} runs heavy member(s)".format(
+                      CI_SOURCE))
+    # Every group of SELF_TEST_GROUPS, read from the live opf/tools/opf.py
+    # with ast, runs as its --self-test-group command on exactly one line of
+    # the live runner and on no line of the live quality.yml, HEAVY_COMMANDS
+    # holds it, and the whole self-test runs on exactly one line of the live
+    # quality.yml, inside a HEAVY_JOBS job; no other group command is wired.
+    # Before the change each group had to run on exactly one quality.yml
+    # line, so a group step put back there passed and a group missing from
+    # quality.yml failed, and the whole self-test was not held at all; each
+    # flip below drops, adds, repeats or moves one command and must be named.
+    count += 1
+    try:
+        opf_groups = _opf_group_names(OPF_TOOL.read_bytes().decode("utf-8"))
+    except (OSError, SyntaxError, TypeError, ValueError) as exc:
+        opf_groups = None
+        failures.append("40 cannot read SELF_TEST_GROUPS from {}: {!r}".format(
+            OPF_TOOL, exc))
+    if opf_groups is not None:
+        group_sides = []
+        live_ci_text = None
+        ci_jobs = {}
+        for path, source, extract, jobs in (
+                (LOCAL_PATH, LOCAL_SOURCE, extract_local, None),
+                (CI_PATH, CI_SOURCE, extract_ci, ci_jobs)):
+            text, diagnostic = read_runner_text(path, source)
+            if diagnostic is not None:
+                failures.append("40 cannot read {}: {!r}".format(source, diagnostic))
+                group_sides.append({})
+            else:
+                if source == CI_SOURCE:
+                    live_ci_text = text
+                group_sides.append(_opf_group_lines(text, extract(text), jobs))
+        live = _opf_group_wiring_faults(opf_groups, *group_sides, ci_jobs=ci_jobs)
+        if live:
+            failures.append("40 the opf.py self-test is not wired: "
+                            + "; ".join(live))
+        local_lines, ci_lines = group_sides
+        first = OPF_GROUP_COMMAND + (opf_groups[0] if opf_groups else "core")
+        whole_lines = ci_lines.get(OPF_WHOLE_COMMAND, [])
+        flips = (
+            ("a group removed from the local runner",
+             (opf_groups, {key: value for key, value in local_lines.items() if key != first},
+              ci_lines), {},
+             LOCAL_SOURCE + " runs no " + first),
+            ("a group step put back into quality.yml",
+             (opf_groups, local_lines, {**ci_lines, first: [0]}), {},
+             CI_SOURCE + " runs {} on 1 line(s)".format(first)),
+            ("a group removed from HEAVY_COMMANDS",
+             (opf_groups, local_lines, ci_lines, HEAVY_COMMANDS - {first}), {},
+             "HEAVY_COMMANDS lacks " + first),
+            ("the whole self-test removed from HEAVY_COMMANDS",
+             (opf_groups, local_lines, ci_lines, HEAVY_COMMANDS - {OPF_WHOLE_COMMAND}), {},
+             "HEAVY_COMMANDS lacks " + OPF_WHOLE_COMMAND),
+            ("a group opf.py adds with no line",
+             (opf_groups + ("synthetic",), local_lines, ci_lines), {},
+             LOCAL_SOURCE + " runs no " + OPF_GROUP_COMMAND + "synthetic"),
+            ("a group opf.py drops while its line stays",
+             (opf_groups[1:], local_lines, ci_lines), {},
+             "runs {}, a group opf.py does not name".format(first)),
+            ("a group run on a second line of the local runner",
+             (opf_groups, {**local_lines, first: local_lines.get(first, []) + [0]},
+              ci_lines), {},
+             LOCAL_SOURCE + " runs {} on {} lines".format(
+                 first, len(local_lines.get(first, [])) + 1)),
+            ("an opf.py line that does not read back",
+             (opf_groups, {**local_lines, None: [0]}, ci_lines), {},
+             LOCAL_SOURCE + " line(s) 0 run opf/tools/opf.py in a form"),
+            ("the whole self-test removed from quality.yml",
+             (opf_groups, local_lines,
+              {key: value for key, value in ci_lines.items() if key != OPF_WHOLE_COMMAND}),
+             {}, CI_SOURCE + " runs no " + OPF_WHOLE_COMMAND),
+            ("the whole self-test on a second line of quality.yml",
+             (opf_groups, local_lines, {**ci_lines, OPF_WHOLE_COMMAND: whole_lines + [0]}),
+             {}, CI_SOURCE + " runs {} on {} lines".format(
+                 OPF_WHOLE_COMMAND, len(whole_lines) + 1)),
+            ("the whole self-test in a job outside HEAVY_JOBS",
+             (opf_groups, local_lines, ci_lines),
+             {"ci_jobs": {number: "registry" for number in whole_lines}},
+             "in job 'registry', not a HEAVY_JOBS job"),
+            ("no group at all", ((), local_lines, ci_lines), {},
+             "opf.py names no self-test group"))
+        for label, args, options, want in flips:
+            count += 1
+            options = dict({"ci_jobs": ci_jobs}, **options)
+            if not any(want in fault for fault in _opf_group_wiring_faults(*args, **options)):
+                failures.append("40 {} not named".format(label))
+        # The live quality.yml edited in memory and read back through the
+        # extractor, the line reader and the job placement, not a hand-built
+        # map: a --self-test-group step put back into the OPF tooling job, the
+        # whole self-test moved from the host-patch job into the registry job,
+        # and the whole self-test run a second time in the heavy OPF tooling
+        # job are each a wiring fault.
+        homes = "        run: python3 -I -B opf/tools/check_opf_homes.py --self-test\n"
+        whole_run = "        run: python3 -I -B " + OPF_WHOLE_COMMAND + "\n"
+        host_step = ("      - name: OPF tooling self-test (host patch)\n"
+                     "        shell: bash\n" + whole_run)
+        parity_step = "        run: python3 -I -B tools/check_ci_parity.py --self-test\n"
+        for label, edits, want in (
+                ("a group step put back into the live quality.yml",
+                 ((homes, homes + "\n      - name: OPF tooling self-test (core group)\n"
+                   "        shell: bash\n        run: python3 -I -B " + first + "\n"),),
+                 CI_SOURCE + " runs {} on 1 line(s)".format(first)),
+                ("the whole self-test moved into the live registry job",
+                 ((host_step, ""),
+                  (parity_step, parity_step + "\n      - name: Moved\n        shell: bash\n"
+                   + whole_run)),
+                 "in job 'registry', not a HEAVY_JOBS job"),
+                ("the whole self-test added to the live OPF tooling job",
+                 ((homes, homes + "\n      - name: Twice\n        shell: bash\n" + whole_run),),
+                 CI_SOURCE + " runs {} on 2 lines".format(OPF_WHOLE_COMMAND))):
+            count += 1
+            if live_ci_text is None:
+                failures.append("40 {}: the live quality.yml was not read".format(label))
+                continue
+            edited = live_ci_text
+            for old, new in edits:
+                if edited.count(old) != 1:
+                    failures.append("40 {}: {!r} occurs {} times in the live quality.yml".format(
+                        label, old, edited.count(old)))
+                edited = edited.replace(old, new, 1)
+            edited_jobs = {}
+            faults = _opf_group_wiring_faults(
+                opf_groups, local_lines,
+                _opf_group_lines(edited, extract_ci(edited), edited_jobs),
+                ci_jobs=edited_jobs)
+            if not any(want in fault for fault in faults):
+                failures.append("40 {} not named: {!r}".format(label, faults))
+    # A fixture quality.yml: the whole self-test in the heavy OPF tooling job
+    # with no group step passes; the same fixture with a --self-test-group
+    # core step put back beside it is a wiring fault, and so is the whole
+    # self-test in an unconditioned job.
+    fixture_groups = ("core", "adopt", "watchdog")
+    group_core = "python3 -I -B " + OPF_GROUP_COMMAND + "core"
+    whole_member = "python3 -I -B " + OPF_WHOLE_COMMAND
+    fixture_local = local_fixture(common + ("python3 tools/a.py",) + tuple(
+        "python3 -I -B " + OPF_GROUP_COMMAND + name for name in fixture_groups))
+    fixture_local_lines = _opf_group_lines(fixture_local, extract_local(fixture_local))
+    for label, ci_text, want in (
+            ("control: the whole self-test in the heavy job and no group step passes",
+             lane_ci(opf_commands=(whole_member,)), None),
+            ("a --self-test-group core step put back is a wiring fault",
+             lane_ci(opf_commands=(whole_member, group_core)),
+             CI_SOURCE + " runs " + OPF_GROUP_COMMAND + "core on 1 line(s)"),
+            ("the whole self-test in an unconditioned job is a wiring fault",
+             lane_ci(light_commands=common + ("python3 tools/a.py", whole_member)),
+             "in job 'secrets', not a HEAVY_JOBS job")):
+        count += 1
+        fixture_jobs = {}
+        faults = _opf_group_wiring_faults(
+            fixture_groups, fixture_local_lines,
+            _opf_group_lines(ci_text, extract_ci(ci_text), fixture_jobs),
+            ci_jobs=fixture_jobs)
+        if want is None and faults:
+            failures.append("40 fixture {}: unexpected fault(s) {!r}".format(label, faults))
+        if want is not None and not any(want in fault for fault in faults):
+            failures.append("40 fixture {} not named: {!r}".format(label, faults))
+    # A job id under a top-level key other than jobs: is no job: the passing
+    # fixture with its jobs: line renamed in place (the line numbers kept)
+    # places the whole self-test in job None, not in the heavy OPF tooling
+    # job above it. The extractor already refuses that file (unknown-top-key),
+    # so the placement is read over the unedited fixture's extraction.
+    count += 1
+    placed_text = lane_ci(opf_commands=(whole_member,))
+    unplaced_text = placed_text.replace("\njobs:\n", "\nworkflow-jobs:\n", 1)
+    unplaced_jobs = {}
+    faults = _opf_group_wiring_faults(
+        fixture_groups, fixture_local_lines,
+        _opf_group_lines(unplaced_text, extract_ci(placed_text), unplaced_jobs),
+        ci_jobs=unplaced_jobs)
+    if (unplaced_text == placed_text
+            or not any("in job None, not a HEAVY_JOBS job" in fault for fault in faults)):
+        failures.append("40 a job under a top-level key other than jobs: was placed: {!r}".format(
+            faults))
+    # The line read-back counts repeats: a group on two lines of a runner
+    # and of quality.yml maps to two line numbers on each side, which the
+    # member set alone cannot show.
+    count += 1
+    twice = "python3 -I -B " + OPF_GROUP_COMMAND + "core"
+    repeat_local = local_fixture(common + (twice, "python3 tools/a.py", twice))
+    repeat_ci = lane_ci(opf_commands=(twice, "python3 tools/b.py", twice))
+    counted = [len(_opf_group_lines(text, extract(text)).get(OPF_GROUP_COMMAND + "core", ()))
+               for text, extract in ((repeat_local, extract_local), (repeat_ci, extract_ci))]
+    if counted != [2, 2]:
+        failures.append("40 a group run on two lines is not counted twice: {!r}".format(counted))
+    # SELF_TEST_GROUPS is read as a literal: a source without the one
+    # top-level assignment, with two, or with a computed value is refused.
+    for label, source in (
+            ("no assignment", "GROUPS = ()\n"),
+            ("two assignments", "SELF_TEST_GROUPS = ()\nSELF_TEST_GROUPS = ()\n"),
+            ("a computed value", "SELF_TEST_GROUPS = tuple(())\n"),
+            ("a value that is not pairs", "SELF_TEST_GROUPS = ('core',)\n")):
+        count += 1
+        try:
+            _opf_group_names(source)
+        except ValueError:
+            pass
+        else:
+            failures.append("40 SELF_TEST_GROUPS read from {} was accepted".format(label))
+    count += 1
+    if _opf_group_names("SELF_TEST_GROUPS = (('a', ('x',)), ('b', ()))\n") != ("a", "b"):
+        failures.append("40 SELF_TEST_GROUPS names are not read in order")
+
+    # 41 LABELED TRIGGER (module docstring, TRIGGER): quality.yml's pull_request
+    # types are exactly [labeled], so a member's open, push or reopen schedules
+    # no Quality run. The first departure is the trigger quality.yml carried
+    # before the change; each departure names the pin, and msg-leaks.yml, which
+    # runs the scan on its four types, draws no pin finding (35a).
+    def labeled_case(name, on_block, want_code, needle=None, header=False):
+        nonlocal count
+        quality = (with_on_header if header else with_on)(ci_fixture(common), on_block)
+        report = evaluate(local_msg, quality, msg_waiver, msg_side)
+        case(name, report, want_code, ("trigger",) if needle else ())
+        if needle is not None:
+            count += 1
+            if not any(finding.kind == "trigger" and needle in finding.message
+                       for finding in report.findings):
+                failures.append("{}: no trigger finding holds {!r}: {!r}".format(
+                    name, needle, report.findings))
+
+    pinned = "not exactly [labeled]"
+    labeled_case("41a the member-head trigger [opened, synchronize, reopened] "
+                 "is a trigger finding", defaults, 1, pinned)
+    labeled_case("41b labeled beside synchronize is a trigger finding",
+                 pr_types("[labeled, synchronize]"), 1, pinned)
+    labeled_case("41c labeled listed twice is a trigger finding",
+                 pr_types("[labeled, labeled]"), 1, pinned)
+    labeled_case("41d a pull_request event with no types (GitHub's default "
+                 "types) is a trigger finding",
+                 "  pull_request:\n    branches: [main]\n  push:\n", 1, pinned)
+    labeled_case("41e a one-line on: list naming pull_request is a trigger "
+                 "finding", "on: [push, pull_request]\n", 1, pinned,
+                 header=True)
+    labeled_case("41f a block list of other types is a trigger finding",
+                 "  pull_request:\n    types:\n      - opened\n      - labeled\n",
+                 1, pinned)
+    labeled_case("41g pull_request_target beside the labeled pull_request is a "
+                 "trigger finding",
+                 labeled + "  pull_request_target:\n    types: [labeled]\n", 1,
+                 "pull_request_target")
+    labeled_case("41h control: types: [labeled] passes", labeled, 0)
+    labeled_case("41h control: a plain scalar types: labeled passes",
+                 pr_types("labeled"), 0)
+    # A quality.yml with no top-level on: line schedules no Quality run for the
+    # train pull request either; this vector passed clean before the missing
+    # on: finding.
+    labeled_case("41h a quality.yml with no top-level on: line is a trigger "
+                 "finding", "", 1, "has no top-level on: line", header=True)
+    # A quality.yml whose on: block names no pull_request event schedules no
+    # Quality run for the train pull request either; this vector passed clean
+    # before the missing-trigger finding.
+    labeled_case("41i an on: block with no pull_request event is a trigger "
+                 "finding", "  push:\n    branches: [main]\n", 1,
+                 "has no pull_request event")
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -8088,7 +9620,7 @@ def self_test():
 
 
 
-# D-400-SPECIAL-FILE-PRECHECK order, QA round 10 (premise change): rounds 8, 9 and 10 each
+# SPECIAL-FILE-PRECHECK order, QA round 10 (premise change): rounds 8, 9 and 10 each
 # found a YAML form the piecemeal per-line value allowlist accepted while a real YAML parser read
 # it differently (escaped-quote names, escaped mapping keys decoding to BASH_ENV, a with: entry
 # with no colon opening a multi-line scalar that hid the precheck step). Extending that allowlist
@@ -8121,6 +9653,20 @@ _GRAMMAR_FLOW_SEQ_RE = re.compile(r"^\[[A-Za-z0-9_.-]+(?:, [A-Za-z0-9_.-]+)*\]$"
 # refused.
 REVIEWED_PLAIN_SCALARS = frozenset(("${{ join(needs.*.result, ' ') }}",))
 
+# The pinned workflow lines the LANES rule holds, read here by their EXACT BYTES, indentation
+# included: the two value lines of quality.yml's top-level concurrency: block (CONCURRENCY_BLOCK)
+# and the heavy jobs' job-level if: (HEAVY_JOB_IF_LINE). Each carries quote characters and YAML
+# indicators the plain-scalar production refuses wholesale, so each is accepted by name rather
+# than by widening a production, and the step model admits each only at its one key (a
+# workflow-level concurrency: of exactly those two entries; a job-level if:). Neither can neuter
+# the precheck step while the job's gates run: the if: can only skip the whole job, the precheck
+# step with it, and the concurrency block can only cancel a run, which Quality gates reads as not
+# success. Any other spelling, or the same text at another indentation, stays refused.
+REVIEWED_WORKFLOW_LINES = frozenset((CONCURRENCY_BLOCK[1], CONCURRENCY_BLOCK[2], HEAVY_JOB_IF_LINE))
+# A '- ' item that is one plain job id, the block form of the aggregate job's needs: list (the one
+# scalar item the grammar reads; the step model admits it only under a job-level needs: key).
+_GRAMMAR_NEEDS_ITEM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
 # QA round 12 (codex MEDIUM = claude m1): the setup-python python-version: value the order guard
 # accepts at or before the precheck: a literal version string (a letter or digit first, at least
 # one digit, then only letters, digits, '.', '_', '+' and '-'), such as 3.14, 3.x, 3.13t or
@@ -8133,10 +9679,13 @@ _YAML_NUMBER_RE = re.compile(
 _SETUP_PYTHON_VERSION_RE = re.compile(r"^(?=[^0-9]*[0-9])[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 WORKFLOW_LEVEL_KEYS = ("jobs", "name", "on", "permissions")
-# if: and needs: are modelled ONLY for the required-status aggregate shape: a job-level if: must
-# be exactly the always-run condition (any other value can skip the job and its gates; the
-# required-status rule holds the aggregate to it), and needs: only sequences jobs (a needed-job
-# failure is visible in the needs results the pinned aggregate body reads).
+# if: and needs: are modelled ONLY for the shapes the LANES and required-status rules pin: a
+# job-level if: must be exactly the always-run condition (the required-status rule holds the
+# aggregate to it) or the heavy jobs' pinned HEAVY_JOB_IF_LINE value (the LANES rule holds it to
+# the HEAVY_JOBS jobs; it can only skip the whole job, its precheck step with it); any other value
+# can skip the job and its gates. needs: only sequences jobs (a needed-job failure is visible in
+# the needs results the pinned aggregate body reads), as a plain scalar, a one-line flow sequence
+# or the block list of plain job ids quality.yml uses.
 JOB_LEVEL_KEYS = ("name", "runs-on", "steps", "strategy", "if", "needs")
 # shell: is modelled ONLY as STEP_SHELL_LINE (shell: bash), the line the required-status rule holds on
 # every quality.yml run: step: any other shell value, and a shell: on a step with no run: key, is a
@@ -8171,7 +9720,12 @@ def _workflow_line_grammar(text, source):
                single-quoted scalar with no quote inside (_GRAMMAR_QUOTED_RE, stored DECODED),
                or a single-line flow sequence of plain items (_GRAMMAR_FLOW_SEQ_RE);
       item     '<indent>- ' followed by exactly one mapping production (the item opens a nested
-               mapping two columns deeper);
+               mapping two columns deeper), or by one plain job id ([A-Za-z_][A-Za-z0-9_-]*),
+               the block form of a needs: list, which the step model admits only directly
+               under a job-level needs: key;
+      pinned   a line equal byte for byte, indentation included, to one of
+               REVIEWED_WORKFLOW_LINES (the LANES rule's concurrency: value lines and heavy-job
+               if: line), read as that key and its value;
       block    '<indent><key>: |' or '<indent><key>: |-', then a literal block whose first line
                sits exactly two spaces past the key (that sets the block's YAML indentation) and
                whose lines are consumed as OPAQUE text, never comment-stripped (inside a literal
@@ -8187,7 +9741,7 @@ def _workflow_line_grammar(text, source):
 
     root is ('map', entries); entries are (key, line, node) tuples where node is ('scalar', text
     or None for a bare key with no nested content), ('flowseq', items), ('block', lines,
-    line_numbers), ('map', entries) or ('seq', ((line, map_node), ...))."""
+    line_numbers), ('map', entries) or ('seq', ((line, map_node or ('item', job id)), ...))."""
     diagnostics = []
     toks = []
 
@@ -8231,6 +9785,13 @@ def _workflow_line_grammar(text, source):
             refuse(number, raw, indent, False, False,
                    "indentation is not a multiple of two spaces")
             continue
+        if raw in REVIEWED_WORKFLOW_LINES:
+            # A pinned LANES line, by exact bytes (REVIEWED_WORKFLOW_LINES): read as its key and
+            # its value; the step model admits it only at its one key.
+            key, value = body.split(": ", 1)
+            toks.append({"n": number, "ind": indent, "dash": False, "bad": False, "key": key,
+                         "key_col": indent, "vkind": "scalar", "value": value, "q": False})
+            continue
         dash = False
         key_col = indent
         if body == "-" or body.startswith("- "):
@@ -8240,6 +9801,12 @@ def _workflow_line_grammar(text, source):
             if not body or body[0] in (" ", "-"):
                 refuse(number, raw, indent, True, False,
                        "a sequence item must carry exactly one mapping entry after '- '")
+                continue
+            if _GRAMMAR_NEEDS_ITEM_RE.match(body):
+                # One plain job id: the block form of a needs: list. The step model admits such an
+                # item only directly under a job-level needs: key (_stray_job_id_items).
+                toks.append({"n": number, "ind": indent, "dash": True, "bad": False,
+                             "key_col": key_col, "item": body})
                 continue
         match = _GRAMMAR_ENTRY_RE.match(body)
         if match is None:
@@ -8379,6 +9946,9 @@ def _workflow_line_grammar(text, source):
                 skip_deeper(t["ind"])
                 continue
             pos += 1
+            if "item" in t:
+                items.append((t["n"], ("item", t["item"])))
+                continue
             items.append((t["n"], parse_map(ind + 2, t)))
         return ("seq", tuple(items))
 
@@ -8458,7 +10028,7 @@ def _workflow_step(item_map, line, source, diagnostics, run_line_numbers):
     plain scalar or a literal block (its body OPAQUE, kept verbatim); env:/with: must be block
     mappings of scalar entries, and an env entry naming an execution-control variable is
     refused (env-override)."""
-    step = dict(uses=None, run=[], env=[], withs=[], keys=set(), line=line)
+    step = dict(uses=None, run=[], env=[], withs=[], keys=set(), line=line, name=None)
     entries = item_map[1]
     first = entries[0] if entries else None
     if (first is None or first[0] not in ("name", "uses")
@@ -8480,6 +10050,8 @@ def _workflow_step(item_map, line, source, diagnostics, run_line_numbers):
                                    "value".format(key)))
             elif key == "uses":
                 step["uses"] = child[1]
+            else:
+                step["name"] = child[1]
         elif key == "shell":
             # The plain shell: bash line only (a quoted 'bash' decodes to the same text but carries
             # the quoted marker, so it is refused here, as the required-status rule refuses it).
@@ -8537,25 +10109,71 @@ def _workflow_step(item_map, line, source, diagnostics, run_line_numbers):
     return step
 
 
+def _stray_job_id_items(node, path=()):
+    """The line numbers of the '- <job id>' items (('item', job id) nodes) under node anywhere
+    but directly under a job-level needs: key (jobs.<job id>.needs), the one place the step
+    model admits that block form."""
+    kind = node[0]
+    if kind == "map":
+        for key, _number, child in node[1]:
+            yield from _stray_job_id_items(child, path + (key,))
+    elif kind == "seq":
+        for number, item in node[1]:
+            if item[0] == "item":
+                if not (len(path) == 3 and path[0] == "jobs" and path[2] == "needs"):
+                    yield number
+            else:
+                yield from _stray_job_id_items(item, path + ("-",))
+
+
+# The pinned concurrency: block as the step model stores it (CONCURRENCY_BLOCK's two value
+# lines, which the grammar reads by exact bytes through REVIEWED_WORKFLOW_LINES), and the heavy
+# jobs' pinned job-level if: value (HEAVY_JOB_IF_LINE).
+_PINNED_CONCURRENCY = tuple((line.strip().split(": ", 1)[0], ("scalar", line.strip().split(": ", 1)[1]))
+                            for line in CONCURRENCY_BLOCK[1:])
+_HEAVY_JOB_IF_VALUE = HEAVY_JOB_IF_LINE.strip().split(": ", 1)[1]
+
+
 def _workflow_step_model(text, source):
     """(jobs, job_names, run_line_numbers, diagnostics): the per-job step model (and each
     job's modelled name: value), built ONLY from lines the
     line grammar accepted. Semantic allowlists on top of the grammar, kept from the earlier
     rounds: workflow-level keys must be the plain spellings of WORKFLOW_LEVEL_KEYS (an env: or
     defaults: there is an inherited execution control that can neuter the precheck step without
-    touching its run body; QA round 5 claude M1, round 6 codex M3); jobs: must be a bare key
+    touching its run body; QA round 5 claude M1, round 6 codex M3), and a workflow-level
+    concurrency: is admitted only as exactly the LANES rule's pinned block (CONCURRENCY_BLOCK:
+    its group: and cancel-in-progress: entries, in that order, each its pinned value; it can
+    only cancel a run, never neuter a step); jobs: must be a bare key
     over a block mapping of job ids; job-level keys must be the plain spellings of
-    JOB_LEVEL_KEYS (an env:, defaults:, if:, continue-on-error: or container: above all); name:
+    JOB_LEVEL_KEYS (an env:, defaults:, continue-on-error: or container: above all); a
+    job-level if: is exactly always() or the heavy jobs' pinned HEAVY_JOB_IF_LINE value (it
+    can only skip the whole job, its precheck step with it; the LANES rule holds where it
+    may stand); needs: is a plain scalar, a one-line flow sequence or a block list of plain
+    job ids; name:
     and runs-on: must carry modelled scalars; steps: must be a block sequence of step mappings
-    (see _workflow_step). The strategy: subtree is grammar-parsed but not semantically modelled
+    (see _workflow_step). A '- <job id>' item anywhere but directly under a job-level needs:
+    is refused. The strategy: subtree is grammar-parsed but not semantically modelled
     (the byte-canon matrix uses it); the on: and permissions: subtrees likewise."""
     root, diagnostics = _workflow_line_grammar(text, source)
+    for number in _stray_job_id_items(root):
+        diagnostics.append(_diagnostic(source, number, "step-shape",
+                           "a '- ' item carrying one plain job id is modelled only directly "
+                           "under a job-level needs: key (the block form of that list)"))
     jobs = {}
     job_names = {}
     run_line_numbers = set()
     jobs_node = None
     for key, number, child in root[1]:
-        if key not in WORKFLOW_LEVEL_KEYS:
+        if key == "concurrency":
+            got = (tuple((entry_key, entry_child) for entry_key, _entry_number, entry_child
+                         in child[1]) if child[0] == "map" else None)
+            if got != _PINNED_CONCURRENCY:
+                diagnostics.append(_diagnostic(source, number, "workflow-key",
+                                   "workflow-level concurrency: is modelled only as exactly "
+                                   "the pinned block CONCURRENCY_BLOCK (its group: and "
+                                   "cancel-in-progress: entries with their pinned values, in "
+                                   "that order)"))
+        elif key not in WORKFLOW_LEVEL_KEYS:
             diagnostics.append(_diagnostic(source, number, "workflow-key",
                                "unmodelled workflow-level key {!r}; only the plain spellings of "
                                "{} are modelled, and anything else (an env: or defaults: above "
@@ -8603,24 +10221,50 @@ def _workflow_step_model(text, source):
                 elif job_key == "name":
                     job_names[job_id] = job_key_child[1]
             elif job_key == "if":
-                if job_key_child[0] != "scalar" or job_key_child[1] != "always()":
+                if (job_key_child[0] != "scalar"
+                        or job_key_child[1] not in ("always()", _HEAVY_JOB_IF_VALUE)):
                     diagnostics.append(_diagnostic(source, job_key_line, "job-key",
                                        "job-level if: is modelled only as the exact value "
-                                       "always() (the required-status aggregate); any other "
-                                       "value can skip the job and every gate in it"))
+                                       "always() (the required-status aggregate) or the heavy "
+                                       "jobs' pinned HEAVY_JOB_IF_LINE value; any other value "
+                                       "can skip the job and every gate in it"))
             elif job_key == "needs":
-                if job_key_child[0] not in ("scalar", "flowseq"):
+                if not (job_key_child[0] in ("scalar", "flowseq")
+                        or (job_key_child[0] == "seq" and job_key_child[1]
+                            and all(item[0] == "item" for _n, item in job_key_child[1]))):
                     diagnostics.append(_diagnostic(source, job_key_line, "job-key",
-                                       "job-level needs: is modelled only as a plain scalar "
-                                       "or a one-line flow sequence of job ids"))
+                                       "job-level needs: is modelled only as a plain scalar, "
+                                       "a one-line flow sequence or a block list of plain job "
+                                       "ids"))
     return jobs, job_names, run_line_numbers, diagnostics
 
 
+def _is_child_status_probe_step(step):
+    """True when step is the child-status probe step exactly as the order pass models it: the
+    name CHILD_STATUS_PROBE_STEP_NAME, the one run line CHILD_STATUS_PROBE_STEP_RUN, exactly the
+    keys CHILD_STATUS_PROBE_STEP_KEYS (shell: is held to bash by the step model), and no uses:,
+    env: or with:."""
+    return (step["name"] == CHILD_STATUS_PROBE_STEP_NAME
+            and tuple(step["run"]) == (CHILD_STATUS_PROBE_STEP_RUN,)
+            and step["keys"] == CHILD_STATUS_PROBE_STEP_KEYS
+            and step["uses"] is None and not step["env"] and not step["withs"])
+
+
 def workflow_precheck_order_problems(text, source):
-    """(problems, diagnostics) for ONE workflow file (D-400-SPECIAL-FILE-PRECHECK order): every
+    """(problems, diagnostics) for ONE workflow file (SPECIAL-FILE-PRECHECK order): every
     job must carry the canonical special-file precheck step (PRECHECK_STEP_RUN_LINES, exactly
-    those run lines in that order) as its first post-checkout run step. After the checkout step
-    and before the precheck only actions/setup-python may appear (with EXACTLY ONE non-empty,
+    those run lines in that order) as the step right after its child-status probe step
+    (_is_child_status_probe_step: CHILD_STATUS_PROBE_STEP_NAME, shell: bash and the one run line
+    CHILD_STATUS_PROBE_STEP_RUN, no other key), itself the step right after setup-python: the
+    first place tools/check_child_status_coverage.py leaves for a step naming Python, since it
+    holds the probe as the step right after setup-python in every job that names Python. The
+    probe is the one run step before the precheck, and it imports only the standard library
+    under -I and reads no file of the tree but its own script, so the precheck still runs
+    before any gate or tool reads the tree (residual: the probe step is pinned exactly and
+    carries no bootstrap test, so a symlink to a FIFO or a device planted at
+    opf/tools/_child_status.py blocks that step until the job times out instead of being
+    refused by name). After the checkout step
+    and before the precheck only actions/setup-python and that probe may appear (setup-python with EXACTLY ONE non-empty,
     literal python-version: input and no other input; QA round 11, claude m1: with no explicit
     version, or an expression that can evaluate empty, setup-python falls back to READING the
     checkout's .python-version file, a read of the checkout before the precheck step runs; QA
@@ -8644,16 +10288,18 @@ def workflow_precheck_order_problems(text, source):
     required-status aggregate: its name: equals the REQUIRED_STATUS_JOB pinned name AND its
     single step's run body equals the pinned aggregate body line for line, each line as the
     step model stores it, stripped of its block indentation (a job-level if:
-    must be exactly the always-run condition, and needs: must be what the step model accepts,
-    a plain scalar or a one-line flow sequence of job ids); every other checkout-less job is
-    refused by name, as at the #400 head.
+    must be what the step model accepts, the always-run condition or the heavy jobs' pinned
+    value, and needs: likewise, a plain scalar, a one-line flow sequence or a block list of
+    plain job ids); every other checkout-less job is refused by name, as at the #400 head.
 
     QA round 10 (premise change; the round 8 to 10 codex and claude majors): the per-line value
     allowlist of rounds 8 and 9 is REPLACED by the whole-file line grammar in
     _workflow_line_grammar. Every line of the file must match exactly one production there
     (blank; full-line comment; plain-keyed mapping line carrying a restricted plain scalar, a
     simple single-quoted scalar or a single-line flow sequence of plain items; a '- ' sequence
-    item of the same form; a literal block 'key: |' or 'key: |-' consumed as opaque text), or
+    item of the same form, or of one plain job id, admitted by the step model only directly
+    under a job-level needs:; one of the LANES rule's pinned lines, REVIEWED_WORKFLOW_LINES, by
+    exact bytes; a literal block 'key: |' or 'key: |-' consumed as opaque text), or
     the guard refuses with the line number and a named reason and the file cannot pass.
     Indentation must step by exactly two spaces and duplicate keys within one mapping are
     refused. The step model is built ONLY from accepted lines (_workflow_step_model), and this
@@ -8663,7 +10309,8 @@ def workflow_precheck_order_problems(text, source):
 
     KNOWN-REFUSED COMMON FORMS (QA round 10 claude m1; QA round 11 claude m3): the grammar
     refuses forms real-world workflows commonly use; this repository's own workflows use none
-    of them and every refusal is loud and named. The most common first: an inline comment on a
+    of them (quality.yml's pinned concurrency: and heavy-job if: lines carry quotes, and are
+    read by exact bytes instead) and every refusal is loud and named. The most common first: an inline comment on a
     structural line (above all the 'uses: pkg@<sha> # vX.Y.Z' action SHA-pin idiom), an
     INDENTLESS sequence (a '- ' item at the same column as its steps: key, the layout GitHub's
     starter workflows generate; it is two-space indentation, so it is refused as a sequence
@@ -8701,13 +10348,15 @@ def workflow_precheck_order_problems(text, source):
     refuses a tools path wherever the model did not capture it.
 
     HOST-PATCH EXEMPTION (disclosed residual): in .github/workflows/quality.yml alone, the jobs
-    opf-host-patch and git-fixture-env-host-patch (PRECHECK_ORDER_EXEMPT_JOBS, matched by exact
+    opf-host-patch, git-fixture-env-core-host-patch, git-fixture-env-config-combined-host-patch,
+    git-fixture-env-config-malformed-host-patch and git-fixture-env-config-system-host-patch
+    (PRECHECK_ORDER_EXEMPT_JOBS, matched by exact
     job id) are not required to carry the canonical precheck step: tools/check_python_host_pin.py
-    holds each of those two jobs whole (every step with exactly name, run and shell: bash, its
+    holds each of those five jobs whole (every step with exactly name, run and shell: bash, its
     own gate as the step right after setup-python, then the job's suites in order) and refuses
     any inserted step, the canonical special-file precheck step included, so requiring the step
     there and keeping that exact job model cannot both hold; the exact job model is the stricter
-    guard over those two jobs and stands unchanged. The residual: those two jobs run their gates
+    guard over those five jobs and stands unchanged. The residual: those five jobs run their gates
     and suites on a tree no workflow precheck step walked. The same job ids in any other
     workflow file, and every other job of quality.yml, stay held to the precheck-first order."""
     jobs, job_names, run_line_numbers, diagnostics = _workflow_step_model(text, source)
@@ -8860,7 +10509,23 @@ def workflow_precheck_order_problems(text, source):
             if s["uses"]:
                 problems.append("{} runs action {!r} before checkout and before the special-file "
                                 "precheck".format(where, s["uses"]))
+        # The precheck's one position: the step right after the child-status probe step, itself
+        # the step right after setup-python (the first place tools/check_child_status_coverage.py
+        # leaves for a step naming Python). The probe step so placed is the one run step allowed
+        # before the precheck; anywhere else it is a run step before the precheck like any other.
+        probe_at = precheck - 1
+        probe_placed = (probe_at > checkout + 1
+                        and _is_child_status_probe_step(job_steps[probe_at])
+                        and bool(job_steps[probe_at - 1]["uses"])
+                        and job_steps[probe_at - 1]["uses"].startswith("actions/setup-python@"))
+        if not probe_placed:
+            problems.append("{} does not run the special-file precheck as the step right after "
+                            "the child-status probe step (name: {}, shell: bash and run: {}, "
+                            "exactly), itself the step right after setup-python".format(
+                                where, CHILD_STATUS_PROBE_STEP_NAME, CHILD_STATUS_PROBE_STEP_RUN))
         for s in job_steps[checkout + 1:precheck]:
+            if probe_placed and s is job_steps[probe_at]:
+                continue
             if s["run"]:
                 problems.append("{} runs {!r} before the special-file precheck".format(
                     where, s["run"][0]))
@@ -8886,9 +10551,9 @@ def precheck_order_report(workflows_dir=None):
     """(problems, diagnostics) across EVERY workflow file (.github/workflows/*.yml and *.yaml,
     sorted), each read through read_runner_text, the one byte-level reader. An unreadable directory
     or an empty listing is a diagnostic (cannot-evaluate), never a clean pass: this is the check that
-    holds every CI job in every workflow file, not just quality.yml, to the precheck-first order
-    (D-400-SPECIAL-FILE-PRECHECK), so a job added in a NEW workflow file cannot run a gate on an
-    unchecked tree."""
+    holds every CI job in every workflow file, not just quality.yml, to the precheck order (the
+    precheck right after the child-status probe; SPECIAL-FILE-PRECHECK), so a job added in a NEW
+    workflow file cannot run a gate on an unchecked tree."""
     import os
     directory = Path(workflows_dir) if workflows_dir is not None else ROOT / ".github" / "workflows"
     problems, diagnostics = [], []
@@ -8935,7 +10600,7 @@ def main(argv=None):
         return self_test()
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+    from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
     precheck_special_files(ROOT)
     report = run_paths(LOCAL_PATH, CI_PATH, extra_ci_paths=CI_WORKFLOWS[1:])
     print(render(report))
@@ -8955,7 +10620,8 @@ def main(argv=None):
     else:
         print("STANDALONE RUNNER: opf/tools/run_all_checks.sh carries the bootstrap and precheck "
               "and extracts cleanly under the shared grammar.")
-    # D-400-SPECIAL-FILE-PRECHECK order: every job in every workflow file, precheck first.
+    # SPECIAL-FILE-PRECHECK order: every job in every workflow file, the precheck right after the
+    # child-status probe.
     order_problems, order_diagnostics = precheck_order_report()
     if order_diagnostics:
         code = 2
@@ -8971,7 +10637,8 @@ def main(argv=None):
             print("  - " + problem)
     else:
         print("PRECHECK ORDER: every workflow job runs the canonical special-file precheck step "
-              "before any other post-checkout run step, except the two host-patch jobs of "
+              "right after its child-status probe step (itself right after setup-python) and "
+              "before any other post-checkout run step, except the five host-patch jobs of "
               "quality.yml, which tools/check_python_host_pin.py holds whole and which refuse "
               "any inserted step (the disclosed residual).")
     return code

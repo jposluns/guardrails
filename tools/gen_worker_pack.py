@@ -35,7 +35,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, read_source_text, reconcile, target_dir_present  # noqa: E402
 from gen_rules import parse_source, load_corpus, CID_RE, SLUG_RE  # noqa: E402
 
 SOURCE_REL = ".aiqt/core/profiles/worker-pack.md"
@@ -109,6 +109,9 @@ def run(root, check):
         return 2
     target = root / TARGET_REL
     if check:
+        # The same directory probe reconcile runs, before this raw-byte read: a .claude/ that resolves outside
+        # the repository exits 2, never read through and reported clean.
+        target_dir_present(target, root)
         try:
             current = target.read_bytes() if target.exists() else None
         except OSError as exc:
@@ -118,7 +121,7 @@ def run(root, check):
             print("drift: {} is out of date; run tools/gen_worker_pack.py".format(TARGET_REL))
             return 1
         return 0
-    if reconcile(target, body, check):
+    if reconcile(target, body, check, root):
         print("drift: {} is out of date; run tools/gen_worker_pack.py".format(TARGET_REL))
         return 1
     return 0
@@ -143,7 +146,9 @@ def main():
 #   (e) a CRLF-only rewrite of the published target fails --check (exit 1): the leg that goes red if the
 #       raw-byte comparison regresses to a newline-normalizing text compare;
 #   (f) an invalid-UTF-8 SOURCE fails closed (exit 2); an invalid-UTF-8 published target is plain byte
-#       drift under the raw-byte comparison, covered by the (b) and (e) legs.
+#       drift under the raw-byte comparison, covered by the (b) and (e) legs;
+#   (g) a .claude/ symlinked outside the root fails closed (exit 2) in --check and write mode, the published
+#       pack there untouched; symlinked inside the root, it is read and rewritten.
 
 _RULE_SRC = """---
 corpus-id: {cid}
@@ -258,6 +263,11 @@ def self_test_main():
         (undec / ".aiqt" / "core" / "profiles" / "worker-pack.md").write_bytes(b"\xff\xfe not utf-8")
         if run_quiet(undec, check=True) != 2:
             failures.append("invalid-UTF-8 source expected exit 2 (fail-closed)")
+
+        # (g) .claude/ symlinked outside the root fails closed (exit 2) in --check and write mode with the
+        #     published pack there untouched; symlinked inside the root, it is read and rewritten.
+        failures.extend(linked_dir_failures(tmp, "claude", lambda base: _build(base, "selfw1, selfw2"), run,
+                                            ".claude", TARGET_REL))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -269,7 +279,9 @@ def self_test_main():
     print("SELF-TEST PASS: a conformant tree generates with the published bytes equal to the expected "
           "body and regenerates drift-clean; a planted drifted target and a CRLF-only published target "
           "each fail --check (exit 1, red without the byte-exact gate); and an unresolved restates "
-          "corpus-id, a source missing restates, and an invalid-UTF-8 source all fail closed (exit 2)")
+          "corpus-id, a source missing restates, and an invalid-UTF-8 source all fail closed (exit 2); a "
+          ".claude/ symlinked outside the root fails closed (exit 2) with the pack there untouched, and one "
+          "symlinked inside the root is read and rewritten")
     return 0
 
 

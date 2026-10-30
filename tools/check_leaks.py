@@ -583,6 +583,34 @@ def read_archive(data):
             yield member, texts
 
 
+def _check_archive_size(data):
+    """Raise CannotEvaluate when a ZIP archive's bytes read are over MAX_ARCHIVE_FILE_SIZE. _read_bytes stops
+    one byte past that bound, so bytes read over it mean the file is larger and the rest was never read; the
+    bound is checked on the bytes actually read, never on the stat size."""
+    if len(data) > MAX_ARCHIVE_FILE_SIZE:
+        raise CannotEvaluate("a ZIP archive of more than MAX_ARCHIVE_FILE_SIZE ({}) bytes; the read stopped "
+                             "at {} bytes and the rest was not read".format(MAX_ARCHIVE_FILE_SIZE, len(data)))
+
+
+def verify_archive(path):
+    """The archive rule as one predicate, for a caller that needs the verdict and not the members' text: the
+    internal-names gate skips a tracked .zip as binary only when this accepts it, so the two gates hold one
+    definition of a readable archive. The file is read as read_scan_text reads an archive (_read_bytes,
+    through one descriptor, stopping one byte past MAX_ARCHIVE_FILE_SIZE for a name ending in .zip in any
+    case or content opening with a ZIP signature), checked against that bound (_check_archive_size), and
+    every member is read by read_archive, which applies every check it states (the directory checks, the
+    records tiling the file, each member read in full under zipfile's CRC and header checks, its data
+    matched and its content decoded). Returns the bytes read, the whole file, when every member was read in
+    full; raises CannotEvaluate with the first refusal (naming the member when one member is the cause), or
+    OSError on a read error. It makes no stat probe and scans no text: the caller classifies the path before
+    the open (an open of a FIFO blocks) and scans what it needs."""
+    data = _read_bytes(path)
+    _check_archive_size(data)
+    for _member in read_archive(data):
+        pass
+    return data
+
+
 def read_scan_text(path):
     """Read one walked file for the scan. Returns (texts, lossless, archive): texts and lossless as
     decode_views returns them, and archive None; or, for a ZIP archive (_is_zip), texts holding the
@@ -599,9 +627,7 @@ def read_scan_text(path):
         raise CannotEvaluate("not a regular file; its content was never opened")
     data = _read_bytes(path)
     if _is_zip(path.name, data):
-        if len(data) > MAX_ARCHIVE_FILE_SIZE:
-            raise CannotEvaluate("a ZIP archive of more than MAX_ARCHIVE_FILE_SIZE ({}) bytes; the read stopped "
-                                 "at {} bytes and the rest was not read".format(MAX_ARCHIVE_FILE_SIZE, len(data)))
+        _check_archive_size(data)
         return (data.decode("utf-8", errors="surrogateescape"),), False, read_archive(data)
     texts, lossless = decode_views(data, path)
     return texts, lossless, None
@@ -765,7 +791,9 @@ def main():
 #      5y. a member name that is a deflate stream of a private IP or holds a control character, a NUL or a
 #      no-break space is CANNOT EVALUATE naming the member and the character, with no member read, a name
 #      that does not decode as UTF-8 under flag bit 11 is a corrupt archive, and printable non-ASCII names
-#      are read,
+#      are read; 5z. verify_archive (the archive rule as one predicate, which the internal-names gate calls)
+#      returns a clean archive's bytes and refuses a CRC-failing member, bytes ahead of the records and an
+#      archive over the size bound with the reason and member the scan names for the same file,
 #   6. a non-regular file (injected FIFO mode) is CANNOT EVALUATE (exit 2, naming it), its content
 #      NEVER read (the read seam raises for it, so a read-before-classification regression shows as a
 #      read error, not the CANNOT EVALUATE line); 6b. a symlink to a regular file is followed and its
@@ -1590,6 +1618,42 @@ def self_test_main():
                 failures.append("an archive whose member name is printable non-ASCII text expected exit 0 with "
                                 "its member scanned (case {}; got {}: {!r})".format(label, rc, out))
 
+        # 5z. verify_archive, the archive rule as one predicate (the internal-names gate's binary skip), gives
+        #     the scan's verdict on the same file: it returns the whole file for a clean archive the scan
+        #     passes, and for an archive the scan refuses (a member failing its CRC, two bytes ahead of the
+        #     records, the archive one byte over the archive-size bound) it raises CannotEvaluate with the
+        #     reason and member the scan's CANNOT EVALUATE line names. A verify_archive that drops the size
+        #     check, reads no member, or opens the archive without read_archive's records check returns for
+        #     one of them instead.
+        verified = tmp / "verify-archive"
+        verified.mkdir()
+        for name, blob, bound in (("clean.zip", plain, len(plain)),
+                                  ("crc.zip", plain[:flipped] + bytes([plain[flipped] ^ 0x01]) + plain[flipped + 1:],
+                                   len(plain)),
+                                  ("prefixed.zip", b"MZ" + plain, len(plain) + 2),
+                                  ("over.zip", plain, len(plain) - 1)):
+            (verified / name).write_bytes(blob)
+            files = dict(clean_files)
+            files["site/downloads/" + name] = blob
+            module.MAX_ARCHIVE_FILE_SIZE = bound
+            try:
+                try:
+                    verdict = verify_archive(verified / name)
+                except CannotEvaluate as exc:
+                    verdict = exc
+                rc, out = run_capture(tree("verify-" + name, files))
+            finally:
+                module.MAX_ARCHIVE_FILE_SIZE = real_bound
+            if name == "clean.zip":
+                if verdict != blob or rc != 0:
+                    failures.append("verify_archive expected to return a clean archive's bytes where the scan "
+                                    "passes (case 5z; got {!r}, scan {}: {!r})".format(verdict, rc, out))
+            elif not isinstance(verdict, CannotEvaluate) or (
+                    "CANNOT EVALUATE (not read in full): site/downloads/{}{} ({})".format(
+                        name, "" if verdict.member is None else "!" + verdict.member, verdict) not in out):
+                failures.append("verify_archive expected to refuse {} with the scan's own CANNOT EVALUATE reason "
+                                "(case 5z; got {!r}, scan {}: {!r})".format(name, verdict, rc, out))
+
         # 6. a non-regular file is CANNOT EVALUATE (exit 2, naming it), its content never read.
         #    Deterministic: the stat seam reports a FIFO mode for one fixture file, so the case runs on
         #    every runner (no /dev/null dependency). The read seam RAISES for that file, so a scan that
@@ -1699,11 +1763,70 @@ def self_test_main():
           "character, a NUL or a no-break space in it), an encrypted, unsupported-method, nested, "
           "CRC-failing, undecodable or size-misstated member, a member with a second deflate stream or one "
           "that never ends, an injected non-regular file (its content never read: its read seam raises if it is) and a symlinked "
-          "directory are each CANNOT EVALUATE (exit 2, naming it), never a skip; and a dangling symlink, "
+          "directory are each CANNOT EVALUATE (exit 2, naming it), never a skip; verify_archive, the archive "
+          "rule as one predicate (the internal-names gate's binary skip), returns a clean archive's bytes and "
+          "refuses a CRC-failing member, bytes ahead of the records and an archive over the size bound with "
+          "the reason and member the scan names; and a dangling symlink, "
           "an injected unreadable file, and a BOM-declared stream that decodes as neither declared "
           "candidate each fail closed (exit 2, naming the file)")
     return 0
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("check_leaks.py") or main())

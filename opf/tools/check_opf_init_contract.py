@@ -32,7 +32,7 @@ from pathlib import Path
 # Import the sibling containment module WITHOUT placing this script's own directory ahead of the stdlib
 # on sys.path (the house append idiom keeps stdlib precedence under `python3 -I`).
 sys.path.append(str(Path(__file__).resolve().parent))
-import _containment  # noqa: E402  precheck_special_files (D-400-SPECIAL-FILE-PRECHECK)
+import _containment  # noqa: E402  precheck_special_files (SPECIAL-FILE-PRECHECK)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -275,10 +275,72 @@ def _self_test():
     sys.exit(0)
 
 
-if __name__ == "__main__":
+def main():
+    """The gate's entry, after the child-status guard: the self-test with --self-test, else the live
+    checks; each ends the process itself (sys.exit)."""
     if "--self-test" in sys.argv:
         _self_test()
-    # D-400-SPECIAL-FILE-PRECHECK before the live leg reads any repository file (runpy on the validator
+    # SPECIAL-FILE-PRECHECK before the live leg reads any repository file (runpy on the validator
     # source above all), so this gate can never block on a plain read of a FIFO planted in the tree.
     _containment.precheck_special_files(ROOT)
     _checks()
+
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in opf/tools/_containment.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
+if __name__ == "__main__":
+    sys.exit(_child_status_refusal_exit("check_opf_init_contract.py") or main())

@@ -19,6 +19,10 @@ built to FAIL if its fix is reverted, so the selftest is the durable guard the f
      (a fail-open returning a clean 0 while reconciling nothing), and an empty target set raises rather
      than passing clean.
 
+  3. A directory above a target that is a symlink resolving outside the root is refused (exit 2) by the
+     shared reconcile before any read or write, and one resolving inside the root is followed; for a block
+     target the same probe runs before its page is read, so a page there without markers is never read.
+
 Every fixture is synthetic and assembled in a tempdir; opf_render.repo_root is redirected to it so no
 real file is read or written. Exit convention matches the repo's selftests: 0 pass, 1 fail, 2 error.
 """
@@ -44,6 +48,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import opf_render  # noqa: E402
+from _gen_common import linked_dir_failures  # noqa: E402
 from opf_render import run_generator, FileTarget, BlockTarget  # noqa: E402
 
 SOURCE = "source.toml"
@@ -157,6 +162,28 @@ def _selftest(root, failures):
     else:
         failures.append("empty targets: an empty target set must raise (fail closed), not pass clean")
 
+    # (h) A directory above a target symlinked outside the root: --check and write mode exit 2 (reconcile's
+    #     directory probe) with the target there untouched; symlinked inside the root, it is read and rewritten.
+    def build(base):
+        (base / SOURCE).write_text("probe = 1\n", encoding="utf-8")
+        (base / "site").mkdir()
+
+    def run(base, check):
+        return _run(base, ["--check"] if check else [], (FileTarget("site/out.md", _fresh),))[0]
+    failures.extend(linked_dir_failures(root / "linked", "site", build, run, "site", "site/out.md"))
+
+    # (i) The same for a block target, whose page is read to splice the block: symlinked outside the root, the
+    #     page there has no markers and each run prints the link refusal, not the markers error, so the page is
+    #     never read through the link; symlinked inside the root, it is read and the block rewritten.
+    def build_page(base):
+        build(base)
+        (base / "site" / "page.html").write_text(BEGIN + "\nOLD\n      " + END + "\n", encoding="utf-8")
+
+    def run_page(base, check):
+        return _run(base, ["--check"] if check else [], (BlockTarget("site/page.html", "ROADMAP", _fresh),))[0]
+    failures.extend(linked_dir_failures(root / "linked-page", "page", build_page, run_page, "site", "site/page.html",
+                                        unread=lambda p: p.write_text("no markers here\n", encoding="utf-8")))
+
 
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-opf-render-selftest-"))
@@ -182,10 +209,68 @@ def main():
           "earlier target's drift line prints and its file is written before a later target's "
           "materialization failure aborts the run (--check and write, missing-page and markerless); a "
           "schema error on a later target aborts before an earlier target is reconciled; a one-shot "
-          "iterator target is reconciled rather than silently skipped; and an empty target set fails "
-          "closed by raising")
+          "iterator target is reconciled rather than silently skipped; an empty target set fails "
+          "closed by raising; and a directory above a whole-file or block target symlinked outside the root "
+          "fails closed (exit 2) with the target there untouched and the page never read, while one "
+          "symlinked inside the root is read")
     return 0
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("selftest_opf_render.py") or main())

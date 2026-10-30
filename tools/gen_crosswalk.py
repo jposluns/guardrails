@@ -55,7 +55,7 @@ import stat
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 
 try:
     import tomllib
@@ -143,9 +143,10 @@ def render_schema():
 
 
 def run_repo(root, check):
-    if not check:
-        (root / SCHEMA_REL).parent.mkdir(parents=True, exist_ok=True)
-    drifted = reconcile(root / SCHEMA_REL, render_schema(), check)   # fail-closes (exit 2) on I/O error
+    # make_parents: the schema's directory is created inside reconcile, after its directory probe, so a
+    # .aiqt/ that resolves outside the repository is refused before anything is made there. reconcile
+    # fail-closes (exit 2) on an I/O error too.
+    drifted = reconcile(root / SCHEMA_REL, render_schema(), check, root, make_parents=True)
     if not check:
         print("wrote {}".format(SCHEMA_REL))
         return 0
@@ -884,11 +885,36 @@ def self_test():
         quiet(run_repo, good, False)
         if (good / SCHEMA_REL).read_text(encoding="utf-8") != first:
             failures.append("REPO mode is not deterministic")
+        # (a2) A tree with no .aiqt/ yet: write mode makes the schema's directories (make_parents, after the
+        #      directory probe) and writes it, exit 0.
+        fresh = tmp / "fresh"
+        fresh.mkdir()
+        got = quiet(run_repo, fresh, False)
+        if got != 0 or not (fresh / SCHEMA_REL).is_file():
+            failures.append("REPO generate in a tree without .aiqt/ expected exit 0 with the schema written there "
+                            "(its directories made after the probe), got exit {}".format(got))
 
         # (b) mutated schema -> exit 1.
         (good / SCHEMA_REL).write_text(first + "# tamper\n", encoding="utf-8")
         if quiet(run_repo, good, True) != 1:
             failures.append("a mutated schema reference expected exit 1 (drift)")
+
+        # (b2) .aiqt/ above the schema reference symlinked outside the root fails closed (exit 2) in --check and
+        #      write mode with the file there untouched; symlinked inside the root, it is read and rewritten. One
+        #      symlinked outside the root to an empty directory is exit 2 in write mode with nothing made there
+        #      (the schema's directory is created only after the probe).
+        def build_repo(base):
+            (base / ".aiqt" / "core" / "migration").mkdir(parents=True)
+        failures.extend(linked_dir_failures(tmp, "aiqt", build_repo, run_repo, ".aiqt", SCHEMA_REL))
+        bare, held = tmp / "bare-linked", tmp / "bare-held"
+        bare.mkdir()
+        held.mkdir()
+        (bare / ".aiqt").symlink_to(held)
+        got = quiet(run_repo, bare, False)
+        made = sorted(p.name for p in held.iterdir())
+        if got != "raised SystemExit(2)" or made:
+            failures.append("a .aiqt/ symlinked outside the root to an empty directory expected exit 2 with nothing "
+                            "made there, got exit {} and {}".format(got, made))
 
         # (c) ADOPTER archive-first: raw bytes under the sha256 dir name.
         legacy = tmp / "legacy"
@@ -1203,5 +1229,61 @@ def self_test():
     return 0
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("gen_crosswalk.py") or main())

@@ -786,7 +786,12 @@ def _discover_md(docs_root, root):
     return sorted(found)
 
 
-def main(argv):
+def main(argv=None):
+    if argv is None:
+        # The process entry: --self-test anywhere in the arguments runs the self-test, as before.
+        if "--self-test" in sys.argv[1:]:
+            return _self_test()
+        argv = sys.argv[1:]
     check = "--check" in argv
     root = repo_root()
     docs_root = root / DOCS_DIR
@@ -849,7 +854,7 @@ def main(argv):
         except SchemaError as exc:
             print("error: {}".format(exc), file=sys.stderr)
             return 2
-        if reconcile(target, page, check):
+        if reconcile(target, page, check, root):
             print("drift: {}".format(target_rel))
             drift = True
     if check and drift:
@@ -1438,6 +1443,51 @@ def _self_test():
             finally:
                 os.chmod(secret, 0o755)
                 secret.rmdir()
+        # site/ symlinked outside the root, or to a directory inside it, fails closed (exit 2) in --check and
+        # write mode with the page there untouched and nothing under it read: main() refuses a site/ that is a
+        # symlink at all, a stricter rule than reconcile's directory probe, which follows a link inside the root.
+        if symlink_ok:
+            import shutil
+
+            def _run_main_out(tmp_repo, argv):
+                """_run_main that also returns the output, reading reconcile's SystemExit as its exit code."""
+                orig = mod.repo_root
+                mod.repo_root = lambda: tmp_repo
+                buf = _io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        try:
+                            code = main(argv)
+                        except SystemExit as exc:
+                            code = exc.code
+                finally:
+                    mod.repo_root = orig
+                return code, buf.getvalue()
+
+            target_rel = _declared_md_sources()[0][1]
+            refusal = "{}/ is a symbolic link; refusing".format(SITE_DIR)
+            with tempfile.TemporaryDirectory() as outside_td:
+                for where in ("outside", "in-root"):
+                    held = Path(outside_td) / SITE_DIR if where == "outside" else td2 / "shared" / SITE_DIR
+                    held.parent.mkdir(exist_ok=True)
+                    shutil.move(str(td2 / SITE_DIR), str(held))
+                    os.symlink(held if where == "outside" else os.path.relpath(held, td2), td2 / SITE_DIR)
+                    page = held / Path(target_rel).relative_to(SITE_DIR)
+                    os.utime(page, ns=(10 ** 9, 10 ** 9))
+                    try:
+                        for argv in (["--check"], []):
+                            case_count += 1
+                            code, out = _run_main_out(td2, argv)
+                            written = os.stat(page).st_mtime_ns != 10 ** 9
+                            if code != 2 or refusal not in out or written:
+                                failures.append("site/ symlinked {} the root ({}): expected exit 2 with {!r} and {} "
+                                                "untouched, got exit {}, written {}, output {!r}".format(
+                                                    "outside" if where == "outside" else "inside",
+                                                    " ".join(argv) or "write", refusal, target_rel, code, written,
+                                                    out))
+                    finally:
+                        (td2 / SITE_DIR).unlink()
+                        shutil.move(str(held), str(td2 / SITE_DIR))
 
     _ = stat  # `stat` imported for potential platform check; retained if the fixture path grows.
 
@@ -1450,7 +1500,61 @@ def _self_test():
     return 0
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    if "--self-test" in sys.argv[1:]:
-        sys.exit(_self_test())
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(_child_status_refusal_exit("gen_site.py") or main())

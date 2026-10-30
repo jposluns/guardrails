@@ -44,7 +44,7 @@ from pathlib import Path
 # enforces this by flagging a reintroduced index-0 insertion in this file.
 sys.path.append(str(Path(__file__).resolve().parent))
 import _qa_adapter as qa  # noqa: E402
-from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 
 AUDIT_ID = "reference"
@@ -76,7 +76,7 @@ def _resolve(explicit):
 
 
 def main():
-    # D-400-SPECIAL-FILE-PRECHECK runs FIRST, before the config resolution below reads any repository
+    # SPECIAL-FILE-PRECHECK runs FIRST, before the config resolution below reads any repository
     # file (.aiqt/assurance.toml above all), so neither the digest nor the normal audit path can block
     # on a plain read of a FIFO planted in the tree.
     precheck_special_files(Path(__file__).resolve().parents[1])

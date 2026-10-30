@@ -107,7 +107,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_leaks import _tokens, ngram_forms  # noqa: E402  reuse the leak gate's n-gram normalization
-from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 
 class GateError(Exception):

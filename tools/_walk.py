@@ -49,6 +49,16 @@ def read_text_nonblocking(path, encoding="utf-8"):
     a special file; it fails closed loudly instead. A symlink is followed exactly as read_text follows
     it, bytes and decode behaviour (strict utf-8, universal newlines) are read_text's, and on a regular
     file O_NONBLOCK is a no-op, so the result is byte-identical to path.read_text(encoding=...)."""
+    return io.TextIOWrapper(io.BytesIO(read_bytes_nonblocking(path)), encoding=encoding).read()
+
+
+def read_bytes_nonblocking(path):
+    """path.read_bytes(), through ONE O_NONBLOCK descriptor, with read_text_nonblocking's refusals: the
+    open of a FIFO with no writer returns at once, and a descriptor that fstat says is not a regular
+    file is refused as OSError, so a scanner that reads raw bytes from WHATEVER its walk meets (a
+    git-ignored path the D-400 precheck does not hold, or a special file created after that walk)
+    never blocks forever; it fails closed loudly instead. A symlink is followed exactly as read_bytes
+    follows it, and on a regular file the result is byte-identical to path.read_bytes()."""
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
                      | getattr(os, "O_BINARY", 0))
@@ -66,4 +76,4 @@ def read_text_nonblocking(path, encoding="utf-8"):
             chunks.append(chunk)
     finally:
         os.close(fd)
-    return io.TextIOWrapper(io.BytesIO(b"".join(chunks)), encoding=encoding).read()
+    return b"".join(chunks)

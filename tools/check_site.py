@@ -43,7 +43,7 @@ from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files, read_text_nonblocking  # noqa: E402  fail-closed tree walk and non-blocking read
-from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 EN, EM = "–", "—"
 # Site host from AIQT_SITE_HOST (default, and empty-value fallback, aiqt.ai; lowercased), so a

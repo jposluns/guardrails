@@ -9,6 +9,19 @@ The optional .aiqt/release-cut.toml has exactly five fields:
   base-changelog-sha256 = "<SHA-256 of the complete comparison-base blob>"
 Initialization instead requires operation = "initialize", previous-version = "",
 and base-changelog-sha256 = "absent", against proven absence only.
+The optional .aiqt/pending-fixes.toml binds a hand-kept pending-fix list to one
+cut: schema = 1, release = "<the version being cut>", and a fix array of
+tables, each carrying an id and a state from open, done and deferred; a
+deferred item also carries a rationale and target. Every id, rationale and
+target must be a string holding a non-whitespace character. Appending a
+release identity is refused while any listed item is open, naming each open
+item; a cut that removes a record still listing open items is refused the
+same way, naming them. A present record that is malformed, unreadable, or a
+symlink cannot be evaluated on any transition; the release binding is checked
+only on a cut, where a record bound to another release cannot be evaluated.
+When neither snapshot holds a record, nothing changes. The list is hand-kept,
+so it shows currency for the items it names, never completeness of what is
+wrong.
 
 A declaration is author-controlled intent, not authorization or readiness.
 This reusable pack author tool is opt-in for adopters of this changelog schema.
@@ -83,13 +96,16 @@ from _semver import _parse  # noqa: E402
 
 CHANGELOG = "changelog.toml"
 DECLARATION = ".aiqt/release-cut.toml"
-PATHS = (CHANGELOG, DECLARATION)
+PENDING = ".aiqt/pending-fixes.toml"
+PATHS = (CHANGELOG, DECLARATION, PENDING)
 TIMEOUT = 30
 OID = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 DECL_KEYS = {
     "schema", "operation", "previous-version", "next-version",
     "base-changelog-sha256",
 }
+PENDING_KEYS = {"schema", "release", "fix"}
+PENDING_STATES = ("open", "done", "deferred")
 
 
 class CannotEvaluate(ValueError):
@@ -177,8 +193,37 @@ def parse_declaration(raw, label="declaration"):
     return dict(data)
 
 
+def parse_pending(raw, label="pending fixes"):
+    """Accept absent or TOML bytes for the optional pending-fix record; validate the whole record."""
+    if raw is None:
+        return None
+    data = document(raw, label)
+    require(isinstance(data, dict) and set(data) == PENDING_KEYS,
+            label + ": expected exactly the schema, release and fix fields")
+    require(type(data["schema"]) is int and data["schema"] == 1,
+            label + ": unsupported schema (expected integer 1)")
+    version(data["release"], label + ": release")
+    require(isinstance(data["fix"], list), label + ": fix must be an array of tables")
+    identifiers = set()
+    for index, item in enumerate(data["fix"]):
+        where = "{}: fix[{}]".format(label, index)
+        require(isinstance(item, dict), where + ": expected table")
+        require(item.get("state") in PENDING_STATES,
+                where + ": state must be open, done or deferred")
+        keys = {"id", "state", "rationale", "target"} if item["state"] == "deferred" else {"id", "state"}
+        require(set(item) == keys,
+                where + ": a deferred item carries exactly id, state, rationale and target;"
+                " an open or done item exactly id and state")
+        for key in keys - {"state"}:
+            require(isinstance(item[key], str) and bool(item[key].strip()),
+                    where + ": " + key + " must be a nonblank string")
+        require(item["id"] not in identifiers, where + ": duplicate fix id")
+        identifiers.add(item["id"])
+    return dict(data)
+
+
 def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
-                        base_decl, head_decl):
+                        base_decl, head_decl, base_pending=None, head_pending=None):
     """Return (exit_code, detail). Only the caller can prove that None is absence."""
     try:
         base = ([] if base_changelog_bytes_or_absent is None else
@@ -186,6 +231,8 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
         head = parse_changelog(head_changelog_bytes, "head changelog")
         base_decl = parse_declaration(base_decl, "base declaration")
         head_decl = parse_declaration(head_decl, "head declaration")
+        base_pending = parse_pending(base_pending, "base pending fixes")
+        head_pending = parse_pending(head_pending, "head pending fixes")
     except (CannotEvaluate, RecursionError) as exc:
         return 2, "cannot evaluate: " + str(exc)
     # Parse every document before deciding policy, including present stale declarations.
@@ -212,6 +259,21 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
     )
     if not authorized:
         return 1, "missing, unchanged or mismatched release declaration"
+    if head_pending is not None:
+        # The record proves currency only for the one cut it names, never completeness.
+        if head_pending["release"] != after[-1]:
+            return 2, ("cannot evaluate: pending fixes: record is bound to release "
+                       + head_pending["release"] + ", not to the appended " + after[-1])
+        open_items = [item["id"] for item in head_pending["fix"] if item["state"] == "open"]
+        if open_items:
+            return 1, "pending fixes still open: " + ", ".join(open_items)
+    elif base_pending is not None:
+        # Removing the record does not resolve its items: a cut that deletes a
+        # record still listing open items is refused like one that leaves them open.
+        removed_open = [item["id"] for item in base_pending["fix"] if item["state"] == "open"]
+        if removed_open:
+            return 1, ("pending fixes still open: " + ", ".join(removed_open)
+                       + " (record removed, not resolved)")
     # Diagnostics must remain total even when a policy guard is mutated away.
     return 0, "release transition accepted"
 
@@ -536,7 +598,7 @@ def local_report(root, protected=None, before=None):
     comparisons.extend((name, snapshot_base, binding["head_tree"]) for name in names)
     for name, base_tree, head_tree in comparisons:
         try:
-            base = ((None, None) if base_tree is None else
+            base = ((None,) * len(PATHS) if base_tree is None else
                     tuple(tree_blob(root, base_tree, path) for path in PATHS))
             if name == "HEAD" or name.startswith("commit:"):
                 candidate = tuple(tree_blob(root, head_tree, path) for path in PATHS)
@@ -544,13 +606,16 @@ def local_report(root, protected=None, before=None):
                 candidate = index_snapshot(root)
             else:
                 candidate = tuple(working_blob(root, path) for path in PATHS)
-            code, detail = evaluate_transition(base[0], candidate[0], base[1], candidate[1])
+            code, detail = evaluate_transition(base[0], candidate[0], base[1], candidate[1],
+                                               base[2], candidate[2])
             results.append({
                 "snapshot": name, "code": code, "detail": detail,
                 "base_changelog_sha256": digest(base[0]),
                 "head_changelog_sha256": digest(candidate[0]),
                 "base_declaration_sha256": digest(base[1]),
                 "head_declaration_sha256": digest(candidate[1]),
+                "base_pending_fixes_sha256": digest(base[2]),
+                "head_pending_fixes_sha256": digest(candidate[2]),
             })
         except (OSError, ValueError, RecursionError) as exc:
             results.append({"snapshot": name, "code": 2, "detail": str(exc)})
@@ -936,7 +1001,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("opf/tools/_opf_observe.py", "subprocess.run:<no-py-literal>"),
-     (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (3, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -966,7 +1031,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     (("opf/tools/check_opf_doctor.py", "spec_from_file_location:"),
      (1, "edge: opf/enforcement/claude/pretooluse_deny.py")),
     (("opf/tools/check_opf_doctor.py", "subprocess.run:<no-py-literal>"),
-     (13, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (14, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1025,15 +1090,6 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
-    (("opf/tools/check_opf_upgrade.py", "spec_from_file_location:"),
-     (1, "loads a flip copy this self-test wrote under its scratch")),
-    (("opf/tools/check_opf_upgrade.py", "subprocess.run:<no-py-literal>"),
-     (5, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
-      "launcher call, the pristine import name included, so a new launch site drifts this count and "
-      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
-      "named LIMITS residue")),
-    (("opf/tools/check_opf_upgrade.py", "subprocess.run:opf.py"),
-     (1, "launches the live opf/tools/opf.py (the path is built from __file__), an enumerated module")),
     (("opf/tools/opf.py", "subprocess.run:<no-py-literal>"),
      (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1154,12 +1210,12 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     (("tools/check_instruction_budget.py", "spec_from_file_location:"),
      (1, "loads a mutant copy this self-test wrote under its scratch")),
     (("tools/check_internal_names.py", "subprocess.run:<no-py-literal>"),
-     (11, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (21, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_internal_names.py", "subprocess.run:check_internal_names.py"),
-     (3, "relaunches tempfile-scratch copies of itself as top-level --self-test children: the "
+     (4, "relaunches tempfile-scratch copies of itself as top-level --self-test children: the "
       "hostile-sibling copy, the mutated inherited-sentinel copy and the platform-lane copy; "
       "the original is this enumerated module")),
     (("tools/check_license_qualification.py", "subprocess.run:<no-py-literal>"),
@@ -1197,11 +1253,6 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
      (1, "relaunches a scratch copy of itself; the original is this enumerated module")),
     (("tools/check_opf_enforce_platforms.py", "spec_from_file_location:"),
      (1, "edge: opf/enforcement/claude/pretooluse_deny.py")),
-    (("tools/check_opf_standalone_closure.py", "subprocess.run:<no-py-literal>"),
-     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
-      "launcher call, the pristine import name included, so a new launch site drifts this count and "
-      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
-      "named LIMITS residue")),
     (("tools/check_portability.py", "subprocess.Popen:<no-py-literal>"),
      (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1246,7 +1297,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_release_build.py", "subprocess.run:<no-py-literal>"),
-     (88, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (91, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1259,9 +1310,6 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     (("tools/check_release_build.py", "subprocess.run:tools/check_manifest.py"),
      (1, "launches tools/check_manifest.py inside a fixture checkout this self-test built; the live "
       "module is enumerated")),
-    (("tools/check_release_build.py", "subprocess.run:tools/gen_manifest.py"),
-     (3, "launches tools/gen_manifest.py inside fixture repositories this self-test built; the live "
-      "module is enumerated")),
     (("tools/check_release_cut.py", "subprocess.run:<no-py-literal>"),
      (4, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1273,16 +1321,13 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_release_delta.py", "subprocess.run:<no-py-literal>"),
-     (56, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (58, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_release_delta.py", "subprocess.run:check_release_delta.py"),
      (4, "relaunches copies of itself inside fixture repositories this self-test built; the original "
       "is this enumerated module")),
-    (("tools/check_release_delta.py", "subprocess.run:tools/gen_manifest.py"),
-     (2, "launches tools/gen_manifest.py inside fixture repositories this self-test built; the live "
-      "module is enumerated")),
     (("tools/check_selftest_execution.py", "spec_from_file_location:_selftest_exit_report.py"),
      (1, "loads the sibling tools/_selftest_exit_report.py, an enumerated module")),
     (("tools/check_selftest_execution.py", "subprocess.run:<no-py-literal>"),
@@ -1309,7 +1354,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_version_monotonicity.py", "subprocess.run:<no-py-literal>"),
-     (12, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (30, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1379,7 +1424,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/selftest_ci_status.py", "subprocess.run:<no-py-literal>"),
-     (10, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (11, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1409,7 +1454,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "and stays reviewable at this row; an argv built at runtime that names an in-tree module "
       "is the named LIMITS residue")),
     (("tools/selftest_git_fixture_env_config_system.py", "subprocess.run:<no-py-literal>"),
-     (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count "
       "and stays reviewable at this row; an argv built at runtime that names an in-tree module "
       "is the named LIMITS residue")),
@@ -1432,13 +1477,97 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
      (1, "a stdlib late import by literal name inside a hook-fixture payload; no in-tree "
       "path or computed name reaches __import__")),
     (("tools/selftest_orch_hooks.py", "subprocess.run:<no-py-literal>"),
-     (29, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (36, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/selftest_orch_hooks.py", "subprocess.run:src/a.py"),
      (1, "a git grep over the fixture repository; src/a.py is a pathspec argument of the probe, git "
       "executes no Python here")),
+    # Keys the merge of main added or moved (its new and changed gates), pinned with their exact
+    # counts; each table still only shrinks truthfully.
+    (("opf/tools/_child_status.py", "subprocess.run:<no-py-literal>"),
+     (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("opf/tools/_opf_adopt_apply.py", "spec_from_file_location:"),
+     (1, "loads a sweep-report slice this self-test wrote under its scratch (_load_sweep_report_slice)")),
+    (("opf/tools/_opf_adopt_apply.py", "subprocess.run:<no-py-literal>"),
+     (11, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("opf/tools/_opf_adopt_state.py", "subprocess.run:<no-py-literal>"),
+     (5, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("opf/tools/_opf_write_guard.py", "subprocess.run:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("opf/tools/check_opf_init.py", "subprocess.Popen:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("opf/tools/opf.py", "spec_from_file_location:_opf_emit.py"),
+     (1, "loads a private copy of the sibling opf/tools/_opf_emit.py (or the source path its caller "
+      "passes), never registered in sys.modules, in the close-out self-test vector; the live module is "
+      "enumerated")),
+    (("opf/tools/opf.py", "subprocess.run:opf.py"),
+     (1, "launches a copy of opf/tools/opf.py this self-test wrote under its scratch, beside a stand-in "
+      "_opf_worklog.py; the live module is enumerated")),
+    (("tools/check_child_status_coverage.py", "spec_from_file_location:"),
+     (2, "loads the canonical opf/tools/_child_status.py, an enumerated module (_canonical_module), and "
+      "the mutant copies of this gate its self-test writes under its scratch (_load_mutant)")),
+    (("tools/check_entry_guard.py", "subprocess.Popen:<no-py-literal>"),
+     (3, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("tools/check_gitleaks_pin.py", "subprocess.run:<no-py-literal>"),
+     (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("tools/check_opf_standalone_closure.py", "subprocess.Popen:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("tools/check_opf_standalone_closure.py", "subprocess.Popen:stub_escape.py"),
+     (1, "launches a stub script this self-test wrote under its scratch")),
+    (("tools/check_opf_standalone_closure.py", "subprocess.Popen:stub_tree.py"),
+     (1, "launches a stub script this self-test wrote under its scratch")),
+    (("tools/check_release_delta.py", "subprocess.run:gen_manifest.py"),
+     (2, "launches the live tools/gen_manifest.py (the path is built from __file__) with --root on "
+      "fixture repositories this self-test built; the live module is enumerated")),
+    (("tools/check_rule_placement.py", "spec_from_file_location:"),
+     (2, "loads the mutated copies of tools/_standards.py and of this gate its self-test writes under its "
+      "scratch (_load_probe_mutant, _load_placement_mutant)")),
+    (("tools/check_rule_placement.py", "subprocess.run:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("tools/check_verifier_delivery.py", "subprocess.Popen:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("tools/check_verifier_delivery.py", "subprocess.run:<no-py-literal>"),
+     (9, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
+    (("tools/gen_hooks.py", "subprocess.Popen:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct launcher "
+      "call, the pristine import name included, so a new launch site drifts this count and stays "
+      "reviewable at this row; an argv built at runtime that names an in-tree module is the named "
+      "LIMITS residue")),
 ))
 
 
@@ -3329,10 +3458,10 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_journal.py::read_lock_owner::os.open", 1),
     ("opf/tools/_journal.py::read_lock_owner_at::os.open", 1),
     ("opf/tools/_journal.py::reconcile_and_claim_stale::os.open", 1),
-    ("opf/tools/_opf_adopt.py::self_test::read_text", 1),
-    ("opf/tools/_opf_adopt_apply.py::_finish_ops_self_test::read_bytes", 2),
-    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::os.open", 2),
-    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::read_bytes", 20),
+    ("opf/tools/_opf_adopt.py::self_test::read_text", 2),
+    ("opf/tools/_opf_adopt_apply.py::_finish_ops_self_test::read_bytes", 3),
+    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::os.open", 18),
+    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::read_bytes", 42),
     ("opf/tools/_opf_adopt_apply.py::dir_at::os.open", 1),
     ("opf/tools/_opf_adopt_apply.py::preserved_now::read_bytes", 2),
     ("opf/tools/_opf_adopt_apply.py::read_retained::os.open", 1),
@@ -3378,7 +3507,6 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_adopt_plan.py::test_default_move_collision::read_bytes", 1),
     ("opf/tools/_opf_adopt_plan.py::test_move_requires_observed_absence::read_bytes", 1),
     ("opf/tools/_opf_adopt_plan.py::test_preservation_destination_occupied::read_bytes", 1),
-    ("opf/tools/_opf_adopt_plan.py::visit::os.open", 1),
     ("opf/tools/_opf_check.py::_list_contained::os.open", 1),
     ("opf/tools/_opf_check.py::_q_vector::os.open", 2),
     ("opf/tools/_opf_check.py::self_test::os.open", 3),
@@ -3426,7 +3554,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_journal.py::_existing_reservation::os.open", 1),
     ("opf/tools/_opf_observe.py::_capture_bounded::os.read", 1),
     ("opf/tools/_opf_observe.py::_worktree_open_succeeds::os.open", 1),
-    ("opf/tools/_opf_observe.py::self_test_isolated::open", 1),
+    ("opf/tools/_opf_observe.py::self_test_isolated::open", 3),
     ("opf/tools/_opf_oplock.py::_chmod_bound::os.open", 1),
     ("opf/tools/_opf_oplock.py::_classify_git_entry::os.open", 1),
     ("opf/tools/_opf_oplock.py::_close_then_reuse::os.open", 1),
@@ -3487,13 +3615,11 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_opf_views.py::pview::read_text", 1),
     ("opf/tools/_opf_views.py::read_view::read_text", 1),
     ("opf/tools/_opf_views.py::self_test::os.open", 8),
-    ("opf/tools/_opf_views.py::self_test::read_bytes", 4),
-    ("opf/tools/_opf_views.py::self_test::read_text", 35),
+    ("opf/tools/_opf_views.py::self_test::read_bytes", 8),
+    ("opf/tools/_opf_views.py::self_test::read_text", 38),
     ("opf/tools/_opf_worklog.py::_self_test::os.open", 1),
     ("opf/tools/_opf_worklog_regressions.py::__enter__::os.open", 1),
     ("opf/tools/_opf_worklog_regressions.py::_entry_point_census::read_text", 1),
-    ("opf/tools/_opf_worklog_regressions.py::_upgrade_preflight_regressions::read_text", 1),
-    ("opf/tools/_opf_worklog_regressions.py::snapshot::read_bytes", 2),
     ("opf/tools/_opf_write_guard.py::_read_capped::os.read", 1),
     ("opf/tools/_opf_write_guard.py::_self_test_vectors::os.open", 2),
     ("opf/tools/_opf_write_guard.py::acquire_lease::os.open", 1),
@@ -3508,19 +3634,19 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/check_opf_doctor.py::_install_seen::read_text", 2),
     ("opf/tools/check_opf_doctor.py::_lstat_entry::open", 1),
     ("opf/tools/check_opf_doctor.py::_precommit_suite::read_bytes", 2),
-    ("opf/tools/check_opf_doctor.py::_precommit_suite::read_text", 12),
+    ("opf/tools/check_opf_doctor.py::_precommit_suite::read_text", 14),
     ("opf/tools/check_opf_doctor.py::_run_recipe_stubbed::read_text", 1),
     ("opf/tools/check_opf_doctor.py::_stub::read_text", 1),
     ("opf/tools/check_opf_doctor.py::_stubbed::read_text", 2),
     ("opf/tools/check_opf_drift.py::_drift_suite::read_text", 1),
     ("opf/tools/check_opf_drift.py::build_clean_store::os.open", 1),
-    ("opf/tools/check_opf_homes.py::_self_test_vectors::os.open", 3),
-    ("opf/tools/check_opf_homes.py::_self_test_vectors::read_bytes", 11),
+    ("opf/tools/check_opf_homes.py::_self_test_vectors::os.open", 2),
+    ("opf/tools/check_opf_homes.py::_self_test_vectors::read_bytes", 17),
     ("opf/tools/check_opf_homes.py::_spec_text::os.open", 1),
     ("opf/tools/check_opf_homes.py::_spec_text::os.read", 1),
     ("opf/tools/check_opf_homes.py::index_digest::read_bytes", 1),
     ("opf/tools/check_opf_init.py::_suite_isolated::os.open", 1),
-    ("opf/tools/check_opf_init.py::_suite_isolated::read_bytes", 7),
+    ("opf/tools/check_opf_init.py::_suite_isolated::read_bytes", 15),
     ("opf/tools/check_opf_init.py::_suite_isolated::read_text", 13),
     ("opf/tools/check_opf_init.py::valid_sources::read_text", 2),
     ("opf/tools/check_opf_init.py::walk::read_bytes", 1),
@@ -3557,21 +3683,13 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/check_opf_record.py::t38_staging_removal_disclosed::read_bytes", 1),
     ("opf/tools/check_opf_record.py::t43_publish_names_removals::read_bytes", 1),
     ("opf/tools/check_opf_record.py::t77_report_every_failure::os.open", 1),
-    ("opf/tools/check_opf_upgrade.py::_snapshot::read_bytes", 1),
-    ("opf/tools/check_opf_upgrade.py::_suite_isolated::open", 1),
-    ("opf/tools/check_opf_upgrade.py::_suite_isolated::read_bytes", 36),
-    ("opf/tools/check_opf_upgrade.py::_suite_isolated::read_text", 1),
-    ("opf/tools/check_opf_upgrade.py::cnt_of::read_text", 1),
-    ("opf/tools/check_opf_upgrade.py::man_of::read_text", 1),
     ("opf/tools/opf.py::_adopt_leg::os.open", 2),
-    ("opf/tools/opf.py::_adopt_read_inputs::os.open", 1),
     ("opf/tools/opf.py::_close_exc_safe_vectors_self_test::os.open", 1),
     ("opf/tools/opf.py::_import_leg::open", 1),
     ("opf/tools/opf.py::_init_inventory::os.open", 1),
     ("opf/tools/opf.py::_retained_close_offpath_self_test::os.open", 5),
     ("opf/tools/opf.py::_self_test_entry_gaps::open", 1),
     ("opf/tools/opf.py::_st_census_reuse_detected::os.open", 2),
-    ("opf/tools/opf.py::_upgrade_replace::os.open", 1),
     ("opf/tools/opf.py::_watchdog_completion_case::os.open", 4),
     ("opf/tools/opf.py::_watchdog_completion_case::os.read", 1),
     ("opf/tools/opf.py::_watchdog_completion_case::read_bytes", 1),
@@ -3590,7 +3708,6 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/opf.py::launch_killed::read_text", 4),
     ("opf/tools/opf.py::launch_wedged::read_text", 4),
     ("opf/tools/opf.py::leave_open::os.open", 1),
-    ("opf/tools/opf.py::observe::read_text", 1),
     ("opf/tools/opf.py::old_census::read_text", 1),
     ("opf/tools/opf.py::outer::os.open", 1),
     ("opf/tools/opf.py::probe::os.read", 1),
@@ -3643,8 +3760,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/_qa_adapter.py::_classify_presence::open", 1),
     ("tools/_qa_adapter.py::load_config::read_bytes", 1),
     ("tools/_selftest_exit_report.py::_file_digest::open", 1),
-    ("tools/_walk.py::read_text_nonblocking::os.open", 1),
-    ("tools/_walk.py::read_text_nonblocking::os.read", 1),
     ("tools/aei_backlog_md.py::main::open", 1),
     ("tools/aiqt_corpus.py::read_text_safe::read_text", 1),
     ("tools/audit_reference.py::_self_test::read_text", 1),
@@ -3658,7 +3773,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_byte_canon.py::validate_allowances::read_bytes", 1),
     ("tools/check_byte_canon.py::validate_hardbreak::read_bytes", 1),
     ("tools/check_ci_parity.py::_run_runner_copy::read_text", 1),
-    ("tools/check_ci_parity.py::self_test::read_bytes", 1),
+    ("tools/check_ci_parity.py::self_test::read_bytes", 2),
     ("tools/check_cited_standards.py::load_config::open", 1),
     ("tools/check_cited_standards.py::read_corpus::open", 1),
     ("tools/check_clauses.py::self_test_main::read_text", 2),
@@ -3673,7 +3788,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_entry_guard.py::_replace_with::read_bytes", 1),
     ("tools/check_entry_guard.py::_roster_text::read_text", 1),
     ("tools/check_entry_guard.py::failing_read::os.read", 1),
-    ("tools/check_entry_guard.py::self_test::read_text", 1),
     ("tools/check_footer.py::_read_regular_page::os.open", 1),
     ("tools/check_gensrc_failclose.py::_read_bytes_safe::os.open", 1),
     ("tools/check_gensrc_failclose.py::_read_bytes_safe::os.read", 1),
@@ -3702,7 +3816,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_opf_enforce_platforms.py::_edit::read_text", 1),
     ("tools/check_opf_enforce_platforms.py::_read::read_bytes", 1),
     ("tools/check_opf_enforce_platforms.py::_swap_codex_gemini_rows::read_text", 1),
-    ("tools/check_opf_standalone_closure.py::self_test_main::read_text", 1),
     ("tools/check_overclaim.py::_asset_closure_self_test::attr.open", 1),
     ("tools/check_overclaim.py::_collector_self_test::attr.open", 2),
     ("tools/check_overclaim.py::_open_regular_nofollow::os.open", 1),
@@ -3742,7 +3855,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_release_delta.py::_post_release_e2e::read_text", 7),
     ("tools/check_release_delta.py::_post_smudge::read_bytes", 1),
     ("tools/check_release_delta.py::_post_staged::read_bytes", 1),
-    ("tools/check_release_delta.py::_real_pack_e2e::read_text", 18),
+    ("tools/check_release_delta.py::_real_pack_e2e::read_text", 16),
     ("tools/check_release_delta.py::_stage1_read_capture::os.open", 1),
     ("tools/check_release_delta.py::_stage1_read_capture::os.read", 1),
     ("tools/check_release_delta.py::_write_result::os.open", 2),
@@ -3772,7 +3885,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/doctor.py::self_test::os.open", 2),
     ("tools/gen_char_policy.py::_self_test::read_bytes", 1),
     ("tools/gen_char_policy.py::run::read_bytes", 2),
-    ("tools/gen_claude.py::main::read_text", 1),
     ("tools/gen_crosswalk.py::_load_successor_inventory::open", 1),
     ("tools/gen_crosswalk.py::_open_dir_at::os.open", 1),
     ("tools/gen_crosswalk.py::_read_fd_all::os.read", 1),
@@ -3791,33 +3903,30 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/gen_crosswalk.py::self_test::read_bytes", 3),
     ("tools/gen_crosswalk.py::self_test::read_text", 4),
     ("tools/gen_cursor.py::run::read_text", 1),
-    ("tools/gen_disclosure.py::main::read_text", 1),
     ("tools/gen_enforceability.py::_readable_regular::open", 1),
     ("tools/gen_enforceability.py::replace_in::read_text", 1),
     ("tools/gen_enforceability.py::roster_scripts::read_text", 1),
-    ("tools/gen_enforceability.py::self_test_main::read_text", 9),
+    ("tools/gen_enforceability.py::self_test_main::read_text", 13),
     ("tools/gen_enforcement_register.py::compose_page::read_text", 1),
     ("tools/gen_enforcement_register.py::load_ledger::read_text", 1),
     ("tools/gen_enforcement_register.py::replace_in::read_text", 1),
-    ("tools/gen_enforcement_register.py::self_test_main::read_text", 12),
+    ("tools/gen_enforcement_register.py::self_test_main::read_text", 15),
     ("tools/gen_first_pin_demo.py::bad_utf8::read_bytes", 1),
     ("tools/gen_first_pin_demo.py::demo_of::read_text", 1),
     ("tools/gen_first_pin_demo.py::hand_edited::read_text", 1),
     ("tools/gen_first_pin_demo.py::read_agents::read_bytes", 1),
     ("tools/gen_first_pin_demo.py::self_test_main::read_bytes", 6),
     ("tools/gen_first_pin_demo.py::self_test_main::read_text", 1),
-    ("tools/gen_gensrc.py::_read_declaration::read_text", 1),
-    ("tools/gen_gensrc.py::self_test_main::read_text", 1),
+    ("tools/gen_gensrc.py::self_test_main::read_text", 2),
     ("tools/gen_hooks.py::_mutate::read_text", 1),
     ("tools/gen_hooks.py::build_desired::read_text", 1),
     ("tools/gen_hooks.py::run::read_text", 1),
-    ("tools/gen_hooks.py::self_test_main::read_text", 4),
+    ("tools/gen_hooks.py::self_test_main::read_text", 16),
     ("tools/gen_install.py::run_gen::read_text", 1),
     ("tools/gen_install.py::self_test_main::read_text", 2),
-    ("tools/gen_manifest.py::_self_test_main_isolated::read_text", 5),
-    ("tools/gen_mappings.py::main::read_text", 1),
+    ("tools/gen_manifest.py::_self_test_main_isolated::read_text", 6),
     ("tools/gen_reference_facts.py::build::read_text", 1),
-    ("tools/gen_reference_facts.py::self_test_main::read_text", 2),
+    ("tools/gen_reference_facts.py::self_test_main::read_text", 8),
     ("tools/gen_renderers.py::_closure_failure::read_bytes", 1),
     ("tools/gen_renderers.py::_crlf_generate::read_bytes", 1),
     ("tools/gen_renderers.py::_determinism_failure::read_bytes", 1),
@@ -3853,7 +3962,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/migrate.py::self_test::os.open", 34),
     ("tools/migrate.py::self_test::read_bytes", 8),
     ("tools/opf_render.py::materialize::read_text", 1),
-    ("tools/orch_register.py::_lines::read_text", 1),
     ("tools/pin.py::_atomic_publish::os.open", 1),
     ("tools/pin.py::_blocking_open_journal::os.open", 1),
     ("tools/pin.py::_load_staged_ops::read_bytes", 1),
@@ -3869,7 +3977,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_aiqt_hooks.py::_duplicate_label_failures::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_g423_state::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_main_isolated::open", 1),
-    ("tools/selftest_aiqt_hooks.py::_main_isolated::read_bytes", 14),
+    ("tools/selftest_aiqt_hooks.py::_main_isolated::read_bytes", 15),
     ("tools/selftest_aiqt_hooks.py::_main_isolated::read_text", 8),
     ("tools/selftest_aiqt_hooks.py::_note_constructor_shape_failures::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_note_site_inventory::read_text", 1),
@@ -3878,7 +3986,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_aiqt_hooks.py::_test_note_shape_pins::read_text", 1),
     ("tools/selftest_ci_status.py::_run_checks::read_text", 2),
     ("tools/selftest_ci_status.py::invoke::read_text", 6),
-    ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text", 1),
     ("tools/selftest_git_fixture_env.py::_await_holder_ready::os.read", 1),
     ("tools/selftest_git_fixture_env.py::_close_lock_sites::open", 1),
     ("tools/selftest_git_fixture_env.py::_pid_state::open", 1),
@@ -3903,7 +4010,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_orch_hooks.py::_event_rows::read_text", 1),
     ("tools/selftest_orch_hooks.py::_main_isolated::os.open", 6),
     ("tools/selftest_orch_hooks.py::_main_isolated::read_bytes", 8),
-    ("tools/selftest_orch_hooks.py::_main_isolated::read_text", 40),
+    ("tools/selftest_orch_hooks.py::_main_isolated::read_text", 44),
     ("tools/selftest_orch_hooks.py::_ordinary::read_bytes", 1),
     ("tools/selftest_orch_hooks.py::_r12_audit::open", 1),
     ("tools/selftest_orch_hooks.py::_r14_left::read_text", 1),
@@ -3931,8 +4038,7 @@ RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_text::os.open", 1),
     ("opf/tools/_opf_check.py::tree::read_bytes", 1),
     ("opf/tools/_opf_observe.py::held_case::read_text", 1),
-    ("opf/tools/_opf_observe.py::self_test_isolated::read_text", 1),
-    ("opf/tools/_opf_record.py::_kind_reservation_high::os.open", 1),
+    ("opf/tools/_opf_observe.py::self_test_isolated::read_text", 5),
     ("opf/tools/check_opf_record.py::_oop_reap::os.read", 1),
     ("opf/tools/check_opf_record.py::t22_homes2_claim_reserves::read_bytes", 2),
     ("opf/tools/check_opf_record.py::t79_kill_after_reserve::read_bytes", 4),
@@ -3962,8 +4068,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_license_qualification.py::_read_file_text::read_text", 1),
     ("tools/check_mistakes_register.py::_read_regular::os.open", 1),
     ("tools/check_mistakes_register.py::_read_regular::os.read", 1),
-    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.open", 1),
-    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.read", 1),
     ("tools/check_mistakes_register.py::self_test::read_bytes", 1),
     ("tools/check_mistakes_register.py::self_test::read_text", 16),
     ("tools/check_mistakes_register.py::update_anchor::os.open", 1),
@@ -3993,7 +4097,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/measure_hook_latency.py::load_hooks::open", 1),
     ("tools/measure_hook_latency.py::self_test::read_bytes", 2),
     ("tools/measure_hook_latency.py::self_test::read_text", 1),
-    ("tools/orch_register.py::_declared_family::read_text", 1),
     ("tools/orch_register.py::_dir_synced::os.open", 1),
     ("tools/orch_register.py::_dirs_created::os.open", 2),
     ("tools/orch_register.py::_fd_bytes::os.pread", 1),
@@ -4005,7 +4108,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/orch_register.py::rewrite_in_place::open", 1),
     ("tools/orch_register.py::self_test::os.open", 1),
     ("tools/orch_register.py::self_test::os.pread", 1),
-    ("tools/orch_register.py::self_test::read_bytes", 12),
+    ("tools/orch_register.py::self_test::read_bytes", 13),
     ("tools/orch_register.py::self_test::read_text", 7),
     ("tools/orch_register.py::state::read_bytes", 1),
     ("tools/selftest_aiqt_hooks.py::_test_note_literal_sites::read_text", 1),
@@ -4036,6 +4139,216 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_orch_hooks.py::set_horizon::read_text", 1),
     ("tools/selftest_orch_hooks.py::snap::read_bytes", 4),
     ("tools/selftest_orch_hooks.py::swap_holder::open", 1),
+    # Keys the merge of main added or moved (its new and changed gates), pinned with their exact
+    # counts; each table still only shrinks truthfully.
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_gensrc_authoring_marker::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rwh_read_marker::os.open", 1),
+    (".preview/stamp-truth-stop.py::test_r39_transcript_rewrite_never_restarts_the_count::open", 1),
+    (".preview/stamp-truth-stop.py::test_r40_truncate_restore_never_restarts_the_count::open", 1),
+    (".preview/stamp-truth-stop.py::test_r41_pre_round40_state_restarts_the_count_once_per_record::open", 2),
+    (".preview/stamp-truth-stop.py::test_r41_recorded_reset_caps_genuine_turns_until_explicit_false::open", 1),
+    (".preview/stamp-truth-stop.py::test_r41_reset_survives_a_stop_that_records_no_reset::open", 1),
+    (".preview/stamp-truth-stop.py::test_r41_unreadable_state_repair_records_unknown_history::open", 1),
+    (".preview/stamp-truth-stop.py::test_r42_absent_state_under_explicit_true_is_unknown_history::open", 1),
+    (".preview/stamp-truth-stop.py::test_r43_absent_state_clean_explicit_true_persists_unknown::open", 1),
+    (".preview/stamp-truth-stop.py::test_r43_explicit_false_staged_restore_restarts_per_record::open", 2),
+    (".preview/stamp-truth-stop.py::test_r43_explicit_false_unreadable_state_keeps_the_boundary::open", 1),
+    (".preview/stamp-truth-stop.py::test_r43_save_state_failed_unlink_is_best_effort_cleanup::open", 2),
+    (".preview/stamp-truth-stop.py::test_r43_save_state_short_write_fails_and_keeps_the_state::open", 2),
+    (".preview/stamp-truth-stop.py::test_r43_unknown_history_nonzero_offset_repair_stays_capped::open", 2),
+    (".preview/stamp-truth-stop.py::test_r43_unknown_history_staged_restore_stays_capped::open", 1),
+    (".preview/stamp-truth-stop.py::test_r43_unknown_history_two_write_restore_stays_capped::open", 2),
+    (".preview/stamp-truth-stop.py::test_r43_unreadable_state_clean_stop_persists_unknown::open", 1),
+    (".preview/stamp-truth-stop.py::unwritten_refusal::os.open", 1),
+    ("opf/tools/_journal.py::_st_fd_table_fails_closed::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_anon_ident::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::_bytes::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::_class_sweep_bound_self_test::read_text", 1),
+    ("opf/tools/_opf_adopt_apply.py::_class_sweep_placement_self_test::read_text", 1),
+    ("opf/tools/_opf_adopt_apply.py::_close_class_sweep_checks::os.open", 2),
+    ("opf/tools/_opf_adopt_apply.py::_discard_unopened_preimages::os.open", 2),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_git_checks::open", 3),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_recorded_plan::os.open", 2),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_txn_clear::os.open", 2),
+    ("opf/tools/_opf_adopt_apply.py::_init_store_view_digests::os.open", 2),
+    ("opf/tools/_opf_adopt_apply.py::_journal_listing::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_kill_injection_child::read_text", 1),
+    ("opf/tools/_opf_adopt_apply.py::_listing_close_run::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_lock_identity::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_run_class_sweep_child::read_text", 1),
+    ("opf/tools/_opf_adopt_apply.py::_scan_fault_named::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_snapshot::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::_st_tree_state::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::acquire_then_reopen::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::acquire_then_reuse::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::cleaned_then_ensure::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::foreign_open::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::hook_failing_inventory::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::live_digest::open", 1),
+    ("opf/tools/_opf_adopt_apply.py::path_ident::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::peer_thread_after::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::plant_stage::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::record::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::site_vector::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::state_at::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::walk::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::written::read_bytes", 1),
+    ("opf/tools/_opf_adopt_complete.py::_reinventory::open", 2),
+    ("opf/tools/_opf_adopt_complete.py::_restore_exercise::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::_retoml::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::_toml_file::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::_tree::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::_unclaim::open", 1),
+    ("opf/tools/_opf_adopt_complete.py::self_test::open", 1),
+    ("opf/tools/_opf_adopt_hook.py::self_test::read_bytes", 1),
+    ("opf/tools/_opf_adopt_plan.py::children::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::_self_test_checks::os.open", 5),
+    ("opf/tools/_opf_adopt_state.py::_self_test_checks::read_bytes", 11),
+    ("opf/tools/_opf_adopt_state.py::commit::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::commit::read_bytes", 1),
+    ("opf/tools/_opf_adopt_state.py::contain::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::counting_read_fd::os.read", 1),
+    ("opf/tools/_opf_adopt_state.py::occ_retire::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::relist::read_bytes", 1),
+    ("opf/tools/_opf_adopt_state.py::retire::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::snapshot::read_bytes", 1),
+    ("opf/tools/_opf_adopt_state.py::state_of::os.open", 1),
+    ("opf/tools/_opf_adopt_state.py::unit_retired::os.open", 1),
+    ("opf/tools/_opf_import_complete.py::_bytes::open", 1),
+    ("opf/tools/_opf_init_operation.py::_bytes::open", 1),
+    ("opf/tools/_opf_init_operation.py::_seam_tests::open", 3),
+    ("opf/tools/_opf_journal.py::_kind_reservation_high::os.open", 1),
+    ("opf/tools/_opf_views.py::_view_bytes::read_bytes", 2),
+    ("opf/tools/_opf_views.py::self_test::open", 2),
+    ("opf/tools/_opf_write_guard.py::_self_test_guard_vectors::os.open", 1),
+    ("opf/tools/_opf_write_guard.py::eol_kept::read_bytes", 1),
+    ("opf/tools/_opf_write_guard.py::replaced_acquisition::read_bytes", 1),
+    ("opf/tools/_opf_write_guard.py::replaced_release::read_bytes", 2),
+    ("opf/tools/check_opf_homes.py::cross_kind::read_bytes", 2),
+    ("opf/tools/check_opf_homes.py::derivation_store::os.open", 1),
+    ("opf/tools/check_opf_homes.py::foreign_garbage::read_bytes", 1),
+    ("opf/tools/check_opf_homes.py::fresh_capability::os.open", 1),
+    ("opf/tools/check_opf_homes.py::repeat_after_advance::read_bytes", 2),
+    ("opf/tools/check_opf_homes.py::repeat_unchanged_maximum::read_bytes", 2),
+    ("opf/tools/check_opf_init.py::_gen2_cli_vectors::read_bytes", 1),
+    ("opf/tools/check_opf_init.py::_gen2_cli_vectors::read_text", 1),
+    ("opf/tools/check_opf_init.py::control_area::read_bytes", 1),
+    ("opf/tools/check_opf_init.py::lease_recording_create::read_text", 2),
+    ("opf/tools/check_opf_prompt_pack.py::_example_vectors::read_bytes", 2),
+    ("opf/tools/check_opf_prompt_pack.py::rewrite::read_text", 1),
+    ("opf/tools/check_opf_prompt_pack.py::stamp::read_bytes", 1),
+    ("opf/tools/check_opf_prompt_pack.py::without_row::read_bytes", 1),
+    ("opf/tools/check_opf_record.py::_t92_child::os.read", 1),
+    ("opf/tools/check_opf_record.py::absent_if_malformed::open", 1),
+    ("opf/tools/check_opf_record.py::absent_if_malformed::os.open", 1),
+    ("opf/tools/check_opf_record.py::t100_ignored_render_target::read_bytes", 1),
+    ("opf/tools/check_opf_record.py::t113_repair_peer_reservation::read_bytes", 1),
+    ("opf/tools/opf.py::_adopt_read_bounded::os.open", 1),
+    ("opf/tools/opf.py::_adopt_reconcile_leg::open", 1),
+    ("opf/tools/opf.py::_fixture_fd_census::read_bytes", 1),
+    ("opf/tools/opf.py::_fixture_fd_census_pins::os.open", 3),
+    ("opf/tools/opf.py::_main_exit_findings::read_bytes", 1),
+    ("opf/tools/opf.py::_watchdog_closeout_mutant_faults::read_text", 1),
+    ("opf/tools/opf.py::_watchdog_tree_case::read_text", 2),
+    ("opf/tools/opf.py::children::read_text", 1),
+    ("opf/tools/opf.py::parse::read_text", 1),
+    ("opf/tools/opf.py::proc_cpu::read_text", 1),
+    ("opf/tools/opf.py::proc_state::read_text", 1),
+    ("opf/tools/opf.py::snap::open", 1),
+    ("opf/tools/opf.py::snapshot::open", 1),
+    ("opf/tools/opf.py::tree_running::read_text", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_gensrc_authoring_marker::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rwh_read_marker::os.open", 1),
+    ("tools/_standards.py::_follow::os.open", 1),
+    ("tools/_standards.py::_read_link::os.open", 1),
+    ("tools/_standards.py::_read_manifest::open", 1),
+    ("tools/_standards.py::_read_manifest::os.open", 1),
+    ("tools/_standards.py::_walk::os.open", 3),
+    ("tools/_walk.py::read_bytes_nonblocking::os.open", 1),
+    ("tools/_walk.py::read_bytes_nonblocking::os.read", 1),
+    ("tools/check_child_status_coverage.py::_behaviour::read_text", 7),
+    ("tools/check_child_status_coverage.py::_copy::read_bytes", 1),
+    ("tools/check_child_status_coverage.py::self_test::read_text", 1),
+    ("tools/check_clauses.py::_read_rule_text::read_bytes", 1),
+    ("tools/check_dangerous_api.py::_read_bytes::read_bytes", 1),
+    ("tools/check_entry_guard.py::_cleanup_lines::read_text", 1),
+    ("tools/check_entry_guard.py::_fifo_open_evidence::open", 2),
+    ("tools/check_entry_guard.py::_hang_credit::os.open", 1),
+    ("tools/check_entry_guard.py::_in_child::os.read", 1),
+    ("tools/check_entry_guard.py::_marker_text::os.read", 1),
+    ("tools/check_entry_guard.py::_pidfd_pid::open", 1),
+    ("tools/check_entry_guard.py::_probe_event_masks::os.open", 1),
+    ("tools/check_entry_guard.py::_read_to_eof::os.read", 1),
+    ("tools/check_entry_guard.py::_self_test::read_text", 1),
+    ("tools/check_entry_guard.py::_walk_once::open", 1),
+    ("tools/check_entry_guard.py::launch::open", 1),
+    ("tools/check_entry_guard.py::launch::os.read", 4),
+    ("tools/check_entry_guard.py::opening::os.open", 1),
+    ("tools/check_entry_guard.py::readlink::os.read", 1),
+    ("tools/check_entry_guard.py::run::os.read", 1),
+    ("tools/check_entry_guard.py::send::open", 1),
+    ("tools/check_entry_guard.py::swap_case::os.open", 1),
+    ("tools/check_entry_guard.py::swap_case::os.read", 1),
+    ("tools/check_entry_guard.py::waited::os.read", 1),
+    ("tools/check_gitleaks_pin.py::run::read_bytes", 1),
+    ("tools/check_gitleaks_pin.py::self_test::read_bytes", 1),
+    ("tools/check_internal_names.py::_self_test::read_bytes", 2),
+    ("tools/check_mistakes_register.py::_read_following::os.open", 1),
+    ("tools/check_mistakes_register.py::_read_following::os.read", 1),
+    ("tools/check_mistakes_register.py::final_entry_state::os.open", 1),
+    ("tools/check_must_deliver.py::_read_decl_bytes::read_bytes", 1),
+    ("tools/check_must_deliver.py::self_test_main::read_bytes", 3),
+    ("tools/check_must_deliver.py::self_test_main::read_text", 2),
+    ("tools/check_opf_standalone_closure.py::_bounds_self_test::read_text", 2),
+    ("tools/check_opf_standalone_closure.py::_closure_legs::read_text", 1),
+    ("tools/check_opf_standalone_closure.py::_parse::read_text", 1),
+    ("tools/check_opf_standalone_closure.py::_readiness_pids::read_text", 1),
+    ("tools/check_opf_standalone_closure.py::run_one::read_text", 1),
+    ("tools/check_release_delta.py::_not_run_net_vectors::read_text", 1),
+    ("tools/check_release_delta.py::_plant_noncanon_source_path::read_text", 1),
+    ("tools/check_release_delta.py::_plant_notice_omission::read_text", 1),
+    ("tools/check_release_delta.py::_self_test_main_isolated::read_text", 1),
+    ("tools/check_relied_exit_pipes.py::judge::read_text", 1),
+    ("tools/check_relied_exit_pipes.py::load_config::open", 1),
+    ("tools/check_relied_exit_pipes.py::scan_file::read_bytes", 1),
+    ("tools/check_rule_placement.py::_open_at::os.open", 1),
+    ("tools/check_rule_placement.py::_read_rule::open", 1),
+    ("tools/check_rule_placement.py::_registered_check_ids::read_text", 1),
+    ("tools/check_rule_placement.py::open::os.open", 1),
+    ("tools/check_rule_placement.py::self_test::read_text", 2),
+    ("tools/check_secrets.py::_self_test::os.open", 1),
+    ("tools/check_verifier_delivery.py::_capped_run::open", 1),
+    ("tools/check_verifier_delivery.py::_expected_check_ids::open", 1),
+    ("tools/check_verifier_delivery.py::_read_input::open", 1),
+    ("tools/check_verifier_delivery.py::_read_input::os.open", 1),
+    ("tools/check_verifier_delivery.py::_self_test_cases::read_bytes", 2),
+    ("tools/check_version_monotonicity.py::raw::attr.open", 1),
+    ("tools/check_version_monotonicity.py::raw::os.open", 1),
+    ("tools/check_version_monotonicity.py::raw::os.read", 1),
+    ("tools/check_version_monotonicity.py::raw::read_bytes", 3),
+    ("tools/check_version_monotonicity.py::self_test_main::read_bytes", 5),
+    ("tools/gen_claude.py::run::read_text", 1),
+    ("tools/gen_claude.py::self_test_main::read_text", 1),
+    ("tools/gen_cursor.py::self_test_main::read_text", 1),
+    ("tools/gen_disclosure.py::run::read_text", 1),
+    ("tools/gen_enforceability.py::_preview_docstring::read_bytes", 1),
+    ("tools/gen_gensrc.py::_parse_module::read_bytes", 1),
+    ("tools/gen_hooks.py::_build_project_tree::read_text", 1),
+    ("tools/gen_hooks.py::_communicate_fault_case::read_text", 1),
+    ("tools/gen_hooks.py::_pid_gone::open", 1),
+    ("tools/gen_hooks.py::_secondary_fault_case::read_text", 1),
+    ("tools/gen_hooks.py::authoring_tree::open", 1),
+    ("tools/gen_hooks.py::fit_case::read_text", 3),
+    ("tools/gen_hooks.py::self_test_main::read_bytes", 1),
+    ("tools/gen_mappings.py::run::read_text", 1),
+    ("tools/gen_mappings.py::self_test_main::read_text", 1),
+    ("tools/gen_reference_facts.py::build_landing::read_text", 1),
+    ("tools/gen_reference_facts.py::self_test_main::read_bytes", 8),
+    ("tools/gen_secret_patterns.py::ci_floor_region::read_bytes", 1),
+    ("tools/selftest_git_fixture_env.py::_trace2_maintenance_children::read_bytes", 1),
+    ("tools/selftest_orch_hooks.py::_hopen_unreadable::open", 1),
+    ("tools/selftest_orch_hooks.py::_oracle_run_argv::open", 1),
+    ("tools/selftest_orch_hooks.py::forced_ask_rows::read_text", 1),
 ))
 
 RAW_READ_REASONS = dict((
@@ -4072,7 +4385,6 @@ RAW_READ_REASONS = dict((
     ("opf/tools/check_opf_init_qa.py", _RAW_READ_PENDING),
     ("opf/tools/check_opf_prompt_pack.py", _RAW_READ_PENDING),
     ("opf/tools/check_opf_record.py", _RAW_READ_PENDING),
-    ("opf/tools/check_opf_upgrade.py", _RAW_READ_PENDING),
     ("opf/tools/opf.py", _RAW_READ_PENDING),
     ("opf/tools/selftest_commonmark_conformance.py", _RAW_READ_PENDING),
     ("opf/tools/selftest_commonmark_headings.py", _RAW_READ_PENDING),
@@ -4116,7 +4428,6 @@ RAW_READ_REASONS = dict((
     ("tools/check_versions.py", _RAW_READ_PENDING),
     ("tools/conformance.py", _RAW_READ_PENDING),
     ("tools/doctor.py", _RAW_READ_PENDING),
-    ("tools/gen_adapters.py", _RAW_READ_PENDING),
     ("tools/gen_agents.py", _RAW_READ_PENDING),
     ("tools/gen_char_policy.py", _RAW_READ_PENDING),
     ("tools/gen_claude.py", _RAW_READ_PENDING),
@@ -4143,6 +4454,30 @@ RAW_READ_REASONS = dict((
     ("tools/pin.py", _RAW_READ_PENDING),
     ("tools/selftest_aiqt_hooks.py", _RAW_READ_PENDING),
     ("tools/selftest_opf_render.py", _RAW_READ_PENDING),
+    # Keys the merge of main added or moved (its new and changed gates), pinned with their exact
+    # counts; each table still only shrinks truthfully.
+    ("opf/tools/_opf_adopt_complete.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_adopt_state.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_import_complete.py", _RAW_READ_PENDING),
+    ("tools/_standards.py", _RAW_READ_PENDING),
+    ("tools/_walk.py", _RAW_READ_PENDING),
+    ("tools/check_child_status_coverage.py", _RAW_READ_PENDING),
+    ("tools/check_dangerous_api.py", _RAW_READ_PENDING),
+    ("tools/check_gitleaks_pin.py", _RAW_READ_PENDING),
+    ("tools/check_must_deliver.py", _RAW_READ_PENDING),
+    ("tools/check_relied_exit_pipes.py", _RAW_READ_PENDING),
+    ("tools/check_rule_placement.py", _RAW_READ_PENDING),
+    ("tools/check_secrets.py", _RAW_READ_PENDING),
+    ("tools/check_verifier_delivery.py", _RAW_READ_PENDING),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", _RAW_READ_PENDING),
+    (".preview/stamp-truth-stop.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_journal.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_write_guard.py", _RAW_READ_PENDING),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", _RAW_READ_PENDING),
+    ("tools/check_mistakes_register.py", _RAW_READ_PENDING),
+    ("tools/check_version_monotonicity.py", _RAW_READ_PENDING),
+    ("tools/selftest_git_fixture_env.py", _RAW_READ_PENDING),
+    ("tools/selftest_orch_hooks.py", _RAW_READ_PENDING),
 ))
 
 
@@ -4307,14 +4642,6 @@ RAW_READ_SITE_REASONS = dict((
      "(c) a bounded loop over a descriptor the callers opened with _RDP_OPEN_FLAGS (which "
      "carry O_NONBLOCK) plus O_NOFOLLOW and fstat-checked S_ISREG before passing it in; a "
      "regular-file read cannot block, and the decision deadline is re-checked between chunks"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_brief::os.open",
-     "(c) already a non-blocking, fstat-type-checked reader: the flags are _RDP_OPEN_FLAGS | "
-     "os.O_NOFOLLOW and the one top-level _RDP_OPEN_FLAGS assignment carries a literal "
-     "os.O_NONBLOCK term, but the module calls __import__ at 13 sites (the errno, hashlib and "
-     "threading late imports, each pinned by name in _RAW_READ_DYNAMIC_SHAPES; round-3 reasons "
-     "named only the errno one); pinned with its reason because EVERY os.open site counts since "
-     "round 6 (the predicate-rested exemption is removed; the late imports had already failed the "
-     "retired round-5 predicate)"),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_fd::os.read",
      "(c) a bounded loop over a descriptor the callers opened with _RDP_OPEN_FLAGS (which "
      "carry O_NONBLOCK) plus O_NOFOLLOW and fstat-checked S_ISREG before passing it in; a "
@@ -5245,18 +5572,6 @@ RAW_READ_SITE_REASONS = dict((
      "(c) the site opens with os.O_DIRECTORY, so the open of anything but a directory fails at "
      "once and a directory open cannot block; no file content is read through it; (a) the "
      "directory is a fixture store root the same test created beneath its own tempfile scratch"),
-    ("opf/tools/opf.py::_adopt_read_inputs::os.open",
-     "(c) a non-blocking reader whose literal chain carries os.O_NONBLOCK; pinned with its reason: "
-     "EVERY os.open site counts since round 6 (the predicate-rested exemption is removed), and the "
-     "module had already failed the retired round-5 predicate (positive since round 5: any "
-     "reflection reference forfeits exemption) (it calls setattr()), under which literal os.O_* "
-     "chains prove nothing (#400 re-cut rounds 4 and 5)"),
-    ("opf/tools/opf.py::_upgrade_replace::os.open",
-     "(c) a write-only creator: the flags carry O_CREAT and O_EXCL, so the open either creates a "
-     "fresh regular file or fails EEXIST on any existing entry (a planted FIFO included) and can "
-     "never block, and nothing is read through the descriptor; counted because proven O_WRONLY no "
-     "longer exempts (a write-only open of a FIFO blocks until a reader appears, fifo(7)) and the "
-     "chain proves no O_NONBLOCK"),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_commit_run::os.read",
      "(c) reads the pipes of the bounded read-only git child, each set non-blocking with "
      "os.set_blocking(False) and read only when the selector reports it ready, under the "
@@ -5402,14 +5717,6 @@ RAW_READ_SITE_REASONS = dict((
      "(c) a bounded loop over a descriptor the callers opened with _RDP_OPEN_FLAGS (which "
      "carry O_NONBLOCK) plus O_NOFOLLOW and fstat-checked S_ISREG before passing it in; a "
      "regular-file read cannot block, and the decision deadline is re-checked between chunks"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_brief::os.open",
-     "(c) already a non-blocking, fstat-type-checked reader: the flags are _RDP_OPEN_FLAGS | "
-     "os.O_NOFOLLOW and the one top-level _RDP_OPEN_FLAGS assignment carries a literal "
-     "os.O_NONBLOCK term, but the module calls __import__ at 13 sites (the errno, hashlib and "
-     "threading late imports, each pinned by name in _RAW_READ_DYNAMIC_SHAPES; round-3 reasons "
-     "named only the errno one); pinned with its reason because EVERY os.open site counts since "
-     "round 6 (the predicate-rested exemption is removed; the late imports had already failed the "
-     "retired round-5 predicate)"),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_fd::os.read",
      "(c) a bounded loop over a descriptor the callers opened with _RDP_OPEN_FLAGS (which "
      "carry O_NONBLOCK) plus O_NOFOLLOW and fstat-checked S_ISREG before passing it in; a "
@@ -5461,17 +5768,6 @@ RAW_READ_SITE_REASONS = dict((
     ("tools/_qa_adapter.py::load_config::read_bytes",
      "(c) _classify_presence requires S_ISREG BEFORE the open (tools/_qa_adapter.py, load_config, "
      "the state check ahead of the read), so the read cannot meet a special file"),
-    ("tools/_walk.py::read_text_nonblocking::os.open",
-     "(c) already a non-blocking, S_ISREG-checked reader: the flags carry getattr(os, "
-     "'O_NONBLOCK', 0), which is os.O_NONBLOCK on every platform that defines it, and EVERY "
-     "os.open site is pinned with its reason since round 6 (the proven-flags exemption is removed)"),
-    ("tools/_walk.py::read_text_nonblocking::os.read",
-     "(c) an os.read loop with NO byte cap that ends at end of file, over a descriptor this "
-     "function opened itself with O_NONBLOCK and fstat-checked S_ISREG before reading: a "
-     "regular file returns end of file at its size, so the loop ends and cannot name a "
-     "blocking FIFO (the read is bounded by the file, not by a constant); "
-     "the descriptor read is counted since round 11 (decided 2: read and pread left the inert "
-     "table because a held descriptor of unknown type can block)"),
     ("tools/audit_reference.py::_self_test::read_text",
      "(a) reads its OWN source from the module directory to build the round-7 child-mutant fixture "
      "(codex 4: the mutated copy must be rejected by the exact-failure-set comparison); the module "
@@ -5610,11 +5906,6 @@ RAW_READ_SITE_REASONS = dict((
      "never block, and nothing is read through the descriptor; counted because proven O_WRONLY no "
      "longer exempts (a write-only open of a FIFO blocks until a reader appears, fifo(7)) and the "
      "chain proves no O_NONBLOCK"),
-    ("tools/orch_register.py::_lines::read_text",
-     "an unconverted pre-existing raw read of the registry text file the caller names; "
-     "gate-reachable only through the reviewed dynamic edge from tools/selftest_orch_hooks.py, "
-     "which points it at registry fixtures created under its own scratch; conversion to a shared "
-     "non-blocking reader is pending and tracked by this pin"),
     ("tools/pin.py::_atomic_publish::os.open",
      "(c) a write-only creator: the flags carry O_CREAT and O_EXCL, so the open either creates a "
      "fresh regular file or fails EEXIST on any existing entry (a planted FIFO included) and can "
@@ -5625,9 +5916,6 @@ RAW_READ_SITE_REASONS = dict((
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
     ("tools/selftest_ci_status.py::invoke::read_text",
-     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
-     "the repository tree"),
-    ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
     ("tools/selftest_git_fixture_env.py::_await_holder_ready::os.read",
@@ -5818,13 +6106,6 @@ RAW_READ_SITE_REASONS = dict((
     ("tools/check_license_qualification.py::_read_file_text::read_text", _RAW_READ_PENDING),
     ("tools/check_mistakes_register.py::_read_regular::os.open", _RAW_READ_PENDING),
     ("tools/check_mistakes_register.py::_read_regular::os.read", _RAW_READ_PENDING),
-    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.open",
-     "(c) already a non-blocking, fstat-checked reader: the open carries O_NONBLOCK and the opened "
-     "descriptor is refused unless S_ISREG before any read, so a special file cannot block it; "
-     "every os.open site is pinned with its reason since round 6"),
-    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.read",
-     "(c) a bounded descriptor read inside the same function that opened the descriptor with "
-     "O_NONBLOCK and refused it unless fstat-checked S_ISREG, so it cannot name a blocking FIFO"),
     ("tools/check_mistakes_register.py::self_test::read_bytes",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
@@ -5838,6 +6119,18 @@ RAW_READ_SITE_REASONS = dict((
     ("tools/check_python_host_pin.py::_self_test_cases::read_bytes",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
+    ("tools/check_verifier_delivery.py::_capped_run::open",
+     "(a) reads back the capped child's stdout file the same test created under its own tempfile "
+     "scratch (fx.base), never the repository tree"),
+    ("tools/check_verifier_delivery.py::_read_input::open",
+     "(c) opens with O_NONBLOCK through its opener and fstat-checks S_ISREG on what it opened before "
+     "it reads, so a FIFO never stalls it"),
+    ("tools/check_verifier_delivery.py::_read_input::os.open",
+     "(c) the opener of the _read_input open: O_NONBLOCK, then an S_ISREG fstat check before any "
+     "read"),
+    ("tools/check_verifier_delivery.py::_self_test_cases::read_bytes",
+     "(a) reads a loose object and a working-tree file of the fixture repository the same test "
+     "built under its own tempfile scratch, never the repository tree"),
     ("tools/check_version_monotonicity.py::_drain_pipes_unreaped::os.read", _RAW_READ_PENDING),
     ("tools/check_version_monotonicity.py::_not_run_vectors::open",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
@@ -5862,7 +6155,6 @@ RAW_READ_SITE_REASONS = dict((
     ("tools/measure_hook_latency.py::self_test::read_text",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
-    ("tools/orch_register.py::_declared_family::read_text", _RAW_READ_PENDING),
     ("tools/orch_register.py::_dir_synced::os.open", _RAW_READ_PENDING),
     ("tools/orch_register.py::_dirs_created::os.open", _RAW_READ_PENDING),
     ("tools/orch_register.py::_fd_bytes::os.pread", _RAW_READ_PENDING),
@@ -7772,16 +8064,6 @@ RAW_READ_UNSUPPORTED_USES = dict((
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
       "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
       "this line is the reviewed site")),
-    (("opf/tools/check_opf_upgrade.py",
-      "if hasattr(os, \"mkfifo\"):"),
-     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
-      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
-      "this line is the reviewed site")),
-    (("opf/tools/check_opf_upgrade.py",
-      "import importlib.util as _importlib_util"),
-     (1, "an import-alias acquisition: round 9 refuses an import under another name instead of "
-      "tracking the alias, so this pinned statement is the one reviewable site for every use made "
-      "through the alias (named LIMITS residue)")),
     (("opf/tools/opf.py",
       "\"truncate\", \"ftruncate\") if hasattr(os, n)]"),
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
@@ -8575,7 +8857,7 @@ RAW_READ_UNSUPPORTED_USES = dict((
       "wrap line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
     (("tools/check_internal_names.py",
       "if hasattr(os, \"mkfifo\"):"),
-     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
       "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
       "this line is the reviewed site")),
     (("tools/check_manifest.py",
@@ -11113,6 +11395,1255 @@ RAW_READ_UNSUPPORTED_USES = dict((
      (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
       "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
       "this line is the reviewed site")),
+    # Keys the merge of main added or moved (its new and changed gates), pinned with their exact
+    # counts; each table still only shrinks truthfully.
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "geteuid = getattr(os, \"geteuid\", None)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    ((".github/check_newtab_contract.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    ((".preview/pattern-self-match.py",
+      "real_os = os"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    ((".preview/pattern-self-match.py",
+      "with patched(os=Split(), pwd=user_db(\"qa-own\"), _ACCOUNTS={}):"),
+     (1, "the keyword os= hands the stub namespace of this case to patched(), which swaps the reader "
+      "seams for the test and restores them; the keyword name labels the patch target")),
+    ((".preview/stamp-truth-stop.py",
+      "os.close = failing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.close = real_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.read = eio  # the state read fails; self.tr does not exist, so the transcript read fails too"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.read = real"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.replace = enospc"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.replace = real"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.write = dribble"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.write = real"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.write = wrapper"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.write, os.unlink = real_write, real_unlink"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "os.write, os.unlink = zero, fail_unlink"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    ((".preview/stamp-truth-stop.py",
+      "real, fails = os.read, []"),
+     (1, "a saved os.read reference for a monkeypatch seam; the acquisition line is the pinned site "
+      "(round 11, decided 2: the descriptor reader is counted or pinned, never consumed silently)")),
+    (("opf/tools/_child_status.py",
+      "if not (hasattr(signal, \"SIGCHLD\") and hasattr(os, \"fork\")):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_child_status.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_containment.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_journal.py",
+      "with mock.patch.object(os, \"fstat\", fstat_eio):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"close-held\", _close_held_caller, quiet_at, (os, \"fstat\"), 0,"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"journal-ensure-dirs\", _journal.ensure_journal_dirs, quiet_at, (os, \"fsync\"), 0,"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"journal-open-dir-contained\", _journal._open_dir_contained, quiet_at, (os, \"dup\"), 0,"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"journal-txn-dirs\", _journal._journal_txn_dirs, quiet_at, (os, \"open\"), 1,"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(\"store-open-working-dir\", store._open_working_dir_fd, exc_safe_at, (os, \"open\"), 0,"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(os, \"listdir\"), 0, lambda temp_s, fd: _opf_check._list_contained(fd, \".working\")),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "(os, \"open\"), 1, lambda temp_s, fd: store._open_dir_nofollow(os.path.join(temp_s, \".working\"))),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "_journal.capture_preimages, _journal.ensure_journal_dirs, _journal.release_lock, os.open)"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 does "
+      "not follow the name it feeds, so this acquisition line is the reviewed site and later uses "
+      "through it are invisible by design")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "efd_skip = _eventfd_skip_reason(census, hasattr(os, \"eventfd\"))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"fork\", side_effect=spawned), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"fstat\", fstat_w), \\"),
+     (5, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"fsync\", fsync_failing):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"listdir\", journal_unlistable):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"lstat\", lstat_w), \\"),
+     (5, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"open\", counting_open), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"rmdir\", counting_rmdir), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"rmdir\", faulting_rmdir), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"stat\", stat_w), \\"),
+     (5, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {counting_open}):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {counting_rmdir}):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {faulting_rmdir}), \\"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {nfs_unlink}):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {stat_w}), \\"),
+     (10, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"supports_follow_symlinks\","),
+     (5, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "mock.patch.object(os, \"system\", side_effect=spawned):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "module = importlib.util.module_from_spec(spec)"),
+     (1, "module_from_spec materializes a module object from a spec constructed beside it by a reviewed "
+      "loader call; the construction line is the pinned site (round 10, decided 1: a loader-yielding "
+      "importlib member is never consumed)")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "opener = mock.patch.object(os, \"open\", adopt_unopenable)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "opener = mock.patch.object(os, \"open\", swap_before_open)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.rmdir = rmdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.add(rmdir)"),
+     (1, "a membership probe of an os.supports_* capability set: the set is consulted as a collection and "
+      "no member is fetched out of it at this site; the sets left the inert table because their "
+      "members ARE capabilities (round 11, decided 2)")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.add(t_rmdir)"),
+     (1, "a membership probe of an os.supports_* capability set: the set is consulted as a collection and "
+      "no member is fetched out of it at this site; the sets left the inert table because their "
+      "members ARE capabilities (round 11, decided 2)")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.add(t_unlink)"),
+     (1, "a membership probe of an os.supports_* capability set: the set is consulted as a collection and "
+      "no member is fetched out of it at this site; the sets left the inert table because their "
+      "members ARE capabilities (round 11, decided 2)")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.discard(t_rmdir)"),
+     (1, "a membership probe of an os.supports_* capability set: the set is consulted as a collection and "
+      "no member is fetched out of it at this site; the sets left the inert table because their "
+      "members ARE capabilities (round 11, decided 2)")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_dir_fd.discard(t_unlink)"),
+     (1, "a membership probe of an os.supports_* capability set: the set is consulted as a collection and "
+      "no member is fetched out of it at this site; the sets left the inert table because their "
+      "members ARE capabilities (round 11, decided 2)")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.supports_follow_symlinks | {stat_w, lstat_w}):"),
+     (5, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: non-inert member supports_follow_symlinks on a watched module")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.unlink, os.rmdir, os.fsync = real_unlink, real_rmdir, real_fsync"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "os.unlink, os.rmdir, os.fsync = t_unlink, t_rmdir, t_fsync"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "real_capture, real_release, real_open = _journal.capture_preimages, _journal.release_lock, "
+      "os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 does "
+      "not follow the name it feeds, so this acquisition line is the reviewed site and later uses "
+      "through it are invisible by design")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "real_open, real_listdir = os.open, os.listdir"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 does "
+      "not follow the name it feeds, so this acquisition line is the reviewed site and later uses "
+      "through it are invisible by design")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "real_open_c, real_dup_c, real_pipe_c = os.open, os.dup, os.pipe"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 does "
+      "not follow the name it feeds, so this acquisition line is the reviewed site and later uses "
+      "through it are invisible by design")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "real_open_here, absent_opens = os.open, []"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 does "
+      "not follow the name it feeds, so this acquisition line is the reviewed site and later uses "
+      "through it are invisible by design")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"close\", close_then_raise))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"dup\", noted_dup))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"fsync\", lambda fd: None))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"open\", noted_open))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"pipe\", noted_pipe))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "stack.enter_context(mock.patch.object(os, \"supports_dir_fd\", os.supports_dir_fd | {noted_open}))"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"close\", close_q), mock.patch.object(os, \"fsync\", lambda fd: None):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"close\", close_r):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"close\", ledger_close):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"fstat\", fstat_eio) if read == \"fstat\" else \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"listdir\", adopt_unlistable):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"listdir\", journal_unlistable_once), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"open\", adopt_unopenable):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"scandir\", unlistable):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"stat\", star_unstatable):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(os, \"unlink\", nfs_unlink), mock.patch.object(os, \"close\", nfs_close), \\"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(subprocess, \"Popen\", side_effect=spawned), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(subprocess, \"run\", _fake_run(scenario)):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_apply.py",
+      "with mock.patch.object(subprocess, \"run\", lambda *a, **k: subprocess.CompletedProcess(a, 128, "
+      "b\"\", said)):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_complete.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_adopt_state.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/_opf_import_complete.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "_patch.object(os, \"read\", reading):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "_patch.object(os, \"supports_dir_fd\", set(os.supports_dir_fd) | {opening}), \\"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "_patch.object(os, \"supports_dir_fd\", set(os.supports_dir_fd) | {opening}):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "lambda: _patch.object(os, \"O_NOFOLLOW\", 0)),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "real_open = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 does "
+      "not follow the name it feeds, so this acquisition line is the reviewed site and later uses "
+      "through it are invisible by design")),
+    (("opf/tools/check_opf_homes.py",
+      "real_open, real_read = os.open, os.read"),
+     (2, "a saved os.read reference for a monkeypatch seam; the acquisition line is the pinned site "
+      "(round 11, decided 2: the descriptor reader is counted or pinned, never consumed silently)")),
+    (("opf/tools/check_opf_homes.py",
+      "with _patch.object(os, \"O_NONBLOCK\", 0) if blocking else contextlib.nullcontext():"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/check_opf_homes.py",
+      "with _patch.object(os, \"open\", opening), \\"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/check_opf_init_contract.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/check_opf_record.py",
+      "if not hasattr(os, \"mkfifo\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "(os, \"close\", lambda fd: None, True)) + tuple("),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "(os, \"listdir\", listdir, None), (emit, \"_fixture_stat_fields\", stat_fields, None),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "(os, \"read\", read, True), (os, \"write\", lambda fd, data: len(data), True),"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "(os, \"wait\", \"os.wait\"), (os, \"wait3\", \"os.wait3\"), (os, \"wait4\", \"os.wait4\"))"),
+     (3, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "(os, \"waitid\", waitid, None), (os, \"getpgid\", getpgid, None), (os, \"kill\", kill, None),"),
+     (3, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "(signal, \"pidfd_send_signal\", pidfd_send_signal, None), (os, \"waitpid\", waitpid, None),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "emit = importlib.util.module_from_spec(spec)"),
+     (1, "module_from_spec materializes a module object from a spec constructed beside it by a reviewed "
+      "loader call; the construction line is the pinned site (round 10, decided 1: a loader-yielding "
+      "importlib member is never consumed)")),
+    (("opf/tools/opf.py",
+      "if hasattr(os, \"eventfd\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "patch.object(builtins, \"issubclass\", builtins.issubclass):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("opf/tools/opf.py",
+      "return (int(fields[11]) + int(fields[12])) / os.sysconf(\"SC_CLK_TCK\")"),
+     (1, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: non-inert member sysconf on a watched module")),
+    (("opf/tools/opf.py",
+      "with (patch.object(os, \"fstat\", fstat_eio) if read == \"fstat\""),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "geteuid = getattr(os, \"geteuid\", None)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/_gen_common.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/_standards.py",
+      "_DIR_FD_OK = (os.open in os.supports_dir_fd and os.lstat in os.supports_dir_fd"),
+     (3, "a membership probe of an os.supports_* capability set: the set is consulted as a collection and "
+      "no member is fetched out of it at this site; the sets left the inert table because their "
+      "members ARE capabilities (round 11, decided 2)")),
+    (("tools/_standards.py",
+      "_SEARCH = getattr(os, \"O_PATH\", 0)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/_standards.py",
+      "and os.readlink in os.supports_dir_fd)"),
+     (1, "a membership probe of an os.supports_* capability set: the set is consulted as a collection and "
+      "no member is fetched out of it at this site; the sets left the inert table because their "
+      "members ARE capabilities (round 11, decided 2)")),
+    (("tools/check_child_status_coverage.py",
+      "module = importlib.util.module_from_spec(spec)"),
+     (2, "module_from_spec materializes a module object from a spec constructed beside it by a reviewed "
+      "loader call; the construction line is the pinned site (round 10, decided 1: a loader-yielding "
+      "importlib member is never consumed)")),
+    (("tools/check_cited_standards.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_dangerous_api.py",
+      "BUILTIN_NAMES = frozenset(builtins.__dict__)"),
+     (1, "a reflective namespace fetch, fail-closed on any base (round 6); carried from the round-8 "
+      "namespace-handle shape pins, with the fetch line as the reviewed site")),
+    (("tools/check_dangerous_api.py",
+      "os.listdir = real_list"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_dangerous_api.py",
+      "os.listdir = refuse_list"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_dangerous_api.py",
+      "os.lstat = real"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_dangerous_api.py",
+      "os.lstat = refuse"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_dangerous_api.py",
+      "os.scandir = real"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_dangerous_api.py",
+      "os.scandir = refuse"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_dangerous_api.py",
+      "os.stat = real"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_dangerous_api.py",
+      "os.stat = refuse"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_derived_command_parameters.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "(found, problem), walks = _walk_patched(table, ((os, \"pidfd_open\", refusing),))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "_SYSCALLS = dict(x86_64=dict(pidfd_getfd=438, open=frozenset((2, 85, 257, 437))),"),
+     (1, "saved pristine os.* references captured for the seam table of the hook self-test, plus the "
+      "keyword open= that labels the table row; the acquisition line is the pinned site")),
+    (("tools/check_entry_guard.py",
+      "_patched(os, \"kill\", lambda pid, signum: kills.append((pid, signum))), _patched(os, \"waitpid\", "
+      "waiting)):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "_probe_table(own, fake), ((os, \"pidfd_open\", opening), (this, \"_pidfd_dead\", probing)))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "aarch64=dict(pidfd_getfd=438, open=frozenset((56, 437))))"),
+     (1, "saved pristine os.* references captured for the seam table of the hook self-test, plus the "
+      "keyword open= that labels the table row; the acquisition line is the pinned site")),
+    (("tools/check_entry_guard.py",
+      "calls = ((os, \"pidfd_open\", os.pidfd_open), (this, \"_pipe_writer\", _pipe_writer),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "detail[\"comm\"] = leg(False, lambda holder: failing(os, \"listdir\", lambda path=\".\": str(path) in "
+      "["),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "detail[\"scanfd\"] = leg(False, lambda holder: failing(os, \"listdir\", lambda path=\".\": str(path) "
+      "in ["),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "detail[\"scanlink\"] = leg(False, lambda holder: failing(os, \"readlink\", lambda path: "
+      "str(path).startswith("),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "fcntl.fcntl(lifeline_r, fcntl.F_SETFL, fcntl.fcntl(lifeline_r, fcntl.F_GETFL) | os.O_ASYNC)"),
+     (1, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: non-inert member O_ASYNC on a watched module")),
+    (("tools/check_entry_guard.py",
+      "foreign=(lambda holder: failing(os, \"readlink\", lambda path: path == \"/proc/self\"), "
+      "\"unresolvable\"),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "link=(lambda holder: failing(os, \"readlink\", lambda path: str(path).startswith("),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "os.closerange(3, witness)"),
+     (1, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: non-inert member closerange on a watched module")),
+    (("tools/check_entry_guard.py",
+      "os.closerange(witness + 1, os.sysconf(\"SC_OPEN_MAX\"))"),
+     (2, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: non-inert member closerange on a watched module")),
+    (("tools/check_entry_guard.py",
+      "patches.append((os, \"close\", closing))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "pidfd=(lambda holder: failing(os, \"pidfd_open\", lambda pid, *rest: pid in holder), "
+      "\"pidfd_open\"))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "real, outcomes = open, []"),
+     (1, "a saved builtin-opener reference inside the f6.2 self-test seam body; the flow is not followed, "
+      "so this acquisition line is the reviewed site and later uses through it are invisible by design")),
+    (("tools/check_entry_guard.py",
+      "real_listdir, real_open = os.listdir, builtins.open"),
+     (2, "a builtins member fetched as a value (builtins consumes nothing, round 9); the fetch line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "real_open, real_listdir, real_walk = builtins.open, os.listdir, _descendants"),
+     (1, "a builtins member fetched as a value (builtins consumes nothing, round 9); the fetch line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "return ((os, \"pidfd_open\", opening), (this, \"_pidfd_dead\", probing)), used"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "return (os, \"pidfd_open\", opening)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "return [(this, \"_syscall\", syscall)] + failing(os, \"fstat\", lambda fd: fd in taken)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "stack.enter_context(_patched(builtins, \"open\", opened))"),
+     (3, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "stack.enter_context(_patched(os, \"kill\", lambda *args: trace.append((\"kill\",) + args)))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "stack.enter_context(_patched(os, \"listdir\", listing))"),
+     (3, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "unreadable=(lambda holder: failing(os, \"listdir\", lambda path=\".\": str(path) in ["),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "with (_patched(builtins, \"open\", opened), _patched(os, \"listdir\", listing),"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "with _patched(builtins, \"open\", reading):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "with _patched(os, \"kill\", lambda pid, signum: kills.append((pid, signum))):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "with _patched(os, \"listdir\", listing), _patched(builtins, \"open\", opened):"),
+     (4, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "with _patched(os, \"readlink\","),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "with _patched(os, \"readlink\", readlink), _patched("),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_entry_guard.py",
+      "with _patched(os, \"waitpid\", polling), _patched(os, \"kill\", killing):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_footer.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_gitleaks_pin.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_install_page.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_leaks.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_links.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_mistakes_register.py",
+      "os.close = failing_parent_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.close = real_parent_release"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = inconsistent_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = real_incon_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.read = gate_failing_read"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.read = real_gate_read"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "real_gate_read = os.read"),
+     (1, "a saved os.read reference for a monkeypatch seam; the acquisition line is the pinned site "
+      "(round 11, decided 2: the descriptor reader is counted or pinned, never consumed silently)")),
+    (("tools/check_must_deliver.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_opf_standalone_closure.py",
+      "((os, \"lstat\", lstat_fault),), 2,"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_opf_standalone_closure.py",
+      "real_popen = subprocess.Popen"),
+     (3, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_opf_standalone_closure.py",
+      "saved = [(subprocess, \"Popen\", subprocess.Popen)] + ["),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_opf_standalone_closure.py",
+      "subprocess.Popen = FailingRead"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_opf_standalone_closure.py",
+      "subprocess.Popen = popen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_opf_standalone_closure.py",
+      "subprocess.Popen = real_popen"),
+     (4, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_opf_standalone_closure.py",
+      "subprocess.Popen = refuse"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_opf_standalone_closure.py",
+      "subprocess.Popen = refuse_launch"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_release_delta.py",
+      "os.geteuid = lambda: 0"),
+     (1, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: attribute target geteuid on a watched module")),
+    (("tools/check_release_delta.py",
+      "os.geteuid = real_geteuid"),
+     (1, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: attribute target geteuid on a watched module")),
+    (("tools/check_rule_placement.py",
+      "def open(self, *args, **kwargs):"),
+     (1, "a seam class method named open that stands in for aiqt_hooks.open during the vector; the def "
+      "line is judged for the watched spelling (decided 2) and pinned")),
+    (("tools/check_rule_placement.py",
+      "module = importlib.util.module_from_spec(spec)"),
+     (2, "module_from_spec materializes a module object from a spec constructed beside it by a reviewed "
+      "loader call; the construction line is the pinned site (round 10, decided 1: a loader-yielding "
+      "importlib member is never consumed)")),
+    (("tools/check_rule_placement.py",
+      "module.os = counter"),
+     (1, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: attribute target os named like a watched name")),
+    (("tools/check_rule_placement.py",
+      "module.os = saved"),
+     (1, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: attribute target os named like a watched name")),
+    (("tools/check_rule_placement.py",
+      "same = os.path.samestat(os.fstat(fd), os.stat(probed))"),
+     (1, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: non-inert member samestat on os.path")),
+    (("tools/check_rule_placement.py",
+      "saved = module.os"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_secrets.py",
+      "if hasattr(os, \"mkfifo\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_secrets.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_selftest_execution.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_site_versions.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_version_monotonicity.py",
+      "(os, \"stat\", \"path\"), (os, \"lstat\", \"path\"), (os, \"access\", \"path\"))"),
+     (3, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_version_monotonicity.py",
+      "if rel not in self._raw and not os.access(path, os.F_OK):"),
+     (1, "a site the merge of main added or moved, pinned with its exact count and not reviewed per line; "
+      "the finding is: non-inert member F_OK on a watched module")),
+    (("tools/check_version_monotonicity.py",
+      "spied = ((builtins, \"open\", \"file\"), (io, \"open\", \"file\"), (os, \"open\", \"path\"),"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_version_monotonicity.py",
+      "with builtins.open(path, \"rb\") as fh:"),
+     (1, "a builtins member fetched as a value (builtins consumes nothing, round 9); the fetch line is "
+      "the reviewed site")),
+    (("tools/check_verifier_delivery.py",
+      "_, status, usage = os.wait4(process.pid, 0)"),
+     (1, "reaps the capped child this module spawned (os.wait4, the resource-usage form of the inert "
+      "waitpid): no in-tree path, descriptor or module name enters")),
+    (("tools/check_verifier_delivery.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_verifier_delivery.py",
+      "pid, status, usage = os.wait4(process.pid, os.WNOHANG)"),
+     (1, "polls the capped child this module spawned (os.wait4, the resource-usage form of the inert "
+      "waitpid): no in-tree path, descriptor or module name enters")),
+    (("tools/check_verifier_delivery.py",
+      "self.pids, self._failure, self._cpu, self._wait4 = [], failure, cpu, os.wait4"),
+     (1, "a saved os.wait4 reference the self-test's wait seam (_WaitSeam) calls through; the "
+      "acquisition line is the reviewed site")),
+    (("tools/check_verifier_delivery.py",
+      "with mock.patch.object(os, \"wait4\", seam):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/check_versions.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_changelog.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_char_policy.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_crosswalk.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_disclosure.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_gensrc.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_hooks.py",
+      "group = hasattr(os, \"killpg\") and not _nested"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_hooks.py",
+      "if hasattr(os, \"killpg\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_hooks.py",
+      "if not hasattr(os, \"killpg\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_hooks.py",
+      "if not hasattr(os, \"mkfifo\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_hooks.py",
+      "os.killpg = _fault_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.killpg = real_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.lstat = _planting_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.lstat = _refusing_bare_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.lstat = _refusing_entry_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.lstat = _refusing_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.lstat = _refusing_marker_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.lstat = real_lstat"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.lstat = real_lstat_abs"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.lstat = real_lstat_c"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.unlink = _observing_unlink"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "os.unlink = real_unlink_d"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "real_communicate = subprocess.Popen.communicate"),
+     (2, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "real_kill = subprocess.Popen.kill"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "real_killpg = getattr(os, \"killpg\", None)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_hooks.py",
+      "real_popen27 = subprocess.Popen"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "real_wait = subprocess.Popen.wait"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "subprocess.Popen = _refusing_popen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "subprocess.Popen = real_popen27"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_hooks.py",
+      "subprocess.Popen.communicate = _fault_communicate"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "subprocess.Popen.communicate = _faulting_communicate"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "subprocess.Popen.communicate = real_communicate"),
+     (2, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "subprocess.Popen.kill = _fault_kill"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "subprocess.Popen.kill = real_kill"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "subprocess.Popen.wait = _fault_wait"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_hooks.py",
+      "subprocess.Popen.wait = real_wait"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/gen_manifest.py",
+      "os.lstat = lstat_denying(fx / parent)"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_manifest.py",
+      "os.lstat = real_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_notice.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_roadmap.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_secret_patterns.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/gen_site.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/orch_doctor.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/orch_register.py",
+      "os.close = app_failing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = landed_close_injector(handler_reg, handler_fired)"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = landed_close_injector(landed_close_reg, landed_fired)"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = real_app_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = real_lc_close"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = real_sup_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = stale_failing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "real_p_read, real_p_fstat, real_p_close = os.read, os.fstat, os.close"),
+     (1, "a saved os.read reference for a monkeypatch seam; the acquisition line is the pinned site "
+      "(round 11, decided 2: the descriptor reader is counted or pinned, never consumed silently)")),
+    (("tools/orch_register.py",
+      "setattr(os, inj_attr, inj_fn)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/orch_register.py",
+      "setattr(os, inj_attr, inj_reals[inj_attr])"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/selftest_aiqt_hooks.py",
+      "_orig_run_bp = aiqt_hooks.subprocess.run"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/selftest_aiqt_hooks.py",
+      "aiqt_hooks.subprocess.run = _bp_run(_bp_out)"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_aiqt_hooks.py",
+      "aiqt_hooks.subprocess.run = _bp_run(_stdout)"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_aiqt_hooks.py",
+      "aiqt_hooks.subprocess.run = _orig_run_bp"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_aiqt_hooks.py",
+      "os.lstat = _gs_race_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_aiqt_hooks.py",
+      "os.lstat = _gs_real_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_git_fixture_env_config_system.py",
+      "load = os.getloadavg()"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap line "
+      "is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/selftest_git_fixture_env_config_system.py",
+      "run = subprocess.run if run is None else run"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/selftest_git_fixture_env_core.py",
+      "stack.enter_context(patch.object(subprocess, \"Popen\", refuse))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/selftest_opf_render.py",
+      "if not hasattr(os, \"fork\"):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture argument, "
+      "a container member): round 9 refuses helper passing instead of modelling it, and this line is "
+      "the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "aiqt_hooks.__dict__.pop(\"open\", None)"),
+     (1, "a reflective namespace fetch, fail-closed on any base (round 6); carried from the round-8 "
+      "namespace-handle shape pins, with the fetch line as the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "aiqt_hooks.open = _hopen_unreadable"),
+     (1, "a monkeypatch store of the journal open seam on the loaded module object; the store line is the "
+      "pinned site")),
+    (("tools/selftest_orch_hooks.py",
+      "aiqt_hooks.subprocess.run = _env_recorder"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "aiqt_hooks.subprocess.run = _probe_stub(exc)"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "aiqt_hooks.subprocess.run = saved_run"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "aiqt_hooks.subprocess.run = saved_run_lc"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the member "
+      "in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "saved_run = aiqt_hooks.subprocess.run"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
+    (("tools/selftest_orch_hooks.py",
+      "saved_run_lc = aiqt_hooks.subprocess.run"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition line "
+      "is the reviewed site and launches through it are invisible by design")),
 ))
 
 
@@ -11137,6 +12668,15 @@ def fixture_declaration(base, previous="1.0.0", following="1.1.0", **changes):
     return ("\n".join(key + " = " + json.dumps(value) for key, value in data.items()) + "\n").encode()
 
 
+def fixture_pending(release="1.1.0", *items):
+    text = "schema = 1\nrelease = " + json.dumps(release) + "\n"
+    if not items:
+        return (text + "fix = []\n").encode()
+    for item in items:
+        text += "\n[[fix]]\n" + "".join(key + " = " + json.dumps(value) + "\n" for key, value in item)
+    return text.encode()
+
+
 def test_cases():
     """Transition policy, local ancestry, PR merge binding and explicit push refs."""
     base = fixture_changelog(["1.0.0"])
@@ -11145,9 +12685,10 @@ def test_cases():
     history = fixture_declaration(base, **{"base-changelog-sha256": "f" * 64})
     cases = {}
 
-    def add(name, expected, before=base, after=base, old=None, new=None, tweak=None):
+    def add(name, expected, before=base, after=base, old=None, new=None,
+            fixes=None, base_fixes=None, tweak=None):
         require(name not in cases, "duplicate self-test ID: " + name)
-        cases[name] = (expected, before, after, old, new, tweak)
+        cases[name] = (expected, before, after, old, new, fixes, base_fixes, tweak)
 
     add("ordinary-content", 0)
     add("notes", 0, after=fixture_changelog(["1.0.0"], "curated note"))
@@ -11199,6 +12740,31 @@ def test_cases():
     add("declaration-only", 1, new=declaration)
     add("declaration-delete", 1, old=history)
     add("bad-base-order", 1, before=fixture_changelog(["1.1.0", "1.0.0"]))
+    open_fix = fixture_pending("1.1.0", (("id", "loose-end"), ("state", "open")))
+    done_fix = fixture_pending("1.1.0", (("id", "loose-end"), ("state", "done")))
+    deferred_fix = fixture_pending("1.1.0", (("id", "loose-end"), ("state", "deferred"),
+                                             ("rationale", "waiting on the next cycle"),
+                                             ("target", "1.2.0")))
+    add("pending-open", 1, after=cut, new=declaration, fixes=open_fix)
+    add("pending-open-second", 1, after=cut, new=declaration,
+        fixes=fixture_pending("1.1.0", (("id", "groundwork"), ("state", "done")),
+                              (("id", "loose-end"), ("state", "open"))))
+    add("pending-open-initialize", 1, before=None,
+        new=fixture_declaration(None, following="1.0.0"),
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "open"))))
+    add("pending-done-initialize", 0, before=None,
+        new=fixture_declaration(None, following="1.0.0"),
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "done"))))
+    add("pending-bound-elsewhere", 2, after=cut, new=declaration,
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "done"))))
+    add("pending-done", 0, after=cut, new=declaration, fixes=done_fix)
+    add("pending-deferred", 0, after=cut, new=declaration, fixes=deferred_fix)
+    add("pending-empty", 0, after=cut, new=declaration, fixes=fixture_pending())
+    add("pending-open-no-cut", 0, fixes=open_fix)
+    add("pending-progress", 0, base_fixes=open_fix, fixes=done_fix)
+    add("pending-open-removed", 1, after=cut, new=declaration, base_fixes=open_fix)
+    add("pending-done-removed", 0, after=cut, new=declaration, base_fixes=done_fix)
+    add("pending-symlink", 2, tweak="pending-symlink")
     bad_logs = {
         "toml": b"[",
         "utf8": b"\xff",
@@ -11232,6 +12798,31 @@ def test_cases():
     for label, raw in bad_declarations.items():
         add("head-decl-" + label, 2, new=raw)
         add("base-decl-" + label, 2, old=raw)
+    bad_pending = {
+        "toml": b"[", "utf8": b"\xff", "empty": b"",
+        "schema": done_fix.replace(b"schema = 1", b"schema = 2"),
+        "boolean": done_fix.replace(b"schema = 1", b"schema = true"),
+        "release": done_fix.replace(b'"1.1.0"', b'"01.1.0"'),
+        "unknown": b"extra = 1\n" + done_fix,
+        "item-unknown": done_fix + b"extra = 1\n",
+        "state": done_fix.replace(b'"done"', b'"fixed"'),
+        "blank-id": done_fix.replace(b'"loose-end"', b'""'),
+        "typed-id": done_fix.replace(b'"loose-end"', b"7"),
+        "space-id": done_fix.replace(b'"loose-end"', b'" "'),
+        "duplicate-id": done_fix + b'\n[[fix]]\nid = "loose-end"\nstate = "done"\n',
+        "missing-fix": b'schema = 1\nrelease = "1.1.0"\n',
+        "typed-fix": b'schema = 1\nrelease = "1.1.0"\nfix = 7\n',
+        "typed-item": b'schema = 1\nrelease = "1.1.0"\nfix = [7]\n',
+        "extra-field": done_fix + b'target = "1.2.0"\n',
+        "missing-rationale": deferred_fix.replace(b'rationale = "waiting on the next cycle"\n', b""),
+        "missing-target": deferred_fix.replace(b'target = "1.2.0"\n', b""),
+        "blank-rationale": deferred_fix.replace(b'"waiting on the next cycle"', b'""'),
+        "space-rationale": deferred_fix.replace(b'"waiting on the next cycle"', b'" "'),
+        "space-target": deferred_fix.replace(b'"1.2.0"', b'" "'),
+    }
+    for label, raw in bad_pending.items():
+        add("head-fix-" + label, 2, fixes=raw)
+        add("base-fix-" + label, 2, base_fixes=raw)
     for name in ("missing-head", "missing-object", "broken-ancestry", "unreadable",
                  "head-symlink", "head-gitlink", "working-symlink", "working-directory",
                  "parent-symlink", "unmerged-index", "unresolved-base", "ambiguous-base",
@@ -11302,7 +12893,7 @@ def fixture_environment(home):
 
 
 def fixture_repo(parent, name, case, env):
-    expected, before, after, old, new, tweak = case
+    expected, before, after, old, new, fixes, base_fixes, tweak = case
     root = parent / name
     root.mkdir()
 
@@ -11316,8 +12907,8 @@ def fixture_repo(parent, name, case, env):
                 name + ": fixture git failed: " + result.stderr.decode("utf-8", "replace"))
         return result.stdout.strip().decode("ascii")
 
-    def write(log, decl):
-        for path, data in ((CHANGELOG, log), (DECLARATION, decl)):
+    def write(log, decl, pending=None):
+        for path, data in ((CHANGELOG, log), (DECLARATION, decl), (PENDING, pending)):
             target = root / path
             if data is None:
                 target.unlink(missing_ok=True)
@@ -11338,12 +12929,12 @@ def fixture_repo(parent, name, case, env):
     (root / "seed.txt").write_text("fixture\n", encoding="utf-8")
     (root / ".aiqt").mkdir()
     if tweak in ("root", "push-root"):
-        write(after, new)
+        write(after, new, fixes)
         head = commit("initialized")
         command("update-ref", "refs/remotes/origin/main", head)
         command("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
         return root
-    write(before, old)
+    write(before, old, base_fixes)
     base = commit("base")
     command("update-ref", "refs/remotes/origin/main", base)
     command("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
@@ -11356,13 +12947,13 @@ def fixture_repo(parent, name, case, env):
         # The target advanced, but the candidate declares against the old tracking tip.
         write(fixture_changelog(["1.0.0", "1.1.0"]), None)
         first_parent = commit("advanced target")
-    write(after, new)
+    write(after, new, fixes)
     (root / "consumer.txt").write_text("ordinary consumer edit\n", encoding="utf-8")
     if tweak == "squash":
         # A preparation commit exists, but the reviewed endpoint is one squashed commit.
-        write(after, old)
+        write(after, old, base_fixes)
         commit("preparation")
-        write(after, new)
+        write(after, new, fixes)
     head = commit("candidate")
     tree = command("rev-parse", head + "^{tree}")
     if binding_fixture:
@@ -11417,7 +13008,7 @@ def fixture_repo(parent, name, case, env):
                   fixture_declaration(after, previous="1.1.0", following="1.2.0"))
             head = commit("second declared cut")
         elif tweak == "push-repaired":
-            write(before, old)
+            write(before, old, base_fixes)
             head = commit("revert undeclared cut")
         elif tweak in ("push-base-second-parent", "push-base-unrelated"):
             other = command("commit-tree", tree, payload=b"other root\n")
@@ -11445,6 +13036,9 @@ def fixture_repo(parent, name, case, env):
             (root / CHANGELOG).symlink_to("seed.txt")
         if tweak == "head-symlink":
             commit("symlink changelog")
+    elif tweak == "pending-symlink":
+        (root / PENDING).symlink_to("seed.txt")
+        commit("symlink pending fixes")
     elif tweak == "parent-symlink":
         (root / ".aiqt").rmdir()
         (root / "outside").mkdir()
@@ -12374,6 +13968,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      _CS_LEGS.format("journal-root open (or None until one)")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
      _CS_LEGS.format("_open_dir_nofollow")),
+    ("opf/tools/_opf_adopt_apply.py", "run_adopt_transaction", "TRY", "mine_held", "mine_held", 1,
+     "false positive: _close_held and _close_held_into pop each number out of the list before its one close, "
+     "so the final close-out's pass over a list the release path already emptied closes none twice"),
     ("opf/tools/_opf_emit.py", "_boom_close7", "AFTER", "fd", "fd", 1,
      "false positive: a self-test close stub; its swallowed close is followed by a raise in the same block, so the "
      "later close never runs after it"),
@@ -15497,6 +17094,16 @@ def _self_test_isolated(red_on_revert):
                 check("staged-hidden-snapshots",
                       [(r["snapshot"], r["code"]) for r in report["snapshots"]]
                       == [("HEAD", 0), ("index", 1), ("working", 0)])
+            if case_id in ("pending-open", "pending-open-second", "pending-open-initialize",
+                           "pending-open-removed"):
+                check(case_id + "-names-open-items",
+                      any("pending fixes still open: " in row["detail"]
+                          and "loose-end" in row["detail"] and "groundwork" not in row["detail"]
+                          for row in report["snapshots"]))
+            if case_id == "pending-bound-elsewhere":
+                check(case_id + "-binding",
+                      any("bound to release 1.0.0, not to the appended 1.1.0" in row["detail"]
+                          for row in report["snapshots"]))
             if case_id == "unreadable":
                 check("unreadable-read-boundary",
                       any("injected unreadable working file" in row["detail"]
@@ -16046,6 +17653,28 @@ def _self_test_isolated(red_on_revert):
                  'for parent, revision in binding["transitions"][-1:]:', "push-noop-undeclared", 0),
                 ("ci-event", 'require(event in ("pull_request", "push"),',
                  "require(True,", "event-dispatch", 0),
+                ("pending-open-items", "if open_items:", "if False:", "pending-open", 0),
+                ("pending-binding", 'if head_pending["release"] != after[-1]:', "if False:",
+                 "pending-bound-elsewhere", 0),
+                ("pending-head-input",
+                 'head_pending = parse_pending(head_pending, "head pending fixes")',
+                 "head_pending = None", "head-fix-toml", 0),
+                ("pending-base-input",
+                 'base_pending = parse_pending(base_pending, "base pending fixes")',
+                 "base_pending = None", "base-fix-toml", 0),
+                ("pending-removed", "elif base_pending is not None:",
+                 "elif False:", "pending-open-removed", 0),
+                ("pending-top-keys",
+                 "require(isinstance(data, dict) and set(data) == PENDING_KEYS,",
+                 "require(isinstance(data, dict) and set(data) >= PENDING_KEYS,",
+                 "head-fix-unknown", 0),
+                ("pending-item-strings",
+                 "require(isinstance(item[key], str) and bool(item[key].strip()),",
+                 "require(True,", "head-fix-typed-id", 0),
+                ("pending-item-blank",
+                 "require(isinstance(item[key], str) and bool(item[key].strip()),",
+                 "require(isinstance(item[key], str) and bool(item[key]),",
+                 "head-fix-space-id", 0),
             )
             parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:

@@ -74,7 +74,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, target_dir_present  # noqa: E402
 
 SOURCE_REL = "tools/check_no_dashes.py"
 TARGET_REL = ".preview/char-policy-write.py"
@@ -123,6 +123,10 @@ def run(root, check):
     """Regenerate (or, with check, compare) the hook's region under root; print the result; return the exit."""
     root = Path(root)
     target = root / TARGET_REL
+    # The directory probe reconcile runs (target_dir_present), before the first read: a .preview/ that is there
+    # but cannot be read as a directory inside the repository (a symlink resolving outside it, say) exits 2,
+    # never read through, reported clean or written.
+    target_dir_present(target, root)
     try:
         current = target.read_bytes()
         desired = render((root / SOURCE_REL).read_bytes(), current)
@@ -196,6 +200,15 @@ def _self_test():
             rc = run(scratch, True)
         if rc != 2:
             failures.append(f"run: an absent source: want exit 2, got {rc}")
+
+        # .preview/ above the hook symlinked outside the root: --check and a regeneration over a drifted region
+        # exit 2 with the hook there untouched; symlinked inside the root, it is read and the region rewritten.
+        def build(base):
+            for rel, data in ((SOURCE_REL, source), (TARGET_REL, target)):
+                Path(base, *rel.split("/")).parent.mkdir(parents=True, exist_ok=True)
+                Path(base, *rel.split("/")).write_bytes(data)
+        failures.extend(linked_dir_failures(Path(scratch, "linked"), "preview", build, run, ".preview", TARGET_REL,
+                                            drift=lambda p: p.write_bytes(target.replace(region, b"X = 0\n"))))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     for failure in failures:
@@ -203,11 +216,13 @@ def _self_test():
     if failures:
         print(f"SELF-TEST FAILED: {len(failures)} vector(s)")
         return 1
-    print("SELF-TEST PASS: gen_char_policy.py splice, drift and marker vectors")
+    print("SELF-TEST PASS: gen_char_policy.py splice, drift, marker and symlinked .preview/ vectors")
     return 0
 
 
-def main(argv):
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv
     if argv[1:] == ["--self-test"]:
         return _self_test()
     if argv[1:] not in ([], ["--check"]):
@@ -216,5 +231,61 @@ def main(argv):
     return run(repo_root(), argv[1:] == ["--check"])
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    sys.exit(_child_status_refusal_exit("gen_char_policy.py") or main())

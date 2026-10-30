@@ -19,7 +19,7 @@ Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalon
   site/downloads/aiqt-skill.zip       the public download, packed deterministically from that SKILL.md
   site/downloads/aiqt-skill-1.0.6.zip the version-numbered copy the site links to (byte-identical alias)
 
-Latest only, allow-listed (D-SKILL-LATEST-ONLY): only the current skill version is served, and the top
+Latest only, allow-listed: only the current skill version is served, and the top
 level of site/downloads admits ONLY declared outputs: this generator's (aiqt-instructions.txt,
 aiqt-skill.zip, the current aiqt-skill-<version>.zip), the generated aiqt/ directory, and the top-level
 outputs of the two sibling owners, read from each owner's own table (gen_mappings.GENSRC_OUTPUTS:
@@ -35,7 +35,7 @@ input is read, and every walk starts from that one descriptor; each parent compo
 is opened with O_DIRECTORY|O_NOFOLLOW from it, the temporary file is created O_EXCL|O_NOFOLLOW at the
 parent's descriptor, fsynced, and renamed over the target with os.replace anchored to the same descriptor.
 
-Threat model (D-399-STATIC-THREAT-MODEL): the generator defends against hostile STATIC tree state, anything a
+Threat model: the generator defends against hostile STATIC tree state, anything a
 hostile commit can plant (a symlink at any component, a hard link, a FIFO or device, a wrong type, an orphan,
 an unknown entry), and fails closed on it: such an entry is refused or named, never read through, written
 through or deleted. That holds for every output and for every other input this generator reads: LICENSE,
@@ -99,7 +99,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The canonical apex ordering. It MUST appear verbatim in the apex rule body (prjint1), so the skill's
@@ -140,7 +140,7 @@ ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
 # it to site/evidence.html); this gate verifies, it never writes there.
 EVIDENCE_PARTS = ("docs", "evidence.md")
 # Canonical form, judged on the RAW page text (comments and markup included), so the gate never models how a
-# styled form renders. Scope (D-399-EVIDENCE-SCOPE): the check catches a FORGOTTEN bump, a stale or missing
+# styled form renders. Scope: the check catches a FORGOTTEN bump, a stale or missing
 # plain sentence; it is not a defence against a deliberately misleading page. What the counter checks: the
 # phrase 'served from the' with plain whitespace between its words (any case, any whitespace run, so a wrapped
 # line counts) must occur EXACTLY ONCE, and that one occurrence must be the plain canonical sentence 'served
@@ -517,11 +517,14 @@ def _is_regular(path):
     return stat.S_ISREG(st.st_mode)
 
 
-def versioned_zips(downloads_dir):
-    """The sorted version-numbered skill zip basenames directly under downloads_dir that are REGULAR files by
-    lstat (top level only; the reserved aiqt/ subtree is not a download location). An absent dir has none; an
-    unreadable one raises OSError, which run_gen surfaces as exit 2."""
-    if not dir_present(downloads_dir):
+def versioned_zips(root):
+    """The sorted version-numbered skill zip basenames directly under root's site/downloads that are REGULAR
+    files by lstat (top level only; the reserved aiqt/ subtree is not a download location). An absent dir has
+    none; an unreadable one, or a symlink at site or downloads that is dangling or whose target is not a
+    directory or resolves outside root, raises OSError, which run_gen surfaces as exit 2 (a symlink to a
+    directory inside root is read)."""
+    downloads_dir = root.joinpath(*ZIP_PARTS[:-1])
+    if not dir_present(downloads_dir, root=root):
         return []
     return sorted(fn for fn in os.listdir(downloads_dir)
                   if is_versioned_zip(fn) and _is_regular(os.path.join(downloads_dir, fn)))
@@ -534,7 +537,7 @@ def _remove_hint(rel_posix):
 
 
 def latest_only_problems(root_fd, current_versioned, require_current):
-    """Latest-only plus ALLOW-LIST (D-SKILL-LATEST-ONLY) scan of the top level of site/downloads, opened from
+    """Latest-only plus ALLOW-LIST scan of the top level of site/downloads, opened from
     the run's root descriptor by _open_dir_fd and judged by lstat relative to it, never following a link. The
     only entries permitted are this generator's declared outputs (the instructions file, the alias
     aiqt-skill.zip, and current_versioned), each a regular file, the sibling owners' declared top-level
@@ -947,7 +950,8 @@ def build_outputs(root, root_fd=None):
 def run_gen(root, check):
     """Reconcile every output under root. Exit 0 in sync, 1 on drift (check mode), 2 on a malformed
     source, an unknown corpus-id, or a read/write failure. Mirrors gen_cursor.main()'s fail-closed shape:
-    dir_present (not is_dir) so an unreadable .aiqt/ parent fails closed, and a walk whose errors raise so an
+    dir_or_absent (not is_dir) so an unreadable .aiqt/ parent, or a corpus path that cannot be read as a
+    directory, fails closed, and a walk whose errors raise so an
     unreadable output dir fails closed instead of concealing an orphan. The repository root is opened ONCE
     (_open_root), before any input is read, and that one descriptor anchors every input read, scan, output
     read and write of the run. Every refusal of static tree state happens BEFORE the first write: the input
@@ -971,7 +975,13 @@ def run_gen(root, check):
         # output as an orphan for removal, never concealed and never deleted. A PRESENT corpus with a
         # missing/unreadable skill source is malformed (the
         # OSError from parse_source propagates here as exit 2), which is the correct fail-closed outcome.
-        if dir_present(corpus_dir):
+        # A corpus path that is there but cannot be read as a directory is a refusal (exit 2), never that
+        # transition; a symlink to a directory inside the root is read.
+        # dir_present, bound beneath root, then judges every component above it the same way.
+        _present, problem = dir_or_absent(corpus_dir, root)
+        if problem is not None:
+            raise NotADirectoryError("{} {} (cannot evaluate)".format(corpus_dir, problem))
+        if dir_present(corpus_dir, root=root):
             reserved_map, standalone, binary = build_outputs(root, root_fd)
         else:
             reserved_map, standalone, binary = {}, [], []
@@ -981,7 +991,7 @@ def run_gen(root, check):
         print("error: {}".format(exc))
         return 2
     try:
-        # Latest-only plus allow-list (D-SKILL-LATEST-ONLY), run FIRST, before any write: exactly one
+        # Latest-only plus allow-list, run FIRST, before any write: exactly one
         # version-numbered skill zip is served, named for the skill meta version (build_outputs has already
         # asserted ZIP_VERSIONED_PARTS spells it), beside the alias, and the ONLY other top-level entries
         # permitted are the declared sibling outputs and the reserved aiqt/ directory. The generator never
@@ -1506,7 +1516,7 @@ def self_test_main():
             if kind not in out or is_versioned_zip(fn) != (i == 0):
                 failures.append("{} expected to be classed as {!r}, got\n{}".format(fn, kind, out))
 
-        # 9. Latest-only (D-SKILL-LATEST-ONLY) scans by lstat and refuses (never skips) a non-regular entry
+        # 9. Latest-only scans by lstat and refuses (never skips) a non-regular entry
         #    at a skill zip name; it also names a missing current copy. Each case is red if the scan reverts
         #    to os.path.isfile (a link to a file passes, a directory is skipped) or drops its lstat filter.
         latest = tmp / "latest"
@@ -1514,7 +1524,7 @@ def self_test_main():
         _write_fixture(latest, good_src)
         capture(latest, False)
         ldl = latest.joinpath(*ZIP_PARTS[:-1])
-        found = versioned_zips(ldl)
+        found = versioned_zips(latest)
         if found != [ZIP_VERSIONED_PARTS[-1]]:
             failures.append("a clean tree must hold exactly the current versioned zip, got {}".format(found))
         alias_bytes = latest.joinpath(*ZIP_PARTS).read_bytes()
@@ -1557,7 +1567,7 @@ def self_test_main():
             failures.append("a missing current versioned zip expected latest-only drift (exit 1, found 0), "
                             "got {}\n{}".format(code, out))
         code, out = capture(latest, False)
-        if code != 0 or versioned_zips(ldl) != [ZIP_VERSIONED_PARTS[-1]]:
+        if code != 0 or versioned_zips(latest) != [ZIP_VERSIONED_PARTS[-1]]:
             failures.append("regen expected to restore exactly the current versioned zip, got {}\n{}".format(
                 code, out))
         code, out = capture(latest, True)
@@ -2336,6 +2346,45 @@ def self_test_main():
         else:
             skipped.append("the FIFO-at-LICENSE and pre-write FIFO vectors: os.mkfifo or "
                            "signal.SIGALRM unavailable")
+
+        # 22. A corpus path that is there but is not a directory is refused in both modes (exit 2), never read
+        #     as the absent-corpus transition, which on a tree with no outputs yet is a clean exit 0.
+        nondir = tmp / "nondir-corpus"
+        nondir.joinpath(*CORPUS_PARTS[:-1]).mkdir(parents=True)
+        nondir.joinpath(*CORPUS_PARTS).write_text("not a directory\n", encoding="utf-8")
+        for chk in (True, False):
+            code, out = capture(nondir, chk)
+            if code != 2 or "is not a directory" not in out:
+                failures.append("a corpus path that is a regular file expected exit 2 naming it (check={}), got "
+                                "{}\n{}".format(chk, code, out))
+
+        # 23. A corpus path that is a symlink, on a generated tree: to the corpus moved elsewhere inside the root,
+        #     it is read (--check exit 0, in sync); dangling, to a regular file inside the root, or to the corpus
+        #     moved outside the root (so following it would be in sync), it is refused in both modes (exit 2),
+        #     named, never read as the absent-corpus transition and never followed.
+        for shape, want, reason in (("in-root", 0, None), ("dangling", 2, "whose target does not exist"),
+                                    ("to-file", 2, "whose target is not a directory"),
+                                    ("outside", 2, "whose target resolves outside the repository")):
+            linked = tmp / ("linked-corpus-" + shape)
+            linked.mkdir()
+            _write_fixture(linked, good_src)
+            capture(linked, False)
+            corpus = linked.joinpath(*CORPUS_PARTS)
+            target = {"in-root": linked / "shared" / "rules", "dangling": linked / "absent",
+                      "to-file": linked / "file.txt", "outside": tmp / "outside-corpus"}[shape]
+            if shape in ("in-root", "outside"):
+                target.parent.mkdir(exist_ok=True)
+                shutil.move(str(corpus), str(target))
+            else:
+                shutil.rmtree(corpus)
+            if shape == "to-file":
+                target.write_text("not a directory\n", encoding="utf-8")
+            corpus.symlink_to(target if shape == "outside" else os.path.relpath(target, corpus.parent))
+            for chk in ((True,) if want == 0 else (True, False)):
+                code, out = capture(linked, chk)
+                if code != want or (reason is not None and "is a symbolic link " + reason not in out):
+                    failures.append("a corpus path that is a symlink {} expected exit {} (check={}), got {}\n{}".format(
+                        shape, want, chk, code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2372,7 +2421,9 @@ def self_test_main():
           "version (a second plain-whitespace mention, a stale, capitalized, wrapped or commented sentence, a "
           "longer version or suffix straight after the version, and a missing page are --check drift; "
           "deliberate markup around or inside the phrase or after a '.' is out of scope); a hard-linked input "
-          "is refused as an input (break the link, never git rm); a facet-misplaced rule fails closed (exit 2).")
+          "is refused as an input (break the link, never git rm); a facet-misplaced rule and a corpus path that "
+          "is not a directory or a symlink to a directory inside the root fail closed (exit 2), and a corpus "
+          "symlinked to a directory inside the root is read.")
     return 0
 
 

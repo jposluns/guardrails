@@ -15,6 +15,8 @@ en/em dash fails closed here rather than as a red site-integrity gate later.
 
   gen_mappings.py           regenerate site/mappings.html and the two exports under site/downloads/
   gen_mappings.py --check   exit 1 if any of the three is out of date; exit 2 on malformed input
+  gen_mappings.py --self-test  build synthetic trees and assert drift is caught (exit 1) and a site/ symlinked
+                               outside the root fails closed (exit 2) without its page being read
 """
 import sys
 
@@ -37,7 +39,8 @@ import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, read_source_text, replace_block, reconcile  # noqa: E402
+from _gen_common import (linked_dir_failures, repo_root, read_source_text, replace_block, reconcile,  # noqa: E402
+                         target_dir_present)
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 import gen_rules  # noqa: E402  (reuse the one frontmatter parser + full corpus validation)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
@@ -451,11 +454,20 @@ def render_json(reg, rows):
     return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
 
 
-def main():
-    check = "--check" in sys.argv[1:]
-    root = repo_root()
+def run(root, check):
+    """Reconcile site/mappings.html and the two exports under site/downloads/ under root. Exit 0 in sync, 1 on
+    drift (check mode), 2 on malformed input, a missing page or missing markers, or a target directory that is
+    there but cannot be read as one inside the repository. Parameterized on root so the self-test drives it
+    against synthetic trees, never the real repo."""
+    page = root / "site" / "mappings.html"
+    exports = (root / "site" / "downloads" / "mappings.csv", root / "site" / "downloads" / "mappings.json")
+    # The directory probe reconcile runs (target_dir_present), for every target before anything is read or
+    # written: a site/ or site/downloads/ that is there but cannot be read as a directory inside the repository
+    # exits 2 here, so the page is never read through it and nothing is written before the refusal.
+    for target in (page,) + exports:
+        target_dir_present(target, root)
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
+        manifests = load_manifests(root / ".aiqt" / "standards", root=root)
         src_dir = root / ".aiqt" / "core" / "rules"
         if not src_dir.is_dir():
             print("error: rule corpus not found at {}".format(src_dir), file=sys.stderr)
@@ -469,7 +481,6 @@ def main():
         return 2
     reg = registry_rows(manifests, rows)
 
-    page = root / "site" / "mappings.html"
     if not page.exists():
         print("error: site/mappings.html not found (expected generated target)", file=sys.stderr)
         return 2
@@ -488,18 +499,108 @@ def main():
         return 2
 
     drift = False
-    if reconcile(page, text, check):
+    if reconcile(page, text, check, root):
         print("drift: site/mappings.html")
         drift = True
-    if reconcile(root / "site" / "downloads" / "mappings.csv", render_csv(export_rows), check):
+    if reconcile(exports[0], render_csv(export_rows), check, root):
         print("drift: site/downloads/mappings.csv")
         drift = True
-    if reconcile(root / "site" / "downloads" / "mappings.json", render_json(reg, export_rows), check):
+    if reconcile(exports[1], render_json(reg, export_rows), check, root):
         print("drift: site/downloads/mappings.json")
         drift = True
     if check and drift:
         print("run tools/gen_mappings.py to regenerate")
         return 1
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if "--self-test" in args:
+        return self_test_main()
+    return run(repo_root(), "--check" in args)
+
+
+# --- self-test ------------------------------------------------------------------------------------
+# Synthetic temp trees only, never the real tree: one pinned manifest, a one-rule corpus (the apex, which
+# carries no mapping key) and a page carrying every generated block. Vectors:
+#   1. the tree generates (exit 0) and re-checks clean (exit 0), and a hand-edited page is drift (exit 1);
+#   2. a site/ symlinked outside the root fails closed (exit 2) in --check and write mode with the page there
+#      untouched and never read: the page there has no markers, and each run prints the link refusal, not the
+#      marker error; symlinked inside the root, it is read and the page rewritten.
+
+_SELFTEST_MANIFEST = (
+    'map-key = "map-alpha"\nname = "Alpha Framework"\npublisher = "AIQT self-test"\nedition = "1.0"\n'
+    'kind = "control"\nstatus = "stable"\ncatalogue = "full"\ncitation-unit = "control"\n'
+    'id-pattern = "ST[0-9]{2}"\nsource-artefact = "self-test fixture"\nretrieved = "2026-01-01"\n'
+    '[[id]]\ncode = "ST01"\ntitle = "one"\n'
+)
+_SELFTEST_APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n"
+                  "---\n\n# Project integrity\n\nA fixture rule.\n")
+_SELFTEST_BLOCKS = ("COVERAGE", "RELKINDS", "IDKINDS", "ISOENTRIES", "REGISTRYINTRO", "REGISTRY", "FORWARD",
+                    "REVERSE")
+
+
+def _write_tree(root):
+    """A synthetic tree with the manifest, the corpus, the page and site/downloads/, for run(root, check)."""
+    std = root / ".aiqt" / "standards"
+    std.mkdir(parents=True)
+    (std / "alpha.toml").write_text(_SELFTEST_MANIFEST, encoding="utf-8")
+    rules = root / ".aiqt" / "core" / "rules"
+    rules.mkdir(parents=True)
+    (rules / "prjint1.md").write_text(_SELFTEST_APEX, encoding="utf-8")
+    (root / "site" / "downloads").mkdir(parents=True)
+    (root / "site" / "mappings.html").write_text("<main>\n" + "".join(
+        "      <!-- {0}:BEGIN (generated) -->\n      <!-- {0}:END -->\n".format(name)
+        for name in _SELFTEST_BLOCKS) + "</main>\n", encoding="utf-8")
+
+
+def self_test_main():
+    import shutil
+    import tempfile
+    from contextlib import redirect_stderr, redirect_stdout
+
+    def quiet(root, check):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            try:
+                return run(root, check)
+            except SystemExit as exc:  # reconcile's fail-closed path raises SystemExit(2)
+                return exc.code
+
+    failures = []
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-mappings-selftest-"))
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        # 1. A well-formed tree generates and re-checks clean; a hand edit of the page is drift.
+        good = tmp / "good"
+        _write_tree(good)
+        got = (quiet(good, False), quiet(good, True))
+        if got != (0, 0):
+            failures.append("well-formed tree expected generate and --check exit (0, 0), got {}".format(got))
+        page = good / "site" / "mappings.html"
+        page.write_text(page.read_text(encoding="utf-8").replace("Alpha Framework", "Hand-edited"),
+                        encoding="utf-8")
+        code = quiet(good, True)
+        if code != 1:
+            failures.append("a hand-edited page expected --check exit 1 (drift), got {}".format(code))
+
+        # 2. site/ symlinked outside the root (page never read) and inside it (followed).
+        failures.extend(linked_dir_failures(tmp, "site", _write_tree, run, "site", "site/mappings.html",
+                                            unread=lambda p: p.write_text("no markers\n", encoding="utf-8")))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if failures:
+        print("SELF-TEST FAIL:")
+        for failure in failures:
+            print("  - " + failure)
+        return 1
+    print("SELF-TEST PASS: a well-formed tree generates the page and both exports and re-checks clean; a "
+          "hand-edited page is drift (exit 1); a site/ symlinked outside the root fails closed (exit 2) with "
+          "the page there untouched and never read, and one symlinked inside the root is read and rewritten.")
     return 0
 
 

@@ -53,7 +53,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import read_source_text  # noqa: E402
 from check_leaks import load_denylist, scan_text  # noqa: E402  shared denylist + scanner (single source)
-from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 ROOT = Path(__file__).resolve().parents[1]
 _ZERO_SHA = "0" * 40

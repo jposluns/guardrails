@@ -31,6 +31,12 @@ EXISTENCE is checked (the registry declares paths); a source's READABILITY is th
 concern, not the registry's, so no readability probing is done here. An unreadable input still fails
 closed (exit 2) exactly like the sibling generators, never a silent clean.
 
+An entry whose target is on the authoring-only roster (tools/gen_hooks.py AUTHORING_ONLY_REL, read
+statically like the declarations) gains the optional key "scope": "authoring". gensrc_guard honours such an
+entry only in a tree whose root carries the authoring marker .aiqt/authoring.toml, so an adopter tree holding
+this registry keeps its own .claude/settings.json. The registry stays version 1: a guard that predates the
+key tolerates it as an unknown key and honours the entry in every tree, as before it.
+
   gen_gensrc.py            regenerate .aiqt/gensrc.json
   gen_gensrc.py --check    fail (exit 1) on drift; exit 2 on a bad declaration or a read/write error
   gen_gensrc.py --self-test  build synthetic trees and assert the generator's own fail-closed invariants
@@ -55,7 +61,7 @@ import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 
 # The registry this tool renders, repo-root-relative. It is listed in its own output (below), so the
 # inventory is complete: the registry names itself alongside every other generated artefact.
@@ -70,11 +76,83 @@ OWN_OUTPUTS = (
 KINDS = {"file", "tree", "block"}
 ENTRY_KEYS = {"target", "kind", "sources", "regenerate"}
 SELF = "gen_gensrc"  # this module's stem, excluded from discovery (it declares its own output above)
+# The authoring-only roster: tools/gen_hooks.py AUTHORING_ONLY_REL names the paths that exist only in the pack
+# authoring tree (the authoring marker and the repository-local .claude/settings.json gated on it). This tool,
+# not the generator, marks every registry entry on that roster "scope": "authoring", so gensrc_guard honours
+# it only where the marker sits and an adopter tree holding the shipped registry keeps its own settings. The
+# roster is read STATICALLY (read_authoring_roster), like every declaration here; a declaration carrying its
+# own "scope" key is refused (ENTRY_KEYS), so the roster is the one source of the scope.
+ROSTER_GEN = "gen_hooks.py"
+ROSTER_NAME = "AUTHORING_ONLY_REL"
+SCOPE_AUTHORING = "authoring"
+
+
+def _reject_rebinding(tree, name, allowed, where, assignment):
+    """Raise ValueError (naming `where`) when the parsed module `tree` binds `name` anywhere other than the
+    Store-context Name node(s) whose id() is in `allowed`: the single-binding discipline _read_declaration
+    (GENSRC_OUTPUTS) and read_authoring_roster (the roster and every name it uses) share. The WHOLE tree is
+    walked, so a binding nested in an if, try, for, with, def or class body is refused like a top-level one.
+    A single Store-/Del-context Name rule covers plain/augmented/annotated assignment, del, walrus, tuple/star
+    unpack, and for/with targets (all bind through such a Name; so does a `type` alias statement); a second
+    rule covers the string-name binders, whose bound name is a str attribute, not a Name node (dotted/wildcard
+    import, def/class, except-as, match capture incl. MatchMapping.rest, a parameter, global/nonlocal).
+    `assignment` names the one allowed form in the message ("literal", "plain")."""
+    binder = ("{}: {} must not be rebound by {{}}; exactly one top-level {} assignment "
+              "is allowed (fail-closed)").format(where, name, assignment)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)) and id(node) not in allowed:
+                raise ValueError("{}: {} must not be rebound (a second/nested/conditional "
+                                 "assignment, an augmented or annotated assignment, a del, a walrus, a "
+                                 "tuple/star unpack, or a for/with target); exactly one top-level {} "
+                                 "assignment is allowed (fail-closed)".format(where, name, assignment))
+        elif isinstance(node, ast.alias):
+            # An alias with no asname binds the ROOT of a (possibly dotted) name: `import X.child` binds `X`,
+            # so compare on name.partition(".")[0]. A wildcard (`from x import *`, name == "*") can bind
+            # `name` and is statically undecidable, so fail closed. `import X.child as y` binds only `y`.
+            bound = node.asname if node.asname is not None else node.name.partition(".")[0]
+            if bound == name or (node.asname is None and node.name == "*"):
+                raise ValueError(binder.format("an import"))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                raise ValueError(binder.format("a def/class"))
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == name:
+                raise ValueError(binder.format("an except-as"))
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name == name:
+                raise ValueError(binder.format("a match capture"))
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest == name:  # `case {**name}` binds the rest to that name
+                raise ValueError(binder.format("a match capture"))
+        elif isinstance(node, ast.arg):
+            if node.arg == name:  # a function/lambda parameter, incl. */**/kw-only
+                raise ValueError(binder.format("a parameter"))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if name in node.names:
+                raise ValueError(binder.format("a global/nonlocal declaration"))
+
+
+def _parse_module(path):
+    """Parse the module at path as the interpreter compiles it: from its BYTES, so a PEP 263 coding cookie
+    decodes the source as an import would (a UTF-8 text read of a file declaring `# coding: utf-7` parses
+    other statements than the module runs). The bytes must also decode as UTF-8 and parse as that text, so a
+    file the text read refused (bytes that are not UTF-8, a leading BOM) stays refused. Raises OSError on a
+    read fault, UnicodeDecodeError (a ValueError) or SyntaxError, and re-raises a parser stack overflow on very
+    deep nesting (MemoryError or RecursionError, the classes gen_renderers._PARSE_ERRORS also maps) as
+    SyntaxError; each caller maps them all to exit 2."""
+    data = path.read_bytes()
+    try:
+        ast.parse(data.decode("utf-8"), filename=str(path))
+        return ast.parse(data, filename=str(path))
+    except (MemoryError, RecursionError) as exc:
+        raise SyntaxError("too deeply nested to parse ({}: {})".format(type(exc).__name__, exc)) from exc
 
 
 def _read_declaration(path, where):
     """Return the value of path's single module-level GENSRC_OUTPUTS literal, recovered by parsing the
-    file to an AST and evaluating ONLY that literal with ast.literal_eval. The module is never imported
+    file to an AST (its bytes, as the interpreter does: _parse_module, so a coding cookie is honoured) and
+    evaluating ONLY that literal with ast.literal_eval. The module is never imported
     or executed, so an import-time SystemExit, a dynamic __getattr__, or any other side effect cannot
     influence the result. Fail-closed: raises ValueError (naming `where`) when there is no single
     top-level literal Assign to GENSRC_OUTPUTS, when the right-hand side is non-literal, or when the
@@ -101,9 +179,8 @@ def _read_declaration(path, where):
     parameter (def f[GENSRC_OUTPUTS](), class C[GENSRC_OUTPUTS], type X[GENSRC_OUTPUTS] = ...)
     binds only in the type-parameter scope, is not inspected, and cannot affect the module-level
     declaration: an accepted nested-scope residual."""
-    source = path.read_text(encoding="utf-8")  # OSError -> caller's fail-closed try
     try:
-        tree = ast.parse(source, filename=str(path))
+        tree = _parse_module(path)  # OSError -> caller's fail-closed try
     except SyntaxError as exc:
         raise ValueError("{}: cannot parse for its GENSRC_OUTPUTS declaration ({})".format(where, exc))
     # The ONLY valid declaration is a single top-level plain Assign to GENSRC_OUTPUTS.
@@ -111,54 +188,14 @@ def _read_declaration(path, where):
                    if isinstance(node, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == "GENSRC_OUTPUTS" for t in node.targets)]
     the_assign = top_assigns[0] if len(top_assigns) == 1 else None
-    # Walk the WHOLE tree and reject any binding of GENSRC_OUTPUTS OTHER than the_assign's own target(s),
-    # closing the entire rebind class. The one allowed binding is the_assign's GENSRC_OUTPUTS Store-Name
-    # target node(s), tracked by identity; every other way Python can bind the name is rejected. A single
-    # Store-/Del-context Name rule covers plain/augmented/annotated assignment, del, walrus, tuple/star
-    # unpack, and for/with targets (all bind through such a Name); a second rule covers the string-name
-    # binders, whose bound name is a str attribute, not a Name node (dotted/wildcard import, def/class,
-    # except-as, match capture incl. MatchMapping.rest, global/nonlocal). A `type GENSRC_OUTPUTS = ...`
-    # needs no branch: its target is itself a Store-context Name caught by the first rule.
+    # Walk the WHOLE tree and reject any binding of GENSRC_OUTPUTS OTHER than the GENSRC_OUTPUTS target(s) of
+    # the_assign, closing the entire rebind class (_reject_rebinding, shared with read_authoring_roster). The
+    # one allowed binding is those Store-Name target node(s), tracked by identity.
     allowed = set()
     if the_assign is not None:
         allowed = {id(t) for t in the_assign.targets
                    if isinstance(t, ast.Name) and t.id == "GENSRC_OUTPUTS"}
-    binder = ("{}: GENSRC_OUTPUTS must not be rebound by {{}}; exactly one top-level literal assignment "
-              "is allowed (fail-closed)").format(where)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            if (node.id == "GENSRC_OUTPUTS" and isinstance(node.ctx, (ast.Store, ast.Del))
-                    and id(node) not in allowed):
-                raise ValueError("{}: GENSRC_OUTPUTS must not be rebound (a second/nested/conditional "
-                                 "assignment, an augmented or annotated assignment, a del, a walrus, a "
-                                 "tuple/star unpack, or a for/with target); exactly one top-level literal "
-                                 "assignment is allowed (fail-closed)".format(where))
-        elif isinstance(node, ast.alias):
-            # An alias with no asname binds the ROOT of a (possibly dotted) name: `import
-            # GENSRC_OUTPUTS.child` binds `GENSRC_OUTPUTS`, so compare on name.partition('.')[0]. A
-            # wildcard (`from x import *`, name == "*") can bind GENSRC_OUTPUTS and is statically
-            # undecidable, so fail closed. `import GENSRC_OUTPUTS.child as y` binds only `y`, allowed.
-            bound = node.asname if node.asname is not None else node.name.partition(".")[0]
-            if bound == "GENSRC_OUTPUTS" or (node.asname is None and node.name == "*"):
-                raise ValueError(binder.format("an import"))
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == "GENSRC_OUTPUTS":
-                raise ValueError(binder.format("a def/class"))
-        elif isinstance(node, ast.ExceptHandler):
-            if node.name == "GENSRC_OUTPUTS":
-                raise ValueError(binder.format("an except-as"))
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
-            if node.name == "GENSRC_OUTPUTS":
-                raise ValueError(binder.format("a match capture"))
-        elif isinstance(node, ast.MatchMapping):
-            if node.rest == "GENSRC_OUTPUTS":  # `case {**GENSRC_OUTPUTS}` binds the rest to that name
-                raise ValueError(binder.format("a match capture"))
-        elif isinstance(node, ast.arg):
-            if node.arg == "GENSRC_OUTPUTS":  # a function/lambda parameter, incl. */**/kw-only
-                raise ValueError(binder.format("a parameter"))
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            if "GENSRC_OUTPUTS" in node.names:
-                raise ValueError(binder.format("a global/nonlocal declaration"))
+    _reject_rebinding(tree, "GENSRC_OUTPUTS", allowed, where, "literal")
     if the_assign is None:
         raise ValueError("{} does not declare GENSRC_OUTPUTS; a generator cannot ship without declaring "
                          "its outputs (fail-closed)".format(where))
@@ -292,10 +329,84 @@ def _validate_entry(raw, where, root, seen):
     return {"target": canon, "kind": kind, "sources": list(sources), "regenerate": regenerate}
 
 
+def read_authoring_roster(tools_dir):
+    """The authoring-only roster, tools/gen_hooks.py AUTHORING_ONLY_REL, read STATICALLY (parsed, never
+    imported or run, like every declaration here). Its value must be a tuple or list whose items are
+    non-empty str literals, or names bound to one (gen_hooks spells it from AUTHORING_MARKER_REL and
+    PROJECT_SETTINGS_REL), each a clean POSIX-relative path. Returns () when tools_dir holds no gen_hooks.py:
+    a tree without that generator has no authoring-only target (the synthetic trees here and in
+    check_gensrc_failclose). Fail-closed: a present gen_hooks.py that cannot be parsed, or whose items do not
+    resolve to str literals, raises ValueError, and a read fault raises OSError; the caller maps both to exit
+    2, so a renamed or computed roster can never silently drop the scope. AUTHORING_ONLY_REL and every name
+    it uses must be bound exactly once, by one plain top-level assignment (a single Name target), and nowhere
+    else: the _reject_rebinding walk _read_declaration uses refuses every other binding of those names
+    anywhere in the module (tuple or star unpacking, augmented or annotated assignment, a for, with, import,
+    def or class binding, a walrus, a del, a global or nonlocal declaration, an except-as, a match capture,
+    a parameter, and any binding nested in a block or a function). Each name the roster uses must also be
+    bound in a statement BEFORE the roster assignment (the module reads it at that line, so a later
+    assignment is not the value the roster takes) and must not be dunder-shaped (begin and end with __): the
+    interpreter binds some such names itself (a module docstring binds __doc__), so every name of that shape is
+    refused, one the interpreter never binds included (failing safe). The file is parsed from its
+    bytes (_parse_module), so a PEP 263 coding cookie is honoured as an import honours it. Within those rules
+    the parsed value is the value the module binds. Bounded like _read_declaration: the walk is conservative
+    (an unrelated local reuse of one of these names inside a function is refused too, failing safe), a
+    dynamic rebinding (globals(), setattr, exec) is out of scope, and a PEP-695 type parameter is not
+    inspected."""
+    path = Path(tools_dir) / ROSTER_GEN
+    try:
+        tree = _parse_module(path)
+    except FileNotFoundError:
+        return ()
+    except SyntaxError as exc:
+        raise ValueError("{}: cannot parse for its {} roster ({})".format(ROSTER_GEN, ROSTER_NAME, exc))
+    plain = {}
+    position = {}
+    for index, node in enumerate(tree.body):
+        position[id(node)] = index
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            plain.setdefault(node.targets[0].id, []).append(node)
+
+    def _bound_once(name):
+        nodes = plain.get(name, [])
+        # The one allowed binding is the Name target of a single plain top-level assignment; any other
+        # binding of the name anywhere in the module fails closed (a second plain assignment included).
+        _reject_rebinding(tree, name, {id(nodes[0].targets[0])} if len(nodes) == 1 else set(), ROSTER_GEN,
+                          "plain")
+        if len(nodes) != 1:
+            raise ValueError("{}: {} must be bound exactly once, by a plain module-level assignment "
+                             "(fail-closed)".format(ROSTER_GEN, name))
+        return nodes[0]
+
+    roster_node = _bound_once(ROSTER_NAME)
+    value = roster_node.value
+    if not isinstance(value, (ast.Tuple, ast.List)) or not value.elts:
+        raise ValueError("{}: {} must be a non-empty tuple or list".format(ROSTER_GEN, ROSTER_NAME))
+    roster = []
+    for item in value.elts:
+        if isinstance(item, ast.Name):
+            if item.id.startswith("__") and item.id.endswith("__"):
+                raise ValueError("{}: {} must not use {}, a dunder-shaped name (every name that begins and ends "
+                                 "with __ is refused, since the interpreter binds some, such as __doc__ and "
+                                 "__name__, itself) (fail-closed)".format(ROSTER_GEN, ROSTER_NAME, item.id))
+            bound = _bound_once(item.id)
+            if position[id(bound)] >= position[id(roster_node)]:
+                raise ValueError("{}: {} must be bound before {} reads it (fail-closed)".format(
+                    ROSTER_GEN, item.id, ROSTER_NAME))
+            item = bound.value
+        if not (isinstance(item, ast.Constant) and isinstance(item.value, str) and item.value):
+            raise ValueError("{}: every {} item must be a str literal, or a name bound once to one "
+                             "(fail-closed)".format(ROSTER_GEN, ROSTER_NAME))
+        roster.append(_canonical_target(item.value, "file", "{} {}".format(ROSTER_GEN, ROSTER_NAME)))
+    return tuple(roster)
+
+
 def collect_entries(declarations, root):
     """Union and validate the declarations of every discovered generator plus this tool's own output,
     then return the entries sorted by target for a deterministic render. Raises ValueError on any
-    malformed entry or duplicate target."""
+    malformed entry or duplicate target. Every kind=file entry whose target is on the authoring-only
+    roster (read_authoring_roster over root/tools) gains "scope": "authoring"; a roster path declared as a
+    tree or block, or lying under a tree entry, raises ValueError, because an unscoped entry over it would
+    make gensrc_guard deny an adopter's edits to its own copy of that path."""
     entries = []
     seen = set()
     for stem, decl in declarations:
@@ -320,6 +431,17 @@ def collect_entries(declarations, root):
                 raise ValueError("tree-descendant overlap: {!r} and {!r} name the same subtree; a tree "
                                  "and any path beneath it cannot both be declared (fail-closed)"
                                  .format(a_target, b_target))
+    roster = read_authoring_roster(root / "tools")
+    for entry in entries:
+        for rel in roster:
+            if entry["kind"] == "file" and entry["target"] == rel:
+                entry["scope"] = SCOPE_AUTHORING
+            elif entry["target"].rstrip("/") == rel or (
+                    entry["kind"] == "tree" and rel.startswith(entry["target"])):
+                raise ValueError("the authoring-only path {!r} ({} {}) is covered by the {} entry {!r}; it "
+                                 "must be a kind=file entry of its own so it can be scoped to the authoring "
+                                 "tree (fail-closed)".format(rel, ROSTER_GEN, ROSTER_NAME, entry["kind"],
+                                                             entry["target"]))
     entries.sort(key=lambda e: e["target"])
     return entries
 
@@ -342,7 +464,7 @@ def run(root, check):
     except (ValueError, OSError) as exc:
         print("error: cannot build {} ({}); fail-closed".format(REGISTRY_REL, exc), file=sys.stderr)
         return 2
-    drifted = reconcile(root / REGISTRY_REL, text, check)  # shared reconcile fail-closes (exit 2) on an
+    drifted = reconcile(root / REGISTRY_REL, text, check, root)  # shared reconcile fail-closes (exit 2) on an
                                                             # OSError or an invalid-UTF-8 target
     if drifted:
         print("drift: {} is out of date; run tools/gen_gensrc.py".format(REGISTRY_REL), file=sys.stderr)
@@ -384,7 +506,23 @@ def main():
 #       fails closed (exit 2), while a sibling on a component boundary ('X/' vs 'XYZ') does NOT collide,
 #   (m) zero generators (a tools/ dir with no gen_*.py besides this tool) fails closed (exit 2),
 #   (n) an invalid-UTF-8 existing .aiqt/gensrc.json target fails closed (exit 2) on --check, via the
-#       shared _gen_common.reconcile guard rather than a raw traceback.
+#       shared _gen_common.reconcile guard rather than a raw traceback,
+#   (o) the tools/gen_hooks.py AUTHORING_ONLY_REL roster marks exactly its entry "scope": "authoring",
+#   (p) a roster path under a tree or declared as a block, an unbound, computed or doubly bound roster, and a
+#       declaration carrying its own scope each fail closed (exit 2),
+#   (q) every binding of the roster or of a name it uses other than its one plain top-level assignment (tuple
+#       or star unpacking, augmented or annotated assignment, top-level or nested, a for/with/import/def/class
+#       binding, a walrus, a del, a global declaration, a plain assignment nested in a block) fails closed
+#       (exit 2),
+#   (r) a source is read as the interpreter binds it: a roster name read through __doc__ or __name__, a name
+#       bound after the roster, a dunder name bound before it, and a `# coding: utf-7` cookie hiding a
+#       rebinding of a roster name or of GENSRC_OUTPUTS each fail closed (exit 2); a leading BOM and bytes that
+#       are not UTF-8 stay refused (exit 2), and a utf-8 cookie on a valid generator generates (exit 0),
+#   (s) a parser stack overflow reading a generator fails closed (exit 2) naming the cause "too deeply nested to
+#       parse", never a traceback: a chain of 200,000 unary minus signs as tools/gen_hooks.py and as another
+#       generator, a RecursionError injected into every parse of tools/gen_hooks.py, and a MemoryError injected into
+#       its byte parse alone, each through run() and, for gen_hooks.py, through the roster read alone (discovery
+#       reads that file's declaration first).
 # A raised SystemExit anywhere in a run() call is caught by run_quiet and returned as a non-int sentinel
 # string, so the self-test can never itself exit early (green or otherwise) on a raise: an UNEXPECTED
 # raise mismatches its case's expected exit code and registers as a FAILURE, while case (n) asserts the
@@ -540,6 +678,122 @@ GENSRC_OUTPUTS = (
 '''
 
 
+# The authoring-only roster fixtures (cases o, p): a tools/gen_hooks.py that spells AUTHORING_ONLY_REL
+# through module-level names, as the real generator does. Case (o) spells the expected scope literally, never
+# from SCOPE_AUTHORING, so a renamed value fails there.
+_ROSTER_NAMES = ('AUTHORING_MARKER_REL = ".aiqt/authoring.toml"\n'
+                 'PROJECT_SETTINGS_REL = ".claude/settings.json"\n')
+_ROSTER = "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)\n"
+
+
+def _hooks_decl(*entries):
+    """A GENSRC_OUTPUTS literal over (target, kind, extra) triples; extra is literal dict-item text."""
+    body = "".join('    {{"target": "{}", "kind": "{}", "sources": ("src.txt",), '
+                   '"regenerate": "python3 tools/gen_hooks.py"{}}},\n'.format(t, k, x) for t, k, x in entries)
+    return "GENSRC_OUTPUTS = (\n" + body + ")\n"
+
+
+_ROSTER_DECL = _hooks_decl((".claude/settings.json", "file", ""), ("OUT.md", "file", ""))
+_FAKE_HOOKS_ROSTER = _ROSTER_NAMES + _ROSTER + _ROSTER_DECL
+_NO_ROSTER_DECL = _hooks_decl(("OUT.md", "file", ""))
+# Each must fail closed (exit 2): an unscoped entry over a roster path would make gensrc_guard deny an
+# adopter's edits to its own copy, and a roster that cannot be read statically must never read as empty.
+_ROSTER_FAULTS = {
+    "a tree entry over a roster path": _ROSTER_NAMES + _ROSTER + _hooks_decl((".claude/", "tree", "")),
+    "a block entry on a roster path": _ROSTER_NAMES + _ROSTER + _hooks_decl(
+        (".claude/settings.json", "block", "")),
+    "a gen_hooks.py with no roster": _NO_ROSTER_DECL,
+    "a computed roster item": (_ROSTER_NAMES + 'AUTHORING_ONLY_REL = (".aiqt/" + "authoring.toml",)\n'
+                               + _NO_ROSTER_DECL),
+    "a roster name bound twice": _ROSTER_NAMES + 'PROJECT_SETTINGS_REL = "x"\n' + _ROSTER + _NO_ROSTER_DECL,
+    "a declaration carrying its own scope": _ROSTER_NAMES + _ROSTER + _hooks_decl(
+        (".claude/settings.json", "file", ', "scope": "authoring"')),
+}
+# Case (q): every binding of the roster, or of a name it uses, other than its one plain top-level assignment
+# fails closed (exit 2), one vector per binding form, each appended to the valid case (o) generator (the
+# augmented and annotated forms also nested in a block, which only the whole-module walk reaches). The first
+# is the reported fixture: a tuple-unpack rebinds PROJECT_SETTINGS_REL before the roster reads it, so the
+# module binds .claude/other.json while a parse of the first assignment reads .claude/settings.json.
+_ROSTER_REBINDS = {
+    "a tuple-unpack rebinding a used name before the roster (the reported fixture)": (
+        "PROJECT_SETTINGS_REL = \".claude/settings.json\"\n"
+        "PROJECT_SETTINGS_REL, = (\".claude/other.json\",)\n"
+        "AUTHORING_ONLY_REL = (PROJECT_SETTINGS_REL,)\n"
+        "GENSRC_OUTPUTS = (\n"
+        "    {\"target\": \".claude/other.json\", \"kind\": \"file\",\n"
+        "     \"sources\": (\"src.txt\",),\n"
+        "     \"regenerate\": \"python3 tools/gen_hooks.py\"},\n"
+        ")\n"),
+    "a tuple unpack of the roster": "AUTHORING_ONLY_REL, _x = (\".claude/other.json\",), 1\n",
+    "a star unpack of a used name": "*PROJECT_SETTINGS_REL, = \"ab\"\n",
+    "an augmented assignment of the roster": "AUTHORING_ONLY_REL += (\".claude/other.json\",)\n",
+    "an augmented assignment nested in an if": "if True:\n    AUTHORING_ONLY_REL += (\".claude/other.json\",)\n",
+    "an annotated assignment of a used name": "PROJECT_SETTINGS_REL: str = \".claude/other.json\"\n",
+    "an annotated assignment nested in a try": ("try:\n    PROJECT_SETTINGS_REL: str = \".claude/other.json\"\n"
+                                                "except Exception:\n    pass\n"),
+    "a for target": "for PROJECT_SETTINGS_REL in (\".claude/other.json\",):\n    pass\n",
+    "a with target": "with x as AUTHORING_MARKER_REL:\n    pass\n",
+    "an import alias": "from os import sep as PROJECT_SETTINGS_REL\n",
+    "a plain import": "import AUTHORING_ONLY_REL\n",
+    "a def": "def PROJECT_SETTINGS_REL():\n    pass\n",
+    "a class": "class AUTHORING_ONLY_REL:\n    pass\n",
+    "a walrus": "(PROJECT_SETTINGS_REL := \".claude/other.json\")\n",
+    "a del": "del AUTHORING_MARKER_REL\n",
+    "a global declaration": "def _f():\n    global AUTHORING_ONLY_REL\n",
+    "a plain assignment nested in an if": "if True:\n    PROJECT_SETTINGS_REL = \".claude/other.json\"\n",
+}
+# Case (r): label -> (generator file name, its bytes or text, expected exit). The first three are the reproduced
+# divergences, each exit 0 under a UTF-8 text parse with no order or dunder rule: it read .claude/settings.json
+# where an import binds another value (the module docstring, the module name, or, under the utf-7 cookie, the
+# hidden second assignment the ASCII comment text "+AAo-" decodes to a newline before). A name bound after the
+# roster and a dunder name bound before it keep the order and dunder rules apart. The declaration reader shares
+# the bytes parse, so the same cookie cannot hide GENSRC_OUTPUTS = () behind the literal. A leading BOM and
+# latin-1 bytes under a latin-1 cookie were refused by the UTF-8 text read and stay refused; a utf-8 cookie on
+# the valid case (o) generator is no false reject.
+_MARKER_NAME = 'AUTHORING_MARKER_REL = ".aiqt/authoring.toml"\n'
+_UTF7 = "# coding: utf-7\n"
+_SOURCE_READS = {
+    "a module docstring read through __doc__, rebound after the roster (reproduced)": (
+        "gen_hooks.py", ('""".claude/other.json"""\n' + _MARKER_NAME
+                         + "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, __doc__)\n"
+                         + '__doc__ = ".claude/settings.json"\n' + _ROSTER_DECL), 2),
+    "__name__ read by the roster, rebound after it (reproduced)": (
+        "gen_hooks.py", (_MARKER_NAME + "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, __name__)\n"
+                         + '__name__ = ".claude/settings.json"\n' + _ROSTER_DECL), 2),
+    "a utf-7 coding cookie hiding a rebinding of a used name (reproduced)": (
+        "gen_hooks.py", (_UTF7 + _ROSTER_NAMES + 'x = 1  # +AAo-PROJECT_SETTINGS_REL = ".claude/other.json"\n'
+                         + _ROSTER + _ROSTER_DECL), 2),
+    "a used name bound after the roster": (
+        "gen_hooks.py", (_MARKER_NAME + _ROSTER + 'PROJECT_SETTINGS_REL = ".claude/settings.json"\n'
+                         + _ROSTER_DECL), 2),
+    "a dunder name bound before the roster": (
+        "gen_hooks.py", (_MARKER_NAME + '__doc__ = ".claude/settings.json"\n'
+                         + "AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, __doc__)\n" + _ROSTER_DECL), 2),
+    "a utf-7 coding cookie hiding GENSRC_OUTPUTS = () behind the literal": (
+        "gen_selftestcookie.py", _UTF7 + _DECOY + "x = 1  # +AAo-GENSRC_OUTPUTS = ()\n", 2),
+    "a leading BOM": ("gen_hooks.py", b"\xef\xbb\xbf" + _FAKE_HOOKS_ROSTER.encode("utf-8"), 2),
+    "latin-1 bytes under a latin-1 cookie": (
+        "gen_hooks.py", b"# coding: latin-1\n# \xe9\n" + _FAKE_HOOKS_ROSTER.encode("utf-8"), 2),
+    "a utf-8 coding cookie on the valid generator": (
+        "gen_hooks.py", "# -*- coding: utf-8 -*-\n" + _FAKE_HOOKS_ROSTER, 0),
+}
+# Case (s): label -> (generator file name, its text, False or the overflow ast.parse raises on it: its class and
+# whether only the byte parse raises it). The real vector overflows the parser (MemoryError on the CPython 3.14 this
+# was written against, at the first parse, the UTF-8 text one); the injection into every parse pins the other class,
+# and the injection into the byte parse alone fails if that parse leaves the handler. Each vector must name the
+# cause, so an interpreter on which the chain parses, failing the vector for another reason, cannot pass it.
+_DEEP_SOURCE = "x = " + "-" * 200000 + "1\n"
+_DEEP_CAUSE = "too deeply nested to parse"
+_DEEP_READS = {
+    "a chain of 200,000 unary minus signs as tools/gen_hooks.py": ("gen_hooks.py", _DEEP_SOURCE, False),
+    "a chain of 200,000 unary minus signs as another generator": ("gen_selftestdeep.py", _DEEP_SOURCE, False),
+    "a RecursionError injected into every parse of tools/gen_hooks.py": (
+        "gen_hooks.py", _FAKE_HOOKS_ROSTER, (RecursionError, False)),
+    "a MemoryError injected into the byte parse alone of tools/gen_hooks.py": (
+        "gen_hooks.py", _FAKE_HOOKS_ROSTER, (MemoryError, True)),
+}
+
+
 def _build_from(base, filename, text):
     """A synthetic repo whose only generator is `filename` carrying `text`, with the source it names and
     an empty .aiqt/ so reconcile can write the registry."""
@@ -564,6 +818,16 @@ def self_test_main():
                 return run(root, check)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+
+    def run_stderr(root, check):
+        # run_quiet that also returns the captured stderr, so a vector can assert the cause it names.
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            try:
+                rc = run(root, check)
+            except SystemExit as exc:
+                rc = "raised SystemExit({!r})".format(exc.code)
+        return rc, err.getvalue()
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-gensrc-selftest-"))
@@ -710,6 +974,95 @@ def self_test_main():
         (unicode_tree / REGISTRY_REL).write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
         if run_quiet(unicode_tree, check=True) != "raised SystemExit(2)":
             failures.append("invalid-UTF-8 registry target expected exit 2 (fail-closed)")
+
+        # (o) The authoring-only roster: a tools/gen_hooks.py naming AUTHORING_ONLY_REL through module-level
+        #     names marks exactly its roster entry "scope": "authoring"; the sibling entry and the registry's
+        #     own entry carry no scope key at all.
+        roster = tmp / "roster"
+        _build_from(roster, "gen_hooks.py", _FAKE_HOOKS_ROSTER)
+        if run_quiet(roster, check=False) != 0 or run_quiet(roster, check=True) != 0:
+            failures.append("authoring-only roster: expected a clean generate and a drift-clean check")
+        try:
+            scopes = {e["target"]: e.get("scope", "no scope key") for e in
+                      json.loads((roster / REGISTRY_REL).read_text(encoding="utf-8"))["generated"]}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            scopes = "unreadable ({})".format(exc)
+        want = {".claude/settings.json": "authoring", "OUT.md": "no scope key",
+                ".aiqt/gensrc.json": "no scope key"}
+        if scopes != want:
+            failures.append("authoring-only roster: expected scopes {!r}, got {!r}".format(want, scopes))
+
+        # (p) Every roster fault fails closed (exit 2): a roster path under a tree entry or declared as a block
+        #     (unscopable), a gen_hooks.py binding no roster, a computed roster item, a roster name bound twice,
+        #     and a declaration that carries its own scope (the roster is the one source of the scope).
+        for idx, (label, text) in enumerate(_ROSTER_FAULTS.items()):
+            rdir = tmp / "rosterfault{}".format(idx)
+            _build_from(rdir, "gen_hooks.py", text)
+            if run_quiet(rdir, check=True) != 2:
+                failures.append("authoring-only roster: {} expected exit 2 (fail-closed)".format(label))
+
+        # (q) Every other binding of the roster or of a name it uses fails closed (exit 2), so the parsed roster
+        #     is the bound one. The reported fixture is a whole generator; each other snippet is appended to the
+        #     valid case (o) generator, which alone generates cleanly there.
+        for idx, (label, snippet) in enumerate(_ROSTER_REBINDS.items()):
+            qdir = tmp / "rosterrebind{}".format(idx)
+            text = snippet if "GENSRC_OUTPUTS" in snippet else _FAKE_HOOKS_ROSTER + snippet
+            _build_from(qdir, "gen_hooks.py", text)
+            if run_quiet(qdir, check=False) != 2:
+                failures.append("authoring-only roster: {} expected exit 2 (single binding)".format(label))
+
+        # (r) A source is read as the interpreter binds it, and the byte forms the UTF-8 text read refused stay
+        #     refused; each generator is written as bytes, so a cookie or a BOM reaches the reader unchanged.
+        for idx, (label, (filename, data, want)) in enumerate(_SOURCE_READS.items()):
+            raw = data if isinstance(data, bytes) else data.encode("utf-8")
+            try:
+                ast.parse(raw)  # the interpreter compiles each vector, so only the reader can refuse it
+            except (SyntaxError, ValueError) as exc:
+                failures.append("source read: {} does not compile from its bytes ({})".format(label, exc))
+            sdir = tmp / "sourceread{}".format(idx)
+            _build_from(sdir, filename, "")
+            (sdir / "tools" / filename).write_bytes(raw)
+            if run_quiet(sdir, check=False) != want:
+                failures.append("source read: {} expected exit {}".format(label, want))
+
+        # (s) A parser stack overflow is exit 2, never a traceback; one that escapes run() is caught here and named.
+        real_parse = ast.parse
+
+        def overflow(source, *args, **kwargs):
+            exc_class, bytes_only = inject
+            if (str(kwargs.get("filename", "")).endswith("gen_hooks.py")
+                    and (isinstance(source, bytes) or not bytes_only)):
+                raise exc_class("injected parser overflow")
+            return real_parse(source, *args, **kwargs)
+
+        for idx, (label, (filename, text, inject)) in enumerate(_DEEP_READS.items()):
+            ddir = tmp / "deep{}".format(idx)
+            _build_from(ddir, filename, text)
+            if inject:
+                ast.parse = overflow
+            rc, err = None, ""
+            try:
+                rc, err = run_stderr(ddir, check=False)
+                # Discovery reads a gen_hooks.py declaration before its roster, so the roster read is also called
+                # alone and must raise ValueError naming the cause (run maps it to exit 2).
+                if filename == ROSTER_GEN:
+                    read_authoring_roster(ddir / "tools")
+                    rc = "a roster read that raised nothing"
+            except ValueError as exc:
+                if _DEEP_CAUSE not in str(exc):
+                    rc = "a roster read that raised ValueError without the cause ({})".format(exc)
+            except (MemoryError, RecursionError, SyntaxError) as exc:
+                rc = "raised {}".format(type(exc).__name__)
+            finally:
+                ast.parse = real_parse
+            if rc != 2 or _DEEP_CAUSE not in err:
+                failures.append("parser overflow: {} expected exit 2 naming {!r}, got {}".format(
+                    label, _DEEP_CAUSE, rc))
+
+        # .aiqt/ above the registry symlinked outside the root fails closed (exit 2) in --check and write mode
+        # with the registry there untouched; symlinked inside the root, it is read and the registry rewritten.
+        failures.extend(linked_dir_failures(tmp, "aiqt", lambda base: _build_from(
+            base, "gen_selftestgood.py", _FAKE_GOOD), run, ".aiqt", REGISTRY_REL))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -733,9 +1086,73 @@ def self_test_main():
           "aliased dotted import binding only y generates cleanly), a non-str kind, a non-str key, each "
           "trailing-'/'-by-kind mismatch, "
           "a tree-descendant overlap (both orders and a nested tree), and an invalid-UTF-8 registry target "
-          "all fail closed (exit 2)" + note)
+          "all fail closed (exit 2); the gen_hooks AUTHORING_ONLY_REL roster scopes exactly its entry "
+          "\"authoring\", and every roster fault (a roster path under a tree or as a block, an unbound, "
+          "computed or doubly bound roster, a self-declared scope, and every other binding of the roster or a "
+          "name it uses) fails closed (exit 2); a roster name read through __doc__ or __name__, bound after the "
+          "roster, or a dunder, a utf-7 cookie hiding a rebinding, a leading BOM and non-UTF-8 bytes fail closed "
+          "(exit 2), while a utf-8 cookie generates; and a parser stack overflow (a chain of 200,000 unary minus "
+          "signs as tools/gen_hooks.py or another generator, a RecursionError injected into every parse and a "
+          "MemoryError into the byte parse alone) fails closed (exit 2) naming its cause"
+          + note)
     return 0
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("gen_gensrc.py") or main())

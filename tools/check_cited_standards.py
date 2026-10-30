@@ -96,7 +96,7 @@ designator (RFC. 2 and RFC.<break>2. Next read RFC 2).
 Without --config the built-in default applies: corpus [".aiqt/core/rules/*.md"] and no exclusions; no
 default file is read. This repository's own CI and tools/run_all_checks.sh pass --config
 .aiqt/cited-standards.toml (tracked, not shipped), whose corpus adds the OPF prompt-pack members
-(opf/prompt-pack/**/*.md) to the rule files. A config file carries:
+(opf/prompt-pack/**/*.md and opf/prompt-pack/import/examples/*.batch.toml) to the rule files. A config file carries:
   format-version = 1                        required
   corpus = ["<root-relative glob>", ...]    optional; each glob must match at least one file
   [[exclusion]]                             optional, repeatable
@@ -137,7 +137,8 @@ from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import load_manifests, ManifestError, dir_present, ensure_listable  # noqa: E402
+from _standards import (load_manifests, ManifestError, dir_or_absent, dir_present, ensure_listable,  # noqa: E402
+                        LINK_OUTSIDE_ROOT)
 
 DEFAULT_CORPUS = (".aiqt/core/rules/*.md",)
 STANDARDS_REL = ".aiqt/standards"
@@ -379,7 +380,14 @@ def expand_corpus(root, globs):
         deep = len(static) < len(parts) - 1      # a wildcard in a directory component
         matched = 0
         try:
-            if dir_present(base):
+            # dir_or_absent: a base that is there but cannot be read as a directory (a regular
+            # file, or a symlink that is dangling, whose target is not a directory or resolves outside the root)
+            # is refused before it is listed; a symlink to a directory inside the root is read.
+            # dir_present, bound beneath root, then judges every component above it the same way.
+            _present, problem = dir_or_absent(base, root)
+            if problem is not None:
+                raise CannotEvaluate("corpus glob {!r}: {} {}".format(pattern, base, problem))
+            if dir_present(base, root=root):
                 # Path.glob silently yields nothing for a directory it cannot list; force the read error.
                 ensure_listable(base)
                 if deep:
@@ -477,7 +485,7 @@ def run(root, config=None):
     root = Path(root)
     try:
         try:
-            manifests = load_manifests(root / STANDARDS_REL)
+            manifests = load_manifests(root / STANDARDS_REL, root=root)
         except (ManifestError, OSError) as exc:
             raise CannotEvaluate("standards manifests: {}".format(exc))
         registered = manifest_identities(manifests)
@@ -1053,6 +1061,25 @@ def self_test_main():
         code, out = _drive(manifests, rules, config, extra[0] if extra else None, extra[1] if len(extra) > 1 else None)
         if code != expect or not predicate(out):
             failures.append("{}: expected exit {}, got {}; output:\n{}".format(label, expect, code, out))
+    # A corpus glob base that is a symlink to a directory holding a matching file: outside the root, it cannot
+    # evaluate, refused by the base probe before it is listed (the refusal names the link); inside the root, it
+    # is read and passes.
+    for where, expect in (("outside", 2), ("in-root", 0)):
+        with tempfile.TemporaryDirectory(prefix="aiqt-cited-standards-selftest-") as tmp:
+            root, _cfg = _fixture(tmp)
+            held = Path(tmp) / "held" if where == "outside" else root / "shared" / "held"
+            held.mkdir(parents=True)
+            (held / "r.md").write_text("# Rule\n\nNothing cited.\n", encoding="utf-8")
+            (root / "linked").symlink_to(held if where == "outside" else os.path.relpath(held, root))
+            cfg = Path(tmp) / "linked.toml"
+            cfg.write_text('format-version = 1\ncorpus = ["linked/*.md"]\n', encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                code = run(root, cfg)
+            named = "{} {}".format(root / "linked", LINK_OUTSIDE_ROOT) in buf.getvalue()
+        if (code, named) != (expect, expect == 2):
+            failures.append("a corpus glob base that is a symlink {}: expected exit {}{}, got {}; output:\n{}".format(
+                where, expect, " naming the link" if expect == 2 else "", code, buf.getvalue()))
     # _drive patch contract: an unknown patch name is rejected before anything is applied (installed, it
     # would leave the intended fault uninjected and contaminate every later vector), and every patched
     # name is restored after a run that returns non-zero, after one that returns 0 (the injected run must
@@ -1109,7 +1136,8 @@ def self_test_main():
             print(line)
         return 1
     print("SELF-TEST PASS: {} normalisation case(s), {} in-text case(s), {} non-designator case(s), the roster's "
-          "manifest-field identities, {} fixture vector(s), the _drive patch contract (an unknown name is "
+          "manifest-field identities, {} fixture vector(s), a corpus glob base symlinked outside the root "
+          "refused before it is listed and one symlinked inside the root read, the _drive patch contract (an unknown name is "
           "rejected; a patched name is restored after a non-zero return, a zero return and a raise) and the "
           "usage error: an "
           "unresolved designator fails, a "
@@ -1121,7 +1149,9 @@ def self_test_main():
     return 0
 
 
-def main(argv):
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
     if argv == ["--self-test"]:
         return self_test_main()
     opts = {}
@@ -1138,5 +1168,61 @@ def main(argv):
     return run(opts.get("--root") or repo_root(), opts.get("--config"))
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(_child_status_refusal_exit("check_cited_standards.py") or main())

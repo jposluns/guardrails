@@ -364,7 +364,8 @@ PIN_KEY = "python-version"
 # (_host_patch_pin). These names are those of tools/check_python_host_pin.py, whose self-test holds them
 # equal (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE there).
 HOST_WORKFLOW_REL = WORKFLOWS_REL + "/quality.yml"
-HOST_JOBS = ("opf-host-patch", "git-fixture-env-host-patch")
+HOST_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
+             "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
 HOST_SOURCE_REL = ".aiqt/python-host.toml"
 HOST_SOURCE_KEYS = {"format-version", "python-host-patch"}
 HOST_PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
@@ -2587,7 +2588,7 @@ def _tomllib_production_cases(base):
     the emulated cap re-run on its own), and, for an emulated cap, the class the production call's own
     emulation injected (fired)."""
     # The contract imports load_toml and precheck_special_files from its own tree's tools/
-    # (D-400-SPECIAL-FILE-PRECHECK), so the fixture carries that sibling too.
+    # (SPECIAL-FILE-PRECHECK), so the fixture carries that sibling too.
     newtab = _fixture(base, files={".github/check_newtab_contract.py":
                                    _read_text(ROOT / ".github" / "check_newtab_contract.py"),
                                    "tools/_gen_common.py": _read_text(ROOT / "tools" / "_gen_common.py")})
@@ -3878,7 +3879,7 @@ def _self_test_cases(base):
 
 def _gate_run(root, gate_source):
     _write(root, "tools/check_python_floor.py", gate_source)
-    # The default entry imports precheck_special_files from its sibling (D-400-SPECIAL-FILE-PRECHECK).
+    # The default entry imports precheck_special_files from its sibling (SPECIAL-FILE-PRECHECK).
     common_source = _read_text(Path(__file__).resolve().parent / "_gen_common.py")
     _write(root, "tools/_gen_common.py", common_source)
     # The copy scans itself and that sibling: record its own self-test seams (the tomllib._parser
@@ -4106,7 +4107,7 @@ def self_test(report_path=None):
 def main(argv):
     if not argv:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+        from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
         code, lines = evaluate(precheck_special_files(ROOT))
         for line in lines:
             print(line, file=sys.stderr if code == 2 else sys.stdout)
