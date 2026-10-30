@@ -174,7 +174,7 @@ def _read_declaration(path, where):
     harmless and fails in the safe direction (do not reuse the name). (b) Truly-DYNAMIC binding
     (globals()["GENSRC_OUTPUTS"] = ..., exec, setattr on the module) is beyond static analysis and out of
     scope; discovery never executes a generator, so such a binding cannot affect the static registry
-    anyway. Per the GD-34 lesson, static enumeration of a dynamic surface is unbounded; this guard covers
+    anyway. Static enumeration of a dynamic surface is unbounded; this guard covers
     the realistic and statically-detectable forms and discloses the rest. (c) A PEP-695 type
     parameter (def f[GENSRC_OUTPUTS](), class C[GENSRC_OUTPUTS], type X[GENSRC_OUTPUTS] = ...)
     binds only in the type-parameter scope, is not inspected, and cannot affect the module-level
@@ -906,7 +906,7 @@ def self_test_main():
 
         # (i) The single-binding invariant, one case per Python binding mechanism: each rebind of
         #     GENSRC_OUTPUTS beside a valid decoy literal fails closed (exit 2). Closes the whole rebind
-        #     class the round-3 node-type enumeration missed (walrus/tuple-unpack/for/with/except/
+        #     class an earlier node-type enumeration missed (walrus/tuple-unpack/for/with/except/
         #     import-as/def/class).
         for idx, (label, snippet) in enumerate(_REBINDS.items()):
             rbdir = tmp / "rebind{}".format(idx)

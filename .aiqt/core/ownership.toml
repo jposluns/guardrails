@@ -199,6 +199,11 @@ path = ".aiqt/assurance-schema.md"
 class = "pack-immutable"
 
 [[release-class]]
+path = ".aiqt/tracker-label-baseline.toml"
+class = "pack-immutable"
+note = "The per-file ratchet baseline of the shipped tracker-label layer in tools/check_internal_names.py: per-shape hit counts for shipped paths, always the exact output of --write-baseline, regenerated in the reviewed change that legitimately moves a count (lowered as labels are removed; raised, under review policy the gate does not itself enforce, only by a refresh that merges upstream files already carrying labels, the movement visible whole in the regenerated file's diff and recounted against the merge parent in review). Shipped so the gate holds in an adopter tree, where the same shipped files carry the same counts."
+
+[[release-class]]
 path = ".aiqt/record-sections.toml.example"
 class = "pack-immutable"
 note = "Adopter example for tools/check_record_sections.py; deliberately NOT the gate's live default path (.aiqt/record-sections.toml), so the gate stays NOT APPLICABLE until an adopter opts in."

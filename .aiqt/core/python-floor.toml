@@ -95,6 +95,7 @@ guarded-surfaces = [
     "opf/tools/selftest_commonmark_conformance.py",
     "opf/tools/selftest_commonmark_headings.py",
     "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+    "tools/_load_bound.py",
     "tools/_qa_adapter.py",
     "tools/aei_backlog_md.py",
     "tools/aiqt_corpus.py",

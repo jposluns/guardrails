@@ -11,12 +11,13 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py and tools/check_verifier_delivery.py), in
-     opf/tools/_opf_declaration.py and tools/check_opf_declaration.py (the constant and both functions) and in
-     the hooks dispatcher and its generated plugin copy (the constant and the probe) are each bound exactly once
-     at module scope, by one top-level definition (an undecorated one for a function), and AST-identical
-     (ast.dump, docstrings included) to the canonical text, so a call by that name reaches the copy. The binding
-     count (_bindings) is the one binding counter of legs 2 and 3; it is a static walk of
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
+     tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
+     (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
+     and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
+     for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
+     name reaches the copy. The binding count (_bindings) is the one binding counter of legs 2 and 3; it is a
+     static walk of
      every node that runs in the module's own scope: nested if, try, with, for, while and match blocks, tuple,
      list and starred targets, walrus, for, with-as, except-as and match names, import and from-import aliases
      (a star import counts), del, and a global declaration of the name in any function. Every attribute or
@@ -224,7 +225,7 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_adopt_state.py", "_opf_adopt_state.py"),
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
-              ("tools/check_must_deliver.py", "check_must_deliver.py"),
+              ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
@@ -401,6 +402,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/check_opf_drift.py",
     "opf/tools/check_opf_homes.py",
     "opf/tools/check_opf_init.py",
+    "opf/tools/check_opf_init_contract.py",
     "opf/tools/check_opf_init_observe.py",
     "opf/tools/check_opf_init_p0.py",
     "opf/tools/check_opf_init_qa.py",
@@ -420,6 +422,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_clauses.py",
     "tools/check_crosswalk.py",
     "tools/check_entry_guard.py",
+    "tools/check_footer.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
     "tools/check_hooks_preview.py",
@@ -492,8 +495,9 @@ DIRECT_LAUNCH_RESIDUAL = (
 # the expression the call spells: a changed assignment, argument or computation leaves the row reviewed, and the
 # scan follows the row's targets, not the new one (R13; the self-test shows this limit).
 DYNAMIC_LOADS_REVIEWED = (
-    ("opf/tools/check_opf_init_contract.py", ("runpy.run_path(str(ROOT / 'opf/tools/_opf_init_contract.py'))",),
-     ("opf/tools/_opf_init_contract.py",), "runpy.run_path of the literal opf/tools/_opf_init_contract.py"),
+    ("opf/tools/check_opf_init_contract.py", (),
+     ("opf/tools/_opf_init_contract.py",), "runpy.run_path of opf/tools/_opf_init_contract.py inside the child "
+     "script it launches, a string the scan does not parse"),
     ("tools/check_footer.py", ("exec(compile(source.replace(new, old), __file__, 'exec'), reverted)",),
      ("tools/check_footer.py",), "its own source with one check reverted, compiled and run in its self-test"),
     ("tools/check_opf_enforce_platforms.py",

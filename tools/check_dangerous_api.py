@@ -397,9 +397,13 @@ ALLOWLIST = (
      " external input"),
     ("opf/tools/check_opf_init_p0.py", "red_on_revert", "code", 1,
      _MUTANT + " (each guard revert, matched exactly once)"),
-    ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", "code", 2,
-     _MUTANT + " (the _read_regular close revert); exec_module loads the repository's own"
-     " _journal.py beside this file as the close harness"),
+    ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", "code", 1,
+     _MUTANT + " (the _read_regular close revert)"),
+    ("opf/tools/check_opf_prompt_pack.py", "_load_sibling", "code", 1,
+     "self-test loader: exec_module of a file by explicit path, never registered in sys.modules;"
+     " its callers pass the repository's own _journal.py beside this file (the close harness) or,"
+     " in the loaded-exit probe child, a scratch file holding one _LOADED_EXIT_CASES literal; no"
+     " external input"),
     ("opf/tools/check_opf_record.py", "flip_t70", "code", 1,
      _MUTANT + " (the _opf_oplock _acquire_body T70 flip)"),
     ("opf/tools/check_opf_record.py", "<module>", "deserialize", 1,
@@ -432,9 +436,16 @@ ALLOWLIST = (
     ("tools/check_instruction_budget.py", "_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own production source with"
      " one reviewed literal substitution; no external input"),
+    ("tools/check_instruction_budget.py", "_GuardedMutant.__getattr__", "code", 1,
+     "type test: isinstance(value, types.FunctionType) only decides whether an attribute of the"
+     " loaded mutant is wrapped in the process-ending guard; types.FunctionType is never called"),
     ("tools/check_entry_guard.py", "_load_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
      " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
+    ("tools/check_internal_names.py", "_load_ratchet_mutant", "code", 1,
+     "self-test mutant loader: exec_module of a scratch copy of this gate's own source (read from"
+     " __file__ by its one caller, with one ratchet-comparison branch disabled by a reviewed literal"
+     " substitution), written under the self-test's temporary directory; no external input"),
     ("tools/check_child_status_coverage.py", "_canonical_module", "code", 1,
      "authority loader: exec_module of the repository's own opf/tools/_child_status.py under ROOT,"
      " the equivalent of an import; no external input"),
@@ -488,9 +499,6 @@ ALLOWLIST = (
     ("tools/selftest_orch_hooks.py", "_main_isolated", "shell", 1,
      "self-test fault injector: setattr on the hook module's own os with a function name from"
      " its fixed fault table; never runs a shell"),
-    ("opf/tools/check_opf_init_contract.py", "_checks", "code", 1,
-     "check harness: runpy.run_path loads the repository's own"
-     " opf/tools/_opf_init_contract.py, the equivalent of an import; no external input"),
     ("opf/tools/_opf_adopt_observe.py", "self_test", "tls", 1,
      "self-test fixture server: a PROTOCOL_TLS_SERVER context for a local listener serving a"
      " freshly generated certificate; server-side, so it verifies no peer; no client context"),
@@ -581,6 +589,23 @@ ALLOWLIST = (
     ("tools/check_opf_declaration.py", "_copy_mutant", "code", 1,
      _MUTANT + " (each revert of opf/tools/opf.py or of this gate's own source, written to the self-test's"
      " temporary directory first)"),
+    ("tools/_load_bound.py", "_acquiring_popen", "shell", 1,
+     "ownership spawn: subclasses the current subprocess.Popen so run() holds the handle before the"
+     " fork; the subclass forwards run()'s own argv list and keywords, and no call in this file"
+     " turns shell on"),
+    ("tools/_load_bound.py", "_acquiring_popen.Acquiring._execute_child", "code", 1,
+     "pid capture: types.FunctionType rebuilds the standard library's own Popen._execute_child code"
+     " object with its globals copied and only _fork_exec wrapped to record the pid; no external"
+     " code"),
+    ("tools/_load_bound.py", "vector_failures", "shell", 14,
+     _SAVED + " (the real Popen each vector's fault or recording double subclasses, set back in a"
+     " finally; the fork-window vector also reads its _execute_child through that saved class)"),
+    ("tools/_load_bound.py", "vector_failures.bounded", "shell", 1,
+     _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
+    ("tools/_load_bound.py", "vector_failures.mid_read_fault", "shell", 1,
+     _SAVED + " (the real Popen the mid-read fault double subclasses, restored in a finally)"),
+    ("tools/_load_bound.py", "vector_failures.drained_stop", "shell", 1,
+     _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
 )
 
 
@@ -2187,7 +2212,7 @@ TREE_VECTORS = (
     # allowance leaves both reported plus the count drift.
     ("two sites on one line", {"tools/a.py": _TWO_ON_ONE_LINE},
      (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-column", 0),
-    # Round 6: two chained calls start at one position, so the end position keeps them apart.
+    # Two chained calls start at one position, so the end position keeps them apart.
     ("two chained sites on one line", {"tools/a.py": _TWO_CHAINED},
      (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-end", 0),
     ("allowlist entry without reason", {"tools/a.py": _SITE}, (_ENTRY[:4] + (" ",),),
