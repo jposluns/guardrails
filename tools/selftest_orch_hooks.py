@@ -186,6 +186,44 @@ def _registry_ceiling(root, probe):
     return _probe
 
 
+# The child of the dispatcher checks: it first writes the sorted keys of its own os.environ as one JSON
+# line on stderr (before the hook is imported, and apart from the hook's stdout), so a check can pin the
+# environment the child actually received; it then loads the hook script from the directory in argv[1],
+# puts the registry walk behind the same test-only ceiling the in-process rows run behind (argv[2] is the
+# JSON list of the (st_dev, st_ino) pairs of _registry_ceiling's .above, each read as carrying no
+# registry), and runs the REAL dispatcher entry for the mode in argv[3], so a registry on the host above
+# the fixture root (for example a TMPDIR inside an orchestrated tree) cannot decide the child's verdict
+# either.
+_CEILED_DISPATCH_CHILD = (
+    "import json, os, sys\n"
+    "sys.stderr.write(json.dumps(sorted(os.environ)) + '\\n')\n"
+    "sys.stderr.flush()\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks\n"
+    "above = frozenset(tuple(pair) for pair in json.loads(sys.argv[2]))\n"
+    "probe = aiqt_hooks._orch_dirfd_has_registry\n"
+    "def ceiled(dirfd):\n"
+    "    st = os.fstat(dirfd)\n"
+    "    return False if (st.st_dev, st.st_ino) in above else probe(dirfd)\n"
+    "aiqt_hooks._orch_dirfd_has_registry = ceiled\n"
+    "os._exit(aiqt_hooks.main(sys.argv[3:]))\n")
+
+
+def _controlled_child_env(home, **extra):
+    """The environment of a hook child, built from controlled inputs only and never from os.environ: the
+    run's PATH (which puts the fixture git wrapper first), HOME at the fixture directory home, a pinned
+    UTF-8 locale, and extra, what the check itself sets. A variable in the caller's environment that the
+    hook reads (an opt-in AIQT_ORCH_REQUIRE_REGISTRY, or anything an orchestrator session exports) never
+    reaches the child, so the child's verdict cannot depend on where the suite was launched. PATH is the
+    one input still taken from the caller, by design: the hook runs git by name, so a verdict it reaches
+    through a git subprocess can depend on which git binary that PATH selects (the fixture wrapper goes
+    first, but the git it runs is the one found on the caller's PATH). That is a disclosed residual, not
+    something these checks control."""
+    env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(home), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+    env.update(extra)
+    return env
+
+
 ENUM_STUB = """#!/usr/bin/env python3
 import sys
 sys.stdout.write(open(sys.argv[1]).read())
@@ -13033,24 +13071,67 @@ def _main_isolated(report_path=None):
         # blocked) stays a NOTE with exit 0 outside registry scope: stdout is one JSON object whose keys
         # are exactly systemMessage, holding non-whitespace text (a structured deny also exits 0 with a
         # systemMessage, and a top-level decision or a hookSpecificOutput of any type would change what
-        # the platform does, so the whole key set is asserted), and no fail-closed stderr.
-        _ctl_env = {k: v for k, v in os.environ.items()
-                    if k != aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV}
-        _ctl = subprocess.run(
-            [sys.executable, "-I", "-B", aiqt_hooks.__file__, "orch_truncation_guard"],
-            input=json.dumps(ti.payload("PreToolUse", "Bash", {
-                "command": "cat <<$'\\c\u00df'\ntext\nEOF\n", "run_in_background": False})),
-            capture_output=True, text=True, timeout=60, env=_ctl_env)
-        try:
-            _ctl_out = json.loads(_ctl.stdout)
-        except ValueError:
-            _ctl_out = None
-        _ctl_keys = sorted(_ctl_out) if isinstance(_ctl_out, dict) else None
-        _ctl_note = _ctl_out.get("systemMessage") if isinstance(_ctl_out, dict) else None
-        check("trunc/oos-ctl-escape-dispatcher-notes-exit-0",
-              (_ctl.returncode, _ctl_keys, isinstance(_ctl_note, str) and bool(_ctl_note.strip()),
-               "failing closed" in _ctl.stderr),
+        # the platform does, so the whole key set is asserted), and no fail-closed stderr. The child runs
+        # behind the run's registry ceiling (_CEILED_DISPATCH_CHILD) with an environment built from an
+        # allowlist (_controlled_child_env), so only the fixture decides its verdict.
+        _ctl_hooks = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
+        _ctl_home = tmp / "ctl-home"
+        _ctl_home.mkdir()
+        _ctl_env = lambda: _controlled_child_env(_ctl_home, XDG_STATE_HOME=str(tmp / "xdg"))
+
+        def _ctl_dispatch(fx, ceiling):
+            ctl = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", _CEILED_DISPATCH_CHILD, _ctl_hooks,
+                 json.dumps(sorted(_registry_ceiling(ceiling, None).above)), "orch_truncation_guard"],
+                input=json.dumps(fx.payload("PreToolUse", "Bash", {
+                    "command": "cat <<$'\\c\u00df'\ntext\nEOF\n", "run_in_background": False})),
+                capture_output=True, text=True, timeout=60, env=_ctl_env())
+            # The child's first stderr line is the keys of the environment it received; the rest is the
+            # hook's own stderr.
+            received, _, err = ctl.stderr.partition("\n")
+            try:
+                received = json.loads(received)
+            except ValueError:
+                received = None
+            try:
+                out = json.loads(ctl.stdout)
+            except ValueError:
+                out = None
+            note = out.get("systemMessage") if isinstance(out, dict) else None
+            return ((ctl.returncode, sorted(out) if isinstance(out, dict) else None,
+                     isinstance(note, str) and bool(note.strip()), "failing closed" in err), received)
+        check("trunc/oos-ctl-escape-dispatcher-notes-exit-0", _ctl_dispatch(ti, tmp)[0],
               (0, ["systemMessage"], True, False))
+        # The same child with its run root below a host orchestration registry (a TMPDIR inside an
+        # orchestrated tree; the stand-in registry sits above the run root, beyond the ceiling): the caller
+        # setting that did change the child's verdict, turning the row above into the registry-scope silent
+        # allow. Then, as defence in depth, the same child launched while this process's environment holds
+        # an opt-in AIQT_ORCH_REQUIRE_REGISTRY and an unrelated canary variable (both restored after). An
+        # inherited opt-in could not reach the child even before, since _main_isolated removes it at entry
+        # and the earlier launch environment filtered it out. The last row is the sorted keys the child
+        # reported of its own os.environ, which must be exactly the allowlist and what the check sets, so
+        # nothing from the caller's environment gets through.
+        _ctl_host = tmp / "ctl-host"
+        (_ctl_host / ".aiqt").mkdir(parents=True)
+        (_ctl_host / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)), encoding="utf-8")
+        (_ctl_host / "run").mkdir()
+        _ctl_fx = Fixture(_ctl_host / "run", "trunc-no-registry")
+        (_ctl_fx.root / ".aiqt" / "orchestration.local.json").unlink()
+        _ctl_rows = [_ctl_dispatch(_ctl_fx, _ctl_host / "run")[0]]
+        _ctl_saved = {name: os.environ.get(name)
+                      for name in (aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV, "SELFTEST_ORCH_HOOKS_CTL_CANARY")}
+        os.environ.update(dict.fromkeys(_ctl_saved, "1"))
+        try:
+            _ctl_rows += list(_ctl_dispatch(ti, tmp))
+        finally:
+            for name, value in _ctl_saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        check("trunc/oos-ctl-dispatcher-verdict-ignores-caller-environment", _ctl_rows,
+              [(0, ["systemMessage"], True, False), (0, ["systemMessage"], True, False),
+               ["HOME", "LANG", "LC_ALL", "PATH", "XDG_STATE_HOME"]])
         # Scanner-level: a literal `{` in a `${...}` default ends the target at the first `}` (as bash
         # does), so the setsid after it is read in command position and named; a depth scan that nested
         # the literal `{` read the target as unreadable or unclosed and never named it.

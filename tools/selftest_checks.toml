@@ -861,6 +861,7 @@ expected-check-ids = [
   "trunc/oos-heredoc-open-quote-delim-notes",
   "trunc/oos-heredoc-no-word-delim-notes",
   "trunc/oos-ctl-escape-dispatcher-notes-exit-0",
+  "trunc/oos-ctl-dispatcher-verdict-ignores-caller-environment",
   "trunc/scan-param-literal-brace-reads-following-setsid",
   "trunc/scan-param-nested-default-unreadable",
   "trunc/scan-param-quoted-default-unreadable",
