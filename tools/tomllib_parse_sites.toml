@@ -46,6 +46,14 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_adopt_apply.py"
+function = "_init_store_git_checks.planned_fresh_run"
+form = "call"
+count = 3
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
 function = "_init_store_self_test"
 form = "call"
 count = 1
@@ -324,7 +332,7 @@ reason = "test-code"
 path = "opf/tools/_opf_adopt_plan.py"
 function = "self_test.PlanningTests.test_ancestry_ignores_manifestless_reserved_content"
 form = "call"
-count = 2
+count = 3
 class = "EXEMPT"
 reason = "test-code"
 
@@ -1055,7 +1063,7 @@ class = "EXEMPT"
 reason = "test-code"
 
 # callers fail closed on the ValueError family by contract; RecursionError and MemoryError are
-# mapped into it at the parse locus (F-TOML-BARE-VALUEERROR-CLASS)
+# mapped into it at the parse locus, so no bare parser error escapes
 [[site]]
 path = "tools/_gen_common.py"
 function = "load_toml"
@@ -1277,7 +1285,7 @@ class = "EXEMPT"
 reason = "test-code"
 
 # build_outputs surfaces the ValueError family as exit 2 by contract; RecursionError and
-# MemoryError are mapped into it at the parse locus (F-TOML-BARE-VALUEERROR-CLASS)
+# MemoryError are mapped into it at the parse locus, so no bare parser error escapes
 [[site]]
 path = "tools/gen_skill.py"
 function = "plugin_identity"
@@ -1312,7 +1320,7 @@ class = "EXEMPT"
 reason = "test-code"
 
 # the ValueError family passes unchanged to do_pin's handler by contract; RecursionError and
-# MemoryError become a fail-closed PinError at the parse locus (F-TOML-BARE-VALUEERROR-CLASS)
+# MemoryError become a fail-closed PinError at the parse locus, so no bare parser error escapes
 [[site]]
 path = "tools/pin.py"
 function = "_read_release"

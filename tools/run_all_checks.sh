@@ -247,6 +247,7 @@ run_gate "brief-capability-behaviour-selftest" python3 -I -B tools/check_selftes
 run_gate "hook-latency-selftest" python3 -I -B tools/check_selftest_execution.py --suite hook-latency-selftest
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
+run_gate "verifier-delivery-selftest" python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test
@@ -329,7 +330,7 @@ run_gate "dangerous-api" python3 -I -B tools/check_dangerous_api.py
 # harness is a real failure); the internal-name scan is gating too.
 run_gate "qa-adapter-selftest"      python3 -I -B tools/_qa_adapter.py --self-test
 run_gate "audit-reference-selftest" python3 -I -B tools/audit_reference.py --self-test
-run_gate "internal-names-selftest"  python3 -I -B tools/check_internal_names.py --self-test
+run_gate "internal-names-selftest"  python3 -I -B tools/check_selftest_execution.py --suite internal-names-selftest
 run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 
 # ADVISORY QA digest, run under run_gate. It runs the reference audit and prints a compact digest that

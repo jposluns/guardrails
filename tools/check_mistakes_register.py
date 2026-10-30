@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mistakes-register gate (GD-112 component 6, rules mstreg/secaud): the register is APPEND-ONLY with
+"""Mistakes-register gate (rules mstreg/secaud): the register is APPEND-ONLY with
 permanent ids and a digest chain, and a landed row's claims are verified against the repository.
 
 Row schema (one JSON object per line):
@@ -10,7 +10,7 @@ Row schema (one JSON object per line):
    ...optional: "class": "<row classifier, e.g. systemic-lapse>", "ref": "<the blocker ref an
    attestation row covers>"}
 A status change is a NEW row re-naming an earlier id at a higher seq; nothing is ever edited in place.
-A registry-declared `attestations` register (GD-127 C.2) is verified by this same gate under the
+A registry-declared `attestations` register is verified by this same gate under the
 AT- id prefix; the id prefix is per-register, MR- for the mistakes register.
 
 Append-only enforcement, two modes: a git-TRACKED register is checked as an exact line-prefix of its
@@ -1825,7 +1825,7 @@ def self_test():
             failures.append("--update-anchor bootstrap should establish the anchor and pass")
         if run(repo) != 0:
             failures.append("gate should pass once the anchor is established")
-        # GD-127 C.2: an attestations register (AT- prefix, optional class/ref fields) is covered by
+        # An attestations register (AT- prefix, optional class/ref fields) is covered by
         # the same machinery; before the change a declared-attestations-only registry was NOT
         # APPLICABLE (exit 0), so these legs discriminate.
         at_good = chain(lambda p: row(1, "AT-1", "proposed", p,

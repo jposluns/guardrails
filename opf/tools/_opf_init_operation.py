@@ -339,9 +339,13 @@ class InitResult:
     REFUSED, FAILED, CANNOT-EVALUATE. `created` and `deduplicated` name the planned paths this
     attempt created or found byte-identical to the plan on resume; `conflicts` the preserved
     destinations that refused; `primary_failure` the first failure (code, detail) or None;
-    `finalization_failures` every later release, outcome, or close failure, kept separately."""
+    `finalization_failures` every later release, outcome, or close failure, kept separately;
+    `staging_removed` and `recovered` what the mutex acquisition removed (its staging leftovers,
+    then the stale records its explicit recovery cleared, in delete order), as the holder, or the
+    refusal of an acquisition that failed after a removal, reports them."""
     __slots__ = ("status", "operation_id", "plan_digest", "milestone", "created", "deduplicated",
-                 "conflicts", "notes", "primary_failure", "finalization_failures", "phases")
+                 "conflicts", "notes", "primary_failure", "finalization_failures", "phases",
+                 "staging_removed", "recovered")
 
     def __init__(self):
         self.status = CANNOT_EVALUATE
@@ -355,6 +359,8 @@ class InitResult:
         self.primary_failure = None
         self.finalization_failures = []
         self.phases = ()
+        self.staging_removed = ()
+        self.recovered = ()
 
 
 # --- the source-digest basis (init.toml excluded) -------------------------------------------------
@@ -840,8 +846,12 @@ def observe_inventory(root_fd):
     the opened product root, walked no-follow and bounded by the D2b contract limits: each directory
     with its mode, each regular file with its mode, size, and content digest. A symbolic link, a
     special file, a hard-linked file, an unreadable entry, or an exceeded bound refuses (never an
-    entry that silently disappears from the inventory). An absent `.working` is the empty
-    inventory."""
+    entry that silently disappears from the inventory). The whole `.working/journals/` subtree is
+    OPF control area, never adopter content (spec 14.2: the reserved child carries no homes
+    qualifier; the adoption journal of a coupled init lives and mutates there), so a plain-directory
+    `journals` entry is carved out of the inventory wholesale, neither listed nor descended into,
+    while a symlinked or non-directory `journals` entry still refuses fail-closed. An absent
+    `.working` is the empty inventory."""
     entries = []
     budget = [0]
 
@@ -867,6 +877,13 @@ def observe_inventory(root_fd):
                 st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
             except OSError as exc:
                 raise InitOperationError("cannot stat {} ({})".format(path, exc), CANNOT_EVALUATE)
+            if path == _opf_store.JOURNALS_REL:
+                # The reserved journals control area (spec 14.2), carved out wholesale: only a plain
+                # directory is carved out; anything else at the reserved name refuses fail-closed.
+                if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                    raise InitOperationError("{} is the reserved journals control area and is not a "
+                                             "plain directory; the inventory refuses it".format(path))
+                continue
             if stat.S_ISDIR(st.st_mode):
                 add({"path": path, "kind": "directory", "mode": stat.S_IMODE(st.st_mode) & 0o777})
                 if depth + 1 >= _opf_init_contract.MAX_PATH_DEPTH:
@@ -2906,7 +2923,11 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
         try:
             run.holder = _opf_oplock.acquire_init_operation(root, OPERATION, recover=recover)
         except _opf_oplock.OpLockError as exc:
+            result.staging_removed = getattr(exc, "staging_removed", ())
+            result.recovered = getattr(exc, "recovered", ())
             raise InitOperationError("cannot take the operation mutex ({})".format(exc))
+        result.staging_removed = getattr(run.holder, "staging_removed", ())
+        result.recovered = getattr(run.holder, "recovered", ())
         binding, head = observe_binding(root, git)
         if (binding, head) != (pre_binding, pre_head):
             raise InitOperationError("the binding or HEAD changed while the mutex was taken; "
@@ -3883,6 +3904,55 @@ def _seam_tests(base, env, ok):
        and "caller-minted operation_id" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
 
+    # The journals carve-out (spec 14.2): the reserved `.working/journals/` subtree is OPF control
+    # area, carved out of the observed inventory wholesale (the coupled adoption's journal lives and
+    # mutates there); a symlinked or non-directory `journals` entry refuses fail-closed; and plain
+    # init keeps refusing a `.working` holding only the journal, exactly as any other existing one.
+    root = _plain_repo(os.path.join(d, "journals"), env)
+    _write(os.path.join(root, ".working", "journals", "adoption", "journal", "frames.log"), b"")
+    _write(os.path.join(root, ".working", "kept.md"), b"kept\n")
+    jfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        model, present = observe_inventory(jfd)
+    finally:
+        os.close(jfd)
+    ok("SEAM-journals-carved-out", present
+       and [e["path"] for e in model["entries"]] == [".working/kept.md"], str(model["entries"]))
+    root = _plain_repo(os.path.join(d, "journalsonly"), env)
+    _write(os.path.join(root, ".working", "journals", "adoption", "journal", "frames.log"), b"")
+    before = _tree_snapshot(root)
+    res = run_init_operation(root)
+    ok("SEAM-plain-journal-only-working-refused", res.status == REFUSED
+       and "already exists" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+    root = _plain_repo(os.path.join(d, "journalslink"), env)
+    os.makedirs(os.path.join(root, ".working", "elsewhere"))
+    os.symlink("elsewhere", os.path.join(root, ".working", "journals"))
+    linked = None
+    jlfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            observe_inventory(jlfd)
+        except InitOperationError as exc:
+            linked = str(exc)
+    finally:
+        os.close(jlfd)
+    root = _plain_repo(os.path.join(d, "journalsfile"), env)
+    _write(os.path.join(root, ".working", "journals"), b"not a directory\n")
+    plainfile = None
+    jffd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            observe_inventory(jffd)
+        except InitOperationError as exc:
+            plainfile = str(exc)
+    finally:
+        os.close(jffd)
+    ok("SEAM-journals-symlink-or-file-refused",
+       linked is not None and "reserved journals control area" in linked
+       and plainfile is not None and "reserved journals control area" in plainfile,
+       "{!r} {!r}".format(linked, plainfile))
+
     def admit_fixture(name, payload=b"frozen source\n"):
         root = _plain_repo(os.path.join(d, name), env)
         rel = os.path.join(".working", "notes", "frozen.md")
@@ -3900,6 +3970,14 @@ def _seam_tests(base, env, ok):
     ok("SEAM-admitted-accepted", res.status == VIEWS_READY and live == payload
        and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
        and len(sub_ops(root)) == 1, str(res.primary_failure))
+
+    # The admitted inventory still holds exactly beside a live journal subtree: the carve-out keeps
+    # the coupled run's own journal out of the exactness comparison and the final check alike.
+    root, adm, payload = admit_fixture("admitjournal")
+    _write(os.path.join(root, ".working", "journals", "adoption", "journal", "frames.log"), b"")
+    res = run_init_operation(root, admitted=adm, operation_id=oid(21))
+    ok("SEAM-admitted-beside-journal-accepted", res.status == VIEWS_READY
+       and _opf_store.resolve_store(root).status == _opf_store.RESOLVED, str(res.primary_failure))
 
     # One byte of drift in the admitted file refuses with nothing written.
     root, adm, payload = admit_fixture("drift")
