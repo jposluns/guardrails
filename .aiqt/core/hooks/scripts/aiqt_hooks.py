@@ -19603,15 +19603,15 @@ def _gensrc_bash(data):
             reasons = "; ".join(sorted(set(why)))
             if session_c is not None and session_c not in loaded:
                 loaded[session_c] = _load_gensrc_registry(session_c)
-            session_state = loaded.get(session_c)
-            if session_state is not None and session_state[0] == "bad":
+            session_registry = loaded.get(session_c)
+            if session_registry is not None and session_registry[0] == "bad":
                 return ("deny",
                         "AIQT rule gensrc (generated-artefact-source-only): the guard could not clear every "
                         "write this Bash command makes ({}), and the .aiqt/gensrc.json registry of the session "
                         "repository {} is PRESENT but could not be read ({}), so it cannot tell whether such a "
                         "write lands on a generated artefact. It fails closed and denies the command. Repair or "
                         "regenerate the registry first (python3 tools/gen_gensrc.py, or a git restore of "
-                        ".aiqt/gensrc.json), then retry.".format(reasons, session_c, session_state[1]),
+                        ".aiqt/gensrc.json), then retry.".format(reasons, session_c, session_registry[1]),
                         "AIQT guardrail: denied a Bash command with an uncleared write because "
                         ".aiqt/gensrc.json is present but unreadable/malformed (rule gensrc, fail-closed).")
             for root_c, (status, payload) in loaded.items():
