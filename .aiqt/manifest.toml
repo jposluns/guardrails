@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "90717703652dba780e92f90d4d48b32b079b374418c6d4bb02bec72fa82eb14e"
+tree-sha256 = "b314aeb7f9ac01b988e0fa1c0d3eb68131e4f37fbf694a5e417db83c10bba390"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3886,8 +3886,8 @@ sha256 = "76e57148e1ad7a82478091682afd175a1ea994d4a8b002b5fac6933e243b3d6e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 156650
-sha256 = "d5d2a740c78fa07d7c8a504ec33ffcf7770f1ce70ee2a822289f8da9770041d0"
+bytes = 156715
+sha256 = "fefab1146bdf0717a392b6b49f4944779c454e6a6c8a904c903cce68be4bf3b6"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3926,8 +3926,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1081168
-sha256 = "b2929bc5dc4e87d86b8dbc0decbd0b21fa6c26757d7b5629f46e6730c504c0d5"
+bytes = 1085052
+sha256 = "ccc01d0993c943842880c29ce21e025733d60c55af7135806b30aea746460c57"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
