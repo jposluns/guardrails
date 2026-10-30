@@ -2698,6 +2698,11 @@ def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound
     when its check matched); otherwise the row goes to cannot_evaluate with its label, never a pass. Each row
     runs in its own session, and the stop kills every process still in that process group (bash, a pipeline
     member or a background child); a process that moved itself to another group or session is not reached.
+    The session also shields the row from a stop aimed at the suite's own group, so any exception leaving a
+    row (KeyboardInterrupt, or an outer stop's signal turned into an exception) kills the row's group the same
+    way and is re-raised. Not covered: an end of the suite that raises no exception (SIGKILL, or a signal
+    left at its default action such as SIGTERM) leaves the row's group running until the row ends by itself,
+    and an exception arriving after bash is reaped stops nothing, as its pid no longer names the group.
     Returns the stdout captured from each row that ran past the bound, keyed by its label."""
     overrun = {}
     if shutil.which("bash") is None or shutil.which("ps") is None or shutil.which("pidwait") is None:
@@ -2710,31 +2715,40 @@ def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound
         with subprocess.Popen(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True, start_new_session=True) as proc:
             try:
-                stdout, stderr = proc.communicate(timeout=bound)
-            except subprocess.TimeoutExpired:
-                # bash leads its own process group and is not yet reaped, so the group still exists here.
-                os.killpg(proc.pid, signal.SIGKILL)
                 try:
-                    partial, partial_err = proc.communicate(timeout=bound)
-                except subprocess.TimeoutExpired as exc:
-                    # A process outside the group still holds a pipe. On POSIX the partial streams are bytes
-                    # (or None) even under text=True.
-                    partial = (exc.stdout or b"").decode("utf-8", "replace")
-                    partial_err = (exc.stderr or b"").decode("utf-8", "replace")
-                overrun[label] = partial
-                if denied != expected:
-                    failures.append("{}: hook deny {} contradicts the row's expected match {}, whatever real bash "
-                                    "printed before its {} s bound stopped it, stdout {!r}, stderr {!r}".format(
-                                        label, denied, expected, bound, partial[:200], partial_err[:200]))
-                elif partial.strip() != "" and not (denied and expected):
-                    failures.append("{}: real bash matched before its {} s bound stopped it, but hook deny {} "
-                                    "(expected {}), stdout {!r}, stderr {!r}".format(
-                                        label, bound, denied, expected, partial[:200], partial_err[:200]))
-                else:
-                    cannot_evaluate.append("{}: real bash did not finish within its {} s bound, not judged "
-                                           "(hook deny {}), stdout {!r}, stderr {!r}".format(
-                                               label, bound, denied, partial[:200], partial_err[:200]))
-                continue
+                    stdout, stderr = proc.communicate(timeout=bound)
+                except subprocess.TimeoutExpired:
+                    # bash leads its own process group and is not yet reaped, so the group still exists here.
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    try:
+                        partial, partial_err = proc.communicate(timeout=bound)
+                    except subprocess.TimeoutExpired as exc:
+                        # A process outside the group still holds a pipe. On POSIX the partial streams are
+                        # bytes (or None) even under text=True.
+                        partial = (exc.stdout or b"").decode("utf-8", "replace")
+                        partial_err = (exc.stderr or b"").decode("utf-8", "replace")
+                    overrun[label] = partial
+                    if denied != expected:
+                        failures.append("{}: hook deny {} contradicts the row's expected match {}, whatever real "
+                                        "bash printed before its {} s bound stopped it, stdout {!r}, stderr "
+                                        "{!r}".format(label, denied, expected, bound, partial[:200],
+                                                      partial_err[:200]))
+                    elif partial.strip() != "" and not (denied and expected):
+                        failures.append("{}: real bash matched before its {} s bound stopped it, but hook deny {} "
+                                        "(expected {}), stdout {!r}, stderr {!r}".format(
+                                            label, bound, denied, expected, partial[:200], partial_err[:200]))
+                    else:
+                        cannot_evaluate.append("{}: real bash did not finish within its {} s bound, not judged "
+                                               "(hook deny {}), stdout {!r}, stderr {!r}".format(
+                                                   label, bound, denied, partial[:200], partial_err[:200]))
+                    continue
+            except BaseException:
+                # The new session keeps a terminal's or an outer timeout's group signal from the row, so an
+                # exception leaving the body (an interrupt, an outer stop raised as an exception) stops the
+                # row's group here. Only while bash is unreaped: its pid then still names the group.
+                if proc.returncode is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                raise
         matched = stdout.strip() != ""
         if denied != matched or matched != expected:
             failures.append("{}: hook deny {} but real bash matched {} (expected {}), exit {}, stdout {!r}, "
@@ -2748,7 +2762,10 @@ def _psm_oracle_overrun_failures(handler, cannot_evaluate):
     cannot-evaluate under its own label and no failure; a silent row past the bound whose hook decision
     contradicts the row's expected match is a failure; a row that printed its match before the stop, which
     the hook allows, is a failure; and a completed row whose match contradicts the hook is still a failure.
-    Each long row ends in exec sleep, and the stop kills the row's whole process group. A row whose failure
+    Each of those long rows ends in exec sleep, so bash is alone in its group; a further row (psm-ov-group)
+    leaves a background child in bash's group holding the output pipes, and the stop must reach it: the row
+    returns within about one bound and the child, by the pid the row printed, is gone. An exception leaving a
+    row must stop its group too (_psm_oracle_raised_failures). A row whose failure
     rests on its output, and whose output had not arrived when the injected bound fired (a loaded host, seen
     as empty captured stdout), is itself cannot-evaluate, never a pass and never a failure of the handling;
     output that did arrive and was left unjudged is a failure."""
@@ -2770,6 +2787,106 @@ def _psm_oracle_overrun_failures(handler, cannot_evaluate):
             out.append("(psm-overrun) {}: expected {} failure(s) and {} cannot-evaluate entry(ies) under the "
                        "row label, got failures {!r} and cannot-evaluate {!r}".format(
                            label, want_failed, want_unjudged, failed, unjudged))
+    # A background child in bash's group holds the row's pipes while bash waits on it, and the row prints that
+    # child's pid as its output (a match the hook allows: one failure). A stop that reaches bash alone leaves
+    # the pipes held, so the row would return only after a second bound, with the child still running.
+    label = "(psm-ov-group) a background child in the row's group holding its pipes"
+    failed, unjudged = [], []
+    start = time.monotonic()
+    overrun = _psm_oracle(failed, unjudged, handler, rows=((label, "sleep 30 & echo $!; wait", False),), bound=3)
+    spent = time.monotonic() - start
+    child = overrun.get(label, "").strip()
+    if label in overrun and child == "":
+        cannot_evaluate.append("(psm-group-unjudged) {}: the injected bound fired before the row's output "
+                               "arrived, not judged: {!r}".format(label, unjudged))
+    elif not child.isdigit():
+        out.append("(psm-group-shape) {}: expected the row to run past its bound and print its child's pid, got "
+                   "stdout {!r}, failures {!r} and cannot-evaluate {!r}".format(label, child, failed, unjudged))
+    else:
+        gone = _psm_gone(int(child), 3)
+        if gone is None:
+            cannot_evaluate.append("(psm-group-blind) {}: /proc cannot tell whether the row's child {} "
+                                   "is still running".format(label, child))
+        elif not (len(failed) == 1 and failed[0].startswith(label + ":") and not unjudged
+                  and spent <= 3 * 1.5 and gone):
+            out.append("(psm-group) {}: the stop must reach the row's whole group, so the row returns within "
+                       "about one 3 s bound with its child {} gone, got {:.2f} s, child gone {}, failures {!r} "
+                       "and cannot-evaluate {!r}".format(label, child, spent, gone, failed, unjudged))
+    out.extend(_psm_oracle_raised_failures(handler, cannot_evaluate))
+    return out
+
+
+def _psm_gone(pid, within):
+    """True once pid has exited (absent from /proc, or a zombie awaiting its reaper) within `within` seconds,
+    False while it still runs after that, None where /proc cannot tell (no /proc, or a refused read)."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            with open("/proc/{}/stat".format(pid), "rb") as handle:
+                stat = handle.read()
+        except FileNotFoundError:
+            return True if os.path.isdir("/proc/self") else None
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return None
+        if stat[stat.rfind(b")") + 2:][:1] in (b"Z", b"X"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+class _PsmOuterStop(Exception):
+    """An outer stop delivered to the suite as an exception, as a caller's signal handler raises one."""
+
+
+def _psm_oracle_raised_failures(handler, cannot_evaluate):
+    """(psm-raised) An exception leaving a row stops the row's group: a SIGALRM handler raises it (a
+    KeyboardInterrupt, then another exception) 2 s into a row whose background child, in bash's group and
+    recording its own pid in a file, would run 30 s. The exception must reach the caller well inside the
+    row's 30 s bound and the child must be gone. The pid file not written when the alarm fired (a loaded host)
+    is cannot-evaluate."""
+    out = []
+    for raised in (KeyboardInterrupt, _PsmOuterStop):
+        label = "(psm-raised) {} leaving a row".format(raised.__name__)
+
+        def raising(signum, frame, raised=raised):
+            raise raised("an outer stop")
+
+        where = _fixture_tmpdir("aiqt-psm-")
+        try:
+            pid_file = where / "pid"
+            row = (label, "sleep 30 & echo $! > {}; wait".format(shlex.quote(str(pid_file))), False)
+            caught = None
+            saved = signal.signal(signal.SIGALRM, raising)
+            start = time.monotonic()
+            try:
+                signal.setitimer(signal.ITIMER_REAL, 2.0)
+                _psm_oracle([], [], handler, rows=(row,), bound=30)
+            except raised as exc:
+                caught = exc
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, saved)
+            spent = time.monotonic() - start
+            child = pid_file.read_text(encoding="utf-8").strip() if pid_file.exists() else ""
+        finally:
+            shutil.rmtree(where, ignore_errors=True)
+        if caught is None:
+            out.append("{}: the injected exception did not reach the caller".format(label))
+            continue
+        if not child.isdigit():
+            cannot_evaluate.append("{}: the row had not recorded its child's pid when the alarm fired, not "
+                                   "judged (pid file {!r})".format(label, child))
+            continue
+        gone = _psm_gone(int(child), 3)
+        if gone is None:
+            cannot_evaluate.append("{}: /proc cannot tell whether the row's child {} is still running".format(
+                label, child))
+        elif spent > 15 or not gone:
+            out.append("{}: the row's group must be stopped before the exception is re-raised, got the exception "
+                       "after {:.2f} s, child {} gone {}".format(label, spent, child, gone))
     return out
 
 
