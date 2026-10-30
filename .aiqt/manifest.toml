@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5b4643abd4f2a9c9e37760027f8dd649f9552df889f6acb79844e71672d87f0e"
+tree-sha256 = "53e62d3fa1b8884898ed2e0718d0023aa8463ced27e291795d6a2780fb9eb1c3"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3426,8 +3426,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 158565
-sha256 = "6dc9b3536825494af42a131854ca06369fa4d3d910b4b634da27f97b98f46787"
+bytes = 158350
+sha256 = "6099b1f89dc2096966606bac0036ff9a313eb6a8d8dd224006f0f17e528c64f6"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3451,8 +3451,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 130694
-sha256 = "2d6b27cffa0e665b980a1fdb5cce047d41960826df313796270e8205ab35be23"
+bytes = 130737
+sha256 = "cf2128a9865eb79b8695194d87cefc2f9ce4e7064d353ed7695195a6e9fbb979"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -3466,8 +3466,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 72938
-sha256 = "b3e22cdae3a787535ea167e252d9affa2f103fd9bb058ec43ee02dc40a19ad1d"
+bytes = 73473
+sha256 = "ae247523c96924dec2827bbd7cb29e6e668bb5124e8b719521df96a8c5d7fbd9"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -3896,8 +3896,8 @@ sha256 = "8d11b8cd543f2ca5da0fa0788d05b476a94635c9919df4e66ff8a19affbc7caa"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 440518
-sha256 = "dd38fa7c3491924fa7bcc4216532fdc2931ef1329d32b4a7416bc03f16bb6e1f"
+bytes = 440260
+sha256 = "7ca619a09525405bf63fcd48b204f882888a00dcc48a1d9d84aa681f7f84d69b"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
