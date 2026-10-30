@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "90717703652dba780e92f90d4d48b32b079b374418c6d4bb02bec72fa82eb14e"
+tree-sha256 = "fa9308d002a47e04014c0ed06f5ec5d6ab41dffcee419be8e2ec182ee1904bb7"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3426,8 +3426,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 158490
-sha256 = "c3bd103f28aa5c8cf482c5aadb4bb00b3c8470bf1ff81a3a2d85ee9a196b5b83"
+bytes = 169723
+sha256 = "a57a39dc9b2b95ce372f966ad133f669b3f7a278ac99176d15e04218c953ffb9"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3626,8 +3626,8 @@ sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 101171
-sha256 = "80cc4d8c10d85882146128e224672ee87f30047db04139b1bafc56b07171d979"
+bytes = 103954
+sha256 = "0a71f6402cfc3f04b7695acd23dbac2fd377e94a8bae818d5a25d8c7bb9e448f"
 
 [[sources]]
 path = "tools/check_secrets.py"
@@ -3886,8 +3886,8 @@ sha256 = "76e57148e1ad7a82478091682afd175a1ea994d4a8b002b5fac6933e243b3d6e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 156650
-sha256 = "d5d2a740c78fa07d7c8a504ec33ffcf7770f1ce70ee2a822289f8da9770041d0"
+bytes = 156799
+sha256 = "03362f840498243ffb954e00bf78e581f5f618288bf762adecd2b647fca4f8d4"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
