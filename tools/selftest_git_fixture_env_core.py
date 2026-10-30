@@ -46,6 +46,9 @@ import selftest_git_fixture_env as _gfe  # noqa: E402
 import _selftest_exit_report  # noqa: E402
 import _git_fixture_env  # noqa: E402
 import _optlevel  # noqa: E402  the engine import put opf/tools on sys.path
+# Tree scans read through the shared non-blocking reader, so a special file (a FIFO above all) at a
+# scanned path is refused by name instead of blocking the suite.
+from _walk import read_text_nonblocking  # noqa: E402
 from selftest_git_fixture_env import (  # noqa: E402
     CANNOT_EVALUATE, CHECKS_MANIFEST, CONFIG_EXCLUSIONS, CONFIG_MEMBER_BOUNDS,
     CONFIG_MEMBER_BOUND_DEFAULT, CONFIG_MEMBER_DRAIN_SECONDS, CONFIG_MEMBER_REAP_SECONDS,
@@ -267,7 +270,7 @@ def _roster_checks():
 def _system_pin_checks(base):
     import types
     # Level 0 parse and compile: the mutant must not follow -O/-OO.
-    tree = _optlevel.parse(Path(_git_fixture_env.__file__).read_text(encoding="utf-8"))
+    tree = _optlevel.parse(read_text_nonblocking(Path(_git_fixture_env.__file__)))
     assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
                    and any(ast.unparse(t) == "os.environ['PATH']" for t in node.targets)]
     if len(assignments) != 1:
@@ -2255,7 +2258,7 @@ def _manifest_extra_setup_failures():
     the actual expressions catches removal of their check_returncode calls.
     This bounded probe does not simulate the rest of the generator's self-test.
     """
-    tree = _optlevel.parse((ROOT / "tools" / "gen_manifest.py").read_text(encoding="utf-8"))
+    tree = _optlevel.parse(read_text_nonblocking(ROOT / "tools" / "gen_manifest.py"))
     owners = [n for n in tree.body if isinstance(n, ast.FunctionDef)
               and n.name == "_self_test_main_isolated"]
     for check_id, fixture, operation in (

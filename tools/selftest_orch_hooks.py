@@ -75,7 +75,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, load_toml  # noqa: E402
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
@@ -104,8 +104,7 @@ def _expected_check_ids():
     unreadable, malformed, or suite-missing manifest (the caller fails closed, exit 2). Light
     validation only; the strict schema gate lives in tools/check_selftest_execution.py."""
     try:
-        with open(CHECKS_MANIFEST, "rb") as handle:
-            data = tomllib.load(handle)
+        data = load_toml(CHECKS_MANIFEST)
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).

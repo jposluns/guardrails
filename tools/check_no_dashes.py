@@ -58,7 +58,8 @@ from pathlib import Path
 import json as _stdlib_json  # noqa: E402,F401
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _walk import walk_files, read_text_nonblocking  # noqa: E402  fail-closed tree walk and non-blocking read
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 from _standards import dir_or_absent, dir_present  # noqa: E402  fail-closed absence probes (raise on an unreadable parent)
 
 POLICY_PATH = ".aiqt/char-policy.json"
@@ -323,7 +324,8 @@ def run(root):
     try:
         for path in scope_paths(root, policy):
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                # non-blocking: this walk reads ignored paths too, which the precheck does not cover.
+                lines = read_text_nonblocking(path).splitlines()
             except UnicodeDecodeError:
                 print(f"SKIP (not utf-8): {path.relative_to(root)}")
                 continue
@@ -554,8 +556,22 @@ def _self_test():
         if (rc, out.splitlines()[1:]) != (1, ["  b/c.md:1:1: left double quotation mark",
                                               "  a.md:1:1: left double quotation mark"]):
             failures.append(f"G9 order or duplicates: {rc} {out!r}")
-        # G10 a scoped tree the walk cannot list fails closed (skipped when running as root, which reads it).
-        if hasattr(os, "geteuid") and os.geteuid() != 0:
+        # G10 a scoped tree the walk cannot list fails closed. #400 re-cut round 6 (codex 4):
+        # a run that cannot use the permission fixtures (root reads a chmod-0 tree, and a
+        # platform without geteuid cannot tell) RECORDS a NOT RUN failure instead of printing
+        # nothing and passing with G10, G11 and G12 silently omitted.
+        def _permission_skip_failure(usable):
+            if usable:
+                return None
+            return ("G10, G11 and G12 NOT RUN (running as root, or os.geteuid is "
+                    "unavailable: chmod 0 does not restrict root, so the permission "
+                    "fixtures prove nothing); failing closed")
+
+        _permission_usable = hasattr(os, "geteuid") and os.geteuid() != 0
+        _skip_failure = _permission_skip_failure(_permission_usable)
+        if _skip_failure is not None:
+            failures.append(_skip_failure)
+        if _permission_usable:
             locked = tree({"d/a.md": "x\n"})
             os.chmod(os.path.join(locked, "d"), 0)
             try:
@@ -573,6 +589,15 @@ def _self_test():
                 expect("G12 unsearchable file entry", hidden, 2, "cannot scan the tree")
             finally:
                 os.chmod(os.path.join(hidden, "d"), 0o700)
+        # G16 the injected root-user condition records a NOT RUN failure (#400 re-cut round
+        # 6, codex 4); red with the round-5 silent skip restored, and a non-root run must
+        # not record it.
+        injected = _permission_skip_failure(False)
+        if injected is None or "NOT RUN" not in injected:
+            failures.append("G16 an injected root-user condition expected a NOT RUN failure, "
+                            "got {!r}".format(injected))
+        if _permission_skip_failure(True) is not None:
+            failures.append("G16 a non-root run must not record the permission NOT RUN failure")
         # G13 arguments: an unknown argument is exit 2 with the usage line, never a scan.
         for argv in (["check_no_dashes.py", "--bogus"], ["check_no_dashes.py", "--self-test", "x"],
                      ["check_no_dashes.py", "--default-parity", "x"]):
@@ -600,7 +625,7 @@ def _self_test():
         copy = os.path.join(shadowed, "tools")
         os.makedirs(copy)
         here = Path(__file__).resolve().parent
-        for name in ("check_no_dashes.py", "_walk.py", "_standards.py"):
+        for name in ("check_no_dashes.py", "_walk.py", "_standards.py", "_gen_common.py"):
             shutil.copyfile(here / name, os.path.join(copy, name))
         with open(os.path.join(copy, "json.py"), "w", encoding="ascii") as handle:
             handle.write("def loads(*args, **kwargs):\n"
@@ -650,7 +675,7 @@ def main(argv):
     if argv[1:]:
         print("usage: check_no_dashes.py [--self-test | --default-parity]", file=sys.stderr)
         return 2
-    return run(Path(__file__).resolve().parents[1])
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
 
 
 if __name__ == "__main__":

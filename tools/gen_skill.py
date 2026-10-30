@@ -45,10 +45,13 @@ declared output or at one of those four inputs is refused, never read and accept
 checkout, made with cp -al, is refused; an input's refusal says to break the link by copying the file and
 moving the copy over it, never to git rm it). The rule corpus is NOT read
 that way: it is read by gen_rules.load_corpus, a shared loader this generator does not change, and then this
-generator's own _rule_body rereads each included rule by plain path (for the source-corpus hash), with no link
-or type check. tools/check_manifest.py refuses a symlinked corpus source (exit 2), but neither it, the loader
-nor _rule_body refuses a FIFO at a corpus path (each blocks on it; load_corpus reaches it first): a disclosed
-gap in the corpus reads, outside the descriptor reader. It does NOT claim defence against a CONCURRENT writer racing the run inside the
+generator's own _rule_body rereads each included rule by path (for the source-corpus hash). Both reads go
+through the shared non-blocking source reader (_gen_common.read_source_text: O_NOFOLLOW on the final
+component, O_NONBLOCK, fstat a regular file), and load_corpus also refuses a '*.md' corpus entry that is not
+a regular file, so a symlink, FIFO, device or directory at a corpus path is refused (exit 2), never read
+through or blocked on; tools/check_manifest.py also refuses a symlinked corpus source (exit 2). That reader
+does not check the link count or the parent components, so a hard link at a corpus path, or a link at one of
+its parent directories, is read through: a disclosed gap in the corpus reads, outside the descriptor reader. It does NOT claim defence against a CONCURRENT writer racing the run inside the
 checkout: whoever can write the checkout during the run can rewrite this generator itself. Disclosed
 residual: a held descriptor pins a directory's inode, not its ancestry, so a directory renamed out of the
 repository mid-run, or a file moved onto this run's temporary name during the run, is out of scope.
@@ -95,7 +98,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
 from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -322,9 +325,11 @@ def parse_source_text(text):
 def _rule_body(path):
     """The rule body with its YAML frontmatter stripped (same extraction as gen_agents.body_of, without
     the H1 demotion). Used only for the deterministic source-corpus hash, never rendered into the body. Read
-    by plain path, with no link or type check (a FIFO here blocks, as it already does in load_corpus): the
-    disclosed corpus gap in the module threat model."""
-    text = path.read_text(encoding="utf-8")
+    by path through the shared non-blocking source reader (read_source_text, as load_corpus reads it), so a
+    symlink final component or a FIFO, device or directory here is refused (an OSError, exit 2), never read
+    through or blocked on; a hard link or a linked parent directory is not checked: the disclosed corpus gap
+    in the module threat model."""
+    text = read_source_text(path)
     end = text.find("\n---\n", 4)
     return text[end + 5:].strip()
 
@@ -1300,6 +1305,9 @@ def self_test_main():
         return code, buf.getvalue()
 
     failures = []
+    # round 10 (#400 re-cut, decided 6): a vector group whose fixture capability is
+    # unavailable is recorded here and the run exits 3 (INCOMPLETE), never a silent PASS
+    skipped = []
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-skill-selftest-"))
     except OSError as exc:
@@ -1980,24 +1988,83 @@ def self_test_main():
         mk_victim.write_bytes(b"PRECIOUS")
         real_mkdir = os.mkdir
 
+        class _SwapConstructionFailed(Exception):
+            # round 11 (decided 6): a fixture-construction fault inside the patched
+            # os.mkdir must never surface as the OSError the vector reads as the
+            # refusal of the writer, so it travels under its own type
+            pass
+
+        mk_swapped = []
+
         def _swapping_mkdir(path_, mode=0o777, *, dir_fd=None):
             real_mkdir(path_, mode, dir_fd=dir_fd)
             if os.path.basename(str(path_)) == RESERVED_PARTS[-1]:
-                os.rmdir(path_, dir_fd=dir_fd)
-                os.symlink(str(mk_out), path_, dir_fd=dir_fd)
+                try:
+                    os.rmdir(path_, dir_fd=dir_fd)
+                    os.symlink(str(mk_out), path_, dir_fd=dir_fd)
+                except OSError as exc:
+                    raise _SwapConstructionFailed(str(exc)) from exc
+                mk_swapped.append(str(path_))
 
-        mk_fd = _open_root(mk)
-        try:
-            os.mkdir = _swapping_mkdir
-            _write_output(mk_fd, mk, mk.joinpath(*RESERVED_PARTS) / "SKILL.md", "GENERATED\n")
-            failures.append("a symlink found at a just-created directory must be refused (OSError)")
-        except OSError:
-            pass
-        finally:
-            os.mkdir = real_mkdir
-            os.close(mk_fd)
+        def _vector_16(root, patched_mkdir, swapped):
+            # round 12 (decided 3): the ONE copy of the vector-16 arms; vector 16 and
+            # 16b below both drive it, so 16b proves THIS recording arm, not a copy
+            root_fd = _open_root(root)
+            try:
+                os.mkdir = patched_mkdir
+                _write_output(root_fd, root, root.joinpath(*RESERVED_PARTS) / "SKILL.md",
+                              "GENERATED\n")
+                failures.append("a symlink found at a just-created directory must be refused (OSError)")
+            except _SwapConstructionFailed as exc:
+                # round 11 (decided 6): an unavailable fixture is recorded incomplete
+                # coverage (exit 3), never a pass
+                skipped.append("vector 16 (the post-mkdir symlink swap): fixture "
+                               "construction failed ({})".format(exc))
+            except OSError:
+                if not swapped:
+                    failures.append("vector 16: the writer raised OSError before the swap "
+                                    "was installed, so the reopen guard was not exercised")
+            finally:
+                os.mkdir = real_mkdir
+                os.close(root_fd)
+
+        _vector_16(mk, _swapping_mkdir, mk_swapped)
         if mk_victim.read_bytes() != b"PRECIOUS" or len(os.listdir(str(mk_out))) != 1:
             failures.append("the post-mkdir reopen followed a symlink and wrote outside the tree")
+
+        # 16b (round 11, decided 6; round 12, decided 3): an INJECTED construction
+        # failure driven through the SAME _vector_16 arms must land in the
+        # incomplete-coverage roster, never read as the refusal of the writer; the
+        # injected entry is then removed, because the real vector-16 fixture above
+        # did run. A vector-16 recording arm weakened to pass leaves the roster
+        # unchanged, so this check turns the suite red.
+        mkb = tmp / "mkdirswap-injected"
+        mkb.mkdir()
+        _write_fixture(mkb, good_src)
+        capture(mkb, False)
+        shutil.rmtree(mkb.joinpath(*RESERVED_PARTS))
+        mkb_before = len(skipped)
+        mkb_failures_before = len(failures)
+
+        def _injected_failing_mkdir(path_, mode=0o777, *, dir_fd=None):
+            real_mkdir(path_, mode, dir_fd=dir_fd)
+            if os.path.basename(str(path_)) == RESERVED_PARTS[-1]:
+                try:
+                    raise OSError("injected symlink construction failure")
+                except OSError as exc:
+                    raise _SwapConstructionFailed(str(exc)) from exc
+
+        _vector_16(mkb, _injected_failing_mkdir, [])
+        if len(failures) != mkb_failures_before:
+            failures.append("16b: an injected construction failure was read as a vector-16 "
+                            "verdict instead of an incomplete-coverage entry")
+        if (len(skipped) == mkb_before + 1
+                and "fixture construction failed" in skipped[-1]
+                and "injected symlink construction failure" in skipped[-1]):
+            skipped.pop()   # injected, never a real gap: the real fixture ran above
+        else:
+            failures.append("16b: an injected construction failure must enter the "
+                            "incomplete-coverage roster exactly once")
 
         # 17. O_NONBLOCK on every read: a FIFO at a reserved output name must be refused at once (exit 2 in
         #     both modes, the FIFO kept), never block the run. Bounded by a 10 s alarm; red if the read opens
@@ -2009,7 +2076,15 @@ def self_test_main():
             capture(ff, False)
             fifo = ff.joinpath(*RESERVED_PARTS) / "SKILL.md"
             fifo.unlink()
-            os.mkfifo(str(fifo))
+            # round 10 (#400 re-cut, decided 6): fixture construction is separated from the
+            # tested operation; a FIFO the fixture cannot create is a recorded NOT RUN (exit 3)
+            try:
+                os.mkfifo(str(fifo))
+                fifo_17_made = True
+            except OSError as exc:
+                fifo_17_made = False
+                skipped.append("vector 17 (a FIFO at a reserved output): mkfifo failed "
+                               "({})".format(exc))
 
             class _Blocked(Exception):
                 pass
@@ -2019,7 +2094,7 @@ def self_test_main():
 
             prev = signal.signal(signal.SIGALRM, _on_alarm)
             try:
-                for chk in (True, False):
+                for chk in (True, False) if fifo_17_made else ():
                     signal.alarm(10)
                     try:
                         code, out = capture(ff, chk)
@@ -2032,6 +2107,9 @@ def self_test_main():
                                         "kept (check={}), got {}\n{}".format(chk, code, out))
             finally:
                 signal.signal(signal.SIGALRM, prev)
+        else:
+            skipped.append("vector 17 (a FIFO at a reserved output): os.mkfifo or "
+                           "signal.SIGALRM unavailable")
 
         # 18. An untracked leftover (an interrupted run's temporary file) is named with BOTH removal commands:
         #     git rm fails on an untracked path. Pinned at the top level and in the reserved tree.
@@ -2221,31 +2299,53 @@ def self_test_main():
                 lic = inp.joinpath(*LICENSE_PARTS)
                 lic_bytes = lic.read_bytes()
                 lic.unlink()
-                os.mkfifo(str(lic))
-                for chk in (True, False):
-                    code, out = _bounded(inp, chk)
-                    if code != 2 or "LICENSE" not in out or "regular file" not in out:
-                        failures.append("a FIFO at LICENSE expected exit 2 at once naming it (check={}), got "
-                                        "{}\n{}".format(chk, code, out))
-                lic.unlink()
-                lic.write_bytes(lic_bytes)
+                # round 10 (decided 6): fixture construction separated from the tested
+                # operation; a FIFO the fixture cannot create is a recorded NOT RUN
+                try:
+                    os.mkfifo(str(lic))
+                    lic_made = True
+                except OSError as exc:
+                    lic_made = False
+                    lic.write_bytes(lic_bytes)
+                    skipped.append("the FIFO-at-LICENSE vectors: mkfifo failed "
+                                   "({})".format(exc))
+                if lic_made:
+                    for chk in (True, False):
+                        code, out = _bounded(inp, chk)
+                        if code != 2 or "LICENSE" not in out or "regular file" not in out:
+                            failures.append("a FIFO at LICENSE expected exit 2 at once naming it (check={}), "
+                                            "got {}\n{}".format(chk, code, out))
+                    lic.unlink()
+                    lic.write_bytes(lic_bytes)
                 pw = tmp / "prewrite"
                 pw.mkdir()
                 _write_fixture(pw, good_src)
                 capture(pw, False)
                 pw_fifo = pw.joinpath(*RESERVED_PARTS) / "SKILL.md"
                 pw_fifo.unlink()
-                os.mkfifo(str(pw_fifo))
+                try:
+                    os.mkfifo(str(pw_fifo))
+                    pw_made = True
+                except OSError as exc:
+                    pw_made = False
+                    skipped.append("the pre-write FIFO-plus-drift vector: mkfifo failed "
+                                   "({})".format(exc))
                 pw_instr = pw.joinpath(*INSTRUCTIONS_PARTS)
                 pw_instr.write_text("local edit\n", encoding="utf-8")
-                code, out = _bounded(pw, False)
-                if (code != 2 or "SKILL.md" not in out or pw_instr.read_text(encoding="utf-8") != "local edit\n"
-                        or not stat.S_ISFIFO(os.lstat(str(pw_fifo)).st_mode)):
-                    failures.append("a FIFO at one output plus a drifted other output expected a normal run to "
-                                    "exit 2 having written nothing, got {} (drifted output kept={})\n{}".format(
-                                        code, pw_instr.read_text(encoding="utf-8") == "local edit\n", out))
+                if pw_made:
+                    code, out = _bounded(pw, False)
+                    if (code != 2 or "SKILL.md" not in out
+                            or pw_instr.read_text(encoding="utf-8") != "local edit\n"
+                            or not stat.S_ISFIFO(os.lstat(str(pw_fifo)).st_mode)):
+                        failures.append("a FIFO at one output plus a drifted other output expected a normal "
+                                        "run to exit 2 having written nothing, got {} (drifted output "
+                                        "kept={})\n{}".format(code, pw_instr.read_text(
+                                            encoding="utf-8") == "local edit\n", out))
             finally:
                 signal.signal(signal.SIGALRM, prev21)
+        else:
+            skipped.append("the FIFO-at-LICENSE and pre-write FIFO vectors: os.mkfifo or "
+                           "signal.SIGALRM unavailable")
 
         # 22. A corpus path that is there but is not a directory is refused in both modes (exit 2), never read
         #     as the absent-corpus transition, which on a tree with no outputs yet is a clean exit 0.
@@ -2293,6 +2393,14 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
+    if skipped:
+        # round 10 (decided 6): incomplete coverage is a NONZERO exit (3, as conformance,
+        # gen_enforceability and launcher-isolation report it), never a silent omission
+        print("SELF-TEST INCOMPLETE: {} vector group(s) NOT RUN; failing closed "
+              "(exit 3):".format(len(skipped)))
+        for entry in skipped:
+            print("  - NOT RUN: " + entry)
+        return 3
     print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md and the zips); an unknown "
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
           "a drifted SKILL.md is caught (exit 1); nothing is ever deleted: an orphan reserved entry and a "

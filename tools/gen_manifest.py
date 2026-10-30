@@ -72,7 +72,8 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile, target_dir_present  # noqa: E402
+from _gen_common import (linked_dir_failures, repo_root, load_toml, read_source_bytes, reconcile,  # noqa: E402
+                         precheck_special_files, target_dir_present)
 import check_versions  # noqa: E402  the ONE shared ASCII SemVer validator the release gates use
 
 # Static content-bearing inputs shared by manifest.toml/root.txt/announce-snippet.txt (VERSION ->
@@ -545,7 +546,7 @@ def read_version(root):
     # embedded whitespace, no NBSP, no CR, exactly one final "\n"), the same standard check_versions holds the
     # on-disk VERSION to (both read raw bytes and reject anything but `latest + "\n"`); the two gates agree.
     try:
-        raw = (root / VERSION_REL).read_bytes().decode("utf-8")
+        raw = read_source_bytes(root / VERSION_REL).decode("utf-8")
     except UnicodeDecodeError as exc:
         raise GateError("VERSION is not valid UTF-8 ({})".format(exc))
     if not raw.endswith("\n") or raw.count("\n") != 1:
@@ -608,7 +609,7 @@ def managed_block_digest(root):
     """SHA-256 over CLAUDE.md's delimited block: from the start of the BEGIN marker through the last
     byte of the END marker, markers included, the following LF excluded. Exactly one pair, BEGIN before
     END, no nesting."""
-    raw = (root / "CLAUDE.md").read_bytes()
+    raw = read_source_bytes(root / "CLAUDE.md")
     begin, end = BLOCK_BEGIN.encode(), BLOCK_END.encode()
     if raw.count(begin) != 1 or raw.count(end) != 1:
         raise GateError("CLAUDE.md: expected exactly one {} / {} marker pair".format(
@@ -657,13 +658,13 @@ def build_artifacts(root, classes, renderers):
                         rid, target))
                 for leaf in leaves:
                     rows.append({"artifact-id": "{}:{}".format(rid, leaf), "path": leaf,
-                                 "kind": "file", "sha256": _sha256((root / leaf).read_bytes())})
+                                 "kind": "file", "sha256": _sha256(read_source_bytes(root / leaf))})
             else:
                 if target not in classes:
                     raise GateError("renderer {}: target {!r} is not a tracked in-scope path".format(
                         rid, target))
                 rows.append({"artifact-id": "{}:{}".format(rid, target), "path": target,
-                             "kind": "file", "sha256": _sha256((root / target).read_bytes())})
+                             "kind": "file", "sha256": _sha256(read_source_bytes(root / target))})
     rows.sort(key=lambda r: (r["path"], r["artifact-id"]))
     ids = [r["artifact-id"] for r in rows]
     if len(ids) != len(set(ids)):
@@ -748,7 +749,7 @@ def compute_all(root, write_mode):
             data = frozen_text.encode("utf-8")
         else:
             try:
-                data = (root / p).read_bytes()
+                data = read_source_bytes(root / p)  # a FIFO is refused, never blocks
             except OSError as exc:
                 raise GateError("cannot read tracked source {} ({}); fail-closed".format(p, exc))
         if p not in binary_set:
@@ -850,7 +851,7 @@ def main():
         if i + 1 >= len(args):
             print("usage: gen_manifest.py [--check] [--root DIR] | --self-test", file=sys.stderr)
             return 2
-        root = Path(args[i + 1]).resolve()
+        root = precheck_special_files(Path(args[i + 1]).resolve())
     return run(root, "--check" in args)
 
 

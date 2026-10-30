@@ -81,6 +81,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files, read_source_bytes  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 CONFIG_REL = ".aiqt/derived-command-parameters.toml"
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")           # a kebab-case binding identifier
@@ -411,7 +412,11 @@ def scan_file(root, path, binding, telemetry):
     literal value (it may be sensitive). telemetry accumulates the commands and options actually matched,
     so run() can reconcile the config's selectors against the real source."""
     try:
-        raw = path.read_bytes()
+        # read_source_bytes, never a plain read: the surface walk picks up WHATEVER sits under the
+        # declared prefix (the D-400 precheck walks ignored directories too, but it certifies only
+        # what stood at walk time, never a later drop-in), so a FIFO here is the named refusal
+        # (SourceReadRefused -> GateError, exit 2), never a blocking read (F-CORPUS-FIFO-HANG class).
+        raw = read_source_bytes(path)
     except OSError as exc:
         raise GateError("configuration {} binding {!r}: cannot read declared surface {} ({})".format(
             CONFIG_REL, binding["id"], path.relative_to(root), exc))
@@ -504,8 +509,8 @@ def run(root):
 # --- self-test ---------------------------------------------------------------------------------------
 # The tokenization and value-classification cases are pure and ALWAYS run. An end-to-end layer over a real
 # synthetic tree (real reads, real containment) runs where a writable tempdir exists; where it (or a case's
-# symlink) cannot be made, each unrun case is a NAMED NOT RUN failure, never a skip beside a PASS. No wall
-# clock, no randomness, no network.
+# symlink) cannot be made, each unrun case is a NAMED NOT RUN failure, never a skip beside a PASS, and a run
+# whose only failures are NOT RUN exits 3, a nonzero cannot-evaluate. No wall clock, no randomness, no network.
 
 def _run_quiet(root):
     import io
@@ -538,11 +543,14 @@ def _not_run_vectors(failures):
     """Red-on-revert vectors for the skips that printed SELF-TEST PASS (PARTIAL) and exited 0. Nested
     self-test runs inject an unavailable temp directory (mkdtemp raises OSError), a failing symlink for case
     (m) alone, for case (n) alone (the other case's symlink made for real), and for both; each run must exit
-    nonzero AND carry every unrun case's NOT RUN bullet on its failure list. The single-case runs matter: in
-    the both-cases run the sibling's recorded failure alone makes the exit nonzero, so a call site that only
-    printed its NOT RUN line would pass there."""
+    exactly 3 (cannot evaluate) AND carry every unrun case's NOT RUN bullet on its failure list. The
+    single-case runs matter: in the both-cases run the sibling's recorded failure alone makes the exit
+    nonzero, so a call site that only printed its NOT RUN line would pass there. A final mixed run adds one
+    definite failure beside the unavailable temp directory and must exit 1: a definite failure outranks a
+    NOT RUN entry, never the cannot-evaluate exit 3."""
     import io
     from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
 
     def _unavailable(*_args, **_kwargs):
         raise OSError("injected: unavailable")
@@ -558,9 +566,9 @@ def _not_run_vectors(failures):
 
     want_m = "NOT RUN: {}: no symlink support".format(_SYMLINK_CASE)
     want_n = "NOT RUN: {}: no symlink support".format(_DANGLING_CASE)
+    want_e2e = "NOT RUN: {}: no writable temp directory".format(_E2E_CASES)
     for label, kwargs, wants in (
-            ("no-tempdir", {"_mkdtemp": _unavailable},
-             ("NOT RUN: {}: no writable temp directory".format(_E2E_CASES),)),
+            ("no-tempdir", {"_mkdtemp": _unavailable}, (want_e2e,)),
             ("no-symlink (m) only", {"_symlink": _unavailable_for("resume.md")}, (want_m,)),
             ("no-symlink (n) only", {"_symlink": _unavailable_for("derived-command-parameters.toml")},
              (want_n,)),
@@ -569,13 +577,37 @@ def _not_run_vectors(failures):
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
             rc = self_test_main(_vectors=False, **kwargs)
         missing = [want for want in wants if not _recorded(out.getvalue(), want)]
-        if rc == 0 or missing:
-            failures.append("(NOT RUN vector {}) must exit nonzero AND record {!r} on the failure list, never "
-                            "a PASS (PARTIAL) exit 0 or a bare printed line (got exit {})"
-                            .format(label, missing or wants, rc))
+        if rc != 3 or missing:
+            failures.append("(NOT RUN vector {}) must exit 3 (cannot evaluate) AND record {!r} on the failure "
+                            "list, never a PASS (PARTIAL) exit 0, a definite-failure exit 1 or a bare printed "
+                            "line (got exit {})".format(label, missing or wants, rc))
+
+    # The mixed run: the unavailable temp directory records the e2e NOT RUN entry, and a mis-graded
+    # even backslash run (the real helper for every other input) records exactly one definite failure.
+    real_ends = _ends_with_continuation
+
+    def _misgraded(text):
+        return text == "a \\\\" or real_ends(text)
+
+    definite = "_ends_with_continuation mis-graded an odd/even trailing backslash run"
+    out = io.StringIO()
+    with patch.object(sys.modules[__name__], "_ends_with_continuation", _misgraded), \
+            redirect_stdout(out), redirect_stderr(io.StringIO()):
+        rc = self_test_main(_vectors=False, _mkdtemp=_unavailable)
+    missing = [want for want in (want_e2e, definite) if not _recorded(out.getvalue(), want)]
+    if rc != 1 or missing:
+        failures.append("(NOT RUN vector mixed) a definite failure beside a NOT RUN entry must exit 1 AND "
+                        "record {!r} on the failure list, never the cannot-evaluate exit 3 (got exit {})"
+                        .format(missing or (want_e2e, definite), rc))
 
 
-def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  a flat sequence of cases
+_SENTINEL_FAILURE = ("the injected unavailable-fixture cases ((w)) and the inherited-sentinel "
+                     "regression ((x)) NOT RUN (AIQT_DERIVED_SELFTEST_CHILD=1 inherited at "
+                     "this top-level --self-test entry); failing closed")
+
+
+def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True,  # noqa: C901  a flat sequence of cases
+                   selftest_child=False):
     failures = []
     commands = {"sample-tool"}
     options = ["--target"]
@@ -918,6 +950,96 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
                        {"cmd/resume.md": "sample-tool -xt sample-org/repo\n"})
             if _run_quiet(r) != 1:
                 failures.append("e2e: a bundled short-option literal value was not scanned")
+
+            # (w) #400 re-cut round 7 (codex 5): each unavailable REQUIRED fixture must
+            #     yield the NONZERO cannot-evaluate exit (3), never PASS (PARTIAL) exit 0:
+            #     one injected child per condition (refused tempdir; refused symlink for
+            #     the declared-surface case; refused symlink for the dangling-symlink
+            #     configuration case), each run through the real wiring. The children are
+            #     marked by ARGUMENT, not only by the environment sentinel they inherit: an
+            #     inherited sentinel at a top-level entry is a recorded NOT RUN failure
+            #     (#400 re-cut round 8, decided 2), never a silent skip.
+            import os as _os
+            import subprocess
+            if selftest_child or not _vectors:
+                # the deliberate child of the injection and regression runners below, or a nested
+                # in-process run of _not_run_vectors: its own copies of cases (w) and (x) stay
+                # skipped BY ARGUMENT, which an inherited environment cannot forge (#400 re-cut
+                # round 8, decided 2); the top-level run still spawns them
+                pass
+            elif _os.environ.get("AIQT_DERIVED_SELFTEST_CHILD") == "1":
+                # #400 re-cut round 8 (decided 2): an INHERITED child sentinel at a
+                # top-level --self-test entry is a recorded NOT RUN failure (nonzero),
+                # never a silent omission of cases (w) and (x); the recursion guard still
+                # holds (this branch spawns nothing)
+                failures.append(_SENTINEL_FAILURE)
+            else:
+                childenv = dict(_os.environ, AIQT_DERIVED_SELFTEST_CHILD="1")
+                toolsdir = str(Path(__file__).resolve().parent)
+                injections = (
+                    ("tempdir",
+                     "_real_mkdtemp = tempfile.mkdtemp\n"
+                     "def _refused(*args, **kwargs):\n"
+                     "    if str(kwargs.get('prefix', '')).startswith('aiqt-derived-cmd-selftest-'):\n"
+                     "        raise OSError('injected: no writable temp directory')\n"
+                     "    return _real_mkdtemp(*args, **kwargs)\n"
+                     "tempfile.mkdtemp = _refused\n",
+                     "NOT RUN: {}: no writable temp directory".format(_E2E_CASES)),
+                    ("surface-symlink",
+                     "_real_symlink = os.symlink\n"
+                     "def _refused(target, *args, **kwargs):\n"
+                     "    if str(target).endswith('real.md'):\n"
+                     "        raise OSError('injected: no symlink support')\n"
+                     "    return _real_symlink(target, *args, **kwargs)\n"
+                     "os.symlink = _refused\n",
+                     "NOT RUN: {}: no symlink support".format(_SYMLINK_CASE)),
+                    ("config-symlink",
+                     "_real_symlink = os.symlink\n"
+                     "def _refused(target, *args, **kwargs):\n"
+                     "    if str(target).endswith('does-not-exist.toml'):\n"
+                     "        raise OSError('injected: no symlink support')\n"
+                     "    return _real_symlink(target, *args, **kwargs)\n"
+                     "os.symlink = _refused\n",
+                     "NOT RUN: {}: no symlink support".format(_DANGLING_CASE)),
+                )
+                # Each child passes _vectors=False: its injected refusal would refuse the fixtures of
+                # the in-process NOT RUN vectors too, which the top-level run already executes.
+                for tag, patch, marker in injections:
+                    runner = base_tmp / ("cannot-evaluate-" + tag + ".py")
+                    runner.write_text(
+                        "import sys, os, tempfile\n"
+                        + "sys.path.insert(0, " + repr(toolsdir) + ")\n"
+                        + patch
+                        + "import check_derived_command_parameters as mod\n"
+                        + "sys.exit(mod.self_test_main(selftest_child=True, _vectors=False))\n",
+                        encoding="utf-8")
+                    proc = subprocess.run([sys.executable, "-I", "-B", str(runner)],
+                                          capture_output=True, text=True, env=childenv,
+                                          timeout=600)
+                    out = proc.stdout + proc.stderr
+                    if proc.returncode != 3 or "CANNOT EVALUATE" not in out or marker not in out:
+                        failures.append("injected unavailable fixture ({}) expected the nonzero "
+                                        "cannot-evaluate exit 3 naming {!r}, got rc={} "
+                                        "tail={!r}".format(tag, marker, proc.returncode,
+                                                               out[-200:]))
+
+                # (x) #400 re-cut round 8 (decided 2, and decided 4: this vector guards the
+                #     PARENT wiring, not a helper): run the REAL script entry with the
+                #     sentinel inherited and no child argument; it must fail rc 1 with
+                #     EXACTLY the recorded NOT RUN failure, so a silent top-level skip of
+                #     case (w) can never return
+                proc = subprocess.run([sys.executable, "-I", "-B",
+                                       str(Path(__file__).resolve()), "--self-test"],
+                                      capture_output=True, text=True, env=childenv,
+                                      timeout=600)
+                sentinel_failures = [line[4:] for line in
+                                     (proc.stdout + proc.stderr).splitlines()
+                                     if line.startswith("  - ")]
+                if proc.returncode != 1 or sentinel_failures != [_SENTINEL_FAILURE]:
+                    failures.append("an inherited child sentinel at a top-level --self-test "
+                                    "entry expected rc 1 with exactly the recorded NOT RUN "
+                                    "failure, got rc={} failures={!r}".format(
+                                        proc.returncode, sentinel_failures[-6:]))
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -928,6 +1050,12 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  - " + f)
+        if all(f.startswith("NOT RUN: ") for f in failures):
+            # An unavailable required fixture is a NONZERO cannot-evaluate result (exit 3), never a PASS
+            # (PARTIAL) exit 0 that could ship a defect detectable only by the omitted cases; a definite
+            # failure beside a NOT RUN entry outranks it (exit 1).
+            print("SELF-TEST CANNOT EVALUATE: NOT RUN (required fixtures unavailable); failing closed (exit 3)")
+            return 3
         return 1
     core = ("tokenization stays total on unbalanced quotes and drops an unquoted word-start comment, value "
             "classification credits only an allowed bare/braced/double-quoted reference (never a "
@@ -942,8 +1070,8 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
           "reconciliation of an unmatched-command/unmatched-option/duplicate-path/overlapping-path/"
           "duplicate-option control failing closed, a line-continuation split sink scanned whole, a "
           "commented-out literal not firing, and a bundled short-option value scanned); an unavailable "
-          "temp directory or symlink support is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)"
-          .format(core))
+          "temp directory or symlink support is a NOT RUN failure (exit 3), never a PASS (PARTIAL), and a "
+          "definite failure beside a NOT RUN entry exits 1".format(core))
     return 0
 
 
@@ -965,9 +1093,65 @@ def main():
     (self_test,) = parsed
     if self_test:
         return self_test_main()
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     return run(root)
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("check_derived_command_parameters.py") or main())

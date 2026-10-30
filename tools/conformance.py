@@ -67,6 +67,7 @@ import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the gen
 import check_rule_placement as crp  # noqa: E402  _scan_tree (with check_name, check_drift)
 from _standards import (close_chain, dir_chain_or_absent, dir_or_absent, dir_present,  # noqa: E402
                         load_manifests, map_keys, open_chain, validate_mappings, ManifestError)
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 
 # Status constants for a single check's outcome.
@@ -697,7 +698,7 @@ def main():
     root, self_test = parsed
     if self_test:
         return self_test_main()
-    return run(root or Path.cwd())
+    return run(precheck_special_files(root or Path.cwd()))
 
 
 # --- self-test --------------------------------------------------------------------------------------
@@ -1794,11 +1795,16 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    skip_note = ("" if not skipped_unreadable else
-                 " NOTE: {} unreadable-input-dir case(s) (9-15, 16f) were SKIPPED this run because the "
-                 "runner could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read "
-                 "bits are enforced to exercise them.".format(
-                     len(skipped_unreadable), ", ".join(skipped_unreadable)))
+    if skipped_unreadable:
+        # #400 re-cut round 9 (round-8 codex 4): a capability-gated case the runner cannot
+        # exercise is INCOMPLETE COVERAGE, never a successful omission: a defect detectable
+        # only by a skipped assertion could survive such a run, so the run exits 3 instead
+        # of printing a success
+        print("SELF-TEST INCOMPLETE: {} unreadable-input-dir case(s) (9-15, 16f) NOT RUN "
+              "because the runner could still read the chmod-0 dir (root/DAC-bypass): {}; "
+              "run where POSIX read bits are enforced (exit 3)".format(
+                  len(skipped_unreadable), ", ".join(skipped_unreadable)))
+        return 3
     print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, the GEMINI.md/copilot "
           "adapters, and the chat-skill surface in both its SKILL.md text and its binary download zip), "
           "empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
@@ -1823,7 +1829,7 @@ def self_test_main():
           "inside the root is read and passes, a family directory below .claude/rules symlinked inside the "
           "root included, and that family's violation is still found with .claude/rules swapped after C3's "
           "open; the every-component probe refuses a path outside the root or "
-          "holding a .. component" + skip_note)
+          "holding a .. component")
     return 0
 
 

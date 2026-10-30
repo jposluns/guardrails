@@ -11,9 +11,11 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py and tools/check_verifier_delivery.py; the
-     constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant and
-     the probe) are each defined once at the top level and AST-identical (ast.dump, docstrings included) to the canonical text, and each is bound
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/check_verifier_delivery.py, and the
+     special-file precheck's two entry modules tools/_gen_common.py and opf/tools/_containment.py with the 23
+     entry points whose import closure reaches its git queries; the constant and both functions) and in the
+     hooks dispatcher and its generated plugin copy (the constant and the probe) are each defined once at the
+     top level and AST-identical (ast.dump, docstrings included) to the canonical text, and each is bound
      nowhere else in the module (_binding_count: no import, assignment, global or other binding of the name
      besides its copy), so a call by that name reaches the copy.
   3. entries: each CLI copy's __main__ body is exactly its cli_entry line: for opf/tools/opf.py,
@@ -194,7 +196,35 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"),
-              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
+              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
+              # The special-file precheck's two entry modules and the entry points whose import closure
+              # reaches its git queries (tools/_gen_common.py, opf/tools/_containment.py): each carries
+              # the inline copy and the plain CLI entry line.
+              (".github/check_newtab_contract.py", "check_newtab_contract.py"),
+              ("opf/tools/_containment.py", "_containment.py"),
+              ("opf/tools/check_opf_init_contract.py", "check_opf_init_contract.py"),
+              ("tools/_gen_common.py", "_gen_common.py"),
+              ("tools/check_cited_standards.py", "check_cited_standards.py"),
+              ("tools/check_derived_command_parameters.py", "check_derived_command_parameters.py"),
+              ("tools/check_footer.py", "check_footer.py"),
+              ("tools/check_install_page.py", "check_install_page.py"),
+              ("tools/check_leaks.py", "check_leaks.py"),
+              ("tools/check_links.py", "check_links.py"),
+              ("tools/check_secrets.py", "check_secrets.py"),
+              ("tools/check_site_versions.py", "check_site_versions.py"),
+              ("tools/check_versions.py", "check_versions.py"),
+              ("tools/gen_changelog.py", "gen_changelog.py"),
+              ("tools/gen_char_policy.py", "gen_char_policy.py"),
+              ("tools/gen_crosswalk.py", "gen_crosswalk.py"),
+              ("tools/gen_disclosure.py", "gen_disclosure.py"),
+              ("tools/gen_gensrc.py", "gen_gensrc.py"),
+              ("tools/gen_notice.py", "gen_notice.py"),
+              ("tools/gen_roadmap.py", "gen_roadmap.py"),
+              ("tools/gen_secret_patterns.py", "gen_secret_patterns.py"),
+              ("tools/gen_site.py", "gen_site.py"),
+              ("tools/orch_doctor.py", "orch_doctor.py"),
+              ("tools/orch_preflight.py", "orch_preflight.py"),
+              ("tools/selftest_opf_render.py", "selftest_opf_render.py"))
 HOOK_COPIES = (".aiqt/core/hooks/scripts/aiqt_hooks.py", "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
 HOOKS_JSON_REL = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
 HOOK_TARGET = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
@@ -1569,8 +1599,10 @@ def _inputs():
                                    "          script: tools/check_leaks.py\n",
         "job-continue-on-error": "jobs:\n  lone:\n    continue-on-error: true\n" + head + setup + step + gate + launch,
         "outside-grammar": outside_grammar, "workflows": workflows,
+        # The unguarded target is a DIRECT_LAUNCH_RESIDUAL entry (tools/check_leaks.py, the earlier example,
+        # now carries the inline copy).
         "shell-unguarded": "#!/bin/sh\n# python3 tools/opf.py in a comment is not a launch\n"
-                           "python3 -I -B tools/check_leaks.py\n",
+                           "python3 -I -B tools/check_no_dashes.py\n",
         "shell-outside": "#!/bin/sh\npython3 -I -B /tmp/opf.py\n" + here_line
                          + 'python3 -I -B "$here/../../../../opf/tools/opf.py"\npython3 -I -B "$OPF_DIR/opf.py"\n',
         "shell-same-name": "#!/bin/sh\n" + here_line + "python3 -I -B tools/opf.py\n"
@@ -1870,7 +1902,8 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/hook-args-exact", lambda: [finding.split(": ", 1)[1].split(" are ")[0]
                                                for finding in hooks("hooks-prepended")] == ["a hook command's args"]),
         ("launchers/shell-target-unguarded", lambda: shell("shell", "shell-unguarded")
-         == ["launches tools/check_leaks.py, resolved to tools/check_leaks.py, which is not a self-guarded entry"]),
+         == ["launches tools/check_no_dashes.py, resolved to tools/check_no_dashes.py, which is not a self-guarded "
+             "entry"]),
         ("launchers/shell-outside-repository", lambda: shell(ci_launcher, "shell-outside") == [
             "launches /tmp/opf.py, which does not resolve to a path inside the repository",
             "launches $here/../../../../opf/tools/opf.py, which does not resolve to a path inside the repository",

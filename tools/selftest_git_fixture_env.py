@@ -135,6 +135,11 @@ import _git_fixture_env  # noqa: E402
 import _selftest_exit_report  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
 import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
+from _walk import read_text_nonblocking  # noqa: E402  tree scans must refuse a special
+# file (for example a FIFO at tools/__pycache__/x.py) by name instead of blocking on it, so
+# EVERY tree scan in this module reads through it, including the nested-.git paths
+# the precheck walk formerly pruned, and the repo-content byte reads go through read_source_bytes.
+from _gen_common import load_toml, read_source_bytes  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
@@ -239,7 +244,7 @@ def _calls_any(member_path, callable_names):
     string can never satisfy the routing check. A member that is unreadable or does not parse is a
     loud failure value, never a silent pass."""
     try:
-        tree = ast.parse(member_path.read_text(encoding="utf-8"))
+        tree = ast.parse(read_text_nonblocking(member_path))
     except (OSError, SyntaxError, ValueError) as exc:
         return "unreadable or unparseable: {}".format(exc)
     for node in ast.walk(tree):
@@ -269,7 +274,7 @@ def _scrub_scoped_first(member_path, func_name, scrub_name):
     or duplicated function, a missing top-level scrub, an earlier launch call, or an unreadable
     or unparseable member is a loud failure value, never a silent pass."""
     try:
-        tree = ast.parse(member_path.read_text(encoding="utf-8"))
+        tree = ast.parse(read_text_nonblocking(member_path))
     except (OSError, SyntaxError, ValueError) as exc:
         return "unreadable or unparseable: {}".format(exc)
 
@@ -316,7 +321,7 @@ def _archive_reads_use_caller_env(member_path, fixture_calls=False):
     With fixture_calls=True, check literal git launches and the hook suite's _git cmd
     builder for git_fixture_env() instead. Other computed commands remain outside coverage."""
     try:
-        tree = ast.parse(member_path.read_text(encoding="utf-8"))
+        tree = ast.parse(read_text_nonblocking(member_path))
     except (OSError, SyntaxError, ValueError) as exc:
         return "unreadable or unparseable: {}".format(exc)
     found = 0
@@ -366,7 +371,7 @@ def _binding_calls(member_path, owner_name, binding, factory, launches=False):
     Syntactic only: aliases, later reassignment and indirect calls are not proved.
     OPF's dict(_scrubbed_env(), HOME=...) is an intentional standalone adapter."""
     try:
-        tree = ast.parse(member_path.read_text(encoding="utf-8"))
+        tree = ast.parse(read_text_nonblocking(member_path))
     except (OSError, SyntaxError, ValueError) as exc:
         return str(exc)
     owners = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
@@ -423,7 +428,7 @@ def _caller_env_archive_only():
                     if not filename.endswith(".py"):
                         continue
                     path = Path(base) / filename
-                    tree = ast.parse(path.read_text(encoding="utf-8"))
+                    tree = ast.parse(read_text_nonblocking(path))
                     parents = {child: node for node in ast.walk(tree)
                                for child in ast.iter_child_nodes(node)}
                     for node in ast.walk(tree):
@@ -585,7 +590,14 @@ def _registered_selftests(root=ROOT):
                 if normalized.ok and normalized.value == member:
                     if tokens[:3] != ["python3", "-I", "-B"]:
                         raise ValueError("unsupported self-test launcher: " + code)
-                    candidates.append(tuple(tokens[3:]))
+                    rest = tokens[3:]
+                    # A registered launch may carry the one reviewed -X pycache_prefix pair
+                    # (check_ci_parity treats it as identity-neutral, like -I and -B), so the
+                    # recovered argv drops it too, or such a command identity would gain a
+                    # bogus "-X" first argument and the exclusion table would go stale.
+                    if rest[:2] == ["-X", "pycache_prefix=/dev/null/aiqt-pycache"]:
+                        rest = rest[2:]
+                    candidates.append(tuple(rest))
             if not candidates:
                 raise ValueError("cannot recover exact self-test arguments: " + member)
             selected.update(candidates)
@@ -613,7 +625,7 @@ def _registered_selftests(root=ROOT):
     if not commands:
         raise ValueError("empty config-injection roster")
     for argv in commands:
-        (root / argv[0]).read_bytes()
+        read_source_bytes(root / argv[0])
     return tuple(sorted(commands))
 
 
@@ -4077,8 +4089,9 @@ def _verdict(failures, cannot_evaluate, caused):
     return 2 if cannot_evaluate else 0
 
 
-# These registered self-tests exercise data/text/filesystem fixtures, not a git
-# lifecycle. They still require a successful observed system-config-lane run.
+# These registered self-tests exercise data/text/filesystem fixtures and have no discovered
+# git lifecycle wrapper; an entry whose vectors do launch git says how those launches are
+# isolated. They still require a successful observed system-config-lane run.
 # New modules and removed wrappers are NOT implicitly exempt.
 OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_child_status.py": ("Child-status probe vectors over forked and trampolined interpreter and bash "
@@ -4100,7 +4113,17 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
-    "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
+    "opf/tools/check_opf_homes.py": ("Homes contract and schema boundary vectors. Its gitignore "
+                                     "reconciliation vectors do build scratch repositories (git "
+                                     "init, add, commit and update-index) through its run_git "
+                                     "helper (an isolated HOME and XDG_CONFIG_HOME, "
+                                     "GIT_CONFIG_NOSYSTEM=1 and the three maintenance pins), and "
+                                     "the code under test reads them through the write guard's "
+                                     "own git launchers; its "
+                                     "special-file vectors launch a child interpreter whose only git "
+                                     "reads are the precheck's _git_lines queries on a scratch root "
+                                     "this user owns, run with the caller's global and system "
+                                     "configuration pinned away."),
     "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
     "opf/tools/check_opf_init_p0.py": "P0 store validation and runner registration vectors.",
@@ -4629,6 +4652,18 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/selftest_git_fixture_env.py", "_auto_maintenance_children", ("git-triggering",),
      "the F-367 probe's own traced commit: the green leg passes the pinned fixture env and the"
      " red leg strips exactly the maintenance pins, so pinning this argv would blind both legs"),
+    ("tools/_gen_common.py", "_git_lines", ("git",),
+     "production precheck root/ignore funnel over the real checkout (rev-parse, ls-files, ls-tree,"
+     " symbolic-ref and for-each-ref reads), bounded with stdin closed; read-only by design, so no"
+     " maintenance pin applies; on a root the effective user owns it runs git with the caller's"
+     " global and system configuration pinned away (D-400 fixture env), while on a root another"
+     " uid owns the caller's configuration still applies and the config observer reports it"),
+    ("opf/tools/_containment.py", "_git_lines", ("git",),
+     "the OPF copy of the production precheck root/ignore funnel (rev-parse, ls-files, ls-tree,"
+     " symbolic-ref and for-each-ref reads), bounded with stdin closed; read-only by design, so no"
+     " maintenance pin applies; on a root the effective user owns it runs git with the caller's"
+     " global and system configuration pinned away (D-400 fixture env), while on a root another"
+     " uid owns the caller's configuration still applies and the config observer reports it"),
     ("tools/aiqt_corpus.py", "git", ("git",),
      "production read-only helper over the real repository (rev-parse/show/ls-files style"
      " reads); its callers never pass a maintenance-triggering subcommand, and production"
@@ -4868,10 +4903,13 @@ _SCAN_ALLOWED_UNPINNED = (
      1),
     ("tools/check_release_cut.py", "_self_test_isolated", ("dynamic",),
      "exec of this tool's own source with one _CLOSE_SWEEP_REVERTS literal applied to the"
-     " sweep code (red-leg mutant) under a non-__main__ __name__, so main() never runs; the"
-     " module body only binds imports, constants and definitions and puts opf/tools on"
-     " sys.path, and the self-test then calls the mutant's _close_sweep_shapes_red, an AST"
-     " sweep over synthetic shapes",
+     " sweep code or one _RAW_READ_REVERTS literal applied to the production prefix (red-leg"
+     " mutants) under a non-__main__ __name__, so main() never runs; the module body only"
+     " binds imports, constants and definitions and puts opf/tools on sys.path (importing"
+     " _semver from it; the round-5 _binding_proof import and the member vector rows are"
+     " gone with the round-6 removal of the exemption and the member proof), and the"
+     " self-test then calls the mutant's _close_sweep_shapes_red or"
+     " _raw_read_vector_failures, AST batteries over synthetic in-memory probes",
      1),
     ("opf/tools/_opf_init_substrate.py", "_t_s23_plan_close_reuse", ("dynamic",),
      "exec of begin_operation's own source with its ownership-first plan_fd close put back as"
@@ -6028,7 +6066,7 @@ def _maintenance_pin_scan(root, allow_missing_files=False, planted_entries=()):
             rel = path.relative_to(root).as_posix()
             scanned.add(rel)
             try:
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+                tree = ast.parse(read_text_nonblocking(path), filename=rel)
             except (OSError, SyntaxError, UnicodeDecodeError, ValueError) as exc:
                 findings.append("%s: unreadable or unparseable: %s" % (rel, exc))
                 continue
@@ -7080,8 +7118,7 @@ def _scan_contract_failures(base):
 
 def _expected_check_ids():
     try:
-        with open(CHECKS_MANIFEST, "rb") as handle:
-            data = tomllib.load(handle)
+        data = load_toml(CHECKS_MANIFEST)
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a
     # RuntimeError) on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).

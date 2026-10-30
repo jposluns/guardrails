@@ -101,6 +101,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import errno
 import hashlib
+import io
 import json
 import os
 import stat

@@ -154,7 +154,13 @@ SCRIPT_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_]+\.py$")  # opf/ accepted t
 # lexical scan of trusted, controlled roster files, so a `python3 -I -B tools/*.py` token embedded in a
 # quoted argument, a heredoc, or an eval string may still be miscounted. The authoritative single-source
 # of the roster (generating both runners from this manifest) is deferred.
-ROSTER_RE = re.compile(r"python3 -I -B ((?:opf/)?tools/[A-Za-z0-9_]+\.py)")  # opf/ accepted toward OPF-SELF-CONTAIN; inert until an opf/tools path exists
+ROSTER_RE = re.compile(
+    r"python3 -I -B (?:-X pycache_prefix=/dev/null/aiqt-pycache )?"
+    r"((?:opf/)?tools/[A-Za-z0-9_]+\.py)")  # opf/ accepted toward OPF-SELF-CONTAIN; the
+# optional -X pair is the reviewed QA round-7 bytecode-read redirection; NO current launch in
+# tools/run_all_checks.sh or the workflows carries it (the D-400 special-file precheck
+# replaced it), and the alternation keeps an older or reintroduced spelling parseable; inert
+# until an opf/tools path exists
 
 # The BOUNDARY string carried at the ledger top level: the honest half of the artefact, in the file.
 BOUNDARY = (
@@ -1405,9 +1411,15 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    note = ("" if not skipped else
-            " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable): {}"
-            .format(len(skipped), ", ".join(skipped)))
+    if skipped:
+        # #400 re-cut round 9 (round-8 codex 4): a capability-gated case the runner cannot
+        # exercise is INCOMPLETE COVERAGE, never a successful omission: a defect detectable
+        # only by a skipped assertion could survive such a run, so the run exits 3 instead
+        # of printing a success
+        print("SELF-TEST INCOMPLETE: {} case(s) NOT RUN (chmod-0 still readable: "
+              "root/DAC-bypass): {}; run where POSIX read bits are enforced (exit 3)"
+              .format(len(skipped), ", ".join(skipped)))
+        return 3
     print("SELF-TEST PASS: a conformant tree generates and regenerates drift-clean with every rule's "
           "status derived correctly (a hook+gate rule reads gate-linked yet lists both controls) and the "
           "boundary string present; a mutated ledger fails --check (exit 1); and an unknown corpus-id, an "
@@ -1432,7 +1444,7 @@ def self_test_main():
           "channel, and one that is a dangling symlink, a symlink, or a directory fails closed (exit 2); one "
           "manifest holding both kinds generates, and a published hook with an entry of each kind fails "
           "closed (exit 2); a corpus symlinked inside the root is read, and one symlinked outside the root "
-          "fails closed (exit 2) with no ledger written" + note)
+          "fails closed (exit 2) with no ledger written")
     return 0
 
 

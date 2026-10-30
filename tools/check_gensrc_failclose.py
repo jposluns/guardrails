@@ -1331,11 +1331,12 @@ def _build_repo(base, gens):
     generate every target into a clean state, then write the .aiqt/gensrc.json registry. `gens` maps a
     stem to its source body. A broad set of harmless sources is created so any generator finds its
     declared inputs; the modechanger fixture also gets a victim file plus the absolute path to it.
-    base is made a git repository BEFORE any generator runs: _gen_common.repo_root() resolves the nearest
-    ancestor holding .git, so a generator run before `git init` resolves a root ABOVE base whenever an
-    ancestor of the temporary directory is itself a git checkout, reads its sources there, and writes no
-    target into base (or writes into that ancestor). Every subprocess is checked and every declared target
-    confirmed; a failure raises _FixtureSetupError."""
+    base is made a git repository BEFORE any generator runs: _gen_common.repo_root() derives the root from
+    the module's own FIXED location (the parent of the fixture's tools/, never an upward search for a .git
+    marker) and requires `git rev-parse --show-toplevel` to CONFIRM that derivation whenever git can
+    answer, so a generator run before `git init` would be confirmed against whatever repository encloses
+    the temporary directory and fail closed (exit 2) instead of generating. Every subprocess is checked
+    and every declared target confirmed; a failure raises _FixtureSetupError."""
     here = Path(__file__).resolve().parent
     tools = base / "tools"
     tools.mkdir(parents=True)
@@ -1366,7 +1367,23 @@ def _build_repo(base, gens):
     # that reaches materialization must be a genuine repo whose tracked set mirrors its on-disk files. The
     # init comes first so each generator's repo_root() resolves to base (see the docstring).
     _git_fixture(base, "init", "-q", "--template=")
-    if repo_root(tools / "gen_gensrc.py") != base.resolve():
+    # Confirm the FIXTURE's own copy of _gen_common resolves repo_root() to base, probed the way a
+    # generator runs (a subprocess with the sanitized environment), never through this process's
+    # _gen_common, whose fixed location is the real tree.
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-I", "-B", "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]); import _gen_common; "
+             "print(_gen_common.repo_root())", str(tools)],
+            cwd=str(base), env=_sanitized_env(), capture_output=True, timeout=PROBE_TIMEOUT,
+            shell=False, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _FixtureSetupError("the fixture repo_root() probe did not complete ({})"
+                                 .format(exc)) from exc
+    if probe.returncode != 0:
+        raise _FixtureSetupError("the fixture repo_root() probe exited {} ({})"
+                                 .format(probe.returncode, _tail(probe.stderr)))
+    if probe.stdout.decode("utf-8", errors="replace").strip() != str(base.resolve()):
         raise _FixtureSetupError("repo_root() of the fixture does not resolve to {}".format(base))
     # Generate targets clean, then the registry last (it lists tools/ and every target).
     for stem in gens:

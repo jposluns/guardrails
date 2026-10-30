@@ -429,13 +429,38 @@ def splice(text, start_line, replacement):
 
 
 def _roster_text(entries, extra=()):
-    """The real roster with its gate lines replaced by fixture launches, so the loader's grammar holds."""
+    """The real roster with its gate lines replaced by fixture launches, so the loader's grammar holds. Its
+    first gate line, the child-status probe (tools/check_child_status_coverage.py holds it first), stays, with
+    the special-file precheck gate and STOP lines the loader accepts only right after it, and the fixture
+    launches stand where the real roster's first gate after them stood."""
     lines = (ROOT / ROSTER_REL).read_text(encoding="ascii").splitlines()
-    first = next(index for index, line in enumerate(lines) if line.startswith('run_gate "'))
-    kept = [line for line in lines if not line.startswith('run_gate "')]
+    precheck = set(check_ci_parity.PRECHECK_BOOTSTRAP_GATE_LINES) | set(check_ci_parity.PRECHECK_GATE_LINES)
+    gates = [index for index, line in enumerate(lines) if line.startswith('run_gate "')]
+    dropped = [index for index in gates[1:] if lines[index].strip() not in precheck]
+    slot = dropped[0]
+    kept = [line for index, line in enumerate(lines) if index not in dropped]
     launches = ['run_gate "fixture-{}" python3 -I -B {}'.format(number, rel)
                 for number, rel in enumerate(entries, 1)]
-    return "\n".join(kept[:first] + launches + list(extra) + kept[first:]) + "\n"
+    return "\n".join(kept[:slot] + launches + list(extra) + kept[slot:]) + "\n"
+
+
+def _scaffold_launches():
+    """The Python scripts the fixture roster launches outside its fixture gate lines (the real roster's
+    child-status probe and the special-file precheck right after it, both ahead of every other gate), read
+    through the gate's own roster loader."""
+    targets = (member.split(" ", 1)[0] for member in check_ci_parity.extract_local(_roster_text(())).members)
+    return sorted(target for target in targets if target.endswith(".py"))
+
+
+def _without_precheck(text):
+    """A roster text with the special-file precheck gate lines and their STOP lines removed, by the exact
+    spellings the roster loader accepts, and with the child-status probe gate line before them, so the roster
+    launches no Python script at all."""
+    drop = (set(check_ci_parity.PRECHECK_BOOTSTRAP_GATE_LINES) | set(check_ci_parity.PRECHECK_GATE_LINES)
+            | {check_ci_parity.PRECHECK_STOP_LINE})
+    lines = text.splitlines(True)
+    probe = next(index for index, line in enumerate(lines) if line.startswith('run_gate "'))
+    return "".join(line for index, line in enumerate(lines) if index != probe and line.strip() not in drop)
 
 
 def _registry_text(runners):
@@ -446,10 +471,12 @@ def _registry_text(runners):
 
 def _tree(base, name, scripts, roster=(TARGET,), registry=(REGISTERED,), registry_text=None,
           roster_text=None):
-    """Write a synthetic repository; scripts is a sequence of (relative path, text or bytes) pairs."""
+    """Write a synthetic repository; scripts is a sequence of (relative path, text or bytes) pairs. Every
+    script the roster launches outside its gate lines is written as INTACT too, as a registered runner is,
+    so the gate finds it and each vector differs from the intact tree only in its own edit."""
     root = Path(base) / name
     (root / "tools").mkdir(parents=True)
-    for rel, text in scripts:
+    for rel, text in tuple(scripts) + tuple((rel, INTACT) for rel in _scaffold_launches()):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_bytes(text if isinstance(text, bytes) else text.encode("utf-8"))
     (root / ROSTER_REL).write_bytes((_roster_text(roster) if roster_text is None else roster_text)
@@ -3741,11 +3768,41 @@ def _launch(path, *args, cwd=None):
 
 OWN_ENTRY = '\n\nif __name__ == "__main__":\n    _selftest_exit_report.exit_with(main())\n'
 OWN_REL = "tools/" + Path(__file__).name
+EXECUTION_GATE_REL = "tools/check_selftest_execution.py"
+
+
+def _import_closure(seeds):
+    """Every sibling module the seed scripts import, directly or through one another, with the seeds: read
+    from their parsed imports at any depth, so an import deferred into a function (the execution gate imports
+    the special-file precheck only when it runs a suite) is followed too. A name resolves to a sibling when
+    the importing script's directory holds that name as a .py file, as each script puts its own directory
+    first on sys.path; any other name is left to the interpreter's own path (the standard library) and is
+    not copied."""
+    closure, pending = set(), list(seeds)
+    while pending:
+        rel = pending.pop()
+        if rel in closure:
+            continue
+        closure.add(rel)
+        directory = rel.rpartition("/")[0]
+        for node in ast.walk(ast.parse(_read_regular(ROOT / rel, rel), filename=rel)):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and not node.level:
+                names = [node.module]
+            else:
+                continue
+            for name in names:
+                sibling = "{}/{}.py".format(directory, name.partition(".")[0])
+                if (ROOT / sibling).is_file():
+                    pending.append(sibling)
+    return closure
 
 
 def _guardless_copy(base):
-    """A scratch repository holding this checker with its own entry deleted, beside the execution gate, the
-    report finalizer, the roster loader, the real registry, every other runner it registers and the real
+    """A scratch repository holding this checker with its own entry deleted, beside every sibling module it or
+    the execution gate imports (the execution gate, the report finalizer, the roster loader and the special-file
+    precheck, derived by _import_closure), the real registry, every other runner it registers and the real
     launch rosters (before it launches any suite, the execution gate resolves every registered runner strictly
     and requires every registered suite to have a launch line in both rosters), or None when this file does
     not end in its own entry."""
@@ -3756,9 +3813,8 @@ def _guardless_copy(base):
     (root / "tools").mkdir(parents=True)
     (root / ".git").write_text("gitdir: absent\n", encoding="ascii")
     (root / OWN_REL).write_text(head + "\n", encoding="utf-8")
-    for rel in ("tools/check_selftest_execution.py", "tools/_selftest_exit_report.py", "tools/check_ci_parity.py",
-                REGISTRY_REL, check_ci_parity.LOCAL_SOURCE, check_ci_parity.CI_SOURCE,
-                *sorted(registry_runners(ROOT) - {OWN_REL})):
+    carried = (_import_closure((OWN_REL, EXECUTION_GATE_REL)) | registry_runners(ROOT)) - {OWN_REL}
+    for rel in (REGISTRY_REL, check_ci_parity.LOCAL_SOURCE, check_ci_parity.CI_SOURCE, *sorted(carried)):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_bytes((ROOT / rel).read_bytes())
     return root
@@ -3824,8 +3880,10 @@ def _fixtures(base):
     def add(vector, root, code, text, patch=None):
         vectors.append((vector, root, code, text, patch))
 
+    # a passing tree checks the target, the registered runner and every script launched ahead of the gates
+    checked = "checked {} launched scripts".format(2 + len(_scaffold_launches()))
     intact = _tree(base, "intact", ((TARGET, INTACT), (REGISTERED, INTACT)))
-    add("intact/passes", intact, 0, "checked 2 launched scripts")
+    add("intact/passes", intact, 0, checked)
     spliced_text = splice(INTACT, "class Second:\n", REPLACEMENT)
     add("splice/guard-missing", _tree(base, "spliced", ((TARGET, spliced_text), (REGISTERED, INTACT))), 1,
         TARGET + ": guard missing")
@@ -3833,8 +3891,7 @@ def _fixtures(base):
         add("shape/" + shape, _tree(base, shape, ((TARGET, text), (REGISTERED, INTACT))), 1,
             TARGET + ": " + reason)
     for name, data in ACCEPTED:
-        add("accepted/" + name, _tree(base, name, ((TARGET, data), (REGISTERED, INTACT))), 0,
-            "checked 2 launched scripts")
+        add("accepted/" + name, _tree(base, name, ((TARGET, data), (REGISTERED, INTACT))), 0, checked)
     add("registry/unlaunched-runner", _tree(base, "unlaunched", ((TARGET, INTACT), (REGISTERED, spliced_text))),
         1, REGISTERED + ": guard missing")
 
@@ -3869,8 +3926,8 @@ def _fixtures(base):
         2, "outside printable ASCII")
     add("roster/malformed-line", _tree(base, "roster-malformed", scripts, roster_text=_roster_text(
         [TARGET], ['run_gate "odd" bash tools/odd.sh'])), 2, "unsupported gate target")
-    add("roster/no-python", _tree(base, "roster-empty", ((REGISTERED, INTACT),), roster=()), 2,
-        "no Python script")
+    add("roster/no-python", _tree(base, "roster-empty", ((REGISTERED, INTACT),),
+                                  roster_text=_without_precheck(_roster_text(()))), 2, "no Python script")
     add("roster/odd-target", _tree(base, "roster-odd", scripts), 2, "unrecognised launch target 'tools/odd.sh'",
         ("extract_local", _odd_extraction))
 
@@ -3903,8 +3960,7 @@ def _fixtures(base):
     split = "".join('\n[[suite]]\nid = "fixture-{0}"\nrunner = "{1}"\nexpected-check-ids = ["fixture-{0}"]\n'
                     'args = ["--lane", "{0}"]\n'.format(lane, REGISTERED) for lane in ("one", "two"))
     add("registry/split-rows",
-        _tree(base, "registry-split", scripts, registry_text="format-version = 1\n" + split), 0,
-        "checked 2 launched scripts")
+        _tree(base, "registry-split", scripts, registry_text="format-version = 1\n" + split), 0, checked)
     return vectors
 
 
@@ -4336,6 +4392,19 @@ def _self_test(restore_problems, report_path):
         not_held = [(vector, detail) for vector, ok, detail in outcomes if ok is not True]
         check("vector/every-vector-holds",
               bool(vectors) and len(outcomes) == len(vectors) and not not_held, not_held)
+        # the no-python roster drops the precheck gate AND its bootstrap gate and their STOP lines: a bootstrap
+        # gate left behind registers no roster member, so roster/no-python alone stays green when only the
+        # precheck gate is dropped
+        precheck_lines = (set(check_ci_parity.PRECHECK_BOOTSTRAP_GATE_LINES)
+                          | set(check_ci_parity.PRECHECK_GATE_LINES) | {check_ci_parity.PRECHECK_STOP_LINE})
+        full = [line.strip() for line in _roster_text(()).splitlines()]
+        stripped = [line.strip() for line in _without_precheck(_roster_text(())).splitlines()]
+        check("roster/no-python-drops-precheck-and-bootstrap",
+              any(line in check_ci_parity.PRECHECK_GATE_LINES for line in full)
+              and any(line in check_ci_parity.PRECHECK_BOOTSTRAP_GATE_LINES for line in full)
+              and check_ci_parity.PRECHECK_STOP_LINE in full
+              and not precheck_lines.intersection(stripped),
+              sorted(precheck_lines.intersection(stripped)))
 
         # 2. the splice reproduction, run directly: the intact script reaches its checks, and the spliced one,
         # a guard whose body only defines a function, a guard whose call follows a nested raise, and a
@@ -4357,8 +4426,7 @@ def _self_test(restore_problems, report_path):
         silent = caught = (None, "this file does not end in its own entry")
         if guardless is not None:
             silent = _launch(guardless / OWN_REL)
-            caught = _launch(guardless / "tools" / "check_selftest_execution.py", "--suite", SUITE_ID,
-                             cwd=guardless)
+            caught = _launch(guardless / EXECUTION_GATE_REL, "--suite", SUITE_ID, cwd=guardless)
         check("own-entry/guard-loss-silent-green", silent == (0, ""), silent)
         check("own-entry/guard-loss-caught-by-execution-gate",
               caught[0] == 2 and "no execution report" in caught[1], caught)

@@ -51,8 +51,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk
-from _gen_common import is_external_url, load_toml  # noqa: E402
+from _walk import read_text_nonblocking, walk_files  # noqa: E402  fail-closed tree walk and reader
+from _gen_common import is_external_url, load_toml, precheck_special_files  # noqa: E402
 
 
 class _Anchors(HTMLParser):
@@ -190,7 +190,10 @@ def _run_one(root, subdir):
     for f in html_files:
         name = str(f.relative_to(root))
         try:
-            findings += page_findings(name, f.read_text(encoding="utf-8"))
+            # read_text_nonblocking, not read_text: this walk reads WHATEVER .html it meets, a
+            # git-ignored page the D-400 special-file precheck deliberately does not walk included,
+            # so a FIFO page must be the named refusal (OSError, exit 2 below), never a blocking read.
+            findings += page_findings(name, read_text_nonblocking(f))
         except (OSError, UnicodeDecodeError) as exc:
             print("error: cannot load {} ({}); fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
@@ -572,10 +575,40 @@ def _self_test():
         (r / "opf/site/index.html").write_text(unsafe, encoding="utf-8")
         expect("missing input followed by finding", r, 2, "opf/site/index.html")
 
+    # F-CORPUS-FIFO-HANG: a FIFO at an .html page (the shape a git-ignored plant takes,
+    # which the D-400 precheck deliberately does not walk) must be the NAMED refusal (exit 2, "not a
+    # regular file"), never a blocking read. MUTATION: reverting the page read to Path.read_text
+    # blocks here; the alarm turns that into a recorded failure. POSIX only (os.mkfifo, SIGALRM).
+    import signal
+    if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
+        class _Hang(Exception):
+            pass
+
+        def _on_alarm(_signum, _frame):
+            raise _Hang()
+
+        with fixture() as r:
+            os.mkfifo(r / "site" / "fifo.html")
+            previous = signal.signal(signal.SIGALRM, _on_alarm)
+            signal.alarm(10)
+            try:
+                expect("FIFO page refused by name, never a hang", r, 2, "not a regular file")
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous)
+
+    else:
+        # A capability-gated vector is an
+        # explicit NOT RUN and a recorded failure, never a silent pass.
+        print("NOT RUN: the FIFO-page refusal vector (os.mkfifo or signal.SIGALRM "
+              "unavailable); failing closed")
+        failures.append("the FIFO-page refusal vector NOT RUN (os.mkfifo or signal.SIGALRM "
+                        "unavailable); failing closed")
     # Inject at the actual I/O boundary; do not depend on chmod under a privileged user.
     original_lstat = Path.lstat
     original_open = Path.open
     original_builtin_open = builtins.open
+    original_os_open = os.open
     for stage in ("discovery", "selected", "configuration-inspection",
                   "configuration-read", "traversal", "html-read"):
         config = declaration_bytes if stage in ("selected", "configuration-read") else None
@@ -605,6 +638,14 @@ def _self_test():
                     raise PermissionError("injected: " + str(path))
                 return original_builtin_open(path, *args, **kwargs)
 
+            def deny_os_open(path, *args, **kwargs):
+                # The configuration read now goes through _gen_common.read_source_bytes, whose one
+                # descriptor comes from os.open (O_NOFOLLOW|O_NONBLOCK); inject exactly there.
+                if isinstance(path, (str, Path)) and Path(path) == target:
+                    touched.append(path)
+                    raise PermissionError("injected: " + str(path))
+                return original_os_open(path, *args, **kwargs)
+
             original_walk = walk_files
 
             def deny_walk(path, *args, **kwargs):
@@ -615,10 +656,10 @@ def _self_test():
 
             if stage in ("discovery", "selected", "configuration-inspection"):
                 fault = patch.object(Path, "lstat", deny_lstat)
-            elif stage == "configuration-read":
-                fault = patch.object(builtins, "open", deny_builtin_open)
-            elif stage == "html-read":
-                fault = patch.object(Path, "open", deny_open)
+            elif stage in ("configuration-read", "html-read"):
+                # Both reads now go through one O_NONBLOCK descriptor from os.open (the config via
+                # _gen_common.read_source_bytes, the page via _walk.read_text_nonblocking): inject there.
+                fault = patch.object(os, "open", deny_os_open)
             else:
                 fault = patch.dict(globals(), walk_files=deny_walk)
             with fault:
@@ -638,7 +679,7 @@ def _self_test():
 def main():
     if "--self-test" in sys.argv[1:]:
         return _self_test()
-    return run(Path(__file__).resolve().parents[1])
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
 
 
 if __name__ == "__main__":

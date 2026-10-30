@@ -362,6 +362,19 @@ def _case_passes(case):
 _RUNNER_PATH_PIN = "readonly PATH\n"
 
 
+# The exact precheck gate line opf/tools/run_all_checks.sh carries right after its
+# child-status probe gate and bootstrap gate (SPECIAL-FILE-PRECHECK): a run_gate
+# registration like any other, so it reaches the executable fixture in roster order.
+PRECHECK_LINE = 'run_gate "special-file-precheck"       python3 -I -B "$here/_containment.py" --precheck'
+
+# The D-400 BOOTSTRAP gate ahead of the precheck gate: a pure shell test under sh -c that fails
+# on a missing, non-regular or symlinked precheck script BEFORE python3 could block loading it,
+# printing why (the runner's STOP line then ends the run). It calls no python3, so it adds no
+# roster entry; any other spelling that names the precheck module is refused below.
+PRECHECK_BOOTSTRAP_LINE = ('run_gate "special-file-precheck-bootstrap" sh -c \'[ -f "$1" ] && ! [ -h "$1" ] '
+                           '|| { echo "error: $1: not a regular non-symlink file; cannot run the '
+                           'special-file precheck; fail-closed" >&2; exit 1; }\' sh "$here/_containment.py"')
+
 def _runner_check(expected, text=None, *, fail_own=0):
     """Prove exact dispatch using the real shell text, as the P0 suite does.
 
@@ -430,6 +443,19 @@ def _runner_check(expected, text=None, *, fail_own=0):
     roster = []
     try:
         for line in runner.read_text(encoding="utf-8").splitlines():
+            if line.strip() == PRECHECK_BOOTSTRAP_LINE:
+                # D-400 bootstrap gate: shell-only, calls no python3, so no roster entry.
+                continue
+            if line.strip().startswith("python3 "):
+                # Any bare python3 line is an unrecognized invocation the
+                # fixture would record outside the roster: refuse before launch.
+                raise ValueError(line)
+            if ("_containment.py" in line and not line.lstrip().startswith("#")
+                    and line.strip() != PRECHECK_LINE):
+                # Any OTHER non-comment spelling that names the precheck module (a mutated
+                # bootstrap or precheck gate, a braced or renamed expansion) is unrecognized:
+                # refuse before launch. The exact precheck gate line is registered below.
+                raise ValueError(line)
             if line.lstrip().startswith("run_gate "):
                 words = [word.replace("$here", str(here)) for word in shlex.split(line)]
                 if (any("$" in word for word in words)

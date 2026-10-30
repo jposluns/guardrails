@@ -2851,6 +2851,7 @@ id = "entry-guard-selftest"
 runner = "tools/check_entry_guard.py"
 expected-check-ids = [
   "vector/every-vector-holds",
+  "roster/no-python-drops-precheck-and-bootstrap",
   "run/intact-reaches-checks",
   "run/splice-silent-green",
   "run/guard-def-silent-green",

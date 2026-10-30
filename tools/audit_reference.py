@@ -44,6 +44,7 @@ from pathlib import Path
 # enforces this by flagging a reintroduced index-0 insertion in this file.
 sys.path.append(str(Path(__file__).resolve().parent))
 import _qa_adapter as qa  # noqa: E402
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 
 AUDIT_ID = "reference"
@@ -75,6 +76,10 @@ def _resolve(explicit):
 
 
 def main():
+    # SPECIAL-FILE-PRECHECK runs FIRST, before the config resolution below reads any repository
+    # file (.aiqt/assurance.toml above all), so neither the digest nor the normal audit path can block
+    # on a plain read of a FIFO planted in the tree.
+    precheck_special_files(Path(__file__).resolve().parents[1])
     argv = sys.argv[1:]
     # ARGUMENT VALIDATION precedes the --self-test dispatch: a malformed --config operand (empty, an
     # =-joined empty value, a next-flag that must not be swallowed as the path, or a duplicate) is a loud
@@ -119,6 +124,101 @@ def main():
 
 
 # --- self-test --------------------------------------------------------------------------------------
+_CHILD_MARKER_FAILURE = ("the subprocess-spawning cases (4 to 7) NOT RUN "
+                         "(AIQT_QA_SELFTEST_CHILD=1 inherited at this top-level "
+                         "--self-test entry); failing closed")
+
+
+def _child_selftest_failures(output):
+    """The '  - ' failure lines of a child --self-test output, exactly as printed."""
+    return [line[4:] for line in output.splitlines() if line.startswith("  - ")]
+
+
+# round 11 (decided 7): the reviewed child-acceptance if-chain, root arm first; the
+# acceptance arm must be the FINAL arm of exactly this chain. Round 12 (decided 4):
+# each arm is (test, body shape), so the arm BODIES are pinned as well as the tests.
+_CHILD_ACCEPTANCE_CHAIN = (
+    ("proc is None", "pass"),
+    ("'SELF-TEST' not in proc.stdout + proc.stderr", "failures.append(one argument)"),
+    ("not _exact_child_verdict(proc)", "failures.append(one argument)"),
+)
+
+
+def _child_acceptance_arm_shape(body):
+    """The reviewed shape of one arm body: exactly pass, or exactly one
+    failures.append call with one positional argument; anything else is reported
+    with its unparsed text, so a neutralised, redirected or extended body differs."""
+    import ast
+    if len(body) == 1 and isinstance(body[0], ast.Pass):
+        return "pass"
+    if (len(body) == 1 and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Call)
+            and ast.unparse(body[0].value.func) == "failures.append"
+            and len(body[0].value.args) == 1 and not body[0].value.keywords):
+        return "failures.append(one argument)"
+    return "unreviewed body: " + "; ".join(ast.unparse(statement) for statement in body)
+
+
+def _child_acceptance_chain_failure(source):
+    """A failure line unless the child-acceptance if-chain in source is EXACTLY the
+    reviewed one (round 11, decided 7, STRUCTURAL, by AST): every if/elif chain that
+    ends at the exact-set acceptance test must be a suffix of the three reviewed
+    arms and all three suffixes must be present, each arm compared by its test AND
+    its body shape (round 12, decided 4: the root arm is exactly pass and each
+    failure arm is exactly one failures.append call with one argument). So an arm
+    inserted before the acceptance arm, a rewritten or duplicated arm, an
+    acceptance arm detached from its guards, a neutralised or redirected
+    failures.append in any arm body, and an else after the acceptance arm (round 13,
+    decided 2: it runs on the accepted path and could clear every earlier failure)
+    each fail by name; the round-10 textual count accepted an inserted arm. The
+    append's message text is not compared."""
+    import ast
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return "the child-acceptance chain cannot be parsed ({}); failing closed".format(exc)
+    chains = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        chain = [(ast.unparse(node.test), _child_acceptance_arm_shape(node.body))]
+        cursor = node
+        while len(cursor.orelse) == 1 and isinstance(cursor.orelse[0], ast.If):
+            cursor = cursor.orelse[0]
+            chain.append((ast.unparse(cursor.test), _child_acceptance_arm_shape(cursor.body)))
+        if chain[-1][0] == _CHILD_ACCEPTANCE_CHAIN[-1][0]:
+            if cursor.orelse:
+                # round 13 (decided 2): the acceptance arm is the final arm with no
+                # else; an else is recorded with its text, so the chain differs
+                chain.append(("else", "unreviewed else: " + "; ".join(
+                    ast.unparse(statement) for statement in cursor.orelse)))
+            chains.append(tuple(chain))
+    expected = [tuple(_CHILD_ACCEPTANCE_CHAIN[i:])
+                for i in range(len(_CHILD_ACCEPTANCE_CHAIN))]
+    if sorted(chains) != sorted(expected):
+        return ("the child-acceptance arm is not the final arm of exactly the "
+                "reviewed if-chain (got {!r}); the exact-failure-set comparison is "
+                "not proven wired at the acceptance arm; failing closed".format(chains))
+    return None
+
+
+def _exact_child_verdict(proc):
+    # The ONE wiring that BOTH the
+    # sibling-child acceptance branch and the mutant rejection evaluate, so weakening
+    # the parent predicate (for example to rc 1 plus a NOT RUN substring anywhere) is
+    # the same mutation the child-mutant vector rejects: the weakened verdict ACCEPTS
+    # the mutant child and that vector turns red.
+    return _child_marker_acceptable(proc.returncode, proc.stdout + proc.stderr)
+
+
+def _child_marker_acceptable(returncode, output):
+    """True only when an isolated child --self-test failed with EXACTLY the inherited-marker
+    NOT RUN failure (#400 re-cut round 7, codex 4: accepting any rc-1 output with a NOT RUN
+    substring let an independently failing child pass the parent, so the parent compares the
+    child's exact failure set)."""
+    return returncode == 1 and _child_selftest_failures(output) == [_CHILD_MARKER_FAILURE]
+
+
 def _self_test():
     import shutil
     import tempfile
@@ -209,21 +309,168 @@ def _self_test():
             #    index-0 insertion lets the sibling shadow _qa_adapter's `import json` under -I and silently
             #    exit 0 before the self-test runs, so no marker appears. The child carries the sentinel so it
             #    skips this (and the other subprocess) case rather than recursing.
-            sib = Path(tempfile.mkdtemp(prefix="aiqt-audit-reference-sibling-"))
+            # The copies live under <fixture>/tools/ so the copy's main() resolves its repository
+            # root (parents[1] of the script) to the FIXTURE root and its D-400 special-file precheck
+            # walks only that hermetic tree, never the system temp directory; _gen_common.py rides
+            # along because the gate imports precheck_special_files from it.
+            sib = Path(tempfile.mkdtemp(prefix="aiqt-audit-reference-sibling-")) / "tools"
             try:
+                sib.mkdir()
                 srcdir = Path(__file__).resolve().parent
                 shutil.copy(str(srcdir / "audit_reference.py"), str(sib / "audit_reference.py"))
                 shutil.copy(str(srcdir / "_qa_adapter.py"), str(sib / "_qa_adapter.py"))
+                shutil.copy(str(srcdir / "_gen_common.py"), str(sib / "_gen_common.py"))
                 for hostile in ("json.py", "hashlib.py"):
                     (sib / hostile).write_text("raise SystemExit(0)\n", encoding="utf-8")
-                proc = subprocess.run([sys.executable, "-I", "-B", str(sib / "audit_reference.py"),
-                                       "--self-test"], capture_output=True, text=True, env=childenv)
-                if "SELF-TEST" not in (proc.stdout + proc.stderr):
+                try:
+                    # A hanging child is a
+                    # recorded failure, never a stalled suite
+                    proc = subprocess.run([sys.executable, "-I", "-B",
+                                           str(sib / "audit_reference.py"),
+                                           "--self-test"], capture_output=True, text=True,
+                                          env=childenv, timeout=600)
+                except subprocess.TimeoutExpired:
+                    failures.append("the isolated child --self-test exceeded its 600 s "
+                                    "timeout; failing closed")
+                    proc = None
+                if proc is None:
+                    pass
+                elif "SELF-TEST" not in (proc.stdout + proc.stderr):
                     failures.append("a hostile sibling json.py/hashlib.py shadowed a stdlib import and "
                                     "prevented the self-test from running (finding-6): rc={} out={!r} "
                                     "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
+                # #400 re-cut round 6 (codex 4): the copy ran with the child marker set, so
+                # its own --self-test must RECORD the omitted subprocess cases as a NOT RUN
+                # failure (rc 1); the parent compares the child's EXACT failure
+                # set, so an additional independent child failure turns this parent red; this
+                # doubles as the vector for the inherited-marker branch below.
+                elif not _exact_child_verdict(proc):
+                    failures.append("the isolated child --self-test (marker inherited) expected "
+                                    "rc 1 with EXACTLY the inherited-marker NOT RUN failure, "
+                                    "got rc={} failures={!r}".format(
+                                        proc.returncode,
+                                        _child_selftest_failures(
+                                            proc.stdout + proc.stderr)[-6:]))
             finally:
-                shutil.rmtree(sib, ignore_errors=True)
+                shutil.rmtree(sib.parent, ignore_errors=True)
+
+            # 7b. DISCRIMINATING (#400 re-cut round 7, codex 4): a child copy MUTATED to
+            #     append one independent extra failure beside the inherited-marker line must
+            #     be REJECTED by the exact-set comparison above; the round-6 acceptance
+            #     (rc 1 plus a NOT RUN substring anywhere) passed it.
+            mutsib = Path(tempfile.mkdtemp(prefix="aiqt-audit-reference-mutant-")) / "tools"
+            try:
+                mutsib.mkdir()
+                srcdir = Path(__file__).resolve().parent
+                shutil.copy(str(srcdir / "_qa_adapter.py"), str(mutsib / "_qa_adapter.py"))
+                shutil.copy(str(srcdir / "_gen_common.py"), str(mutsib / "_gen_common.py"))
+                original = (srcdir / "audit_reference.py").read_text(encoding="utf-8")
+                # The same wiring is held at the CALL SITE too: the
+                # recursion guard keeps a call-site mutant from exercising itself (a copy
+                # runs with the child marker set and spawns nothing), so the acceptance arm
+                # at case 7 is pinned STRUCTURALLY by AST (round 11, decided 7): the
+                # acceptance arm must be the final arm of exactly the reviewed
+                # if-chain, so a rewritten arm AND an arm inserted before it go red.
+                chain_failure = _child_acceptance_chain_failure(original)
+                if chain_failure:
+                    failures.append(chain_failure)
+                # round 11 (decided 7) DISCRIMINATING: the round-8 weakened arm
+                # INSERTED before the acceptance arm must be refused by the structural
+                # pin; the needle is built by concatenation so it matches only the
+                # real arm, never this vector text.
+                needle = "                elif not _exact_child_verdict" + "(proc):"
+                weak_arm = ("                elif proc.returncode == 1 and "
+                            "\"NOT RUN\" in (proc.stdout + proc.stderr):\n"
+                            "                    pass\n")
+                inserted = original.replace(needle, weak_arm + needle, 1)
+                if inserted == original or not _child_acceptance_chain_failure(inserted):
+                    failures.append("an arm inserted before the child-acceptance arm "
+                                    "was not refused by the structural chain pin; "
+                                    "failing closed")
+                # round 12 (decided 4) DISCRIMINATING: the acceptance arm's BODY is
+                # pinned too: its failures.append neutralised into a no-op call must be
+                # refused by name (built by concatenation, so it matches only the real
+                # arm body, never this vector text).
+                body_needle = needle + "\n                    failures." + "append("
+                if original.count(body_needle) != 1:
+                    failures.append("the neutralised-body vector could not anchor the "
+                                    "child-acceptance arm body exactly once; failing closed")
+                else:
+                    neutral_failure = _child_acceptance_chain_failure(original.replace(
+                        body_needle, needle + "\n                    (lambda *a, **k: None)(", 1))
+                    if not neutral_failure or "unreviewed body" not in neutral_failure:
+                        failures.append("a neutralised failures.append in the child-acceptance "
+                                        "arm was not refused by name by the structural chain "
+                                        "pin; failing closed")
+                # round 13 (decided 2) DISCRIMINATING: an else appended after the
+                # acceptance arm runs on the accepted path and could clear every earlier
+                # failure, so it must be refused by name; the anchor is the finally that
+                # closes the chain (built by concatenation, so it matches only the real
+                # chain end, never this vector text).
+                else_anchor = ("\n            finally:\n                shutil.rmtree("
+                               + "sib.parent, ignore_errors=True)")
+                if original.count(else_anchor) != 1:
+                    failures.append("the trailing-else vector could not anchor the end of the "
+                                    "child-acceptance chain exactly once; failing closed")
+                else:
+                    else_failure = _child_acceptance_chain_failure(original.replace(
+                        else_anchor, "\n                else:\n                    failures.clear()"
+                        + else_anchor, 1))
+                    if not else_failure or "unreviewed else" not in else_failure:
+                        failures.append("an else after the child-acceptance arm was not refused "
+                                        "by name by the structural chain pin; failing closed")
+                # built by concatenation so this literal does not match itself
+                anchor = "failures.append(" + "_CHILD_MARKER_FAILURE)"
+                if original.count(anchor) != 1:
+                    failures.append("the child-mutant vector could not anchor the marker branch "
+                                    "exactly once; the exact-failure-set comparison is "
+                                    "UNVERIFIED this run; failing closed")
+                else:
+                    (mutsib / "audit_reference.py").write_text(
+                        original.replace(anchor, anchor + "; failures.append("
+                                         + "'injected independent child regression')"),
+                        encoding="utf-8")
+                    try:
+                        # A hanging mutant
+                        # child is a recorded failure, never a stalled suite
+                        proc = subprocess.run(
+                            [sys.executable, "-I", "-B",
+                             str(mutsib / "audit_reference.py"), "--self-test"],
+                            capture_output=True, text=True, env=childenv, timeout=600)
+                    except subprocess.TimeoutExpired:
+                        failures.append("the mutant child --self-test exceeded its 600 s "
+                                        "timeout; failing closed")
+                        proc = None
+                    mutant_expected = [_CHILD_MARKER_FAILURE,
+                                       "injected independent child regression"]
+                    mutant_failures = ([] if proc is None else
+                                       _child_selftest_failures(proc.stdout + proc.stderr))
+                    if proc is None:
+                        pass
+                    elif proc.returncode != 1 or mutant_failures != mutant_expected:
+                        # #400 re-cut round 8 (decided 3): the mutant must first REACH its
+                        # designated failing state (exit 1 with EXACTLY the inherited-marker
+                        # failure plus the injected regression); a crash, an import failure,
+                        # a missing diagnostic or an extra failure leaves the mutation
+                        # evidence UNVERIFIED and is a failed mutation test, never an
+                        # accepted rejection
+                        failures.append("the child mutant did not reach its designated "
+                                        "failing state (rc 1 with exactly the "
+                                        "inherited-marker failure plus the injected "
+                                        "regression): rc={} failures={!r}; failing "
+                                        "closed".format(proc.returncode,
+                                                        mutant_failures[-6:]))
+                    elif _exact_child_verdict(proc):
+                        failures.append("a child mutant carrying one independent extra failure "
+                                        "beside the inherited-marker line was ACCEPTED; the "
+                                        "parent must compare the child's exact failure set")
+            finally:
+                shutil.rmtree(mutsib.parent, ignore_errors=True)
+        else:
+            # #400 re-cut round 6 (codex 4): an INHERITED child marker at a top-level
+            # --self-test entry silently omitted cases 4 to 7; now a recorded NOT RUN
+            # failure (the recursion guard still holds: this run spawns nothing).
+            failures.append(_CHILD_MARKER_FAILURE)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

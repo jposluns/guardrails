@@ -2587,9 +2587,22 @@ def _tomllib_production_cases(base):
     asserts the class: natively observed through _raises (deep nesting and the over-long integer, and
     the emulated cap re-run on its own), and, for an emulated cap, the class the production call's own
     emulation injected (fired)."""
+    # The contract imports load_toml and precheck_special_files from its own tree's tools/
+    # (SPECIAL-FILE-PRECHECK), so the fixture carries that sibling too.
     newtab = _fixture(base, files={".github/check_newtab_contract.py":
-                                   _read_text(ROOT / ".github" / "check_newtab_contract.py")})
-    contract = _load_path("newtab_contract_floor_probe", newtab / ".github" / "check_newtab_contract.py")
+                                   _read_text(ROOT / ".github" / "check_newtab_contract.py"),
+                                   "tools/_gen_common.py": _read_text(ROOT / "tools" / "_gen_common.py")})
+    saved_path, saved_common = list(sys.path), sys.modules.get("_gen_common")
+    try:
+        contract = _load_path("newtab_contract_floor_probe", newtab / ".github" / "check_newtab_contract.py")
+    finally:
+        # The load appends the fixture's tools/ to sys.path and binds _gen_common from it: undo both,
+        # so no later import in this self-test resolves into the fixture tree.
+        sys.path[:] = saved_path
+        if saved_common is None:
+            sys.modules.pop("_gen_common", None)
+        else:
+            sys.modules["_gen_common"] = saved_common
     hook = _load_path("pretooluse_deny_floor_probe", ROOT / "opf" / "enforcement" / "claude" / "pretooluse_deny.py")
     import contextlib
     import io
@@ -3866,17 +3879,23 @@ def _self_test_cases(base):
 
 def _gate_run(root, gate_source):
     _write(root, "tools/check_python_floor.py", gate_source)
-    # The copy scans itself: record its own self-test seams (the tomllib._parser rebinding in
-    # _key_part_capped) in the fixture's table, computed from the copy's source so the rows never go
-    # stale, unless the case under test supplies its own table.
+    # The default entry imports precheck_special_files from its sibling (SPECIAL-FILE-PRECHECK).
+    common_source = _read_text(Path(__file__).resolve().parent / "_gen_common.py")
+    _write(root, "tools/_gen_common.py", common_source)
+    # The copy scans itself and that sibling: record its own self-test seams (the tomllib._parser
+    # rebinding in _key_part_capped) and the sibling's load_toml (the valueerror-passthrough row the
+    # recorded table holds for it) in the fixture's table, computed from each copied source so the rows
+    # never go stale, unless the case under test supplies its own table.
     if not os.path.lexists(root / TOMLLIB_TABLE_REL):
         groups = {}
-        for line, function, form, _text, handled, _passthrough in tomllib_sites(ast.parse(gate_source))[0]:
-            if not handled:
-                groups.setdefault((function, form), []).append(line)
+        for rel, source, reason in (("tools/check_python_floor.py", gate_source, "test-code"),
+                                    ("tools/_gen_common.py", common_source, "valueerror-passthrough")):
+            for line, function, form, _text, handled, _passthrough in tomllib_sites(ast.parse(source))[0]:
+                if not handled:
+                    groups.setdefault((rel, function, form, reason), []).append(line)
         _write(root, TOMLLIB_TABLE_REL, "format-version = 1\n" + "".join(
-            _tomllib_row(function, form=form, count=len(found), path="tools/check_python_floor.py")
-            for (function, form), found in sorted(groups.items())))
+            _tomllib_row(function, form=form, count=len(found), reason=reason, path=rel)
+            for (rel, function, form, reason), found in sorted(groups.items())))
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(root / "tools" / "check_python_floor.py")], cwd=root,
@@ -4087,7 +4106,9 @@ def self_test(report_path=None):
 
 def main(argv):
     if not argv:
-        code, lines = evaluate(ROOT)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
+        code, lines = evaluate(precheck_special_files(ROOT))
         for line in lines:
             print(line, file=sys.stderr if code == 2 else sys.stdout)
         return code

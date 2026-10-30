@@ -118,7 +118,8 @@ import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _walk import walk_files, read_bytes_nonblocking  # noqa: E402  fail-closed tree walk and non-blocking read
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".working"}
 # Skip THIS file (it enumerates credential patterns) by its repo-relative PATH, not by basename, so a
@@ -421,8 +422,12 @@ def _read_scan_text(path):
     claude MEDIUM-1). Only an ODD-length UTF-16-marked file whose first four bytes are not the
     overlapping UTF-32-LE mark (that one keeps its UTF-32 views; the round-6 residual above) yields
     no wide view; it is judged as any other non-UTF-8 file: a SUFFIXLESS one is treated as binary and skipped, as the existing rule
-    (_is_scan_candidate) defines, and a declared-text one keeps the lossless view."""
-    data = path.read_bytes()
+    (_is_scan_candidate) defines, and a declared-text one keeps the lossless view. The bytes are read
+    through read_bytes_nonblocking, never a plain blocking read: the walk meets git-ignored paths the
+    D-400 special-file precheck does not hold and files created after it ran, so a FIFO or other
+    special file there (or a symlink to one) is refused as OSError, which main() reports as exit 2,
+    instead of blocking the scan forever."""
+    data = read_bytes_nonblocking(path)
     try:
         return (data.decode("utf-8"),), None
     except UnicodeDecodeError:
@@ -483,11 +488,15 @@ def _is_scan_candidate(path):
 
 
 def main(root=None) -> int:
+    if root is None and "--self-test" in sys.argv[1:]:
+        # The process entry: --self-test anywhere in the arguments runs the self-test, as before; a
+        # fixture root (the self-test's own calls) always scans.
+        return _self_test()
     error = _validate_entropy_constants()
     if error is not None:
         print(f"error: invalid entropy control constant ({error}); fail-closed", file=sys.stderr)
         return 2
-    root = Path(__file__).resolve().parents[1] if root is None else Path(root)
+    root = precheck_special_files(Path(__file__).resolve().parents[1]) if root is None else Path(root)
     findings = []
     try:
         for path in sorted(walk_files(root, SKIP_DIRS)):
@@ -980,20 +989,113 @@ def _self_test() -> int:
             failures.append("non-UTF-8 scan {!r}: want present={}, output was {!r}".format(
                 needle, want, scan_out))
 
+    # The scan reads every candidate through read_bytes_nonblocking (_read_scan_text), never a plain
+    # blocking read: a FIFO with no writer at a scan candidate (under a git-ignored directory the
+    # special-file precheck does not hold, or created after it ran) is refused, exit 2, at once. The
+    # scan runs in a worker thread with a bound, so a revert to a blocking read is red here (the FIFO
+    # is then opened for writing to release the stuck reader) instead of hanging the self-test.
+    import os
+    import threading
+    from contextlib import redirect_stderr
+    fifo_cases = 0
+    if hasattr(os, "mkfifo"):
+        with tempfile.TemporaryDirectory(prefix="check-secrets-fifo-") as tmp:
+            froot = Path(tmp)
+            (froot / "ignored").mkdir()
+            fifo = froot / "ignored" / "notes.txt"
+            os.mkfifo(str(fifo))
+            outcome = []
+
+            def _fifo_scan():
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    outcome.append(main(froot))
+            worker = threading.Thread(target=_fifo_scan, daemon=True)
+            worker.start()
+            worker.join(30)
+            fifo_cases = 1
+            if worker.is_alive():
+                failures.append("a FIFO at a scan candidate blocked the scan for 30 s (a plain blocking "
+                                "read); it must be refused at once, exit 2")
+                try:
+                    os.close(os.open(str(fifo), os.O_WRONLY | os.O_NONBLOCK))
+                except OSError:
+                    pass
+                worker.join(5)
+            elif outcome != [2]:
+                failures.append("a FIFO at a scan candidate must be refused with exit 2, got "
+                                "{!r}".format(outcome))
+    else:
+        failures.append("the FIFO scan vector was NOT RUN (os.mkfifo unavailable); failing closed")
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  " + f)
         return 1
     print("SELF-TEST PASS: {} ASSIGN + {} scan-candidate + {} PREFIXES + {} provider-label + {} "
-          "provider-neg + {} ENTROPY + {} entropy-unit + {} non-UTF-8 scan + {} lossless-decode "
-          "cases".format(
+          "provider-neg + {} ENTROPY + {} entropy-unit + {} non-UTF-8 scan + {} lossless-decode + {} "
+          "FIFO-scan cases".format(
               len(cases), len(names), len(prefix_cases), len(label_cases), len(label_neg),
-              len(entropy_cases), len(entropy_units), len(non_utf8_cases), len(lossless_cases)))
+              len(entropy_cases), len(entropy_units), len(non_utf8_cases), len(lossless_cases),
+              fifo_cases))
     return 0
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    if "--self-test" in sys.argv[1:]:
-        sys.exit(_self_test())
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("check_secrets.py") or main())

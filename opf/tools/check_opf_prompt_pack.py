@@ -90,6 +90,7 @@ from _opf_adopt import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, MISSINGNESS_REASONS, _DIGEST_RE, _is_contained_filepath,
 )
 from _semver import _parse as _parse_version  # noqa: E402
+import _containment  # noqa: E402  precheck_special_files (SPECIAL-FILE-PRECHECK)
 import _opf_import_batch as batch  # noqa: E402
 import _opf_schema as schema  # noqa: E402
 import _opf_store  # noqa: E402
@@ -934,8 +935,27 @@ def _self_test_vectors():
                     failures.append("{} (wanted exit {} carrying {!r}, got exit {}: {!r} {!r})".format(
                         name, code, text, got, out.getvalue(), err.getvalue()))
             # chmod cannot make a directory unreadable to root. Restore access before snapshot/cleanup.
-            if hasattr(os, "geteuid") and os.geteuid() == 0:
-                print("SKIP unreadable-subdirectory: running as root")
+            # #400 re-cut round 6 (codex 4): a root run RECORDS the omitted case as a NOT RUN
+            # failure instead of printing SKIP and passing with the assertion silently gone.
+            def _unreadable_skip_failure(is_root):
+                if not is_root:
+                    return None
+                return ("unreadable-subdirectory NOT RUN (running as root: chmod 0 does not "
+                        "restrict root, so the fixture proves nothing); failing closed")
+
+            _root_skip = _unreadable_skip_failure(hasattr(os, "geteuid") and os.geteuid() == 0)
+            # the injected root condition must record a NOT RUN failure, and a non-root run
+            # must not (#400 re-cut round 6 vector); red with the round-5 SKIP print restored
+            injected = _unreadable_skip_failure(True)
+            if injected is None or "NOT RUN" not in injected:
+                failures.append("an injected root condition expected a NOT RUN failure, got "
+                                "{!r}".format(injected))
+            if _unreadable_skip_failure(False) is not None:
+                failures.append("a non-root run must not record the unreadable-subdirectory "
+                                "NOT RUN failure")
+            if _root_skip is not None:
+                print("NOT RUN unreadable-subdirectory: failing closed")
+                failures.append(_root_skip)
             else:
                 pack = Path(tmp) / "unreadable" / "prompt-pack"
                 hidden = pack / "hidden"
@@ -981,7 +1001,9 @@ def _self_test_vectors():
                         name, CANNOT_EVALUATE, got[0], got[1], got[2]))
 
             # Use a child timeout so a blocking open is a failed check, never a hung self-test.
-            # Probe member reads directly: the walk's earlier refusal must not mask a lost open guard.
+            # Probe member reads directly: the walk's earlier refusal must not mask a lost open guard. For the
+            # same reason the manifest probe bypasses main()'s special-file precheck (patched to a pass-through),
+            # so the FIFO reaches the manifest open guard itself.
             probe = """\
 import sys
 from pathlib import Path
@@ -990,6 +1012,7 @@ import check_opf_prompt_pack as gate
 path, what = Path(sys.argv[2]), sys.argv[3]
 if what == "manifest":
     gate.DEFAULT_PACK_DIR = path.parent
+    gate._containment.precheck_special_files = lambda root: root
     sys.exit(gate.main([]))
 try:
     gate._read_regular(path, gate.MAX_MEMBER_BYTES, what)
@@ -1066,7 +1089,7 @@ def main(argv=None):
         if args:
             print("usage: check_opf_prompt_pack.py [--self-test]", file=sys.stderr)
             return 2
-        status, guard, detail = _validate_with_examples(DEFAULT_PACK_DIR)
+        status, guard, detail = _validate_with_examples(_containment.precheck_special_files(DEFAULT_PACK_DIR))
         if status == VALID:
             print("OPF PROMPT PACK: VALID ({})".format(detail))
         else:

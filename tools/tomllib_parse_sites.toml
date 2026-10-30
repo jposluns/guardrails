@@ -1328,27 +1328,3 @@ form = "alias"
 count = 5
 class = "EXEMPT"
 reason = "test-code"
-
-[[site]]
-path = "tools/selftest_ci_status.py"
-function = "_expected_check_ids"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "tools/selftest_git_fixture_env.py"
-function = "_expected_check_ids"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "tools/selftest_orch_hooks.py"
-function = "_expected_check_ids"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"

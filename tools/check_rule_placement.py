@@ -108,6 +108,7 @@ import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
 from gen_rules import parse_source, parse_source_text, derive  # noqa: E402
 from _standards import close_chain, dir_or_absent, dir_present, follow_link, map_keys, open_chain  # noqa: E402
 from _standards import LINK_DANGLING, LINK_NOT_A_DIRECTORY, LINK_OUTSIDE_ROOT  # noqa: E402
+from _gen_common import precheck_special_files  # SPECIAL-FILE-PRECHECK  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_REL = "tools/selftest_checks.toml"
@@ -450,7 +451,7 @@ def main(argv=None):
         if problem is not None:
             print("error: {} (cannot evaluate)".format(problem), file=sys.stderr)
             return 2
-    root = (Path(root) if root is not None else repo_root_default()).resolve()
+    root = precheck_special_files((Path(root) if root is not None else repo_root_default()).resolve())
     # gen_rules binds MAP_KEYS/SEQ_KEYS at import from ITS OWN repo_root(); derive() (called by
     # check_drift) validates a rule's map-* keys against them. Under --root against an adopter tree with
     # its own .aiqt/standards/, rebind from that root so their map-keys are judged against their

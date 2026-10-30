@@ -67,8 +67,8 @@ import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
-from _gen_common import load_toml  # noqa: E402
+from _walk import read_text_nonblocking, walk_files  # noqa: E402  fail-closed tree walk and reader
+from _gen_common import load_toml, precheck_special_files  # noqa: E402
 
 SKIP_DIRS = set()  # scan the whole of site/ (matching check_newtab); skipping no content directory means a
 # page under a node_modules/, __pycache__/, or similar cannot escape the currency check.
@@ -200,7 +200,10 @@ def _scan_root(root, subdir, valid):
                       f.relative_to(root), subdir), file=sys.stderr)
             return 2
         try:
-            text = f.read_text(encoding="utf-8")
+            # read_text_nonblocking, not read_text: this walk reads WHATEVER .html it meets, a
+            # git-ignored page the D-400 special-file precheck deliberately does not walk included,
+            # so a FIFO page must be the named refusal (OSError, exit 2 below), never a blocking read.
+            text = read_text_nonblocking(f)
         except (OSError, UnicodeDecodeError) as exc:
             print("error: cannot load {} ({}); fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
@@ -321,28 +324,92 @@ def _self_test():
         if got != 2:
             failures.append("h: page-less site/ expected exit 2 got {}".format(got))
 
+    # F-CORPUS-FIFO-HANG: a FIFO at an .html page (the shape a git-ignored plant takes,
+    # which the D-400 precheck deliberately does not walk) must be the named refusal (exit 2), never a
+    # blocking read. MUTATION: reverting the page read to Path.read_text blocks here; the alarm turns
+    # that into a recorded failure. POSIX only (os.mkfifo, SIGALRM).
+    import os
+    import signal
+    if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
+        class _Hang(Exception):
+            pass
+
+        def _on_alarm(_signum, _frame):
+            raise _Hang()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = build(tmp, good_toml, {"i.html": "<p>AIQT 1.0.0</p>"})
+            os.mkfifo(root / "site" / "fifo.html")
+            previous = signal.signal(signal.SIGALRM, _on_alarm)
+            signal.alarm(10)
+            try:
+                got = run_quiet(root)
+            except _Hang:
+                got = "hung"
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous)
+            if got != 2:
+                failures.append("y: a FIFO site page expected the named refusal exit 2, got {}".format(got))
+
+    else:
+        # A capability-gated vector is an
+        # explicit NOT RUN and a recorded failure, never a silent pass.
+        print("NOT RUN: the FIFO site-page refusal vector (os.mkfifo or signal.SIGALRM "
+              "unavailable); failing closed")
+        failures.append("the FIFO site-page refusal vector NOT RUN (os.mkfifo or "
+                        "signal.SIGALRM unavailable); failing closed")
+    # #400 re-cut round 5 (codex 3): the symlink FIXTURE construction is separated from the
+    # operation under test (the broad try of round 4 also covered run_quiet, so an OSError
+    # from the tested run could read as fixture unavailability), and an unavailable fixture
+    # is a recorded cannot-evaluate failure, never a silent skip.
+    def _symlink_fixture(target, linkpath, symlink=Path.symlink_to):
+        # only the fixture constructor's own errors read as unavailability; the tested
+        # operation runs OUTSIDE this try
+        try:
+            symlink(linkpath, target)
+        except (OSError, NotImplementedError):
+            return False
+        return True
+
+    def _symlinked_case(label, noun, target, linkpath, root, symlink=Path.symlink_to):
+        if not _symlink_fixture(target, linkpath, symlink=symlink):
+            return [label + ": the " + noun + " fixture could not be created (no symlink "
+                    "capability); the fail-closed assertion NOT RUN; failing closed"]
+        if run_quiet(root) != 2:
+            return [label + ": " + noun + " expected exit 2"]
+        return []
+
     # a symlinked site page fails closed rather than being followed outside site/.
     with tempfile.TemporaryDirectory() as tmp:
         root = build(tmp, good_toml, {"real.html": "<p>AIQT 1.0.0</p>"})
         outside = root / "outside.html"
         outside.write_text("<p>AIQT 9.9.9</p>", encoding="utf-8")
-        try:
-            (root / "site" / "link.html").symlink_to(outside)
-            if run_quiet(root) != 2:
-                failures.append("q: symlinked site page expected exit 2")
-        except (OSError, NotImplementedError):
-            pass  # platform without symlink support: skip rather than fail spuriously
+        failures.extend(_symlinked_case("q", "symlinked site page", outside,
+                                        root / "site" / "link.html", root))
 
     with tempfile.TemporaryDirectory() as tmp:  # symlinked changelog.toml fails closed (out-of-tree source)
         root = build(tmp, None, {"i.html": "<p>AIQT 1.0.0</p>"})
         target = root / "outside.toml"
         target.write_bytes(b'[[release]]\nversion = "9.9.9"\ntitle = "r"\n')
-        try:
-            (root / "changelog.toml").symlink_to(target)
-            if run_quiet(root) != 2:
-                failures.append("w: symlinked changelog.toml expected exit 2")
-        except (OSError, NotImplementedError):
-            pass
+        failures.extend(_symlinked_case("w", "symlinked changelog.toml", target,
+                                        root / "changelog.toml", root))
+
+    # injected-fixture-failure vector (#400 re-cut round 5, codex 3): a fixture constructor
+    # that fails yields a recorded cannot-evaluate failure, never a silent capability skip;
+    # red with the round-4 silent skip restored.
+    def _raising_symlink(_link, _target):
+        raise OSError("injected fixture failure")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = build(tmp, good_toml, {"i.html": "<p>AIQT 1.0.0</p>"})
+        outside = root / "outside.html"
+        outside.write_text("<p>ok</p>", encoding="utf-8")
+        injected = _symlinked_case("inj", "symlinked site page", outside,
+                                   root / "site" / "link.html", root,
+                                   symlink=_raising_symlink)
+        if len(injected) != 1 or "NOT RUN" not in injected[0]:
+            failures.append("an injected symlink-fixture failure expected a recorded "
+                            "cannot-evaluate failure, got {!r}".format(injected))
 
     # opf/site is a second required coverage root: a stale token in an opf/site page is a finding, and an
     # absent opf/site root fails closed.
@@ -379,7 +446,8 @@ def _self_test():
           "'the 1.0.0 release', bare '1.0.0 pack', 'CSA AICM v1.1.0', and out-of-scope 4-segment/pre-release/"
           "build-suffixed forms yield no finding; multi-space and tab separators match; malformed/missing/"
           "release-less/version-less/non-SemVer changelog, an in-dev entry not > the release, a non-UTF-8 "
-          "page, a page-less site/, and (where supported) a symlinked page or changelog all fail closed "
+          "page, a page-less site/, and a symlinked page or changelog all fail closed (an unavailable "
+          "symlink fixture is a recorded cannot-evaluate failure, never a silent skip) "
           "({}+ cases)".format(len(cases) + 2))
     return 0
 
@@ -387,8 +455,64 @@ def _self_test():
 def main():
     if "--self-test" in sys.argv[1:]:
         return _self_test()
-    return run(Path(__file__).resolve().parents[1])
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
+
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("check_site_versions.py") or main())

@@ -113,6 +113,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import hashlib
 import io
+import os
 import re
 import stat
 import struct
@@ -283,10 +284,22 @@ def _read_bytes(path):
     """The content read, through one descriptor: its first four bytes, then, when the name or those bytes
     mark a ZIP archive (_is_zip), at most MAX_ARCHIVE_FILE_SIZE + 1 bytes in all, else the rest of the
     file. The caller checks the bytes returned against the bound, so a file that grows or is replaced
-    after the stat probe is never read or accepted past it. A module-level seam so the self-test can raise
+    after the stat probe is never read or accepted past it. The open is non-blocking and the OPENED
+    descriptor must still be a regular file (fstat), because this walk reads git-ignored paths too,
+    which the special-file precheck does not cover: a FIFO swapped in between the stat probe and this
+    open raises instead of blocking the gate (the final symlink is still followed: a symlink to a
+    regular file reads as its target, the file rule). A module-level seam so the self-test can raise
     a read error deterministically (case 7) on a runner whose chmod 0 cannot bite (root or
     CAP_DAC_OVERRIDE)."""
-    with path.open("rb") as handle:
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("{}: not a regular file on the opened descriptor; its content was not read"
+                          .format(path))
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as handle:
         data = handle.read(4)
         if _is_zip(path.name, data):
             return data + handle.read(max(MAX_ARCHIVE_FILE_SIZE + 1 - len(data), 0))
@@ -700,7 +713,12 @@ def run(root):
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test_main()
-    return run(Path(__file__).resolve().parents[1])
+    # Refuse special files by name before the gate walks and reads the tree (the walk's own
+    # non-blocking reads cover the git-ignored paths the precheck does not). Imported here,
+    # not at module level, so a self-test fixture copy of this module beside a gate under
+    # test imports without _gen_common.py riding along (only the live gate run needs it).
+    from _gen_common import precheck_special_files
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
 
 
 # --- self-test ----------------------------------------------------------------------------------------
@@ -1754,5 +1772,61 @@ def self_test_main():
     return 0
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point reads a
+# child's exit status (the git queries of the special-file precheck in tools/_gen_common.py
+# among them), so under an ignored SIGCHLD it would read a failing child as a pass; it refuses
+# at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("check_leaks.py") or main())
