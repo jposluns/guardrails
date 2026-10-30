@@ -144,7 +144,7 @@ reason = "Cross-reference to trkasy.5 (a truncated deliverable is not observable
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "Applying a fix on disk is not the same as landing it."
+text = "Applying a fix on disk is not landing it."
 reason = "Rationale for vfxcmt.1; no obligation of its own."
 
 [[exempt]]
