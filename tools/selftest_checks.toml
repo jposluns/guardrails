@@ -1566,6 +1566,7 @@ expected-check-ids = [
   "rdp/label-screen-hides-dispatch",
   "rdp/label-screen-not-caught",
   "rdp/label-screen-over-refusal-kept",
+  "rdp/label-screen-name-continued",
   "rdp/label-screen-every-line-screened",
   "rdp/label-screen-fence-exact-label-read",
   "rdp/label-screen-reason",

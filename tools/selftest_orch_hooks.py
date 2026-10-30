@@ -1299,7 +1299,7 @@ def _rdp_label_screen_cases(base):
     block's included, by two rules, each withholding the dispatch as UNVERIFIABLE with a reason naming the
     first line at fault: the character rule (a control character other than a newline or a tab, or a format
     character, anywhere) and the name test (a line, a line read as a label by its value alone, whose
-    letters and digits hold a label's name followed by its colon)."""
+    letters and digits hold a label's name with a colon after it)."""
     ls = RdpFixture(base, "labelscreen")
     _rdp_hidden_character_cases(ls)
     _rdp_name_test_cases(ls)
@@ -1369,7 +1369,8 @@ def _rdp_hidden_character_cases(ls):
 def _rdp_name_test_cases(ls):
     """The name test: each hide class is withheld for each of three labels, and its flip (a semicolon for
     its colon) passes; one row of each class is withheld through the whole hook; each over-refusal class the
-    rule keeps is withheld, and its flip passes; each form the rules disclose they do not catch passes; no
+    rule keeps is withheld, and its flip passes; a name that starts a longer word passes, and its flip (the
+    word split after the name) is withheld; each form the rules disclose they do not catch passes; no
     fenced code block is passed over; and the reason names the first line and the label."""
     labels = ls.binding["labels"]
 
@@ -1402,18 +1403,30 @@ def _rdp_name_test_cases(ls):
         ("html", lambda n, c, v: ["<span>" + n + c + " " + v]),
         ("value-next-line", lambda n, c, v: [n + c, v]),
         ("before-colon", lambda n, c, v: [n + " " + c + " " + v]),
-        ("before-colon", lambda n, c, v: [n + "\u0903" + c + " " + v]),
         ("before-colon", lambda n, c, v: [n + "\U00013441" + c + " " + v]),
         ("before-colon", lambda n, c, v: [n + "\u3164" + c + " " + v]),
         ("before-colon", lambda n, c, v: [n + "\U00013441" * 3 + c + " " + v]),
         ("before-colon", lambda n, c, v: [n + "\u4e2d\u6587" + c + " " + v]),
+        ("letters-before-colon", lambda n, c, v: ["[" + n + "](x)" + c + " " + v]),
+        ("letters-before-colon",
+         lambda n, c, v: ["[" + n + "][r]" + c + " " + v, "", "[r]: https://example.invalid/"]),
+        ("letters-before-colon", lambda n, c, v: [n + "<span hidden>x</span>" + c + " " + v]),
+        ("letters-before-colon", lambda n, c, v: [n + "\u3164x" + c + " " + v]),
         ("lookalike-colon", lambda n, c, v: [n + look(c, "\uff1a") + " " + v]),
         ("lookalike-colon", lambda n, c, v: [n + look(c, "\u2236") + " " + v]),
         ("lookalike-colon", lambda n, c, v: [n + look(c, "\ua789") + " " + v]),
+        ("mark-for-colon", lambda n, c, v: [n + look(c, "\u0903") + " " + v]),
+        ("mark-for-colon", lambda n, c, v: [n + look(c, "\u0a83") + " " + v]),
+        ("mark-for-colon", lambda n, c, v: [n + look(c, "\u0f7f") + " " + v]),
+        ("other-for-colon", lambda n, c, v: [n + look(c, "\u1680") + " " + v]),
+        ("other-for-colon", lambda n, c, v: [n + look(c, "\ue000") + " " + v]),
+        ("other-for-colon", lambda n, c, v: [n + look(c, "\ufdd0") + " " + v]),
         ("lookalike-letter", lambda n, c, v: [n.replace("e", "\u0435", 1) + c + " " + v]),
         ("lookalike-letter", lambda n, c, v: [n.replace("e", "\u0435").replace("i", "\u0456") + c + " " + v]),
         ("lookalike-letter", lambda n, c, v: ["\uff32" + n[1:] + c + " " + v]),
         ("lookalike-letter", lambda n, c, v: ["\u0154" + n[1:] + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: [n[0] + "\u0301\u0435\u0300" + n[2:] + c + " " + v]),
+        ("lookalike-letter", lambda n, c, v: [n[0] + "\u2010\u0435\u2010" + n[2:] + c + " " + v]),
         ("prefix-letter-or-digit", lambda n, c, v: ["1. " + n + c + " " + v]),
         ("prefix-letter-or-digit", lambda n, c, v: ["a) " + n + c + " " + v]),
         ("prefix-letter-or-digit", lambda n, c, v: ["- [x] " + n + c + " " + v]),
@@ -1457,30 +1470,27 @@ def _rdp_name_test_cases(ls):
         [(cls, ("unverifiable", True), "allow") for cls, _m, _v in rows])
 
     # What the rules do not catch, as the docstring, the residue and ORCHESTRATION.md disclose: an ASCII
-    # letter or digit inside a name or between a name and its colon, a letter written as another ASCII letter
-    # or digit or as three look-alikes in a row, a missing colon or one written as a letter or a mark, and a
-    # label split across lines. Each is neither read nor refused.
+    # letter or digit inside a name or right after its last letter, a letter written as another ASCII letter
+    # or digit or as three look-alikes in a row, a missing colon or one written as a letter, and a label
+    # split across lines. Each is neither read nor refused.
     missed = (
-        ("letter-in-link-destination", ["[Review-path](x): seed.txt"]),
-        ("letter-in-reference-link", ["[Review-path][r]: seed.txt", "", "[r]: https://example.invalid/"]),
-        ("letters-in-tag", ["Review-path<span hidden>x</span>: seed.txt"]),
         ("letters-in-tag-inside", ["Re<b></b>view-path: seed.txt"]),
         ("reference-inside", ["Review&#45;path: seed.txt"]),
         ("reference-for-letter", ["&#82;eview-path: seed.txt"]),
         ("reference-for-colon", ["Review-path&#58; seed.txt"]),
+        ("letter-right-after-name", ["Review-pathx: seed.txt"]),
         ("ascii-letter-replaced", ["Rev1ew-path: seed.txt"]),
         ("three-lookalikes", ["R\u0435\u0475\u0456ew-path: seed.txt"]),
         ("colon-missing", ["Review-path seed.txt"]),
         ("colon-a-letter", ["Review-path\u02d0 seed.txt"]),
-        ("colon-a-mark", ["Review-path\u0903 seed.txt"]),
         ("split-across-lines", ["Review-", "path: seed.txt"]),
     )
     check("rdp/label-screen-not-caught", [(cls, _rdp_screen(ls, extra)) for cls, extra in missed],
           [(cls, "passed") for cls, _extra in missed])
 
-    # The over-refusal classes the rules keep: a label's name followed by a colon in prose is withheld, and so
-    # is a refused character in prose or a carriage return before a line's end; the flip (the colon dropped,
-    # ASCII quotes, the character removed) passes.
+    # The over-refusal classes the rules keep: a label's name with a colon after it in prose is withheld, and
+    # so is a refused character in prose or a carriage return before a line's end; the flip (the colon
+    # dropped, ASCII quotes, the character removed) passes.
     kept = (
         ("code-span", ["`Review-path:` is repeated per file."], ["`Review-path` is repeated per file."]),
         ("list", ["- `Review-path:` lines name the files to read."],
@@ -1502,6 +1512,12 @@ def _rdp_name_test_cases(ls):
         ("punctuation-outside-ascii", ["Review-path \u2192 one per file"], ["Review-path -> one per file"]),
         ("space-for-hyphen", ["Review path: one per file"], ["Review path, one per file"]),
         ("word-holding-name", ["preview path: build/out"], ["preview path build/out"]),
+        ("colon-later-in-line", ["The Review-path lines follow: one per file."],
+         ["The Review-path lines follow, one per file."]),
+        ("link-after-name", ["Review-path is described at https://example.invalid/docs"],
+         ["Review-path is described at example.invalid/docs"]),
+        ("mark-after-name", ["Review-path\u0301 lines"], ["Review-path lines"]),
+        ("space-outside-ascii-after-name", ["Review-path\u1680lines"], ["Review-path lines"]),
         ("fenced", ["```", "- `Review-path:` lines name the files to read.", "```"],
          ["```", "- `Review-path` lines name the files to read.", "```"]),
         ("format-character-in-prose", ["co\u00adoperate"], ["cooperate"]),
@@ -1510,6 +1526,19 @@ def _rdp_name_test_cases(ls):
     check("rdp/label-screen-over-refusal-kept", [
         (cls, _rdp_screen(ls, extra), _rdp_screen(ls, flip)) for cls, extra, flip in kept],
         [(cls, "withheld", "passed") for cls, _extra, _flip in kept])
+
+    # A name that starts a longer word, an ASCII letter or digit right after its last letter, is not a label
+    # however a colon follows on its line, so a path or a plural holding a name passes; the flip, the word
+    # split after the name, is withheld.
+    continued = (
+        ("plural", ["Review-paths are listed below: one per file."],
+         ["Review-path entries are listed below: one per file."]),
+        ("path-holding-name", ["Add `.preview/pathfinder.py`, with a row in `hooks.toml`:"],
+         ["Add `.preview/path/finder.py`, with a row in `hooks.toml`:"]),
+    )
+    check("rdp/label-screen-name-continued", [
+        (cls, _rdp_screen(ls, extra), _rdp_screen(ls, flip)) for cls, extra, flip in continued],
+        [(cls, "passed", "withheld") for cls, _extra, _flip in continued])
 
     # No fenced code block is passed over: a line inside one and a fence line itself are screened like any
     # other, however the fence is written, so a label after an opener inside an HTML comment, a
@@ -1550,6 +1579,7 @@ def _rdp_label_screen_mutant_cases(ls):
     """One mutant per element of the rules: each flips its row (the first value is the row with the hook as
     it is, the second with the mutant)."""
     import re
+    import string
     import types
     labels = ls.binding["labels"]
     never = re.compile(r"(?!)")
@@ -1574,13 +1604,13 @@ def _rdp_label_screen_mutant_cases(ls):
         # a name read only from its line's first letter (a regex is fine here: these lines are short)
         for number, line in enumerate(text.split("\n")):
             for key, held in names.items():
-                if re.match("[\x00:]*".join("[{}\x00]".format(ch) for ch in held) + "[\x00:]*:", line):
+                if re.match("[\x00: ]*".join("[{}\x00]".format(ch) for ch in held) + "[\x00: ]*:", line):
                     return (number, key)
         return None
 
     def _any_script(label):
-        held = letters(label).replace(":", "")
-        return held if held and letters(label).endswith(":") else None
+        held = letters(label).replace(" ", "")
+        return held.replace(":", "") if held.replace(":", "") and held.endswith(":") else None
     shim = types.SimpleNamespace(normalize=lambda form, text: text, category=unicodedata.category,
                                  name=unicodedata.name)
     mutants = (
@@ -1599,18 +1629,24 @@ def _rdp_label_screen_mutant_cases(ls):
          labels),
         ("case-folding", [("_rdp_fold", lambda text: unicodedata.normalize("NFKD", text))],
          ["REVIEW-PATH: seed.txt"], labels),
-        ("non-letters-removed", [("_RDP_UNLETTER", re.compile(r"[^\w:\n ]+|_+"))], ["Review-path : seed.txt"],
+        ("non-letters-passed-over", [("_RDP_UNLETTER", never)], ["Review/path: seed.txt"], labels),
+        ("underscore-passed-over", [("_RDP_UNLETTER", re.compile(r"[^\w:\n]+"))], ["Review_path: seed.txt"],
          labels),
-        ("underscore-removed", [("_RDP_UNLETTER", re.compile(r"[^\w:\n]+"))], ["Review_path: seed.txt"], labels),
-        ("lookalike-colon", [("_RDP_COLONISH", "")], ["Review-path\u2236 seed.txt"], labels),
+        ("outside-ascii-a-colon", [("_RDP_NOT_WORD", never)], ["Review-path\u0903 seed.txt"], labels),
         ("colons-between-letters",
          [("_rdp_screened", lambda text: re.sub(r":(?=[0-9a-z\x00])", "#", screened(text)))],
          ["Review\u2010path:"], labels),
         ("stand-in-for-a-letter", [("_RDP_LOOKALIKE", never)], ["R\u0435view-path: seed.txt"], labels),
+        ("stand-in-through-separators", [("_RDP_LOOKALIKE", re.compile(r"[^\x00-\x7f](?=[0-9a-z])"))],
+         ["R\u2010\u0435\u2010view-path: seed.txt"], labels),
         ("stand-in-passed-over", [("_rdp_screened", lambda text: screened(text).replace("\x00", "\x01"))],
          ["Review-path\U00013441: seed.txt"], labels),
         ("other-letters-removed", [("_RDP_NOT_ASCII", never)],
-         ["Review-path\U00013441\U00013441\U00013441: seed.txt"], labels),
+         ["Re\U00013441\U00013441\U00013441view-path: seed.txt"], labels),
+        ("letters-after-name-passed-over", [("_RDP_NAME_ENDS", "")], ["[Review-path](x): seed.txt"], labels),
+        ("blank-letter-ends-name", [("_RDP_NAME_ENDS", " ")], ["Review-path\u3164x: seed.txt"], labels),
+        ("letter-continues-name", [("_RDP_NAME_ENDS", " \x00" + string.ascii_lowercase + string.digits)],
+         ["Add `.preview/pathfinder.py`, with a row in `hooks.toml`:"], labels),
         ("contained-anywhere", [("_rdp_named", _anchored)], ["1. Review-path: seed.txt"], labels),
         ("colon-after-name", [("_rdp_screened", lambda text: ":".join(screened(text)))],
          ["the Review-path field"], labels),
@@ -1627,12 +1663,13 @@ def _rdp_label_screen_mutant_cases(ls):
 def _rdp_label_screen_sweep(ls):
     """The defining property, swept through _rdp_labels: every assigned code point that is not a letter or
     digit (no letter or digit in its folded form, decided here apart from the hook), every 509th unassigned
-    or private-use one, and every 61st letter or digit, before each of three labels; and each of those whose
-    folded form holds no ASCII letter or digit also after the name's first letter and between the name and
-    its colon. Each such line withholds the brief, by the character rule or the name test. A code point
-    whose folded form holds an ASCII letter or digit, inside a name or before its colon, is a disclosed hide
-    and is only counted. A newline (it splits the line) and a surrogate (it cannot occur in a UTF-8 brief)
-    are not swept."""
+    or private-use one, and every 61st letter or digit, before each of three labels; each of those whose
+    folded form holds no ASCII letter or digit also after the name's first letter; and each of those whose
+    folded form does not begin with an ASCII letter or digit also between the name and its colon. Each such
+    line withholds the brief, by the character rule or the name test. A code point whose folded form holds
+    an ASCII letter or digit inside a name, or begins with one before its colon, is a disclosed hide and is
+    only counted. A newline (it splits the line) and a surrogate (it cannot occur in a UTF-8 brief) are not
+    swept."""
     values = (("Review-target", "working-tree"), ("Reviewed-revision", ls.seed), ("Review-path", "seed.txt"))
     tally = {}
     for cp in range(sys.maxunicode + 1):
@@ -1647,28 +1684,33 @@ def _rdp_label_screen_sweep(ls):
             continue
         side = "letter-or-digit" if letter else "other"
         inner = "ascii-letter-or-digit" if any(f.isascii() and f.isalnum() for f in folded) else side
+        after = "ascii-letter-or-digit" if folded[0].isascii() and folded[0].isalnum() else side
         for n, v in values:
             for spot, kind, line in (("before", side, ch + n + ": " + v),
                                      ("inside", inner, n[0] + ch + n[1:] + ": " + v),
-                                     ("before-colon", inner, n + ch + ": " + v)):
+                                     ("before-colon", after, n + ch + ": " + v)):
                 key = (kind, spot, _rdp_screen(ls, [line]))
                 tally[key] = tally.get(key, 0) + 1
     check("rdp/label-screen-sweep", (
         sorted(key for key in tally if key[2] != "withheld" and key[0] != "ascii-letter-or-digit"),
         all(tally.get((side, spot, "withheld"), 0) > 0 for side in ("other", "letter-or-digit")
             for spot in ("before", "inside", "before-colon")),
-        tally.get(("ascii-letter-or-digit", "inside", "passed"), 0) > 0), ([], True, True))
+        tally.get(("ascii-letter-or-digit", "inside", "passed"), 0) > 0,
+        tally.get(("ascii-letter-or-digit", "before-colon", "passed"), 0) > 0), ([], True, True, True))
 
 
 def _rdp_label_screen_timing(ls):
-    """Linear time: the label screen over four adversarial briefs, each at 256 KiB and at 1 MiB: a line of
+    """Linear time: the label screen over seven adversarial briefs, each at 256 KiB and at 1 MiB: a line of
     backticks that ends in a letter and a backtick (a pattern that backtracks over it takes time quadratic
     in its length), a name's first eight letters with a look-alike and a colon, repeated (every attempt
-    reaches deep into a name), a letter and a look-alike, repeated (a NUL at every other character), and a
-    short line, repeated (the most lines). At 1 MiB each takes under a second of this process's CPU time, and each grows less
-    than eightfold from 256 KiB (about fourfold is linear, about sixteenfold quadratic). Stray work only adds
-    time, so the 256 KiB brief is timed three times and the least time kept, and the 1 MiB brief up to five
-    times until its least time passes; a 256 KiB time over a second ends the row's timing for that shape."""
+    reaches deep into a name), a letter and a look-alike, repeated (a NUL at every other character), a
+    short line, repeated (the most lines), a whole name and a word, repeated on one line that ends in a
+    colon (a name ended at every word), a letter and a look-alike between two marks, repeated (every mark a
+    colon the look-alike test passes over), and a mark, repeated (a colon at every character). At 1 MiB
+    each takes under a second of this process's CPU time, and each grows less than eightfold from 256 KiB
+    (about fourfold is linear, about sixteenfold quadratic). Stray work only adds time, so the 256 KiB brief
+    is timed three times and the least time kept, and the 1 MiB brief up to five times until its least time
+    passes; a 256 KiB time over a second ends the row's timing for that shape."""
     labels = ls.binding["labels"]
     lead = _rdp_screen_text(ls, [])
 
@@ -1680,7 +1722,9 @@ def _rdp_label_screen_timing(ls):
     def _brief(unit, tail, size):
         return lead + unit * ((size - len(lead) - len(tail.encode())) // len(unit.encode())) + tail + "\n"
     shapes = (("backtick-fence-line", "`", "x`"), ("name-prefix-and-colon", "reviewpa\u0435:", ""),
-              ("lookalike-pairs", "r\u0435", ":"), ("short-lines", "a:\n", ""))
+              ("lookalike-pairs", "r\u0435", ":"), ("short-lines", "a:\n", ""),
+              ("names-then-words", "reviewpath x ", ":"), ("lookalike-between-marks", "r\u0301\u0435\u0300", ":"),
+              ("marks", "\u0903", ""))
     rows = []
     for shape, unit, tail in shapes:
         small = _cpu(_brief(unit, tail, 262144))

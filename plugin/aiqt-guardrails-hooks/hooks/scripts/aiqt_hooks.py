@@ -23311,8 +23311,8 @@ def orch_dispatch_ledger(data):
 # declared too, less the paths it records as skipped (_rdp_draft_census);
 # and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
 # at the pinned gitlink, which are not read. A brief holding a control character other than a newline or a
-# tab, or a format character, and a line that holds a label's name followed by a colon anywhere but in a
-# column-0 label the hook reads (_rdp_labels), are a cannot-evaluate. A refusal is a deny naming its reason;
+# tab, or a format character, and a line that holds a label's name with a colon after it on that line
+# anywhere but in a column-0 label the hook reads (_rdp_labels), are a cannot-evaluate. A refusal is a deny naming its reason;
 # a cannot-evaluate is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through
 # _review_git, which neutralizes replacement refs, grafts, pathspec magic and the commit-graph cache.
 _RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes"))
@@ -23538,17 +23538,21 @@ def _rdp_read_brief(path, max_bytes):
 # each of them (_rdp_hidden).
 _RDP_HIDDEN_CATEGORIES = ("Cc", "Cf")
 _RDP_SHOWN_CONTROLS = "\n\t"
-# _rdp_letters: a character outside ASCII that str.isalnum rejects; the Unicode categories (by their first
-# letter, punctuation and symbol) of such a character that becomes a colon; and every run of characters
-# removed outright (ones str.isalnum rejects other than a colon or a newline, and underscores, which \w
-# accepts). Each alternative is one repeated character class, so each pass is linear in the text.
+# _rdp_letters: a character outside ASCII that str.isalnum rejects, which becomes a colon (every such
+# character is outside Unicode categories L and N: a punctuation mark, a symbol, a mark, a space, a
+# private-use or unassigned code point); and every run of the characters that become a space (ones
+# str.isalnum rejects other than a colon or a newline, and underscores, which \w accepts). Each alternative
+# is one repeated character class, so each pass is linear in the text.
 _RDP_NOT_WORD = re.compile(r"[^\w\x00-\x7f]")
-_RDP_COLONISH = "PS"
 _RDP_UNLETTER = re.compile(r"[^\w:\n]+|_+")
-# _rdp_screened: a letter or digit outside ASCII next to an ASCII letter or digit, which becomes a NUL, and
-# every run of other characters outside ASCII, which is removed.
-_RDP_LOOKALIKE = re.compile(r"(?<=[0-9a-z])[^\x00-\x7f:\n]|[^\x00-\x7f:\n](?=[0-9a-z])")
+# _rdp_screened: a letter or digit outside ASCII with an ASCII letter or digit after it, colons and spaces
+# passed over, which becomes a NUL (a pass over the text and one over the text reversed, so a letter or
+# digit before it counts too), and every run of other characters outside ASCII, which is removed.
+_RDP_LOOKALIKE = re.compile(r"[^\x00-\x7f](?=[: ]*[0-9a-z])")
 _RDP_NOT_ASCII = re.compile(r"[^\x00-\x7f]+")
+# _rdp_named: after a name's last letter, the characters that end it (a space, so a removed separator, and
+# a NUL); a colon after them on its line is the name's colon, whatever stands between.
+_RDP_NAME_ENDS = " \x00"
 
 
 def _rdp_hidden(text):
@@ -23573,32 +23577,31 @@ def _rdp_fold(text):
 
 def _rdp_letters(text):
     """text's letters and digits as the label screen compares them, each newline kept: text folded
-    (_rdp_fold), then every character that is not a letter or digit (str.isalnum) removed, except a colon,
-    and a punctuation mark or symbol outside ASCII (Unicode category P or S: a look-alike colon such as
-    U+2236 RATIO or U+A789 MODIFIER LETTER COLON, but also a curly quote, a dash or an arrow), which
-    becomes a colon."""
-    folded = _rdp_fold(text)
-    table = {}
-    for ch in set(_RDP_NOT_WORD.findall(folded)):
-        table[ord(ch)] = ":" if unicodedata.category(ch)[0] in _RDP_COLONISH else None
-    return _RDP_UNLETTER.sub("", folded.translate(table))
+    (_rdp_fold), then every character outside ASCII that is not a letter or digit (str.isalnum) made a colon
+    (a look-alike colon such as U+2236 RATIO, U+A789 MODIFIER LETTER COLON or the spacing mark U+0903
+    DEVANAGARI SIGN VISARGA, but also a curly quote, a dash, an arrow, a combining mark or U+1680 OGHAM
+    SPACE MARK), and every run of other characters that are not letters or digits, other than a colon or a
+    newline, made one space."""
+    return _RDP_UNLETTER.sub(" ", _RDP_NOT_WORD.sub(":", _rdp_fold(text)))
 
 
 def _rdp_screened(text):
     """_rdp_letters(text) brought into ASCII: each letter or digit outside ASCII that stands next to an ASCII
-    letter or digit written as a NUL, which the name test (_rdp_named) reads as any one letter of a name or
-    as nothing, and every other letter or digit outside ASCII removed. So Review-path: with its first e
-    written as the Cyrillic U+0435 holds the name, and so does Review-path with a blank letter such as
-    U+3164 HANGUL FILLER inside it or before its colon. A run of three or more such letters keeps only its
-    outer ones, so a word of another script never stands for a name's letters."""
-    return _RDP_NOT_ASCII.sub("", _RDP_LOOKALIKE.sub("\x00", _rdp_letters(text)))
+    letter or digit, colons and spaces passed over, written as a NUL, which the name test (_rdp_named) reads
+    as any one letter of a name or as nothing, and every other letter or digit outside ASCII removed. So
+    Review-path: with its first e written as the Cyrillic U+0435 holds the name, accented or not, and so
+    does Review-path with a blank letter such as U+3164 HANGUL FILLER inside it or before its colon. A run of
+    three or more such letters keeps only its outer ones, so a word of another script never stands for a
+    name's letters."""
+    marked = _RDP_LOOKALIKE.sub("\x00", _rdp_letters(text))
+    return _RDP_NOT_ASCII.sub("", _RDP_LOOKALIKE.sub("\x00", marked[::-1])[::-1])
 
 
 def _rdp_name(label):
-    """The letters and digits the name test finds label by (_rdp_letters, its colons removed), or None for a
-    label with no letter or digit, one outside ASCII, or no colon after its last one; such a label is read
-    only in its exact form."""
-    letters = _rdp_letters(label)
+    """The letters and digits the name test finds label by (_rdp_letters, its colons and spaces removed), or
+    None for a label with no letter or digit, one outside ASCII, or no colon after its last one; such a
+    label is read only in its exact form."""
+    letters = _rdp_letters(label).replace(" ", "")
     name = letters.replace(":", "")
     if not name or not name.isascii() or not letters.endswith(":"):
         return None
@@ -23607,12 +23610,15 @@ def _rdp_name(label):
 
 def _rdp_named(screened, names):
     """(the index of the first line, its label key) where screened text (_rdp_screened) holds a label's name
-    followed by its colon, or None; names maps each label key to its name (_rdp_name). A name is held when
-    its letters and digits stand in order, any of them also written as a NUL, with nothing but colons and
-    NULs between them and after the last one, and then a colon; any other ASCII letter or digit, or a
-    newline, ends the attempt. One pass tracks, for every name at once, which of its letters the attempts
-    in progress have reached (one bit each, set from the bit before it, or for a name's first letter from
-    nothing), so the test is linear in the text and never backtracks."""
+    with a colon after it, or None; names maps each label key to its name (_rdp_name). A name is held when
+    its letters and digits stand in order, any of them also written as a NUL, with nothing but colons,
+    spaces and NULs between them; any other ASCII letter or digit, or a newline, ends the attempt. A held
+    name followed by colons, spaces and NULs and then a colon has its colon; so does one followed by a space
+    or a NUL (_RDP_NAME_ENDS), whatever stands after that before a colon on its line, while an ASCII letter
+    or digit right after its last letter continues the word. One pass tracks, for every name at once, which
+    of its letters the attempts in progress have reached (one bit each, set from the bit before it, or for
+    a name's first letter from nothing), and which name the line has ended, so the test is linear in the
+    text and never backtracks."""
     if not names:
         return None
     first = last = 0
@@ -23627,17 +23633,23 @@ def _rdp_named(screened, names):
         last |= 1 << (bit - 1)
         ends.append((key, 1 << (bit - 1)))
     every = (1 << bit) - 1
+    name_ends = _RDP_NAME_ENDS
     state = 0
+    ended = None
     for at, ch in enumerate(screened[:screened.rfind(":") + 1]):
         if ch == ":":
-            if state & last:
-                return (screened.count("\n", 0, at), next(key for key, end in ends if state & end))
+            if ended or state & last:
+                return (screened.count("\n", 0, at), ended or next(key for key, end in ends if state & end))
         elif ch == "\n":
             state = 0
-        elif ch == "\x00":
-            state |= ((state << 1) | first) & every
+            ended = None
         else:
-            state = ((state << 1) | first) & masks.get(ch, 0)
+            if ch in name_ends and not ended and state & last:
+                ended = next(key for key, end in ends if state & end)
+            if ch == "\x00":
+                state |= ((state << 1) | first) & every
+            elif ch != " ":
+                state = ((state << 1) | first) & masks.get(ch, 0)
     return None
 
 
@@ -23665,27 +23677,30 @@ def _rdp_labels(text, labels):
     - a control character other than a newline or a tab (a carriage return, an escape, a backspace) or a
       format character (a bidirectional control, a zero width character, a byte-order mark; _rdp_read_text
       drops one that opens the file) anywhere in the brief is refused (_rdp_hidden); and
-    - a line, a line read as a label by its value alone, is refused when it holds a label's name followed by
-      its colon (_rdp_named over _rdp_screened text): after folding (_rdp_fold), the name's ASCII letters
-      and digits in order, any of them also written as a letter or digit outside ASCII next to an ASCII
-      one, with no other ASCII letter or digit between them or between the last one and the colon after
-      it, a colon being an ASCII colon or a punctuation mark or symbol outside ASCII. Every other character
-      between them is passed over: punctuation, spaces, markup with no letter or digit, a combining or
-      spacing mark, a letter or digit outside ASCII.
+    - a line, a line read as a label by its value alone, is refused when it holds a label's name with a
+      colon after it (_rdp_named over _rdp_screened text): after folding (_rdp_fold), the name's ASCII
+      letters and digits in order, any of them also written as a letter or digit outside ASCII next to an
+      ASCII one, with no other ASCII letter or digit between them, and later on the line a colon, an ASCII
+      colon or any character outside ASCII that is not a letter or digit. Every other character between
+      the name's letters is passed over (punctuation, spaces, markup with no letter or digit, a letter or
+      digit outside ASCII), and so is everything between the name and the colon, unless an ASCII letter or
+      digit follows the name's last letter directly, which makes the name the start of a longer word.
     So a label is withheld behind any prefix, another label's value included; in any case; in fullwidth or
     accented letters, or with look-alike letters outside ASCII in runs of one or two; with any character but
-    an ASCII letter or digit inside its name or before its colon; with no space, a tab or a no-break space
-    after its colon; and with a look-alike colon of category P or S. So is every line that mentions a
-    label's name followed by a colon, in prose, a list, a table, a heading, a code span, a quote or a fenced
-    code block, and a name followed by a curly quote, a dash or an arrow. A label is neither read nor
-    refused when an ASCII letter or digit stands inside its name or between its name and its colon (a
-    Markdown link destination or reference, an HTML tag, a character reference such as Review&#45;path:);
-    when a letter of its name is written as another ASCII letter or digit (Rev1ew-path:, &#82;eview-path:)
-    or as a letter outside ASCII with no ASCII letter or digit next to it (three look-alikes in a row);
-    when its colon is missing or is a look-alike that is neither a punctuation mark nor a symbol (U+02D0
-    MODIFIER LETTER TRIANGULAR COLON, a letter; U+0903 DEVANAGARI SIGN VISARGA, a mark); when it is split
-    across lines; and when the binding's label has no letter or digit, one outside ASCII, or no colon after
-    its last one."""
+    an ASCII letter or digit inside its name; with anything between its name and its colon that does not
+    begin with an ASCII letter or digit (a Markdown link destination or reference, an HTML tag holding
+    letters); with no space, a tab or a no-break space after its colon; and with a look-alike colon that is a
+    punctuation mark, a symbol, a mark (U+0903 DEVANAGARI SIGN VISARGA) or a space. So is every line that
+    holds a label's name, other than as the start of a longer word, with a colon anywhere after it (a URL or
+    a time included), in prose, a list, a table, a heading, a code span, a quote or a fenced code block, and
+    a name followed by a curly quote, a dash, an arrow or a mark. A label is neither read nor refused when an
+    ASCII letter or digit stands inside its name (an HTML tag holding letters, a character reference such as
+    Review&#45;path:) or right after its last letter (Review-pathx:, read as another word); when a letter of
+    its name is written as another ASCII letter or digit (Rev1ew-path:, &#82;eview-path:) or as a letter
+    outside ASCII with no ASCII letter or digit next to it, colons and spaces passed over (three look-alikes
+    in a row); when its colon is missing (Review-path&#58;) or is a look-alike letter (U+02D0 MODIFIER
+    LETTER TRIANGULAR COLON); when it is split across lines; and when the binding's label has no letter or
+    digit, one outside ASCII, or no colon after its last one."""
     lines = text.split("\n")
     at = _rdp_hidden(text)
     if at is not None:
