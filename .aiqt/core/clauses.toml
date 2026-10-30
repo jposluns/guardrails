@@ -1562,7 +1562,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.2"
@@ -1571,7 +1571,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.3"
@@ -1580,7 +1580,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.4"
@@ -1589,7 +1589,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.5"
@@ -1598,151 +1598,160 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.6"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 25
-end-line = 29
+start-line = 31
+end-line = 35
 canonical-text = "The\nsnapshot's OWN git operations change no working state (the ref is not a branch, HEAD, the index, or the\nworking tree, and is invisible to plain `git status`, `git branch`, and `git log`, though reachable via `git\nlog --all`, `git for-each-ref refs/aiqt-recovery`, and `git show-ref` as the real ref it is), so it keeps\nthe inert posture."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.7"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 29
-end-line = 35
+start-line = 35
+end-line = 41
 canonical-text = "To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient\n`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited\nenvironment cannot redirect the call to a decoy repository, inject configuration into it, redirect its\nattribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a\nread-only call write a trace file; the call re-applies only the few variables it sets itself after the\nscrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent\nallow."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.8"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 29
-end-line = 35
+start-line = 35
+end-line = 41
 canonical-text = "To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient\n`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited\nenvironment cannot redirect the call to a decoy repository, inject configuration into it, redirect its\nattribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a\nread-only call write a trace file; the call re-applies only the few variables it sets itself after the\nscrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent\nallow."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.9"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 29
-end-line = 35
+start-line = 35
+end-line = 41
 canonical-text = "To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient\n`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited\nenvironment cannot redirect the call to a decoy repository, inject configuration into it, redirect its\nattribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a\nread-only call write a trace file; the call re-applies only the few variables it sets itself after the\nscrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent\nallow."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.10"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 42
-end-line = 44
+start-line = 48
+end-line = 50
 canonical-text = "The\nexception is limited to recovery snapshots written for the actor's own protection; it is not a general\nlicence to mutate repository metadata."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.11"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 46
-end-line = 46
+start-line = 52
+end-line = 52
 canonical-text = "Running code a worker returns is an apply step, not an inspection;"
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.12"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 46
-end-line = 48
+start-line = 52
+end-line = 54
 canonical-text = "this governs the orchestrator running a\ndeliverable it receives, not a worker running a candidate in its own scratch, which needs the same\nisolation as a disposable copy."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.13"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 48
-end-line = 50
+start-line = 54
+end-line = 56
 canonical-text = "A label, a claimed print-only purpose, or a check the deliverable carries\ndoes not show that its code changes nothing, so the orchestrator extracts, decodes, and prints a\ndeliverable with a reader it wrote or reviewed, never with code the deliverable supplies."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.14"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 50
-end-line = 51
+start-line = 56
+end-line = 57
 canonical-text = "That code runs,\nto evaluate it or to produce a candidate, only after a full reading and only in a disposable copy."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.15"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 51
-end-line = 53
+start-line = 57
+end-line = 59
 canonical-text = "A\ndisposable copy is an exported tree or a clone sharing no object storage (no hard links or alternates),\noutside every live checkout and never a linked worktree of the live repository;"
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.16"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 53
-end-line = 54
+start-line = 59
+end-line = 60
 canonical-text = "it shares nothing writable\nwith a live checkout, git metadata included, and has no remote it can push to."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.17"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 54
-end-line = 56
+start-line = 60
+end-line = 62
 canonical-text = "The code's working directory\nand every target it names are inside the copy, and no argument, path, or environment value it is given\nnames a live checkout;"
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.18"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 56
-end-line = 56
+start-line = 62
+end-line = 62
 canonical-text = "a changed working directory alone is not that isolation."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.19"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 56
-end-line = 57
+start-line = 62
+end-line = 63
 canonical-text = "That code's changes reach a\nlive checkout only through the orchestrator's own verified apply."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.20"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 57
-end-line = 59
+start-line = 63
+end-line = 65
 canonical-text = "This is a rule on what the orchestrator\nruns and where, not OS containment: only the full reading checks a path the code builds at run time or\nconfiguration it inherits."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "wowo01.21"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 24
-end-line = 25
+start-line = 30
+end-line = 31
 canonical-text = "Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be\nundone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to)."
-source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
+
+[[clause]]
+clause-id = "wowo01.22"
+corpus-id = "wowo01"
+source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
+start-line = 24
+end-line = 28
+canonical-text = "A candidate records the commit it was cut from, and the apply refuses a whole-file candidate for any path\nwhose content at that commit, absence included, differs from its current content on the target: a diff\nwith context fails to apply on that drift, but a whole file overwrites the later work silently. Such a\npath is replayed three-way from the recorded base instead, and a candidate with no recorded base is a\ncannot-evaluate, never a clean apply."
+source-digest = "6df2ae4bd3fa583356cc1efb99115f47991514bb732fb5d759ee0c47d5dcd703"
 
 [[clause]]
 clause-id = "deccls.1"

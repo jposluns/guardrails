@@ -8,6 +8,12 @@ Workers produce research and candidate diffs as inert data; one orchestrator re-
 integrates them, and workers apply nothing themselves. Parallelism lives in the research stage; authority
 and seriality live in the apply stage.
 
+A candidate records the commit it was cut from, and the apply refuses a whole-file candidate for any path
+whose content at that commit, absence included, differs from its current content on the target: a diff
+with context fails to apply on that drift, but a whole file overwrites the later work silently. Such a
+path is replayed three-way from the recorded base instead, and a candidate with no recorded base is a
+cannot-evaluate, never a clean apply.
+
 Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be
 undone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to). The
 snapshot's OWN git operations change no working state (the ref is not a branch, HEAD, the index, or the
