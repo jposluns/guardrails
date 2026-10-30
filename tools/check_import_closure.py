@@ -829,10 +829,26 @@ DYNAMIC_IMPORT_SITES = (
       "#1: spec.loader.exec_module(_journal)"),
      "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
      "close harness"),
+    ("opf/tools/_opf_emit.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
+    ("opf/tools/_opf_init.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
+    ("opf/tools/_opf_init_operation.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
     ("opf/tools/_opf_store.py", MODULE_SCOPE,
      ("#1: 'imp'",
       "#2: 'imp'"),
      "the string imp is a run-id prefix, not the imp module"),
+    ("opf/tools/_opf_views.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
     ("opf/tools/_vendor/marko/cli.py", MODULE_SCOPE,
      ("#1: import importlib",),
      "byte-exact vendored Marko: its command-line entry imports importlib"),
@@ -854,6 +870,14 @@ DYNAMIC_IMPORT_SITES = (
       "#1: hook_spec.loader.exec_module(hook_mod)"),
      "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
      "Claude hook classifier"),
+    ("opf/tools/check_opf_doctor.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
+    ("opf/tools/check_opf_drift.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
     ("opf/tools/check_opf_homes.py", "_self_test_vectors",
      ("#1: 'imp'",
       "#2: 'imp'",
@@ -869,6 +893,10 @@ DYNAMIC_IMPORT_SITES = (
     ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>#97/175",
      ("#1: 'imp'",),
      "the string imp is a run-id prefix in vectors, not the imp module"),
+    ("opf/tools/check_opf_homes.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
     ("opf/tools/check_opf_init.py", "_suite_isolated",
      ("#1: opf._bootstrap()",),
      "calls opf.py's own _bootstrap function (the opf module of this tree), not importlib._bootstrap"),
@@ -894,20 +922,30 @@ DYNAMIC_IMPORT_SITES = (
      ("#1: boot_module._bootstrap",),
      "passes a loaded boot mutant's own _bootstrap (opf.py's, a raise inserted before its first helper import) to "
      "fd_capture; not importlib._bootstrap"),
-    ("opf/tools/check_opf_init_contract.py", MODULE_SCOPE,
-     ("#1: import runpy",),
-     "imports runpy for _checks"),
-    ("opf/tools/check_opf_init_contract.py", "_checks",
-     ("#1: runpy.run_path(str(ROOT / 'opf/tools/_opf_init_contract.py'))",),
-     "runs opf/tools/_opf_init_contract.py of this tree by its path to read its namespace"),
-    ("opf/tools/check_opf_prompt_pack.py", "_close_vectors",
+    ("opf/tools/check_opf_init_contract.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
+    ("opf/tools/check_opf_init_observe.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
+    ("opf/tools/check_opf_init_p0.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
+    ("opf/tools/check_opf_prompt_pack.py", "_load_sibling",
      ("#1: import importlib.util",
-      "#1: importlib.util.spec_from_file_location('_prompt_pack_close_harness', "
-      "Path(__file__).resolve().parent / '_journal.py')",
+      "#1: importlib.util.spec_from_file_location(name, path)",
       "#1: importlib.util.module_from_spec(spec)",
-      "#1: spec.loader.exec_module(harness)"),
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
-     "close harness"),
+      "#1: spec.loader.exec_module(module)"),
+     "self-test loads a file by its path (spec_from_file_location, module_from_spec, exec_module): its callers pass "
+     "this tree's _journal.py beside this file (the close harness) or, in the loaded-exit probe child, a scratch "
+     "file the self-test wrote from one _LOADED_EXIT_CASES literal; no input chooses the path"),
+    ("opf/tools/check_opf_prompt_pack.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
     ("opf/tools/check_opf_record.py", "_self_test_isolated",
      ("#1: opf._bootstrap()",),
      "calls opf.py's own _bootstrap function (the opf module of this tree), not importlib._bootstrap"),
@@ -1075,6 +1113,10 @@ DYNAMIC_IMPORT_SITES = (
      "the strings name code sinks, loader methods and importers in the lint's tables (CODE_SINKS, LOADER_METHODS, "
      "METHOD_SINKS, _IMPORTERS); each is compared against the names in the source it scans, never called or "
      "resolved"),
+    ("tools/check_dangerous_api.py", MODULE_SCOPE,
+     ("#1: '_GuardedMutant.__getattr__'",),
+     "the string names a scope of tools/check_instruction_budget.py in the lint's ALLOWLIST; it is compared "
+     "against the scopes of the source it scans, never called or resolved"),
     ("tools/check_entry_guard.py", MODULE_SCOPE,
      ("#1: import importlib.util",),
      "imports importlib.util for this file's loads by path, each reviewed in its own row"),
@@ -1083,6 +1125,10 @@ DYNAMIC_IMPORT_SITES = (
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(module)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
+    ("tools/check_footer.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
     ("tools/check_import_closure.py", "<module>",
      ("#1: import importlib.util",),
      "it imports importlib.util for _load_mutant"),
@@ -1105,6 +1151,10 @@ DYNAMIC_IMPORT_SITES = (
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(mutant)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
+    ("tools/check_instruction_budget.py", "_install_fault_hooks",
+     ("#1: _threads.Thread._bootstrap",),
+     "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
+     "to compare a low-level thread start's target with it by identity; never called, not importlib._bootstrap"),
     ("tools/check_internal_names.py", "_load_ratchet_mutant",
      ("#1: import importlib.util",
       "#1: importlib.util.spec_from_file_location('tracker_mutant_{}'.format(tag), str(path))",
