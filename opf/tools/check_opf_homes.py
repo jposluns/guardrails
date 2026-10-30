@@ -1605,13 +1605,22 @@ _TOOLS = Path(__file__).resolve().parent
 # after an optional UTF-8 BOM, no CR that is not followed by LF (the compiler ends a line there, a reader
 # that splits at LF alone does not, and the two then look for a coding cookie on different lines), and no
 # coding cookie but utf-8 or utf-8-sig on lines 1 and 2. A cookie is every `coding:` or `coding=` and the
-# name after it, in a comment or not (Python reads one only in a comment, an over-refusal), its letter case
-# and underscores read as Python reads them. Anything else is refused as a finding naming the file, as is a
-# module the no-homes-1 scan cannot compile; none is a traceback.
+# name after it, in a comment or not (Python reads one only in a comment, an over-refusal). The name passes
+# only when, lower-cased with each underscore read as a hyphen, it is exactly utf-8 or utf-8-sig (`UTF_8`
+# passes). Python reads more names as UTF-8 (`utf8`, `u8`, `cp65001`, and any name that begins `utf-8-`, such
+# as Emacs's `utf-8-unix`); each is refused, an over-refusal. Anything else is refused as a finding naming the
+# file, as is a module the no-homes-1 scan cannot compile or whose syntax tree it cannot walk (too deep or too
+# large); none is a traceback.
 _BOM = b"\xef\xbb\xbf"
 _CODING = re.compile(r"coding[:=][ \t]*([-\w.]+)")
 _SOURCE_RULE = ("a scanned module must be strict UTF-8, a UTF-8 BOM allowed, with no CR not followed by LF and "
-                "no coding cookie but utf-8 or utf-8-sig on lines 1 and 2, and must compile")
+                "no coding cookie but utf-8 or utf-8-sig on lines 1 and 2, and must compile to a syntax tree the "
+                "scan can walk")
+_COMPILED_RULE = ("no __pycache__ directory, bytecode file or extension module may sit under opf/tools; run Python "
+                  "with -B and remove it")
+# The suffixes import loads compiled code from on any platform: bytecode, and every extension module suffix
+# (`.cpython-314-x86_64-linux-gnu.so` and `.abi3.so` end in .so; Windows uses .pyd).
+_BYTECODE_SUFFIX, _EXTENSION_SUFFIXES = ".pyc", (".so", ".pyd")
 
 
 def _source_finding(rel, line, scan, reason):
@@ -1661,7 +1670,12 @@ def retired_gate_name_findings(tools=None):
 # generation they accept, and every other value refuses. A homes read is a name or attribute ending in
 # `homes`, a subscript, `.get(...)` or getattr(...) keyed by a string ending in `homes`, or a
 # homes_generation(...) call; a called name (`_directory_homes(plan)`) is not one. The HOMES constant is
-# the bare name HOMES, or HOMES read off a name the module binds only by importing _opf_store. Outside
+# the bare name HOMES, or HOMES read off a name the module binds only by importing _opf_store and never
+# rebinds through a namespace: no attribute of that name is set or deleted on any object (the module object
+# included: `sys.modules[__name__].store = x`), and no string constant or keyword argument is exactly that name
+# (a namespace key or a writer's name: `globals()["store"] = x`, `globals().update(store=x)`,
+# `setattr(module, "store", x)`); a dict key or an attribute of another object that only shares the name is an
+# over-refusal. Outside
 # self-test code and the vendored tree, this AST scan of opf/tools fails on the rules below. Self-test code,
 # which still builds refused homes-1 inputs, is every check_*.py module and the body of each self-test
 # function: a module-level def whose name holds `self_test` or `self_tests` as whole words between
@@ -1672,10 +1686,16 @@ def retired_gate_name_findings(tools=None):
 # scanned like any other where production code spells its name, as a name, an attribute or an import alias,
 # in any module (names are matched across modules, so every self-test function of that name is scanned, and
 # what its body spells is then production code too). Production code is all the scan walks outside the bodies
-# of self-test functions, of each module's `if __name__ == "__main__":` block and module-level `main` def (the
-# self-test entries), and of the helpers only self-test code names (a module-level def without decorators that
-# self-test code or another such helper spells, as a name, an attribute or inside a string, and nothing else
-# spells: opf.py's two watchdog fixtures, which the self-test pins). The scan then fails on:
+# of self-test functions, of the self-test entries, and of the helpers only self-test code names (a
+# module-level def without decorators that self-test code or another such helper spells, as a name, an
+# attribute or inside a string, and nothing else spells: opf.py's two watchdog fixtures, which the self-test
+# pins). The self-test entries are the body of each module's `if __name__ == "__main__":` block (not its else
+# or elif arms, which run on import and are production code) and the body of each module-level `main` def
+# without decorators (a decorated main is production code, as every decorated def other than a self-test
+# function is: its decorator may run it). A main is production code too where production code spells `main`
+# outside the body of a module-level def without decorators (a module-level call `main()`, a decorator, a
+# class), or where a self-test function production code reaches spells it; names are matched across modules
+# here too. The scan then fails on:
 #   1. any comparison or membership test with a homes read anywhere in an operand (`homes - 1 == 0`,
 #      `int(homes) == 1`, `m["opf"]["homes"] == 1`) other than ONE `==` between a bare homes read and
 #      the integer 2 or the HOMES constant (element by element in a tuple `==`), or the type guard
@@ -1756,8 +1776,14 @@ def retired_gate_name_findings(tools=None):
 # module must have one reading (_module_source): strict UTF-8 after an optional BOM, no CR that is not
 # followed by LF, and no coding cookie but utf-8 or utf-8-sig on lines 1 and 2, so the compiler and every
 # scan here read the same UTF-8 text; any other module (`# -*- coding: utf-7 -*-`, a latin-1 byte, CR-only
-# line ends), and one the AST scan cannot compile (a SyntaxError or UnicodeError), is a finding naming it,
-# never a traceback. The AST scan parses the file's bytes, so the compiler applies the same reading.
+# line ends), one the AST scan cannot compile (a SyntaxError or UnicodeError, or a MemoryError or
+# RecursionError where the source nests too deeply to parse), and one whose syntax tree the scan cannot walk
+# (a RecursionError or MemoryError from a tree too deep or too large, `VALUE = 1 + 1 + ...` in thousands of
+# terms; what the walk found in that module before it stopped is dropped) is a finding naming it, never a
+# traceback. The AST scan parses the file's bytes, so the compiler applies the same reading. Python imports
+# that source only where nothing compiled stands in for it, so a __pycache__ directory, a bytecode file (.pyc)
+# and an extension module (.so, .pyd) anywhere under opf/tools, the vendored tree included, is a finding naming it
+# (_compiled_findings): Python may import one in place of the scanned source beside it, or with no source.
 # RESIDUAL, outside this gate: a generation held in or passed through a differently named variable
 # (`gen = homes`, `store_control_roots(gen)`), or computed rather than written as a literal; a literal
 # bound to a homes read that is not a number (`self.homes = None`), or bound by a loop target, an
@@ -1779,8 +1805,11 @@ def retired_gate_name_findings(tools=None):
 # module, the vendored tree, the standard library or another package: unittest.mock's patch.object, or its
 # patch given a dotted target string); a self-test function production code reaches with no spelling the
 # scan reads (its name held as data, a string given to getattr or a namespace key, or a helper reached that
-# way), or through a self-test entry, which also dispatches production verbs (a call in the `__main__` block
-# or in `main` outside its self-test branch, which review catches), or run at import by the decorator of a
+# way), or through a self-test entry, which also dispatches production verbs (a call in the `__main__` block's
+# body or in `main` outside its self-test branch, which review catches), or through a main production code
+# reaches only from the body of a module-level def without decorators (`def run(): return main()` with
+# `run()` called at import: such a body's spelling of `main` is not read as reach, since a body may bind a
+# local of that name, as opf/tools' git worktree fixtures do), or run at import by the decorator of a
 # self-test function (the scan reads the decorator expression, not what it does with the function); the
 # reason of each exclusion, a data-flow claim the scan enforces only through the HOMES string refusal and the
 # one-site key, so a name obtained at run time that reaches an excluded site (directly, or through a list of
@@ -1799,7 +1828,8 @@ def retired_gate_name_findings(tools=None):
 # positional generation after a `*args`, or passed to a function that opf/tools does not define by a def
 # statement under the called name (a lambda or a function alias); a comparison, binding or path built at
 # run time through no attribute writer (rule 4 refuses those): string joins, getattr with a computed name,
-# a namespace-mapping key, exec or eval of source text, a name re-bound to the record module; the journal
+# a namespace-mapping key, exec or eval of source text, a name re-bound to the record module, the store
+# module's alias re-bound under a name built at run time (`globals()["sto" + "re"] = x`); the journal
 # path spelled in pieces; and docstrings and comments, which are prose.
 _HOMES1_FREE = {"_opf_adopt.py": ("validate_op", "validate_plan", "_validate_plan_sources",
                                   "_control_operand_findings")}
@@ -2158,7 +2188,10 @@ def _binds_homes(node, module):
 
 def _store_names(tree):
     """The names a module binds only by importing _opf_store (`import _opf_store`, `... as store`); any other
-    binding of the name, a type parameter included, removes it."""
+    binding of the name, a type parameter included, removes it, as does a write that may rebind it through a
+    namespace: an attribute of that name set or deleted on any object (`sys.modules[__name__].store = x`), or a
+    string constant or keyword argument that is exactly the name (`globals()["store"] = x`,
+    `globals().update(store=x)`, `setattr(module, "store", x)`)."""
     imported, other = set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -2168,6 +2201,12 @@ def _store_names(tree):
             other.update(alias.asname or alias.name for alias in node.names)
         elif isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
             other.add(node.id)
+        elif isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
+            other.add(node.attr)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            other.add(node.value)
+        elif isinstance(node, ast.keyword) and node.arg is not None:
+            other.add(node.arg)
         elif isinstance(node, ast.arg):
             other.add(node.arg)
         elif isinstance(node, ast.MatchMapping) and node.rest:
@@ -2247,10 +2286,8 @@ def _qualified(owner, local, name):
 
 
 def _self_test_entry(stmt):
-    """Whether a module-level statement is a self-test entry: the `if __name__ == "__main__":` block or the def of
-    main."""
-    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return stmt.name == "main"
+    """Whether a module-level statement is the `if __name__ == "__main__":` block, whose body (not its else or elif
+    arms) is a self-test entry."""
     test = stmt.test if isinstance(stmt, ast.If) else None
     if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)):
         return False
@@ -2277,7 +2314,8 @@ def _self_test_functions(trees):
     """(unread, helpers): the ids of the self-test function defs whose bodies the scan does not read, and the names
     of the helpers only self-test code names (the paragraph above rule 1). A name is matched across modules, so one
     production code spells in any module is production's in every one, and a self-test function production spells
-    is production code itself, so what its body spells is production's too."""
+    is production code itself, so what its body spells is production's too; so is a main production spells outside
+    the body of a module-level def without decorators."""
     regions, tests, defs = [], [], set()    # a region: (kind, def name, identifiers, its strings joined by NUL)
 
     def region(kind, name, nodes):
@@ -2291,15 +2329,16 @@ def _self_test_functions(trees):
     for _rel, tree in trees:
         for stmt in tree.body:
             # A def's body is its own region; its decorators, defaults, annotations and type parameters run at
-            # import. A decorated def other than a self-test function or main is production code: its decorator
-            # may run it.
+            # import. A decorated def other than a self-test function, main included, is production code: its
+            # decorator may run it. Only the body of the `__main__` block is an entry; its else and elif arms run
+            # on import.
             kind, inner = "production", []
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                kind = ("entry" if stmt.name == "main" else "test" if _SELF_TEST_NAME.search(stmt.name)
-                        else "def" if not stmt.decorator_list else "production")
+                kind = ("test" if _SELF_TEST_NAME.search(stmt.name) else "production" if stmt.decorator_list
+                        else "entry" if stmt.name == "main" else "def")
                 inner = stmt.body if kind != "production" else []
             elif _self_test_entry(stmt):
-                kind, inner = "entry", stmt.body + stmt.orelse
+                kind, inner = "entry", stmt.body
             if kind == "test":
                 tests.append(stmt)
             elif kind == "def":
@@ -2329,11 +2368,18 @@ def _self_test_functions(trees):
             visiting.discard(name)
         return memo[name]
 
+    def reached(name, through_defs):
+        # Production code spells `name`: a production region, a self-test function or main production reaches,
+        # or (through_defs) the body of a module-level def that is no helper. A def body is not read as reaching
+        # main, since it may bind a local of that name.
+        return any(kind == "production" or (kind in ("test", "entry") and owner in production)
+                   or (through_defs and kind == "def" and not helper(owner)) for kind, owner in holders(name, False))
+
     while True:
         memo.clear()
-        added = {stmt.name for stmt in tests if stmt.name not in production and any(
-            kind == "production" or (kind == "test" and owner in production) or (kind == "def" and not helper(owner))
-            for kind, owner in holders(stmt.name, False))}
+        added = {stmt.name for stmt in tests if stmt.name not in production and reached(stmt.name, True)}
+        if "main" not in production and reached("main", False):
+            added.add("main")
         if not added:
             break
         production |= added
@@ -2548,9 +2594,40 @@ def _homes1_walk(node, owner, local, module, findings):
             _homes1_walk(child, owner, local, module, findings)
 
 
+def _compile_failure(exc):
+    """The reason a module the AST scan cannot compile is refused: the compiler's message, or for a source nested too
+    deeply to parse (a MemoryError or RecursionError) a fixed reason, since that message varies with the stack."""
+    if isinstance(exc, (MemoryError, RecursionError)):
+        return "it does not compile: the source nests too deeply to parse ({})".format(type(exc).__name__)
+    return "it does not compile: {}".format(exc.msg if isinstance(exc, SyntaxError) else exc)
+
+
+def _compiled_findings(tools):
+    """A finding for each __pycache__ directory, bytecode file and extension module under tools, the vendored tree
+    included (one for a __pycache__ directory, whatever it holds): Python may import one in place of the source the
+    scan reads."""
+    findings = []
+    for path in sorted(tools.rglob("*")):
+        rel = path.relative_to(tools)
+        if path.name == "__pycache__":
+            what = "a __pycache__ directory"
+        elif "__pycache__" in rel.parts[:-1]:
+            continue
+        elif path.name.endswith(_BYTECODE_SUFFIX):
+            what = "a bytecode file"
+        elif path.name.endswith(_EXTENSION_SUFFIXES):
+            what = "an extension module"
+        else:
+            continue
+        findings.append("{}: {}, which Python may import in place of the scanned source, so the no-homes-1 scan "
+                        "refuses it ({})".format(rel.as_posix(), what, _COMPILED_RULE))
+    return findings
+
+
 def _scanned_trees(tools):
     """(trees, findings): each scanned module's (path relative to tools, AST), outside check_*.py and the vendored
-    tree, and a finding for each module that has no one reading or does not compile (_module_source)."""
+    tree, and a finding for each module that has no one reading or does not compile (_module_source), then one for
+    each compiled entry under tools (_compiled_findings)."""
     trees, findings = [], []
     for path in sorted(tools.rglob("*.py")):
         rel = path.relative_to(tools).as_posix()
@@ -2562,12 +2639,10 @@ def _scanned_trees(tools):
                 # The bytes, as import compiles them: the compiler applies the BOM itself.
                 trees.append((rel, ast.parse(raw, filename=rel)))
                 continue
-            except (SyntaxError, UnicodeError) as exc:
-                refused = _source_finding(rel, getattr(exc, "lineno", None) or 1, "no-homes-1",
-                                          "it does not compile: {}".format(
-                                              exc.msg if isinstance(exc, SyntaxError) else exc))
+            except (SyntaxError, UnicodeError, MemoryError, RecursionError) as exc:
+                refused = _source_finding(rel, getattr(exc, "lineno", None) or 1, "no-homes-1", _compile_failure(exc))
         findings.append(refused)
-    return trees, findings
+    return trees, findings + _compiled_findings(tools)
 
 
 def _homes1_scan(tools=None):
@@ -2581,9 +2656,20 @@ def _homes1_scan(tools=None):
         module = {"rel": rel, "free": _HOMES1_FREE.get(rel, ()), "docstrings": _docstring_ids(tree),
                   "store": _store_names(tree), "constant": _homes_definition(rel, tree), "params": params,
                   "caught": _caught_raises(tree), "sites": _constant_sites(tree), "unpacked": set(),
-                  "writers": set(), "reported": set(), "seen": set(), "tests": {}, "hits": hits,
+                  "writers": set(), "reported": set(), "seen": set(), "tests": {}, "hits": {},
                   "self_tests": self_tests}
-        _homes1_walk(tree, "<module>", False, module, findings)
+        found = len(findings)
+        try:
+            _homes1_walk(tree, "<module>", False, module, findings)
+        except (RecursionError, MemoryError) as exc:
+            # A tree too deep or too large to walk is a finding naming the module, never a traceback; what the walk
+            # found there before it stopped, and the exclusion sites it admitted, are dropped (they vary with the
+            # stack depth the walk starts at).
+            del findings[found:]
+            findings.append(_source_finding(rel, 1, "no-homes-1", "the scan cannot walk its syntax tree ({})".format(
+                type(exc).__name__)))
+            continue
+        hits.update(module["hits"])
     for table in _EXCLUSION_TABLES:
         for (rel, owner, text), lines in ((key, hits.get(key, ())) for key in table):
             if len(lines) > 1:
@@ -6728,6 +6814,10 @@ def _self_test_vectors():
     plain = ("class Box:\n    pass\n\n\nBOX = Box()\nsetattr(BOX, 'size', 1)\ndelattr(BOX, 'size')\n"
              "BOX.__setattr__('size', 1)\nobject.__delattr__(BOX, 'size')\n")
     importing = "import _opf_store\n\n"
+    test_writer = "def helper_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n\n\n"
+    test_main = "def main():\n    return helper_self_test()\n"
+    store_rebound = ("import sys\nimport _opf_store as store\n\n{}\n\n\ndef home(homes):\n    if homes == store.HOMES:\n"
+                     "        return 'typed'\n    raise ValueError(homes)\n")
     gap_forms = (
         # A fallthrough after `== 2`: what a failed test reaches must refuse.
         ("fallthrough-after-return", "planted.py",
@@ -7024,6 +7114,47 @@ def _self_test_vectors():
          "    setattr(_opf_store, 'HOMES', 1)\n    return _fixture\n\n\nFIXTURE = _fixture\n",
          importing + "def _fixture():\n    return helper_self_test\n\n\ndef helper_self_test():\n"
          "    setattr(_opf_store, 'HOMES', 1)\n    return _fixture\n", (8, rebound_in.format("helper_self_test"))),
+        # Only the body of the `__main__` block is an entry: its else and elif arms run on import. A decorated main
+        # is production code, and so is a main production code spells (called at import, or from a self-test
+        # function production reaches). Each clean flip moves the call into the block's body, or drops the
+        # decorator.
+        ("self-test-main-block-else", "planted.py",
+         importing + test_writer + "if __name__ == '__main__':\n    pass\nelse:\n    helper_self_test()\n",
+         importing + test_writer + "if __name__ == '__main__':\n    helper_self_test()\nelse:\n    pass\n",
+         (4, rebound_in.format("helper_self_test"))),
+        ("self-test-main-block-elif", "planted.py",
+         importing + test_writer + "if __name__ == '__main__':\n    pass\nelif True:\n    helper_self_test()\n",
+         importing + test_writer + "if __name__ == '__main__':\n    helper_self_test()\nelif True:\n    pass\n",
+         (4, rebound_in.format("helper_self_test"))),
+        ("self-test-main-decorated", "planted.py",
+         importing + test_writer + "@(lambda run: run() or run)\n" + test_main,
+         importing + test_writer + test_main, (4, rebound_in.format("helper_self_test"))),
+        ("self-test-main-called", "planted.py", importing + test_writer + test_main + "\n\nmain()\n",
+         importing + test_writer + test_main + "\n\nif __name__ == '__main__':\n    main()\n",
+         (4, rebound_in.format("helper_self_test"))),
+        ("self-test-main-from-self-test", "planted.py",
+         importing + test_writer + test_main + "\n\ndef run_self_test():\n    return main()\n\n\nrun_self_test()\n",
+         importing + test_writer + test_main + "\n\ndef run_self_test():\n    return main()\n\n\n"
+         "if __name__ == '__main__':\n    run_self_test()\n", (4, rebound_in.format("helper_self_test"))),
+        # The store module's alias rebound through a namespace (the module object's attribute, a namespace key, a
+        # keyword, a writer's name) no longer reads as the store, so `== store.HOMES` is no `== 2`; the flip
+        # writes another name.
+        ("store-alias-module-attribute", "planted.py", store_rebound.format("sys.modules[__name__].store = None"),
+         store_rebound.format("sys.modules[__name__].other = None"), (8, arm, "homes == store.HOMES", "home",
+                                                                     _COMPARE_RULE)),
+        ("store-alias-namespace-key", "planted.py", store_rebound.format("globals()['store'] = None"),
+         store_rebound.format("globals()['other'] = None"), (8, arm, "homes == store.HOMES", "home", _COMPARE_RULE)),
+        ("store-alias-namespace-keyword", "planted.py", store_rebound.format("globals().update(store=None)"),
+         store_rebound.format("globals().update(other=None)"), (8, arm, "homes == store.HOMES", "home",
+                                                                _COMPARE_RULE)),
+        ("store-alias-writer-name", "planted.py", store_rebound.format("setattr(sys.modules[__name__], 'store', None)"),
+         store_rebound.format("setattr(sys.modules[__name__], 'other', None)"),
+         (8, arm, "homes == store.HOMES", "home", _COMPARE_RULE)),
+        # A module Python imports whose syntax tree is too deep for the walk is a finding naming it, not a
+        # RecursionError; the same sum in fewer terms is walked.
+        ("deep-expression", "planted.py", "VALUE = " + " + ".join(["1"] * 3000) + "\n",
+         "VALUE = " + " + ".join(["1"] * 30) + "\n",
+         (1, source_refused.format("the scan cannot walk its syntax tree (RecursionError)"))),
         # A star import binds names the module never spells, HOMES possibly among them.
         ("star-import", "planted.py",
          "from check_shim import *\n\n\ndef home(homes):\n    if homes == HOMES:\n        return 'typed'\n"
@@ -7074,6 +7205,27 @@ def _self_test_vectors():
                 check("homes1-gap-" + ("red-" if expected else "clean-") + label,
                       lambda e=expected: homes1_findings(tree) == e)
             (tree / name).unlink()
+        # The walk's other way to stop, a MemoryError (raised here where the walk reaches the second def), is refused
+        # like the RecursionError above, naming the module, and what the walk found there before it stopped is
+        # dropped: the arm the same module's full walk reports is absent.
+        (tree / "planted.py").write_text("def home(ctx):\n    return ctx.homes == 1\n\n\ndef later():\n    pass\n",
+                                         encoding="utf-8")
+        walk = _homes1_walk
+
+        def stopping(node, *rest):
+            if isinstance(node, ast.Pass):
+                raise MemoryError
+            return walk(node, *rest)
+
+        def walk_stopped():
+            with patch.object(sys.modules[__name__], "_homes1_walk", stopping):
+                return homes1_findings(tree)
+        check("homes1-walk-memory-error-red", lambda: walk_stopped() == [
+            "planted.py:1: " + source_refused.format("the scan cannot walk its syntax tree (MemoryError)")])
+        check("homes1-walk-memory-error-unstopped", lambda: homes1_findings(tree) == [
+            "planted.py:2: homes-1 arm `ctx.homes == 1` in home is reintroduced; homes 2 is the only generation and "
+            "every other one refuses ({})".format(_COMPARE_RULE)])
+        (tree / "planted.py").unlink()
     # a module with no one reading, or one the AST scan cannot compile, is refused by each
     # scan as a finding naming it (red where the retired gate name scan decoded through tokenize.open, where the
     # AST scan read the compiler's reading, and where either raised), and the flip one edit away is read as UTF-8:
@@ -7105,7 +7257,10 @@ def _self_test_vectors():
         ("bom-latin-1-cookie", bom + b"# coding: latin-1\nimport _opf_store\n", bom + b"# coding: utf-8\nimport _opf_store\n",
          1, "the coding cookie 'latin-1' is not utf-8 or utf-8-sig", True, [], []),
         ("syntax-error", b"def broken(:\n    pass\n", b"def fixed():\n    pass\n", 1, None, False, [], []),
-        ("null-byte", b"VALUE = 1\x00\n", b"VALUE = 1\n", 1, None, False, [], []))
+        ("null-byte", b"VALUE = 1\x00\n", b"VALUE = 1\n", 1, None, False, [], []),
+        # A source nested too deeply to parse: the parser stops with a MemoryError, not a SyntaxError.
+        ("parser-depth", b"VALUE = " + b"-" * 200000 + b"1\n", b"VALUE = -1\n", 1,
+         "it does not compile: the source nests too deeply to parse (MemoryError)", False, [], []))
 
     def compiled(raw):
         try:
@@ -7127,6 +7282,35 @@ def _self_test_vectors():
             check("source-reading-clean-" + label, lambda e=clean_retired, h=clean_homes1:
                   retired_gate_name_findings(tree) == e and homes1_findings(tree) == h)
         (tree / "encoded.py").unlink()
+    # A compiled entry Python may import in place of the scanned source is refused by its name wherever it sits under
+    # the tree, beside a clean source or with none, a __pycache__ directory once whatever it holds; the flip renames it
+    # out of what import loads: (label, red entries, clean entries, the refused path, what it is). An entry ending in
+    # "/" is an empty directory; a file holds bytes the scan never reads, and planted.py a clean module.
+    compiled_entries = (
+        ("pycache-empty", ("__pycache__/",), ("pycache/",), "__pycache__", "a __pycache__ directory"),
+        ("pycache-beside-source", ("planted.py", "__pycache__/planted.cpython-314.pyc"),
+         ("planted.py", "pycache/planted.cpython-314.pyc.orig"), "__pycache__", "a __pycache__ directory"),
+        ("pycache-vendored", ("_vendor/__pycache__/",), ("_vendor/pycache/",), "_vendor/__pycache__",
+         "a __pycache__ directory"),
+        ("sourceless-bytecode", ("sourceless.pyc",), ("sourceless.pyc.orig",), "sourceless.pyc", "a bytecode file"),
+        ("extension-module", ("planted.py", "planted.cpython-314-x86_64-linux-gnu.so"),
+         ("planted.py", "planted.cpython-314-x86_64-linux-gnu.so.orig"), "planted.cpython-314-x86_64-linux-gnu.so",
+         "an extension module"),
+        ("extension-module-windows", ("planted.pyd",), ("planted.pyd.orig",), "planted.pyd", "an extension module"))
+    with tempfile.TemporaryDirectory(prefix="opf-homes-compiled-") as tmp:
+        for label, red, clean, refused, what in compiled_entries:
+            expect = ["{}: {}, which Python may import in place of the scanned source, so the no-homes-1 scan refuses "
+                      "it ({})".format(refused, what, _COMPILED_RULE)]
+            for entries, expected in ((red, expect), (clean, [])):
+                tree = Path(tmp) / (("red-" if expected else "clean-") + label)
+                for entry in entries:
+                    if entry.endswith("/"):
+                        (tree / entry).mkdir(parents=True)
+                        continue
+                    (tree / entry).parent.mkdir(parents=True, exist_ok=True)
+                    (tree / entry).write_bytes(b"VALUE = 1\n" if entry == "planted.py" else b"\x00compiled\x00")
+                check("homes1-compiled-" + ("red-" if expected else "clean-") + label,
+                      lambda t=tree, e=expected: homes1_findings(t) == e)
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)
@@ -9448,6 +9632,18 @@ def _self_test_vectors():
         check("main-default-entry-refuses-source", lambda r=planted_rc, out=buf.getvalue(): r == 1 and out == "".join(
             "check_opf_homes: {}\n".format(_source_finding("reader.py", 1, scan, "a CR that is not followed by LF ends a "
                                                            "line")) for scan in ("retired gate name", "no-homes-1")))
+    # Nor is a module whose syntax tree is too deep to walk a traceback there: it is the no-homes-1 scan's finding
+    # naming it (a named failure where the walk's RecursionError escapes main()).
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-deep-") as tmp:
+        (Path(tmp) / "reader.py").write_text("VALUE = " + " + ".join(["1"] * 3000) + "\n", encoding="utf-8")
+
+        def deep_entry(tools=Path(tmp)):
+            with patch.object(module, "_TOOLS", tools):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    return main([]), buf.getvalue()
+        check("main-default-entry-refuses-deep-tree", lambda: deep_entry() == (1, "check_opf_homes: {}\n".format(
+            _source_finding("reader.py", 1, "no-homes-1", "the scan cannot walk its syntax tree (RecursionError)"))))
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())
