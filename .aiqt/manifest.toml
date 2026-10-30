@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "46fc2bf8e6e87f0caacf858a26987384d56536305e166877e43c90c855b30060"
+tree-sha256 = "0d65f2f91d51c0389045c5da5d0d63eef721c7c9b7182acd206e02b7686fe807"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 528227
-sha256 = "519f46429d25273ca297706891fba43415fa4b2f1b9e5953be7c4b71dfa6e219"
+bytes = 530045
+sha256 = "0cb94438f847cb7fa72b9b0db74f8f89cfeca4dd6b5a74eecc7cbe980db90269"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -821,8 +821,8 @@ sha256 = "0b38d8d8ebf794ff90d1966dd4032ceb40562575431b9dac1507e41f899aa16f"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 968046
-sha256 = "66953ae88b59e59ae9e5a8e85e099cfccfaddb89821acc91806f5bb8818ec030"
+bytes = 969864
+sha256 = "179661027aa7b450a823d11e06d20c76b682738a33d64695fd3a32d2eb5d21e2"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2361,8 +2361,8 @@ sha256 = "a774875eea19a3157fea5127bcd61fbc659d1d56679592bcd3d6e2d2c0d196b1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 589026
-sha256 = "b24cf2b5a5727b042a8da5b31fae88a1dfb67085c4ab0d32e913aab68b5aae03"
+bytes = 590844
+sha256 = "16c39ec4c9833c804cbd15f49f6568e019ca851aacabfd6177f4a9a2d222402e"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3251,8 +3251,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 648292
-sha256 = "329a8ab741514e62a3034634b23b830eae0a85bbecf55e9d70f84c2dd5b2985c"
+bytes = 650118
+sha256 = "00a33c960daf3b72e1dd07d318ba022ebd839c2a854ced0d9d827472e47df4c1"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3586,8 +3586,8 @@ sha256 = "355fa85c86b2d132f70ec0e131fbd66437292f22149ae90b55b7a8a2972f63f6"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
-bytes = 295192
-sha256 = "509c181d608d2669be7e48a43ab66d3b313487d41b8392bd62f98219554c1f7d"
+bytes = 315340
+sha256 = "683c103b1f942fc7e524a064ae3e85e18b8da6c2531d7ceea553c6211da5d608"
 
 [[sources]]
 path = "tools/check_record_drift.py"
