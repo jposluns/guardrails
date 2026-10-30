@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.19** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.20** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -140,8 +140,8 @@ git-fixture-env suites; `git-fixture-env-core` stays on `3.14` as the one canary
 other job there that sets up Python pins `3.14` (the Quality gates job sets up none); with `check-latest`
 off, setup-python may resolve that pin to a 3.14 already on the runner rather than the newest patch release.
 Every other job in `quality.yml` stays required, `opf-tooling-a`, `opf-tooling-b` and `opf-tooling-c`
-(every OPF gate and direct self-test, split across the three parallel jobs by measured step cost with each
-step kept, run on `3.14`) among them. Under the maintainer's 2026-10-27 authorization this reverses the earlier decision that
+(every OPF gate and direct self-test on `3.14`, split by a local timing that stopped each step at 20
+seconds; live balance unconfirmed) among them. Under the maintainer's 2026-10-27 authorization this reverses the earlier decision that
 the host jobs' CI time was a cost accepted for running those suites twice: the `3.14` copies of the OPF
 tooling self-test and of the three config suites are gone, and the local runner's
 `opf.py --self-test-group` lines have no CI counterpart (CI runs the whole self-test once, on the host

@@ -273,10 +273,10 @@ block scalars and comments; a workflow outside that subset is
 cannot-evaluate (exit 2), never skipped. Every component from the
 repository root to the workflows directory (.github and workflows; the
 root itself is resolved when the module loads) is read through lstat: a
-symlinked one can point this rule at another tree, so it is
-cannot-evaluate, never followed. A workflow entry that is not a regular
-file (a symlink, directory, FIFO or device, refused before any read, so
-none is followed or blocks the gate), a workflow it cannot read (a stat
+symlinked one can point this rule at another tree, so one the lstat sees
+is cannot-evaluate, not followed. A workflow entry that is not a regular
+file (a symlink, directory, FIFO or device, refused on its own lstat
+before any read of it), a workflow it cannot read (a stat
 or read error or a byte outside printable ASCII plus tab and newline) or
 parse (an empty file, a tab, a document marker or directive, an anchor,
 alias or tag, a flow mapping, a folded scalar, a multi-line plain or
@@ -287,14 +287,20 @@ a step's uses: key spelled in another letter case (a step is a
 sequence-item mapping; whether a workflow reader folds key case is not
 modelled, and a key of an env: or other non-step mapping is data, never
 held to this rule), a with: or persist-credentials key of a checkout step
-spelled in another letter case, a step uses: starting with ./ once its
-surrounding whitespace is stripped, whatever path it names (a step cannot
+spelled in another letter case, a step uses: starting with ./ or .\\ (a
+dot then either path separator, however a runner reads the backslash) once
+its surrounding whitespace is stripped, whatever path it names (a step cannot
 call a reusable workflow, which is a job-level uses:, so it runs a local
 action, a composite one among them, whose steps are not in these files; a
 path under .github/workflows/ is no exception), a checkout's with: that
 is not a mapping, a directory that cannot be listed and one holding no
-workflow file are each cannot-evaluate (exit 2), never skipped. The rules
-are CHECKOUT_RULES (persist-credentials and fail-closed); the self-test
+workflow file are each cannot-evaluate (exit 2), never skipped. Each lstat
+is a path lookup apart from the later listing and reads, which follow
+symlinks: a concurrent writer to the tree during the run that swaps
+.github, workflows or a workflow entry for a symlink after its lstat has
+it followed, and one swapped for a FIFO can block the read; this is not
+closed, so the checks hold for a tree nothing writes while the gate runs.
+The rules are CHECKOUT_RULES (persist-credentials and fail-closed); the self-test
 removes each from the running module and shows every case of it red
 without it, and the main wiring vectors run main([]) itself, so the
 checkout leg cannot be cut out of the process exit. Not read: a checkout
@@ -4085,6 +4091,9 @@ def render(report):
 CHECKOUT_ACTION = "actions/checkout"
 CHECKOUT_INPUT = "persist-credentials"
 CHECKOUT_RULES = frozenset({"persist-credentials", "fail-closed"})
+# A step uses: opening with a dot then either path separator names a local
+# path, whichever separator a runner honours, so both are refused.
+LOCAL_STEP_PREFIXES = ("./", ".\\")
 CheckoutReport = namedtuple(
     "CheckoutReport", "code files steps findings diagnostics")
 
@@ -4401,10 +4410,12 @@ def _exact_key(mapping, key, line):
 
 
 def _local_step(uses):
-    """True when a step's uses: value names a local path: it starts with ./
-    once its surrounding whitespace is stripped, so a quoted ' ./tools/act'
-    is not read as a remote action."""
-    return uses.strip().startswith("./")
+    """True when a step's uses: value names a local path: it starts with a
+    dot then a path separator (LOCAL_STEP_PREFIXES, ./ or .\\) once its
+    surrounding whitespace is stripped, so a quoted ' ./tools/act' and a
+    .\\tools\\act are not read as remote actions, however a runner reads the
+    backslash."""
+    return uses.strip().startswith(LOCAL_STEP_PREFIXES)
 
 
 def _checkout_steps(node, found, item=False):
@@ -4478,7 +4489,9 @@ def checkout_credentials(directory=WORKFLOWS_PATH, reader=None):
     # Every component from the repository root to the workflows directory
     # (.github and workflows; ROOT itself is resolved) is read through
     # lstat, the outermost first: a symlinked one can point this rule at
-    # another tree, so it is refused, never followed.
+    # another tree, so one seen here is refused, not followed. The listing
+    # and reads below are later lookups, so a component swapped after this
+    # walk is not caught (module docstring, CHECKOUT CREDENTIALS).
     names = ()
     components = [directory, *directory.parents][
         :len(Path(WORKFLOWS_SOURCE).parts)]
@@ -4520,7 +4533,10 @@ def checkout_credentials(directory=WORKFLOWS_PATH, reader=None):
     for name in names:
         source = WORKFLOWS_SOURCE + "/" + name
         # Only a regular file is read: a symlink, directory, FIFO or device
-        # entry is refused before any read, so none is followed or blocks.
+        # entry is refused on this lstat, before any read of it. The read
+        # below is a separate lookup that follows a symlink, so an entry
+        # swapped after this lstat by a concurrent writer is not caught
+        # (module docstring, CHECKOUT CREDENTIALS).
         try:
             regular = stat.S_ISREG((directory / name).lstat().st_mode)
         except OSError as exc:
@@ -8783,6 +8799,16 @@ def self_test():
         "      - uses: actions/checkout@v4\n        with:\n"
         "          persist-credentials: false\n").encode("ascii")
     leading_space = (("ci.yml", local_step("' ./tools/act'")),)
+    # A dot then a backslash, plain, single-quoted and doubled: each passed
+    # under the ./ prefix alone (the flip below).
+    backslash_cases = (
+        ("a step uses: of a .\\x local path is cannot-evaluate",
+         (("ci.yml", local_step(".\\x")),), True),
+        ("a step uses: of a single-quoted '.\\x' local path is "
+         "cannot-evaluate", (("ci.yml", local_step("'.\\x'")),), True),
+        ("a step uses: of a .\\\\x local path is cannot-evaluate",
+         (("ci.yml", local_step(".\\\\x")),), True),
+    )
     # Each step uses: below names a local path a step can only run as a
     # local action, so each is cannot-evaluate; the files value carries an
     # act directory or a regular other.yml where the vector names one. The
@@ -8808,7 +8834,7 @@ def self_test():
         ("a step uses: of a local path before a quoted trailing space is "
          "cannot-evaluate", (("ci.yml", local_step("'./tools/act '")),),
          False),
-    )
+    ) + backslash_cases
     persist = "persist-credentials"
     closed = "fail-closed"
 
@@ -9027,8 +9053,9 @@ def self_test():
     # every vector it reopens must pass there, so each is red without the
     # change: the one-part rule that read a step uses: of
     # ./.github/workflows/<name> as a workflow file this rule reads, the
-    # local check without whitespace stripping, and an lstat of the
-    # workflows directory alone (a one-component WORKFLOWS_SOURCE).
+    # local check without whitespace stripping, the ./ prefix alone (a
+    # one-member LOCAL_STEP_PREFIXES), and an lstat of the workflows
+    # directory alone (a one-component WORKFLOWS_SOURCE).
     def one_part_local_step(uses):
         parts = uses[2:].split("/")
         return uses.startswith("./") and not (
@@ -9041,6 +9068,9 @@ def self_test():
         ("a step uses: of a local path after a quoted leading space is "
          "cannot-evaluate", leading_space, "_local_step",
          lambda uses: uses.startswith("./")),
+    ) + tuple(
+        (label, files, "LOCAL_STEP_PREFIXES", ("./",))
+        for label, files, _ in backslash_cases) + (
         ("a symlinked ancestor of the workflows directory is "
          "cannot-evaluate, never followed", "ancestor-symlink",
          "WORKFLOWS_SOURCE", "workflows"),
