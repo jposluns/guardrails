@@ -10,7 +10,8 @@ fence, or a command line in the text the family is addressed by (S1 to S3), unle
 and for every family, a path outside a declared workdir when the family's row says it cannot read outside one
 (P2), or a pinned revision that a git command line of the listed subcommands (P5: clone, checkout, switch,
 reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
-no later cure, or through a dispatch ref that resolves to another commit (P5). The
+no later cure, or through a dispatch ref that resolves to another commit (P5), or an input the brief declares on an
+INPUT: line that does not exist on the host the lint runs on (P6). The
 signal is structural, not certain: the lint fails closed, so some text a human would pass refuses (see
 RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
@@ -224,10 +225,41 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        after the reach, git -C <dir> checkout --detach and the first 40-hex BRIEF-PIN value followed
                        by ^{commit} (with none, it says to add such a BRIEF-PIN line first), and the REFUSE line
                        states the cure shape (CURE_SHAPE). With no pin the rule does not fire.
+  P6 declared input    HARD, for every family. A line that opens (once markup is skipped) with INPUT: (upper
+                       case, as written here; **INPUT:** and **INPUT**: count too) declares one input the worker
+                       must read, wherever the line stands (in a fence, indented, in a list item), as pin lines
+                       do. After the label comes one absolute path, quoted with " or ` when it holds a space,
+                       then only whitespace; the path is taken as written (no punctuation is stripped and nothing
+                       is expanded). The lint calls os.stat on it on the host the lint runs on: a path that does
+                       not exist (ENOENT, or ENOTDIR for a path under a file; a dangling symbolic link is one,
+                       since the link is followed) is a HARD finding (exit 1). Any other stat error (EACCES on a
+                       parent directory, ELOOP, ENAMETOOLONG), a path that is neither a regular file nor a
+                       directory (a FIFO, a socket, a device) and a path os.access(R_OK) refuses for the lint's
+                       uid are CANNOT_EVALUATE (exit 2); os.access opens no descriptor, so a FIFO or a device is
+                       never opened. A declaration P6 cannot check is CANNOT_EVALUATE (exit 2): no path (a bare
+                       INPUT:, an empty quoted path), a path holding a character of INPUT_SHAPE_CHARACTERS (a
+                       <name> placeholder, $, ~, a glob or a brace: < > $ ~ * ? [ ] { }) or a control character,
+                       a relative path, a `..` component, a quote that does not close on the line, a word after
+                       the path (an unquoted space), or bold markup that does not close around the label. A
+                       LOOK-ALIKE input label is never ignored, as a workdir label is not: a line that is no
+                       declaration but, folded to NFKC (a fullwidth colon or letter is its ASCII form) with
+                       markup, backticks and table pipes skipped around the label, opens with INPUT or INPUTS in
+                       any case and a colon (Input:, input:, INPUTS:, INPUT with a fullwidth colon, `INPUT: x`,
+                       | INPUT: | x |) is CANNOT_EVALUATE (exit 2). A path in prose is never judged by P6: only a
+                       declared input is, and an output the brief asks the worker to create is not declared, so
+                       it is not judged.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
-there. It does not follow symbolic links, so a path under the workdir lexically can lead outside it; it does
+there. P6 checks only the paths a brief declares on INPUT: lines, only on the host the lint runs on and only at
+lint time: a declared input present there can be missing where the worker runs, unreadable by the worker's uid,
+sandbox or mount, or removed or replaced after the lint runs; os.access answers for the lint's own real uid and
+groups, not the worker's, so a lint run as root passes a mode-000 file; a directory is checked for read
+permission, not for search permission; a symbolic link is followed and its target judged; a required input the
+brief names only in prose, or not at all, is not checked; and a verifier that skips a declared input without
+saying so is not caught here (check_verifier_delivery reads a clean verdict whose UNVERIFIABLE answer names a
+declared input as no vote, and no more). P2 does not follow symbolic links, so a path under the workdir lexically
+can lead outside it; the preflight does
 not know which relative paths are inputs and which are files the brief asks the worker to create, so a path
 missing at a pin is ADVISORY (P3); P2 judges only the slashes above (a path split by a line break, a relative
 path, a path in an http:// or https:// word, and a path spelt with look-alike slashes are not judged, and an
@@ -403,16 +435,19 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2 or P5). Rewrite the brief, or send the item
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5 or P6). Rewrite the brief, or send the item
                            to a family that can execute (S1 to S3), name paths it can read (P2) or, after the reach,
                            add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or reach
-                           the pin by a dispatch ref (P5).
+                           the pin by a dispatch ref (P5), or provide each missing declared input or correct its
+                           INPUT line (P6).
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
   exit 2  CANNOT_EVALUATE  the brief is missing, not a regular file, larger than MAX_BYTES, not UTF-8, or
                            blank; a scope range runs backwards; a pinned revision does not resolve or
-                           cannot be read (P3); the family is not in the table; the
+                           cannot be read (P3); an INPUT line P6 cannot check, a look-alike input label, or a
+                           declared input that exists but cannot be confirmed readable (P6); the family is not
+                           in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
                            included). A brief that cannot be evaluated is never OK.
@@ -546,6 +581,7 @@ import ast
 import atexit
 import bisect
 import contextlib
+import errno
 import io
 import os
 import posixpath
@@ -1701,6 +1737,17 @@ NEAR_PIN_FORM = "NFKC"
 NEAR_PIN_DASHES = frozenset(("Pd",))
 NEAR_PIN_RE = re.compile(r"[`|*_\s]*+(?:REVIEWED\s++HEAD|BRIEF-PIN)[`|*_\s]*+[:=]?+[`|*_\s(]*+"
                          r"([0-9a-f]{64}|[0-9a-f]{7,40})(?![\w-])", re.I)
+# P6: a line that opens (after markup) with INPUT_LABEL, or with the bold INPUT_BOLD_LABEL after `**`, declares one
+# input path; a character of INPUT_SHAPE_CHARACTERS in it (a <name> placeholder, a variable, a home path, a glob or
+# brace) leaves the path unknown; a stat error in MISSING_ERRNOS is a missing input, any other is cannot evaluate
+INPUT_LABEL = "INPUT:"
+INPUT_BOLD_LABEL = "INPUT**:"
+INPUT_SHAPE_CHARACTERS = frozenset("<>$~*?[]{}")
+MISSING_ERRNOS = frozenset((errno.ENOENT, errno.ENOTDIR))
+# a LOOK-ALIKE input label (near_input): once folded to INPUT_FORM, INPUT or INPUTS in any case and a colon, with
+# markup, backticks and table pipes skipped around the label
+INPUT_FORM = "NFKC"
+NEAR_INPUT_RE = re.compile(r"[`|*_\s]*+INPUTS?+[`|*_\s]*+:", re.I)
 # a slash after a letter, a digit or one of these continues a relative path word, so P2 does not judge it
 PATH_GLUE = frozenset("._")
 # a web address is not a file read; file:// and every other scheme is judged as a path
@@ -1922,6 +1969,66 @@ def near_pin(line):
     return found.group(1) if found else None
 
 
+def input_declaration(line, start):
+    """None when `line` is no INPUT declaration, else (path, None) for a path P6 can check or (None, reason) for a
+    declaration whose path it cannot. `start` is where the line's opening markup ends (MarkupEnds). The label is
+    INPUT_LABEL, or, after an opening `**`, INPUT_LABEL then `**` or INPUT_BOLD_LABEL; then one path, quoted with
+    " or ` when it holds a space, then only whitespace (input_shape judges the path)."""
+    bold = line.endswith("**", 0, start)
+    if line.startswith(INPUT_LABEL, start):
+        rest = line[start + len(INPUT_LABEL):]
+        closed = rest.startswith("**")
+        rest = rest[2:] if closed else rest
+    elif line.startswith(INPUT_BOLD_LABEL, start):
+        rest, closed = line[start + len(INPUT_BOLD_LABEL):], True
+    else:
+        return None
+    if bold != closed or rest[:1] in ("*", "_"):
+        return None, "the INPUT label's markup does not close around it; write INPUT:, **INPUT:** or **INPUT**:"
+    rest = rest.lstrip()
+    if rest[:1] in ('"', "`"):
+        end = rest.find(rest[0], 1)
+        if end < 0:
+            return None, "the declared input's quote does not close on its line"
+        path, tail = rest[1:end], rest[end + 1:]
+    else:
+        words = rest.split(None, 1)
+        path, tail = (words[0] if words else ""), (words[1] if len(words) > 1 else "")
+    if tail.strip():
+        return None, ("a word follows the declared input {} (quote a path that holds a space, and write nothing "
+                      "after it)".format(path))
+    return input_shape(path)
+
+
+def input_shape(path):
+    """(path, None) when a declared input names one absolute path P6 can check, else (None, reason): no path, a
+    character of INPUT_SHAPE_CHARACTERS (a <name> placeholder, $, ~, a glob or a brace), a control character, a
+    relative path, or a `..` component."""
+    if not path:
+        return None, "an INPUT line with no path; write one absolute path after INPUT:"
+    if any(character in INPUT_SHAPE_CHARACTERS for character in path):
+        return None, ("the declared input {} holds a placeholder, variable, home, glob or brace character ({}), so "
+                      "the path it names is not in the text; write the path itself".format(
+                          path, " ".join(sorted(INPUT_SHAPE_CHARACTERS))))
+    if any(unicodedata.category(character) == "Cc" for character in path):
+        return None, "the declared input {!r} holds a control character".format(path)
+    if not path.startswith("/"):
+        return None, "the declared input {} is not an absolute path".format(path)
+    if ".." in path.split("/"):
+        return None, "the declared input {} holds a `..` component; write the path itself".format(path)
+    return path, None
+
+
+def near_input(line):
+    """Whether a line that is no INPUT declaration reads as one once folded: the line folded to INPUT_FORM (NFKC: a
+    fullwidth colon or letter is read as its ASCII form), then matched after its markup by NEAR_INPUT_RE (INPUT or
+    INPUTS in any case and a colon, backticks and table pipes skipped around the label). So Input:, input:,
+    INPUTS:, INPUT with a fullwidth colon and `INPUT: x` are look-alikes, and Input files are listed below is not."""
+    if not line.isascii():   # NFKC leaves ASCII as it is
+        line = unicodedata.normalize(INPUT_FORM, line)
+    return bool(NEAR_INPUT_RE.match(line, MarkupEnds(line)(0)))
+
+
 class PreflightText:
     """The paths a brief names, found once: [(line, path)] for the path words P2 judges (see path_words), split
     into the absolute ones and the ones it cannot place (unplaced), each kept only when no prohibition
@@ -1932,9 +2039,11 @@ class PreflightText:
     BRIEF-PIN, plain or in bold, and a commit of 7 to 40 or 64 hex digits; the BRIEF-PIN ones and the REVIEWED HEAD
     ones also apart, for pin agreement (rule_p3) and the P5 cure), the lines that open with such a label but carry
     no such commit (bad_pins) and the commit ids of the other lines that are look-alike pin lines (near_pins, see
-    near_pin; for pin agreement); and whether a hand-back file is named (the words hand-back file or path and an
-    absolute path on one line). `raw` is the brief's text before decode_brief removes format characters, which the P5
-    cure reads (cure_lines); None stands for `text` itself."""
+    near_pin; for pin agreement); the declared inputs (input_declaration: [(line, path)]) and the INPUT lines whose
+    path cannot be checked or that are look-alikes (near_input), with the reason (bad_inputs); and whether a
+    hand-back file is named (the words hand-back file or path and an absolute path on one line). `raw` is the
+    brief's text before decode_brief removes format characters, which the P5 cure reads (cure_lines); None stands
+    for `text` itself."""
 
     def __init__(self, text, raw=None):
         self.text = text
@@ -1946,6 +2055,8 @@ class PreflightText:
         self.reviewed_heads = []   # [(line, pin)] for the pin lines labelled REVIEWED HEAD
         self.near_pins = []   # [(line, commit id)] for the look-alike pin lines (near_pin)
         self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
+        self.inputs = []   # [(line, path)] for the INPUT declarations P6 checks
+        self.bad_inputs = []   # [(line, reason)] for an INPUT line P6 cannot check, or a look-alike of one
         self.handback_named = False
         bare = None   # the line of a bare Workdir (or Workdir:, Workdir is) whose path is on the next line
         for number, line in enumerate(text.split("\n"), 1):
@@ -1986,6 +2097,15 @@ class PreflightText:
                 self.bad_pins.append(number)
             elif near_pin(line) is not None:
                 self.near_pins.append((number, near_pin(line)))
+            declared = input_declaration(line, start)
+            if declared is None and near_input(line):
+                self.bad_inputs.append((number, "a line that opens with a look-alike of the INPUT: label (another "
+                                        "case, INPUTS, a fullwidth colon, a code span or a table cell) is never "
+                                        "ignored; write INPUT: and one absolute path"))
+            elif declared is not None and declared[1] is not None:
+                self.bad_inputs.append((number, declared[1]))
+            elif declared is not None:
+                self.inputs.append((number, declared[0]))
             if found and HANDBACK_NAMED_RE.search(line):
                 self.handback_named = True
         if bare is not None:
@@ -2870,12 +2990,56 @@ def rule_p5(names, row, repo):
     return findings
 
 
+def input_readable(path):
+    """Whether the lint's real uid may read `path`: os.access R_OK, which opens no descriptor."""
+    return os.access(path, os.R_OK)
+
+
+def input_state(path):
+    """(errno, reason) for a declared input on the host the lint runs on, opening nothing: (None, None) when os.stat
+    finds a regular file or a directory that input_readable allows; the stat's errno and message when it fails;
+    (None, reason) for any other file type (a FIFO, a socket, a device); (EACCES, reason) when input_readable
+    refuses."""
+    try:
+        info = os.stat(path)
+    except OSError as exc:
+        return exc.errno, exc.strerror or str(exc)
+    except ValueError as exc:
+        return None, str(exc)
+    if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+        return None, "it is neither a regular file nor a directory"
+    if not input_readable(path):
+        return errno.EACCES, "the lint's uid may not read it (os.access R_OK refused)"
+    return None, None
+
+
+def rule_p6(names, row, repo):
+    """P6 HARD, for every family: a declared input (an INPUT line, input_declaration) that does not exist on the host
+    the lint runs on (input_state gives an errno of MISSING_ERRNOS: ENOENT, or ENOTDIR for a path under a file).
+    An INPUT line whose path cannot be checked or a look-alike label (bad_inputs), any other stat error, another
+    file type and a path input_readable refuses leave the input unconfirmed: CannotEvaluate, never a pass. Paths in
+    prose are not judged."""
+    if names.bad_inputs:
+        line, reason = names.bad_inputs[0]
+        raise CannotEvaluate("line {}: {}".format(line, reason))
+    findings = []
+    for line, path in _first_seen(names.inputs):
+        code, reason = input_state(path)
+        if code in MISSING_ERRNOS:
+            findings.append(("P6", "HARD", line, "declared input does not exist on this host ({}), so the worker "
+                             "cannot read it; provide it or correct the INPUT line".format(reason), _excerpt(path)))
+        elif reason is not None:
+            raise CannotEvaluate("line {}: the declared input {} cannot be confirmed readable: {}".format(
+                line, path, reason))
+    return findings
+
+
 def preflight(text, row, repo, raw):
-    """The preflight findings (P1 to P5) for a brief's text and its family's row; they apply to every family. `raw`
+    """The preflight findings (P1 to P6) for a brief's text and its family's row; they apply to every family. `raw`
     is the text before decode_brief removed format characters, which the P5 cure reads."""
     names = PreflightText(text, raw)
     return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo)
+        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo)
 
 
 def can_execute(row):
@@ -2938,7 +3102,9 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6"))
+# added to a REFUSE line when a P6 hit is among the hard hits
+INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None):
@@ -2951,22 +3117,27 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     for rule, severity, line, message, excerpt in findings:
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
+    missing_input = INPUT_HINT if "P6" in hard else ""
     if code == EXIT_REFUSE and set(hard) - PREFLIGHT_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
-              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}".format(
+              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else ""))
+                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
-              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}; "
+              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
               "{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
-                  CURE_SHAPE))
+                  missing_input, CURE_SHAPE))
+    elif code == EXIT_REFUSE and set(hard) == {"P6"}:
+        print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
+              "P6 x{}){}".format(family, len(hard), len(hard), INPUT_HINT))
     elif code == EXIT_REFUSE:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
-              "paths under the declared workdir, or state a path the worker must not use as a prohibition".format(
-                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard)))))
+              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}".format(
+                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                  missing_input))
     elif can_execute(table[family]):
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
         print("OK: family {} can execute ({}); the execution rules do not apply{}".format(
@@ -5663,7 +5834,96 @@ def self_test(report_path=None):
             CLONE_REVISION_OPTIONS=frozenset()))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 187)
+    # ---------- P6: a declared input (an INPUT line) must exist on the lint's host; {T} is a fresh directory ----------
+    inputs = Path(tempfile.mkdtemp(prefix="aiqt-brief-input-"))
+    locked = inputs / "locked"
+    try:
+        os.makedirs(inputs / "dir with space")
+        os.makedirs(locked)
+        for name in ("in.md", "dir with space/in.md", "unreadable.md", "locked/in.md"):
+            with open(inputs / name, "w", encoding="utf-8") as handle:
+                handle.write("input\n")
+        os.symlink(inputs / "nowhere.md", inputs / "dangling.md")
+        os.mkfifo(inputs / "fifo")
+        os.chmod(inputs / "unreadable.md", 0)
+        os.chmod(locked, 0)
+
+        def p6(text, family="alpha"):
+            return _outcome(text.replace("{T}", str(inputs)), family)
+
+        def p6_code(text):
+            outcome = p6(text)
+            return outcome if isinstance(outcome, str) else outcome[0]
+
+        def unreadable_code():
+            """The mode-000 vector with os.access refusing for every uid, so it runs as root too."""
+            with _patched(input_readable=lambda path: False):
+                return p6_code("INPUT: {T}/unreadable.md\n")
+
+        p6_missing = (1, [("P6", "HARD")])
+        check("preflight/p6-present-quiet", [p6(text) for text in (
+            "INPUT: {T}/in.md\n", "INPUT: \"{T}/dir with space/in.md\"\n", "INPUT: `{T}/dir with space/in.md`\n",
+            "INPUT: {T}\n", "INPUT: \"{T}/dir with space\"\n", "**INPUT:** {T}/in.md\n", "**INPUT**: {T}/in.md\n",
+            "- INPUT: {T}/in.md\n", "INPUT: {T}/in.md\r\n")], [(0, [])] * 9)
+        # the end of the declaration: exactly at the path's end, just inside (trailing whitespace), just outside
+        check("preflight/p6-trailing-boundary", [p6(text) for text in (
+            "INPUT: {T}/in.md\n", "INPUT: {T}/in.md  \t \n", "INPUT: {T}/in.md extra\n")],
+            [(0, []), (0, []), "CannotEvaluate"])
+        # prose is never judged: a missing input named only in prose, an output to create, a placeholder clone line
+        check("preflight/p6-prose-quiet", [p6(text) for text in (
+            "Read {T}/missing.md and summarise it.\n", "Write your notes to {T}/out/new.md (create it).\n",
+            "Make a scratch clone: `git clone --no-hardlinks <url> <scratch>/r && git -C <scratch>/r checkout "
+            "--detach <pin>`\n", "Input files are listed below: {T}/missing.md\n")], [(0, [])] * 4)
+        check("preflight/p6-missing-hard", [p6(text) for text in (
+            "INPUT: {T}/missing.md\n", "**INPUT:** {T}/missing.md\n", "**INPUT**: {T}/missing.md\n",
+            "INPUT: {T}/dangling.md\n", "INPUT: {T}/in.md/x\n", "```\nINPUT: {T}/missing.md\n```\n")]
+            + [p6("INPUT: {T}/missing.md\n", "gamma")], [p6_missing] * 7)
+        table = parse_table(TABLE_FIXTURE.encode("utf-8"))
+        second = evaluate("INPUT: {T}/in.md\nINPUT: {T}/missing.md\n".replace("{T}", str(inputs)).encode("utf-8"),
+                          "alpha", table)
+        check("preflight/p6-second-line-named", (second[0], [(rule, line) for rule, _, line, _, _ in second[1]]),
+              (1, [("P6", 2)]))
+        check("preflight/p6-shape-cannot-evaluate", [p6(text) for text in (
+            "INPUT: <scratch>/in.md\n", "INPUT: $HOME/in.md\n", "INPUT: ~/in.md\n", "INPUT: docs/in.md\n",
+            "INPUT: {T}/a/../in.md\n", "INPUT: {T}/*.md\n", "INPUT: {T}/{a,b}.md\n", "INPUT:\n", "INPUT: \"\"\n",
+            "INPUT: \"{T}/in.md\n", "INPUT: {T}/dir with space/in.md\n", "**INPUT: {T}/in.md\n",
+            "INPUT:** {T}/in.md\n")], ["CannotEvaluate"] * 13)
+        check("preflight/p6-look-alike-cannot-evaluate", [p6(text) for text in (
+            "Input: {T}/in.md\n", "input: {T}/in.md\n", "INPUTS: {T}/in.md\n", "INPUT： {T}/in.md\n",
+            "ＩＮＰＵＴ: {T}/in.md\n", "`INPUT: {T}/in.md`\n", "| INPUT: | {T}/in.md |\n",
+            "INPUT : {T}/in.md\n")], ["CannotEvaluate"] * 8)
+        check("preflight/p6-not-file-or-directory-cannot-evaluate",
+              [p6(text) for text in ("INPUT: {T}/fifo\n", "INPUT: /dev/null\n")], ["CannotEvaluate"] * 2)
+        # a uid that reads a mode-000 file (root, or a capability) cannot show the permission refusal: recorded
+        enforced = not os.access(inputs / "unreadable.md", os.R_OK)
+        skipped = "skipped: this uid reads a mode-000 file, so os.access cannot refuse here"
+        check("preflight/p6-permission-cannot-evaluate",
+              [p6(text) for text in ("INPUT: {T}/unreadable.md\n", "INPUT: {T}/locked/in.md\n")] if enforced
+              else skipped, ["CannotEvaluate"] * 2 if enforced else skipped)
+        if not enforced:
+            print("NOTE: preflight/p6-permission-cannot-evaluate " + skipped)
+        printed = io.StringIO()
+        brief_path, table_path = inputs / "brief.md", inputs / "table.toml"
+        with open(brief_path, "w", encoding="utf-8") as handle:
+            handle.write("INPUT: {}/missing.md\n".format(inputs))
+        with open(table_path, "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        with contextlib.redirect_stdout(printed):
+            refused = run(str(brief_path), "alpha", table_path)
+        check("preflight/p6-refuse-line", (refused, "declares an input that does not exist" in printed.getvalue(),
+                                           INPUT_HINT in printed.getvalue()), (1, True, True))
+        missing = lambda: p6_code("INPUT: {T}/missing.md\n")  # noqa: E731
+        check("revert/p6-red", *flip([missing], [0], rule_p6=nothing))
+        check("revert/p6-probe-red", *flip([missing], [0], input_state=lambda path: (None, None)))
+        check("revert/p6-eacces-red", *flip([unreadable_code], [1], MISSING_ERRNOS=MISSING_ERRNOS | {errno.EACCES}))
+        check("revert/p6-near-input-red", *flip([lambda: p6_code("Input: {T}/in.md\n")], [0], NEAR_INPUT_RE=never))
+        check("revert/p6-shape-red", *flip([lambda: p6_code("INPUT: {T}/*.md\n")], [1],
+                                           INPUT_SHAPE_CHARACTERS=frozenset()))
+    finally:
+        if os.path.lexists(locked):
+            os.chmod(locked, 0o700)
+        shutil.rmtree(inputs, ignore_errors=True)
+    check("revert/every-flip-ran", len(flipped), 192)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -5713,7 +5973,10 @@ def self_test(report_path=None):
           "negation before another verb, a prohibition word in a code span or after `=`, a second listed command "
           "line and a later clause are judged), and prints one reached from prose, gh pr checkout, a web address "
           "naming a branch or a "
-          "submodule update --remote (P5), and "
+          "submodule update --remote (P5), refuses a declared input (an INPUT: line, plain or bold, in a fence "
+          "too) missing on this host, a dangling link or a path under a file included, never a path in prose, and "
+          "exits 2 on an INPUT line it cannot check, a look-alike label, a FIFO or device, or an input this uid "
+          "cannot read (P6), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "

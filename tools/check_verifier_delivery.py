@@ -142,7 +142,17 @@ Rules:
      (a run of letters or digits) outside its "QN." marker and the file names it holds, where its words
      are not exactly the words of its question (a restated question). So "Q1. ", "Q1. README.md", the
      question copied back and "Q2. Confirmed." under a quote question are not answered, and findings
-     text never answers the last question. One UNVERIFIABLE answer among answered ones is legitimate.
+     text never answers the last question. One UNVERIFIABLE answer among answered ones is legitimate,
+     except over a declared input: under the clean verdict (VERDICT: NO BLOCKERS), an UNVERIFIABLE answer
+     whose text (its "QN." line and body, outside fenced blocks and blockquotes) holds a path the brief
+     declares on an INPUT line, as a substring, makes the delivery NO_VOTE (exit 1, the reason naming the
+     answer, the path and its brief line): a clean verdict over a required input the verifier did not read
+     counts as not-passed. The brief is the --brief file already read for its pin and questions. An INPUT
+     line is any brief line (a fenced one included) that opens, once leading spaces, tabs and the
+     characters > * _ # + - . ) and digits are stripped, with INPUT: or INPUT**:, then, past any
+     asterisks and whitespace, one path: the text inside a " or ` quote, else the first word. The path is
+     compared as text and never opened. A BLOCKERS FOUND or any other verdict is unchanged, and an
+     UNVERIFIABLE answer that names no declared input is legitimate as above.
      Coverage n/m is reported: n answered answers, m the brief's numbered questions.
   C2 verbatim. Every fenced code block, every blockquote run and every inline double-quoted span must
      appear byte for byte (UTF-8) as a contiguous span of one file of the pinned tree (a tree file stored
@@ -295,7 +305,16 @@ whole-line reading refuses a backslash-escaped reference that reads as a marker 
 over-refusal this grammar accepts; the escape-aware reading is kept beside the whole-line
 reading as a further refusal branch, a stated union, never a replacement);
 the UNVERIFIABLE and quote-question tests are word tests, so a stray
-mention moves an answer toward NO_VOTE, never toward a pass. Object reads: commit and tree objects are
+mention moves an answer toward NO_VOTE, never toward a pass. The declared-input reading of C1 matches a
+declared path as a substring of the UNVERIFIABLE answer's text: an answer that names the input another way
+(a relative path, its basename, another spelling, a link to it) passes as before, and a declared path that
+starts another named path (/a/in.md of /a/in.md.bak, a directory of a file under it) reads as named, toward
+NO_VOTE; INPUT lines are read leniently and the brief lint (check_brief_capability P6) refuses any other
+shape and every look-alike label before the brief is sent, so here a look-alike or malformed declaration
+declares nothing; a verifier that skips a declared input without answering UNVERIFIABLE for it is not
+caught (that needs a per-input acknowledgement in the delivery format); and an UNVERIFIABLE answer naming
+an absolute path outside the repository that its question does not name already fails on that absent file
+reference (C2), and FAIL wins over NO_VOTE. Object reads: commit and tree objects are
 not re-hashed (only blobs are), so a rewritten loose tree or commit object could list other existing
 blob ids; a shallow file cuts only parent lists, which no read here uses. git is resolved through PATH,
 a trusted-toolchain concern; a repository in SHA-256 object format never resolves a 40-hex pin and so
@@ -303,7 +322,8 @@ cannot be evaluated.
 
 SELF-TEST COVERAGE. Each rule has a fixture that changes result when the rule is removed; a flip/ check
 patches a rule out in the suite and shows its fixture's result change for C1 (no answered item, answer
-content, a quote question needs a quote, findings evidence is no answer), C2 (verbatim, inline, fenced,
+content, a quote question needs a quote, findings evidence is no answer, a clean verdict over an
+UNVERIFIABLE answer that names a declared input), C2 (verbatim, inline, fenced,
 list-item fences, blockquotes, the answer's names, absent references in an answer and in a question,
 the findings section and its names, quoted text naming nothing, bare-name binding, absolute repository
 paths, excerpts, indentation, examples and their closing ")", the example openers, CRLF tree files),
@@ -402,6 +422,10 @@ HARNESS_FIRST_RE = re.compile(r"WORKER_STATUS: [A-Z][A-Z_]*+ \(account=[^\s,()]+
                               r"model=[^\s,()]++, effort=[^\s,()]++\)")
 HARNESS_LAST_LINE = "WORKER_STATUS: COMPLETE"
 CLEAN_VERDICT = "NO BLOCKERS"
+# C1: a brief line that opens, once the characters of INPUT_MARKUP are stripped, with a label of INPUT_LABELS
+# declares one input path (_declared_inputs)
+INPUT_LABELS = ("INPUT:", "INPUT**:")
+INPUT_MARKUP = " \t>*_#+-.)0123456789"
 ANSWER_HEAD_RE = re.compile(r"Q([0-9]+)\.(?=[ \t]|$)")
 # U+2800 BRAILLE PATTERN BLANK is no space and no format character, yet renders as a blank glyph.
 MARKER_DECORATION = " \t*_#>+-\\\u2800"
@@ -2020,6 +2044,51 @@ def _rule_all_unverifiable(verdict, answered, total):
     return None
 
 
+def _declared_inputs(lines):
+    """(brief line, path) for the first declaration of each input the brief declares on an INPUT line: a line
+    (a fenced one included) that opens, once the characters of INPUT_MARKUP are stripped, with a label of
+    INPUT_LABELS, then, past any asterisks and whitespace, one path: the text inside a " or ` quote, else the
+    first word. The path is text, never opened; the brief lint's P6 refuses a declaration of any other shape."""
+    declared, seen = [], set()
+    for number, line in lines:
+        rest = line.lstrip(INPUT_MARKUP)
+        label = next((label for label in INPUT_LABELS if rest.startswith(label)), None)
+        if label is None:
+            continue
+        rest = rest[len(label):].lstrip("* \t")
+        if rest[:1] in ('"', "`"):
+            end = rest.find(rest[0], 1)
+            path = rest[1:end] if end > 0 else ""
+        else:
+            words = rest.split(None, 1)
+            path = words[0] if words else ""
+        if path and path not in seen:
+            seen.add(path)
+            declared.append((number, path))
+    return declared
+
+
+def _rule_unread_input(verdict, answers, inputs):
+    """C1: the clean verdict with an UNVERIFIABLE answer whose text (its QN. line and body) holds a declared input
+    path (_declared_inputs) as a substring is no vote: a clean verdict over a required input the verifier did not
+    read counts as not-passed. Any other verdict, and an UNVERIFIABLE answer naming no declared input, is as
+    before."""
+    if verdict != CLEAN_VERDICT or not inputs:
+        return None
+    unread = []
+    for item in answers:
+        if item["unverifiable"]:
+            text = "\n".join([item["heading"]] + item["body"])
+            unread.extend("Q{} names {} (brief line {})".format(item["item"], path, line)
+                          for line, path in inputs if path in text)
+    if not unread:
+        return None
+    return ("verdict {!r} with an UNVERIFIABLE answer over an input the brief declares ({}): a clean verdict over a "
+            "required input the verifier did not read counts as not-passed".format(
+                verdict, "; ".join(unread[:MAX_LISTED]) + (" and {} more".format(len(unread) - MAX_LISTED)
+                                                         if len(unread) > MAX_LISTED else "")))
+
+
 # ---------------------------------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------------------------------
@@ -2036,6 +2105,7 @@ def evaluate(brief_path, delivery_path, repo):
         report["pin"] = pin
         body = _delivery_body(delivery, pin)
         questions = _parse_questions(_lines(brief))
+        inputs = _declared_inputs(_lines(brief))
         if not questions:
             raise CannotEvaluate("the brief numbers no question; the closed delivery shape answers a numbered "
                                  "question list")
@@ -2080,7 +2150,8 @@ def evaluate(brief_path, delivery_path, repo):
     total = len(questions)
     answered = sum(1 for item in items if item["state"] == "answered")
     report["coverage"] = {"answered": answered, "total": total, "text": "{}/{}".format(answered, total)}
-    no_vote = [reason for reason in (_rule_all_unverifiable(report["delivery_verdict"], answered, total),) if reason]
+    no_vote = [reason for reason in (_rule_all_unverifiable(report["delivery_verdict"], answered, total),
+                                     _rule_unread_input(report["delivery_verdict"], items, inputs)) if reason]
     if failures:
         report["verdict"] = "FAIL"
         report["reasons"] = failures + no_vote
@@ -2151,6 +2222,10 @@ BRIEF_QUOTE_TWO = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
 BRIEF_ABSENT_ASKED = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Does docs/retired/alpha.md still exist?\n"
 BRIEF_VERSION = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the VERSION line as written.\n"
 BRIEF_BARE_ABSENT = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the first rule from alpha_old.md.\n"
+# question 3 names an input outside the repository, so an answer naming it is no absent reference of its own
+BRIEF_INPUT = BRIEF_MIXED.replace("3. Quote the sentence in docs/gamma.md.", "3. Quote the sentence in /abs/in.md.")
+BRIEF_INPUT_DECLARED = BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: /abs/in.md\n")
+A3_UNREAD = "Q3. UNVERIFIABLE: cannot read /abs/in.md."
 A1 = 'Q1. docs/alpha.md reads "The first rule is plain."'
 A2 = "Q2. src/beta.py:\n```python\n    if ready:\n        return 1\n```"
 A3 = 'Q3. docs/gamma.md says "Only gamma carries this exact sentence."'
@@ -2269,6 +2344,41 @@ def _self_test_cases(fx):
           "PASS")
     one = fx.run(_mixed(sha, {3: _unverifiable(3)}, lead=HARNESS_LEAD))
     check("c1/one-unverifiable-passes", (verdict(one), one["coverage"]["text"]), ("PASS", "3/4"))
+    # a clean verdict whose UNVERIFIABLE answer names an input the brief declares is no vote
+    unread = _mixed(sha, {3: A3_UNREAD})
+    report = fx.run(unread, BRIEF_INPUT_DECLARED)
+    check("c1/unverifiable-declared-input-no-vote",
+          (verdict(report), report["coverage"]["text"], "/abs/in.md (brief line 3)" in " ".join(report["reasons"])),
+          ("NO_VOTE", "3/4", True))
+    check("flip/c1-declared-input",
+          verdict(_patched("_rule_unread_input", lambda *a: None, lambda: fx.run(unread, BRIEF_INPUT_DECLARED))),
+          "PASS")
+    report = fx.run(unread, BRIEF_INPUT)
+    check("c1/unverifiable-no-declared-input-passes", (verdict(report), report["coverage"]["text"]), ("PASS", "3/4"))
+    check("c1/unverifiable-undeclared-path-passes", verdict(fx.run(
+        _mixed(sha, {3: A3_UNREAD.replace("in.md", "other.md")}),
+        BRIEF_INPUT_DECLARED.replace("3. Quote the sentence in /abs/in.md.", "3. Quote the sentence in /abs/other.md."))),
+        "PASS")
+    report = fx.run(_mixed(sha, {3: A3_UNREAD}, verdict="VERDICT: BLOCKERS FOUND"), BRIEF_INPUT_DECLARED)
+    check("c1/unverifiable-declared-input-blockers-unchanged", (verdict(report), report["delivery_verdict"]),
+          ("PASS", "BLOCKERS FOUND"))
+    in_repo = "{}/docs/gamma.md".format(fx.repo)
+    spaced = "/abs/dir with space/inputs"
+    check("c1/declared-input-forms-no-vote", [verdict(fx.run(delivery, brief)) for delivery, brief in (
+        (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n**INPUT:** /abs/in.md\n")),
+        (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n**INPUT**: /abs/in.md\n")),
+        (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n- INPUT: /abs/in.md\n")),
+        (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n```\nINPUT: /abs/in.md\n```\n")),
+        (_mixed(sha, {3: "Q3. UNVERIFIABLE: cannot read " + in_repo}),
+         BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: " + in_repo + "\n")),
+        (_mixed(sha, {3: "Q3. UNVERIFIABLE: " + spaced + " could not be listed."}),
+         BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: \"" + spaced + "\"\n")))],
+          ["NO_VOTE"] * 6)
+    # an answer naming an absolute path its question does not name already fails on that absent reference
+    report = fx.run(unread, BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: /abs/in.md\n"))
+    check("c1/declared-input-absent-reference-fail-wins",
+          (verdict(report), any("absent from the pinned tree" in reason for reason in report["reasons"]),
+           any("input the brief declares" in reason for reason in report["reasons"])), ("FAIL", True, True))
     no_quotes = _delivery(sha, *("Q{}. Confirmed after reading the file.".format(n) for n in range(1, 5)))
     report = fx.run(no_quotes, BRIEF_QUOTE_ONLY)
     check("c1/quote-only-without-quotes-no-vote", (verdict(report), report["coverage"]["text"]), ("NO_VOTE", "0/4"))
