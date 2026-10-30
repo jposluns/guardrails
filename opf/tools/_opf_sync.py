@@ -77,24 +77,34 @@ boundary of _opf_observe._run_git): the adopter's global and system git configur
 so credential helpers and SSH keys work (HOME, XDG_CONFIG_HOME and the safe GIT_CONFIG_NOSYSTEM
 toggle are carried, with SSH_AUTH_SOCK for an agent-held key), while every other ambient GIT_*
 variable is dropped by construction and the env-based config overrides are dropped, not honoured
-(they can set any key). Repository-local exec surfaces are forced off for the transport call:
-core.hooksPath to the null device (no repository pre-push or other hook runs), core.fsmonitor off,
-protocol.allow=never with only file, https and ssh re-allowed (a remote-helper or ext:: transport
-cannot run even where repository config allows it), and core.sshCommand pinned to the adopter's own
-global-or-system value (or plain `ssh` where none is set), so a repository-local core.sshCommand
-never executes while a global one is honoured as the adopter's own setting. Two enumerations then
-gate every fetch and push, both fail-closed. First, the repository scopes (--local and --worktree)
-are listed by name, and a credential helper, core.askpass, core.gitProxy, an http.sslVerify /
-sslCAInfo / sslCAPath server-trust override, an http.cookieFile / saveCookies cookie path, a
-fetch.bundleURI bundle source, a url.*.insteadOf / pushInsteadOf rewrite, and include.path /
-includeIf.*.path are each REFUSED, in the plain and the subsection form alike (http.cookieFile and
-http.<url>.cookieFile): a repository-planted helper is a program launch, a repository trust
-override can authenticate an interposed https server, a repository cookie path makes the https
-transport read cookies from, or write a cookie jar to, a file the repository chooses (a filesystem
-effect, not routing or shaping), a repository bundle source makes a fetch also download a bundle
-from a location the repository chooses and write its objects and refs/bundles/* refs under .git (a
-fetch source the destination agreement never verified), and a repository-local include is read by
-the transport but not expanded by a scoped listing, so its keys could not be verified by name.
+(they can set any key). Repository-local exec surfaces where a command-scope override wins are
+forced off for the transport call: core.hooksPath to the null device (no repository pre-push or
+other hook runs), core.fsmonitor off, protocol.allow=never with only file, https and ssh
+re-allowed, and core.sshCommand pinned to the adopter's own global-or-system value (or plain `ssh`
+where none is set), so a repository-local core.sshCommand never executes while a global one is
+honoured as the adopter's own setting. Two enumerations then gate every fetch and push, both
+fail-closed. First, the repository scopes (--local and --worktree) are listed by name, and a
+credential helper, core.askpass, core.gitProxy, a push.gpgSign / gpg.program /
+gpg.<format>.program / gpg.ssh.defaultKeyCommand push-signing key, a remote.<name>.receivepack /
+uploadpack / vcs program name, a per-protocol protocol.<name>.allow (protocol.allow included), an
+http.sslVerify / sslCAInfo / sslCAPath server-trust override, an http.cookieFile / saveCookies
+cookie path, a fetch.bundleURI bundle source, a url.*.insteadOf / pushInsteadOf rewrite, and
+include.path / includeIf.*.path are each REFUSED, in the plain and the subsection form alike
+(http.cookieFile and http.<url>.cookieFile): a repository-planted helper is a program launch, a
+repository push.gpgSign makes the push sign its certificate where the target advertises signing,
+running the signing program the configuration names, and a repository gpg.program, any
+gpg.<format>.program or gpg.ssh.defaultKeyCommand makes that a repository-chosen program, a
+repository remote.<name>.receivepack, uploadpack or vcs names the pack program or remote helper
+git runs where the configured remote's name is the very URL the transport is given, a repository
+per-protocol protocol.<name>.allow is read over the command-scope protocol.allow=never override
+(the specific key outranks the general one, whatever the scope) and could re-widen the transport
+onto a program-running helper, a repository trust override can authenticate an interposed https
+server, a repository cookie path makes the https transport read cookies from, or write a cookie
+jar to, a file the repository chooses (a filesystem effect, not routing or shaping), a repository
+bundle source makes a fetch also download a bundle from a location the repository chooses and
+write its objects and refs/bundles/* refs under .git (a fetch source the destination agreement
+never verified), and a repository-local include is read by the transport but not expanded by a
+scoped listing, so its keys could not be verified by name.
 Second, the EFFECTIVE url.* rewrites are read under the exact environment and override pairs the
 transport call runs with, so every source git would honour (global, system, local, worktree,
 include, command) is the source checked, and any insteadOf or pushInsteadOf whose prefix matches
@@ -126,12 +136,14 @@ refused), so the verified destination cannot be silently replaced and a wrong pr
 fails the transport closed. Shaping: http.extraHeader and the tuning keys (http.postBuffer, the
 pack and fetch sizing family, protocol.version) shape an already-authenticated connection to the
 verified URL and can at worst fail it; ssh.variant shapes the arguments of the pinned ssh and names
-no program; remote.<name>.* is never consulted (fetch and push go by explicit URL, never by remote
-name); and a per-protocol protocol.<name>.allow at repository scope can re-widen a protocol, but
-the verified URL is already restricted to file, https and ssh before any launch and URL rewriting
-is refused, so a widened protocol is reachable only through the verified target's own redirect,
-inside that trust domain. File reads: http.sslCert / sslKey, the proxy TLS paths
-(http.proxySSLCert / proxySSLKey / proxySSLCAInfo) and http.pinnedPubkey make the transport READ a
+no program; and remote.<name>.* is consulted only where a configured remote's NAME is itself the
+URL the transport is given (fetch and push go by explicit URL, never by a remote name the operator
+chose): a second remote section already refuses under the destination agreement's single-remote
+rule, the one recorded remote's push URL must agree with the recorded target, so a url or pushurl
+that differs from the verified URL refuses before any transport, and the program-naming remote
+keys (receivepack, uploadpack, vcs) are refused by name above. File reads: http.sslCert / sslKey,
+the proxy TLS paths (http.proxySSLCert / proxySSLKey / proxySSLCAInfo) and
+http.pinnedPubkey make the transport READ a
 file the repository names, to present a client certificate to the verified server or its proxy, to
 trust the proxy's own TLS, or to narrow the server's trust; they write nothing and leave the
 server's authentication to the adopter's trust roots. The destination agreement compares by exact
@@ -182,7 +194,14 @@ _HELPER_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9+.]*::")
 # Repository-SCOPE config keys the transport refuses by name, over both the --local and --worktree
 # listings (section/key folded, the subsection kept): a URL rewrite silently redirects the verified
 # destination; a repository-planted credential helper, askpass or git proxy is a program launch on
-# fetch or push; a repository-scope https trust override can authenticate an interposed server; a
+# fetch or push; a repository-scope push.gpgSign turns on push-certificate signing where the target
+# advertises it, which runs the configured signing program during the push, and a repository-scope
+# gpg.program, gpg.<format>.program or gpg.ssh.defaultKeyCommand makes that a repository-chosen
+# program; a repository-scope remote.<name>.receivepack, uploadpack or vcs names the pack program or
+# remote helper git runs where the configured remote's name is the URL the transport is given; a
+# repository-scope per-protocol protocol.<name>.allow is read over the command-scope
+# protocol.allow=never override and could re-widen the transport onto a program-running helper; a
+# repository-scope https trust override can authenticate an interposed server; a
 # repository-scope cookie file or cookie save makes the https transport read cookies from, or write a
 # cookie jar to, a path the repository chooses; a repository-scope bundle URI makes a fetch also
 # download a bundle from a location the repository chooses, writing its objects and refs/bundles/*
@@ -192,10 +211,15 @@ _HELPER_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9+.]*::")
 # instead; the effective url.* rewrites of EVERY scope are additionally matched against the verified
 # URL before each transport call. Each entry is a folded section.key, and a name refuses when it is
 # that key with or without a subsection between the two (http.sslVerify and http.<url>.sslVerify,
-# url.<base>.insteadOf, includeIf.<condition>.path); _refuse_local_redirect_config reads these lists
-# and nothing else, so the stated and the enforced lists are one.
+# url.<base>.insteadOf, includeIf.<condition>.path, gpg.program and gpg.<format>.program,
+# gpg.defaultkeycommand and gpg.ssh.defaultKeyCommand, protocol.allow and protocol.<name>.allow);
+# _refuse_local_redirect_config reads these lists and nothing else, so the stated and the enforced
+# lists are one.
 _LOCAL_REDIRECT_KEYS = (b"url.insteadof", b"url.pushinsteadof")
 _LOCAL_EXEC_KEYS = (b"credential.helper", b"core.askpass", b"core.gitproxy")
+_LOCAL_SIGN_KEYS = (b"push.gpgsign", b"gpg.program", b"gpg.defaultkeycommand")
+_LOCAL_REMOTE_PROGRAM_KEYS = (b"remote.receivepack", b"remote.uploadpack", b"remote.vcs")
+_LOCAL_PROTOCOL_KEYS = (b"protocol.allow",)
 _LOCAL_TRUST_KEYS = (b"http.sslverify", b"http.sslcainfo", b"http.sslcapath")
 _LOCAL_COOKIE_KEYS = (b"http.cookiefile", b"http.savecookies")
 _LOCAL_BUNDLE_KEYS = (b"fetch.bundleuri",)
@@ -569,7 +593,14 @@ def _refuse_local_redirect_config(git, store_root):
     """Refuse, by name, a repository-scope config key that would redirect, exec, weaken the trust
     decision or reach a repository-chosen path on the transport call: url.*.insteadOf /
     pushInsteadOf (a silent rewrite of the verified URL), a credential helper, core.askpass,
-    core.gitProxy, an http.sslVerify / sslCAInfo / sslCAPath server-trust override, an
+    core.gitProxy, a push.gpgSign / gpg.program / gpg.<format>.program / gpg.ssh.defaultKeyCommand
+    push-signing key (push.gpgSign makes the push sign its certificate where the target advertises
+    signing, running the configured signing program, and the gpg keys make that program a
+    repository-chosen one), a remote.<name>.receivepack / uploadpack / vcs program name (git runs
+    it where the configured remote's name is the URL the transport is given), a per-protocol
+    protocol.<name>.allow (read over the command-scope protocol.allow=never override, so it could
+    re-widen the transport onto a program-running helper), an http.sslVerify / sslCAInfo /
+    sslCAPath server-trust override, an
     http.cookieFile / saveCookies cookie path (the https transport reads cookies from, or writes a
     cookie jar to, a file the repository names), a fetch.bundleURI bundle source (a fetch also
     downloads a bundle from the location the repository names, writing its objects and
@@ -587,6 +618,22 @@ def _refuse_local_redirect_config(git, store_root):
         (_LOCAL_EXEC_KEYS,
          ", a repository-planted program launch on fetch or push; credentials belong in the "
          "adopter's own global configuration (spec 5.6); remove it and re-run (fail-closed)"),
+        (_LOCAL_SIGN_KEYS,
+         ", a repository-scope push-signing key: push.gpgSign makes the push sign its certificate "
+         "where the target advertises signing, running the configured signing program, and "
+         "gpg.program, gpg.<format>.program or gpg.ssh.defaultKeyCommand makes that a "
+         "repository-chosen program; the signing decision and the signing program belong to the "
+         "adopter's own global configuration (spec 5.6); remove it and re-run (fail-closed)"),
+        (_LOCAL_REMOTE_PROGRAM_KEYS,
+         ", a repository-scope pack program or remote helper name that git runs where the "
+         "configured remote's name is the URL the transport is given; the pack programs and "
+         "helpers belong to the adopter's own global configuration (spec 5.6); remove it and "
+         "re-run (fail-closed)"),
+        (_LOCAL_PROTOCOL_KEYS,
+         ", a repository-scope protocol allow that is read over the transport's "
+         "protocol.allow=never override and could re-widen the transport onto a program-running "
+         "helper; the protocol surface belongs to the adopter's own global configuration "
+         "(spec 5.6); remove it and re-run (fail-closed)"),
         (_LOCAL_INCLUDE_KEYS,
          ": the transport reads the included file, but this scoped enumeration does not expand it, "
          "so the included keys cannot be verified by name; move the settings you own into your "
@@ -1020,8 +1067,9 @@ def self_test():
     bare report, the fast-forward pull with its doctor gate, the authorized push with its
     destination agreement, the held-lease refusal (never seized), the hostile-repository-config
     neutralization, the effective URL-rewrite refusal over every config scope, the repository-scope
-    include/helper/trust/cookie/bundle refusals (every listed key in its plain and its
-    subsection form), the pre-git target validation, and the fetch/detached/unborn refusals. The
+    include/helper/signing/remote-program/protocol/trust/cookie/bundle refusals (every listed key
+    in its plain and its subsection form), the pre-git target validation, and the
+    fetch/detached/unborn refusals. The
     load-bearing guards are each also run with the guard dropped (an attribute-patched flip), so the
     vector that watches it is shown to go red. Judged on exit codes, repository state and lease
     bytes, never by output grepping alone. Returns 0 clean, 1 on a failure, 2 on a harness error."""
@@ -1439,7 +1487,6 @@ def _self_test_units(check):
             _git(x_root, "config", "core.hooksPath", hooks)
             _git(x_root, "config", "core.fsmonitor", os.path.join(hooks, "fsmon"))
             _git(x_root, "config", "core.sshCommand", os.path.join(hooks, "ssh"))
-            _git(x_root, "config", "protocol.ext.allow", "always")
             _local_commit(x_root, "data.txt", "seven\n")
             rc, _out = run(["--push", "--root", x_root])
             check("the hostile-config push completes with the exec surfaces neutralized",
@@ -1622,11 +1669,104 @@ def _self_test_units(check):
             check("emptying the bundle list lets the repository bundle source write refs/bundles/* "
                   "(shown red)",
                   rc == EXIT_OK and _bundle_refs() != "")
+            # a repository-scope push-signing key refuses, each listed key plain and under a
+            # subsection (each set alone on an ahead store, pushed, so the refusal is the only
+            # thing between it and the transport): the repository-chosen signing program never
+            # runs (no marker) and the target never moves; a name just past a listed key matches
+            # nothing and the run proceeds to the ordinary report
+            sg_root, sg_bare = _paired("signing")
+            sg_marker = os.path.join(base, "signing-marker")
+            sg_prog = Path(base) / "signing-gpg"
+            sg_prog.write_text("#!/bin/sh\n: > {}\nexit 1\n".format(sg_marker), encoding="utf-8")
+            os.chmod(str(sg_prog), 0o755)
+            _git(sg_bare, "config", "receive.certNonceSeed", "opf-selftest-nonce")
+            _local_commit(sg_root, "data.txt", "ten\n")
+            sg_tip = _tip(sg_bare)
+            for sg_key, sg_value in (("push.gpgSign", "if-asked"),
+                                     ("gpg.program", str(sg_prog)),
+                                     ("gpg.openpgp.program", str(sg_prog)),
+                                     ("gpg.x509.program", str(sg_prog)),
+                                     ("gpg.ssh.program", str(sg_prog)),
+                                     ("gpg.ssh.defaultKeyCommand", str(sg_prog))):
+                _git(sg_root, "config", "--local", sg_key, sg_value)
+                rc, out = run(["--push", "--root", sg_root])
+                _git(sg_root, "config", "--local", "--unset", sg_key)
+                check("a repository-scope {} refuses before any transport".format(sg_key),
+                      rc == EXIT_MALFORMED and "signing" in out
+                      and not os.path.exists(sg_marker) and _tip(sg_bare) == sg_tip)
+            for sg_key in ("push.gpgSignx", "gpg.xprogram"):
+                _git(sg_root, "config", "--local", sg_key, "if-asked")
+                rc, out = run(["--root", sg_root])
+                _git(sg_root, "config", "--local", "--unset", sg_key)
+                check("{}, a name just past a listed key, matches nothing and sync runs".format(
+                    sg_key), rc == EXIT_MALFORMED and "AHEAD" in out and "signing" not in out)
+            # the named flip: with the signing list emptied, the push signs its certificate against
+            # the target's advertised nonce and the repository-chosen signing program RUNS (the
+            # marker appears) before the push fails at signing, so the refusal reads the list, not
+            # a copy of it (the signing identity comes from the fixture's own global config)
+            (Path(home) / ".gitconfig").write_text(
+                "[user]\n\tname = OPF Self Test\n\temail = opf@example.invalid\n", encoding="utf-8")
+            _git(sg_root, "config", "--local", "push.gpgSign", "if-asked")
+            _git(sg_root, "config", "--local", "gpg.program", str(sg_prog))
+            with patch.object(module, "_LOCAL_SIGN_KEYS", ()):
+                rc, _out = run(["--push", "--root", sg_root])
+            _git(sg_root, "config", "--local", "--unset", "push.gpgSign")
+            _git(sg_root, "config", "--local", "--unset", "gpg.program")
+            (Path(home) / ".gitconfig").unlink()
+            check("emptying the signing list runs the repository-chosen signing program (shown red)",
+                  rc == EXIT_MALFORMED and os.path.exists(sg_marker) and _tip(sg_bare) == sg_tip)
+            # a repository-scope protocol allow refuses, plain and per-protocol (each set alone on
+            # an equal store); protocol.version, a shaping key of the same section, passes, and so
+            # does a name just past the listed key
+            pw_root, _pw_bare = _paired("protowiden")
+            for pw_key in ("protocol.allow", "protocol.ext.allow"):
+                _git(pw_root, "config", "--local", pw_key, "always")
+                rc, out = run(["--root", pw_root])
+                _git(pw_root, "config", "--local", "--unset", pw_key)
+                check("a repository-scope {} refuses before any transport".format(pw_key),
+                      rc == EXIT_MALFORMED and "re-widen" in out)
+            for pw_key in ("protocol.version", "protocol.allowx"):
+                _git(pw_root, "config", "--local", pw_key, "2")
+                rc, out = run(["--root", pw_root])
+                _git(pw_root, "config", "--local", "--unset", pw_key)
+                check("{}, a name just past the listed key, matches nothing and sync runs".format(
+                    pw_key), rc == EXIT_OK and "EQUAL" in out)
+            _git(pw_root, "config", "--local", "protocol.ext.allow", "always")
+            with patch.object(module, "_LOCAL_PROTOCOL_KEYS", ()):
+                rc, _out = run(["--root", pw_root])
+            _git(pw_root, "config", "--local", "--unset", "protocol.ext.allow")
+            check("emptying the protocol list lets the repository protocol allow through (shown red)",
+                  rc == EXIT_OK)
+            # a repository-scope remote program name refuses, plain and under a subsection (each
+            # set alone on an equal store, whose remote.origin.url and remote.origin.fetch sit at
+            # repository scope throughout, so the unlisted remote keys are shown passing live); a
+            # name just past a listed key matches nothing and the run reports EQUAL
+            rp_root, _rp_bare = _paired("remoteprog")
+            for rp_key in ("remote.receivepack", "remote.origin.receivepack",
+                           "remote.origin.uploadpack", "remote.origin.vcs"):
+                _git(rp_root, "config", "--local", rp_key, "git-upload-pack")
+                rc, out = run(["--root", rp_root])
+                _git(rp_root, "config", "--local", "--unset", rp_key)
+                check("a repository-scope {} refuses before any transport".format(rp_key),
+                      rc == EXIT_MALFORMED and "pack program" in out)
+            for rp_key in ("remote.origin.receivepackx", "remote.origin.xvcs"):
+                _git(rp_root, "config", "--local", rp_key, "x")
+                rc, out = run(["--root", rp_root])
+                _git(rp_root, "config", "--local", "--unset", rp_key)
+                check("{}, a name just past a listed key, matches nothing and sync runs".format(
+                    rp_key), rc == EXIT_OK and "EQUAL" in out)
+            _git(rp_root, "config", "--local", "remote.origin.vcs", "hg")
+            with patch.object(module, "_LOCAL_REMOTE_PROGRAM_KEYS", ()):
+                rc, _out = run(["--root", rp_root])
+            _git(rp_root, "config", "--local", "--unset", "remote.origin.vcs")
+            check("emptying the remote-program list lets the repository remote program through "
+                  "(shown red)", rc == EXIT_OK)
             # every entry of every _LOCAL_* list refuses, plain, under a subsection and in any case,
             # through the same enumeration (its listing stubbed), while a name one character past
             # the entry does not: a list entry the refusal stopped enforcing shows here
             listed_misses = []
-            for family in (_LOCAL_REDIRECT_KEYS, _LOCAL_EXEC_KEYS, _LOCAL_TRUST_KEYS,
+            for family in (_LOCAL_REDIRECT_KEYS, _LOCAL_EXEC_KEYS, _LOCAL_SIGN_KEYS,
+                           _LOCAL_REMOTE_PROGRAM_KEYS, _LOCAL_PROTOCOL_KEYS, _LOCAL_TRUST_KEYS,
                            _LOCAL_COOKIE_KEYS, _LOCAL_BUNDLE_KEYS, _LOCAL_INCLUDE_KEYS):
                 for listed in family:
                     section, _dot, key = listed.partition(b".")
