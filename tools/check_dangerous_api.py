@@ -92,10 +92,12 @@ never importing or running the file, and reports:
                a name or attribute (a walrus included) is followed to every read the scan resolves
                to it, to every attribute read named like it (self.P, cls.P or Lines.P for a class
                attribute P), and to every name read that may hold the stored value (p = self.P,
-               then p.fullmatch); a getattr in its file with a name it is stored to, or with a name
-               that is not a literal, and any other use (match or fullmatch, an argument, a
-               return, a container, any other attribute) report it there. \\A, \\Z and \\z anchor
-               the whole input under MULTILINE too.
+               then p.fullmatch); a getattr in its file with a name it is stored to, with a name
+               that is not a literal, or read other than as the function a call calls (g =
+               getattr, getattr.__call__, functools.partial(getattr, x), a conditional expression
+               of it), and any other use (match or fullmatch, an argument, a return, a container,
+               any other attribute) report it there. \\A, \\Z and \\z anchor the whole input
+               under MULTILINE too.
                A compiled pattern is an re.compile call, the value of a walrus, either branch of a
                conditional expression, any operand of a boolean expression (cache or
                re.compile(...)), or a name every binding of which is one of these or a copy of
@@ -226,8 +228,12 @@ findall, finditer, sub, subn or split; a line scan (anchored only by ^ or $ unde
 used only to scan lines, so a line validator that admits non-ASCII digits in each line is not
 seen, and a line scan matched from its start only in another module (mod.LINE.fullmatch) or
 only through a read that is not a name, an attribute or a getattr (vars(self)["P"],
-operator.attrgetter("P")); a lookaround, conditional or backreference group at either end is
-not entered (^\\d+(?=$) is not read as anchored), nor is a group that closes the pattern with a
+operator.attrgetter("P"), self.__getattribute__("P"), inspect.getattr_static(self, "P")); a
+comprehension's own target named like a name a line scan is stored to is read through the
+outer binding of that name, so its use is followed (a false report), and a module-level
+function named getattr is read as the builtin (a conservative false report); a lookaround,
+conditional or backreference group at either end is not entered (^\\d+(?=$) is not read as
+anchored), nor is a group that closes the pattern with a
 quantifier after it (^(\\d+$)? is not read as anchored); a top-level alternation is read by its
 first and last tokens only, and neither it nor a group holding its own alternation is entered
 at an end (^a|b$ reads as anchored; (^a)|b$, ^a(?:b|$) and a|^\\d+$ do not); \\D, \\W, \\s, \\S
@@ -1499,8 +1505,8 @@ class _Scanner(ast.NodeVisitor):
         """(the name reads the scan resolves to each re.compile, by the call's id, each with its
         scope; every attribute read, by attribute name, each with its scope; every node's parent;
         the name reads that may hold each assigned value, by the value's id, each with its scope;
-        the attribute names getattr is called with, None for a name that is not a literal),
-        built once per file."""
+        the attribute names getattr is called with, None for a name that is not a literal or for
+        a getattr read other than as the function a call calls), built once per file."""
         if self.uses is None:
             names, attrs, parents = _reads(self.tree, self.binder)
             by_call, by_value, getattrs = {}, {}, set()
@@ -1511,12 +1517,17 @@ class _Scanner(ast.NodeVisitor):
                     if source is not None:
                         by_value.setdefault(id(source[0]), []).append((read, scope))
             for read, scope in names + attrs.get("getattr", []):
+                if not self._judged_in(scope, self.resolve, read) & _GETATTR:
+                    continue
                 call = parents.get(id(read))
-                if isinstance(call, ast.Call) and call.func is read \
-                        and self._judged_in(scope, self.resolve, read) & _GETATTR:
+                if isinstance(call, ast.Call) and call.func is read:
                     attr = _positional(call, 1)
                     getattrs.add(attr.value if isinstance(attr, ast.Constant)
                                  and isinstance(attr.value, str) else None)
+                else:
+                    # Held, passed or wrapped before it is called (g = getattr, getattr.__call__,
+                    # functools.partial(getattr, x)), it may be given any name.
+                    getattrs.add(None)
             self.uses = by_call, attrs, parents, by_value, getattrs
         return self.uses
 
@@ -1526,7 +1537,8 @@ class _Scanner(ast.NodeVisitor):
         read anywhere in this file named like a name or attribute it is stored to (self.P, cls.P
         or Lines.P for a class attribute P), and every name read that may hold a value stored to
         a name (p = self.P, Q = Lines.P, or a walrus of either). A getattr anywhere in this file
-        with a name it is stored to, or with a name that is not a literal, is a use that is not
+        with a name it is stored to, with a name that is not a literal, or read other than as the
+        function a call calls (held, passed or wrapped before it is called), is a use that is not
         followed, so it is not a line scan. A use in another module is not seen."""
         if id(call) not in self.line_scans:
             by_call, attrs, _parents, by_value, getattrs = self._pattern_uses()
@@ -2601,6 +2613,16 @@ POSITIVE_VECTORS = (
      "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
      "        return getattr(self, 'P').fullmatch(t)\n",
      ("regex-ascii", "regex-lines", "regex-stores")),
+    # A getattr held, passed or wrapped before it is called may be given any name.
+    *(("import functools, re\n" + held + "class Ids:\n    def __init__(self):\n"
+       "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t, c):\n"
+       + local + "        return " + read + ".fullmatch(t)\n",
+       ("regex-ascii", "regex-lines", "regex-stores"))
+      for held, local, read in (
+          ("", "        g = getattr\n", "g(self, 'P')"), ("g = getattr\n", "", "g(self, 'P')"),
+          ("", "", "getattr.__call__(self, 'P')"),
+          ("", "", "functools.partial(getattr, self)('P')"),
+          ("", "", "(getattr if c else hasattr)(self, 'P')"))),
     ("import re\nclass Ids:\n    def __init__(self):\n"
      "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
      "        (p := self.P).finditer(t)\n        return p.fullmatch(t)\n",
@@ -2777,6 +2799,14 @@ NEGATIVE_VECTORS = (
     "class Ids:\n    def __init__(self):\n        self.P = re.compile(r'^\\d+$', re.M)\n"
     "    def scan(self, t):\n        p = self.P\n        return p.finditer(t)\n"
     "QUOTE = Lines.P\nQUOTE.findall(text)\nQUOTE.sub('', text)\n",
+    # A stored line scan used only as one beside a hasattr held, passed or wrapped (only a read
+    # of getattr may hand the scan on).
+    "import functools, re\nh = hasattr\nclass Ids:\n    def __init__(self):\n"
+    "        self.P = re.compile(r'^\\d+$', re.M)\n    def scan(self, t, c):\n"
+    "        g = hasattr\n        ok = g(self, 'P') and h(self, 'P')\n"
+    "        ok = ok and hasattr.__call__(self, 'P') and functools.partial(hasattr, self)('P')\n"
+    "        ok = ok and (hasattr if c else callable)(t)\n"
+    "        return ok and self.P.finditer(t)\n",
     # ASCII after comment groups among the leading flag groups, and in a scoped (?a:...) group
     # that holds only part of the pattern, (?u:...) closed before the \d.
     *_REGEX_LEADING_ASCII,
