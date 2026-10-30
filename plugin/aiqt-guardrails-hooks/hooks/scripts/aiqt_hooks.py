@@ -4431,6 +4431,172 @@ def _diff_possibles(readings, added, shared):
     return out
 
 
+# HERE-DATA FLOOR. The shared lexer refuses a here-string and a here-document under an unquoted delimiter, so a
+# blocking guard whose parse-failure fallback only notes or allows read a form it denies bare as weaker once such
+# a construct came before it ('cat <<<x; git diff', a here-document then 'git switch --orphan x'). Each such
+# guard reads the command again on its parse-failure path, in a form the lexer reads (_here_data_rewrite): each
+# here-string becomes a here-document under a quoted delimiter (_HERE_DATA_STRING_DELIM) whose body is empty, its
+# word dropped, and each unquoted delimiter is quoted. A here-string's word and a here-document's body are data
+# either way, so only what the command reads on that descriptor changes, and every command word is kept, in
+# order. The guard takes only a deny from that reading (diff_source_pretool a confirmed console dump, branch_root
+# a deny of its judging loop, gate_weakening a verification run piped into a truncating sink,
+# orch_truncation_guard a background producer piped into a truncating sink) and otherwise keeps its own
+# fallback, so the reading adds denies and never removes one. The rewrite refuses (None: the guard's own
+# fallback stands, a disclosed residual) every form whose
+# reading by bash it does not model: a command substitution, backquote or process substitution anywhere, a
+# comment, a backslash-newline line continuation anywhere, a quote it cannot pair (an unterminated one, or an
+# ANSI-C quote holding a backslash), a here-string word that is not one literal word, a delimiter
+# _parse_heredoc_delim refuses, an unterminated body, and a backslash in a body under an unquoted delimiter (bash
+# removes it, and joins such a line with the next before it compares the delimiter). A here-string or
+# here-document on a numbered descriptor ('cat 3<<<x') is rewritten, but the lexer refuses that operator after a
+# descriptor number either way, so the guard's own fallback stands there too.
+_HERE_DATA_STOP_RE = re.compile(r"[\\'\"#<\n]")
+_HERE_DATA_WORD_RE = re.compile(r"[A-Za-z0-9_./:=@%+,-]+|'[^'\n]*'|\"[^\"\n$`\\!]*\"")
+_HERE_DATA_WORD_END = frozenset(" \t\n;&|)<>")
+_HERE_DATA_STRING_DELIM = "HERE_STRING"
+
+
+def _here_data_rewrite(command, expansions=True):
+    """command with each here-string read as a here-document under a quoted delimiter with an empty body and each
+    here-document under an unquoted delimiter read under that delimiter quoted (HERE-DATA FLOOR, above
+    _HERE_DATA_STOP_RE), or None where nothing is rewritten or the rewrite refuses the command. With expansions
+    False it refuses as well a body under an unquoted delimiter that holds '${' or '$[', an expansion that can
+    assign a variable (${X:=v}), which the quoted delimiter would read as text."""
+    if ("<<" not in command or "$(" in command or "`" in command or "<(" in command or ">(" in command
+            or "\\\n" in command):
+        return None
+    n = len(command)
+    edits = []
+    # (delimiter, strip_tabs, quoted) of each here-document opened on the current line, in order; the delimiter
+    # is None for one a here-string became, whose empty body is inserted where bash reads its body
+    pending = []
+    i = 0
+    while True:
+        m = _HERE_DATA_STOP_RE.search(command, i)
+        if m is None:
+            break
+        i = m.start()
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            k = command.find("'", i + 1)
+            if k < 0 or (i and command[i - 1] == "$" and "\\" in command[i + 1:k]):
+                return None  # unterminated, or an ANSI-C quote whose escapes may hide its closing quote
+            i = k + 1
+        elif c == '"':
+            k = i + 1
+            while k < n and command[k] != '"':
+                k += 2 if command[k] == "\\" else 1
+            if k >= n:
+                return None
+            i = k + 1
+        elif c == "#":
+            if i == 0 or command[i - 1] in " \t\n;&|()<>":
+                return None
+            i += 1
+        elif c == "\n":
+            i += 1
+            for delim, strip_tabs, quoted in pending:
+                if delim is None:
+                    edits.append((i, i, _HERE_DATA_STRING_DELIM + "\n"))
+                    continue
+                while True:
+                    nl = command.find("\n", i)
+                    line = command[i:(nl if nl != -1 else n)]
+                    if (line.lstrip("\t") if strip_tabs else line) == delim:
+                        i = n if nl == -1 else nl + 1
+                        break
+                    if nl == -1 or (not quoted and ("\\" in line or (not expansions and ("${" in line
+                                                                                       or "$[" in line)))):
+                        return None
+                    i = nl + 1
+            pending = []
+        elif command.startswith("<<<", i):
+            j = i + 3
+            while j < n and command[j] in " \t":
+                j += 1
+            word = _HERE_DATA_WORD_RE.match(command, j)
+            if word is None or (word.end() < n and command[word.end()] not in _HERE_DATA_WORD_END):
+                return None
+            edits.append((i, word.end(), "<<'" + _HERE_DATA_STRING_DELIM + "'"))
+            pending.append((None, False, True))
+            i = word.end()
+        elif command.startswith("<<", i):
+            parsed = _parse_heredoc_delim(command, i + 2, n)
+            if parsed is None:
+                return None
+            quoted, delim, strip_tabs, next_i = parsed
+            if not quoted:
+                if "'" in delim:
+                    return None
+                edits.append((i + 2, next_i, ("-" if strip_tabs else "") + "'" + delim + "'"))
+            pending.append((delim, strip_tabs, quoted))
+            i = next_i
+        else:
+            i += 1
+    if not edits or any(delim is not None for delim, _strip_tabs, _quoted in pending):
+        return None
+    if pending:
+        # the line of the last here-strings ends the command: end it, then give each its empty body
+        edits.append((n, n, "\n" + (_HERE_DATA_STRING_DELIM + "\n") * len(pending)))
+    out, last = [], 0
+    for start, end, text in edits:
+        out.append(command[last:start])
+        out.append(text)
+        last = end
+    out.append(command[last:])
+    return "".join(out)
+
+
+def _diff_source_verdict(command, readings, reading, reads):
+    """What diff_source_pretool decides on command once its lex has given readings (_lex_readings inside the
+    _CommandReading reading, reads the _SubstHeredocs.reads count before that lex): "allow" (no possible producer,
+    or one of the closed proofs), "fallback" (that allow where main's reading of a here-document body the lex read
+    fails, so the fallback main's failed lex takes decides), "dump" (a confirmed console dump, which denies) or
+    "note" (a producer-capable form outside the proofs)."""
+    possibles = _diff_possibles(readings, reading.added, reading.shared)
+    # The segments are joined only where a possible producer is judged against its neighbours and the proofs.
+    segments = [seg for segs in readings for seg in segs] if possibles else []
+    own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
+    # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
+    # one of the five closed proofs. Either allows, unless main's reading of a here-document body the lex read
+    # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
+    if not possibles or (_diff_proof_help(command) or _diff_proof_summary(command)
+                         or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
+                         or _diff_proof_realfile(own) or _diff_proof_pager(own)):
+        return "fallback" if _SubstHeredocs.reads != reads else "allow"
+    # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
+    # compound), and any remaining producer-capable-but-unproven form ASKS. A segment the command reading read
+    # past a compound command's reserved words writes where that compound's closing word sends its output, so
+    # it is a confirmed dump only where that reaches the console too (_diff_compound_console); a segment of a
+    # backquote substitution is judged as main judges one of a '$(...)' substitution, by its own redirects.
+    compound = _diff_compound_console(own) if reading.added else ()
+    for index, seg in possibles:
+        if index >= len(own):
+            origin, body = reading.origins[index - len(own)]
+            if not body and not compound[origin]:
+                continue
+        if _is_console_dump(seg, segments, index):
+            return "dump"
+    return "note"
+
+
+def _diff_source_here_data_verdict(command):
+    """_diff_source_verdict on the here-data reading of command (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), or
+    None where the rewrite refuses command or its reading does not lex."""
+    rewritten = _here_data_rewrite(command)
+    if rewritten is None:
+        return None
+    reads = _SubstHeredocs.reads
+    try:
+        with _CommandReading(origins=True) as reading:
+            readings = _lex_readings(rewritten)
+    except ValueError:
+        return None
+    return _diff_source_verdict(rewritten, readings, reading, reads)
+
+
 def _diff_source_fallback(command):
     """FAIL-SAFE conservative check when _lex_command cannot parse the command (an unbalanced quote or an
     unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
@@ -4474,7 +4640,9 @@ def diff_source_pretool(data):
     quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
     _MainHashReading), main's segments are judged beside the lex's own where main's reading lexes, and where
     it fails the fallback a lex that fails takes, which never denies, decides in place of this guard's
-    allow."""
+    allow. A command the lexer refuses for a here-string or a here-document under an unquoted delimiter is read
+    again in its here-data reading (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), and a confirmed console dump
+    there DENIES as in a command the lexer reads (cat <<<x; git diff); any other outcome keeps the fallback."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -4521,39 +4689,25 @@ def diff_source_pretool(data):
                 "(rule cnsdif, fail-closed).")
         return _diff_source_fallback(command)
     except ValueError:
-        return _diff_source_fallback(command)
-    possibles = _diff_possibles(readings, reading.added, reading.shared)
-    # The segments are joined only where a possible producer is judged against its neighbours and the proofs.
-    segments = [seg for segs in readings for seg in segs] if possibles else []
-    own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
-    # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
-    # one of the five closed proofs. Either allows, unless main's reading of a here-document body the lex read
-    # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
-    if not possibles or (_diff_proof_help(command) or _diff_proof_summary(command)
-                         or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
-                         or _diff_proof_realfile(own) or _diff_proof_pager(own)):
-        if _SubstHeredocs.reads != reads:
+        # HERE-DATA FLOOR (above _HERE_DATA_STOP_RE): a confirmed console dump in the here-data reading denies as
+        # it does in a command the lexer reads; anything else takes the parse-failure fallback.
+        if _diff_source_here_data_verdict(command) != "dump":
             return _diff_source_fallback(command)
+        verdict = "dump"
+    else:
+        verdict = _diff_source_verdict(command, readings, reading, reads)
+    if verdict == "fallback":
+        return _diff_source_fallback(command)
+    if verdict == "allow":
         return _allow()
-    # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
-    # compound), and any remaining producer-capable-but-unproven form ASKS. A segment the command reading read
-    # past a compound command's reserved words writes where that compound's closing word sends its output, so
-    # it is a confirmed dump only where that reaches the console too (_diff_compound_console); a segment of a
-    # backquote substitution is judged as main judges one of a '$(...)' substitution, by its own redirects.
-    compound = _diff_compound_console(own) if reading.added else ()
-    for index, seg in possibles:
-        if index >= len(own):
-            origin, body = reading.origins[index - len(own)]
-            if not body and not compound[origin]:
-                continue
-        if _is_console_dump(seg, segments, index):
-            return _deny(
-                "AIQT rule cnsdif (no-console-diff-dumps): this command runs a version-control diff whose "
-                "patch is not redirected to a real file or piped into a pager where the diff command stands, "
-                "so it reaches the console or a substitution or coprocess that captures it, a raw dump that "
-                "buries the review surface. Use a summary form (--stat, --name-only, --name-status, "
-                "--numstat), redirect the diff to a real file (> file), or pipe it into a pager (| less).",
-                "AIQT guardrail: denied a diff dump not sent to a file or a pager (rule cnsdif).")
+    if verdict == "dump":
+        return _deny(
+            "AIQT rule cnsdif (no-console-diff-dumps): this command runs a version-control diff whose "
+            "patch is not redirected to a real file or piped into a pager where the diff command stands, "
+            "so it reaches the console or a substitution or coprocess that captures it, a raw dump that "
+            "buries the review surface. Use a summary form (--stat, --name-only, --name-status, "
+            "--numstat), redirect the diff to a real file (> file), or pipe it into a pager (| less).",
+            "AIQT guardrail: denied a diff dump not sent to a file or a pager (rule cnsdif).")
     return _allow_note(
         "AIQT guardrail (rule cnsdif, no-console-diff-dumps): this command is producer-capable (it can "
         "render a version-control diff) but is outside the guard's proven-safe forms - a wrapper, a pathed "
@@ -14319,7 +14473,11 @@ def branch_root(data):
     too (_git_alias_spelled); a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading,
     so a value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a
     git option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
-    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote."""
+    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote.
+    A command the lexer refuses for a here-string or a here-document under an unquoted delimiter has the segments
+    of its here-data reading (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE) judged as well, and a deny they reach
+    stands (cat <<<x; git switch --orphan x denies); any other outcome keeps the judgement of the recovered
+    segments."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -14338,6 +14496,7 @@ def branch_root(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
     named = _git_alias_named(command)
     built = False  # a git command that reads as under an alias only through a word built at run time (_BRNROT_BUILT)
+    floor_segments = None  # the segments of the here-data reading, on a parse failure (HERE-DATA FLOOR)
     reads = _SubstHeredocs.reads
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
@@ -14371,6 +14530,9 @@ def branch_root(data):
         spelled = _git_alias_spelled_kind(command)
         named = named or spelled == "alias"
         built = spelled == "built"
+        # HERE-DATA FLOOR (above _HERE_DATA_STOP_RE): the here-data reading's segments are judged below too, and
+        # only a deny they reach is taken.
+        floor_segments = _branch_root_here_data_segments(command)
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
@@ -14398,7 +14560,36 @@ def branch_root(data):
                                        for seg in _lex_command_read(command, partial=True, skip_empty=True)[0]]
         except _ReadingLimitError:
             return _deny(*_BRNROT_READ_LIMIT)
+    kind, detail = _branch_root_verdict(data, command, segments, named, built)
+    if kind != "deny" and floor_segments is not None:
+        floor_kind, floor_detail = _branch_root_verdict(data, command, floor_segments, named, built)
+        if floor_kind == "deny":
+            kind, detail = floor_kind, floor_detail
+    if kind == "deny":
+        return _deny(*detail)  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
+    if kind == "note":
+        return _allow_note(detail)  # an unresolvable command-local redirect
+    return _allow()
 
+
+def _branch_root_here_data_segments(command):
+    """The (argv, sep_after) segments of the here-data reading of command (HERE-DATA FLOOR, above
+    _HERE_DATA_STOP_RE), read as branch_root reads a command the lexer reads, or None where the rewrite refuses
+    command or its reading does not lex."""
+    rewritten = _here_data_rewrite(command)
+    if rewritten is None:
+        return None
+    try:
+        with _WordSpellings():
+            return _segments_read(rewritten, skip_empty=True)
+    except ValueError:
+        return None
+
+
+def _branch_root_verdict(data, command, segments, named, built):
+    """branch_root's judgement of command's (argv, sep_after) segments, named and built saying the command runs
+    under a git alias it cannot read (_BRNROT_UNCLASSIFIED, _BRNROT_BUILT): ("deny", (reason, banner)), ("note",
+    text) or ("allow", None)."""
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
     # correct action (an explicit start point, a plain command from the target repo, or restoring
@@ -14487,7 +14678,7 @@ def branch_root(data):
         else:
             outcome, detail = _branch_root_probe(probe_repo, start)
         if outcome == "orphaned":
-            return _deny(
+            return "deny", (
                 "AIQT rule brnrot (branch-rooted-on-live-main): start point {!r} has no merge base "
                 "with origin/HEAD. Do not dispatch work onto the retired root; recut from origin/HEAD "
                 "or replay the branch's unique commits onto it first.".format(start),
@@ -14501,10 +14692,10 @@ def branch_root(data):
                 "AIQT guardrail: denied a branch creation whose root ancestry is unresolved (rule brnrot); "
                 "restore origin/HEAD, then retry.")
     if pending_deny is not None:
-        return _deny(*pending_deny)  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
+        return "deny", pending_deny
     if pending_note is not None:
-        return _allow_note(pending_note)  # an unresolvable command-local redirect
-    return _allow()
+        return "note", pending_note
+    return "allow", None
 
 
 # --- gatdis: a Bash command that weakens a verification gate -------------------------------
@@ -15690,8 +15881,9 @@ def _gate_case_depths(records):
 # The commands that may come before the producer pipeline in the same command while the deny tier still holds,
 # each in one exact shape: cd with one directory operand, echo whose every argument is a plain literal word
 # (_GATE_PLAIN_WORD_RE, with no '$', backslash or quote anywhere in the segment's raw text, so no ANSI-C or
-# quoted spelling hides an option), and true, ':' or pwd alone. printf is never benign: a format can assign a
-# variable ('printf %n PATH' sets PATH to 0, and -v can be spelled $'\x2dv'). Any other earlier command (an
+# quoted spelling hides an option), true, ':' or pwd alone, and a stage that only prints here-data
+# (_gate_here_data_printer, below). printf is benign only in that last shape: anywhere else a format can assign
+# a variable ('printf %n PATH' sets PATH to 0, and -v can be spelled $'\x2dv'). Any other earlier command (an
 # assignment, export, declare or typeset, set, source or '.', alias, unset, a function definition, a
 # redirection, anything else) can change the run's environment, options or configuration (export
 # PYTEST_ADDOPTS=--collect-only, set -a, echo addopts > pytest.ini), so the pipeline notes. A pipeline joined
@@ -15700,6 +15892,52 @@ def _gate_case_depths(records):
 # the command before it fails, and after 'true ||' it never runs.
 _GATE_BENIGN_ALONE = frozenset(("true", ":", "pwd"))
 _GATE_PLAIN_WORD_RE = re.compile(r"[A-Za-z0-9_./:,@%+=][A-Za-z0-9_./:,@%+=-]*\Z")
+# A STAGE THAT ONLY PRINTS HERE-DATA to its standard output, the whole permitted set: a command word in
+# _GATE_HERE_DATA_PRINTERS, spelled bare; every other word an option (_GATE_HERE_DATA_OPTION_RE: '-' and then
+# letters, digits or '-'), with no word starting '-v' after printf (its one option, which assigns a variable);
+# at least one here-document under a quoted delimiter; no redirection of its own output and no other input
+# redirection; and nothing else in its raw text (no quote, '$', backslash or descriptor number outside the
+# delimiter). cat prints the body, and echo and printf print at most text their own words spell; none of them
+# can change the run's environment, options or configuration, and a quoted body is never expanded. A
+# here-string, and a here-document under an unquoted delimiter, which the shared lexer refuses, reach this shape
+# through the here-data floor (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), which reads each as a here-document
+# under a quoted delimiter; for this guard that floor refuses a body under an unquoted delimiter holding '${' or
+# '$[', which can assign a variable, so such a stage keeps the note.
+_GATE_HERE_DATA_PRINTERS = frozenset(("cat", "echo", "printf"))
+_GATE_HERE_DATA_OPTION_RE = re.compile(r"-[A-Za-z0-9-]+\Z")
+_GATE_HERE_DATA_WORD_RE = re.compile(r"[A-Za-z0-9-]+(?=[ \t<]|\Z)")
+
+
+def _gate_here_data_printer(seg):
+    """True when seg is a stage that only prints here-data (the shape above _GATE_HERE_DATA_PRINTERS), read from
+    its raw text: a printer word, option words and at least one here-document under a quoted delimiter
+    (_parse_heredoc_delim), nothing else, the words exactly the lexer's argv, and no redirection record."""
+    argv = seg.argv
+    if seg.redirects or not argv or argv[0] not in _GATE_HERE_DATA_PRINTERS:
+        return False
+    raw, words, documents = seg.raw, [], 0
+    n = len(raw)
+    at = 0
+    while True:
+        while at < n and raw[at] in " \t":
+            at += 1
+        if at >= n:
+            break
+        if raw.startswith("<<", at) and not raw.startswith("<<<", at):
+            parsed = _parse_heredoc_delim(raw, at + 2, n)
+            if parsed is None or not parsed[0]:
+                return False
+            documents += 1
+            at = parsed[3]
+            continue
+        word = _GATE_HERE_DATA_WORD_RE.match(raw, at)
+        if word is None:
+            return False
+        words.append(word.group())
+        at = word.end()
+    return (documents > 0 and words == list(argv)
+            and all(_GATE_HERE_DATA_OPTION_RE.match(tok) for tok in words[1:])
+            and not (words[0] == "printf" and any(tok.startswith("-v") for tok in words[1:])))
 
 
 def _gate_benign_prefix(seg):
@@ -15707,14 +15945,17 @@ def _gate_benign_prefix(seg):
     command (_gate_simple) with no redirection and no '${' or '$[' in its raw text (either can assign a variable,
     as ${X:=v} does), ended by ';', '&&', '||', '&' or a newline (never a pipe), that is 'cd DIR' (one operand
     that does not start with '-'), echo whose raw text has no '$', backslash or quote and whose every argument is
-    a plain literal word (_GATE_PLAIN_WORD_RE: no leading '-', no glob or brace), or true, ':' or pwd with no
-    argument. printf is never benign."""
+    a plain literal word (_GATE_PLAIN_WORD_RE: no leading '-', no glob or brace), true, ':' or pwd with no
+    argument, or a stage that only prints here-data (_gate_here_data_printer: cat, echo or printf with options
+    alone, fed by a here-document under a quoted delimiter). printf is benign in that last shape only."""
     if seg.redirects or seg.sep_after not in _GATE_LIST_SEPS:
         return False
     if not seg.argv:
         return True
     if not _gate_simple(seg) or "${" in seg.raw or "$[" in seg.raw:
         return False
+    if _gate_here_data_printer(seg):
+        return True
     word, args = seg.argv[0], seg.argv[1:]
     if word == "cd":
         return len(args) == 1 and not args[0].startswith("-")
@@ -15974,7 +16215,22 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
-def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
+def _gate_here_data_sink(command):
+    """The _verification_sink hit of the first reading of command's here-data reading that holds one (HERE-DATA
+    FLOOR, above _HERE_DATA_STOP_RE; a body under an unquoted delimiter holding an expansion that can assign a
+    variable is refused, so such a stage never reads as a benign prefix), or None where the rewrite refuses
+    command, its reading does not lex, or no reading holds a hit."""
+    rewritten = _here_data_rewrite(command, expansions=False)
+    if rewritten is None:
+        return None
+    try:
+        readings = _lex_readings(rewritten, skip_empty=_SKIP_EMPTY_REPEATS)
+    except ValueError:
+        return None
+    return next((hit for hit in (_verification_sink(reading) for reading in readings) if hit is not None), None)
+
+
+def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, here_data=False):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
@@ -15991,7 +16247,9 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies."""
+    only note or allow ($G commit -nv <<<x) denies. That branch passes here_data too: after every deny above, a
+    verification run piped into a truncating sink in the here-data reading (_gate_here_data_sink) denies as the
+    deny tier denies it in a parsed command, where this would note or allow (cat <<<x; pytest | head)."""
     kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
@@ -16018,6 +16276,11 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
         runtime_hit = _gate_runtime_bypass(command)
         if runtime_hit is not None:
             return _gate_runtime_deny(runtime_hit)
+    if here_data:
+        sink_hit = _gate_here_data_sink(command)
+        if sink_hit is not None:
+            reason, banner = _verification_sink_message(sink_hit)
+            return _deny(reason, banner)
     if kind == "swallow":
         # the swallow/truncate checker-shape heuristic is too broad (a benign optional
         # probe is common), so on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; the
@@ -17442,8 +17705,9 @@ def gate_weakening(data):
                     "verification-hook bypass (rule gatdis, fail-safe).")
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
-            # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True)
+            # above and each of the fallback's keeps its message; so is the here-data reading's verification
+            # sink (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), after them.
+            return _gate_weakening_fallback(command, runtime=True, here_data=True)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -23342,7 +23606,9 @@ def orch_truncation_guard(data):
     # judged on the segments of both readings, so a '| head' that either reading reaches denies. A parse
     # error falls through to the unprovable allow-note below (nothing proven), except at such a '#' the
     # lexer cannot judge under both readings: that '#' is exactly where one reading ends the line and the
-    # other reads on into a possible '| head', so it denies. The command reading (_CommandReading) adds the
+    # other reads on into a possible '| head', so it denies; and except where the here-data reading of the
+    # command lexes (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), whose segments are read for the sink in its
+    # place. The command reading (_CommandReading) adds the
     # commands of each backquote substitution, read whole, so a pipe into a sink inside one ('x=`make | head`',
     # which the lexer splits at the '|' into words that keep the backquotes) is read as a pipe too.
     try:
@@ -23368,7 +23634,17 @@ def orch_truncation_guard(data):
             "AIQT guardrail: denied a background dispatch carrying a '#' whose comment reading this guard "
             "could not decide (rules trkasy/vrfdlv, fail-closed).")
     except ValueError:
+        # HERE-DATA FLOOR (above _HERE_DATA_STOP_RE): the here-data reading's segments are read for the sink
+        # instead, where the rewrite reads the command and its reading lexes; a sink there denies as below, and
+        # anything else keeps the note. The foreground detach reading above already reads such a command
+        # through its raw scan, and outside registry scope no deny of this guard turns on the command text.
         _segs = None
+        _rewritten = _here_data_rewrite(command)
+        if _rewritten is not None:
+            try:
+                _segs = _segments_read(_rewritten)
+            except ValueError:
+                _segs = None
     if _segs:
         for _i, (_argv, _sep) in enumerate(_segs):
             if _i == 0:
