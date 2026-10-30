@@ -2824,6 +2824,7 @@ expected-check-ids = [
   "behaviour/import-complete-self-test-refuses",
   "behaviour/gitleaks-pin-refuses",
   "behaviour/must-deliver-refuses",
+  "behaviour/verifier-delivery-refuses",
   "control/opf-cli-default-runs",
   "control/launcher-cli-default-runs",
   "control/coverage-gate-default-runs",
