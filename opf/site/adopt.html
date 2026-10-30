@@ -141,6 +141,17 @@
           with exit 2, so no approval is recorded, nothing is applied, and nothing is retired. Installing the enforcement pack through adoption, and
           post-adoption import, are not available either. An assistant following the pack stops at
           the approval step and reports, rather than doing the missing stages by hand.</p>
+        <p>Recovery after a refused or reversed run: when an adoption transaction is refused after
+          its intent opens, or is reversed, the engine retains <code>.working/</code> holding only
+          the adoption journal (<code>.working/journals/adoption/</code>). That journal is recovery
+          state: the transaction record and its preimages, and the durable record that the refused
+          run id can never rerun. In that posture the store does not resolve, and plain
+          <code>opf init</code> refuses over the retained <code>.working/</code> exactly as over any
+          other existing one. Recovery needs no cleanup: investigation reads a
+          <code>.working/</code> holding only the journal as a first adoption, so a fresh
+          <code>opf adopt</code> plan with its own run id re-admits the tree. Do not delete
+          <code>.working/</code> to unblock <code>opf init</code>; that discards the journal, and
+          with it the record that the refused run id is burnt.</p>
       </div>
     </div>
     <p>For a project with no prior records, the clean-start guidance describes one interim route:

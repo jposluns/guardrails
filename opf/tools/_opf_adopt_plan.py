@@ -1904,6 +1904,19 @@ def self_test():
                                          ("first-adoption", []))
                     finally:
                         shutil.rmtree(self.root / ".working")
+            # The retained adoption journal alone is NOT ancestry: a refused or reversed first
+            # adoption retains .working holding only the adoption journal (no counter ever
+            # published), and a fresh run plans that posture as a first adoption again, never
+            # as a re-adoption demanding an ancestral seed that never existed (spec 14.2).
+            txn = (store.journal_root("adoption")
+                   + "/adopt-20260102T030405Z-0123456789abcdef")
+            (self.root / txn).mkdir(parents=True)
+            (self.root / txn / "frames.log").write_bytes(b"{}\n")
+            doc = tomllib.loads(self.observation().observation.decode())
+            self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
+            self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                             ("first-adoption", []))
+            shutil.rmtree(self.root / ".working")
             # Foreign .working content, even a nested reserved-looking name, stays first-adoption.
             (self.root / ".working/notes").mkdir(parents=True)
             (self.root / ".working/notes/toml").write_bytes(b"notes")

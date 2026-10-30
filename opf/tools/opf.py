@@ -55,10 +55,10 @@ delivery bundle; `transition ID acknowledged` from `sent` takes an optional `--r
 freezes and PRINTS the inert adoption proposal through the adoption planner (_opf_adopt_plan), writing
 nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readiness to apply -- and
 `opf adopt status [--root DIR]` reports the adoption state read-only (the adoption evidence bundles; with
-none present it reports that no adoption run exists, and every report says the .aiqt adoption journal is
+none present it reports that no adoption run exists, and every report says the adoption journal is
 not read, so its state is unknown). The stage driver adds `opf adopt approve --inputs FILE --plan FILE
 --actor NAME`, the one approval, printed and writing nothing. On base 2.0.0, the only base this build
-implements, the adoption journal is a homes-1 location under .aiqt and is not read, so
+implements, the adoption journal is not read, so
 `opf adopt apply --inputs FILE --plan FILE --approval FILE` and `opf adopt reconcile [--root DIR]` refuse
 with exit 2 before the root is resolved or anything is read or written: nothing is applied and no
 interrupted adoption transaction is recovered until the journal moves to its homes-2 home. `complete` is
@@ -109,19 +109,66 @@ def _bootstrap():
     (ImportError) or read (OSError) -- maps to a located cannot-evaluate (EXIT_MALFORMED / 2), never an
     uncaught ImportError that Python would surface as its default exit 1 and that a direct `opf render
     --check` would then read as a false DRIFT (the exit-1=drift conflation, reached here BEFORE the render
-    dispatcher's own fail-closed handler). Only ImportError and OSError (the broken/partial-install signals)
-    are caught; a broader error propagates rather than being masked as bootstrap. The imports moved OFF module
-    top for exactly this reason -- an eager top-level import failed before main()'s contract could apply.
+    dispatcher's own fail-closed handler). Every exception raised while a helper is imported maps to
+    EXIT_MALFORMED except a KeyboardInterrupt, which is re-raised unchanged (one whose class also derives
+    from ImportError or OSError is caught by that arm first and maps as that arm does), because exit 1 is
+    the drift or finding code and this function exists to keep an import fault from reaching it; this, like
+    every guarantee opf states, holds only within the residual stated below. An `except KeyboardInterrupt`
+    arm follows the OSError arm and re-raises what it catches; the interpreter matches it through the
+    type's mro(), calling neither issubclass nor type. The broader arm is an `except BaseException as exc`,
+    where the interpreter binds what it caught, and it tests the real type again as a second check. A bare
+    except follows it, because `except BaseException` matches through the class's mro(), which a metaclass
+    can make leave BaseException out, so such a class would escape that arm (one whose mro() names
+    KeyboardInterrupt is re-raised by the interrupt arm first and never reaches the bare one). The bare arm
+    never asks what it caught (sys.exception() is a function code opf loads can replace) and never
+    re-raises: it prints the fixed cannot-bootstrap line and the fixed line naming no cause, then returns
+    EXIT_MALFORMED. The handlers that guard a description are bare excepts as well, and read no exception.
+    ImportError and OSError (the broken/partial-install signals) keep their own arms and messages, and every
+    other exception the broader arm catches, an Exception subclass included (a SyntaxError in an installed
+    helper, a ValueError at import) and a SystemExit (sys.exit(0) and a bare sys.exit() included, which
+    would otherwise end any verb at exit 0, read as success), maps to a located diagnostic naming the
+    helper (the module running in the outermost
+    module frame of the traceback, or only "a helper module" when the traceback holds no module frame, as
+    for a SyntaxError in the helper, whose own text names its file; and the innermost one's module when
+    another module raised it) and the cause (its type and text), rendered through _init_inert. An error
+    raised after a helper is imported, outside this function, is not mapped here. The imports moved OFF
+    module top for exactly this reason -- an eager top-level import failed before main()'s contract could
+    apply.
     Idempotent: a re-import of an already-loaded module is a cheap no-op, so main() may call it on every
-    invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
-    that could not be brought in; the variable parts of that diagnostic (the helper name or the read
-    error's text) are rendered through _init_inert, the one init escaper, so no raw, shell-live value is
-    printed on the way to any verb. A bootstrap failure OTHER than ImportError or OSError (for example a
-    SyntaxError in an installed helper) is not mapped here and surfaces as Python's own traceback: it
-    runs before init dispatch and outside _cmd_init's rendering boundary, a window _cmd_init and
-    OPF-QUICKSTART state. Both mapped arms render their variable parts AT this print (the init suite
+    invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a cannot-bootstrap diagnostic (the
+    ImportError arm's line names the module its error names, which need not be a helper, or else gives the
+    error's text); every variable part of a diagnostic (a module name, the cause's type or text) is
+    rendered through _init_inert, the one init escaper, so no raw, shell-live value is printed on the way
+    to any verb. Describing a cause runs code the cause controls (its __str__, a name that is not a str,
+    its type's __name__ under a hostile metaclass), so no description may escape: the ImportError and
+    OSError arms build their one line inside a guard, and the broader arm runs no code the cause controls
+    before it prints a fixed cannot-bootstrap line, and then describes the helper and the cause inside a
+    guard; a description that raises anything (a SystemExit or a ValueError included) falls back to a line
+    naming only the cause's type, or to a fixed line naming nothing, and every arm still returns
+    EXIT_MALFORMED (that fallback's own print is guarded too, so a stream raising there leaves the fixed
+    line and the status). Whether a cause is a KeyboardInterrupt is decided by its real type: first by the
+    `except KeyboardInterrupt` arm, then by the broader arm's issubclass(type(exc), KeyboardInterrupt),
+    never by isinstance, which reads the cause's own __class__ when its type is not one: a __class__
+    property raising SystemExit(0) would escape this function before it prints a line, and one returning
+    KeyboardInterrupt would be re-raised as if it were one. Both tests follow the type's mro(), so a class
+    whose metaclass's mro() names KeyboardInterrupt is an interrupt here and is re-raised, by design, by
+    the interrupt arm whether or not that mro() names BaseException. A
+    KeyboardInterrupt re-raised here surfaces as Python's own traceback: it runs before init dispatch and
+    outside _cmd_init's rendering boundary, a window _cmd_init and OPF-QUICKSTART state. No in-process code
+    can close one residual: code opf loads (a helper, or a module a helper imports) runs in this process
+    with its privileges, at import, when called or later (an atexit hook, a thread, a signal handler, a
+    destructor, or a replaced stream whose failing flush at shutdown ends the process at exit 120),
+    and can end the process with any status or replace anything opf uses (a builtins name such as print,
+    type, SystemExit or KeyboardInterrupt, a sys function such as sys.exception, a stream such as
+    sys.stderr, a module global such as EXIT_MALFORMED), so every guarantee opf states (the exit guarantees
+    here, in _main_exit and in OPF-QUICKSTART included) holds only while that code does neither. A
+    replaced issubclass is no longer a route by which a real interrupt is mapped instead of re-raised: the
+    interrupt arm re-raises it before issubclass is called. The second check still calls issubclass, so a
+    replacement that answers yes for another cause re-raises that cause (a SystemExit(0) then ends the
+    process at exit 0), which is within this residual too. Every mapped arm renders its variable parts
+    AT this print (the init suite
     drives a hostile ImportError, a nameless hostile ImportError and a hostile OSError through them
-    and requires each printed line inert, QA round 13 C)."""
+    and requires each printed line inert)."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
@@ -144,18 +191,294 @@ def _bootstrap():
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
     except ImportError as exc:
-        print("opf: cannot bootstrap: {} (cannot evaluate)".format(
-            _init_inert(exc.name or str(exc))), file=sys.stderr)
+        try:
+            line = "opf: cannot bootstrap: {} (cannot evaluate)".format(_init_inert(exc.name or str(exc)))
+        except:  # noqa: E722  a cause that cannot be described is still a cannot-evaluate
+            line = _bootstrap_undescribed(exc)
+        print(line, file=sys.stderr)
         return EXIT_MALFORMED
     except OSError as exc:
-        print("opf: cannot bootstrap: a helper module could not be read "
-              "({}: {}) (cannot evaluate)".format(
-                  _init_inert(type(exc).__name__), _init_inert(str(exc))),
+        try:
+            line = ("opf: cannot bootstrap: a helper module could not be read "
+                    "({}: {}) (cannot evaluate)".format(
+                        _init_inert(type(exc).__name__), _init_inert(str(exc))))
+        except:  # noqa: E722  a cause that cannot be described is still a cannot-evaluate
+            line = _bootstrap_undescribed(exc)
+        print(line, file=sys.stderr)
+        return EXIT_MALFORMED
+    except KeyboardInterrupt:  # matched through the type's mro(), no issubclass or type call: re-raised unchanged
+        raise
+    except BaseException as exc:  # an import-time fault is a cannot-evaluate, never exit 0 or 1
+        # The interpreter binds exc, and the real type decides again, as a second check: isinstance would read
+        # the cause's own __class__, code the cause controls.
+        if issubclass(type(exc), KeyboardInterrupt):
+            raise
+        # The fixed line first: describing the cause runs its code, whose own failure must not erase this one.
+        print("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)",
               file=sys.stderr)
+        try:
+            # The helper is the module running in the outermost module frame of the traceback (the one this
+            # function's import statement was bringing in); the innermost one, when another, raised the cause.
+            modules, tb = [], exc.__traceback__
+            while tb is not None:
+                if tb.tb_frame.f_code.co_name == "<module>":
+                    modules.append(_init_inert(tb.tb_frame.f_globals.get("__name__", "?")))
+                tb = tb.tb_next
+            helper = "helper " + modules[0] if modules else "a helper module"
+            inner = ", in module " + modules[-1] if len(modules) > 1 and modules[-1] != modules[0] else ""
+            print("opf: cannot bootstrap: {} raised {} ({}) while being imported{} (cannot evaluate)".format(
+                helper, _init_inert(type(exc).__name__), _init_inert(str(exc)), inner), file=sys.stderr)
+        except:  # noqa: E722  a cause that cannot be described is still a cannot-evaluate
+            try:
+                print(_bootstrap_undescribed(exc), file=sys.stderr)
+            except:  # noqa: E722  the fixed line and the exit status still carry the fault
+                pass
+        return EXIT_MALFORMED
+    except:  # noqa: E722  a class whose metaclass's mro() leaves out BaseException and KeyboardInterrupt
+        # is a cannot-evaluate too. Never asks what it caught (sys.exception() can be replaced) and never
+        # re-raises: fixed lines only.
+        print("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)",
+              file=sys.stderr)
+        print("opf: cannot bootstrap: the cause could not be described (cannot evaluate)", file=sys.stderr)
         return EXIT_MALFORMED
     return EXIT_OK
 
-# F-SELFTEST-NO-MAIN: the one entry a module that binds self_test must carry, matched by AST structure (so
+
+def _bootstrap_undescribed(exc):
+    """The cannot-bootstrap line for a cause whose description raised: it names only the cause's type
+    (rendered through _init_inert), or nothing when even that cannot be rendered. Never raises."""
+    try:
+        return "opf: cannot bootstrap: the cause ({}) could not be described (cannot evaluate)".format(
+            _init_inert(type(exc).__name__))
+    except:  # noqa: E722  a type name that cannot be rendered still leaves a fixed line
+        return "opf: cannot bootstrap: the cause could not be described (cannot evaluate)"
+
+
+# The lines _bootstrap_exit_findings expects, each a (template, raw parts) pair whose parts are rendered
+# through _init_inert: the broader arm's fixed first line, its located description, the ImportError and
+# OSError arms' one line, and the line for a cause whose description raised.
+_BOOT_FAILED = ("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)", ())
+_BOOT_RAISED = "opf: cannot bootstrap: helper _opf_worklog raised {} ({}) while being imported (cannot evaluate)"
+_BOOT_MISSING = "opf: cannot bootstrap: {} (cannot evaluate)"
+_BOOT_UNREAD = "opf: cannot bootstrap: a helper module could not be read ({}: {}) (cannot evaluate)"
+_BOOT_UNDESCRIBED = "opf: cannot bootstrap: the cause ({}) could not be described (cannot evaluate)"
+_BOOT_NAMELESS = ("opf: cannot bootstrap: the cause could not be described (cannot evaluate)", ())
+
+# Stand-in prefixes defining HelperExit, a SystemExit subclass whose metaclass's mro() leaves BaseException out,
+# so `except BaseException` never matches it: _BOOT_MRO_KEEP's mro() is (cls, SystemExit, object), so uncaught
+# it ends the process at its code as a SystemExit does (exit 0 for HelperExit(0)); _BOOT_MRO_DROP's is (cls,
+# object). Raised at import, either reaches only the bare arm, which maps it without describing it.
+_BOOT_MRO_KEEP = ("class SkipBase(type):\n    def mro(cls):\n        return (cls, SystemExit, object)\n\n\n"
+                  "class HelperExit(SystemExit, metaclass=SkipBase):\n    pass\n\n\n")
+_BOOT_MRO_DROP = ("class SkipAll(type):\n    def mro(cls):\n        return (cls, object)\n\n\n"
+                  "class HelperExit(SystemExit, metaclass=SkipAll):\n    pass\n\n\n")
+# A stand-in prefix replacing sys.exception with a function that reports a KeyboardInterrupt whatever is in flight,
+# so a handler that asks sys.exception() what it caught re-raises an exit or an error as an interrupt.
+_BOOT_CLAIMS_INTERRUPT = "import sys\n\nsys.exception = lambda: KeyboardInterrupt()\n"
+# A stand-in prefix defining Unwritable, a stream whose every write raises HelperExit(0) (so _BOOT_MRO_KEEP first).
+_BOOT_UNWRITABLE = "import sys\n\n\nclass Unwritable:\n    def write(self, text):\n        raise HelperExit(0)\n\n\n"
+# A stand-in prefix defining HelperExit, a SystemExit subclass whose metaclass's mro() is (cls, KeyboardInterrupt,
+# object): `except KeyboardInterrupt` matches it and `except BaseException` does not. Its str() is object's, as
+# BaseException is not on that mro(), so it names an address and is not compared.
+_BOOT_MRO_INTERRUPT = ("class Liar(type):\n    def mro(cls):\n        return (cls, KeyboardInterrupt, object)\n\n\n"
+                       "class HelperExit(SystemExit, metaclass=Liar):\n    pass\n\n\n")
+# A stand-in prefix replacing builtins.issubclass with a function that answers no whenever it is asked about
+# KeyboardInterrupt, so a handler that decides the interrupt by calling issubclass maps a real one as a fault.
+_BOOT_HIDES_INTERRUPT = ("import builtins\n\nreal_issubclass = builtins.issubclass\nbuiltins.issubclass = lambda cls, "
+                         "classinfo: classinfo is not KeyboardInterrupt and real_issubclass(cls, classinfo)\n")
+
+# The import-time faults _bootstrap_exit_findings raises from a stand-in for the first helper _bootstrap
+# imports: (label, the stand-in's source, the exception type the call must let escape unchanged, the name of a
+# class the stand-in defines that must escape, or None, then the escaping exception's text (None when it is not
+# compared), or else the exact lines the call must print as it returns EXIT_MALFORMED).
+_BOOTSTRAP_EXIT_CASES = (
+    ("systemexit-0", "raise SystemExit(0)\n", None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "0")))),
+    ("bare-sys-exit", "import sys\nsys.exit()\n", None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "")))),
+    ("systemexit-1", "raise SystemExit(1)\n", None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "1")))),
+    ("custom-baseexception",
+     "class HelperHalt(BaseException):\n    pass\n\n\nraise HelperHalt('halted at $(import)')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("HelperHalt", "halted at $(import)")))),
+    ("keyboardinterrupt", "raise KeyboardInterrupt('stop')\n", KeyboardInterrupt, "stop"),
+    ("broader-error", "raise ValueError('not an exit')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("ValueError", "not an exit")))),
+    ("helper-syntaxerror", "return 1\n",
+     None, (_BOOT_FAILED, ("opf: cannot bootstrap: a helper module raised {} ({}) while being imported (cannot "
+                           "evaluate)", ("SyntaxError", "'return' outside function (_opf_worklog.py, line 1)")))),
+    ("str-raises-systemexit-0",
+     "class HelperFault(Exception):\n    def __str__(self):\n        raise SystemExit(0)\n\n\nraise HelperFault()\n",
+     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperFault",)))),
+    ("str-raises-valueerror",
+     "class HelperHalt(BaseException):\n    def __str__(self):\n        raise ValueError('undescribable')\n\n\n"
+     "raise HelperHalt()\n",
+     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperHalt",)))),
+    ("class-raises-systemexit-0",
+     "class HelperFault(Exception):\n    @property\n    def __class__(self):\n"
+     "        raise SystemExit(0)\n\n\nraise HelperFault('class raises')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("HelperFault", "class raises")))),
+    ("class-claims-keyboardinterrupt",
+     "class HelperFault(Exception):\n    @property\n    def __class__(self):\n"
+     "        return KeyboardInterrupt\n\n\nraise HelperFault('class claims')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("HelperFault", "class claims")))),
+    ("importerror-str-raises-systemexit-0",
+     "class HelperMissing(ImportError):\n    def __str__(self):\n        raise SystemExit(0)\n\n\n"
+     "raise HelperMissing()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperMissing",)),)),
+    ("importerror-class-raises-systemexit-0",
+     "class HelperMissing(ImportError):\n    @property\n    def __class__(self):\n"
+     "        raise SystemExit(0)\n\n\nraise HelperMissing('class raises', name='_opf_missing')\n",
+     None, ((_BOOT_MISSING, ("_opf_missing",)),)),
+    ("importerror-class-claims-keyboardinterrupt",
+     "class HelperMissing(ImportError):\n    @property\n    def __class__(self):\n"
+     "        return KeyboardInterrupt\n\n\nraise HelperMissing('class claims', name='_opf_missing')\n",
+     None, ((_BOOT_MISSING, ("_opf_missing",)),)),
+    ("oserror-str-raises-valueerror",
+     "class HelperUnread(OSError):\n    def __str__(self):\n        raise ValueError('undescribable')\n\n\n"
+     "raise HelperUnread()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperUnread",)),)),
+    ("oserror-class-raises-systemexit-0",
+     "class HelperUnread(OSError):\n    @property\n    def __class__(self):\n"
+     "        raise SystemExit(0)\n\n\nraise HelperUnread('class raises')\n",
+     None, ((_BOOT_UNREAD, ("HelperUnread", "class raises")),)),
+    ("oserror-class-claims-keyboardinterrupt",
+     "class HelperUnread(OSError):\n    @property\n    def __class__(self):\n"
+     "        return KeyboardInterrupt\n\n\nraise HelperUnread('class claims')\n",
+     None, ((_BOOT_UNREAD, ("HelperUnread", "class claims")),)),
+    ("mro-keeps-systemexit", _BOOT_MRO_KEEP + "raise HelperExit(0)\n", None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("mro-drops-baseexception", _BOOT_MRO_DROP + "raise HelperExit(0)\n", None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("str-raises-mro-exit",
+     _BOOT_MRO_KEEP + "class HelperFault(Exception):\n    def __str__(self):\n        raise HelperExit(0)\n\n\n"
+     "raise HelperFault()\n",
+     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperFault",)))),
+    ("type-name-raises-mro-exit",
+     _BOOT_MRO_KEEP + "class Nameless(type):\n    @property\n    def __name__(cls):\n"
+     "        raise HelperExit(0)\n\n\nclass HelperFault(Exception, metaclass=Nameless):\n    pass\n\n\n"
+     "raise HelperFault()\n",
+     None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("importerror-str-raises-mro-exit",
+     _BOOT_MRO_KEEP + "class HelperMissing(ImportError):\n    def __str__(self):\n"
+     "        raise HelperExit(0)\n\n\nraise HelperMissing()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperMissing",)),)),
+    ("oserror-str-raises-mro-exit",
+     _BOOT_MRO_KEEP + "class HelperUnread(OSError):\n    def __str__(self):\n        raise HelperExit(0)\n\n\n"
+     "raise HelperUnread()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperUnread",)),)),
+    ("fallback-print-raises-mro-exit",
+     _BOOT_MRO_KEEP + _BOOT_UNWRITABLE + "class HelperFault(Exception):\n    def __str__(self):\n"
+     "        sys.stderr = Unwritable()\n        raise ValueError('undescribable')\n\n\nraise HelperFault()\n",
+     None, (_BOOT_FAILED,)),
+    ("replaced-sys-exception-systemexit-0", _BOOT_CLAIMS_INTERRUPT + "raise SystemExit(0)\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "0")))),
+    ("replaced-sys-exception-systemexit-1", _BOOT_CLAIMS_INTERRUPT + "raise SystemExit(1)\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "1")))),
+    ("replaced-sys-exception-valueerror", _BOOT_CLAIMS_INTERRUPT + "raise ValueError('helper')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("ValueError", "helper")))),
+    ("replaced-sys-exception-mro-exit", _BOOT_CLAIMS_INTERRUPT + _BOOT_MRO_KEEP + "raise HelperExit(0)\n",
+     None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("replaced-sys-exception-keyboardinterrupt",
+     "import sys\n\nsys.exception = lambda: None\nraise KeyboardInterrupt('stop')\n", KeyboardInterrupt, "stop"),
+    ("mro-names-keyboardinterrupt", _BOOT_MRO_INTERRUPT + "raise HelperExit(0)\n", "HelperExit", None),
+    ("replaced-issubclass-keyboardinterrupt", _BOOT_HIDES_INTERRUPT + "raise KeyboardInterrupt('stop')\n",
+     KeyboardInterrupt, "stop"),
+    ("replaced-issubclass-systemexit-0", _BOOT_HIDES_INTERRUPT + "raise SystemExit(0)\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "0")))),
+)
+
+
+def _bootstrap_exit_findings(bootstrap=None):
+    """Drive each case of _BOOTSTRAP_EXIT_CASES through `bootstrap` (default _bootstrap) and return the
+    failures, empty when every case holds. Each case writes a stand-in _opf_worklog.py into a fresh temporary
+    directory put first on sys.path and takes the loaded _opf_worklog out of sys.modules for the call; the
+    loaded module, sys.path, sys.exception, builtins.issubclass and the path importer cache are restored after
+    it. An import-time
+    fault other than a KeyboardInterrupt (a SystemExit of 0, of None from a bare sys.exit(), of 1, a BaseException
+    subclass that is not an Exception, a ValueError, a SyntaxError in the helper) must return EXIT_MALFORMED,
+    raise nothing, and print exactly the fixed cannot-bootstrap line and then one line naming the helper and
+    the cause's type and text, rendered inert. A cause whose __str__ raises (SystemExit(0) or a ValueError),
+    in the broader arm or in the ImportError or OSError arm, must still return EXIT_MALFORMED, its
+    description falling back to a line naming only its type. A cause whose __class__ is a property raising
+    SystemExit(0) or returning KeyboardInterrupt, in each arm, must return EXIT_MALFORMED and print exactly
+    the lines that arm prints for its real type. A SystemExit subclass whose metaclass's mro() leaves out
+    BaseException and KeyboardInterrupt, raised at import (its mro() keeping SystemExit or not), from the
+    cause's __str__ in each arm, or from the cause's type's __name__, must return EXIT_MALFORMED and print
+    exactly the expected lines. One whose mro() names KeyboardInterrupt and leaves out BaseException, raised
+    at import, must escape, judged by its class (the stand-in's own HelperExit), as its str() names an address.
+    A cause whose __str__ replaces sys.stderr with a stream raising such a class must leave the fixed line and
+    EXIT_MALFORMED. A stand-in that replaces sys.exception with a function reporting a KeyboardInterrupt, then
+    raises SystemExit(0), SystemExit(1), a ValueError or such a class, must map as it would without the
+    replacement, and one that replaces it with a function reporting nothing, then raises a KeyboardInterrupt,
+    must let that interrupt escape. A stand-in that replaces builtins.issubclass with a function answering no
+    whenever it is asked about KeyboardInterrupt, then raises a KeyboardInterrupt, must let that interrupt
+    escape, and one that then raises SystemExit(0) must map as it would without the replacement. A
+    KeyboardInterrupt must escape unchanged. Each call is judged under a
+    bare except, so an escape of any class is that case's failure. With the broader arm narrowed back to exits
+    only (`except SystemExit as exc` and no bare arm), the ValueError and SyntaxError cases escape the call
+    and fail; with the bare arm removed, the three mro() cases raised at import whose mro() leaves out
+    KeyboardInterrupt escape the call and fail; with the `except KeyboardInterrupt` arm removed, the mro()
+    case naming KeyboardInterrupt returns EXIT_MALFORMED from the bare arm and the replaced-issubclass
+    interrupt case returns it from the broader arm, and each fails; with
+    the bare arm asking sys.exception() what it caught and re-raising the interrupt it reports, the
+    replaced-sys.exception mro() case escapes the call and fails; with the broader arm deciding the interrupt
+    from sys.exception() in place of exc, the replaced-sys.exception exit and error cases escape the call and
+    fail (its interrupt case is re-raised by the interrupt arm first); with a description guard, or
+    _bootstrap_undescribed's own,
+    reverted to `except BaseException`, that guard's mro() case escapes the call or loses its line and fails;
+    with the guard around the fallback's print removed or reverted to `except BaseException`, the
+    fallback-print case escapes the call and fails;
+    with any arm reverted to describing its cause in its one unguarded print, that arm's __str__ cases
+    escape the call and fail; with the broader arm's interrupt test reverted to isinstance, its two __class__
+    cases escape the call and fail, and an isinstance interrupt test put first in the ImportError or OSError
+    arm makes that arm's two fail the same way. The replaced-issubclass SystemExit(0) case pins the exit-2
+    outcome under a replaced issubclass, and no revert of an interrupt arm or test turns it red: the
+    replacement answers otherwise than the real issubclass only when asked whether a KeyboardInterrupt class
+    is one, and SystemExit is not, so an interrupt test that asks about the caught type reads the same with
+    it or without it. With an `except SystemExit: raise` arm put ahead of the broader arm, that case escapes
+    the call and fails, as does every other case that raises a SystemExit at import (an mro() that keeps
+    SystemExit included)."""
+    import builtins
+    import contextlib
+    import io
+    import tempfile
+    from unittest.mock import patch
+    bootstrap = _bootstrap if bootstrap is None else bootstrap
+    failures = []
+    for label, source, escapes, want in _BOOTSTRAP_EXIT_CASES:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="opf-boot-exit-") as tmp:
+            (Path(tmp) / "_opf_worklog.py").write_text(source, encoding="utf-8")
+            loaded = sys.modules.pop("_opf_worklog", None)
+            try:
+                with patch.object(sys, "path", [tmp] + sys.path), patch.object(sys, "dont_write_bytecode", True):
+                    # A stand-in may replace sys.exception, which the verdict below calls, or builtins.issubclass:
+                    # each restored on the way out.
+                    with patch.object(sys, "exception", sys.exception), \
+                            patch.object(builtins, "issubclass", builtins.issubclass):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                            rc = bootstrap()
+            except:  # noqa: E722  an escape is this case's verdict, judged below, whatever its class
+                rc = sys.exception()
+            finally:
+                sys.path_importer_cache.pop(tmp, None)
+                sys.modules.pop("_opf_worklog", None)
+                if loaded is not None:
+                    sys.modules["_opf_worklog"] = loaded
+        if escapes is not None:
+            # A str names a class the stand-in defines, which is judged by its module and name.
+            if isinstance(escapes, str):
+                escaped = (type(rc).__module__, type(rc).__qualname__) == ("_opf_worklog", escapes)
+            else:
+                escaped = type(rc) is escapes
+            if not escaped or (want is not None and str(rc) != want):
+                failures.append("bootstrap {}: {!r} (expected the {} to escape unchanged)".format(
+                    label, rc, getattr(escapes, "__name__", escapes)))
+            continue
+        want = "".join(template.format(*map(_init_inert, parts)) + "\n" for template, parts in want)
+        if type(rc) is not int or rc != EXIT_MALFORMED or out.getvalue() != want:
+            failures.append("bootstrap {}: returned {!r} printing {!r} (expected exit {} printing {!r})".format(
+                label, rc, out.getvalue(), EXIT_MALFORMED, want))
+    return failures
+
+
+# Self-test entry rule: the one entry a module that binds self_test must carry, matched by AST structure (so
 # spacing, quoting, parentheses and comments do not matter). _ENTRY_TEST is the only accepted test of the entry
 # block (that operand order only); _ENTRY_STATEMENT must be that block's first statement, with nothing else in
 # its body and no else. Any argument handling a module has beyond exactly `--self-test` follows it.
@@ -492,7 +815,7 @@ def _self_test_entry_gap(tree):
 
 
 def _self_test_entry_gaps(directory, required=()):
-    """Check the F-SELFTEST-NO-MAIN class STATICALLY: no module code is executed. Returns (gaps, exposers):
+    """Check the missing-self-test-entry class STATICALLY: no module code is executed. Returns (gaps, exposers):
     `exposers` is the set of *.py names directly in `directory` that bind self_test at module scope, and `gaps`
     maps a name to why it fails. Every exposer must carry the one canonical entry, exactly:
 
@@ -998,12 +1321,12 @@ def _self_test_group_probe(registry):
 
 
 def _aggregator_self_test():
-    """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
+    """Guard the aggregator's fail-closed return-vocabulary check. A helper returning a value
     OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
     admitted as clean because a bool or float compares equal to an allowed int (False == 0, True == 1,
     0.0 == 0). Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
     the store legs did not, letting a helper returning False produce an aggregate exit 0. It also holds
-    the F-SELFTEST-NO-MAIN class empty by static form (_self_test_entry_gaps, which runs no module code): every
+    the missing-self-test-entry class empty by static form (_self_test_entry_gaps, which runs no module code): every
     module in this directory that binds self_test must carry the canonical `--self-test` entry; the floor
     (_self_test_floor) requires every module whose self_test is registered below and fails on an empty
     registry, an empty scan, or a registered callable that is not its module's self_test and not exempt; and
@@ -1148,7 +1471,7 @@ def _watchdog_timer_case(label, mode, bounded=None, clock=None):
     def forbid_parent(name, original):
         def call(*args, **kwargs):
             # An empty SIG_BLOCK is only a mask query. The supervision layer's
-            # OWN cancellation masking (fix 2w) is sanctioned, verified as an
+            # OWN cancellation masking is sanctioned, verified as an
             # exact pair: a SIG_BLOCK of {SIGINT, SIGTERM} followed by a
             # SIG_SETMASK restoring the exact mask captured at the block; any
             # other mutation, and any unbalanced or inexact restore, is a
@@ -1306,7 +1629,7 @@ def _watchdog_isolation_self_test(launch=None):
     return EXIT_FINDING if failed else EXIT_OK
 
 
-# F-335-LOAD-FLAKE-PIPE-STALL: the execution-latency ceiling is a
+# Load-flake bound: the execution-latency ceiling is a
 # scheduling bound, not a correctness deadline. Worst observed
 # `cancelled - start` for the pipe-stall and transient-census cases under
 # 24 dedicated CPU-pressure workers on a 16-CPU host already running at
@@ -2018,8 +2341,8 @@ def _watchdog_finite_seconds(value):
     """A usable bound or budget: a finite, positive int or float (never a bool)."""
     import math
     # type(value), never isinstance: a value whose __class__ property claims
-    # float passes isinstance and then raises in math.isfinite (claude
-    # round-9 MINOR); its exact type gates it out instead.
+    # float passes isinstance and then raises in math.isfinite; its
+    # exact type gates it out instead.
     kind = type(value)
     return (kind is not bool and issubclass(kind, (int, float))
             and math.isfinite(value) and value > 0)
@@ -2196,8 +2519,8 @@ def _watchdog_thread_entry(table, thread, factory):
     Thread object's IDENTITY: `table` maps id(thread) to the pair (thread,
     container), never the Thread object itself, whose user __eq__ and
     __hash__ (a Thread subclass may define both) would decide membership
-    and let distinct threads share one exemption or suppression (codex
-    round-9 MAJOR 2). The pair retains the Thread object, so its id cannot
+    and let distinct threads share one exemption or suppression. The
+    pair retains the Thread object, so its id cannot
     be reused while the entry exists, and every lookup checks
     `entry[0] is thread`. No user code runs: the key is an int. With a
     factory, a missing entry is created in ONE atomic dict step
@@ -2279,8 +2602,7 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
     paths; the caller carries that ledger through every later step
     (the deadline tick, the wrapper suppression depth), so the
     stack is never re-read after a charge and neither an exemption
-    nor a suppression can migrate to a ledger that was not charged
-    (codex round-8 MAJOR 2)."""
+    nor a suppression can migrate to a ledger that was not charged."""
     import threading
     while True:
         # Bind ONCE, before any user code: the conversion below may suspend
@@ -2317,8 +2639,8 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
             # conversion runs user code (float() runs a subclass
             # __float__), which may block, fork, raise or make registered
             # calls. The gate reads type(seconds), never a user __class__
-            # (claude round-9 MINOR: a value whose __class__ property
-            # claims float passes isinstance, then float() refuses it).
+            # (a value whose __class__ property claims float passes
+            # isinstance, then float() refuses it).
             # Only a non-bool int or float type is convertible; anything
             # else is uncountable, exactly as _watchdog_finite_seconds
             # refuses it, and never reaches the transform (whose fixture
@@ -2347,8 +2669,8 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
             elif opened:
                 # Belongs to this thread's outer registered call. The
                 # record names the open steps: the report accepts it as
-                # nothing only once each of them has closed (codex round-9
-                # MAJOR 1: a step whose close an exception interrupted
+                # nothing only once each of them has closed (a step
+                # whose close an exception interrupted
                 # never closes, and the leg is then CANNOT-EVALUATE, never
                 # a silent pass).
                 record = ("suppressed", what, opens, opened)
@@ -2360,7 +2682,7 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
                 # A child forked INSIDE this charge after the check above (a
                 # signal handler may fork anywhere): it gets no ledger, so
                 # no caller writes a tick or a suppression step to the
-                # inherited one (claude round-9 MINOR); the landing below
+                # inherited one; the landing below
                 # is pid-gated too.
                 return None, None
             return normalized, ledger
@@ -2389,8 +2711,7 @@ def _watchdog_deadline(seconds):
     # the tick store below, never a re-read of the stack: the
     # conversion may suspend this thread across the leg end, and a
     # re-read here would hand the tick, and with it the sub-tick
-    # exemption, to an outer ledger that was never charged (codex
-    # round-8 MAJOR 2).
+    # exemption, to an outer ledger that was never charged.
     normalized, ledger = _watchdog_charge(seconds, "deadline")
     if (ledger is not None and normalized is not None
             and _watchdog_finite_seconds(normalized)
@@ -2498,7 +2819,7 @@ def _watchdog_install_charges():
             # it on exit: single atomic dict steps, never a
             # read-modify-write a same-thread signal handler could tear.
             # The step goes on the ONE ledger the charge above bound at
-            # its BEGIN (codex round-8 MAJOR 2: a timeout conversion
+            # its BEGIN (a timeout conversion
             # suspended across a nested leg end must not suppress waits
             # on an outer, uncharged ledger); None in a forked child
             # (plain calls there), and both the OPEN and the pop are
@@ -2508,8 +2829,7 @@ def _watchdog_install_charges():
             token = [name]
             opens = None
             try:
-                # OPEN is the FIRST step inside this try (codex round-9
-                # MAJOR 1): an exception a raising signal handler throws
+                # OPEN is the FIRST step inside this try: an exception a raising signal handler throws
                 # right after it still reaches the pop below, so no
                 # suppression outlives its call. A pop of an OPEN that
                 # never happened is a no-op.
@@ -2587,8 +2907,8 @@ def _watchdog_leg_entry(budget, case, *args):
         # dicts by VALUE: a nested leg whose ledger has no charges
         # is equal to a quiescent outer one, and remove would delete
         # the OUTER ledger, leave this closed one on the stack, and
-        # raise ValueError at the outer leg exit (codex round-8
-        # MAJOR 1). The search runs from the top: this ledger is
+        # raise ValueError at the outer leg exit. The search runs from
+        # the top: this ledger is
         # innermost on the orderly path.
         for index in range(len(_WATCHDOG_LEDGERS) - 1, -1, -1):
             if _WATCHDOG_LEDGERS[index] is ledger:
@@ -2618,7 +2938,7 @@ def _watchdog_leg_entry(budget, case, *args):
         unlanded = [token[0] for token in list(ledger["begun"])
                     if id(token) not in landed_tokens]
         # A SUPPRESSED record counts as nothing only once every OPEN step
-        # it was suppressed under has closed (codex round-9 MAJOR 1): a
+        # it was suppressed under has closed: a
         # step still open is a registered call still running, or one whose
         # close an exception interrupted, and the two cannot be told apart,
         # so the report waits for it under the same bound.
@@ -2681,19 +3001,19 @@ def _watchdog_leg_entry(budget, case, *args):
 
 def _watchdog_ledger_case(mode, budget):
     """Private subprocess: one concurrency vector of the runtime ledger, in its
-    own independently bounded fixture process (claude round-6 MEDIUM-2, codex
-    round-7 MEDIUM 6): a regression that hangs a vector is killed at that
+    own independently bounded fixture process, so a hung vector cannot take
+    the others with it: a regression that hangs a vector is killed at that
     vector's own process bound, which the runner records as that vector's own
     no-verdict CANNOT-EVALUATE (EXIT_MALFORMED), never a
     hung suite and never a pass. Returns the vector leg's own verdict
     int for the launching fixture to compare (3 marks a fixture that never
     exercised its path); the two bool-return control modes
-    deliberately return a bool the launching fixture must REJECT
-    (codex round-8 MEDIUM). The held-landing vectors suspend one thread INSIDE
+    deliberately return a bool the launching fixture must REJECT.
+    The held-landing vectors suspend one thread INSIDE
     the landing step (the leg's `landed` list swapped for one whose append
     blocks on that thread's first landing, before the record is appended),
     so they catch a reintroduced ledger lock held ACROSS the landing
-    append, as the round-7 per-leg gate was: a design that locks
+    append, as an earlier per-leg gate was: a design that locks
     registration that way never reaches their fork or signal step and dies
     at this fixture's bound. A lock scoped to the `begun` append alone is
     never held at that suspension point, so those vectors pass it, and
@@ -2896,7 +3216,7 @@ def _watchdog_ledger_case(mode, budget):
         # append would hold (a lock around the BEGIN append alone is not
         # held here). The thread-keyed maps are keyed by id(thread), so a
         # Thread subclass's __hash__ no longer runs inside a charge and can
-        # no longer serve as this suspension point (codex round-9 MAJOR 2).
+        # no longer serve as this suspension point.
         held = []
         holder = threading.Thread(
             target=lambda: _watchdog_charge(0.5, "held-landing"))
@@ -2915,13 +3235,13 @@ def _watchdog_ledger_case(mode, budget):
         return holder, install
 
     def fork_held_landing():
-        # codex round-7 MAJOR 2, and the lock-reintroduction probe (claude
-        # round-6 MEDIUM-1, codex round-7 MEDIUM 5): the process forks
+        # The fork-during-landing vector, and the lock-reintroduction
+        # probe: the process forks
         # while one thread sits suspended INSIDE the landing bookkeeping
         # and the MAIN thread's own charge is mid-conversion; the child
         # RESUMES that conversion, finds a foreign-pid ledger, lands
         # nothing and exits 0 promptly, inside its own 10 s alarm. Red
-        # against a mutant restoring the round-7 per-leg gate: a design
+        # against a mutant restoring the earlier per-leg gate: a design
         # that locks registration deadlocks before the fork (this
         # fixture's bound kills it), and a lock held across the landing
         # append is held by the suspended holder, so the parent's own
@@ -2980,13 +3300,14 @@ def _watchdog_ledger_case(mode, budget):
         return _watchdog_leg_entry(budget, leg)
 
     def signal_held_landing():
-        # codex round-7 MAJOR 3, and the same lock-reintroduction probe: a
+        # The signal-during-landing vector, and the same
+        # lock-reintroduction probe: a
         # SIGUSR1 handler charges on the MAIN thread while a helper thread
         # sits suspended inside the landing bookkeeping and the main
         # thread's own charge is mid-conversion. Appends never wait, so
         # the handler's charge completes and every record lands: outer 1.0
         # + held-landing 0.5 + handler 2.0 = 3.5, exactly the budget.
-        # Proven red against a mutant restoring the round-7 per-leg gate:
+        # Proven red against a mutant restoring the earlier per-leg gate:
         # the handler then blocks on the gate the suspended helper holds,
         # the helper waits for a release only the blocked main thread
         # could issue, and this fixture's own bound kills the deadlock and
@@ -3056,7 +3377,7 @@ def _watchdog_ledger_case(mode, budget):
             sys.settrace(saved)
 
     def landing_reentrant_charge():
-        # claude round-8 MEDIUM: a same-thread charge made from INSIDE
+        # A same-thread charge made from INSIDE
         # the landing append, exactly where a signal handler or finalizer
         # can land, must complete. A trace hook at the landing line runs
         # the nested charge at that line's line event, which fires BEFORE
@@ -3066,7 +3387,7 @@ def _watchdog_ledger_case(mode, budget):
         # self-deadlocks (this fixture's bound kills it and reports this
         # vector's failure). A one-line `with lock: ...append(...)`, or a
         # lock around the BEGIN append alone, is not held at that line
-        # event and passes here (claude round-9 MEDIUM);
+        # event and passes here;
         # append-reentrant-charge catches every such layout. Lock-free,
         # both charges land: outer 1.0 + nested 2.0 = 3.0, exactly the
         # budget, from declared timeouts alone.
@@ -3085,7 +3406,7 @@ def _watchdog_ledger_case(mode, budget):
         return _watchdog_leg_entry(budget, leg)
 
     def begin_interrupted():
-        # claude round-8 MINOR: an exception raised on the charging
+        # An exception raised on the charging
         # thread right AFTER its BEGIN append (a trace hook at the next
         # line stands in for a raising signal handler) must still land
         # the token, because the BEGIN is the first step inside the try
@@ -3117,7 +3438,7 @@ def _watchdog_ledger_case(mode, budget):
         return _watchdog_leg_entry(budget, leg)
 
     def late_conversion(charge):
-        # codex round-7 MAJOR 1: registration precedes the value's own
+        # Registration precedes the value's own
         # conversion on EVERY entry path (the shared wrapper and
         # _watchdog_deadline), so a float subclass whose conversion blocks
         # past the leg body's return is still counted by the closing
@@ -3368,7 +3689,7 @@ def _watchdog_ledger_case(mode, budget):
             _opf_emit.run_bounded = real
 
     def empty_nested_leg():
-        # codex round-8 MAJOR 1: a nested leg whose ledger carries NO
+        # A nested leg whose ledger carries NO
         # charges is VALUE-equal to a quiescent outer one, so an
         # equality-based stack removal deletes the OUTER ledger, leaves
         # the closed inner one on the stack, and raises ValueError at
@@ -3386,7 +3707,7 @@ def _watchdog_ledger_case(mode, budget):
         return _watchdog_leg_entry(budget, leg)
 
     def nested_migration(mode):
-        # codex round-8 MAJOR 2: a numeric conversion begun INSIDE a
+        # A numeric conversion begun INSIDE a
         # nested leg suspends until that ledger has left the stack,
         # then resumes. The charge itself lands on the inner ledger
         # (bound at its BEGIN); the bookkeeping that FOLLOWS the
@@ -3481,7 +3802,7 @@ def _watchdog_ledger_case(mode, budget):
             _opf_emit.run_bounded = real
 
     def append_reentrant_charge():
-        # claude round-9 MEDIUM, the layout-independent lock vector: the
+        # The layout-independent lock vector: the
         # leg swaps its ledger's `begun` and `landed` lists for lists whose
         # append, once each, completes the real append and THEN makes a
         # same-thread charge, exactly where a signal handler charging
@@ -3519,7 +3840,7 @@ def _watchdog_ledger_case(mode, budget):
         return _watchdog_leg_entry(budget, leg)
 
     def suppression_interrupted(entry):
-        # codex round-9 MAJOR 1: a REAL raising SIGUSR1 handler interrupts
+        # A REAL raising SIGUSR1 handler interrupts
         # a registered call's suppression bookkeeping on the main thread.
         # The leg seeds its own thread's open-step map with a dict whose
         # store (entry) or pop (cleanup), once, raises the signal: right
@@ -3580,7 +3901,7 @@ def _watchdog_ledger_case(mode, budget):
             signal.signal(signal.SIGUSR1, saved)
 
     def fork_in_charge():
-        # claude round-9 MINOR: a fork INSIDE the charge, after its
+        # A fork INSIDE the charge, after its
         # conversion's pid check (a forking transform stands in for a
         # signal handler that forks there): the child's charge must
         # return (None, None), never the parent's ledger, so no caller
@@ -3613,7 +3934,7 @@ def _watchdog_ledger_case(mode, budget):
         return _watchdog_leg_entry(budget, leg)
 
     class EqualThread(threading.Thread):
-        # codex round-9 MAJOR 2: every instance compares equal to every
+        # Every instance compares equal to every
         # other and hashes alike, so a thread map keyed by the Thread
         # object (its equality and hash) hands one thread's entry to
         # another.
@@ -3740,7 +4061,7 @@ def _watchdog_ledger_case(mode, budget):
                 "wrapper-suppression-migration"):
         return nested_migration(mode)
     if mode == "bool-false-control":
-        # codex round-8 MEDIUM: boolean verdicts, which compare equal
+        # Boolean verdicts, which compare equal
         # to 0 and 1 under a plain ==, must be REJECTED by the
         # launching fixture comparison (type(rc) is int before
         # equality). The budget is declared but no leg runs.
@@ -4119,7 +4440,7 @@ def _fixture_fd_census():
 
 
 def _fixture_fd_census_pins():
-    """Round 8: the pins of _fixture_fd_census, run by each completion mode that uses it, raising
+    """The pins of _fixture_fd_census, run by each completion mode that uses it, raising
     AssertionError naming the first that fails. A number closed and reopened on another file is reported
     (red against a number-only census); a distinct eventfd at a reused number is reported (red against
     the stat and flags tuple alone); an O_NONBLOCK toggle is no leak (red against every status flag in
@@ -5205,12 +5526,12 @@ def _watchdog_completion_case(mode, tree=None):
         def check():
             result = emit.run_bounded(lambda: "OK", timeout_s=2)
             assert result.startswith("SETUP-ERROR:ChildStatusUnavailable:"), result
-            for text in ("OSError", '"errno": 5', "QA15-CAUSE",
+            for text in ("OSError", '"errno": 5', "INJECTED-CAUSE",
                          "raw wait status=32000", "exitcode=125"):
                 assert text in result, result
 
         for boundary in ("_fixture_subreaper", "_fixture_close_all_except"):
-            with patch.object(emit, boundary, side_effect=OSError(5, "QA15-CAUSE")):
+            with patch.object(emit, boundary, side_effect=OSError(5, "INJECTED-CAUSE")):
                 check()
                 with patch.object(emit, "_bounded_setup_error",
                                   side_effect=lambda exc: "SETUP-ERROR:" + type(exc).__name__):
@@ -5219,10 +5540,10 @@ def _watchdog_completion_case(mode, tree=None):
         real_close = emit._FixtureProcess.close
         def fail_close(child):
             real_close(child)
-            raise emit.ChildStatusUnavailable("raw wait status=32000; QA15-CLOSE")
+            raise emit.ChildStatusUnavailable("raw wait status=32000; INJECTED-CLOSE")
         def check_close():
             result = emit.run_bounded(lambda: "OK", timeout_s=2)
-            assert "QA15-CLOSE" in result and "raw wait status=32000" in result, result
+            assert "INJECTED-CLOSE" in result and "raw wait status=32000" in result, result
         with patch.object(emit._FixtureProcess, "close", fail_close):
             check_close()
             with patch.object(emit, "_bounded_setup_error",
@@ -5261,7 +5582,7 @@ def _watchdog_completion_case(mode, tree=None):
                 attempts.append(deadline)
                 append(repr(deadline))
                 if len(attempts) == 1:
-                    raise OSError(5, "QA15-RETRY")
+                    raise OSError(5, "INJECTED-RETRY")
                 return real_drain(subject, subject_fd, deadline=deadline)
             with patch.object(emit, "_fixture_drain", retry), \
                     patch.object(emit, "_fixture_cleanup_deadline", budget):
@@ -5283,7 +5604,8 @@ def _watchdog_completion_case(mode, tree=None):
         def late(thunk, **kwargs):
             # The forced timeout sits ABOVE the measured execution bound,
             # so the late parent deadline stays red under any load the
-            # bound itself tolerates (F-335-LOAD-FLAKE-PIPE-STALL).
+            # bound itself tolerates (the load-flake bound note at
+            # _DEADLINE_EXECUTION_BOUND).
             return real_run(thunk, **dict(
                 kwargs, timeout_s=_DEADLINE_EXECUTION_BOUND + 1))
         with patch.object(emit, "run_bounded", late):
@@ -5302,7 +5624,8 @@ def _watchdog_completion_case(mode, tree=None):
         # the 1.6 s transient-census window, so THIS red keys on that
         # window, not on the load-tolerant shared bound: pinning the bound
         # to the window keeps the mutant red under any load (load only
-        # delays the retried send further; F-335-LOAD-FLAKE-PIPE-STALL).
+        # delays the retried send further; see the load-flake bound note
+        # at _DEADLINE_EXECUTION_BOUND).
         import sys as sys_module
         runner_module = sys_module.modules[_watchdog_deadline_case.__module__]
         with patch.object(emit, "_fixture_signal", census_only), \
@@ -5316,7 +5639,7 @@ def _watchdog_completion_case(mode, tree=None):
             in_guardian[0] = True
         def fail_subject():
             if in_guardian[0]:
-                raise OSError(5, "QA15-SUBJECT")
+                raise OSError(5, "INJECTED-SUBJECT")
             return real_setsid()
 
         def check():
@@ -5332,7 +5655,7 @@ def _watchdog_completion_case(mode, tree=None):
                     os.close(saved)
                 err.seek(0)
                 diagnostic = err.read()
-                assert b"Traceback" in diagnostic and b"OSError: [Errno 5] QA15-SUBJECT" in diagnostic
+                assert b"Traceback" in diagnostic and b"OSError: [Errno 5] INJECTED-SUBJECT" in diagnostic
         check()
         import traceback
         with patch.object(traceback, "print_exc"):
@@ -5702,7 +6025,7 @@ def _watchdog_completion_case(mode, tree=None):
         flip_child.close()
     elif mode == "launch-cancel":
         import time
-        # QA18 codex F1: a cancellation delivered while the launcher thread is
+        # A cancellation delivered while the launcher thread is
         # being CREATED (inside threading.Thread.start, before its bootstrap runs)
         # must neither be replaced by a cleanup RuntimeError, nor leak the control
         # sockets, nor leak a guardian. The launcher is parked at construction and
@@ -5725,7 +6048,7 @@ def _watchdog_completion_case(mode, tree=None):
         def interrupted_start(thread):
             if thread.name == "opf-fixture-launcher":
                 # A REAL SIGINT: the launcher is created under the masked
-                # bracket (fix 2x), so the KeyboardInterrupt stays pending
+                # bracket, so the KeyboardInterrupt stays pending
                 # through Thread.start and materializes at the bracket's
                 # restore -- still inside construction, which must abort the
                 # launch and re-raise the cancellation unreplaced.
@@ -5916,7 +6239,7 @@ def _watchdog_completion_case(mode, tree=None):
     elif mode == "fd-census":
         import errno
         caller = os.getpid()
-        # QA18 codex F4: without an authoritative /proc/self/fd census the sweep
+        # Without an authoritative /proc/self/fd census the sweep
         # cannot be proven complete (a soft-RLIMIT bound does not enumerate
         # descriptors already open above it), so the guardian must REFUSE startup,
         # never run the subject behind a partial sweep.
@@ -5954,7 +6277,7 @@ def _watchdog_completion_case(mode, tree=None):
         finally:
             os.close(spare)
     elif mode == "pdeathsig":
-        # D2: the subject arms PR_SET_PDEATHSIG(SIGKILL) before any subject code
+        # The subject arms PR_SET_PDEATHSIG(SIGKILL) before any subject code
         # runs (partial coverage for the wedged-guardian residual; the behavioral
         # leg rides the subject-receipt case). PR_GET_PDEATHSIG reads it back.
         def query():
@@ -5971,7 +6294,7 @@ def _watchdog_completion_case(mode, tree=None):
         with patch.object(emit, "_fixture_pdeathsig", lambda: None):
             assert emit.run_bounded(query, timeout_s=10) == "0"
     elif mode == "subject-gc":
-        # QA18 gemini F3: the guardian disables gc for its own forked-heap safety,
+        # The guardian disables gc for its own forked-heap safety,
         # but the SUBJECT runs arbitrary test code and must get the collector back
         # before its callable runs, or every cycle it builds leaks for the
         # callable's whole life.
@@ -6031,7 +6354,7 @@ def _watchdog_completion_case(mode, tree=None):
         # supervision and stays BUFFERED on the control socket: the caller collects
         # it even after the guardian's death, so escalation always knows the
         # subject. The subject's PR_SET_PDEATHSIG(SIGKILL) partial coverage is
-        # observed behaviorally on the same stimulus (D2).
+        # observed behaviorally on the same stimulus.
         with tempfile.TemporaryDirectory(prefix="opf-receipt-") as directory:
             guardian_file = Path(directory, "guardian")
             real_send = emit._fixture_send_subject
@@ -6117,7 +6440,7 @@ def _watchdog_completion_case(mode, tree=None):
     elif mode == "subject-ack":
         import time
         caller = os.getpid()
-        # QA18 codex F2: the subject may not run user code (so cannot create
+        # The subject may not run user code (so cannot create
         # descendants) before the guardian has delivered its receipt and
         # acknowledged ownership; a guardian that dies before the acknowledgment
         # must yield a subject that refuses to run, even without pdeathsig.
@@ -6212,7 +6535,7 @@ def _watchdog_completion_case(mode, tree=None):
         import time
         import types
         import warnings
-        # QA18 codex F3: pdeathsig is not retroactive, so a subject first scheduled
+        # Pdeathsig is not retroactive, so a subject first scheduled
         # after its guardian died arms too late; it must detect the reparenting and
         # refuse to run. Independently, close() must kill and prove a
         # receipt-identified subject on ANY guardian failure, not only after an
@@ -6799,7 +7122,7 @@ def _watchdog_completion_case(mode, tree=None):
 
             # Flip A: without the parent check (and with pdeathsig disarmed, which
             # a post-death arm cannot help anyway) the released orphan runs its
-            # callable: the QA18 codex F3 defect, reproduced.
+            # callable: the released-orphan defect, reproduced.
             with patch.object(emit, "_fixture_check_parent", lambda expected: None):
                 child, subject = launch_held(arm=False)
                 os.kill(child.pid, signal.SIGKILL)
@@ -7167,8 +7490,9 @@ def _watchdog_completion_case(mode, tree=None):
                     return real_pidfd_signal(fd, signum, *args)
 
                 def rec_killpg(pgid, signum):
-                    # The layer must never issue a numeric group kill (QA21
-                    # codex F3); any call is a loud wrong-owner-class failure.
+                    # The layer must never issue a numeric group kill (an
+                    # unpinned pgid may be recycled); any call is a loud
+                    # wrong-owner-class failure.
                     raise AssertionError(
                         "numeric killpg is banned: " + repr((pgid, signum)))
 
@@ -7216,7 +7540,7 @@ def _watchdog_completion_case(mode, tree=None):
         pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=False)
         # Kill order: freeze first, then the subject's tree (per-member
         # verified pidfds -- the banned-killpg recorder proves no numeric
-        # group kill ran, QA21 codex F3), then the guardian.
+        # group kill ran), then the guardian.
         assert sequence and sequence[0][0] == "pidfd" and sequence[0][2] == signal.SIGSTOP, sequence
         subject_kills = [index for index, entry in enumerate(sequence)
                          if entry[0] == "members" and entry[1] == subject
@@ -7226,7 +7550,7 @@ def _watchdog_completion_case(mode, tree=None):
                           and entry[2] == signal.SIGKILL]
         assert subject_kills, (sequence, subject)
         assert descendant in sequence[subject_kills[0]][3], (sequence, descendant)
-        # Fix 2y (codex F1/F2): the census is licensed by the frozen
+        # The census is licensed by the frozen
         # guardian's subreaper ownership, EXCLUDES the leader (members die
         # first; the leader dies LAST through its held pidfd), and accounts
         # every member -- the leader never appears as a census delivery and
@@ -7258,12 +7582,12 @@ def _watchdog_completion_case(mode, tree=None):
         import time
         from contextlib import ExitStack
         caller = os.getpid()
-        # QA18 gemini F1: escalation must reach the receipt-identified
+        # Escalation must reach the receipt-identified
         # subject's same-group members even when the guardian already REAPED
         # the subject: the frozen subreaper guardian still parents the
         # surviving descendant (the census pin), which is then addressed
         # through its OWN verified pidfd -- never a numeric killpg of the
-        # freed, recyclable pgid (QA21 codex F3).
+        # freed, recyclable pgid.
         with tempfile.TemporaryDirectory(prefix="opf-reaped-") as directory:
             wedged = Path(directory, "wedged")
             grandchild_file = Path(directory, "grandchild")
@@ -7415,14 +7739,14 @@ def _watchdog_completion_case(mode, tree=None):
                 return child, subject, descendant
 
             child, subject, descendant = launch_killed()
-            # Fix 2y (D2): the guardian is DEAD when poll() collects, so the
+            # The guardian is DEAD when poll() collects, so the
             # collection-time receipt kill is SUBJECT-ONLY through the held
             # pidfd -- NO member census, NO new pidfds. The surviving
             # same-group descendant is the documented orphan-escape residual
             # (pdeathsig is disarmed here to expose it), which close()
             # DISCLOSES and never claims killed. The pre-fix layer anchored a
             # census on the subject's bare NUMERIC pid here (the
-            # recycled-anchor class, QA22 codex F1) and killed the descendant.
+            # recycled-anchor class) and killed the descendant.
             assert child._subject_kill == "subject-only", child._subject_kill
             closed = []
             with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0):
@@ -7433,7 +7757,7 @@ def _watchdog_completion_case(mode, tree=None):
             assert closed and "guardian failed" in closed[0], \
                 ("close() did not re-raise the poll-recorded failure", closed)
             assert "descendants, if any, unaddressed" in closed[0], closed
-            # Fix 2z (gemini F3): with a dead guardian NO census ran at all,
+            # With a dead guardian NO census ran at all,
             # so the disclosure covers EVERY unaddressed descendant --
             # narrowing it to "same-group" falsely implied the other-group
             # ones were addressed or could not exist.
@@ -7451,11 +7775,11 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(descendant, (None, "Z"),
                         "the residual hygiene did not complete")
 
-            # Flip (red-on-revert, D2): reintroduce the removed no-guardian
+            # Flip (red-on-revert): reintroduce the removed no-guardian
             # census -- a member kill anchored on the subject's bare numeric
             # pid after one freeze probe -- and the orphaned descendant dies
             # through a freshly opened pidfd on this guardian-dead path,
-            # exactly the unowned kill fix 2y removed.
+            # exactly the unowned kill the subject-only path removed.
             def census_kill(target, fd, **license):
                 signal.pidfd_send_signal(fd, signal.SIGSTOP)
                 emit._fixture_kill_group_members(
@@ -7474,7 +7798,8 @@ def _watchdog_completion_case(mode, tree=None):
                 except emit.ChildStatusUnavailable:
                     pass
 
-            # Flip: erase everything fix 2w acts on -- no collection-time kill,
+            # Flip: erase everything the masked collection step acts on --
+            # no collection-time kill,
             # no recorded failure, and a FORGED validated status (the pre-fix
             # close believed exactly this state) -> close() returns SILENTLY
             # and the subject tree survives.
@@ -7755,8 +8080,8 @@ def _watchdog_completion_case(mode, tree=None):
         await_state(subject, (None, "Z"), "the interrupted collection left the subject")
         assert open_fds() == before and no_children(), "the interrupted collection leaked"
 
-        # Leg 5: SIGINT raised ENTERING the ownership transfer (the QA20 codex
-        # F2 gap, before _abandoned is recorded) -> masked, the transfer still
+        # Leg 5: SIGINT raised ENTERING the ownership transfer (the gap
+        # before _abandoned is recorded) -> masked, the transfer still
         # records the abandonment under the lock before the interrupt can land.
         gate.clear()
 
@@ -7782,7 +8107,7 @@ def _watchdog_completion_case(mode, tree=None):
                 "the abandoned launcher did not collect its own fork"
         assert open_fds() == before and no_children(), "the transfer interrupt leaked"
 
-        # Leg 6 (QA21 claude F1): a PROCESS-directed SIGINT -- the real
+        # Leg 6: a PROCESS-directed SIGINT -- the real
         # Ctrl-C delivery shape, os.kill(getpid()), which the kernel may hand
         # to ANY thread with it unblocked -- injected during the wedged-fork
         # window. The launcher is created with the pair blocked, so with this
@@ -7833,7 +8158,7 @@ def _watchdog_completion_case(mode, tree=None):
         assert open_fds() == before and no_children(), \
             "the process-directed leg leaked"
 
-        # Leg 7 (QA21 claude F3 / codex F1 / gemini F1): a cancellation whose
+        # Leg 7: a cancellation whose
         # interpreter flag trips during the mask INSTALLATION itself (modeled:
         # the seam installs the real block, then raises). The prior mask is
         # captured by query before the restoring try and the block is the
@@ -8010,7 +8335,7 @@ def _watchdog_completion_case(mode, tree=None):
                 ("the flip did not reproduce the false claim", flipped)
     elif mode == "poll-masked":
         import time
-        # QA20 codex F1 + claude F1 (masked design, fix 2w): poll()'s whole
+        # Masked design: poll()'s whole
         # collection-to-failure-recording step runs MASKED and kills the
         # receipt-identified subject pin-first AT COLLECTION time; a validation
         # that still dies inside that window leaves an UNRESOLVED collection
@@ -8018,7 +8343,7 @@ def _watchdog_completion_case(mode, tree=None):
         # close() treats as a failure of its own, and the last-resort interrupt
         # collector addresses the subject of a collected-but-uncleaned guardian
         # instead of returning early. On a pidfd-absent host the un-escalated
-        # re-raise names the unverifiable cleanup (QA20 claude F3).
+        # re-raise names the unverifiable cleanup.
         cancellation = {signal.SIGINT, signal.SIGTERM}
         with tempfile.TemporaryDirectory(prefix="opf-pollmask-") as directory:
             descendant_file = Path(directory, "descendant")
@@ -8137,8 +8462,8 @@ def _watchdog_completion_case(mode, tree=None):
             assert child._subject_kill == "subject-only", child._subject_kill
             assert child.subject_pid == subject, (child.subject_pid, subject)
             # The collection-time kill addressed the SUBJECT before close();
-            # the descendant is the disclosed orphan-escape residual (fix 2y,
-            # D2: the guardian is dead, so no census runs on this path).
+            # the descendant is the disclosed orphan-escape residual (the
+            # guardian is dead, so no census runs on this path).
             await_state(subject, (None, "Z"),
                         "poll() left the failed guardian's subject running")
             assert state(descendant) not in (None, "Z"), \
@@ -8181,7 +8506,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(subject, (None, "Z"),
                         "the interrupt collector left the unresolved subject running")
             # Subject-only on the collected (guardian-dead) path: the
-            # descendant is the disclosed orphan-escape residual (fix 2y, D2).
+            # descendant is the disclosed orphan-escape residual.
             assert state(descendant) not in (None, "Z"), \
                 "the interrupt collector census-killed the orphaned descendant"
             closed = close_grace(child)
@@ -8205,7 +8530,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
 
-            # Leg 2b (QA21 claude F2): an asynchronous exception landing
+            # Leg 2b: an asynchronous exception landing
             # BETWEEN poll()'s two collection-state writes -- after the reap,
             # at the SECOND write's line, located from the live source so the
             # injection tracks the code -- must leave close() OWNING the
@@ -8260,14 +8585,14 @@ def _watchdog_completion_case(mode, tree=None):
             assert closed and "guardian ownership lost" in closed[0], \
                 ("close() did not refuse the half-recorded collection loudly",
                  closed)
-            # Fix 2y (claude Finding 2): the lost-ownership refusal ATTEMPTS
+            # The lost-ownership refusal ATTEMPTS
             # the held receipt's subject kill and disappearance proof instead
             # of raising bare -- the subject dies through its held pidfd, the
             # refusal names the proven kill, and the descendant remains the
             # disclosed subject-only residual.
             assert "receipt subject killed" in closed[0] \
                 and "exit proven" in closed[0], closed
-            # Fix 2z (gemini F3): the lost-ownership disclosure covers every
+            # The lost-ownership disclosure covers every
             # unaddressed descendant, never just the same-group ones.
             assert "same-group" not in closed[0], closed
             await_state(subject, (None, "Z"),
@@ -8291,7 +8616,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
 
-            # Leg 3 (QA20 claude F3): pidfd-absent host -- a pid-only receipt's
+            # Leg 3: pidfd-absent host -- a pid-only receipt's
             # poll-collected failure re-raises through close() NAMING the
             # unverifiable cleanup, and the known subject pid is never
             # group-killed unpinned: the surviving tree is the documented
@@ -8334,7 +8659,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "unpinned-kill":
         import time
-        # QA20 claude F1 + QA21 codex F3: NEVER signal a numeric pid or pgid
+        # Ownership pin rule: NEVER signal a numeric pid or pgid
         # whose ownership is not pinned -- a held pidfd does not pin the
         # NUMBER once the process is reaped, and SIGSTOP delivery to a ZOMBIE
         # leader cannot stop its parent reaping it and the freed pgid being
@@ -8344,7 +8669,7 @@ def _watchdog_completion_case(mode, tree=None):
         # against /proc (group AND an anchored parent chain) AFTER the pidfd
         # is opened. Pin-first: only a leader frozen ALIVE (its pidfd
         # unreadable after the freeze) or a frozen subreaper guardian still
-        # parenting a member (the census pin, QA18 gemini F1) anchors the
+        # parenting a member (the census pin) anchors the
         # member kill; a reaped or ZOMBIE leader with no census license is
         # reported unpinned and its group members are left disclosed, never
         # guessed at. The subject's own pidfd SIGKILL always runs against the
@@ -8374,7 +8699,7 @@ def _watchdog_completion_case(mode, tree=None):
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
-        # Leg 1 (fix 2y, codex F1 under D2): NO GUARDIAN -> NO census. A live
+        # Leg 1: NO GUARDIAN -> NO census. A live
         # leader with a live same-group descendant, addressed WITHOUT
         # guardian ownership (the guardian-dead path), gets a SUBJECT-ONLY
         # kill: SIGSTOP then SIGKILL through the already-held pidfd, the
@@ -8451,7 +8776,7 @@ def _watchdog_completion_case(mode, tree=None):
         os.close(fd)
         reaped_leader = leader
 
-        # Leg 3 (QA21 codex F3): a ZOMBIE leader accepts the pidfd SIGSTOP --
+        # Leg 3: a ZOMBIE leader accepts the pidfd SIGSTOP --
         # delivery proves only that it exists unreaped NOW -- but its parent
         # can still reap it and the freed pgid can be recycled mid-sequence,
         # so a zombie leader licenses NO member kill: escalation reports
@@ -8515,7 +8840,7 @@ def _watchdog_completion_case(mode, tree=None):
                 pass
             assert time.monotonic() < bound, "the decoy never took its group"
             time.sleep(0.005)
-        # Fix 2y (codex F2): the census ACCOUNTS the live member it refused
+        # The census ACCOUNTS the live member it refused
         # to signal -- ([], [decoy]) -- so no caller can read a refused
         # member as an addressed tree.
         assert emit._fixture_kill_group_members(
@@ -8534,7 +8859,7 @@ def _watchdog_completion_case(mode, tree=None):
         # Leg 5: reaped leader, frozen-guardian census -> a surviving
         # same-group descendant, adopted by the stopped subreaper guardian,
         # pins the group and the member kill still reaches it through its own
-        # verified pidfd (QA18 gemini F1 preserved under the pin rule).
+        # verified pidfd (the census pin preserved under the pin rule).
         with tempfile.TemporaryDirectory(prefix="opf-pin-") as directory:
             leader_file = Path(directory, "leader")
             grandchild_file = Path(directory, "grandchild")
@@ -8611,7 +8936,7 @@ def _watchdog_completion_case(mode, tree=None):
             os.kill(guardian, signal.SIGCONT)
             os.waitpid(guardian, 0)
 
-        # Leg 6 (fix 2y, claude Finding 1): the escalation contract must hold
+        # Leg 6: the escalation contract must hold
         # with a subject pidfd AT OR ABOVE FD_SETSIZE (1024). The layer polls
         # pidfds with select.poll everywhere; the pre-fix freeze probe used
         # select.select, whose fd_set raises ValueError there, replacing the
@@ -8651,7 +8976,8 @@ def _watchdog_completion_case(mode, tree=None):
 
         # Flip (red-on-revert): the pre-fix select.select probe on the same
         # high descriptor raises ValueError BEFORE any kill, leaving the
-        # frozen leader stranded -- the exact fix-2x regression signature.
+        # frozen leader stranded -- the exact stranded-leader regression
+        # signature.
         import select as select_module
 
         def legacy_escalate(subject, subject_fd, **license):
@@ -8669,7 +8995,7 @@ def _watchdog_completion_case(mode, tree=None):
         os.waitpid(leader, 0)
         os.close(fd)
 
-        # Leg 7 (fix 2y, codex F1/F2 on the GUARDIAN path): with a frozen
+        # Leg 7 (the GUARDIAN path): with a frozen
         # subreaper guardian and a LIVE leader, the census is anchored on the
         # GUARDIAN alone (never the subject's bare numeric pid), EXCLUDES the
         # leader (members die first; the leader dies LAST through its held
@@ -8756,7 +9082,7 @@ def _watchdog_completion_case(mode, tree=None):
             os.kill(guardian, signal.SIGCONT)
             os.waitpid(guardian, 0)
 
-        # Leg 8 (fix 2y, codex F3): TimeoutError/InterruptedError -- OSError
+        # Leg 8: TimeoutError/InterruptedError -- OSError
         # subclasses carrying deadline/cancellation semantics -- PROPAGATE
         # out of the member census and its /proc field reads instead of
         # silently reading as "no members" / "not pinned", which would let a
@@ -8792,7 +9118,7 @@ def _watchdog_completion_case(mode, tree=None):
         real_os_open = os.open
 
         def raising_open(path, flags, *args, **kwargs):
-            # The census reads /proc through os.open (fix 8: no stdlib
+            # The census reads /proc through os.open (no stdlib
             # context manager hides the close from the boundary).
             if str(path).startswith("/proc/"):
                 raise InterruptedError("census read interrupted")
@@ -8809,19 +9135,18 @@ def _watchdog_completion_case(mode, tree=None):
     elif mode == "census-verify":
         import time
         import types
-        # Fix 2z (premise change) + maintainer ruling
-        # PD-335-TREE-CLAIM-STALL: "subject tree killed" rests on
+        # Tree-claim rule: "subject tree killed" rests on
         # OBSERVATION -- while the guardian is still frozen, a bounded
         # post-kill verification census must see NO live, signalable group
         # member in TWO CONSECUTIVE clean passes -- never on the kill sends
         # alone, and the claim is worded as that observation, never a proof.
         # Anything
         # the escalation cannot OBSERVE dead downgrades the claim: an
-        # unreadable /proc entry is accounted, never read as exited (codex
-        # BLOCKER 2 / gemini F2); a leader SIGKILL failing with anything but
-        # ProcessLookupError names the surviving leader (gemini F1); a
+        # unreadable /proc entry is accounted, never read as exited; a
+        # leader SIGKILL failing with anything but
+        # ProcessLookupError names the surviving leader; a
         # member forked past the kill census's snapshot is observed by the
-        # verification census and named (claude F1).
+        # verification census and named.
         def state(target):
             try:
                 stat = Path("/proc", str(target), "stat").read_bytes()
@@ -8905,7 +9230,7 @@ def _watchdog_completion_case(mode, tree=None):
             os.kill(guardian, signal.SIGCONT)
             os.waitpid(guardian, 0)
 
-        # Leg 1 (codex BLOCKER 2 / gemini F2): an unreadable /proc entry is
+        # Leg 1: an unreadable /proc entry is
         # NEVER proof of exit: the member is accounted (named), unsignalled,
         # and the claim downgrades to "partial". The pre-fix census read the
         # PermissionError as an exited process and claimed ("tree", []) with
@@ -8927,10 +9252,10 @@ def _watchdog_completion_case(mode, tree=None):
                     leader, fd, guardian_pid=guardian)
             assert outcome == ("partial", ([], [grandchild])), (
                 "an unreadable entry was read as exited, or accounted as an "
-                "established member (round 24, claude F1)", outcome)
+                "established member", outcome)
             # The refusal never asserts membership the census did not
             # establish: the unreadable entry is disclosed as an
-            # unverifiable POSSIBLE member (round 24, claude F1). The
+            # unverifiable POSSIBLE member. The
             # pre-fix wording claimed "members [pid] unaddressed" for a
             # possibly-foreign unreadable entry.
             fake = types.SimpleNamespace(
@@ -8954,7 +9279,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(grandchild, (None, "Z"),
                         "the leg-1 hygiene did not complete")
             release(guardian)
-        # Leg 2 (gemini F1): a leader SIGKILL failing with anything but
+        # Leg 2: a leader SIGKILL failing with anything but
         # ProcessLookupError NAMES the surviving leader and never claims the
         # tree. The pre-fix code swallowed the failure and, with a clean
         # census, still claimed ("tree", []) over the live leader.
@@ -8983,7 +9308,7 @@ def _watchdog_completion_case(mode, tree=None):
             os.close(fd)
             release(guardian)
 
-        # Leg 3 (claude F1, the fix-2z premise change): a member FORKED
+        # Leg 3 (the tree claim rests on observation): a member FORKED
         # between the kill census's /proc snapshot and its kills is invisible
         # to the snapshot but OBSERVED by the verification census: the claim
         # downgrades to "partial" NAMING the live survivor. The
@@ -9035,7 +9360,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(forked, (None, "Z"), "the leg-3 hygiene did not complete")
             release(guardian)
 
-        # Leg 4 (maintainer ruling PD-335-TREE-CLAIM-STALL): the "tree"
+        # Leg 4 (the tree-claim rule): the "tree"
         # observation needs TWO CONSECUTIVE clean censuses -- a /proc scan
         # cannot prove the whole tree died, and a survivor missing from one
         # snapshot can appear in the next. The pre-fix verifier accepted a
@@ -9080,26 +9405,26 @@ def _watchdog_completion_case(mode, tree=None):
     elif mode == "census-exception":
         import time
         import types
-        # Fix 2z (codex BLOCKER 3): cleanup is exception-safe. The subject's
+        # Cleanup is exception-safe. The subject's
         # held-pidfd SIGKILL runs even if the member census raises, the
         # guardian's SIGKILL runs even if the subject cleanup raises, the
         # exception still propagates, and the recorded accounting ("partial",
         # members unknown) makes the refusal name exactly what ran. The
         # pre-fix escalation let an ordinary census failure strand a frozen
-        # guardian and a frozen, unkilled subject. Round 24 extends the
-        # contract to the freeze sites (both SIGSTOPs run inside the kill
+        # guardian and a frozen, unkilled subject. The contract extends
+        # to the freeze sites (both SIGSTOPs run inside the kill
         # protection), to cancellations raised by the direct guardian
         # backstop (they propagate, chaining the helper failure), and to the
-        # double-fault refusal wording ("attempted", never "sent"). QA25
-        # (codex) adds pending-cancellation priority: a cancellation ALREADY
+        # double-fault refusal wording ("attempted", never "sent"). It
+        # adds pending-cancellation priority: a cancellation ALREADY
         # propagating into the guardian-kill finally stays the outward
         # exception, an ordinary kill-helper failure chained beneath it.
-        # QA26 (codex) closes that priority as a CLASS: one exception
+        # That priority holds as a CLASS: one exception
         # boundary spans the whole cleanup, direct backstop included, so
         # EVERY later failure -- helper or backstop, ordinary or
-        # cancellation -- stays beneath a pending cancellation; QA26
-        # (claude MINOR 1) keeps the cancellation's own pre-existing chain
-        # intact while doing so.
+        # cancellation -- stays beneath a pending cancellation, and
+        # the cancellation's own pre-existing chain
+        # stays intact while doing so.
         def state(target):
             try:
                 stat = Path("/proc", str(target), "stat").read_bytes()
@@ -9159,8 +9484,8 @@ def _watchdog_completion_case(mode, tree=None):
             # process's group for good, so the guardian-anchored
             # census found no group member, no census ran, and the
             # injected census failure was never raised -- the
-            # intermittent "fixture was accepted" flake (fix 16,
-            # QA37 claude). Hand the pair out only once the leader
+            # intermittent "fixture was accepted" flake. Hand the pair
+            # out only once the leader
             # holds its own group.
             leader = int(leader_file.read_text(encoding="ascii"))
             await_pgid(leader, "the model leader never took its own group")
@@ -9226,7 +9551,7 @@ def _watchdog_completion_case(mode, tree=None):
             os.close(guardian_fd)
             os.close(leader_fd)
 
-        # Leg 3 (fix 2z, claude F4): a census kill RECORDED by a prior
+        # Leg 3: a census kill RECORDED by a prior
         # interrupted close ("tree"/"partial") is disclosed as that census
         # kill when a later close re-raises the recorded failure -- never as
         # a subject-only kill this close did not run (the pre-fix branch
@@ -9269,11 +9594,11 @@ def _watchdog_completion_case(mode, tree=None):
             "the recorded census kill was not disclosed", relabel)
         assert "subject-only kill" not in relabel, (
             "the census kill was relabelled subject-only", relabel)
-        # Maintainer ruling PD-335-TREE-CLAIM-STALL: the tree claim is
+        # Tree-claim rule: the tree claim is
         # worded as an observation with its residual, never a proof.
         assert "an observation, not a proof" in relabel, (
             "the tree claim was not worded as an observation", relabel)
-        # QA26 claude MINOR 4: pin the narrowed claim and its residual.
+        # Pin the narrowed claim and its residual.
         # Reverting to the stronger "every member addressed" wording or
         # dropping the ruling-mandated residual disclosure turns this red.
         assert "every observed member addressed" in relabel, (
@@ -9285,7 +9610,7 @@ def _watchdog_completion_case(mode, tree=None):
                 "evade it") in relabel, (
             "the residual disclosure was dropped", relabel)
 
-        # Leg 4 (round 24, codex boundary, subject freeze site): the subject
+        # Leg 4 (subject freeze site): the subject
         # SIGSTOP runs INSIDE the kill protection, so a raising freeze -- a
         # non-OSError delivery fault here -- still reaches the held-pidfd
         # SIGKILL. The pre-fix freeze sat before the try: the exception
@@ -9310,7 +9635,7 @@ def _watchdog_completion_case(mode, tree=None):
             os.kill(guardian, signal.SIGCONT)
             os.waitpid(guardian, 0)
 
-        # Leg 5 (round 24, codex boundary): at the _escalate tier the same
+        # Leg 5: at the _escalate tier the same
         # subject-freeze fault records only what actually ran -- the
         # held-pidfd SIGKILL now provably runs inside the helper's
         # protection, so the recorded ("partial", None) is honest and the
@@ -9345,7 +9670,7 @@ def _watchdog_completion_case(mode, tree=None):
                 and fake._subject_skipped is None), (
             fake._subject_kill, fake._subject_skipped)
         await_state(subject, (None, "Z"),
-                    "the recorded subject kill never ran (round 24: the "
+                    "the recorded subject kill never ran (the "
                     "freeze fault skipped the held-pidfd SIGKILL)")
         os.waitpid(subject, 0)
         bound = _watchdog_deadline(30)
@@ -9360,7 +9685,7 @@ def _watchdog_completion_case(mode, tree=None):
         os.close(guardian_fd)
         os.close(subject_fd)
 
-        # Leg 6 (round 24, codex boundary, guardian freeze site): the
+        # Leg 6 (guardian freeze site): the
         # guardian SIGSTOP runs INSIDE the guardian-kill protection, so a
         # raising freeze still reaches the finally's guardian SIGKILL --
         # and records NOTHING, because the subject cleanup never ran and
@@ -9409,7 +9734,7 @@ def _watchdog_completion_case(mode, tree=None):
         os.close(guardian_fd)
         os.close(subject_fd)
 
-        # Leg 7 (round 24, codex BLOCKER 2): a cancellation raised by the
+        # Leg 7: a cancellation raised by the
         # direct held-pidfd guardian backstop PROPAGATES, chaining the kill
         # helper's failure as its context. The pre-fix fallback caught every
         # OSError -- TimeoutError/InterruptedError included -- and discarded
@@ -9440,7 +9765,7 @@ def _watchdog_completion_case(mode, tree=None):
             except RuntimeError:
                 raise AssertionError(
                     "the direct guardian backstop swallowed the "
-                    "cancellation (round 24, codex BLOCKER 2)")
+                    "cancellation")
             else:
                 raise AssertionError("the escalation did not propagate")
         # Both kill paths were injected to fail: the frozen guardian remains
@@ -9449,7 +9774,7 @@ def _watchdog_completion_case(mode, tree=None):
         os.waitpid(guardian, 0)
         os.close(guardian_fd)
 
-        # Leg 8 (round 24, claude F2): under a double fault -- the member
+        # Leg 8: under a double fault -- the member
         # census raises AND the held-pidfd subject SIGKILL fails with a
         # non-lookup error -- the recorded ("partial", None) refusal words
         # the kill as ATTEMPTED through the held pidfd, never as "sent":
@@ -9482,7 +9807,7 @@ def _watchdog_completion_case(mode, tree=None):
             # pidfd_send_signal returns, but /proc shows "T" only once
             # the sleeping leader is next scheduled and completes the
             # group-stop, so an immediate read can still observe
-            # "S"/"R" (QA36 codex: one intact run failed here while
+            # "S"/"R" (one intact run failed here while
             # the diagnostic re-read already showed "T"). Wait bounded
             # for the observed stopped state; a subject the denied
             # SIGKILL nevertheless killed would show None/"Z" and
@@ -9508,7 +9833,7 @@ def _watchdog_completion_case(mode, tree=None):
             os.close(guardian_fd)
             os.close(leader_fd)
 
-        # Leg 9 (QA25 codex): a cancellation ALREADY propagating into the
+        # Leg 9: a cancellation ALREADY propagating into the
         # guardian-kill finally stays the OUTWARD exception when the
         # ownership-checked kill helper fails with an ordinary error: the
         # helper failure is chained beneath it, never promoted over it. The
@@ -9541,7 +9866,7 @@ def _watchdog_completion_case(mode, tree=None):
             except RuntimeError:
                 raise AssertionError(
                     "an ordinary helper failure displaced the pending "
-                    "cancellation (QA25 codex)")
+                    "cancellation")
             else:
                 raise AssertionError("the escalation did not propagate")
         assert fake._subject_kill is None and fake._subject_skipped is None, (
@@ -9560,7 +9885,7 @@ def _watchdog_completion_case(mode, tree=None):
         assert os.WIFSIGNALED(raw) and os.WTERMSIG(raw) == signal.SIGKILL, raw
         os.close(guardian_fd)
 
-        # Leg 10 (QA26 codex BLOCKER; QA26 claude MINOR 1; QA27 codex):
+        # Leg 10:
         # ONE exception boundary spans the guardian-kill cleanup, direct
         # backstop included. The full matrix -- pending (none, ordinary,
         # cancellation with an implicit context, cancellation with an
@@ -9571,8 +9896,8 @@ def _watchdog_completion_case(mode, tree=None):
         # beneath it as an exception object AND with its own pre-existing
         # chain intact (a triple fault must not unlink it), while every
         # no-pending combination without a helper cancellation keeps its
-        # round-24 outward exception. A cancellation the HELPER raises is
-        # pending for the direct backstop (fix 7, QA28 codex BLOCKER 1),
+        # established outward exception. A cancellation the HELPER raises is
+        # pending for the direct backstop,
         # so it is the boundary exception for EVERY backstop kind, the
         # backstop failure kept reachable beneath IT. The
         # pre-fix finally excluded cancellation-typed helper failures from
@@ -9580,7 +9905,7 @@ def _watchdog_completion_case(mode, tree=None):
         # OSError-only handler (both displaced the pending cancellation),
         # its raise-from rewrote the cancellation's __context__, and with
         # an explicit __cause__ it kept only a repr note, never the
-        # failure object (QA27 codex chain retention).
+        # failure object (chain retention).
         guardian = os.fork()
         if guardian == 0:
             time.sleep(3600)
@@ -9677,12 +10002,12 @@ def _watchdog_completion_case(mode, tree=None):
                           or backstop_kind == "ok"
                           or (backstop_kind == "oserror"
                               and pending_kind in ("none", "ordinary"))):
-                        # Fix 7 (QA28 codex BLOCKER 1): a cancellation the
+                        # A cancellation the
                         # helper raised is pending for the direct
                         # backstop, so it stays the boundary exception
                         # over ANY backstop failure; only an ordinary
                         # helper failure yields to a raising backstop.
-                        # Fix 14 (QA35 codex MAJOR): with a cancellation
+                        # With a cancellation
                         # pending -- at the backstop's own boundary or
                         # the enclosing finally's -- an OSError backstop
                         # fault is no longer discarded: it is re-raised
@@ -9704,13 +10029,13 @@ def _watchdog_completion_case(mode, tree=None):
                     else:
                         expected = None
                     assert signature(outward) == expected, (
-                        "the outward exception was displaced (QA26 codex)",
+                        "the outward exception was displaced",
                         combo, signature(outward), expected)
                     if pending_kind == "cancellation":
                         assert (signature(outward.__context__)
                                 == "ValueError: pre-existing chain"), (
                             "the pending cancellation's pre-existing chain "
-                            "was rewritten (QA26 claude MINOR 1)", combo,
+                            "was rewritten", combo,
                             signature(outward.__context__))
                         if boundary is None:
                             assert outward.__cause__ is None, (
@@ -9731,7 +10056,7 @@ def _watchdog_completion_case(mode, tree=None):
                                     "the chain", combo,
                                     signature(outward.__cause__.__context__))
                     elif pending_kind == "cancellation-cause":
-                        # QA27 codex: an EXPLICIT __cause__ on the pending
+                        # An EXPLICIT __cause__ on the pending
                         # cancellation survives untouched, and a cleanup
                         # failure stays reachable as an EXCEPTION OBJECT,
                         # appended at the tail of the pre-existing chain,
@@ -9756,8 +10081,7 @@ def _watchdog_completion_case(mode, tree=None):
                             assert (signature(outward.__cause__.__context__)
                                     == boundary_sig), (
                                 "the cleanup failure was not kept "
-                                "reachable beneath the explicit cause "
-                                "(QA27 codex)", combo,
+                                "reachable beneath the explicit cause", combo,
                                 signature(outward.__cause__.__context__),
                                 boundary_sig)
                             if boundary.startswith("backstop "):
@@ -9772,7 +10096,7 @@ def _watchdog_completion_case(mode, tree=None):
                                     signature(outward.__cause__
                                               .__context__.__context__))
                     elif pending_kind == "ordinary" and boundary is not None:
-                        # Reachability over BOTH edges (fix 7): with a
+                        # Reachability over BOTH edges: with a
                         # helper cancellation the backstop failure now
                         # occupies its __cause__ slot, so the ordinary
                         # pending failure sits on its __context__.
@@ -9792,11 +10116,10 @@ def _watchdog_completion_case(mode, tree=None):
                             and backstop_kind in ("oserror",
                                                   "non-oserror",
                                                   "cancellation")):
-                        # Fix 7 (QA28 codex BLOCKER 1): the cleanup-born
+                        # The cleanup-born
                         # cancellation stays over the backstop failure,
                         # which attaches beneath IT -- the OSError kind
-                        # included (fix 14, QA35 codex MAJOR: it was
-                        # discarded outright).
+                        # included (it was once discarded outright).
                         if pending_kind in ("none", "ordinary"):
                             helper_node = outward
                         elif pending_kind == "cancellation":
@@ -9814,8 +10137,7 @@ def _watchdog_completion_case(mode, tree=None):
                         assert (signature(helper_node.__cause__)
                                 == backstop_sig), (
                             "the backstop failure was not kept beneath "
-                            "the cleanup-born cancellation (fix 7, QA28 "
-                            "codex BLOCKER 1)", combo,
+                            "the cleanup-born cancellation", combo,
                             signature(helper_node.__cause__))
         # Every guardian-directed signal was stubbed, none delivered: the
         # guardian survives for this hygiene kill.
@@ -9824,11 +10146,7 @@ def _watchdog_completion_case(mode, tree=None):
         assert waited == guardian and os.WIFSIGNALED(raw), (waited, raw)
         os.close(guardian_fd)
 
-        # Leg 11 (fix 6, premise change; fix 7, QA28; fix 8, QA29 codex
-        # BLOCKER 2 / claude MAJOR 1, MINOR 2 / gemini BLOCKER; maintainer
-        # ruling PD-335, narrow and disclose; fix 9, QA30 codex BLOCKER
-        # 1/2 / claude MINOR 1/2/3; fix 11, QA32, maintainer ruling
-        # PD-335-TAIL option 2): the pending-cancellation boundary is
+        # Leg 11 (narrow and disclose): the pending-cancellation boundary is
         # checked structurally as a TRIPWIRE over RECOGNIZED SHAPES --
         # not a whole-language proof. Python's open grammar
         # (reflection, dynamic namespaces, pattern bindings) means a
@@ -9846,7 +10164,7 @@ def _watchdog_completion_case(mode, tree=None):
         # module OWNS: every module-owned cleanup reachable from the
         # lifecycle entry points (_FixtureProcess.close, _finish_close,
         # _interrupt_collect, _escalate, _address_failed_subject) routes
-        # through _cleanup_boundary. DISCLOSED RESIDUAL (PD-335): calls
+        # through _cleanup_boundary. DISCLOSED RESIDUAL: calls
         # INTO the standard library or other external code -- builtins,
         # declared stdlib modules, the enumerated external-object
         # primitives below, and the launch lock's with-statement
@@ -9854,74 +10172,72 @@ def _watchdog_completion_case(mode, tree=None):
         # never an enforced property, and the module keeps them off its
         # own cleanup paths (its /proc reads go through os.open/os.read
         # with the close as a boundary step, never a hidden stdlib
-        # context manager, QA29 codex BLOCKER 1). Inside the closure the
+        # context manager). Inside the closure the
         # leg fails, as cannot-evaluate, anything it cannot statically
         # clear: a call edge it cannot resolve -- an alias, a computed
-        # attribute, an undisclosed object method (QA29 claude MAJOR 1)
+        # attribute, an undisclosed object method
         # -- a with statement other than the disclosed launch-lock
         # shape, a finally that is not exactly one _cleanup_boundary
         # call, a boundary pending argument hard-wired to None, a
         # boundary step it cannot resolve (every resolved step and every
-        # module function passed BY REFERENCE is also traversed, QA29
-        # codex BLOCKER 2), a handler exception type it cannot resolve,
+        # module function passed BY REFERENCE is also traversed), a
+        # handler exception type it cannot resolve,
         # or unprotected work inside a cancellation-capable handler.
         # Handler hardening: a handler that can catch a cancellation
         # never CONSTRUCTS a new exception (re-raising a captured
         # exception object stays legal: the deferred-re-raise pattern),
         # and must re-raise EVERY cancellation type it can catch before
         # any unprotected work -- by being a bare re-raise, opening with
-        # the isinstance guard ON ITS OWN BOUND NAME (QA29 claude MINOR
-        # 2), standing after a bare-raising handler that already covers
+        # the isinstance guard ON ITS OWN BOUND NAME, standing after a bare-raising handler that already covers
         # those types, ending in a raise while calling nothing but
         # isinstance and _cleanup_boundary (a final raise may name only
-        # the handler's own bound exception or an alias of it, fix 9,
-        # QA30 claude MINOR 1), or capturing its exception for a
+        # the handler's own bound exception or an alias of it), or
+        # capturing its exception for a
         # deferred re-raise while doing nothing else but boundary-routed
-        # work -- and the capture is held to its promise STRUCTURALLY
-        # (fix 9, QA30 codex BLOCKER 1): after a capturing handler,
+        # work -- and the capture is held to its promise STRUCTURALLY:
+        # after a capturing handler,
         # every statement that can run while the captured object may be
         # pending calls nothing but the boundary and isinstance, never
         # rebinds the captured name, and every path re-raises exactly
         # THAT captured object, else cannot-evaluate FAILURE. Receiver
-        # identity (fix 9, QA30 codex BLOCKER 2 / claude MINOR 3): a
+        # identity: a
         # disclosed method name clears a call only on a receiver PROVEN
         # external -- a builtin-typed value or an object built by a call
         # into an imported module -- a proven module class instance is
         # resolved INTO the closure, no disclosed name may shadow a
         # module method, and any receiver that could be module-owned is
-        # a cannot-evaluate FAILURE. Fix 10 (QA31 codex BLOCKER 1/2 /
-        # gemini BLOCKER b/c) and fix 11 (QA32) hold both promises at
+        # a cannot-evaluate FAILURE. Both promises hold at
         # the width of the MODELED shapes: after a capture, every
         # boundary call that can run while the capture may be pending
         # passes exactly the CAPTURED NAME as its pending argument,
         # and EVERY boundary call in the closure passes a pending
         # argument of a recognized shape -- a bare name, or the
         # module's cancellation-conditional expression -- any other
-        # shape is a cannot-evaluate FAILURE (QA32 claude BLOCKER 2:
+        # shape is a cannot-evaluate FAILURE (
         # shape recognition is the tripwire; that the name holds the
         # RIGHT object at runtime is what leg 19 checks at every
         # site). The captured name must not be rebound by any binding
         # form the walk MODELS: assignment in every modeled syntactic
         # shape (a bare annotation with no value binds nothing and is
-        # NOT a rebinding, QA32 codex MINOR), a walrus anywhere in an
+        # NOT a rebinding), a walrus anywhere in an
         # expression, a nested def or class name, and a
         # nonlocal/global of the captured name ANYWHERE in the
-        # function, nested defs included (QA32 claude BLOCKER 1) --
+        # function, nested defs included --
         # while the statement forms the walk does not model
         # (for/with/except/del/import targets among them) fail
         # closed, as does a call-free yield/await suspension point
-        # after a capture (QA32 claude MINOR 2). A try that follows a
+        # after a capture. A try that follows a
         # capture is walked in FULL (body, else and finally), the
-        # capturing try's OWN finally is walked as a successor (QA32
-        # codex BLOCKER 1), and a nested def or lambda after a
+        # capturing try's OWN finally is walked as a successor, and a
+        # nested def or lambda after a
         # capture has its definition-time work -- decorators and
         # parameter defaults; NOT its parameter/return annotations,
         # which PEP 649 defers on the pinned 3.14 interpreter so
-        # nothing spelled inside one runs at definition time (fix
-        # 14, QA35 codex/claude MINOR) -- checked like any other
-        # call site (QA32 codex BLOCKER 2; a class statement after a
+        # nothing spelled inside one runs at definition time) --
+        # checked like any other
+        # call site (a class statement after a
         # capture already fails closed), and the deferral makes
-        # the READ the execution point (fix 15, QA36 codex MAJOR).
+        # the READ the execution point.
         # Of that read-triggered deferred-evaluation grammar this
         # leg recognizes EXACTLY one shape: a spelled
         # __annotations__/__annotate__ attribute access, rejected
@@ -9936,12 +10252,11 @@ def _watchdog_completion_case(mode, tree=None):
         # every OTHER read-triggered lazy construct (PEP 695 type
         # parameters and aliases among them) is not recognized at
         # all: both limits are DISCLOSED open-grammar residual
-        # classes below, held by leg 19, not by this leg (fix 16,
-        # QA37 codex/claude MAJOR). A
+        # classes below, held by leg 19, not by this leg. A
         # handler whose capture
         # target collides with its own `as` name, and a handler that
         # overwrites its bound name or an alias of it before its
-        # final raise, are FAILURES (QA32 codex BLOCKER 3). An
+        # final raise, are FAILURES. An
         # imported name counts as external only while the import is
         # its only binding AMONG THE BINDING AND MUTATION FORMS THE
         # SCAN BELOW MODELS and no modeled attribute assignment or
@@ -9953,33 +10268,29 @@ def _watchdog_completion_case(mode, tree=None):
         # disqualifies the name module-wide, fail-closed by
         # construction), and a boundary-step os/signal primitive
         # clears only through an unpoisoned imported module name.
-        # DISCLOSED OPEN-GRAMMAR RESIDUAL CLASSES (fix 11, QA32,
-        # PD-335-TAIL option 2) -- shapes this tripwire does NOT
+        # DISCLOSED OPEN-GRAMMAR RESIDUAL CLASSES -- shapes this
+        # tripwire does NOT
         # recognize and does NOT enforce against; each could hide
         # module-owned cleanup from this leg or launder it as
         # external, so they are disclosed here, where leg 11 is
         # defined, and leg 19's behavioural matrix -- not this leg --
         # is what holds every known cleanup site to the guarantee:
         #   - match/case pattern bindings (capture, sequence and
-        #     mapping patterns bind names past both binding scanners,
-        #     QA32 codex BLOCKER 4);
+        #     mapping patterns bind names past both binding scanners);
         #   - reflective module or namespace mutation: a qualified
         #     setattr (builtins.setattr), sys.modules stores,
         #     importlib / __import__, and stores through
-        #     globals()/vars()/module __dict__ (QA32 codex BLOCKER 4
-        #     / claude MAJOR 2; QA31 gemini c);
+        #     globals()/vars()/module __dict__;
         #   - one module imported under TWO names: poisoning one
         #     alias leaves the other cleared, though both reference
-        #     the same mutated module object (QA32 codex BLOCKER 4);
+        #     the same mutated module object;
         #   - escape of an imported module as a VALUE (alias = os):
         #     mutation through the escaped reference never poisons
-        #     the imported name (QA32 gemini c);
+        #     the imported name;
         #   - a module self-import: a plain import of the emit module
-        #     itself makes module-owned code clear as "external"
-        #     (QA32 claude MAJOR 1);
+        #     itself makes module-owned code clear as "external";
         #   - module-level shadowing of a BUILTIN name: resolve_call's
-        #     builtin clearance checks function-local bindings only
-        #     (QA32 codex BLOCKER 5 / claude MINOR 1);
+        #     builtin clearance checks function-local bindings only;
         #   - deferred evaluation AT LARGE: annotation_reads
         #     recognizes only the spelled __annotations__/
         #     __annotate__ attribute access, so any OTHER
@@ -9988,8 +10299,8 @@ def _watchdog_completion_case(mode, tree=None):
         #     read, a `type` alias's __value__ read, and whatever
         #     lazy grammar a later interpreter adds -- executing
         #     deferred expressions with no call and no recognized
-        #     attribute at the read site (fix 16, QA37 codex/claude
-        #     MAJOR; both reproductions are pinned below as
+        #     attribute at the read site (both reproductions are
+        #     pinned below as
         #     accepted-here, caught-by-leg-19 vectors);
         #   - calls inside a RECOGNIZED capture handler's
         #     boundary-call arguments: the capture branch hands the
@@ -9997,26 +10308,24 @@ def _watchdog_completion_case(mode, tree=None):
         #     the handler-body call scan runs, so an indirect
         #     annotation reader -- or any other call -- spelled in
         #     those arguments runs while the captured exception is
-        #     in flight (fix 16, QA37 codex MAJOR; pinned below the
-        #     same way).
+        #     in flight (pinned below the same way).
         # These classes are RESIDUAL, not enforced: their absence
         # from the emit module is a review invariant, and a mutation
         # inside one of them evades this leg while leg 19 still holds
         # every existing boundary CALL SITE in the computed
         # close-lifecycle closure -- each driven at its own pending
         # point, the cancellations born inside owned-handle cleanup
-        # included (fix 12, QA33 claude/codex BLOCKER) -- to its
+        # included -- to its
         # runtime behaviour; a boundary call OUTSIDE that closure
         # (_fixture_children's guardian-side census) is outside
-        # leg 19's hold (fix 13, QA34 gemini MINOR).
+        # leg 19's hold.
         import ast
         import builtins
         import inspect
         import textwrap
 
-        # MODELED INTERPRETER (fix 14, QA35 gemini, orchestrator
-        # decision reconciling QA35 gemini with the QA35 codex/claude
-        # annotation finding): this leg models the annotation
+        # MODELED INTERPRETER (annotation semantics differ by
+        # interpreter version): this leg models the annotation
         # semantics of the interpreter the project runs -- CPython
         # 3.14 (CI pins python-version 3.14), where PEP 649 defers
         # every def parameter/return annotation and a function-local
@@ -10033,7 +10342,7 @@ def _watchdog_completion_case(mode, tree=None):
                 "semantics: on this interpreter annotations in defs "
                 "and on non-name AnnAssign targets WOULD execute "
                 "where the leg does not scan them -- cannot-evaluate "
-                "FAILURE (fix 14, QA35 gemini; CI pins "
+                "FAILURE (CI pins "
                 "python-version 3.14)", tuple(version_info[:3]))
 
         leg11_interpreter_pinned(sys.version_info)
@@ -10056,8 +10365,7 @@ def _watchdog_completion_case(mode, tree=None):
 
         # Names bound by a plain `import X` anywhere in the module: a
         # call through one is a call INTO another module -- external
-        # code, the DISCLOSED residual (PD-335), never enforced. Fix 10
-        # (QA31 codex BLOCKER 2 / gemini BLOCKER c): the import must be
+        # code, the DISCLOSED residual, never enforced. The import must be
         # the name's ONLY binding -- any other binding form anywhere in
         # the module (assignment in every syntactic shape, a for/with/
         # except/comprehension target, a walrus, a def/class/lambda
@@ -10070,8 +10378,7 @@ def _watchdog_completion_case(mode, tree=None):
         # falls back into the receiver-origin proof and fails closed
         # instead of hiding module-owned cleanup behind an imported
         # name. This scan models exactly the forms its walk below
-        # enumerates and NO MORE (fix 11, QA32 codex BLOCKER 4 /
-        # gemini c): pattern bindings, reflective mutation (a
+        # enumerates and NO MORE: pattern bindings, reflective mutation (a
         # qualified setattr, sys.modules, importlib, __import__,
         # globals()/vars()/__dict__ stores), a second import alias of
         # the same module, escape of the module as a value, and a
@@ -10145,7 +10452,7 @@ def _watchdog_completion_case(mode, tree=None):
         assert set(["os", "signal", "select", "time", "errno",
                     "threading"]) <= imported_modules, (
             "an imported name the close lifecycle depends on lost its "
-            "external status (fix 10)", sorted(imported_modules))
+            "external status", sorted(imported_modules))
 
         # The boundary machinery is the verified primitive the structure
         # routes through (legs 10 and 12..18 prove it dynamically); it is
@@ -10157,7 +10464,7 @@ def _watchdog_completion_case(mode, tree=None):
         step_primitives = {("os", "close"),
                            ("signal", "pidfd_send_signal"),
                            ("signal", "pthread_sigmask")}
-        # DISCLOSED external-object touchpoints (PD-335): standard-library
+        # DISCLOSED external-object touchpoints: standard-library
         # code on objects this module constructed. The boundary protects
         # the module-owned CALL SITE; the callee's internals are the
         # disclosed residual. A call this table does not name is a
@@ -10168,8 +10475,8 @@ def _watchdog_completion_case(mode, tree=None):
             ("report", "close"), ("report", "seek"), ("report", "read"),
             ("_go", "set"), ("_launched", "wait"), ("_launched", "is_set"),
         }
-        # Methods on module-local VALUES, disclosed by NAME -- and, fix 9
-        # (QA30 codex BLOCKER 2 / claude MINOR 3), a name only counts
+        # Methods on module-local VALUES, disclosed by NAME -- and a name
+        # only counts
         # when the receiver is PROVEN external: a builtin-typed value (a
         # literal, a display, a fresh-value builtin call, a disclosed
         # method's result, or a local bound only to those) or an object
@@ -10183,15 +10490,14 @@ def _watchdog_completion_case(mode, tree=None):
         # proven receiver origin, never by name, and no disclosed name
         # may shadow a module method (asserted below), so a module-owned
         # method can no longer hide behind a stdlib method name (the
-        # QA30 .poll() collision).
+        # .poll() collision).
         external_builtin_methods = frozenset([
             "append", "add", "join", "format", "split", "rsplit",
             "isdecimal", "decode",
         ])
         assert not (external_builtin_methods & set(module_methods)), (
             "a disclosed external method name shadows a module method: "
-            "a module-owned method could hide behind it (fix 9, QA30 "
-            "claude MINOR 3)",
+            "a module-owned method could hide behind it",
             sorted(external_builtin_methods & set(module_methods)))
         # Builtin callables whose result is always a FRESH builtin-typed
         # value -- never one of their arguments (unlike min/max/next), so
@@ -10204,7 +10510,7 @@ def _watchdog_completion_case(mode, tree=None):
         ])
 
         def local_value_kinds(function):
-            # Receiver-origin PROOF (fix 9, QA30 codex BLOCKER 2): map
+            # Receiver-origin PROOF: map
             # each local name to "builtin" (always a builtin-typed
             # value), "extmodule" (an object built by a call into an
             # imported module), or ("modclass", name) (a proven module
@@ -10331,7 +10637,7 @@ def _watchdog_completion_case(mode, tree=None):
                                 and base.id in imported_modules
                                 and base.id not in bindings
                                 and base.id not in poisoned):
-                            # fix 10 (QA31 codex BLOCKER 2): a name
+                            # A name
                             # this function binds ANYWHERE is not the
                             # imported module here -- the receiver
                             # stays unproven
@@ -10391,7 +10697,7 @@ def _watchdog_completion_case(mode, tree=None):
                     break
             for name in poisoned:
                 kinds.pop(name, None)
-            # Fix 10 (QA31 codex BLOCKER 2): every name this function
+            # Every name this function
             # binds or poisons keeps an entry, so a local rebinding of
             # an imported module name stays VISIBLE to resolve_call --
             # "local" marks bound-but-unproven, which no clearing
@@ -10404,10 +10710,10 @@ def _watchdog_completion_case(mode, tree=None):
             # Returns the in-module (key, node) targets a call edge
             # reaches (empty when it stays inside this scope), or None
             # when the callee is DISCLOSED external code; anything it
-            # cannot resolve is a cannot-evaluate FAILURE (fix 8, QA29
-            # claude MAJOR 1), never a silent pass. A method call on a
-            # local value resolves through the receiver-origin proof
-            # (fix 9): disclosed names count only on proven-external
+            # cannot resolve is a cannot-evaluate FAILURE, never a
+            # silent pass. A method call on a
+            # local value resolves through the receiver-origin proof:
+            # disclosed names count only on proven-external
             # receivers, a proven module class instance resolves into
             # the closure, and an unproven receiver is a FAILURE.
             if isinstance(func, ast.Name):
@@ -10424,22 +10730,20 @@ def _watchdog_completion_case(mode, tree=None):
                                                   ast.AsyncFunctionDef))]
                 if (callable(getattr(builtins, name, None))
                         and name not in kinds):
-                    # fix 10 (QA31 class width): a builtin-named call
+                    # Class width: a builtin-named call
                     # clears only while the function itself never
                     # binds that name -- the same shadowing discipline
                     # as the imported-module names. A module-LEVEL
                     # rebinding of a builtin name is NOT caught here:
                     # it is one of the disclosed open-grammar residual
-                    # classes at the leg 11 header (fix 11, QA32 codex
-                    # BLOCKER 5 / claude MINOR 1) -- it could route
+                    # classes at the leg 11 header -- it could route
                     # module-owned cleanup through a cleared builtin
                     # name, and only the behavioural matrix (leg 19)
                     # holds such a site to the guarantee.
                     return None
                 raise AssertionError((
                     "cannot resolve a call edge in the close-lifecycle "
-                    "closure: FAILURE, never a silent pass (fix 8, QA29 "
-                    "claude MAJOR 1)", where, ast.dump(func)))
+                    "closure: FAILURE, never a silent pass", where, ast.dump(func)))
             if isinstance(func, ast.Attribute):
                 base = func.value
                 if isinstance(base, ast.Name):
@@ -10447,14 +10751,13 @@ def _watchdog_completion_case(mode, tree=None):
                         targets = module_methods.get(func.attr, ())
                         assert targets, (
                             "cannot resolve a self-method call in the "
-                            "close-lifecycle closure: FAILURE (fix 8)",
+                            "close-lifecycle closure: FAILURE",
                             where, ast.dump(func))
                         return [("m:" + qual, node)
                                 for qual, node in targets]
                     if (base.id in imported_modules
                             and base.id not in kinds):
-                        # fix 10 (QA31 codex BLOCKER 2 / gemini BLOCKER
-                        # c): the imported-name clearance holds only
+                        # The imported-name clearance holds only
                         # while the import is the receiver's only
                         # binding -- imported_modules already excludes
                         # every module-wide shadowed or poisoned name,
@@ -10466,15 +10769,14 @@ def _watchdog_completion_case(mode, tree=None):
                     if kind == "extmodule":
                         # every method on an object a call into an
                         # imported module built is the same disclosed
-                        # residual as that call itself (fix 9)
+                        # residual as that call itself
                         return None
                     if (kind == "builtin"
                             and func.attr in external_builtin_methods):
                         return None
                     if isinstance(kind, tuple):
                         # a PROVEN module class instance: the method is
-                        # module-owned and joins the closure (fix 9,
-                        # QA30 codex BLOCKER 2)
+                        # module-owned and joins the closure
                         cls = module_classes[kind[1]]
                         targets = [("m:" + cls.name + "." + inner.name,
                                     inner)
@@ -10485,13 +10787,12 @@ def _watchdog_completion_case(mode, tree=None):
                                    and inner.name == func.attr]
                         assert targets, (
                             "cannot resolve a module-class method call "
-                            "in the close-lifecycle closure: FAILURE "
-                            "(fix 9)", where, ast.dump(func))
+                            "in the close-lifecycle closure: FAILURE", where, ast.dump(func))
                         return targets
                     raise AssertionError((
                         "cannot prove a method receiver external in "
                         "the close-lifecycle closure: FAILURE, never a "
-                        "silent pass (fix 9, QA30 codex BLOCKER 2)",
+                        "silent pass",
                         where, ast.dump(func)))
                 if (isinstance(base, ast.Attribute)
                         and isinstance(base.value, ast.Name)
@@ -10509,11 +10810,11 @@ def _watchdog_completion_case(mode, tree=None):
                 raise AssertionError((
                     "cannot prove a method receiver external in the "
                     "close-lifecycle closure: FAILURE, never a silent "
-                    "pass (fix 9, QA30 codex BLOCKER 2)", where,
+                    "pass", where,
                     ast.dump(func)))
             raise AssertionError((
                 "cannot resolve a computed call in the close-lifecycle "
-                "closure: FAILURE (fix 8, QA29 claude MAJOR 1)", where,
+                "closure: FAILURE", where,
                 ast.dump(func)))
 
         def scope_edges(key, function):
@@ -10535,7 +10836,7 @@ def _watchdog_completion_case(mode, tree=None):
                     # A module function REFERENCED without a call --
                     # passed as a boundary step or any other function
                     # reference -- is traversed too: what it reaches is
-                    # reachable (fix 8, QA29 codex BLOCKER 2).
+                    # reachable.
                     yield "f:" + node.id, module_functions[node.id]
                 elif (isinstance(node, ast.Attribute)
                         and isinstance(node.ctx, ast.Load)
@@ -10550,7 +10851,7 @@ def _watchdog_completion_case(mode, tree=None):
                 if candidate == qualname:
                     return node
             raise AssertionError(
-                ("a lifecycle entry point is missing (fix 7/8)", qualname))
+                ("a lifecycle entry point is missing", qualname))
 
         scope = {}
         frontier = [
@@ -10588,8 +10889,7 @@ def _watchdog_completion_case(mode, tree=None):
                 "m:_FixtureProcess._unverified_refusal",
                 "m:_FixtureProcess._ownership_lost_refusal"} <= set(
                     scope), (
-            "the computed close-lifecycle closure lost known members "
-            "(fix 7/8)", sorted(scope))
+            "the computed close-lifecycle closure lost known members", sorted(scope))
 
         def resolve_exception_classes(node, where):
             elts = node.elts if isinstance(node, ast.Tuple) else [node]
@@ -10606,7 +10906,7 @@ def _watchdog_completion_case(mode, tree=None):
                 assert (isinstance(resolved, type)
                         and issubclass(resolved, BaseException)), (
                     "cannot evaluate a close-lifecycle exception type "
-                    "statically: FAILURE, never a pass (fix 7)", where,
+                    "statically: FAILURE, never a pass", where,
                     ast.dump(element))
                 classes.append(resolved)
             return classes
@@ -10623,12 +10923,11 @@ def _watchdog_completion_case(mode, tree=None):
                     and body[0].exc is None)
 
         def rebound_names(stmt):
-            # Every name the statement subtree may BIND (fix 11, QA32
-            # codex BLOCKER 3): assignment targets in every modeled
+            # Every name the statement subtree may BIND: assignment
+            # targets in every modeled
             # shape, a walrus, for/with/except/del/import targets,
             # def/class names, global/nonlocal declarations. A bare
-            # annotation with no value binds nothing (QA32 codex
-            # MINOR). The walk descends into nested defs;
+            # annotation with no value binds nothing. The walk descends into nested defs;
             # over-collection only ever REMOVES an alias, so it fails
             # closed.
             bound = set()
@@ -10677,14 +10976,14 @@ def _watchdog_completion_case(mode, tree=None):
             # A bare re-raise, or the deferred re-raise of the handler's
             # OWN captured object: a final `raise <name>` counts only
             # when <name> is the handler's bound name or was assigned
-            # from it in this handler (fix 9, QA30 claude MINOR 1:
+            # from it in this handler (
             # any-Name acceptance let a handler end in a raise of an
             # unrelated pre-existing object while swallowing the caught
             # cancellation) -- and the alias must SURVIVE to the raise:
             # any later binding of an alias by anything but a fresh
             # alias-of-alias assignment DISCARDS it, so a handler that
             # overwrites its bound name or an alias before the final
-            # raise no longer counts (fix 11, QA32 codex BLOCKER 3:
+            # raise no longer counts (
             # `interrupted: object = None; raise interrupted` raised
             # the overwritten object while swallowing the caught
             # cancellation).
@@ -10713,7 +11012,7 @@ def _watchdog_completion_case(mode, tree=None):
             # `if isinstance(<bound>, (...)): raise` as the FIRST
             # statement re-raises the named cancellations before any
             # other work; the subject must be the handler's OWN bound
-            # name (fix 8, QA29 claude MINOR 2).
+            # name.
             if bound is None:
                 return False
             if not (isinstance(stmt, ast.If) and not stmt.orelse
@@ -10737,7 +11036,7 @@ def _watchdog_completion_case(mode, tree=None):
             # handler captures the exception and does nothing else but
             # boundary-routed calls. Returns the CAPTURED name so the
             # enclosing code can be held to the promise structurally
-            # (fix 9, QA30 codex BLOCKER 1: this shape used to be
+            # (this shape used to be
             # accepted on the handler alone, so cleanup after the
             # capture could run outside the boundary and displace the
             # captured cancellation), or None when the shape does not
@@ -10759,8 +11058,7 @@ def _watchdog_completion_case(mode, tree=None):
                         "name: Python DELETES that binding when the "
                         "handler exits, so every later use of the "
                         "capture reads an unbound name and the "
-                        "cancellation is lost -- FAILURE (fix 11, "
-                        "QA32 codex BLOCKER 3)")
+                        "cancellation is lost -- FAILURE")
                     continue
                 if (isinstance(stmt, ast.Expr)
                         and isinstance(stmt.value, ast.Call)
@@ -10771,7 +11069,7 @@ def _watchdog_completion_case(mode, tree=None):
                             call.args
                             and isinstance(call.args[0], ast.Name)
                             and call.args[0].id == captured):
-                        # fix 10 (QA31 codex BLOCKER 1): once the
+                        # Once the
                         # handler has captured, a boundary call in it
                         # must pass the captured object itself as
                         # pending -- any other shape is NOT the
@@ -10782,7 +11080,7 @@ def _watchdog_completion_case(mode, tree=None):
                            and leaf.target.id == captured
                            for leaf in ast.walk(stmt)):
                         # a walrus hidden in the boundary call's own
-                        # arguments rebinds the capture (fix 10)
+                        # arguments rebinds the capture
                         return None
                     continue
                 return None
@@ -10793,21 +11091,19 @@ def _watchdog_completion_case(mode, tree=None):
             # when invoked, so its BODY is checked where it is routed
             # -- but the definition statement itself EXECUTES its
             # decorators and parameter defaults in the enclosing
-            # scope, so those are walked here (fix 11, QA32 codex
-            # BLOCKER 2: a default expression ran unprotected
+            # scope, so those are walked here (a default expression ran unprotected
             # cleanup right after a capture). Its parameter and
             # return annotations are NOT definition-time work on the
             # pinned interpreter: PEP 649 defers them until an
             # explicit annotation access, so nothing spelled inside
             # one runs when the def executes, and they are not
-            # walked (fix 14, QA35 codex/claude MINOR: modeling them
+            # walked (modeling them
             # as immediate calls falsely rejected a harmless
-            # annotated nested def; the fix-11-era claim that they
+            # annotated nested def; the earlier claim that they
             # "execute now" was pre-3.14 semantics). The deferral
             # moves the execution point to the READ:
             # annotation_reads below recognizes that access, and
-            # every scan that restricts calls rejects it too
-            # (fix 15, QA36 codex MAJOR).
+            # every scan that restricts calls rejects it too.
             stack = list(body)
             while stack:
                 node = stack.pop()
@@ -10821,8 +11117,8 @@ def _watchdog_completion_case(mode, tree=None):
                         for decorator in node.decorator_list:
                             # applying a decorator CALLS it with the
                             # function -- with no ast.Call node when
-                            # the decorator is bare (fix 12, QA33
-                            # codex MAJOR) -- so the application is
+                            # the decorator is bare -- so the
+                            # application is
                             # modeled as a call of the decorator
                             # expression itself; a call-shaped
                             # decorator (whose RESULT is applied) has
@@ -10836,7 +11132,7 @@ def _watchdog_completion_case(mode, tree=None):
                     # the pinned interpreter, so a call spelled inside
                     # it runs nothing: walking it over-rejected an
                     # unevaluated spelling that annotation_reads below
-                    # already skips (fix 17, QA38 codex/claude MINOR)
+                    # already skips
                     # -- only the target and the value can execute
                     # here, so only they are walked
                     stack.append(node.target)
@@ -10851,7 +11147,7 @@ def _watchdog_completion_case(mode, tree=None):
 
         def annotation_reads(body):
             # Under PEP 649 a def's annotations are deferred and their
-            # READ is the execution point (fix 15, QA36 codex MAJOR):
+            # READ is the execution point:
             # touching a function's __annotations__ (or __annotate__,
             # whose call evaluates them) runs every expression spelled
             # in its annotations, with NO ast.Call at the read site
@@ -10860,8 +11156,7 @@ def _watchdog_completion_case(mode, tree=None):
             # lambda's body, its still-unread annotations, and a
             # LOCAL AnnAssign's annotation expression (which never
             # evaluates on the pinned interpreter and is skipped by
-            # BOTH scanners: fix 16, QA37 codex MINOR; fix 17, QA38
-            # codex/claude MINOR) stay deferred and accepted -- and
+            # BOTH scanners) stay deferred and accepted -- and
             # yields
             # every attribute access spelled with an evaluating
             # name, in ANY expression context (a store or delete is
@@ -10874,8 +11169,7 @@ def _watchdog_completion_case(mode, tree=None):
             # and every OTHER read-triggered lazy construct (PEP 695
             # type parameters and aliases among them) is not
             # recognized at all -- both are DISCLOSED residual
-            # classes at the head of this leg, held by leg 19
-            # (fix 16, QA37 codex/claude MAJOR).
+            # classes at the head of this leg, held by leg 19.
             stack = list(body)
             while stack:
                 node = stack.pop()
@@ -10889,10 +11183,10 @@ def _watchdog_completion_case(mode, tree=None):
                         stack.extend(node.decorator_list)
                     continue
                 if isinstance(node, ast.AnnAssign):
-                    # a LOCAL annotation expression never evaluates
-                    # (fix 12/14): scanning it over-rejected an
-                    # unevaluated deferred-read spelling (fix 16,
-                    # QA37 codex MINOR) -- only the target and the
+                    # a LOCAL annotation expression never evaluates:
+                    # scanning it over-rejected an
+                    # unevaluated deferred-read spelling -- only the
+                    # target and the
                     # value can execute here, so only they are
                     # walked
                     stack.append(node.target)
@@ -10919,7 +11213,7 @@ def _watchdog_completion_case(mode, tree=None):
             return ("opaque", ast.dump(func))
 
         def boundary_pending_shape(pending_arg, key):
-            # fix 11 (QA32 claude BLOCKER 2, PD-335-TAIL option 2): the
+            # Pending-shape rule: the
             # pending argument of EVERY boundary call in the closure
             # must be a RECOGNIZED shape -- a bare name, or exactly the
             # module's cancellation-conditional expression `<name> if
@@ -10953,13 +11247,12 @@ def _watchdog_completion_case(mode, tree=None):
             raise AssertionError((
                 "a boundary call's pending argument is not a "
                 "recognized shape: cannot evaluate what is pending "
-                "at this site -- FAILURE (fix 11, QA32 claude "
-                "BLOCKER 2)", key, ast.dump(pending_arg)[:160]))
+                "at this site -- FAILURE", key, ast.dump(pending_arg)[:160]))
 
         def successors_after(function, target, key):
             # The statements that can run after `target` completes,
             # walking out through every enclosing block in execution
-            # order (fix 9, QA30 codex BLOCKER 1). Fails closed on an
+            # order. Fails closed on an
             # enclosing construct this walk does not model: a loop can
             # re-run statements before the capture.
             def blocks(stmt):
@@ -10975,7 +11268,7 @@ def _watchdog_completion_case(mode, tree=None):
             def find(body):
                 for index, stmt in enumerate(body):
                     if stmt is target:
-                        # fix 11 (QA32 codex BLOCKER 1): the capturing
+                        # The capturing
                         # try's OWN finally runs after its handler
                         # completes, while the capture may be pending
                         # -- it is a successor under the same rules
@@ -10993,8 +11286,7 @@ def _watchdog_completion_case(mode, tree=None):
                                    ast.While)), (
                             "a capturing handler sits inside a loop: "
                             "cannot evaluate what re-runs while the "
-                            "captured object is pending -- FAILURE "
-                            "(fix 9)", key)
+                            "captured object is pending -- FAILURE", key)
                         if isinstance(stmt, try_nodes):
                             if field == "body":
                                 path.append(stmt.orelse)
@@ -11007,13 +11299,12 @@ def _watchdog_completion_case(mode, tree=None):
 
             path = find(function.body)
             assert path is not None, (
-                "a capturing try was not found in its function "
-                "(fix 9)", key)
+                "a capturing try was not found in its function", key)
             return [stmt for block in path for stmt in block]
 
         def deferred_capture_sound(function, successors, captured,
                                    key):
-            # Fix 9 (QA30 codex BLOCKER 1 / claude MINOR 1): after a
+            # After a
             # capturing handler, walk everything that can still run.
             # While the captured object may be pending, a statement may
             # call nothing but _cleanup_boundary and isinstance, never
@@ -11022,21 +11313,19 @@ def _watchdog_completion_case(mode, tree=None):
             # body ends in that re-raise discharges the capture, so the
             # code after it runs only with the capture empty. A
             # STATEMENT form this walk does not model and a call-free
-            # yield/await suspension point (fix 11, QA32 claude MINOR
-            # 2) are cannot-evaluate FAILURES, and a path that could
+            # yield/await suspension point are cannot-evaluate
+            # FAILURES, and a path that could
             # complete with the capture still pending is a FAILURE:
             # the function would swallow the captured cancellation by
             # returning normally. A nonlocal/global of the captured
             # name ANYWHERE in the function -- a pre-capture nested
             # def used as a boundary step can rebind the capture with
-            # zero post-capture binding leaves -- is a FAILURE too
-            # (fix 11, QA32 claude BLOCKER 1).
+            # zero post-capture binding leaves -- is a FAILURE too.
             for leaf in ast.walk(function):
                 assert not (isinstance(leaf, (ast.Global, ast.Nonlocal))
                             and captured in leaf.names), (
                     "a nonlocal/global reach-back can rebind the "
-                    "captured name from anywhere in the function "
-                    "(fix 11, QA32 claude BLOCKER 1)", key)
+                    "captured name from anywhere in the function", key)
 
             def protected_calls(node):
                 for call in direct_calls([node]):
@@ -11044,11 +11333,10 @@ def _watchdog_completion_case(mode, tree=None):
                     assert called[0] == "name" and called[1] in (
                         "isinstance", "_cleanup_boundary"), (
                         "an unprotected call runs after a capture while "
-                        "the captured exception may be pending (fix 9, "
-                        "QA30 codex BLOCKER 1)", key,
+                        "the captured exception may be pending", key,
                         ast.dump(call.func))
                     if called[1] == "_cleanup_boundary":
-                        # fix 10 (QA31 codex BLOCKER 1): while the
+                        # While the
                         # capture may be pending, the boundary must
                         # receive exactly the captured object -- any
                         # other pending argument re-opens the
@@ -11058,15 +11346,14 @@ def _watchdog_completion_case(mode, tree=None):
                                 and call.args[0].id == captured), (
                             "a boundary call after a capture does not "
                             "pass the captured object as its pending "
-                            "argument (fix 10, QA31 codex BLOCKER 1)",
+                            "argument",
                             key, ast.dump(call)[:160])
                 for access in annotation_reads([node]):
                     raise AssertionError((
                         "an annotation READ follows a capture: it "
                         "evaluates deferred PEP 649 annotations -- "
                         "code no call scan saw -- while the captured "
-                        "exception may be pending (fix 15, QA36 codex "
-                        "MAJOR)", key, access.attr))
+                        "exception may be pending", key, access.attr))
 
             def is_none_guard(stmt):
                 return (isinstance(stmt, ast.If) and not stmt.orelse
@@ -11086,7 +11373,7 @@ def _watchdog_completion_case(mode, tree=None):
                         break
                     leaves = [(stmt, False)]
                     while leaves:
-                        # fix 10 (QA31 codex BLOCKER 1): no binding
+                        # No binding
                         # form may touch the captured name while it may
                         # be pending -- a walrus hides inside any
                         # expression that executes HERE, and a nested
@@ -11098,7 +11385,7 @@ def _watchdog_completion_case(mode, tree=None):
                         # (for/with/except/del/import/class targets)
                         # already fail closed
                         leaf, nested_def = leaves.pop()
-                        # fix 13 (QA34 codex/claude MAJOR): only a
+                        # Only a
                         # nested def's or lambda's BODY is deferred to
                         # its own call -- its decorators, parameter
                         # defaults and every other definition-time
@@ -11107,9 +11394,8 @@ def _watchdog_completion_case(mode, tree=None):
                         # annotation expression never executes at all
                         # on the pinned PEP 649 interpreter -- on ANY
                         # AnnAssign target shape: name, attribute or
-                        # subscript (fix 13, QA34 codex MINOR: nothing
-                        # spelled inside one runs or binds; fix 14,
-                        # QA35 gemini: pre-3.14, where a non-name
+                        # subscript (nothing spelled inside one runs
+                        # or binds; pre-3.14, where a non-name
                         # target's annotation WOULD run, the
                         # interpreter pin fails the leg closed) -- so
                         # it is not walked
@@ -11130,8 +11416,7 @@ def _watchdog_completion_case(mode, tree=None):
                             if id(child) != skipped)
                         # a walrus inside a nested def's or lambda's
                         # BODY binds THAT function's local, never the
-                        # enclosing captured name (fix 13, QA34 codex
-                        # MINOR); reaching back needs nonlocal/global,
+                        # enclosing captured name; reaching back needs nonlocal/global,
                         # rejected function-wide above and on every
                         # leaf below
                         assert nested_def or not (
@@ -11139,24 +11424,22 @@ def _watchdog_completion_case(mode, tree=None):
                             and isinstance(leaf.target, ast.Name)
                             and leaf.target.id == captured), (
                             "the captured name is rebound before its "
-                            "re-raise (fix 9/10, QA31 codex "
-                            "BLOCKER 1)", key)
+                            "re-raise", key)
                         assert not (isinstance(leaf, (ast.Global,
                                                       ast.Nonlocal))
                                     and captured in leaf.names), (
                             "the captured name is rebound before its "
-                            "re-raise (fix 9/10, QA31 codex "
-                            "BLOCKER 1)", key)
+                            "re-raise", key)
                         # a yield/await INSIDE a nested def's or
                         # lambda's BODY suspends THAT function when
                         # it is called, never this one, so it is no
-                        # suspension point here (fix 12, QA33 codex
-                        # MINOR; the body is checked where it is
+                        # suspension point here (the body is checked
+                        # where it is
                         # routed) -- but one in a parameter default
                         # or any other definition-time expression
                         # runs in THIS function and generator-
                         # converts it, so only the body is exempt
-                        # (fix 13, QA34 codex/claude MAJOR)
+                        #
                         assert nested_def or not isinstance(
                             leaf, (ast.Yield, ast.YieldFrom,
                                    ast.Await)), (
@@ -11164,8 +11447,7 @@ def _watchdog_completion_case(mode, tree=None):
                             "cannot evaluate what runs -- or never "
                             "runs, for a dropped generator or "
                             "coroutine -- while the captured "
-                            "exception is pending: FAILURE (fix 11, "
-                            "QA32 claude MINOR 2)", key)
+                            "exception is pending: FAILURE", key)
                     if isinstance(stmt, ast.Raise):
                         assert (isinstance(stmt.exc, ast.Name)
                                 and stmt.exc.id == captured
@@ -11174,8 +11456,7 @@ def _watchdog_completion_case(mode, tree=None):
                                                    ast.Name))), (
                             "after a capture, raising anything but the "
                             "captured object could swallow the pending "
-                            "cancellation (fix 9, QA30 codex BLOCKER 1 "
-                            "/ claude MINOR 1)", key)
+                            "cancellation", key)
                         state = "terminated"
                     elif isinstance(stmt, ast.If):
                         protected_calls(stmt.test)
@@ -11184,7 +11465,7 @@ def _watchdog_completion_case(mode, tree=None):
                                               "pending") == "terminated", (
                                 "an `if <captured> is not None` guard "
                                 "does not end by re-raising the captured "
-                                "object (fix 9)", key)
+                                "object", key)
                             state = "clear"
                         else:
                             body_state = walk_block(stmt.body, "pending")
@@ -11201,9 +11482,8 @@ def _watchdog_completion_case(mode, tree=None):
                     elif isinstance(stmt, try_nodes):
                         assert not stmt.handlers, (
                             "a try with handlers follows a capture: "
-                            "cannot evaluate the pending path -- FAILURE "
-                            "(fix 9)", key)
-                        # fix 10 (QA31 gemini BLOCKER b): the else and
+                            "cannot evaluate the pending path -- FAILURE", key)
+                        # The else and
                         # finally bodies are walked in FULL under the
                         # same rules -- the old call-only scan of the
                         # finalbody let a zero-call finally rebind the
@@ -11226,14 +11506,13 @@ def _watchdog_completion_case(mode, tree=None):
                                  else "pending")
                     elif isinstance(stmt, (ast.Assign, ast.AugAssign,
                                            ast.AnnAssign, ast.Expr)):
-                        # fix 10 (QA31 codex BLOCKER 1): EVERY
+                        # EVERY
                         # assignment form and EVERY target shape is
                         # scanned -- an AnnAssign with a value, an
                         # AugAssign, and any name inside a tuple,
                         # star, subscript or attribute target; a bare
                         # annotation with NO value binds nothing at
-                        # runtime and is not a rebinding (fix 11,
-                        # QA32 codex MINOR)
+                        # runtime and is not a rebinding
                         for target in (stmt.targets
                                        if isinstance(stmt, ast.Assign)
                                        else []
@@ -11246,11 +11525,10 @@ def _watchdog_completion_case(mode, tree=None):
                                 assert not (isinstance(leaf, ast.Name)
                                             and leaf.id == captured), (
                                     "the captured name is rebound "
-                                    "before its re-raise (fix 9/10, "
-                                    "QA31 codex BLOCKER 1)", key)
+                                    "before its re-raise", key)
                         if isinstance(stmt, ast.AnnAssign):
                             # a LOCAL annotation expression never
-                            # executes (fix 12, QA33 codex MINOR: a
+                            # executes (a
                             # call spelled inside a bare AnnAssign's
                             # annotation runs nothing); only the
                             # value -- and a non-simple target's
@@ -11268,31 +11546,29 @@ def _watchdog_completion_case(mode, tree=None):
                                                ast.AsyncFunctionDef))
                                     and stmt.name == captured), (
                             "the captured name is rebound before its "
-                            "re-raise (fix 9/10, QA31 codex "
-                            "BLOCKER 1)", key)
+                            "re-raise", key)
                         if isinstance(stmt, (ast.FunctionDef,
                                              ast.AsyncFunctionDef)):
-                            # fix 11 (QA32 codex BLOCKER 2): the
+                            # The
                             # definition EXECUTES its decorators and
                             # defaults now, while the capture may be
                             # pending -- checked like any other call
                             # site (direct_calls yields exactly that
                             # definition-time work; its annotations
                             # run NOTHING under PEP 649 and are not
-                            # checked, fix 14, QA35 codex/claude
-                            # MINOR)
+                            # checked)
                             protected_calls(stmt)
                     else:
                         raise AssertionError((
                             "cannot evaluate a statement that follows a "
                             "capture while the captured exception may be "
-                            "pending: FAILURE (fix 9)", key,
+                            "pending: FAILURE", key,
                             ast.dump(stmt)[:160]))
                 return state
 
             assert walk_block(successors, "pending") != "pending", (
                 "a capturing function can complete without re-raising "
-                "the captured object (fix 9, QA30 codex BLOCKER 1)",
+                "the captured object",
                 key)
 
         try_nodes = ((ast.Try, ast.TryStar) if hasattr(ast, "TryStar")
@@ -11322,7 +11598,7 @@ def _watchdog_completion_case(mode, tree=None):
                         "statically verify -- cannot-evaluate FAILURE; "
                         "the one DISCLOSED shape is the launch-lock "
                         "with statement (threading lock release, stdlib "
-                        "internals, PD-335 residual)", key)
+                        "internals, disclosed residual)", key)
                 if (isinstance(node, ast.Call)
                         and call_target(node)[:2]
                         == ("name", "_cleanup_boundary")):
@@ -11330,19 +11606,19 @@ def _watchdog_completion_case(mode, tree=None):
                     pending_arg = node.args[0]
                     assert not (isinstance(pending_arg, ast.Constant)
                                 and pending_arg.value is None), (
-                        "a boundary call hard-wires pending=None (fix 7)",
+                        "a boundary call hard-wires pending=None",
                         key)
                     boundary_pending_shape(pending_arg, key)
                     step = node.args[1]
                     assert isinstance(step, ast.Name), (
                         "cannot resolve a boundary step statically: "
-                        "FAILURE, never a pass (fix 7)", key,
+                        "FAILURE, never a pass", key,
                         ast.dump(step))
                     target = (nested.get(step.id)
                               or module_functions.get(step.id))
                     assert target is not None, (
                         "a boundary step does not resolve to an in-module "
-                        "function: FAILURE, never a pass (fix 7)", key,
+                        "function: FAILURE, never a pass", key,
                         step.id)
                     for call in direct_calls(target.body):
                         called = call_target(call)
@@ -11365,13 +11641,12 @@ def _watchdog_completion_case(mode, tree=None):
                             "a boundary-routed cleanup step calls "
                             "something that is neither in-module code "
                             "nor a disclosed primitive: FAILURE, never "
-                            "a pass (fix 7/8)", key, ast.dump(call.func))
+                            "a pass", key, ast.dump(call.func))
                     for access in annotation_reads(target.body):
                         raise AssertionError((
                             "a boundary-routed cleanup step READS "
                             "deferred annotations: the evaluation runs "
-                            "code the call scan above cannot see "
-                            "(fix 15, QA36 codex MAJOR)", key,
+                            "code the call scan above cannot see", key,
                             access.attr))
                 if not isinstance(node, try_nodes):
                     continue
@@ -11383,7 +11658,7 @@ def _watchdog_completion_case(mode, tree=None):
                             and call_target(node.finalbody[0].value)[:2]
                             == ("name", "_cleanup_boundary")), (
                         "a close-lifecycle finally does not route "
-                        "through the shared boundary (fix 6/7/8)", key)
+                        "through the shared boundary", key)
                 for handler in node.handlers:
                     required = catchable_cancellations(handler, key)
                     if not required:
@@ -11394,8 +11669,7 @@ def _watchdog_completion_case(mode, tree=None):
                             assert isinstance(inner.exc, ast.Name), (
                                 "a cancellation-capable close-lifecycle "
                                 "handler CONSTRUCTS a new exception over "
-                                "a possibly-pending cancellation "
-                                "(fix 6/8)", key)
+                                "a possibly-pending cancellation", key)
                     earlier = node.handlers[:node.handlers.index(handler)]
                     guarded_before = any(
                         bare_raise_only(h.body) and required
@@ -11410,11 +11684,10 @@ def _watchdog_completion_case(mode, tree=None):
                             "an annotation READ inside a "
                             "cancellation-capable handler evaluates "
                             "deferred annotations over a "
-                            "possibly-pending exception (fix 15, QA36 "
-                            "codex MAJOR)", key, access.attr))
+                            "possibly-pending exception", key, access.attr))
                     captured = capture_shape(handler.body, handler.name)
                     if captured is not None:
-                        # Fix 9 (QA30 codex BLOCKER 1): the capture is a
+                        # The capture is a
                         # PROMISE, now checked structurally -- everything
                         # that can run after the capturing try while the
                         # captured object may be pending routes through
@@ -11428,15 +11701,14 @@ def _watchdog_completion_case(mode, tree=None):
                     assert ends_in_raise(handler.body, handler.name), (
                         "a close-lifecycle handler can swallow or "
                         "replace a pending cancellation without the "
-                        "boundary (fix 6/7)", key)
+                        "boundary", key)
                     for call in direct_calls(handler.body):
                         called = call_target(call)
                         assert called[0] == "name" and called[1] in (
                             "isinstance", "_cleanup_boundary"), (
                             "an unprotected call inside a "
                             "cancellation-capable handler could displace "
-                            "a pending cancellation (fix 7, QA28 codex "
-                            "BLOCKER 1)", key, ast.dump(call.func))
+                            "a pending cancellation", key, ast.dump(call.func))
 
         # Leg 11 NEGATIVE VECTORS: each reproduces an in-memory
         # mutation and must be REJECTED by
@@ -12289,7 +12561,7 @@ def _watchdog_completion_case(mode, tree=None):
                 "a disclosed residual shape did not reproduce "
                 "the displacement leg 19 catches", label, repr(outward))
 
-        # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
+        # Leg 12: a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd
         # subject SIGKILL in the finally itself fails -- with an ordinary
         # RuntimeError or with a cancellation-typed InterruptedError --
@@ -12317,14 +12589,14 @@ def _watchdog_completion_case(mode, tree=None):
                 except BaseException as exc:
                     raise AssertionError(
                         "the subject kill failure displaced the pending "
-                        "cancellation (QA27 codex BLOCKER 1)",
+                        "cancellation",
                         kill_failure.__name__, repr(exc))
                 else:
                     raise AssertionError(
                         "the escalation did not propagate")
             assert sent == [signal.SIGSTOP, signal.SIGKILL], sent
 
-        # Leg 13 (QA27 codex BLOCKER 1, matrix gap): the same sequence at
+        # Leg 13 (matrix gap): the same sequence at
         # the _escalate tier WITH a supplied subject receipt. The
         # cancellation propagates out of the subject cleanup with the
         # kill failure beneath it, records NO subject accounting (the
@@ -12361,8 +12633,7 @@ def _watchdog_completion_case(mode, tree=None):
             except BaseException as exc:
                 raise AssertionError(
                     "the subject kill failure displaced the pending "
-                    "cancellation at the _escalate tier (QA27 codex "
-                    "BLOCKER 1)", repr(exc))
+                    "cancellation at the _escalate tier", repr(exc))
             else:
                 raise AssertionError("the escalation did not propagate")
         assert (fake._subject_kill is None
@@ -12371,7 +12642,7 @@ def _watchdog_completion_case(mode, tree=None):
             fake._subject_kill, fake._subject_skipped)
         assert helper_kills == [(11888, signal.SIGKILL)], helper_kills
 
-        # Leg 14 (QA27 codex BLOCKER 2): with an EXPLICIT __cause__ on
+        # Leg 14: with an EXPLICIT __cause__ on
         # the pending cancellation, the attachment appends the cleanup
         # failure at the tail of the pre-existing chain -- the exception
         # OBJECT, never a repr -- and no diagnostic runs outside the
@@ -12405,17 +12676,17 @@ def _watchdog_completion_case(mode, tree=None):
                     "the explicit cause was rewritten", exc.__cause__)
                 assert exc.__cause__.__context__ is hostile, (
                     "the cleanup failure object was not kept reachable "
-                    "beneath the explicit cause (QA27 codex)",
+                    "beneath the explicit cause",
                     exc.__cause__.__context__)
             except BaseException as exc:
                 raise AssertionError(
                     "a raising __repr__ displaced the pending "
-                    "cancellation (QA27 codex BLOCKER 2)",
+                    "cancellation",
                     type(exc).__name__)
             else:
                 raise AssertionError("the escalation did not propagate")
 
-        # Leg 15 (QA27 codex BLOCKER 2, degraded path): when NO acyclic
+        # Leg 15 (degraded path): when NO acyclic
         # attachment exists (the pending cancellation's own chain is
         # cyclic), the boundary degrades to a note -- and even there
         # every diagnostic runs inside the protection, so the raising
@@ -12449,12 +12720,12 @@ def _watchdog_completion_case(mode, tree=None):
             except BaseException as exc:
                 raise AssertionError(
                     "the degraded diagnostic path displaced the pending "
-                    "cancellation (QA27 codex BLOCKER 2)",
+                    "cancellation",
                     type(exc).__name__)
             else:
                 raise AssertionError("the escalation did not propagate")
 
-        # Leg 16 (fix 7, QA28 codex BLOCKER 1): a cancellation born
+        # Leg 16: a cancellation born
         # INSIDE the guardian cleanup -- raised by the ownership-checked
         # kill helper itself, after a successful freeze -- becomes the
         # pending cancellation for the direct held-pidfd backstop, so a
@@ -12490,7 +12761,7 @@ def _watchdog_completion_case(mode, tree=None):
                 except BaseException as exc:
                     assert type(exc) is born, (
                         "a backstop failure displaced the cleanup-born "
-                        "cancellation (fix 7, QA28 codex BLOCKER 1)",
+                        "cancellation",
                         born.__name__, repr(exc))
                     assert type(exc.__cause__) is RuntimeError, (
                         "the backstop failure was not kept beneath the "
@@ -12504,7 +12775,7 @@ def _watchdog_completion_case(mode, tree=None):
                     and fake._subject_skipped is None), (
                 born.__name__, fake._subject_kill, fake._subject_skipped)
 
-        # Leg 17 (fix 7, QA28 codex BLOCKER 2 / claude BLOCKER 1): the
+        # Leg 17: the
         # member census's per-pidfd close is an escalation-path cleanup
         # too. A cancellation raised at the member SIGKILL send crosses
         # that close, so a failing os.close must attach beneath it, never
@@ -12540,7 +12811,7 @@ def _watchdog_completion_case(mode, tree=None):
             except BaseException as exc:
                 raise AssertionError(
                     "the member pidfd close displaced the pending "
-                    "cancellation (fix 7, QA28 codex BLOCKER 2)",
+                    "cancellation",
                     repr(exc))
             else:
                 raise AssertionError("the member census did not propagate")
@@ -12590,8 +12861,7 @@ def _watchdog_completion_case(mode, tree=None):
             except BaseException as exc:
                 raise AssertionError(
                     "the member pidfd close displaced the pending "
-                    "cancellation at the _escalate tier (fix 7, QA28 "
-                    "codex BLOCKER 2)", repr(exc))
+                    "cancellation at the _escalate tier", repr(exc))
             else:
                 raise AssertionError("the escalation did not propagate")
         assert (fake._subject_kill is None
@@ -12600,7 +12870,7 @@ def _watchdog_completion_case(mode, tree=None):
             fake._subject_kill, fake._subject_skipped)
         assert helper_kills == [(11888, signal.SIGKILL)], helper_kills
 
-        # Leg 18 (fix 7, QA28 claude MINOR 3): the cancellation tiers are
+        # Leg 18: the cancellation tiers are
         # harmonized. A KeyboardInterrupt interrupting the subject cleanup
         # records NOTHING, exactly like its sibling cancellations, so the
         # interrupt owner's retry still owns the idempotent receipt kill.
@@ -12634,19 +12904,17 @@ def _watchdog_completion_case(mode, tree=None):
                 pass
             except BaseException as exc:
                 raise AssertionError(
-                    "the KeyboardInterrupt was displaced or swallowed "
-                    "(fix 7, QA28 claude MINOR 3)", repr(exc))
+                    "the KeyboardInterrupt was displaced or swallowed", repr(exc))
             else:
                 raise AssertionError("the escalation did not propagate")
         assert (fake._subject_kill is None
                 and fake._subject_skipped is None), (
             "a KeyboardInterrupt-interrupted subject cleanup was "
-            "recorded (fix 7, QA28 claude MINOR 3)",
+            "recorded",
             fake._subject_kill, fake._subject_skipped)
         assert helper_kills == [(11888, signal.SIGKILL)], helper_kills
 
-        # Leg 19 (fix 11, QA32, maintainer ruling PD-335-TAIL option
-        # 2; fix 12, QA33 claude/codex BLOCKER): the BEHAVIOURAL
+        # Leg 19: the BEHAVIOURAL
         # guarantee leg 11's tripwire defers to. For EVERY
         # _cleanup_boundary CALL SITE in the computed close-lifecycle
         # closure -- keyed (member, site-string, source-order
@@ -12659,8 +12927,8 @@ def _watchdog_completion_case(mode, tree=None):
         # chain. For _finish_close's two exceptional-path calls the
         # pending point is a cancellation BORN inside the
         # owned-handle cleanup itself (raised by close_subject_pidfd
-        # / close_guardian_pidfd), the displacement class QA33 found
-        # unpinned under the old (member, label) keying. The site
+        # / close_guardian_pidfd), a displacement class the old
+        # (member, label) keying left unpinned. The site
         # list is DERIVED from the closure leg 11 computed, so a
         # boundary call added to the lifecycle without a case here --
         # a NEW call reusing an existing label included -- fails the
@@ -12672,52 +12940,48 @@ def _watchdog_completion_case(mode, tree=None):
         # enclosing boundary does, so a revert there leaves the
         # driven behaviour intact -- what rejects the direct call
         # there is this leg's OWN coverage assert, not leg 11's
-        # tripwire (fix 13, QA34 claude MINOR: leg 11 covers the two
+        # tripwire (leg 11 covers the two
         # exceptional-path calls only, and dropping a normal-path
         # site removes or shifts its label's source-order ordinals,
-        # stranding a case as stale). Reproduced for the
-        # unfinished-launch abandonment site during fix 11 and for
-        # both owned-handle cleanup sites during fix 12. fix 17
-        # (QA38 codex BLOCKER) made each case run under fixture
-        # states derived from its member's own code; fixes 18-30
-        # (QA39-51, maintainer decisions 2026-09-29/30) keep that
-        # derivation a BOUNDED, DISCLOSED guarantee whose claim
-        # matches its code EXACTLY, and converge it by construction:
+        # stranding a case as stale). Each case runs under fixture
+        # states derived from its member's own code; that
+        # derivation is a BOUNDED, DISCLOSED guarantee whose claim
+        # matches its code EXACTLY, and converges by construction:
         # the bound below is stated verbatim at derived_overrides
         # too, and the two copies are asserted identical. Pinned red
-        # after the matrix: the QA38 state-conditioned mutation; the
-        # two QA39 vectors outside the bound (a condition read
+        # after the matrix: a state-conditioned mutation; two
+        # vectors outside the bound (a condition read
         # through a local, a multi-attribute condition), each fired
-        # by its one targeted state; the QA40 and QA41 spellings,
+        # by its one targeted state; further condition spellings,
         # each driven only by states the derivation itself returns;
-        # and the fix 30 entry vectors (a special attribute, an
+        # the entry vectors (a special attribute, an
         # unlisted and a stale driver overwrite, an unmangled
-        # private name) with the QA51 private-name mutation, driven
-        # by its mangled derived state; the fix 31 vectors (a driver
+        # private name) with a private-name mutation, driven
+        # by its mangled derived state; the copy vectors (a driver
         # clearing its state, planted drifts of the two bound
-        # copies); and the fix 32 vectors (a driver entering once
+        # copies); the re-entry vectors (a driver entering once
         # with the deviation, then through a cached member, on the
-        # real member and on the QA38 mutant; a driver suspending
-        # the observation; no free tool id; each state copy; a lost
-        # indentation and a marker's trailing whitespace); and the
-        # fix 33 vectors (an entry callback made to raise by its
-        # fixture, a caller's preregistered previous callback, a
-        # freed-then-retaken shared-name id); and the fix 34
-        # vectors (a flag-only callback failure and the flag
+        # real member and on the state-conditioned mutant; a driver
+        # suspending the observation; no free tool id; each state
+        # copy; a lost indentation and a marker's trailing
+        # whitespace); the callback vectors (an entry callback made
+        # to raise by its fixture, a caller's preregistered previous
+        # callback, a freed-then-retaken shared-name id); the
+        # registration vectors (a flag-only callback failure and the flag
         # store's bytecode, every event's preregistered
         # callback restored around a case, a failing
         # registration and a failing save, the bound's
-        # live-case uniqueness wording); and the fix 35 vectors
+        # live-case uniqueness wording); the save-loop vectors
         # (the entry callback's cell-free prelude, the save
         # loop's non-allocating slot store, an injected restore
         # failure abandoning later callbacks, a pre-existing
         # local-event mask surviving a case, a planted
-        # interrupt right after the claim); and the fix 36
+        # interrupt right after the claim); and the SIGINT
         # vectors (a real SIGINT before the save loop's first
         # slot store and one in the release, each repeated with
         # the mask removed, and the single allocator/audit/async
         # exclusion wording).
-        # -- leg 19 bound (two identical copies, fix 30) --
+        # -- leg 19 bound (two identical copies) --
         # derived_overrides IS the authoritative grammar. Every case
         # runs under every fixture state derived_overrides returns
         # for its member -- the default state plus single-attribute
@@ -12823,7 +13087,7 @@ def _watchdog_completion_case(mode, tree=None):
                         and isinstance(node.args[2].value, str)), (
                     "a boundary site label is not a string "
                     "literal: the behavioural matrix cannot name "
-                    "it (fix 11)", member_key)
+                    "it", member_key)
                 label = node.args[2].value
                 ordinal = label_ordinals.get(label, 0)
                 label_ordinals[label] = ordinal + 1
@@ -12843,13 +13107,13 @@ def _watchdog_completion_case(mode, tree=None):
         flip_stand_in = types.SimpleNamespace()
 
         def derived_overrides(member_key, member=None):
-            # fix 17 (QA38 codex BLOCKER): the driven fixture states
+            # The driven fixture states
             # are DERIVED from the site's own code, never hand-listed;
             # the code below IS the grammar (fixes 19-20, 30). A pin
             # passes `member` to derive from a mutant or probe body;
             # the matrix itself always derives from the member's own
             # committed AST.
-            # -- leg 19 bound (two identical copies, fix 30) --
+            # -- leg 19 bound (two identical copies) --
             # derived_overrides IS the authoritative grammar. Every case
             # runs under every fixture state derived_overrides returns
             # for its member -- the default state plus single-attribute
@@ -12948,7 +13212,7 @@ def _watchdog_completion_case(mode, tree=None):
             def compiled(attr):
                 # the name the compiler emits for self.<attr> in a
                 # method of the member's class: a private name is
-                # mangled (fix 30, QA51 claude/codex MAJOR -- keyed
+                # mangled (keyed
                 # unmangled, `self.__x` derived a state on "__x"
                 # while the member read "_FixtureProcess__x")
                 if (owner and attr.startswith("__")
@@ -12957,10 +13221,10 @@ def _watchdog_completion_case(mode, tree=None):
                 return attr
 
             def spelled_constants(side):
-                # the constants a comparison side spells (fix 19):
+                # the constants a comparison side spells:
                 # a bare ast.Constant, an ast.UnaryOp ast.UAdd or
                 # ast.USub over a numeric non-bool ast.Constant
-                # with the sign applied (fix 20), or an
+                # with the sign applied, or an
                 # ast.Tuple/ast.List/ast.Set of those (a
                 # frozenset() call with exactly that one literal
                 # argument and no keywords included)
@@ -13030,7 +13294,7 @@ def _watchdog_completion_case(mode, tree=None):
                             for value in values:
                                 # type-aware: 2 never collapses
                                 # into 2.0, nor True into 1
-                                # (fix 20)
+                                #
                                 if not any(value is known
                                            or (type(value)
                                                is type(known)
@@ -13048,7 +13312,7 @@ def _watchdog_completion_case(mode, tree=None):
                 states = [False, True] if attr in truthy else []
                 for value in consts.get(attr, ()):
                     # type-aware: a spelled 1 stays distinct from
-                    # the truthiness True (fix 20)
+                    # the truthiness True
                     if not any(value is known
                                or (type(value) is type(known)
                                    and value == known)
@@ -13062,7 +13326,7 @@ def _watchdog_completion_case(mode, tree=None):
 
         def behavioural_case(label, driver, cancellation, fault,
                              state):
-            # fix 17 (QA38 codex BLOCKER): each case runs under every
+            # Each case runs under every
             # derived fixture state. A raise binds a traceback, so
             # whether the pending point and the injected step actually
             # FIRED under this state is observable on the objects
@@ -13072,33 +13336,33 @@ def _watchdog_completion_case(mode, tree=None):
             # reachable in its chain; a flipped state that routes
             # around the pending point makes that run vacuous, and the
             # DEFAULT state must never be vacuous: there both must
-            # fire, which keeps the pre-fix-17 strictness.
+            # fire, which keeps the single-state strictness.
             outward = None
             try:
-                # the driver gets its own copy of the state (fix 31)
+                # the driver gets its own copy of the state
                 driver(cancellation, fault, dict(state))
             except BaseException as exc:
                 outward = exc
             if cancellation.__traceback__ is not None:
                 assert outward is not None, (
-                    "the pending cancellation was swallowed (fix 11)",
+                    "the pending cancellation was swallowed",
                     label, type(cancellation).__name__,
                     sorted(state))
                 assert outward is cancellation, (
                     "the injected cleanup fault displaced the pending "
-                    "cancellation (fix 11, behavioural guarantee)",
+                    "cancellation (behavioural guarantee)",
                     label, type(cancellation).__name__,
                     repr(outward), sorted(state))
                 if fault.__traceback__ is not None:
                     assert any(node is fault
                                for node in chain_members(outward)), (
                         "the injected cleanup fault was dropped from "
-                        "the cancellation's chain (fix 11)", label,
+                        "the cancellation's chain", label,
                         type(cancellation).__name__, sorted(state))
             assert state or (cancellation.__traceback__ is not None
                              and fault.__traceback__ is not None), (
                 "the default-state case went vacuous: its pending "
-                "point or its injected fault never fired (fix 17)",
+                "point or its injected fault never fired",
                 label)
 
         def stat_close_driver(cancellation, fault, state):
@@ -13176,7 +13440,7 @@ def _watchdog_completion_case(mode, tree=None):
             # a flipped subject_pidfd state walks into the subject
             # escalation before this site's own cleanup runs: keep
             # that path hermetic -- no real signals -- and
-            # outcome-free (fix 17, QA38 codex BLOCKER)
+            # outcome-free
             return None
 
         def backstop_driver(cancellation, fault, state):
@@ -13255,7 +13519,7 @@ def _watchdog_completion_case(mode, tree=None):
                 _close_coordinated=raising_coordinated,
                 # a flipped state can route past the step under test
                 # into the other owner steps: they must then behave,
-                # never blow up on a missing attribute (fix 17)
+                # never blow up on a missing attribute
                 _abandon_unfinished_launch=lambda: False,
                 _interrupt_collect=lambda: None)
             vars(fake).update(state)
@@ -13301,7 +13565,7 @@ def _watchdog_completion_case(mode, tree=None):
                 _launched=types.SimpleNamespace(wait=raising_wait),
                 _abandon_unfinished_launch=abandon,
                 # a state flipped off the launcher path falls through
-                # to the plain collection finish (fix 17)
+                # to the plain collection finish
                 _finish_close=lambda: None)
             vars(fake).update(state)
             return fake
@@ -13353,8 +13617,7 @@ def _watchdog_completion_case(mode, tree=None):
             # receipt read raises the cancellation as the
             # collection's first step; cancellation=None drives a
             # normally-completing collection, for the cases whose
-            # cancellation is BORN in the owned-handle cleanup
-            # (fix 12, QA33 claude/codex BLOCKER).
+            # cancellation is BORN in the owned-handle cleanup.
             def raising_recv():
                 if cancellation is not None:
                     raise cancellation
@@ -13372,7 +13635,7 @@ def _watchdog_completion_case(mode, tree=None):
                 # a flipped state (unresolved=True) walks the
                 # failure-recording path a default-state run never
                 # takes: record-and-return, subject addressed as a
-                # no-op (fix 17)
+                # no-op
                 _record_failure=lambda failure: failure,
                 _address_failed_subject=lambda: None,
                 report=types.SimpleNamespace(
@@ -13395,8 +13658,7 @@ def _watchdog_completion_case(mode, tree=None):
             # the exceptional-path "report channel close" call: the
             # cancellation is BORN in the subject pidfd close (the
             # owned-handle cleanup itself), the fault in the
-            # boundary's step, the report close (fix 12, QA33
-            # claude/codex BLOCKER).
+            # boundary's step, the report close.
             def fake_close(fd):
                 if fd == 987007:
                     raise cancellation
@@ -13428,8 +13690,7 @@ def _watchdog_completion_case(mode, tree=None):
             # the exceptional-path "subject pidfd and report close"
             # call: the cancellation is BORN in the guardian pidfd
             # close, the fault in the boundary's step -- the subject
-            # pidfd close inside the tail (fix 12, QA33 claude/codex
-            # BLOCKER).
+            # pidfd close inside the tail.
             def fake_close(fd):
                 if fd == 987006:
                     raise cancellation
@@ -13532,12 +13793,10 @@ def _watchdog_completion_case(mode, tree=None):
             "boundary call-site list exactly: every module-owned "
             "cleanup call site needs a fault-injection case -- a "
             "NEW call reusing an existing label included -- and "
-            "every case must name a real call site (fix 11/12, "
-            "PD-335-TAIL option 2)",
+            "every case must name a real call site",
             sorted(lifecycle_sites
                    ^ set(behavioural_drivers)))
-        # fix 30 (QA51 claude/codex MAJOR; orchestrator premise review
-        # 2026-09-30): the matrix CHECKS each deviation at entry instead
+        # The matrix CHECKS each deviation at entry instead
         # of disclosing where a deviation is lost. The deliberate
         # driver overwrites, keyed (case, attribute): each driver
         # replaces its attribute after the state is installed, so a
@@ -13560,17 +13819,17 @@ def _watchdog_completion_case(mode, tree=None):
             "a generated deviation fails the entry check -- its name "
             "is not loaded, or the fixture does not hold its value "
             "at entry: derive the name its compiled code loads, or "
-            "list a deliberate driver overwrite (fix 30)")
+            "list a deliberate driver overwrite")
         stale_overwrite = (
             "a listed driver overwrite no longer replaces a value the "
-            "member reads at entry (fix 30)")
+            "member reads at entry")
         import dis
         import signal
         unobserved_entries = (
             "the member's entries were not all observed: no free "
             "sys.monitoring tool id, the observation was not intact "
             "when the driver returned, or the entry callback itself "
-            "failed (fix 32/33/34)")
+            "failed")
         monitoring = sys.monitoring
         entry_event = monitoring.events.PY_START
         entry_tool_name = "opf leg 19 entry check"
@@ -13578,7 +13837,7 @@ def _watchdog_completion_case(mode, tree=None):
         # an id already in use -- a caller's debugger, coverage,
         # profiler or optimizer included -- is never taken
         entry_tool_ids = (3, 4, 0, 1, 2, 5)
-        # fix 34 (QA55 codex MAJOR): every single-bit event a
+        # Every single-bit event a
         # callback can be registered for, saved and restored
         # around a case; NO_EVENTS carries none, and the
         # deprecated BRANCH alias writes through to BRANCH_LEFT
@@ -13590,8 +13849,7 @@ def _watchdog_completion_case(mode, tree=None):
             and value > 0 and not value & (value - 1)))
 
         def mask_handled_signals():
-            # fix 36 (QA57 codex MAJOR x2), rescoped by fix 37
-            # (QA58): the save loop through the claim, and the
+            # The save loop through the claim, and the
             # whole release, run with SIGINT and every signal
             # this process currently has a Python-level
             # handler for blocked on the calling thread. A
@@ -13635,10 +13893,9 @@ def _watchdog_completion_case(mode, tree=None):
             # it -- and the fixture must yield the deviation's value
             # under that name each time the member is entered
             # (read once per entry: which object a load reads, and
-            # what a later read yields, lie outside it). fix 31 (QA52
-            # codex BLOCKER): the check keeps its own immutable copy of
+            # what a later read yields, lie outside it). The check keeps its own immutable copy of
             # the state; behavioural_case gives the driver a separate copy.
-            # fix 32 (QA53 codex/claude BLOCKER): an entry is each
+            # An entry is each
             # PY_START of the member's own code object while the driver
             # runs, observed on a free sys.monitoring tool id, and the
             # fixture is the entry frame's own self -- the pre-fix
@@ -13653,7 +13910,7 @@ def _watchdog_completion_case(mode, tree=None):
                 return
             assert label[0].startswith("m:"), (
                 "a deviation was generated for a site without an m: "
-                "method key (fix 30)", label, sorted(state))
+                "method key", label, sorted(state))
             owner_name, member_name = label[0][2:].rsplit(".", 1)
             owner = getattr(emit, owner_name)
             member = vars(owner)[member_name]
@@ -13671,17 +13928,17 @@ def _watchdog_completion_case(mode, tree=None):
             absent = object()
             entries = []
             observation_failures = []
-            # fix 34 (QA55 codex BLOCKER): the callback's failure
+            # The callback's failure
             # flag -- a one-slot list preallocated here, written
             # by an item store of a singleton, which allocates
             # nothing
             observation_incomplete = [None]
-            # fix 33 (QA54 codex MAJOR, claude MINOR 2): the case
+            # The case
             # OWNS its id under a name unique to this case for as
             # long as the case is live -- entries lives until the
             # case completes, so no two live cases share
             # id(entries); a completed case's name may recur
-            # (fix 34, QA55 codex MINOR) -- so a freed-then-
+            # -- so a freed-then-
             # retaken id -- the shared prefix included -- or a
             # nested case's id is never mistaken for its own
             case_tool_name = "%s %d" % (entry_tool_name, id(entries))
@@ -13689,11 +13946,10 @@ def _watchdog_completion_case(mode, tree=None):
             def entered(started, offset):
                 # called in the entry frame: sys._getframe(1) is the
                 # member's own frame, its arguments already bound.
-                # fix 33 (QA54 codex BLOCKER): a failure HERE -- an
+                # A failure HERE -- an
                 # attribute read raising, anything at all -- must
                 # never pass silently; it is recorded, and the check
-                # below fails the run on the record. fix 35 (QA56
-                # codex BLOCKER): the callback captures NOTHING and
+                # below fails the run on the record. The callback captures NOTHING and
                 # allocates nothing before the try -- the pre-fix
                 # generator expression captured `fixture`, whose
                 # cell was allocated before the protected region,
@@ -13709,7 +13965,7 @@ def _watchdog_completion_case(mode, tree=None):
                         entry[attr] = getattr(fixture, attr, absent)
                     entries.append(entry)
                 except BaseException as exc:
-                    # fix 34 (QA55 codex BLOCKER): the flag
+                    # The flag
                     # FIRST, by a store that allocates nothing,
                     # so a failure recording the detail below
                     # cannot lose the record
@@ -13717,7 +13973,7 @@ def _watchdog_completion_case(mode, tree=None):
                     observation_failures.append(exc)
 
             def restore_saved(target, slots):
-                # fix 35 (QA56 codex MAJOR): every saved slot is
+                # Every saved slot is
                 # put back even if one registration raises; the
                 # first error is re-raised once every slot has
                 # been tried, so a failing restore cannot
@@ -13743,7 +13999,7 @@ def _watchdog_completion_case(mode, tree=None):
                 for candidate in entry_tool_ids:
                     if monitoring.get_tool(candidate) is not None:
                         continue
-                    # fix 35 (QA56 codex MAJOR): the save slots
+                    # The save slots
                     # are preallocated, and each event's previous
                     # callback is held by an item store -- which
                     # allocates nothing -- the instant its
@@ -13753,7 +14009,7 @@ def _watchdog_completion_case(mode, tree=None):
                     # reached
                     saved = [absent] * len(callback_events)
                     taken = False
-                    # fix 36 (QA57 codex MAJOR): a real SIGINT
+                    # A real SIGINT
                     # between a removal returning and its slot
                     # store loses that callback -- the slot
                     # still holds `absent`, which restore_saved
@@ -13761,7 +14017,7 @@ def _watchdog_completion_case(mode, tree=None):
                     # publication, the claim and the
                     # failure-path restore all run with handled
                     # signals blocked on this thread; best
-                    # effort only (fix 37, QA58): a delivery
+                    # effort only: a delivery
                     # before the mask is in place, inside the
                     # masking call, or through another thread
                     # still interrupts, as the bound discloses;
@@ -13770,7 +14026,7 @@ def _watchdog_completion_case(mode, tree=None):
                     unmasked = mask_handled_signals()
                     try:
                         try:
-                            # fix 34 (QA55 codex MAJOR): EVERY
+                            # EVERY
                             # event's callback on the id --
                             # registration needs no claimed id -- is
                             # saved before the case takes it, to be
@@ -13781,7 +14037,7 @@ def _watchdog_completion_case(mode, tree=None):
                                 saved[at] = monitoring.register_callback(
                                     candidate, event, None)
                             try:
-                                # fix 35 (QA56 gemini): the id and
+                                # The id and
                                 # its saved callbacks are published
                                 # BEFORE the claim and the taken
                                 # flag, so an interrupt landing
@@ -13796,7 +14052,7 @@ def _watchdog_completion_case(mode, tree=None):
                                 tool, saved_callbacks = None, ()
                         finally:
                             if not taken:
-                                # fix 34 (QA55 codex MAJOR): setup
+                                # Setup
                                 # that fails puts back only the
                                 # callbacks it saved and never frees
                                 # an id it did not take
@@ -13811,7 +14067,7 @@ def _watchdog_completion_case(mode, tree=None):
                 monitoring.register_callback(tool, entry_event,
                                              entered)
                 registered = True
-                # fix 35 (QA56 codex MAJOR): the member's
+                # The member's
                 # pre-existing local-event mask on this id -- an
                 # unclaimed id keeps its per-code masks -- is
                 # saved before setup overwrites it, to be
@@ -13829,13 +14085,13 @@ def _watchdog_completion_case(mode, tree=None):
                           and monitoring.get_local_events(
                               tool, member_code) == entry_event)
             finally:
-                # fix 36 (QA57 codex MAJOR): the WHOLE release
+                # The WHOLE release
                 # runs with handled signals blocked -- a real
                 # SIGINT after the member's mask went back and
                 # before free_tool_id and restore_saved leaves
                 # the id claimed and no callback restored -- the
                 # prior mask put back in a finally; best effort
-                # only (fix 37, QA58): the masking call itself
+                # only: the masking call itself
                 # starts unmasked, and a delivery before it
                 # completes or through another thread still
                 # interrupts the release, as the bound
@@ -13844,12 +14100,11 @@ def _watchdog_completion_case(mode, tree=None):
                 try:
                     # release exactly the id this case took; an id a
                     # driver freed, and someone else then took -- under
-                    # the shared name included -- is left alone (fix 33)
+                    # the shared name included -- is left alone
                     if (tool is not None
                             and monitoring.get_tool(tool)
                             == case_tool_name):
-                        # fix 35 (QA56 codex MAJOR, claude MINOR):
-                        # the member's local-event mask goes back
+                        # The member's local-event mask goes back
                         # exactly as saved -- a mask never saved was
                         # never overwritten -- and freeing clears no
                         # local events on other code objects, so
@@ -13861,7 +14116,6 @@ def _watchdog_completion_case(mode, tree=None):
                             tool, entry_event, None) if registered
                             else None)
                         monitoring.free_tool_id(tool)
-                        # fix 33/34 (QA54/QA55 codex MAJOR):
                         # free_tool_id clears the id's callbacks, so
                         # every callback saved before the case took
                         # the id is put back afterwards, restoring
@@ -13872,7 +14126,7 @@ def _watchdog_completion_case(mode, tree=None):
                         intact = intact and released is entered
                 finally:
                     unmask_handled_signals(unmasked)
-            # fix 34 (QA55 codex BLOCKER): the flag, checked
+            # The flag, checked
             # before any other outcome; the detailed record may
             # be absent if recording it failed
             if observation_incomplete[0] is not None:
@@ -13920,11 +14174,11 @@ def _watchdog_completion_case(mode, tree=None):
         assert any("armed" in override for override in site_overrides[
                 "m:_FixtureProcess._finish_close"]), (
             "the derived _finish_close state list lost the armed "
-            "flip that catches the pinned QA38 state-conditioned "
-            "displacement (fix 17)")
+            "flip that catches the pinned armed-flag state-conditioned "
+            "displacement")
         drive_matrix(sorted(behavioural_drivers), site_overrides,
                      lambda: [RuntimeError("injected cleanup fault")])
-        # fix 14 (QA35 codex MAJOR): a RuntimeError fault crosses the
+        # A RuntimeError fault crosses the
         # two SIGKILL steps' own `except (ProcessLookupError, OSError)`
         # / OSError filters untouched, so the matrix above never saw
         # the module-owned handling of a realistic syscall failure --
@@ -13949,22 +14203,20 @@ def _watchdog_completion_case(mode, tree=None):
                      lambda: [PermissionError(1,
                                               "injected cleanup fault"),
                               OSError(9, "injected cleanup fault")])
-        # fix 30: every listed overwrite still happens -- a fresh
+        # Every listed overwrite still happens -- a fresh
         # object planted on its attribute must not be the value the
         # member reads at entry
         for case_label, attr in sorted(behavioural_overwrites):
             assert case_label in behavioural_drivers, (
-                "a listed driver overwrite names no matrix case "
-                "(fix 30)", case_label, attr)
+                "a listed driver overwrite names no matrix case", case_label, attr)
             drive_matrix(
                 [case_label],
                 dict([(case_label[0], [dict([(attr, object())])])]),
                 lambda: [RuntimeError("injected cleanup fault")])
 
-        # fix 17 (QA38 codex BLOCKER, reproduced by the
-        # orchestrator): the state-conditioned displacement itself,
+        # The armed-flag state-conditioned displacement itself,
         # pinned. Rebuild _finish_close from the module's own AST
-        # with its capture `pending = exc` replaced by the QA38
+        # with its capture `pending = exc` replaced by the armed-flag
         # mutation `pending = exc if not self.armed else None`, and
         # require the armed-state run of the held-descriptor case to
         # go RED against it: with the fixture armed the mutant
@@ -13984,17 +14236,17 @@ def _watchdog_completion_case(mode, tree=None):
             and isinstance(node.value, ast.Name)
             and node.value.id == "exc"]
         assert len(capture_assigns) == 1, (
-            "the pinned QA38 mutation site (`pending = exc` inside "
-            "_finish_close) is no longer unique (fix 17)",
+            "the pinned armed-flag mutation site (`pending = exc` inside "
+            "_finish_close) is no longer unique",
             len(capture_assigns))
         capture_assigns[0].value = _optlevel.parse(
             "exc if not self.armed else None", mode="eval").body
         mutant_namespace = dict(vars(emit))
         exec(compile(ast.fix_missing_locations(ast.Module(
                 body=[mutant_member], type_ignores=[])),
-             "<fix 17 QA38 pinned mutant>", "exec", optimize=0),
+             "<armed-flag pinned mutant>", "exec", optimize=0),
              mutant_namespace)
-        qa38_mutant = mutant_namespace["_finish_close"]  # fix 32 reuses it
+        qa38_mutant = mutant_namespace["_finish_close"]  # the re-entry vectors reuse it
         try:
             with patch.object(emit._FixtureProcess, "_finish_close",
                               qa38_mutant):
@@ -14009,16 +14261,15 @@ def _watchdog_completion_case(mode, tree=None):
             pass
         else:
             raise AssertionError(
-                "the pinned QA38 state-conditioned mutation was NOT "
-                "caught by the armed-state behavioural run (fix 17)")
+                "the pinned armed-flag state-conditioned mutation was NOT "
+                "caught by the armed-state behavioural run")
 
-        # fix 18 (QA39 claude BLOCKER / gemini BLOCKER, maintainer
-        # decision 2026-09-29): the two found state-conditioned
+        # Outside-bound vectors: the two found state-conditioned
         # displacements OUTSIDE derived_overrides' disclosed bound,
         # pinned as vectors that must go RED. Each rebuilds
         # _finish_close from the module's own AST with the mutation
         # inserted right after the same unique capture `pending =
-        # exc` the QA38 pin locates -- the capture line itself stays
+        # exc` the armed-flag pin locates -- the capture line itself stays
         # pristine and unique for that pin -- and drives the
         # held-descriptor case under the ONE targeted fixture state
         # that fires the displacement, a state the derived matrix
@@ -14038,11 +14289,11 @@ def _watchdog_completion_case(mode, tree=None):
              "if not ok:\n"
              "    pending = None",
              dict(_failure=RuntimeError("recorded failure")),
-             "locals-conditioned (QA39 claude)"),
+             "locals-conditioned"),
             ("if self.armed and self.unresolved:\n"
              "    pending = None",
              dict(armed=True, unresolved=True),
-             "multi-attribute-conditioned (QA39 gemini)"),
+             "multi-attribute-conditioned"),
         )
         for mutation_source, pin_state, vector in pinned_vectors:
             behavioural_case(
@@ -14063,23 +14314,22 @@ def _watchdog_completion_case(mode, tree=None):
                 and isinstance(node.value, ast.Name)
                 and node.value.id == "exc"]
             assert len(capture_assigns) == 1, (
-                "the pinned QA39 mutation site (`pending = exc` "
-                "inside _finish_close) is no longer unique "
-                "(fix 18)", len(capture_assigns))
+                "the pinned outside-bound mutation site (`pending = exc` "
+                "inside _finish_close) is no longer unique", len(capture_assigns))
             holders = [
                 node for node in ast.walk(mutant_member)
                 if isinstance(getattr(node, "body", None), list)
                 and capture_assigns[0] in node.body]
             assert len(holders) == 1, (
-                "the pinned QA39 capture's holding body is not "
-                "unique (fix 18)", len(holders))
+                "the pinned outside-bound capture's holding body is not "
+                "unique", len(holders))
             at = holders[0].body.index(capture_assigns[0])
             holders[0].body[at + 1:at + 1] = _optlevel.parse(
                 mutation_source).body
             mutant_namespace = dict(vars(emit))
             exec(compile(ast.fix_missing_locations(ast.Module(
                     body=[mutant_member], type_ignores=[])),
-                 "<fix 18 QA39 pinned mutant>", "exec", optimize=0),
+                 "<outside-bound pinned mutant>", "exec", optimize=0),
                  mutant_namespace)
             try:
                 with patch.object(
@@ -14096,14 +14346,13 @@ def _watchdog_completion_case(mode, tree=None):
                 pass
             else:
                 raise AssertionError(
-                    "the pinned QA39 " + vector + " mutation was "
-                    "NOT caught by its targeted behavioural run "
-                    "(fix 18)")
+                    "the pinned outside-bound " + vector + " mutation was "
+                    "NOT caught by its targeted behavioural run")
 
-        # fix 19 (QA40 claude/codex/gemini BLOCKER, maintainer
-        # decision 2026-09-29): the recognizer missed two ORDINARY
+        # Ordinary-spelling vectors: the recognizer once missed two
+        # ORDINARY
         # spellings of a DIRECT single-attribute branch test that
-        # the fix 18 disclosure claimed were driven -- a
+        # the outside-bound disclosure claimed were driven -- a
         # constant-tuple membership test (comparison values were
         # taken from bare constant sides only, so container members
         # were never derived) and an attribute nested in a call on
@@ -14117,7 +14366,7 @@ def _watchdog_completion_case(mode, tree=None):
         # _finish_close from the module's own AST with the mutation
         # inserted right after the same unique capture `pending =
         # exc` (the capture line stays pristine and unique for the
-        # QA38/QA39 pins), requires the firing states among the
+        # armed-flag/outside-bound pins), requires the firing states among the
         # states derived from that mutant member (what the matrix
         # would drive if this branch were committed code), and
         # requires every firing state to turn the mutant RED. Each
@@ -14131,12 +14380,12 @@ def _watchdog_completion_case(mode, tree=None):
               dict(_subject_kill="partial")),
              (dict(_subject_kill="tree"),
               dict(_subject_kill="partial")),
-             "container-membership (QA40)"),
+             "container-membership"),
             ("if bool(self.armed) == True:\n"
              "    pending = None",
              (dict(armed=False), dict(armed=True)),
              (dict(armed=True),),
-             "call-nested-attribute (QA40)"),
+             "call-nested-attribute"),
         )
         for (mutation_source, derived_states, firing_states,
              vector) in fix19_vectors:
@@ -14151,8 +14400,7 @@ def _watchdog_completion_case(mode, tree=None):
                 assert derived_state in probe_overrides, (
                     "the derivation no longer recognizes this "
                     "ordinary branch-test spelling: the leg 19 "
-                    "claim would again be broader than its code "
-                    "(fix 19)", vector, derived_state)
+                    "claim would again be broader than its code", vector, derived_state)
             mutant_member = copy.deepcopy(
                 scope["m:_FixtureProcess._finish_close"])
             capture_assigns = [
@@ -14164,16 +14412,15 @@ def _watchdog_completion_case(mode, tree=None):
                 and isinstance(node.value, ast.Name)
                 and node.value.id == "exc"]
             assert len(capture_assigns) == 1, (
-                "the pinned QA40 mutation site (`pending = exc` "
-                "inside _finish_close) is no longer unique "
-                "(fix 19)", len(capture_assigns))
+                "the pinned ordinary-spelling mutation site (`pending = exc` "
+                "inside _finish_close) is no longer unique", len(capture_assigns))
             holders = [
                 node for node in ast.walk(mutant_member)
                 if isinstance(getattr(node, "body", None), list)
                 and capture_assigns[0] in node.body]
             assert len(holders) == 1, (
-                "the pinned QA40 capture's holding body is not "
-                "unique (fix 19)", len(holders))
+                "the pinned ordinary-spelling capture's holding body is not "
+                "unique", len(holders))
             at = holders[0].body.index(capture_assigns[0])
             holders[0].body[at + 1:at + 1] = _optlevel.parse(
                 mutation_source).body
@@ -14182,13 +14429,13 @@ def _watchdog_completion_case(mode, tree=None):
             for firing_state in firing_states:
                 assert firing_state in mutant_overrides, (
                     "the ordinary matrix would not drive this "
-                    "QA40 firing state on a member containing "
-                    "the mutated branch (fix 19)", vector,
+                    "ordinary-spelling firing state on a member containing "
+                    "the mutated branch", vector,
                     firing_state)
             mutant_namespace = dict(vars(emit))
             exec(compile(ast.fix_missing_locations(ast.Module(
                     body=[mutant_member], type_ignores=[])),
-                 "<fix 19 QA40 pinned mutant>", "exec", optimize=0),
+                 "<ordinary-spelling pinned mutant>", "exec", optimize=0),
                  mutant_namespace)
             for pin_state in firing_states:
                 behavioural_case(
@@ -14214,12 +14461,12 @@ def _watchdog_completion_case(mode, tree=None):
                     pass
                 else:
                     raise AssertionError(
-                        "the pinned QA40 " + vector + " mutation "
+                        "the pinned ordinary-spelling " + vector + " mutation "
                         "was NOT caught by its derived-state "
-                        "behavioural run (fix 19)")
+                        "behavioural run")
 
-        # fix 20 (QA41 codex BLOCKER / claude MAJOR, maintainer
-        # decision 2026-09-29): the recognizer missed two more
+        # Constant-spelling vectors: the recognizer once missed two
+        # more
         # ORDINARY spellings of a DIRECT single-attribute branch
         # test the disclosure's plain reading said were driven --
         # a unary-minus numeric constant (`-1` parses as an
@@ -14231,13 +14478,13 @@ def _watchdog_completion_case(mode, tree=None):
         # was never driven -- exactly the state an
         # isinstance-guarded displacement needs). Both spellings
         # sit INSIDE the disclosed bound, so each pin follows the
-        # fix 19 shape unchanged: derive from a probe member
+        # ordinary-spelling shape unchanged: derive from a probe member
         # holding ONLY the mutated branch and require the
         # spelling's own states among them (red-on-revert for the
         # recognizer clause), rebuild _finish_close from the
         # module's own AST with the mutation inserted right after
         # the same unique capture `pending = exc` (the capture
-        # line stays pristine and unique for the QA38/QA39/QA40
+        # line stays pristine and unique for the armed-flag/outside-bound/ordinary-spelling
         # pins), require the firing states among the states
         # derived from that mutant member, prove every firing
         # state green on the real member first, and require it to
@@ -14260,13 +14507,13 @@ def _watchdog_completion_case(mode, tree=None):
              "    pending = None",
              (dict(_subject_kill=-1),),
              (dict(_subject_kill=-1),),
-             "unary-minus-constant (QA41)"),
+             "unary-minus-constant"),
             ("if self.pid in (2.0, 2) and isinstance(self.pid, "
              "int):\n"
              "    pending = None",
              (dict(pid=2.0), dict(pid=2)),
              (dict(pid=2),),
-             "type-collapsed-constant (QA41)"),
+             "type-collapsed-constant"),
         )
         for (mutation_source, derived_states, firing_states,
              vector) in fix20_vectors:
@@ -14282,8 +14529,7 @@ def _watchdog_completion_case(mode, tree=None):
                                     probe_overrides), (
                     "the derivation no longer recognizes this "
                     "ordinary branch-test spelling: the leg 19 "
-                    "claim would again be broader than its code "
-                    "(fix 20)", vector, derived_state)
+                    "claim would again be broader than its code", vector, derived_state)
             mutant_member = copy.deepcopy(
                 scope["m:_FixtureProcess._finish_close"])
             capture_assigns = [
@@ -14295,16 +14541,15 @@ def _watchdog_completion_case(mode, tree=None):
                 and isinstance(node.value, ast.Name)
                 and node.value.id == "exc"]
             assert len(capture_assigns) == 1, (
-                "the pinned QA41 mutation site (`pending = exc` "
-                "inside _finish_close) is no longer unique "
-                "(fix 20)", len(capture_assigns))
+                "the pinned constant-spelling mutation site (`pending = exc` "
+                "inside _finish_close) is no longer unique", len(capture_assigns))
             holders = [
                 node for node in ast.walk(mutant_member)
                 if isinstance(getattr(node, "body", None), list)
                 and capture_assigns[0] in node.body]
             assert len(holders) == 1, (
-                "the pinned QA41 capture's holding body is not "
-                "unique (fix 20)", len(holders))
+                "the pinned constant-spelling capture's holding body is not "
+                "unique", len(holders))
             at = holders[0].body.index(capture_assigns[0])
             holders[0].body[at + 1:at + 1] = _optlevel.parse(
                 mutation_source).body
@@ -14314,13 +14559,13 @@ def _watchdog_completion_case(mode, tree=None):
                 assert driven_state(firing_state,
                                     mutant_overrides), (
                     "the ordinary matrix would not drive this "
-                    "QA41 firing state on a member containing "
-                    "the mutated branch (fix 20)", vector,
+                    "constant-spelling firing state on a member containing "
+                    "the mutated branch", vector,
                     firing_state)
             mutant_namespace = dict(vars(emit))
             exec(compile(ast.fix_missing_locations(ast.Module(
                     body=[mutant_member], type_ignores=[])),
-                 "<fix 20 QA41 pinned mutant>", "exec", optimize=0),
+                 "<constant-spelling pinned mutant>", "exec", optimize=0),
                  mutant_namespace)
             for pin_state in firing_states:
                 behavioural_case(
@@ -14346,18 +14591,17 @@ def _watchdog_completion_case(mode, tree=None):
                     pass
                 else:
                     raise AssertionError(
-                        "the pinned QA41 " + vector + " mutation "
+                        "the pinned constant-spelling " + vector + " mutation "
                         "was NOT caught by its derived-state "
-                        "behavioural run (fix 20)")
+                        "behavioural run")
 
-        # fix 30 (QA51 claude/codex MAJOR; orchestrator premise review
-        # 2026-09-30): the entry check itself, pinned. Each planted
+        # The entry check itself, pinned. Each planted
         # deviation is driven through drive_matrix, the matrix's own
         # path, and must go RED for exactly the entry reason: a
         # special attribute whose read ignores the fixture's instance
         # dictionary, a driver overwrite missing from the list (the
         # same state passes while listed), and a listed overwrite that
-        # no longer happens. Then the QA51 private-name mutation:
+        # no longer happens. Then the private-name mutation:
         # _finish_close rebuilt INSIDE a class named _FixtureProcess,
         # so the compiler mangles it as it mangles the committed
         # member, with a private-name branch inserted right after the
@@ -14367,20 +14611,20 @@ def _watchdog_completion_case(mode, tree=None):
         # behaviourally; the unmangled key -- the state the pre-fix
         # derivation returned, which passed the mutant -- must go red
         # at entry.
-        # fix 31 (QA52): a driver that clears its state and then drives
-        # a member cached before the case must go red at entry (codex
-        # BLOCKER; fix 32 observes that cached entry, so the driver now
+        # A driver that clears its state and then drives
+        # a member cached before the case must go red at entry (the
+        # entry observation covers that cached entry, so the driver
         # enters it under the cleared state); the special attribute is
-        # planted on the QA51 mutant, which also loads self.__class__,
-        # so only the value check can catch it (claude MINOR). fix 32
-        # (QA53 codex/claude BLOCKER): a driver entering once through
+        # planted on the private-name mutant, which also loads self.__class__,
+        # so only the value check can catch it. A driver entering
+        # once through
         # the class attribute with the deviation, then through a member
         # cached before the case under another value, must go red at
-        # entry, on the real member and on the QA38 mutant; so must a
+        # entry, on the real member and on the armed-flag mutant; so must a
         # driver suspending the observation, and a case finding no
         # free tool id; a caller's tool id and a nested case stay
         # undisturbed, every tool id is released exactly, and each
-        # state copy is pinned (claude MINOR 1).
+        # state copy is pinned.
         def entry_red(case_labels, overrides, overwrites, reason,
                       vector):
             try:
@@ -14394,16 +14638,16 @@ def _watchdog_completion_case(mode, tree=None):
                                  (unobserved_entries,))
                 if reason is None:
                     assert exc.args[:1] not in entry_reasons, (
-                        "the planted fix 30 vector went red at entry, "
+                        "the planted entry-check vector went red at entry, "
                         "not behaviourally", vector, exc.args)
                 else:
                     assert exc.args[:1] == (reason,), (
-                        "the planted fix 30 vector went red for the "
+                        "the planted entry-check vector went red for the "
                         "wrong reason", vector, exc.args)
             else:
                 raise AssertionError(
-                    "the planted fix 30 " + vector + " vector was NOT "
-                    "caught by the matrix (fix 30)")
+                    "the planted entry-check " + vector + " vector was NOT "
+                    "caught by the matrix")
 
         held_case = ("m:_FixtureProcess._finish_close",
                      "held descriptor and report close", 0)
@@ -14455,8 +14699,8 @@ def _watchdog_completion_case(mode, tree=None):
                          dict([(held_case[0], [dict(armed=True)])]),
                          lambda: [RuntimeError("injected cleanup fault")])
         assert received and all(type(got) is dict for got in received), (
-            "a driver no longer gets its own copy of the state (fix 32, "
-            "QA53 claude MINOR 1)", [type(got) for got in received])
+            "a driver no longer gets its own copy of the state",
+            [type(got) for got in received])
         given = dict(armed=True)
 
         def given_clearing_driver(cancellation, fault, state):
@@ -14473,7 +14717,7 @@ def _watchdog_completion_case(mode, tree=None):
         else:
             raise AssertionError(
                 "the entry check no longer keeps its own copy of the "
-                "state (fix 32, QA53 claude MINOR 1)")
+                "state")
 
         def wrapped_then_cached(cached):
             def driver(cancellation, fault, state):
@@ -14496,7 +14740,7 @@ def _watchdog_completion_case(mode, tree=None):
 
         for cached, vector in ((cached_finish, "wrapped-then-cached"),
                                (qa38_mutant,
-                                "wrapped-then-cached QA38 mutant")):
+                                "wrapped-then-cached armed-flag mutant")):
             with patch.object(emit._FixtureProcess, "_finish_close",
                               cached), (
                     patch.dict(behavioural_drivers, dict(
@@ -14525,7 +14769,7 @@ def _watchdog_completion_case(mode, tree=None):
         try:
             for tool in entry_tool_ids:
                 if monitoring.get_tool(tool) is None:
-                    monitoring.use_tool_id(tool, "fix 32 occupant")
+                    monitoring.use_tool_id(tool, "occupant tool")
                     occupied.append(tool)
             entry_red([held_case],
                       dict([(held_case[0], [dict(armed=True)])]),
@@ -14548,7 +14792,7 @@ def _watchdog_completion_case(mode, tree=None):
                                state, behavioural_overwrites)
             finish_handles_driver(cancellation, fault, state)
 
-        monitoring.use_tool_id(caller_tool, "fix 32 caller")
+        monitoring.use_tool_id(caller_tool, "caller tool")
         try:
             monitoring.register_callback(caller_tool, entry_event,
                                          caller_callback)
@@ -14562,7 +14806,7 @@ def _watchdog_completion_case(mode, tree=None):
                              lambda: [RuntimeError(
                                  "injected cleanup fault")])
             caller_intact = (
-                monitoring.get_tool(caller_tool) == "fix 32 caller"
+                monitoring.get_tool(caller_tool) == "caller tool"
                 and monitoring.get_local_events(
                     caller_tool, cached_finish.__code__) == entry_event)
         finally:
@@ -14575,12 +14819,11 @@ def _watchdog_completion_case(mode, tree=None):
                 and len(caller_entries)
                 == 2 * len(pending_cancellations)), (
             "the entry check disturbed a caller's sys.monitoring tool id "
-            "or a nested case (fix 32)", caller_tool, len(caller_entries))
+            "or a nested case", caller_tool, len(caller_entries))
         assert [monitoring.get_tool(tool)
                 for tool in entry_tool_ids] == tool_table, (
-            "the entry check did not release its tool ids exactly "
-            "(fix 32)", tool_table)
-        # fix 33 (QA54 codex BLOCKER): a deviation attribute whose
+            "the entry check did not release its tool ids exactly", tool_table)
+        # A deviation attribute whose
         # read raises INSIDE the entry callback must fail the case.
         # Pre-fix the entry went unrecorded, the raise surfaced as
         # the driver's outward exception, and a nonempty deviation
@@ -14589,7 +14832,7 @@ def _watchdog_completion_case(mode, tree=None):
             def __getattribute__(self, name):
                 if name == "armed":
                     raise RuntimeError(
-                        "entry attribute read failed (fix 33)")
+                        "entry attribute read failed")
                 return super().__getattribute__(name)
 
         def callback_faulting_driver(cancellation, fault, state):
@@ -14613,7 +14856,7 @@ def _watchdog_completion_case(mode, tree=None):
                       dict([(held_case[0], [dict(armed=True)])]),
                       behavioural_overwrites, unobserved_entries,
                       "raising entry callback")
-        # fix 33 (QA54 codex MAJOR): a PY_START callback a caller
+        # A PY_START callback a caller
         # registered on the id before the case -- registration needs
         # no claimed id -- must be back, exactly, once the case has
         # released the id; pre-fix it was discarded on registration
@@ -14637,9 +14880,8 @@ def _watchdog_completion_case(mode, tree=None):
                                                     entry_event, None)
         assert restored is preregistered_callback, (
             "the caller's previous PY_START callback was not "
-            "restored exactly when the case released its tool id "
-            "(fix 33, QA54)", pre_tool, restored)
-        # fix 33 (QA54 codex MAJOR, claude MINOR 2): an id the driver
+            "restored exactly when the case released its tool id", pre_tool, restored)
+        # An id the driver
         # frees and retakes under the SHARED name is not this case's
         # id; the release leaves it alone (the run itself still goes
         # red: its observation is gone). Pre-fix the release compared
@@ -14671,14 +14913,14 @@ def _watchdog_completion_case(mode, tree=None):
                 monitoring.get_tool(tool) == entry_tool_name
                 for tool in retaken), (
                 "the release freed an id the driver had freed and "
-                "retaken under the shared name (fix 33, QA54)",
+                "retaken under the shared name",
                 retaken,
                 [monitoring.get_tool(tool) for tool in retaken])
         finally:
             for tool in retaken:
                 if monitoring.get_tool(tool) == entry_tool_name:
                     monitoring.free_tool_id(tool)
-        # fix 34 (QA55 codex BLOCKER): the callback stores its
+        # The callback stores its
         # preallocated failure flag FIRST, by a store that
         # allocates nothing, and the check fails the run on the
         # flag before any other outcome -- so an allocation
@@ -14705,7 +14947,7 @@ def _watchdog_completion_case(mode, tree=None):
                     assert ("observation_incomplete"
                             in code.co_freevars), (
                         "the entry callback no longer holds the "
-                        "preallocated failure flag (fix 34, QA55)",
+                        "preallocated failure flag",
                         code.co_freevars)
                     flag = callback.__closure__[
                         code.co_freevars.index(
@@ -14714,7 +14956,7 @@ def _watchdog_completion_case(mode, tree=None):
                     captured_callbacks.append(callback)
             assert captured_callbacks, (
                 "the flag vector found no live entry-check tool "
-                "id (fix 34, QA55)")
+                "id")
 
         with patch.dict(behavioural_drivers,
                         dict([(held_case, flag_setting_driver)])):
@@ -14738,7 +14980,7 @@ def _watchdog_completion_case(mode, tree=None):
             if flag_instructions[at].opname == "STORE_SUBSCR")
         assert handler_at < flag_at and store_at < detail_at, (
             "the failure flag is not stored first in the entry "
-            "callback's handler (fix 34, QA55)",
+            "callback's handler",
             handler_at, flag_at, store_at, detail_at)
         allocation_free = frozenset((
             "PUSH_EXC_INFO", "CHECK_EXC_MATCH", "POP_JUMP_IF_FALSE",
@@ -14750,9 +14992,9 @@ def _watchdog_completion_case(mode, tree=None):
                        in flag_instructions[handler_at:store_at + 1]]
         assert set(handler_ops) <= allocation_free, (
             "an operation before the failure flag store may "
-            "allocate (fix 34, QA55)",
+            "allocate",
             sorted(set(handler_ops) - allocation_free))
-        # fix 34 (QA55 codex MAJOR): a callback a caller
+        # A callback a caller
         # registered on the id for ANY event -- not only PY_START
         # -- must be back, exactly, once the case has released the
         # id; pre-fix free_tool_id wiped every other event's
@@ -14783,11 +15025,11 @@ def _watchdog_completion_case(mode, tree=None):
         assert restored_all == preregistered_all, (
             "a caller's previous callback for an event other than "
             "PY_START was not restored exactly when the case "
-            "released its tool id (fix 34, QA55)", every_tool,
+            "released its tool id", every_tool,
             [event for (event, callback), (_, restored)
              in zip(preregistered_all, restored_all)
              if restored is not callback])
-        # fix 34 (QA55 codex MAJOR): setup that raises restores
+        # Setup that raises restores
         # exactly what the case had replaced and never frees an id
         # it did not take. A registration failure after the id was
         # taken frees the id and puts every saved callback back; a
@@ -14804,7 +15046,7 @@ def _watchdog_completion_case(mode, tree=None):
         def entered_rejecting(tool, event, func):
             if getattr(func, "__name__", None) == "entered":
                 raise RuntimeError(
-                    "injected registration failure (fix 34)")
+                    "injected registration failure")
             return real_register(tool, event, func)
 
         monitoring.register_callback(setup_tool, entry_event,
@@ -14824,15 +15066,14 @@ def _watchdog_completion_case(mode, tree=None):
                 else:
                     raise AssertionError(
                         "the injected registration failure did "
-                        "not propagate (fix 34, QA55)")
+                        "not propagate")
         finally:
             setup_restored = monitoring.register_callback(
                 setup_tool, entry_event, None)
         assert (setup_restored is setup_prior
                 and monitoring.get_tool(setup_tool) is None), (
             "a failing registration destroyed the caller's "
-            "previous PY_START callback, or left the id claimed "
-            "(fix 34, QA55)", setup_tool, setup_restored,
+            "previous PY_START callback, or left the id claimed", setup_tool, setup_restored,
             monitoring.get_tool(setup_tool))
         raise_event = monitoring.events.RAISE
         assert (any(event < raise_event for event in callback_events)
@@ -14841,7 +15082,7 @@ def _watchdog_completion_case(mode, tree=None):
 
         def save_rejecting(tool, event, func):
             if func is None and event == raise_event:
-                raise RuntimeError("injected save failure (fix 34)")
+                raise RuntimeError("injected save failure")
             return real_register(tool, event, func)
 
         save_prior = [(event, preregistered_for(event))
@@ -14863,10 +15104,10 @@ def _watchdog_completion_case(mode, tree=None):
                 else:
                     raise AssertionError(
                         "the injected save failure did not "
-                        "propagate (fix 34, QA55)")
+                        "propagate")
             assert monitoring.get_tool(setup_tool) is None, (
                 "a failing save claimed or freed an id the case "
-                "never took (fix 34, QA55)", setup_tool,
+                "never took", setup_tool,
                 monitoring.get_tool(setup_tool))
         finally:
             save_after = [
@@ -14875,11 +15116,11 @@ def _watchdog_completion_case(mode, tree=None):
                 for event, callback in save_prior]
         assert save_after == save_prior, (
             "a failing save did not put back exactly the "
-            "callbacks it had removed (fix 34, QA55)", setup_tool,
+            "callbacks it had removed", setup_tool,
             [event for (event, callback), (_, after)
              in zip(save_prior, save_after)
              if after is not callback])
-        # fix 35 (QA56 codex BLOCKER): the entry callback
+        # The entry callback
         # captures NOTHING -- a captured variable's cell is
         # allocated by MAKE_CELL before the try, where an
         # allocation failure skips the flag -- and every
@@ -14889,8 +15130,7 @@ def _watchdog_completion_case(mode, tree=None):
         entered_code = captured_callbacks[-1].__code__
         assert entered_code.co_cellvars == (), (
             "the entry callback captures a variable into a "
-            "cell, allocated before its protected region "
-            "(fix 35, QA56)", entered_code.co_cellvars)
+            "cell, allocated before its protected region", entered_code.co_cellvars)
         prelude_free = frozenset(("RESUME", "COPY_FREE_VARS",
                                   "NOP", "NOT_TAKEN"))
         prelude_ops = []
@@ -14900,9 +15140,9 @@ def _watchdog_completion_case(mode, tree=None):
             prelude_ops.append(instruction.opname)
         assert set(prelude_ops) <= prelude_free, (
             "an operation before the entry callback's protected "
-            "region may allocate (fix 35, QA56)",
+            "region may allocate",
             sorted(set(prelude_ops) - prelude_free))
-        # fix 35 (QA56 codex MAJOR): the save loop holds each
+        # The save loop holds each
         # removed callback by an item store into its
         # preallocated slot, with nothing between the removal
         # returning and the store -- an allocating record
@@ -14929,8 +15169,8 @@ def _watchdog_completion_case(mode, tree=None):
         assert held_saves, (
             "the save loop no longer holds each removed "
             "callback by a non-allocating item store into its "
-            "preallocated slot (fix 35, QA56)")
-        # fix 35 (QA56 codex MAJOR): a restoration failure at
+            "preallocated slot")
+        # A restoration failure at
         # release must not abandon the saved callbacks after
         # it -- every remaining slot is still put back and the
         # first error propagates
@@ -14949,7 +15189,7 @@ def _watchdog_completion_case(mode, tree=None):
                     == raise_event):
                 restore_rejected.append(func)
                 raise RuntimeError(
-                    "injected restore failure (fix 35)")
+                    "injected restore failure")
             return real_register(tool, event, func)
 
         try:
@@ -14967,7 +15207,7 @@ def _watchdog_completion_case(mode, tree=None):
                 else:
                     raise AssertionError(
                         "the injected restore failure did not "
-                        "propagate (fix 35, QA56)")
+                        "propagate")
         finally:
             restore_after = [
                 (event, monitoring.register_callback(
@@ -14976,7 +15216,7 @@ def _watchdog_completion_case(mode, tree=None):
         assert (restore_rejected
                 and monitoring.get_tool(restore_tool) is None), (
             "the injected restore failure never fired, or left "
-            "the id claimed (fix 35, QA56)",
+            "the id claimed",
             monitoring.get_tool(restore_tool))
         restore_abandoned = [
             event for (event, callback), (_, after)
@@ -14984,9 +15224,8 @@ def _watchdog_completion_case(mode, tree=None):
             if after is not callback and event != raise_event]
         assert not restore_abandoned, (
             "a failing restore abandoned the saved callbacks "
-            "after it when the case released its tool id "
-            "(fix 35, QA56)", restore_abandoned)
-        # fix 35 (QA56 codex MAJOR, claude MINOR): a
+            "after it when the case released its tool id", restore_abandoned)
+        # A
         # pre-existing local-event mask -- an unclaimed id
         # keeps its per-code masks -- survives a case exactly:
         # the member's mask is saved before setup arms the
@@ -15000,7 +15239,7 @@ def _watchdog_completion_case(mode, tree=None):
                          if monitoring.get_tool(tool) is None)
         member_finish = vars(
             emit._FixtureProcess)["_finish_close"].__code__
-        monitoring.use_tool_id(mask_tool, "opf fix 35 mask pin")
+        monitoring.use_tool_id(mask_tool, "opf mask pin")
         try:
             monitoring.set_local_events(mask_tool, member_finish,
                                         return_event)
@@ -15020,7 +15259,7 @@ def _watchdog_completion_case(mode, tree=None):
                                             member_finish),
                 monitoring.get_local_events(mask_tool,
                                             mask_probe.__code__))
-            monitoring.use_tool_id(mask_tool, "opf fix 35 mask pin")
+            monitoring.use_tool_id(mask_tool, "opf mask pin")
             try:
                 monitoring.set_local_events(mask_tool,
                                             member_finish, 0)
@@ -15030,9 +15269,9 @@ def _watchdog_completion_case(mode, tree=None):
                 monitoring.free_tool_id(mask_tool)
         assert mask_after == (return_event, return_event), (
             "a pre-existing local-event mask did not survive "
-            "the case exactly (fix 35, QA56)", mask_after,
+            "the case exactly", mask_after,
             return_event)
-        # fix 35 (QA56 gemini): an interrupt landing right
+        # An interrupt landing right
         # after the claim -- after use_tool_id returns, before
         # setup finishes -- must not leave the id taken with
         # its callbacks cleared: the id and its saved
@@ -15073,26 +15312,25 @@ def _watchdog_completion_case(mode, tree=None):
                 else:
                     raise AssertionError(
                         "the planted interrupt right after the "
-                        "claim did not propagate (fix 35, QA56)")
+                        "claim did not propagate")
         finally:
             interrupt_after = [
                 (event, monitoring.register_callback(
                     interrupt_tool, event, None))
                 for event, callback in interrupt_prior]
         assert claim_interrupted == [interrupt_tool], (
-            "the planted interrupt fired on an unexpected id "
-            "(fix 35, QA56)", claim_interrupted, interrupt_tool)
+            "the planted interrupt fired on an unexpected id", claim_interrupted, interrupt_tool)
         assert monitoring.get_tool(interrupt_tool) is None, (
             "an interrupt right after the claim left the id "
-            "taken and unreleased (fix 35, QA56)", interrupt_tool,
+            "taken and unreleased", interrupt_tool,
             monitoring.get_tool(interrupt_tool))
         assert interrupt_after == interrupt_prior, (
             "an interrupt right after the claim lost a saved "
-            "callback (fix 35, QA56)",
+            "callback",
             [event for (event, callback), (_, after)
              in zip(interrupt_prior, interrupt_after)
              if after is not callback])
-        # fix 36 (QA57 codex MAJOR x2): one REAL SIGINT, delivered
+        # One REAL SIGINT, delivered
         # by an opcode trace at the reported instruction -- once
         # immediately before the save loop's first STORE_SUBSCR,
         # after register_callback(..., None) returned, and once in
@@ -15102,7 +15340,7 @@ def _watchdog_completion_case(mode, tree=None):
         # restored and the id unclaimed, the pending SIGINT
         # delivered only after the masked section -- the
         # single-threaded, inside-the-section timing where
-        # the best-effort mask does hold (fix 37, QA58: not
+        # the best-effort mask does hold (not
         # a general promise). Each delivery
         # is then repeated with the mask removed --
         # signal.pthread_sigmask stubbed out, the reviewed-HEAD
@@ -15130,15 +15368,14 @@ def _watchdog_completion_case(mode, tree=None):
                         case_instructions[at].positions.lineno
                         for at in release_calls)) == 1), (
                 "the release's entry-callback unregistration is "
-                "no longer a uniquely traceable statement "
-                "(fix 36, QA57)", release_calls)
+                "no longer a uniquely traceable statement", release_calls)
             release_offsets = tuple(
                 case_instructions[at].offset
                 for at in release_calls)
 
             def sigint_delivery(target_offsets):
                 # one real SIGINT at one of target_offsets
-                # in entry_checked_case, the QA57 technique:
+                # in entry_checked_case, by this technique:
                 # tracing is disabled before the signal is sent
                 signal_tool = next(
                     tool for tool in entry_tool_ids
@@ -15179,7 +15416,7 @@ def _watchdog_completion_case(mode, tree=None):
                     else:
                         raise AssertionError(
                             "the real SIGINT was not delivered "
-                            "outward (fix 36, QA57)",
+                            "outward",
                             target_offsets)
                 finally:
                     sys.settrace(None)
@@ -15194,18 +15431,16 @@ def _watchdog_completion_case(mode, tree=None):
                 assert (len(fired) == 1
                         and fired[0] in target_offsets), (
                     "the SIGINT vector never reached its target "
-                    "instruction (fix 36, QA57)", target_offsets,
+                    "instruction", target_offsets,
                     fired)
                 assert still_claimed is None, (
-                    "a real SIGINT left the tool id claimed "
-                    "(fix 36, QA57)", signal_tool, still_claimed)
+                    "a real SIGINT left the tool id claimed", signal_tool, still_claimed)
                 lost = [event
                         for (event, callback), (_, restored)
                         in zip(prior, after)
                         if restored is not callback]
                 assert not lost, (
-                    "a real SIGINT lost saved callbacks "
-                    "(fix 36, QA57)", target_offsets, lost)
+                    "a real SIGINT lost saved callbacks", target_offsets, lost)
 
             for target_offsets in ((save_store_offset,),
                                    release_offsets):
@@ -15223,10 +15458,9 @@ def _watchdog_completion_case(mode, tree=None):
                 except AssertionError as exc:
                     unfixed = exc
                 assert (unfixed is not None
-                        and "fix 36" in str(unfixed.args[0])), (
+                        and "SIGINT" in str(unfixed.args[0])), (
                     "removing the signal mask did not turn the "
-                    "SIGINT vector red through its own assertion "
-                    "(fix 36, QA57)", target_offsets, unfixed)
+                    "SIGINT vector red through its own assertion", target_offsets, unfixed)
         mutant_member = copy.deepcopy(
             scope["m:_FixtureProcess._finish_close"])
         capture_assigns = [
@@ -15238,16 +15472,15 @@ def _watchdog_completion_case(mode, tree=None):
             and isinstance(node.value, ast.Name)
             and node.value.id == "exc"]
         assert len(capture_assigns) == 1, (
-            "the pinned QA51 mutation site (`pending = exc` inside "
-            "_finish_close) is no longer unique (fix 30)",
+            "the pinned private-name mutation site (`pending = exc` inside "
+            "_finish_close) is no longer unique",
             len(capture_assigns))
         holders = [
             node for node in ast.walk(mutant_member)
             if isinstance(getattr(node, "body", None), list)
             and capture_assigns[0] in node.body]
         assert len(holders) == 1, (
-            "the pinned QA51 capture's holding body is not unique "
-            "(fix 30)", len(holders))
+            "the pinned private-name capture's holding body is not unique", len(holders))
         at = holders[0].body.index(capture_assigns[0])
         holders[0].body[at + 1:at + 1] = _optlevel.parse(
             "try:\n"
@@ -15264,7 +15497,7 @@ def _watchdog_completion_case(mode, tree=None):
                 and not any("__qa51" in override
                             for override in mutant_overrides)), (
             "the derivation no longer keys a private name as the "
-            "compiler mangles it (fix 30, QA51)", mutant_overrides)
+            "compiler mangles it", mutant_overrides)
         assert driven_state(dict([("__class__", True)]),
                             mutant_overrides), mutant_overrides
         mutant_class = _optlevel.parse(
@@ -15273,7 +15506,7 @@ def _watchdog_completion_case(mode, tree=None):
         mutant_namespace = dict(vars(emit))
         exec(compile(ast.fix_missing_locations(ast.Module(
                 body=[mutant_class], type_ignores=[])),
-             "<fix 30 QA51 pinned mutant>", "exec", optimize=0),
+             "<private-name pinned mutant>", "exec", optimize=0),
              mutant_namespace)
         behavioural_case(held_case, finish_handles_driver,
                          TimeoutError("pending cancellation"),
@@ -15296,17 +15529,17 @@ def _watchdog_completion_case(mode, tree=None):
                       behavioural_overwrites, ineffective_deviation,
                       "special-attribute")
 
-        # fix 30: the leg 19 bound is stated twice, at the leg 19 head
+        # The leg 19 bound is stated twice, at the leg 19 head
         # and at derived_overrides, and the two copies must stay
-        # identical, so neither can drift from the other. fix 31
-        # (QA52): the file must hold exactly two terminated blocks,
+        # identical, so neither can drift from the other. The file
+        # must hold exactly two terminated blocks,
         # every block line carrying its start marker's indentation
         # and the rest byte-identical; planted drifts are pinned red.
-        # fix 32 (QA53 claude MINOR 2): each drift must be caught for
+        # Each drift must be caught for
         # its own reason, a lost indentation and a marker line's
         # trailing whitespace included
-        bound_marks = (("# -- leg 19 bound (two identical copies, "
-                        "fix 30) --").encode(),
+        bound_marks = (("# -- leg 19 bound (two identical "
+                        "copies) --").encode(),
                        ("# -- end of leg 19 "
                         "bound --").encode())
 
@@ -15330,18 +15563,18 @@ def _watchdog_completion_case(mode, tree=None):
 
         own_text = Path(__file__).read_bytes()
         assert bound_copy_fault(own_text) is None, (
-            bound_copy_fault(own_text), "(fix 30/31)")
-        # fix 34 (QA55 codex MINOR): both copies qualify the case
+            bound_copy_fault(own_text),
+            "the bound copy self-check reported a fault")
+        # Both copies qualify the case
         # name's uniqueness to live cases
         live_needle = b"among live " + b"cases"
         assert own_text.count(live_needle) == 2, (
             "the leg 19 bound no longer qualifies the case name's "
-            "uniqueness to live cases in both copies "
-            "(fix 34, QA55)", own_text.count(live_needle))
-        # fix 36 (QA57 codex MINOR): the general exclusion is the
+            "uniqueness to live cases in both copies", own_text.count(live_needle))
+        # The general exclusion is the
         # single disclosure -- its wording appears exactly once
         # per copy, and the removed narrower allocator-detail
-        # qualification stays gone; fix 37 (QA58): the rescoped
+        # qualification stays gone; the rescoped
         # disclosure names the signal-delivery exclusion
         # exactly once per copy too
         allocation_needle = b"interpreter " + b"allocation"
@@ -15351,8 +15584,7 @@ def _watchdog_completion_case(mode, tree=None):
                 and own_text.count(async_needle) == 2
                 and own_text.count(signal_needle) == 2), (
             "the allocator/audit/async/signal-delivery exclusion "
-            "no longer appears exactly once per bound copy "
-            "(fix 36/37, QA57/QA58)",
+            "no longer appears exactly once per bound copy",
             own_text.count(allocation_needle),
             own_text.count(async_needle),
             own_text.count(signal_needle))
@@ -15375,7 +15607,7 @@ def _watchdog_completion_case(mode, tree=None):
                  blocks_fault)):
             assert bound_copy_fault(data) == reason, (
                 "the planted leg 19 bound drift was NOT caught by the "
-                "copy self-check for its own reason (fix 31/32)", vector,
+                "copy self-check for its own reason", vector,
                 bound_copy_fault(data))
     elif mode == "receipt-high-fd":
         import fcntl
@@ -15384,7 +15616,7 @@ def _watchdog_completion_case(mode, tree=None):
         import socket
         import time
         import types
-        # Fix 2z (claude F2 / gemini F4): the buffered subject receipt must
+        # The buffered subject receipt must
         # survive a control socket AT OR ABOVE FD_SETSIZE (1024). The layer
         # polls descriptors with select.poll everywhere; the pre-fix
         # _recv_subject probed with select.select, whose fd_set raises
@@ -15610,8 +15842,7 @@ def _watchdog_regression_self_test():
                     "liveness-permission")
     launcher_labels = ("isolation", "regression", "shared")
     launcher_dispositions = ("ignored", "handler")
-    # The runtime ledger's concurrency vectors (claude round-6 MEDIUM-2,
-    # codex round-7 MEDIUM 6): each runs in its own independently bounded
+    # The runtime ledger's concurrency vectors: each runs in its own independently bounded
     # fixture process, so a regression that hangs one is killed at THAT
     # vector's bound, which the runner records as that vector's own
     # no-verdict CANNOT-EVALUATE (never a pass), never a hung
@@ -15630,29 +15861,29 @@ def _watchdog_regression_self_test():
         ("deadline-late-conversion", 0.0001, EXIT_FINDING),
         ("late-landing-charge", 1, EXIT_FINDING),
         ("unlanded-charge", 10, EXIT_MALFORMED),
-        # claude round-8 MEDIUM: a same-thread charge made at the
+        # A same-thread charge made at the
         # landing line's line event completes (a lock taken on an EARLIER
         # line self-deadlocks here; a one-line lock or a BEGIN-only lock
-        # does not, which append-reentrant-charge covers); claude
-        # round-8 MINOR: an exception right after the BEGIN append still
+        # does not, which append-reentrant-charge covers); an
+        # exception right after the BEGIN append still
         # lands the token, so the leg is evaluated, never
         # CANNOT-EVALUATE.
         ("landing-reentrant-charge", 3, EXIT_OK),
         ("begin-interrupted", 1, EXIT_OK),
-        # claude round-9 MEDIUM: a same-thread charge made right after
+        # A same-thread charge made right after
         # EITHER append completes, so a non-reentrant lock held across
         # the BEGIN or the LAND append, in any layout, self-deadlocks.
         ("append-reentrant-charge", 7, EXIT_OK),
-        # codex round-9 MAJOR 1: a raising signal handler right after the
+        # A raising signal handler right after the
         # suppression OPEN still closes it (the later sleep charges and
         # overruns); one right before the close leaves the step open, and
         # the leg is CANNOT-EVALUATE, never a silent pass.
         ("suppression-entry-interrupted", 0.01, EXIT_FINDING),
         ("suppression-close-interrupted", 0.01, EXIT_MALFORMED),
-        # claude round-9 MINOR: a child forked inside the charge gets
+        # A child forked inside the charge gets
         # (None, None), never the inherited ledger.
         ("fork-in-charge", 1, EXIT_OK),
-        # codex round-9 MAJOR 2: distinct threads that compare EQUAL
+        # Distinct threads that compare EQUAL
         # never share a deadline exemption or a suppression (the thread
         # maps are identity-keyed); the same-thread controls keep both.
         ("equal-thread-subtick", 100.01, EXIT_FINDING),
@@ -15664,12 +15895,12 @@ def _watchdog_regression_self_test():
         ("recycled-thread-sleep", 600.01, EXIT_FINDING),
         ("cross-thread-over", _deadline_case_budget(0.5) + 0.1, EXIT_FINDING),
         ("cross-thread-within", _deadline_case_budget(0.5) + 0.15, EXIT_OK),
-        # codex round-8 MAJOR 1: a nested leg with NO charges must
+        # A nested leg with NO charges must
         # leave the OUTER ledger on the stack when it ends, raising
         # nothing (stack removal by identity, never dict equality,
         # under which two quiescent ledgers compare equal).
         ("empty-nested-leg", 1, EXIT_OK),
-        # codex round-8 MAJOR 2: a conversion suspended across a
+        # A conversion suspended across a
         # nested leg end keeps its deadline tick and its suppression
         # depth on the ledger it charged; the outer, uncharged leg
         # (budget 0.01) then fails on the worker sleep (0.05, from
@@ -15678,7 +15909,7 @@ def _watchdog_regression_self_test():
         ("deadline-exemption-migration", 0.01, EXIT_FINDING),
         ("wrapper-suppression-migration", 0.01, EXIT_FINDING),
     )
-    # Boolean-return controls (codex round-8 MEDIUM): each returns
+    # Boolean-return controls: each returns
     # a bool verdict (False for expected 0, True for expected 1)
     # that the launching fixture comparison must REJECT: the
     # control fixture exits 0 only on that rejection, so a
@@ -15704,12 +15935,12 @@ def _watchdog_regression_self_test():
                         "unpinned-kill", "census-verify",
                         "census-exception", "receipt-high-fd")
     # Each launcher case's bound DERIVES from its nested callee's sanctioned
-    # budget, following the blocked-isolation convention below (fix 2z,
-    # claude F3 / gemini F5): with _run_fixture_process patched, every nested
+    # budget, following the blocked-isolation convention below: with
+    # _run_fixture_process patched, every nested
     # case is exactly one 5 s exit-37 launch and the callee runs TWICE
     # (control + hostile), plus launch margin -- never a flat empirical
     # constant sitting below what the callee itself is sanctioned to wait
-    # for (the pre-QA kill-timeout-exceeds-callee-wait flake).
+    # for (the earlier kill-timeout-exceeds-callee-wait flake).
     nested_launches = {
         "isolation": 5 * 6 + 1,  # the timer matrix: 5 labels x 6 modes + window/expiry
         "regression": (len(deadline_modes) + len(overlap_modes)
@@ -15894,7 +16125,7 @@ def _watchdog_regression_self_test():
     # a hung suite.
     def ledger_fixture(mode, seconds, want, control=False):
         # ONE comparison fragment serves the real vectors and the
-        # boolean-return controls (codex round-8 MEDIUM): only an
+        # boolean-return controls: only an
         # EXACT int verdict passes (type(rc) is int, never a bool,
         # whose False == 0 and True == 1). A control returns a bool
         # and its fixture exits 0 only when this same fragment
@@ -16025,13 +16256,13 @@ def _watchdog_regression_self_test():
     # child that RESUMES a conversion while a second thread sits
     # suspended inside the landing step itself, where a reintroduced
     # lock held across the landing append would be held across the fork
-    # (fork-held-landing, red on the round-7 locked design by
+    # (fork-held-landing, red on the earlier locked design by
     # construction: the suspension is the leg's swapped `landed` list
     # blocking that thread's first append; a lock around the BEGIN
     # append alone is not held there and is append-reentrant-charge's
     # to catch); a SIGUSR1 handler charging on the main thread while
     # that same held-landing suspension is live completes without a
-    # hang (signal-held-landing, red on the round-7 locked design); a
+    # hang (signal-held-landing, red on the earlier locked design); a
     # bool or str fixture timeout is uncountable, never a 0.0 wait
     # (run-bounded-bool-timeout, run-bounded-str-timeout); and a nested longer deadline opened from
     # inside the outer deadline's own clock read survives, because ticks
@@ -16339,7 +16570,7 @@ def _watchdog_regression_self_test():
             ("run-bounded-timeout-within", _watchdog_leg_entry(
                 _deadline_case_budget(0.5),
                 bounded(0.5, lambda: time.sleep(4) or "ok", "TIMEOUT")), EXIT_OK),
-            # claude round-8 MINOR: a bool or str fixture timeout (refused
+            # A bool or str fixture timeout (refused
             # by run_bounded before fork) is uncountable and fails the
             # leg, never a 0.0 wait through the fixture allowance.
             ("run-bounded-bool-timeout", _watchdog_leg_entry(
@@ -16375,7 +16606,7 @@ def _watchdog_regression_self_test():
                 ("pinned-allowance",
                  stubbed("run_bounded", bounded_stub, _deadline_case_budget(0.25) - 0.5,
                          patched_allowance_leg), EXIT_FINDING),
-                # claude round-9 MINOR: a timeout whose __class__ property
+                # A timeout whose __class__ property
                 # claims float passes isinstance, yet float() refuses it;
                 # gated on its exact type it is uncountable and fails the
                 # leg, never a 0.0 wait through the fixture allowance.
@@ -17010,8 +17241,8 @@ def _init_glob_escape(text):
 # consists solely of these characters (_init_bare): such a word a POSIX shell cannot
 # split, substitute, quote, redirect or continue, on any physical line (shlex.quote is
 # retired: it kept a newline-holding value syntactically quoted while the quoted value's
-# middle physical lines ran standalone when the output was pasted line by line, QA
-# round 6 MAJOR). The escape names in this region are spelled in words because the CLI
+# middle physical lines ran standalone when the output was pasted line by line).
+# The escape names in this region are spelled in words because the CLI
 # self-test's import structural check re-decodes this whole file under a planted
 # raw_unicode_escape declaration, to which a raw backslash-u sequence in any comment or
 # docstring is itself an escape: well-formed it would decode to another character,
@@ -17024,11 +17255,11 @@ def _init_exact_str(value):
     """The EXACT built-in str that every value and exception text init renders
     or formats into a line, and every line it writes, is converted to first, as
     are the text a rendering proof compares and each argument token before the
-    argument loop compares or gates it (QA round 14, requirement A: str() may
+    argument loop compares or gates it (str() may
     return a str SUBCLASS, and a subclass overriding __eq__, __hash__, __iter__
     or __format__ decided what the rendering proof compared, what the renderer
     iterated and what str.format printed, while the characters it carried
-    reached the output raw; QA round 15, requirement C: the argument loop
+    reached the output raw; the argument loop
     compared and gated tokens it had not converted, so a token whose own __eq__
     answered "--root" acted as --root). Init's other comparisons (of a
     sibling module's result, such as a resolver status, and of its own
@@ -17052,17 +17283,17 @@ def _init_bare(value):
     value may be interpolated into a printed command hint, because a hint carries its
     values with no quoting at all. This is a gate, not a renderer: a value that fails
     it is never escaped into a command (an escaped command could still carry a live
-    shell substitution or split across physical lines, QA round 6 MAJOR); the command
+    shell substitution or split across physical lines); the command
     is withheld instead and the value is printed on a detail line through
     _init_inert. The value is read as its exact str (_init_exact_str), so a str
     subclass cannot pass the gate by what its own iteration yields."""
     return all(ch in _INIT_BARE_SAFE for ch in _init_exact_str(value))
 
 
-# The FIXED rendering alphabet (QA round 8 BLOCKER 1: the round-8 widening to
+# The FIXED rendering alphabet (the earlier widening to
 # "readable" punctuation let "!" reach output raw, where interactive bash history
 # expansion replays a prior history line, and zsh glob qualifiers and fish command
-# substitution execute code; the round-7 alphabet is restored and is FIXED): ASCII
+# substitution execute code; the earlier alphabet is restored and is FIXED): ASCII
 # letters, digits and . / - _ ONLY. Every other character, the SPACE included, every
 # quote, "!", "$", the backquote, "(", ")", braces, "~", "#", "=", every separator,
 # redirection and glob character, every control or format character and every
@@ -17080,20 +17311,19 @@ _INIT_INERT_SAFE = frozenset(
 
 def _init_inert(value):
     """THE one renderer for every value (path, argument, commit id, exception text, JSON
-    report string) interpolated into any line init prints (QA rounds 6, 7 and 8): the
+    report string) interpolated into any line init prints: the
     safe alphabet is FIXED and narrow, ASCII letters, digits and . / - _ only, and
     every character outside it, the space included, becomes a backslash-x, backslash-u
     or backslash-U escape of its code point, so the rendered form holds nothing an
-    interactive shell acts on (QA round 8 BLOCKER 1: the widened round-8 set let "!"
+    interactive shell acts on (the widened earlier set let "!"
     through raw, and bash history expansion replays the user's history even inside
     double quotes; readability is not a goal that may widen the set). ascii() and
     repr() are NOT inert for this purpose: each leaves "$" and the backquote raw inside
     the quoted Python literal it yields, where a POSIX shell keeps them live when the
-    printed line is pasted (QA rounds 5 and 6 MAJOR). A value proven bare by _init_bare
+    printed line is pasted. A value proven bare by _init_bare
     renders unchanged. A rendered value is for reconstruction by hand (each escape
     names one code point); it is never for pasting into a shell. Any value is
-    first converted to its exact str (_init_exact_str; QA round 14, requirement
-    A), so the characters iterated and tested here are the value's own and a
+    first converted to its exact str (_init_exact_str), so the characters iterated and tested here are the value's own and a
     str subclass's __str__, __iter__, __eq__ or __hash__ never decides them; the
     result is a join of exact str pieces, itself an exact str."""
 
@@ -17110,7 +17340,7 @@ def _init_inert(value):
 
 
 def _init_echo(line, err=False):
-    """THE one output route for opf init (QA round 7, requirement B; QA round 9: the
+    """THE one output route for opf init (the
     permitted-CALL allowlist is replaced by a permitted-REFERENCE allowlist): every
     line _cmd_init or any opf.py function it reaches prints goes through this
     emitter. The init suite's route gate (check_opf_init._init_route_violations)
@@ -17141,8 +17371,8 @@ def _init_echo(line, err=False):
     _InitRestoreLine or _InitPriorStoreRefusal construction whose template (the
     remedy template included) is not a string literal or a name that the
     constructing function's OWN scope binds only by plain assignments of string
-    literals, with no nested def, lambda or match capture binding (QA round 10
-    MAJOR 2: the round-9 rule counted a binding a match capture hid from it and
+    literals, with no nested def, lambda or match capture binding (the
+    earlier rule counted a binding a match capture hid from it and
     a nested-def binding that did not bind the outer read). A
     spelled output route (subprocess.run, os.system, os.write, os.writev, open,
     Path(...).write_text, sys.exit, SystemExit, input, traceback, pprint,
@@ -17163,20 +17393,19 @@ def _init_echo(line, err=False):
     residual. What such code hands to init's OWN prints is COVERED AT THE
     OUTPUT, not chased statically: every value and exception text init
     renders or formats into a line, and every line this emitter writes, is
-    first converted to an exact built-in str (_init_exact_str; QA round 14,
-    requirement A: a str subclass returned by str() overrode __eq__, __iter__
-    or __format__ and printed raw past the round-13 checks; QA round 15,
-    requirement C pins this emitter's own conversion), a JSON event line
+    first converted to an exact built-in str (_init_exact_str: a str subclass returned by str() overrode __eq__, __iter__
+    or __format__ and printed raw past the earlier checks; this
+    emitter's own conversion is pinned too), a JSON event line
     passes through unrendered only a value whose type is exactly int, float,
     bool or None and renders every other value that is not a list, tuple or
-    dict as text (_init_inert_json; QA round 15, requirement A: a tuple from a
+    dict as text (_init_inert_json; a tuple from a
     sibling module's stat result, or one a str subclass's reflected __radd__
     made of the root-binding text, printed its strings raw), the rendering
     constructors
     format only registered templates (_INIT_TEMPLATES) and render anything else
     as a value, and the refusal handler accepts a message or restore line only
     with its constructor's rendering proof, re-rendering everything else at the
-    point of output (QA round 13, requirements A and E). NOT covered, and
+    point of output. NOT covered, and
     stated: output such code writes by itself rather than through this
     emitter, and in-process rebinding of init's own functions or forgery of
     the private rendering proofs. The suite's runtime paste test over
@@ -17188,8 +17417,8 @@ def _init_echo(line, err=False):
 
 def _init_inert_json(value):
     """Prepare a report for json.dumps so that every string in it went through
-    _init_inert, KEYS included, and FAIL CLOSED on every other type (QA round 15,
-    requirement A: the round-14 walk returned unchanged any value that was not a
+    _init_inert, KEYS included, and FAIL CLOSED on every other type (the
+    earlier walk returned unchanged any value that was not a
     str, list or dict, so a tuple reaching a report, a sibling module's stat
     st_size or a root binding that a str subclass's reflected __radd__ turned
     into a tuple, was serialised by json.dumps as an array of its raw strings).
@@ -17205,7 +17434,7 @@ def _init_inert_json(value):
     json.dumps alone is NOT shell-inert: it escapes quotes and control characters but
     leaves "$" and "`" raw inside the JSON double quotes, exactly the double-quote context
     in which a POSIX shell keeps substitutions live, so a pasted event line whose root or
-    foreign-entry name carries $(...) could execute it (QA round 5). An escaped value
+    foreign-entry name carries $(...) could execute it. An escaped value
     reads back as a Python string literal."""
     kind = type(value)
     if value is None or kind is bool or kind is int or kind is float:
@@ -17218,14 +17447,14 @@ def _init_inert_json(value):
     return _init_inert(value)
 
 
-# The REGISTERED rendering templates (QA round 13, requirement A: render at the
+# The REGISTERED rendering templates (render at the
 # output, so no construction path prints raw). Every template the real init
 # source passes to _InitRestoreLine or _InitPriorStoreRefusal is spelled once at
 # its construction site, where the route gate pins it as a string literal or a
 # literal-only-bound name, and once here, byte-identically. The rendering
 # constructors FORMAT a template only when it is a member of this set: any other
 # template value, whatever construction route supplied it (a local or
-# module-level subclass inheriting a constructor included; QA round 12 MAJOR: a
+# module-level subclass inheriting a constructor included; a
 # declared subclass of _InitPriorStoreRefusal escaped the gate's
 # constructor-name rule and its message, a hostile value in the template
 # position, printed raw), is treated as a VALUE and rendered through
@@ -17311,19 +17540,19 @@ _INIT_TEMPLATES = frozenset([
 
 class _InitRestoreLine(str):
     """One physical line of a prior-store refusal's restore and detail block: a str
-    whose CONSTRUCTOR renders (QA round 7, requirement B). The template is a string
+    whose CONSTRUCTOR renders. The template is a string
     literal, or a name the constructing function's own scope binds only by plain
     assignments of string literals, with no nested def, lambda or match capture
-    binding (the route gate refuses any other construction; QA round 10 MAJOR 2:
-    the round-9 rule counted bindings it could not see or that did not bind the
+    binding (the route gate refuses any other construction;
+    the earlier rule counted bindings it could not see or that did not bind the
     read), is FORMATTED only when it is a member of the registered-template set
-    _INIT_TEMPLATES (QA round 13, requirement A: a subclass inheriting this
+    _INIT_TEMPLATES (a subclass inheriting this
     constructor carried a hostile value in the template position, which no
     constructor-name rule reads; an unregistered template is now itself rendered
     through _init_inert as a value and never formatted, with the rendered values
     following after literal spaces), and EVERY value is rendered through _init_inert
-    before it is formatted in, with no exception and no pass-through of any kind (QA
-    round 9, requirement B: the round-8 constructor passed a value of the exact
+    before it is formatted in, with no exception and no pass-through of any kind (the
+    earlier constructor passed a value of the exact
     _InitRestoreLine type through unrendered, and str.__new__ could mint such a value
     around a raw string); a value already proven bare renders unchanged, so rendering
     it again is the identity, and every bare-word restore command stays
@@ -17342,7 +17571,7 @@ class _InitRestoreLine(str):
         if type(template) is str and template in _INIT_TEMPLATES:
             line = str.__new__(cls, template.format(*rendered))
         else:
-            # Fail-safe (QA round 13, requirement A): an unregistered template,
+            # Fail-safe: an unregistered template,
             # whatever construction route supplied it, is itself a VALUE and is
             # rendered, never formatted; the rendered values follow after
             # literal spaces, so the line still carries what was passed, inert.
@@ -17355,8 +17584,8 @@ class _InitRestoreLine(str):
 def _init_line_rendered(line):
     """True only for a line the _InitRestoreLine constructor produced, proven by the
     private slot that constructor sets after rendering every value: never a type
-    check (QA round 9, requirement B: a str.__new__-minted instance of the exact
-    type carried a raw value through the round-8 type-based pass-through). A minted
+    check (a str.__new__-minted instance of the exact
+    type carried a raw value through the earlier type-based pass-through). A minted
     instance has no slot value, and anything else fails the type test, so the
     caller re-renders both."""
     if type(line) is not _InitRestoreLine:
@@ -17369,10 +17598,9 @@ def _init_line_rendered(line):
 
 def _init_refusal_message(exc):
     """The caught prior-store refusal's message, PROVEN rendered, or re-rendered
-    HERE, at the point of output (QA round 13, requirement A; QA round 14,
-    requirement A). The live text is first converted to an EXACT built-in str
+    HERE, at the point of output. The live text is first converted to an EXACT built-in str
     (_init_exact_str): str(exc) may return a str subclass, whose own __eq__
-    faked the round-13 comparison below and whose __format__ or __iter__
+    faked the earlier comparison below and whose __format__ or __iter__
     changed what the handler printed, raw, past an untouched constructor proof.
     The real constructor binds the composed, fully rendered message to a
     private attribute AFTER rendering it; this accepts the exact text only when
@@ -17406,21 +17634,20 @@ class _InitPriorStoreRefusal(RuntimeError):
     missing-store-path detail lines naming each structural store file the restorable
     .working tree lacks). The exit code is the
     same 2 either way; only the reporting wording distinguishes the two verdicts.
-    The CONSTRUCTOR renders (QA rounds 7 and 9, requirement B): the message is
+    The CONSTRUCTOR renders: the message is
     template.format over values EACH rendered through _init_inert, with no
     pass-through of any kind (the template and the remedy template are string
     literals or literal-only-bound names, pinned by the route gate, and each is
     FORMATTED only when it is a member of the registered-template set
     _INIT_TEMPLATES: an unregistered one, a subclass inheriting this constructor
-    included, is itself rendered as a value and never formatted, QA round 13,
-    requirement A); the composed message is then bound to the private rendering
+    included, is itself rendered as a value and never formatted); the composed message is then bound to the private rendering
     proof the refusal handler checks at the point of output; the remedy
     prose is formatted here from its own pinned template over its own rendered
     values, gains the fixed PARTIAL clause when partial is true, and fills the
     template's {remedy} field, so no composed prose is ever passed back through the
     renderer as a value; and every restore_lines entry that does not carry the
     _InitRestoreLine constructor's rendering proof (_init_line_rendered, a private
-    slot a minted instance of the exact type lacks; QA round 9, requirement B) is
+    slot a minted instance of the exact type lacks) is
     re-rendered through that constructor, so a raw value bound into any channel is
     escaped at construction, never printed raw."""
 
@@ -17430,7 +17657,7 @@ class _InitPriorStoreRefusal(RuntimeError):
         if type(remedy_template) is str and remedy_template in _INIT_TEMPLATES:
             remedy = remedy_template.format(*rendered_remedy)
         else:
-            # Fail-safe (QA round 13, requirement A): an unregistered remedy
+            # Fail-safe: an unregistered remedy
             # template is itself a value and renders, never formats.
             remedy = " ".join(
                 [_init_inert(remedy_template)] + rendered_remedy)
@@ -17450,7 +17677,7 @@ class _InitPriorStoreRefusal(RuntimeError):
                 + ([remedy] if remedy else []))
         super().__init__(message)
         # The rendering PROOF the refusal handler accepts at the point of
-        # output (QA round 13, requirement A): set only AFTER the message was
+        # output: set only AFTER the message was
         # composed from rendered parts, and checked there by VALUE equality
         # with the live str(exc), so a message swapped in afterwards (a
         # reassigned exc.args) no longer matches and is re-rendered.
@@ -17490,23 +17717,22 @@ def _init_no_prior_store(git, repo, root):
     line, names only the store paths its commit's tree holds (git checkout fails outright on a
     pathspec the commit lacks) and runs under --no-replace-objects, the neutralization every
     read of this scan already runs under, because checkout honours replacement refs: without the
-    flag a replacement ref could substitute other bytes for the named commit's (QA round 4), and
+    flag a replacement ref could substitute other bytes for the named commit's, and
     under --literal-pathspecs as the staging hint is. A history that deleted the store across
     MORE than one commit leaves the named commit's tree holding only part of the store: the
     store path it lacks is probed one step the same way (its newest first-parent change at or
     before the named commit, else that change's first parent), and a found holder is printed
-    as a second, ADDITIONAL restore command. A deletion split INSIDE .working (QA round 5
-    MAJOR; QA round 6 MAJOR; QA round 7 for the store definition) is probed structurally
+    as a second, ADDITIONAL restore command. A deletion split INSIDE .working is probed structurally
     through working_gaps: a first-level subdirectory of the restored .working tree is a
     machine store only when it directly holds manifest.toml or counters.toml, in that
     tree or in a first-parent commit at or before the named commit; each store found
     either way must hold BOTH structural files in the restored tree, and a subdirectory
     holding only other files or only deeper directories is neither expected nor named
-    (QA round 7 MAJOR 2: an adopter-kept non-store file such as notes/plan.md must not
+    (an adopter-kept non-store file such as notes/plan.md must not
     make the restore read as PARTIAL); every expected file the tree lacks makes the
     remedy say the restore is PARTIAL and name that missing path on its own detail line,
     in words that state only what the scan observed (the restored tree lacks the path),
-    never that the path once existed or was deleted (QA round 6 MEDIUM: the counters of
+    never that the path once existed or was deleted (the counters of
     a manifest-only history never existed).
     No remedy text ever claims to restore the whole store: each command is labelled with
     exactly the store paths its commit's tree holds, as git checks them out (the adopter's
@@ -17519,12 +17745,12 @@ def _init_no_prior_store(git, repo, root):
     POSIX shell could split, substitute, quote or continue, on any physical line
     (shlex.quote is retired here: it kept a newline-holding root syntactically quoted
     while the quoted value's middle physical lines ran standalone when the output was
-    pasted line by line, QA round 6 MAJOR). Otherwise NO command is printed at all: the
+    pasted line by line). Otherwise NO command is printed at all: the
     refusal instead names the repository, commit(s) and path(s) on detail lines rendered
     through _init_inert, the one renderer every value in this function's output goes
     through at construction (the _InitRestoreLine and _InitPriorStoreRefusal
     constructors render; ascii() is never used for output: it leaves "$" and the
-    backquote raw inside the quoted literal it yields, QA round 5 MAJOR).
+    backquote raw inside the quoted literal it yields).
 
     SCOPE: the scan follows HEAD's FIRST-PARENT line only, the same line the adoption reader
     proves an ancestral counters seed on (_opf_init_operation.read_ancestral_counter_seed,
@@ -17619,7 +17845,7 @@ def _init_no_prior_store(git, repo, root):
 
     def working_gaps(commit):
         """Structural store files a checkout of <commit>:.working would still LACK, as
-        repo-relative paths (QA rounds 5, 6 and 7): a .working tree counts as a held
+        repo-relative paths: a .working tree counts as a held
         store path while a counters.toml or manifest.toml inside it was already absent
         from it, so a restore of that tree exits 0 with spec 8.2's high-water counters
         still missing. A first-level subdirectory of that tree is a machine STORE only
@@ -17631,22 +17857,22 @@ def _init_no_prior_store(git, repo, root):
         an earlier commit is still disclosed. The walk reads --raw (with --no-abbrev)
         with rename detection, newest first, and its records are parsed from git's NUL-delimited
         token stream positionally, by record arity, so a byte a committed filename may
-        legally hold (QA round 9 codex MEDIUM: the 0x01 header sentinel) never splits
+        legally hold (the 0x01 header sentinel) never splits
         a record: a header is read only at a record boundary, where every path token
         was already consumed. A structural file whose NEWEST first-parent change at or
         before <commit> renamed it counts at its destination INSTEAD OF its old path
         only when the record's destination blob id EQUALS its source blob id, as the
         --raw record carries both (git's similarity score of 100 does NOT prove the
         bytes unchanged: the score is computed over a multiset of line hashes, so
-        reordered lines still score 100 while the blobs differ, QA round 10 MINOR 3),
+        reordered lines still score 100 while the blobs differ),
         no older first-parent record touched the destination path, and the
         renaming commit's own tree holds no structural file under the source
         subdirectory (one ls-tree probe per rename record, read like every other
         answer here); so a machine subdirectory renamed whole with git mv survives
-        complete at its new name and does not read as a PARTIAL restore (QA round 8
-        MINOR 4), while ANY other pairing git's similarity-based rename detection
+        complete at its new name and does not read as a PARTIAL restore,
+        while ANY other pairing git's similarity-based rename detection
         reports, for example a store deleted while a similar store was created in the
-        same commit (QA round 9 MEDIUM 2: that store's loss went unreported), reads
+        same commit (that store's loss went unreported), reads
         as a deletion of its source, which stays expected, FAIL-SAFE: the doubtful
         case is disclosed as missing, never silently absorbed. A rename whose
         destination the pathspecs exclude is reported by git as a deletion of its
@@ -17654,11 +17880,11 @@ def _init_no_prior_store(git, repo, root):
         (the source was not changed by a copy). Each store found either way is expected
         to hold BOTH structural files; each expected file the tree lacks is returned.
         A subdirectory holding only other files, or only deeper directories, is neither
-        expected nor named (QA round 7 MAJOR 2: an adopter-kept .working/notes/plan.md
+        expected nor named (an adopter-kept .working/notes/plan.md
         is not a store, and reporting its structural files as missing was a false
         PARTIAL). The caller reports each returned path as a PARTIAL restore in words
-        that assert only this observed lack, never a prior existence or deletion (QA
-        round 6 MEDIUM: the counters of a manifest-only history never existed). Only
+        that assert only this observed lack, never a prior existence or deletion (the
+        counters of a manifest-only history never existed). Only
         the two structural filenames are probed: a tree in which some OTHER file was
         deleted by an earlier commit is not detected, which is one reason no printed
         remedy ever claims to restore the whole store. Called only for a commit whose
@@ -17671,8 +17897,7 @@ def _init_no_prior_store(git, repo, root):
         its two sides included (a T only between different file types; an M, R
         or C only between regular files or two sides of one non-regular mode,
         the non-regular R or C exact only; an executable-bit change keeps the
-        file type): the derivation is stated at the parse below (QA round 13 B;
-        QA round 14 B). A stream or record outside those shapes refuses like
+        file type): the derivation is stated at the parse below. A stream or record outside those shapes refuses like
         every other unreadable answer, fail-closed, before any record can
         release a rename source."""
         listing = read(["ls-tree", "-r", "-z", "--name-only",
@@ -17708,7 +17933,7 @@ def _init_no_prior_store(git, repo, root):
 
         # PARSE: git's -z output is one NUL-delimited token stream; a committed
         # path may hold ANY byte but NUL and the separator slash, the 0x01 header
-        # sentinel included (QA round 9 codex MEDIUM: splitting the whole stream on
+        # sentinel included (splitting the whole stream on
         # 0x01 split such a path in half and refused a previously supported
         # disclosure), so the stream is split on NUL alone and read POSITIONALLY: a
         # header (the 0x01-led token the %x01%H format prints) is accepted only at
@@ -17722,7 +17947,7 @@ def _init_no_prior_store(git, repo, root):
         # record, so the token at a boundary may carry one leading newline (and
         # carries ONLY the next header after it when a listed commit has no
         # records). Any other or unparseable token shape refuses. The stream
-        # must END with the terminating NUL of its last token (QA round 13 B:
+        # must END with the terminating NUL of its last token (
         # -z terminates every token, headers included, so a non-empty stream
         # without a final NUL is truncated or not git's, and reading its tail
         # as a complete token could hand a cut record to the resolver).
@@ -17756,7 +17981,7 @@ def _init_no_prior_store(git, repo, root):
                     "git history preflight: unparseable --raw record {}; "
                     "refusing".format(ascii(meta)))
             status = fields[4]
-            # DERIVATION (git-diff(1), RAW OUTPUT FORMAT; QA round 13 B): git
+            # DERIVATION (git-diff(1), RAW OUTPUT FORMAT): git
             # prints each record as ":<src mode> <dst mode> <src id> <dst id>
             # <status>", each mode %06o. A mode is 000000 EXACTLY on the side a
             # record has no file on -- the src of a creation (A), the dst of a
@@ -17775,7 +18000,7 @@ def _init_no_prior_store(git, repo, root):
             # cannot-evaluate, fail-closed), a 000000 on a side the status
             # says has a file, a zero id beside a non-zero mode or the
             # reverse, a malformed score -- is not a shape this scan can vouch
-            # for and REFUSES (QA round 12 E and QA round 13 B: the round-11
+            # for and REFUSES (the earlier
             # parser checked none of this, so junk modes, zero-mode rename
             # sides carrying non-zero ids, and malformed scores all passed,
             # and a malformed rename record could release a source).
@@ -17810,7 +18035,7 @@ def _init_no_prior_store(git, repo, root):
             # the status per the derivation above; a rename record releases
             # its source below ONLY when the ids are EQUAL and not the
             # all-zero id, because git's similarity score of 100 does not
-            # prove the bytes unchanged (QA round 10 MINOR 3: reordered lines
+            # prove the bytes unchanged (reordered lines
             # score 100 while the blobs differ).
             old_blob = oid(fields[2])
             new_blob = oid(fields[3])
@@ -17821,7 +18046,7 @@ def _init_no_prior_store(git, repo, root):
                     "git history preflight: --raw record whose modes, status "
                     "and object ids are not mutually consistent {}; "
                     "refusing".format(ascii(meta)))
-            # FILE TYPES (QA round 14 B; git-diff(1) RAW OUTPUT FORMAT and
+            # FILE TYPES (git-diff(1) RAW OUTPUT FORMAT and
             # git's diffcore, each relationship below pinned by the suite's
             # real-git fixtures): a present side's file type is REGULAR
             # (100644 or 100755, which differ in the executable bit alone),
@@ -17841,7 +18066,7 @@ def _init_no_prior_store(git, repo, root):
             # one file type; an inexact R or C between non-regular sides) is
             # not a record git emits, so it REFUSES here, at the parse,
             # before any record is resolved and before any rename source can
-            # be released (codex round-13 MEDIUM: an R100 from a regular
+            # be released (an R100 from a regular
             # file to a symbolic link or gitlink with equal ids released its
             # source).
             regular = (b"100644", b"100755")
@@ -17901,18 +18126,18 @@ def _init_no_prior_store(git, repo, root):
 
         # RESOLVE, newest first: the first record seen for a path is that path's
         # newest change at or before <commit> and decides it. A rename record
-        # releases its SOURCE, counting the file at its destination only (QA
-        # round 8 MINOR 4: git mv of a machine subdirectory must not read as
+        # releases its SOURCE, counting the file at its destination only (git
+        # mv of a machine subdirectory must not read as
         # PARTIAL), ONLY when the record is R100 AND its destination blob id
-        # EQUALS its source blob id (QA round 10 MINOR 3: the similarity score
+        # EQUALS its source blob id (the similarity score
         # is computed over a multiset of line hashes, so reordered lines still
         # score 100 while the bytes differ; blob identity, never the score, is
         # what releases the source), its destination is
         # itself a structural store path that NO OLDER first-parent record
         # touched, and the renaming commit's tree holds no structural file under
         # the source subdirectory (source_left); otherwise the source reads as
-        # DELETED and its subdirectory stays expected, FAIL-SAFE (QA round 9
-        # MEDIUM 2: git pairs by content similarity, so a store deleted beside a
+        # DELETED and its subdirectory stays expected, FAIL-SAFE (git
+        # pairs by content similarity, so a store deleted beside a
         # similar store created in the same commit read as a rename and the
         # deleted store's loss went unreported). A rename whose destination falls
         # outside the glob pathspecs is reported by git as a plain deletion of the
@@ -18029,7 +18254,7 @@ def _init_no_prior_store(git, repo, root):
                 "git history preflight: commit {} changed a store path yet neither its tree "
                 "nor its first parent's holds a store identifier; refusing rather than "
                 "guessing".format(newest))
-    # A SPLIT deletion can leave the newest holding tree PARTIAL (QA round 4 MEDIUM 1): with
+    # A SPLIT deletion can leave the newest holding tree PARTIAL: with
     # .working deleted in one commit and the pointer in a later one (or the reverse), the
     # commit named above holds only one store path while an older first-parent tree still
     # holds the other, so a command restoring only what the named commit holds would quietly
@@ -18063,7 +18288,7 @@ def _init_no_prior_store(git, repo, root):
                 continue   # a non-store change at the path, not a restorable store
         extra_commit = holder
         extra_paths.append(marker)
-    # A split deletion can also happen INSIDE .working (QA round 5 MAJOR): both markers
+    # A split deletion can also happen INSIDE .working: both markers
     # survive into the named tree while a counters.toml or manifest.toml under .working was
     # deleted in an earlier commit, so the commands below would exit 0 with spec 8.2's
     # high-water counters still deleted. Whichever named commit's tree the remedy restores
@@ -18077,7 +18302,7 @@ def _init_no_prior_store(git, repo, root):
     # Every value interpolated below is rendered through _init_inert by the
     # _InitRestoreLine and _InitPriorStoreRefusal constructors, never ascii() (ascii()
     # is not shell-inert: it leaves "$" and the backquote raw inside the quoted literal
-    # it yields, QA round 5 MAJOR); the renderer escapes every character a POSIX shell
+    # it yields); the renderer escapes every character a POSIX shell
     # could act on, and the commit ids are already validated hex (oid), which renders
     # unchanged. Restore commands are printed ONLY when the repository path and every
     # restored path are BARE (_init_bare: every character in A-Za-z0-9 . / - _): every
@@ -18085,12 +18310,12 @@ def _init_no_prior_store(git, repo, root):
     # quote or continue, on any physical line, so the command needs no quoting at all
     # (shlex.quote is retired: it kept a newline-holding value syntactically quoted
     # while its middle physical lines ran standalone when the output was pasted line by
-    # line, QA round 6 MAJOR). The printed command carries exactly two of the scan's
+    # line). The printed command carries exactly two of the scan's
     # neutralizations: --literal-pathspecs keeps git from reading a path as a pattern,
     # and --no-replace-objects keeps a replacement ref from substituting another
-    # commit's bytes for the named one's (QA round 4 MEDIUM: checkout honours
+    # commit's bytes for the named one's (checkout honours
     # replacement refs; the scan's own reads already run under that flag). The scan's
-    # OTHER neutralizations, listed exactly (QA round 5 MINOR), transfer to no printed
+    # OTHER neutralizations, listed exactly, transfer to no printed
     # command: the grafts refusal (any entry at the legacy grafts path refused above,
     # before any command is built); the allowlist environment scrub with
     # GIT_NO_LAZY_FETCH=1, -c core.fsmonitor=false and --no-pager, which guard only the
@@ -18100,10 +18325,10 @@ def _init_no_prior_store(git, repo, root):
     # -c core.commitGraph=false, which guards the scan's rev-list and rev-parse walks
     # against a commit-graph's cached data, and is not needed in the printed command
     # because a checkout named by a FULL commit id reads the commit object itself,
-    # never the graph's cached tree (QA round 5, verified against a tree-substituted
+    # never the graph's cached tree (verified against a tree-substituted
     # commit-graph). For any OTHER value (a space, a quote, a control or format
     # character, an undecodable byte: anything outside the bare-command alphabet) NO
-    # command is printed at all (QA round 4 MINOR 2; QA round 6 MAJOR): an escaped
+    # command is printed at all: an escaped
     # command could keep a substitution live under the shell's quote reading or split
     # across physical lines, so the refusal instead names the repository, the commits
     # and the paths on rendered detail lines.
@@ -18112,7 +18337,7 @@ def _init_no_prior_store(git, repo, root):
         # unchanged through the constructor; the separating spaces come from one
         # string-literal template per path arity (the renderer's fixed alphabet
         # escapes a space inside a VALUE, and no composed line is ever passed back
-        # through the renderer as a value, QA round 9, requirement B), and a
+        # through the renderer as a value), and a
         # smuggled non-bare word would render visibly rather than run.
         if len(paths) == 1:
             return _InitRestoreLine(
@@ -18319,8 +18544,8 @@ def _init_main(rest):
     success verdict is supplied here.
     Every failure path prints rendered text through the two handlers below; the second catches
     BaseException, so a non-Exception raised while the try body runs (an interrupt or SystemExit after
-    publication started) still reports the partial-publication disclosure before returning rendered (QA
-    round 12 C). The disclosure is itself guarded (QA round 13 D; QA round 14 D; QA round 15 B: the
+    publication started) still reports the partial-publication disclosure before returning rendered. The
+    disclosure is itself guarded (the
     guard is the handler's first statement, so the publication test runs inside it too), with its
     windows stated exactly. Once publication has started, a SECOND interrupt raised anywhere from the
     publication test through the cannot-evaluate line and the detail report (the root re-check, the
@@ -18341,16 +18566,16 @@ def _init_main(rest):
     saying a second failure interrupted the report and no publication was attempted; nothing was
     published there, so no disclosure is owed, and a further interrupt landing in that fixed line
     escapes to the boundary the same way. Whatever escapes the handlers (an interrupt during the
-    argument loop above the try, for one) is caught by _cmd_init's last-resort rendering boundary (QA
-    round 10 MAJOR 1); the windows that boundary itself does not cover are stated there and in
+    argument loop above the try, for one) is caught by _cmd_init's last-resort rendering boundary; the
+    windows that boundary itself does not cover are stated there and in
     QUICKSTART.
     """
     root = None
     recover = False
     i = 0
     while i < len(rest):
-        # Each token is read as its exact str before it is compared or gated (QA
-        # round 15, requirement C: a str subclass whose own __eq__ answered
+        # Each token is read as its exact str before it is compared or gated (a
+        # str subclass whose own __eq__ answered
         # "--root" acted as --root).
         tok = _init_exact_str(rest[i])
         if tok == "--root":
@@ -18364,8 +18589,8 @@ def _init_main(rest):
             if val == "" or val.startswith("-"):
                 # The rejected value is rendered inert, never {!r}: repr of a value
                 # holding a single quote and no double quote is a DOUBLE-quoted literal
-                # in which $(...) stays live when the printed line reaches a POSIX shell
-                # (QA round 6 MAJOR). An empty value renders as nothing; the sentence
+                # in which $(...) stays live when the printed line reaches a POSIX shell.
+                # An empty value renders as nothing; the sentence
                 # names that case.
                 _init_echo("opf init: --root requires a non-empty directory argument, "
                            "not the inert-escaped value {} (an empty value shows as "
@@ -18403,7 +18628,7 @@ def _init_main(rest):
 
         inventory = _init_inventory(root_fd)
         if inventory["entries"] or not inventory["complete"]:
-            # Report strings are inert-escaped, keys included (QA round 5): a raw root or
+            # Report strings are inert-escaped, keys included: a raw root or
             # foreign-entry name inside a printed JSON string sits in exactly the
             # double-quote context where a POSIX shell keeps $(...) and `...` live on paste.
             _init_echo(json.dumps(_init_inert_json(dict(inventory,
@@ -18593,7 +18818,7 @@ def _init_main(rest):
         # The staging and render hints are printed ONLY when the root and every created
         # path are BARE (_init_bare): every word of each hint is then a
         # bare literal no POSIX shell can split, substitute, quote or continue, on any
-        # physical line. shlex.quote is retired here (QA round 6 MAJOR): it kept a
+        # physical line. shlex.quote is retired here: it kept a
         # newline-holding root syntactically quoted while the quoted value's middle
         # physical lines ran standalone when the output was pasted line by line. For any
         # other root the hints are withheld and the root is named rendered on a detail
@@ -18636,18 +18861,18 @@ def _init_main(rest):
     except _InitPriorStoreRefusal as exc:
         # A DEFINITE finding, not an evaluation failure: reported as REFUSED in its own
         # words. It is raised only by the read-only ancestry preflight, so publication
-        # never started. The message is NOT trusted by type (QA round 13, requirement
-        # A: this handler catches subclasses too, and a subclass inheriting or
+        # never started. The message is NOT trusted by type (this
+        # handler catches subclasses too, and a subclass inheriting or
         # overriding the constructor carried a raw value): _init_refusal_message
         # accepts it at this point of output only with the constructor's rendering
         # proof, by value equality with the live str(exc), and renders it through
         # _init_inert otherwise (never ascii(), which leaves a raw dollar sign and
-        # backquote inside the quoted literal it yields, QA round 5 MAJOR). The
+        # backquote inside the quoted literal it yields). The
         # restore lines are read defensively (a subclass that never ran the real
         # constructor may carry none) and each is accepted only with the
         # _InitRestoreLine constructor's rendering proof (_init_line_rendered, a
-        # private slot set after every value was rendered; never a type check, QA
-        # round 9, requirement B: str.__new__ minted an exact-type instance around a
+        # private slot set after every value was rendered; never a type check:
+        # str.__new__ minted an exact-type instance around a
         # raw value); any other entry (a raw string or minted instance smuggled onto
         # the caught exception after construction) is re-rendered through that
         # constructor here, never printed raw. The suite's runtime paste test holds
@@ -18664,16 +18889,16 @@ def _init_main(rest):
                        else _InitRestoreLine("{}", line), err=True)
         _init_echo("opf init: preflight refused; no publication attempted.", err=True)
         return EXIT_MALFORMED
-    except BaseException as exc:  # noqa: BLE001  InitError and residual errors, plus a non-Exception (interrupt or SystemExit) after publication started, so the partial-publication disclosure below runs before this returns rendered (QA round 12 C)
-        # Every interpolation is rendered inert AT THE PRINT (QA round 5; QA round 6):
+    except BaseException as exc:  # noqa: BLE001  InitError and residual errors, plus a non-Exception (interrupt or SystemExit) after publication started, so the partial-publication disclosure below runs before this returns rendered
+        # Every interpolation is rendered inert AT THE PRINT:
         # the root, the stage token and the exception text through _init_inert, whose
         # raising sites may quote path-derived values with ascii() (not shell-inert on its
         # own); the exception TYPE is printed by name around the escaped text, the
         # readable part ascii(exc) used to carry. The handler's FIRST statement
         # enters the disclosure guard, so the publication test, the cannot-evaluate
-        # line and the detail report all run inside it (QA round 14 D: a second
-        # interrupt landing in the first print escaped past the guard; QA round 15
-        # B: one landing on the publication test, which the round-14 handler ran
+        # line and the detail report all run inside it (a second
+        # interrupt landing in the first print escaped past the guard; one
+        # landing on the publication test, which the earlier handler ran
         # before entering the guard, escaped the same way and dropped the
         # partial-publication sentence).
         try:
@@ -18686,7 +18911,7 @@ def _init_main(rest):
                     binding = "same-root"
                 except Exception as binding_exc:
                     # The exception text is an exact str BEFORE the concatenation
-                    # (QA round 15, requirement A: ascii() may return the str
+                    # (ascii() may return the str
                     # subclass repr() returned, whose reflected __radd__ decided
                     # the result); the report renders it once, at the output.
                     binding = "cannot-confirm-root: " + _init_exact_str(ascii(binding_exc))
@@ -18703,7 +18928,7 @@ def _init_main(rest):
                     _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
                 _init_echo("opf init: preflight refused; no publication attempted.", err=True)
                 return EXIT_MALFORMED
-        except BaseException:  # noqa: BLE001  a SECOND interrupt anywhere from the publication test through the detail report must not drop the fixed disclosure below (QA round 13 D; QA round 14 D; QA round 15 B)
+        except BaseException:  # noqa: BLE001  a SECOND interrupt anywhere from the publication test through the detail report must not drop the fixed disclosure below
             if not (publishing and root_fd is not None):
                 _init_echo("opf init: a second failure interrupted this report; "
                            "preflight refused; no publication attempted.", err=True)
@@ -18721,9 +18946,9 @@ def _init_main(rest):
 
 
 def _cmd_init(rest):
-    """Run _init_main under ONE last-resort rendering boundary (QA round 10 MAJOR 1).
+    """Run _init_main under ONE last-resort rendering boundary.
 
-    The round-9 argument loop sat outside the rendering handlers, so an assert, a
+    The earlier argument loop sat outside the rendering handlers, so an assert, a
     raise ... from (whose cause a chained traceback prints), or an implicit
     exception (a subscript's KeyError or IndexError) raised there printed a raw
     argv value on descriptor 2 inside an escaping Python traceback. _init_main now
@@ -18744,17 +18969,20 @@ def _cmd_init(rest):
     the guarded report, at the return) can still escape, and because it arrives
     while the caught exception is still being handled, Python's traceback then
     CHAINS that exception (its type and its raw, unrendered text, then "During
-    handling of the above exception, another exception occurred"; QA round 14
-    C), so this window can print an init value raw; any failure BEFORE
-    init dispatch is outside this boundary entirely (a bootstrap fault other than
-    the ImportError or OSError _bootstrap maps to a rendered cannot-evaluate, for
-    example a SyntaxError in an installed helper, or an interrupt before or during
-    dispatch, surfaces as Python's own traceback or signal); and an interrupt
-    AFTER this function returns, in the dispatcher's own return and sys.exit
-    statements, escapes as Python's traceback of those dispatcher lines (that
-    traceback shows the dispatcher's source lines and the interrupt type; by
-    then no exception is being handled, so it interpolates no init value: this
-    qualifier holds for this post-return window only). What a static scan
+    handling of the above exception, another exception occurred"), so this window can print an init value raw; any failure BEFORE
+    init dispatch is outside this boundary entirely (_bootstrap maps every fault
+    raised while a helper is imported, a SyntaxError in an installed helper
+    included, to a rendered cannot-evaluate, exit 2, except a KeyboardInterrupt,
+    within the residual _bootstrap states for code opf loads; that interrupt, or
+    any interrupt before or during dispatch, surfaces as
+    Python's own traceback or signal); and an interrupt
+    AFTER this function returns, in the dispatcher's own return statement or in
+    _main_exit, the entry's wrapper, which re-raises an interrupt and ends the
+    process by raising SystemExit itself (main() calls no sys.exit), escapes as
+    Python's traceback of those lines (that traceback shows their source lines
+    and the interrupt type; by then no exception is being handled, so it
+    interpolates no init value: this qualifier holds for this post-return
+    window only). What a static scan
     still cannot prove is stated in _init_echo's docstring (its RESIDUAL paragraph)."""
     try:
         return _init_main(rest)
@@ -18804,7 +19032,7 @@ def _cmd_import(rest):
     list, whether none, `--help`, any former form (spelled in full, by prefix, joined or repeated) or any
     other token. No argument is parsed or validated, so no former form can meet a usage error instead of
     the pointer. Nothing reads the clock, stdin, a named file or the store, and nothing is written. The
-    root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same way (D7: import is a
+    root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same way (import is a
     REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
     doctor/render report on a non-adopter root).
 
@@ -19164,8 +19392,8 @@ def _adopt_read_bounded(path, label, cap):
             try:
                 _opf_store._close_fd_exc_safe(pfd)
             except OSError:
-                # A failing parent close must not leak the just-opened input fd (round-5 defect 2)
-                # or the parent fd itself (P1, #378): the parent close is _close_fd_exc_safe's single
+                # A failing parent close must not leak the just-opened input fd
+                # or the parent fd itself (single-close rule, #378): the parent close is _close_fd_exc_safe's single
                 # os.close (#377) and the input close the journal engine's, and close(2) has released
                 # the number when it reports the error, so it is never touched again; the propagating
                 # error still fails the read closed below.
@@ -19252,9 +19480,9 @@ def _cmd_adopt(rest):
     READ-ONLY subcommands, the stage driver adds `approve` and `apply`, `reconcile` runs the journal-only
     recovery, and `complete` refuses fail-closed (exit 2) until the completion stage lands, so a stub can
     never read as a passing operation. On base 2.0.0 (_opf_adopt_apply.adoption_journal_fenced; the only
-    base this build implements) the adoption journal, a homes-1 location under .aiqt, is not read: apply
+    base this build implements) the adoption journal is not read: apply
     and reconcile refuse with exit 2 (_opf_adopt_apply.ADOPTION_FENCE) once their arguments parse, before
-    the root is resolved or any input or .aiqt path is read; plan, approve and status run without it, so
+    the root is resolved or any input or path is read; plan, approve and status run without it, so
     none of them refuses over an open transaction or a held lock there, and status says the journal is not
     read (_opf_adopt_apply.JOURNAL_UNREAD). The apply and reconcile entries below therefore describe their
     engine bodies, which no CLI call reaches on base 2.0.0.
@@ -19317,10 +19545,14 @@ def _cmd_adopt(rest):
           names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
           creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
           seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
-          classify, a stray or wrong-type journal entry, or a transaction renamed or replaced after the
-          listing), store-lease-held (a store pointer at the product root, or a store lease present, or
-          claimed by another writer, in a machine subdirectory, beside an open transaction other than
-          init-store's), init-store-reversal-unproven (the reversal could remove content the operation
+          classify, a stray or wrong-type journal entry, a transaction renamed or replaced after the
+          listing, or an open transaction whose journal records another product root's binding or none:
+          one copied in from another tree, and equally this tree's own after the tree moved to another
+          filesystem, was restored from a backup or was remounted under another device number, which
+          changes the identity the journal is bound to; reconcile never consumes it, and clearing it is
+          the operator's own act outside any OPF operation), store-lease-held (a store pointer at the
+          product root, or a store lease present, or claimed by another writer, in a machine
+          subdirectory, beside an open transaction other than init-store's), init-store-reversal-unproven (the reversal could remove content the operation
           did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
           began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
           recovery-failed (files already restored or frames already published stay, the transaction stays
@@ -19342,7 +19574,7 @@ def _cmd_adopt(rest):
           earlier finding (no inventory, or a legacy-format inventory) ends verification first, or an
           unreadable bundle). Like
           `plan`, a NOT-ADOPTED root is fine: adoption is the verb that PRECEDES a store, so neither
-          subcommand requires store resolution (unlike import D7).
+          subcommand requires store resolution (unlike import).
 
     The parser is the house fail-closed idiom: an unknown subcommand or token, an empty or
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
@@ -19439,7 +19671,7 @@ def _cmd_adopt(rest):
               "{!r} (a `..` after a symlink); a symlinked root or ancestor refuses".format(
                   sub, effective, physical, root_abs), file=sys.stderr)
         return EXIT_MALFORMED
-    # Layer 2 (K9a round 3): the realpath comparison alone still ADMITS a `..` whose crossing lands back
+    # Layer 2: the realpath comparison alone still ADMITS a `..` whose crossing lands back
     # on the collapsed path (R/link/.. with the link resolving inside R) and a `..` after a component
     # that does not exist (R/missing/..), so VALIDATE the ORIGINAL traversal too: every `..` must cross
     # a REAL directory -- present, and neither a symlink nor a non-directory -- or the root refuses.
@@ -19509,7 +19741,7 @@ def _cmd_adopt(rest):
     if sub == "plan":
         import datetime
         try:
-            # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced), so plan runs
+            # On base 2.0.0 the adoption journal is not read (adoption_journal_fenced), so plan runs
             # no reconcile-first gate; the planner itself never reads that journal.
             doc = _adopt_read_inputs(inputs_file)
             now = datetime.datetime.now(datetime.timezone.utc)
@@ -19539,7 +19771,7 @@ def _cmd_adopt(rest):
         import datetime
         try:
             # On base 2.0.0 (adoption_journal_fenced) apply refused with the fence before root resolution
-            # above, so only approve reaches here there; it runs without the .aiqt adoption journal.
+            # above, so only approve reaches here there; it runs without the adoption journal.
             doc = _adopt_read_inputs(inputs_file)
             plan_bytes = _adopt_read_bounded(given["--plan"], "--plan file", _opf_adopt_plan.MAX_ARTIFACT_BYTES)
             if sub == "approve":
@@ -19568,7 +19800,7 @@ def _cmd_adopt(rest):
     # symlinked root or ancestor refuses, a `..` after a symlink included), the same ones verify_bundle
     # uses: a symlinked, dangling or wrong-type home or entry is cannot-evaluate, never followed, skipped
     # or read as absent. A bundle is reported only when the engine's own bundle validator grades it VALID.
-    # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced): status says so on
+    # On base 2.0.0 the adoption journal is not read (adoption_journal_fenced): status says so on
     # every report it prints, so the journal's unknown state is never reported clean.
     adopt, journal = _opf_adopt_apply, _opf_adopt_apply._journal
     try:
@@ -19586,7 +19818,7 @@ def _cmd_adopt(rest):
                                                 "entry at the reserved adoption evidence home)".format(
                                                     evidence_rel))
                 dfd = journal._open_dir_contained(root_fd, evidence_rel)
-            # K9a fix 4: the home descriptor that produced the listing is HELD through EVERY bundle
+            # The home descriptor that produced the listing is HELD through EVERY bundle
             # verification and passed into it, so the listing and each bundle bind to ONE home directory
             # identity: an evidence home swapped onto the pathname after the listing is never
             # re-resolved, and two homes neither of which is clean alone can never combine into one
@@ -20173,7 +20405,7 @@ def _cli_self_test():
                 "_cmd_import = lambda rest: open(rest[0]).read()",
                 "print = lambda *a, **k: open(a[0]).read()",
                 "EXIT_MALFORMED = 3",
-                # A walrus in an expression evaluated at module scope (the round-7 reproductions first).
+                # A walrus in an expression evaluated at module scope (the earlier reproductions first).
                 "[(print := w) for _ in [0]]",
                 "def _z(x=(print := w)): pass",
                 "def _z(*, k=(sys := w)): pass",
@@ -20188,7 +20420,7 @@ def _cli_self_test():
             mutants = [(t, "".join(lines[:at] + ["    " + t + "\n"] + lines[at:])) for t in planted_body]
             mutants += [(t, own_text + "\n" + t + "\n") for t in planted_tail]
             # A `__builtins__` binding ahead of the def changes what print resolves to inside _cmd_import
-            # without binding print (the round-8 reproductions: a dict, a builtins copy, an import).
+            # without binding print (the earlier reproductions: a dict, a builtins copy, an import).
             planted_head = (
                 '__builtins__ = {"print": p}',
                 "__builtins__ = dict(vars(builtins), print=p)",
@@ -20201,7 +20433,7 @@ def _cli_self_test():
                     failures.append("import structural check: a planted {!r} was not flagged".format(text))
             # A coding declaration hides a binding from a check over utf-8 text: under raw_unicode_escape a
             # backslash-u000a escape in a comment is a newline to the interpreter, so the rest of that line
-            # is a statement (the round-10 reproduction; this file carries no such escape, so the mutant
+            # is a statement (the earlier reproduction; this file carries no such escape, so the mutant
             # decodes as intended, and the escape is built from chr(92)). Each mutant, as bytes, must be
             # flagged both ways: the bytes parse sees the hidden binding, and the declaration is itself a
             # finding.
@@ -20498,7 +20730,7 @@ def _cli_self_test():
             transaction or a nothing-opened entry -> 0, over a run-id directory the bundle validator grades
             INVALID -> 1, and over a symlinked, dangling or wrong-type root, evidence home or evidence entry,
             or a `--root DIR/link/..` -> 2; with the evidence home swapped right after its listing, the
-            ORIGINAL home's findings (read through the held home descriptor, K9a fix 4); `reconcile` and
+            ORIGINAL home's findings (read through the held home descriptor); `reconcile` and
             `apply` -> 2 with the base 2.0.0 fence, apply before it reads its inputs; `approve` reads its
             inputs and approves without the journal; an unresolvable cwd -> 2;
             `plan` with a missing, FIFO, oversized, symlinked, symlinked-parent or hardlinked
@@ -20589,7 +20821,7 @@ def _cli_self_test():
                     return EXIT_MALFORMED
 
                 # On base 2.0.0, the only base this build implements (_opf_adopt_apply.adoption_journal_fenced),
-                # the .aiqt adoption journal is not read: status, plan and approve run without it. Status
+                # the adoption journal is not read: status, plan and approve run without it. Status
                 # over the debris and over the clean root alike exits 0 with the no-adoption-run message and
                 # the journal-not-read line (red when it reports the debris's interrupted transaction, exit
                 # 1, or refuses over the unread journal, exit 2); it still reads the evidence home (red when
@@ -20677,7 +20909,7 @@ def _cli_self_test():
                     failures.append("adopt on base 2.0.0 mutated a product root (journal debris, clean or the "
                                     "malformed evidence home)")
 
-                # status reads the evidence home through the ENGINE (K9a fix 1), and on base 2.0.0 not the
+                # status reads the evidence home through the ENGINE, and on base 2.0.0 not the
                 # journal: a COMPLETED engine transaction is clean and its bundle verifies (was 1, "any journal
                 # entry is interrupted"); a nothing-opened entry is clean (was 1); a run-id directory the
                 # bundle validator grades INVALID is a finding (was 0, "evidence bundle"); and a symlinked,
@@ -20703,8 +20935,8 @@ def _cli_self_test():
                                        "adoption run {}: evidence bundle at".format(adopt_rid)),
                                       ("nothing-opened journal entry", unopened, EXIT_OK,
                                        "no adoption run exists")]
-                    # Round 9: status holds each inventory's [adoption] identity to the doctor's bar (spec
-                    # 4.2), each red at the round-9 head (which listed the run and exited 0): a plan digest
+                    # Status holds each inventory's [adoption] identity to the doctor's bar (spec
+                    # 4.2), each red at the earlier head (which listed the run and exited 0): a plan digest
                     # other than the bundle's own sealed plan's, a phase other than the file name's, and an
                     # empty base inventory with no plan are each cannot-evaluate; the hand-built control
                     # with its own sealed plan stays clean.
@@ -20795,7 +21027,7 @@ def _cli_self_test():
                     status_vectors.append(("--root with a .. through a real directory",
                                            os.path.join(clean, "..", "clean"), EXIT_OK,
                                            "no adoption run exists"))
-                    # K9a fix 3, each red on the fix-2 head, whose guard compared collapsed REALPATHS
+                    # each red on the earlier head, whose guard compared collapsed REALPATHS
                     # only (physical == lexical admitted both): a `..` whose preceding component is a
                     # symlink is refused even when the link resolves INSIDE the root (the kernel still
                     # crossed a directory the operator never named), and a `..` after a component that
@@ -20850,7 +21082,7 @@ def _cli_self_test():
 
                         def racing_open(root_fd, rel, root=root, decoy=decoy, fired=swap_fired):
                             fd = real_open_jr(root_fd, rel)
-                            fired.append(rel)   # the injection provably ran (K9a fix 4)
+                            fired.append(rel)   # the injection provably ran
                             os.rename(os.path.join(root, rel), os.path.join(root, rel) + ".moved")
                             os.symlink(decoy, os.path.join(root, rel))
                             return fd
@@ -20871,11 +21103,11 @@ def _cli_self_test():
                                         "fired={!r} (expected {} + {!r}, no lock reported and the journal "
                                         "never opened)".format(label, rc, bool(fired), want, needle))
 
-                # K9a fix 4 (round-4 BLOCKER), red on the fix-3 head: the evidence home's directory
+                # red on the earlier head: the evidence home's directory
                 # identity is HELD from the status listing through EVERY bundle verification, so a home
                 # swapped onto `.working/imported/adoption` right after its listing is never re-resolved:
                 # the report stays the ORIGINAL home's (its payload-drift finding, exit 1), never a
-                # combination of the original's listing with the replacement's bundles (the fix-3 head
+                # combination of the original's listing with the replacement's bundles (the earlier head
                 # exited 0 here, reporting the replacement bundle as verified while the replacement's
                 # own foreign entry went unlisted). Each home alone is a finding (exit 1), asserted
                 # around the swap; the hook asserts its swap actually fired.
@@ -20987,7 +21219,7 @@ def _cli_self_test():
 
                 # root normalization sits INSIDE the fail-closed handling: an unresolvable current
                 # directory (os.getcwd raising, as it does once the cwd is deleted) is exit 2, never an
-                # uncaught FileNotFoundError (red on the K9a head, where abspath ran outside every handler).
+                # uncaught FileNotFoundError (red on the earlier head, where abspath ran outside every handler).
                 real_getcwd = os.getcwd
 
                 def _no_cwd():
@@ -21004,9 +21236,9 @@ def _cli_self_test():
                         failures.append("adopt with an unresolvable cwd: rc={!r} (expected 2 + the "
                                         "cannot-resolve message)".format(rc))
 
-                # the physical-vs-lexical refusal NAMES the effective root (K9a fix 3): with --root
+                # the physical-vs-lexical refusal NAMES the effective root: with --root
                 # omitted the effective root is the current directory, so the refusal must name that
-                # directory, never format the absent --root value (the fix-2 head printed 'the product
+                # directory, never format the absent --root value (the earlier head printed 'the product
                 # root None'). The cwd is simulated as a `..`-after-symlink path, the deterministic
                 # stand-in for a cwd concurrently swapped for a symlink.
                 fake_cwd = os.path.join(abase, "dotdot", "link", "..")
@@ -21059,7 +21291,7 @@ def _cli_self_test():
                 if tree_snapshot(clean) != before:
                     failures.append("adopt plan (stale digest) mutated the product root")
 
-                # the --inputs read is BOUNDED (K9a fix 1), each vector red on the K9a head: a FIFO refuses
+                # the --inputs read is BOUNDED, each vector red on the earlier head: a FIFO refuses
                 # at once (the head blocked in open(), so it runs in an isolated child under a timeout and a
                 # regression fails rather than hangs), an oversized worksheet refuses at the planner's byte
                 # bound (the head read it whole), and a symlinked worksheet is refused, never followed (the
@@ -21074,7 +21306,7 @@ def _cli_self_test():
                     os.symlink(stale, linked)
                     linkdir = os.path.join(abase, "linkdir")
                     os.symlink(abase, linkdir)
-                    # K9a fix 4: a hardlinked worksheet (two names, one inode) refuses BEFORE a byte is
+                    # A hardlinked worksheet (two names, one inode) refuses BEFORE a byte is
                     # read; a separate source file so the other fixtures stay singly-linked.
                     hardsrc = os.path.join(abase, "hardlink-src.toml")
                     with open(hardsrc, "w", encoding="utf-8") as fh:
@@ -21098,14 +21330,14 @@ def _cli_self_test():
                         ("a FIFO", fifo_result, "not a regular file"),
                         ("an oversized", run_adopt(["adopt", "plan", "--inputs", big, "--root", clean]),
                          "-byte bound"),
-                        # K9a fix 4, red on the fix-3 head (which read the 2-link worksheet and reported
+                        # red on the earlier head (which read the 2-link worksheet and reported
                         # its stale digest): a multiply-linked worksheet refuses before a byte is read.
                         ("a hardlinked", run_adopt(["adopt", "plan", "--inputs", hardlinked,
                                                     "--root", clean]),
                          "hard links"),
                         ("a symlinked", run_adopt(["adopt", "plan", "--inputs", linked, "--root", clean]),
                          "worksheet unreadable"),
-                        # K9a fix 2: a symlinked PARENT is refused too (red on the fix-1 head, whose
+                        # A symlinked PARENT is refused too (red on the earlier head, whose
                         # final-component O_NOFOLLOW followed it to the stale worksheet's digest mismatch).
                         ("a symlinked-parent", run_adopt(["adopt", "plan", "--inputs",
                                                           os.path.join(linkdir, "stale.toml"), "--root", clean]),
@@ -21151,7 +21383,7 @@ def _cli_self_test():
                                         "os.O_PATH: expected the documented EACCES refusal, got {!r}".format(
                                             _so_out))
 
-                # Round-5 defect 2 (K9a fix 5): a parent-directory close that reports an error inside
+                # a parent-directory close that reports an error inside
                 # the --inputs open must not leak the just-opened worksheet fd. Inject the failure at
                 # the REAL close (the number is still released, as on Linux); the read still fails
                 # closed (ValueError -> the cannot-evaluate exit) and the worksheet fd is closed
@@ -21246,7 +21478,7 @@ def _cli_self_test():
 
                 # The stage driver end to end over a decision-complete fixture (a retire source and a
                 # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
-                # the approval binding the plan's two digests on stdout, writing nothing, without the .aiqt
+                # the approval binding the plan's two digests on stdout, writing nothing, without the
                 # adoption journal on base 2.0.0. apply -> 2 with the base 2.0.0 fence, for the approved
                 # plan and for a fresh plan of the same tree alike, writing nothing, no journal and no
                 # bundle (red when apply goes past the fence to the receipt-stage or binding refusal, which
@@ -21341,7 +21573,8 @@ def _cli_self_test():
                         if rc != EXIT_MALFORMED or out or err != fence_err:
                             failures.append("adopt apply for {} on base 2.0.0: rc={!r} (expected 2 + exactly the "
                                             "fence; {!r})".format(label, rc, out + err))
-                    if tree_snapshot(adoptee) != before or os.path.exists(os.path.join(adoptee, ".aiqt")):
+                    if tree_snapshot(adoptee) != before \
+                            or os.path.exists(os.path.join(adoptee, _opf_store.WORKING_DIRNAME)):
                         failures.append("adopt approve/apply mutated the stage fixture (each must write nothing "
                                         "in this build)")
                     with open(os.path.join(adoptee, "legacy.md"), "w", encoding="utf-8") as fh:
@@ -21560,7 +21793,7 @@ def _cli_self_test():
                 # On base 2.0.0 reconcile is fenced (_opf_adopt_apply.ADOPTION_FENCE): over every fixture
                 # above, each journal state the recovery, no-op and refusal vectors of the engine drive, and
                 # over a product root that does not exist, `adopt reconcile` exits 2 with exactly the fence
-                # before any .aiqt access, never a recovery outcome, a nothing-to-reconcile report or a
+                # before any journal access, never a recovery outcome, a nothing-to-reconcile report or a
                 # REFUSED finding, with the store resolver, discovery and every journal checkpoint raising,
                 # and every file stays byte-identical (red when the fence is removed: each root then
                 # recovers, reports nothing to reconcile or refuses by name). The recovery each fixture names
@@ -21638,6 +21871,14 @@ def _cli_self_test():
         _expect_harness("mkdtemp-oserror", tempfile, "mkdtemp")
         _expect_harness("makedirs-oserror", os, "makedirs")
 
+        # A helper that faults while being imported (sys.exit(0), a bare sys.exit(), SystemExit(1), another
+        # BaseException, a ValueError, a SyntaxError, a cause whose __str__ raises, a class whose metaclass's
+        # mro() leaves out BaseException and KeyboardInterrupt) must reach the located cannot-evaluate (exit 2),
+        # never a success or the finding code; and the script entry must end at exit 2 whenever main() raises
+        # anything but an interrupt or returns anything but 0, 1 or 2, sys.exit replaced or not.
+        failures.extend(_bootstrap_exit_findings())
+        failures.extend(_main_exit_findings())
+
         # The same fixture vectors drive this in-process dispatcher and the dedicated gate's
         # isolated child. A refusal must name its reason and preserve the fixture, not merely return 2.
         # The in-process init and the lease fixtures take the shared init operation mutex, whose
@@ -21681,7 +21922,7 @@ def _cli_self_test():
               "sockets), or another module patching this one; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred complete fail closed to exit 2; "
-              "on base 2.0.0 the .aiqt adoption journal is not read: reconcile -> 2 with exactly the fence "
+              "on base 2.0.0 the adoption journal is not read: reconcile -> 2 with exactly the fence "
               "over every journal state (interrupted, rolled-back mid-way, dead or live or malformed lock, "
               "invalid frames, stray entry, store lease, unproven init-store reversal, no journal, a missing "
               "root), byte-identical, malformed arguments named by the parser; status -> 0 no-run or "
@@ -21694,7 +21935,13 @@ def _cli_self_test():
               "schema-violating op, each mutating nothing; the stage driver's approve -> 0 with the approval "
               "binding the plan's two digests, without the journal / 2 after a source edit or a moved "
               "revision, and apply -> 2 with exactly the fence before it reads its inputs, each mutating "
-              "nothing; an unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2)")
+              "nothing; an unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2; "
+              "a helper faulting while being imported -> 2 naming the helper and the cause, only the cause's "
+              "type where describing the cause fails, or neither where its type cannot be named or its "
+              "class's metaclass's mro() leaves out BaseException, an interrupt it raises escaping unchanged; "
+              "the script entry -> 2 when main() raises anything but an interrupt or returns anything but 0, 1 "
+              "or 2, sys.exit replaced or not, and an interrupt main() raises ends the run as an uncaught "
+              "interrupt does (SIGINT, return code -2))")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(
@@ -21866,8 +22113,8 @@ def _st_census_eio_raises(scan, fd, seam="fstat", code=None):
 
 
 def _retained_close_offpath_self_test():
-    """F-RETAINED-CLOSE-OFFPATH (part B), under P1: swept over every descriptor-closing helper family OFF
-    the adopt status/plan paths K9a hardened. Each family's fixture call runs clean to count the os.close
+    """The retained-close off-path sweep (part B), under the single-close rule: swept over every descriptor-closing helper family OFF
+    the hardened adopt status/plan paths. Each family's fixture call runs clean to count the os.close
     calls made from opf/tools code (an ExitStack callback is attributed to the code that registered it;
     _journal's own bare closes are part A's), then once per position N with the N-th such close releasing
     its descriptor and then raising OSError(EINTR), the only mode: on Linux a close that raises has
@@ -22118,7 +22365,7 @@ def _retained_close_offpath_self_test():
             _opf_adopt_observe._read_archive(observe_fd, deadline)
 
         expect("offpath-adopt-observe-descriptor-stack", put_and_read)
-        # #377 fix 2 (claude QA r1 coverage gaps): the quarantine stack's five exit-callback closes and the
+        # The quarantine stack's five exit-callback closes and the
         # rollback owner's parent reopen, then the unpacker's members descriptor and per-entry stacks.
         quarantine = base / "quarantine"
         quarantine.mkdir()
@@ -22195,7 +22442,7 @@ def _retained_close_offpath_self_test():
             _init_observed(init_fd, [_opf_store.WORKING_DIRNAME], dict(VERSION=b"1.0.0\n"))
 
         expect("offpath-opf-init-helpers", init_helpers)
-        # #377 fix 2 (claude QA r1 coverage gaps): _render_resolved_store's product-root open-failure branch,
+        # _render_resolved_store's product-root open-failure branch,
         # _init_repo's repository-root probe (a real git worktree), and _cmd_init's directory publication (its
         # git boundary stubbed).
         missing = base / "no-such-product-root"
@@ -22261,7 +22508,7 @@ def _retained_close_offpath_self_test():
 
 
 def _close_exc_safe_vectors_self_test():
-    """#377 fix 2, under P1 (one close): the in-flight-exception close vectors. Each vector drives one call
+    """Under the single-close rule (one os.close): the in-flight-exception close vectors. Each vector drives one call
     site with the close it names releasing its descriptor and then raising (EINTR, and separately EIO, as
     close(2) does on Linux), and grades one property on its own assertion:
       body    the body's exception is in flight at the close: that SAME exception object must propagate;
@@ -22277,8 +22524,8 @@ def _close_exc_safe_vectors_self_test():
     exactly their own vectors red, each by that vector's own assertion: MASK (every close helper always
     propagating, the adoption transaction's record-and-report close-out included) the body vectors;
     SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
-    (#377 fix 1's any-exception test in place of the calling-frame test, in both helpers, the ExitStack
-    callback and the descriptor stack's close) the caller vectors; RECLOSE (the pre-P1 fstat-then-reclose
+    (the any-exception test in place of the calling-frame test, in both helpers, the ExitStack
+    callback and the descriptor stack's close) the caller vectors; RECLOSE (the pre-single-close fstat-then-reclose
     recovery put back in #377's helpers, in _journal's _close_fd_quietly and _close_fd_propagating, and in
     _opf_check._close_fd_quietly) every V1 vector, by REUSE (PROBE may fail with it; nothing else may);
     and PROBE (#378's P flip: the same helpers making one close, then an fstat of the number when it
@@ -22311,16 +22558,16 @@ def _close_exc_safe_vectors_self_test():
                                   break_reuse=False, census=real_fstat)
 
     def propagating(fd):
-        """A P1 propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
+        """A single-close propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
         os.close(fd)
 
     def quietly(fd):
-        """A P1 quiet close (the SWALLOW and CALLER-FRAME stand-in): one os.close, its error swallowed."""
+        """A single-close quiet close (the SWALLOW and CALLER-FRAME stand-in): one os.close, its error swallowed."""
         with contextlib.suppress(OSError):
             os.close(fd)
 
     def reclose(fd, quiet):
-        """RECLOSE: the pre-P1 confirm-then-reclose recovery, inlined so the flip outlives #378's _journal."""
+        """RECLOSE: the pre-single-close confirm-then-reclose recovery, inlined so the flip outlives #378's _journal."""
         try:
             os.close(fd)
             return
@@ -22842,7 +23089,7 @@ def _close_exc_safe_vectors_self_test():
         return fails + p1
 
     def fix1_close(fd):
-        """#377 fix 1's test: ANY exception in sys.exc_info() counts as in flight."""
+        """The any-exception test: ANY exception in sys.exc_info() counts as in flight."""
         if sys.exc_info()[1] is not None:
             quietly(fd)
         else:
@@ -22977,7 +23224,7 @@ def _close_exc_safe_vectors_self_test():
     reds = {None: {}, "MASK": {"body": "body"}, "SWALLOW": {"normal": "normal", "caller": "caller"},
             "CALLER-FRAME": {"caller": "caller"}}
     # RECLOSE breaks REUSE (PROBE may break with it) on every V1 vector, the journal-routed sites' included
-    # (the flip puts the pre-P1 body back in _journal's helpers too); PROBE breaks PROBE alone on every one.
+    # (the flip puts the pre-single-close body back in _journal's helpers too); PROBE breaks PROBE alone on every one.
     reds["RECLOSE"] = dict(body="reuse", normal="reuse", caller="reuse", quiet="reuse")
     reds["PROBE"] = dict(body="probe", normal="probe", caller="probe", quiet="probe")
     failures = []
@@ -23194,7 +23441,7 @@ KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync",
 
 
 # Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
-# value in a finally (the round-7 int-limit hermeticity work). run_self_tests guards that RESTORE half below.
+# value in a finally (the earlier int-limit hermeticity work). run_self_tests guards that RESTORE half below.
 _INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf-fuzz"})
 
 
@@ -23215,7 +23462,7 @@ def run_self_tests_isolated(tests=None):
     by _self_tests() at call time (after _bootstrap() has bound the _opf_* helpers), never a module-level
     default that would need those helpers imported at module top.
 
-    Int-limit hermeticity guard (finding 8-4): each helper in _INT_LIMIT_SELF_TESTS pins the int-string
+    Int-limit hermeticity guard: each helper in _INT_LIMIT_SELF_TESTS pins the int-string
     conversion limit to 4300 inside its fixtures and must RESTORE the ambient value afterward. That restore
     had no fails-if-reverted check: under the DEFAULT ambient (already 4300) a dropped restore leaves 4300
     and is invisible. So around each such helper we set a distinct SENTINEL limit (!= 4300 and != the real
@@ -23240,7 +23487,7 @@ def run_self_tests_isolated(tests=None):
                 sys.set_int_max_str_digits(_idlimit_orig)   # restore the real ambient regardless of outcome
             if _idlimit_after != _idlimit_sentinel:
                 print("opf self-test: {} left sys.get_int_max_str_digits at {} (expected the sentinel {}); a "
-                      "dropped int-limit restore is a hermeticity leak, failing closed (finding 8-4)".format(
+                      "dropped int-limit restore is a hermeticity leak, failing closed".format(
                           label, _idlimit_after, _idlimit_sentinel), file=sys.stderr)
                 worst = EXIT_MALFORMED
         else:
@@ -23303,6 +23550,246 @@ def main(argv=None):
     return EXIT_MALFORMED
 
 
+# The one line the module entry point prints before it ends the process at EXIT_MALFORMED.
+_MAIN_UNDOCUMENTED = "opf: the command raised an error or returned no documented exit status (cannot evaluate)"
+
+
+def _main_exit(main):
+    """The module entry point: run `main` and end the process by raising SystemExit itself, never through
+    sys.exit, so a helper that replaces sys.exit with a no-op cannot let the script run on to exit 0. The
+    status is main()'s own return only when it is exactly an int among the exit codes opf documents
+    (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED); any other return (None, a str, a bool, a float, another int)
+    and any exception main() lets escape end at EXIT_MALFORMED after the one best-effort _MAIN_UNDOCUMENTED
+    line, except a KeyboardInterrupt by its real type, which is re-raised unchanged. An `except
+    KeyboardInterrupt` arm decides that first: the interpreter matches it through the type's mro(), calling
+    neither issubclass nor type, so a class whose metaclass's mro() names KeyboardInterrupt is one, by design,
+    whether or not that mro() names BaseException. An `except BaseException as exc` arm follows, where the
+    interpreter binds what it caught, and tests the real type again (issubclass(type(exc),
+    KeyboardInterrupt)) as a second check. A bare except follows it for a class whose metaclass's mro()
+    leaves out BaseException and KeyboardInterrupt, never asks what it caught (sys.exception() can be
+    replaced) and never re-raises, so such a class ends at EXIT_MALFORMED too. Every guarantee here holds
+    only within the residual stated in _bootstrap: code main() loads can end the process itself, at any time,
+    or replace anything this function uses."""
+    try:
+        status = main()
+    except KeyboardInterrupt:  # matched through the type's mro(), no issubclass or type call: re-raised unchanged
+        raise
+    except BaseException as exc:  # an escape is a cannot-evaluate, except an interrupt
+        # The interpreter binds exc, and the real type decides again, as a second check: isinstance would read
+        # the exception's own __class__.
+        if issubclass(type(exc), KeyboardInterrupt):
+            raise
+        status = None
+    except:  # noqa: E722  a class whose metaclass's mro() leaves out BaseException and KeyboardInterrupt
+        # Never read, never re-raised.
+        status = None
+    if type(status) is int and status in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
+        raise SystemExit(status)
+    try:
+        print(_MAIN_UNDOCUMENTED, file=sys.stderr)
+    except:  # noqa: E722  the exit status still carries the fault
+        pass
+    raise SystemExit(EXIT_MALFORMED)
+
+
+# The scripts _main_exit_findings launches, each a copy of this file run as `opf.py upgrade` beside an empty
+# stand-in for every helper _bootstrap imports, the first (_opf_worklog) holding the source given: (label, that
+# source, then the exact lines, stdout and stderr merged, the run must print as it exits EXIT_MALFORMED, or
+# KeyboardInterrupt when the run must end as Python ends an interrupt nothing caught). A
+# helper that replaces sys.exit with a no-op leaves `opf upgrade` its own refusal and exit; one that rebinds
+# that verb to return None makes main() return a non-int; the two mro() faults are mapped by _bootstrap. A
+# helper that replaces sys.exception with a function reporting a KeyboardInterrupt, then raises SystemExit(0)
+# at import or rebinds that verb to raise SystemExit(0) or an mro() exit, must still end at EXIT_MALFORMED.
+# A class whose metaclass's mro() names KeyboardInterrupt and leaves out BaseException, raised at import or by
+# that verb, is an interrupt and must end the run as one; so must a KeyboardInterrupt that verb raises after a
+# helper replaced builtins.issubclass with a function answering no about KeyboardInterrupt, while a
+# SystemExit(0) it raises then must still end at EXIT_MALFORMED.
+_MAIN_HALTS = "import __main__\n\n\ndef halt(rest):\n    raise {}\n\n\n__main__._cmd_upgrade = halt\n"
+_MAIN_EXIT_CASES = (
+    ("helper-replaces-sys-exit", "import sys\nsys.exit = lambda *args: None\n", ("opf upgrade: " + UPGRADE_NONE,)),
+    ("main-returns-none", "import __main__\n__main__._cmd_upgrade = lambda rest: None\n", (_MAIN_UNDOCUMENTED,)),
+    ("mro-keeps-systemexit", _BOOT_MRO_KEEP + "raise HelperExit(0)\n", (_BOOT_FAILED[0], _BOOT_NAMELESS[0])),
+    ("mro-drops-baseexception", _BOOT_MRO_DROP + "raise HelperExit(0)\n", (_BOOT_FAILED[0], _BOOT_NAMELESS[0])),
+    ("helper-replaces-sys-exception", _BOOT_CLAIMS_INTERRUPT + "raise SystemExit(0)\n",
+     (_BOOT_FAILED[0], _BOOT_RAISED.format("SystemExit", "0"))),
+    ("replaced-sys-exception-main-raises", _BOOT_CLAIMS_INTERRUPT + _MAIN_HALTS.format("SystemExit(0)"),
+     (_MAIN_UNDOCUMENTED,)),
+    ("replaced-sys-exception-main-raises-mro-exit",
+     _BOOT_CLAIMS_INTERRUPT + _BOOT_MRO_KEEP + _MAIN_HALTS.format("HelperExit(0)"), (_MAIN_UNDOCUMENTED,)),
+    ("mro-names-keyboardinterrupt", _BOOT_MRO_INTERRUPT + "raise HelperExit(0)\n", KeyboardInterrupt),
+    ("main-raises-mro-names-keyboardinterrupt", _BOOT_MRO_INTERRUPT + _MAIN_HALTS.format("HelperExit(0)"),
+     KeyboardInterrupt),
+    ("replaced-issubclass-main-raises-keyboardinterrupt",
+     _BOOT_HIDES_INTERRUPT + _MAIN_HALTS.format("KeyboardInterrupt('stop')"), KeyboardInterrupt),
+    ("replaced-issubclass-main-raises", _BOOT_HIDES_INTERRUPT + _MAIN_HALTS.format("SystemExit(0)"),
+     (_MAIN_UNDOCUMENTED,)),
+)
+
+
+def _main_exit_findings():
+    """Drive the module entry point and return the failures, empty when every case holds. In process,
+    _main_exit must raise exactly SystemExit of main()'s own return, printing nothing, when it is exactly 0, 1
+    or 2, and SystemExit(EXIT_MALFORMED) printing exactly _MAIN_UNDOCUMENTED when main() returns anything else
+    (None, a str, False, 0.0, 3) or raises a ValueError, a SystemExit(0), a SystemExit subclass whose
+    metaclass's mro() leaves out BaseException and KeyboardInterrupt (keeping SystemExit or not), or an
+    exception whose __class__ claims KeyboardInterrupt, and SystemExit(EXIT_MALFORMED) printing nothing when
+    main() returns None after replacing sys.stderr with a stream whose write raises SystemExit(0) or such a
+    class; a KeyboardInterrupt, and a SystemExit subclass whose metaclass's mro() names KeyboardInterrupt and
+    leaves out BaseException (judged by its class, as its str() names an address), must escape unchanged.
+    Then each _MAIN_EXIT_CASES script must exit exactly EXIT_MALFORMED printing exactly its lines, or, where
+    its case names KeyboardInterrupt, end at the SIGINT status Python ends an interrupt nothing caught with,
+    printing a traceback and no line that starts with opf. With _main_exit's SystemExit raises reverted to
+    sys.exit, the sys.exit script exits 0 (or prints the entry's line after its own) and fails; with the
+    entry ending at main()'s own return (sys.exit(main()) or raise SystemExit(main()), the child-status guard
+    first or not), the None script and the three scripts whose verb raises SystemExit(0) or an mro() exit
+    after a helper replaced sys.exception or issubclass exit 0 and fail; with _main_exit's bare arm removed,
+    its two mro() cases that leave out KeyboardInterrupt escape and fail; with its `except KeyboardInterrupt`
+    arm removed, the
+    in-process mro() case naming KeyboardInterrupt ends at EXIT_MALFORMED from the bare arm, and the two
+    scripts that raise that class and the replaced-issubclass script whose verb raises a KeyboardInterrupt
+    print the entry's line and exit EXIT_MALFORMED, and each fails; with _bootstrap's `except
+    KeyboardInterrupt` arm removed, the script that raises that class at import prints the bootstrap lines
+    and exits EXIT_MALFORMED, and fails; with its interrupt test reverted to isinstance, the __class__ case
+    escapes and fails;
+    with its broader arm deciding the interrupt from sys.exception(), the replaced-sys.exception script whose
+    verb raises SystemExit(0) exits 0 and fails, and with its bare arm re-raising the interrupt sys.exception() reports,
+    the one whose verb raises an mro() exit exits 0 and fails; with the guard around its line removed, both
+    stream cases end at the stream's exception and fail, and with that guard reverted to `except
+    BaseException`, the mro() stream case does; with _bootstrap's bare arm removed, the two mro() scripts
+    print the entry's line in place of the bootstrap lines and fail, and with _bootstrap's broader arm
+    deciding the interrupt from sys.exception(), the replaced-sys.exception script that raises at import
+    does the same. The replaced-issubclass script whose verb raises SystemExit(0) pins the exit-2 outcome
+    under a replaced issubclass, and no revert of an interrupt test or arm turns it red: the replacement
+    answers otherwise than the real issubclass only when asked whether a KeyboardInterrupt class is one, and
+    SystemExit is not. Besides the entry revert above, an `except SystemExit: raise` arm put ahead of
+    _main_exit's broader arm makes it exit 0 and fail, as the in-process SystemExit(0) case then ends at
+    SystemExit(0) and fails."""
+    import ast
+    import contextlib
+    import inspect
+    import io
+    import signal
+    import subprocess
+    import tempfile
+
+    class SkipBase(type):
+        def mro(cls):
+            return (cls, SystemExit, object)
+
+    class SkipAll(type):
+        def mro(cls):
+            return (cls, object)
+
+    class Liar(type):
+        def mro(cls):
+            return (cls, KeyboardInterrupt, object)
+
+    class KeptExit(SystemExit, metaclass=SkipBase):
+        pass
+
+    class DroppedExit(SystemExit, metaclass=SkipAll):
+        pass
+
+    class InterruptExit(SystemExit, metaclass=Liar):
+        pass
+
+    class ClaimsInterrupt(ValueError):
+        @property
+        def __class__(self):
+            return KeyboardInterrupt
+
+    def raising(exc):
+        def stand_in():
+            raise exc
+        return stand_in
+
+    class Unwritable:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def write(self, text):
+            raise self.exc
+
+    def unwritable(exc):
+        # A main() that replaces sys.stderr with a stream whose every write raises exc, then returns None.
+        def stand_in():
+            sys.stderr = Unwritable(exc)
+        return stand_in
+
+    line = _MAIN_UNDOCUMENTED + "\n"
+    failures = []
+    # (label, a stand-in main, the exception type that must escape unchanged or None, then the escaping
+    # exception's text (None when it is not compared), or else the status _main_exit must raise as SystemExit
+    # and exactly what it must print).
+    for label, stand_in, escapes, want in (
+            ("returns-0", lambda: 0, None, (EXIT_OK, "")),
+            ("returns-1", lambda: 1, None, (EXIT_FINDING, "")),
+            ("returns-2", lambda: 2, None, (EXIT_MALFORMED, "")),
+            ("returns-none", lambda: None, None, (EXIT_MALFORMED, line)),
+            ("returns-str", lambda: "0", None, (EXIT_MALFORMED, line)),
+            ("returns-false", lambda: False, None, (EXIT_MALFORMED, line)),
+            ("returns-float", lambda: 0.0, None, (EXIT_MALFORMED, line)),
+            ("returns-3", lambda: 3, None, (EXIT_MALFORMED, line)),
+            ("raises-valueerror", raising(ValueError("not an exit")), None, (EXIT_MALFORMED, line)),
+            ("raises-systemexit-0", raising(SystemExit(0)), None, (EXIT_MALFORMED, line)),
+            ("raises-mro-keeps-systemexit", raising(KeptExit(0)), None, (EXIT_MALFORMED, line)),
+            ("raises-mro-drops-baseexception", raising(DroppedExit(0)), None, (EXIT_MALFORMED, line)),
+            ("raises-class-claims-keyboardinterrupt", raising(ClaimsInterrupt("class claims")), None,
+             (EXIT_MALFORMED, line)),
+            ("stream-raises-systemexit-0", unwritable(SystemExit(0)), None, (EXIT_MALFORMED, "")),
+            ("stream-raises-mro-exit", unwritable(KeptExit(0)), None, (EXIT_MALFORMED, "")),
+            ("raises-keyboardinterrupt", raising(KeyboardInterrupt("stop")), KeyboardInterrupt, "stop"),
+            ("raises-mro-names-keyboardinterrupt", raising(InterruptExit(0)), InterruptExit, None)):
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                got = _main_exit(stand_in)
+        except:  # noqa: E722  what ends the call is this case's verdict, judged below, whatever its class
+            got = sys.exception()
+        if escapes is not None:
+            if type(got) is not escapes or (want is not None and str(got) != want):
+                failures.append("main exit {}: {!r} (expected the {} to escape unchanged)".format(
+                    label, got, escapes.__name__))
+            continue
+        if (type(got) is not SystemExit or type(got.code) is not int or got.code != want[0]
+                or out.getvalue() != want[1]):
+            failures.append("main exit {}: ended with {!r} printing {!r} (expected SystemExit({}) printing "
+                            "{!r})".format(label, got, out.getvalue(), want[0], want[1]))
+
+    helpers = [alias.name for node in ast.walk(ast.parse(inspect.getsource(_bootstrap)))
+               if isinstance(node, ast.Import) for alias in node.names]
+    if "_opf_worklog" not in helpers:
+        failures.append("main exit scripts: _bootstrap imports no _opf_worklog to stand in for: {!r}".format(
+            helpers))
+        return failures
+    source = Path(__file__).read_bytes()
+    for label, stand_in, lines in _MAIN_EXIT_CASES:
+        want = b"" if lines is KeyboardInterrupt else "".join(text + "\n" for text in lines).encode("utf-8")
+        with tempfile.TemporaryDirectory(prefix="opf-main-exit-") as tmp:
+            for name in helpers:
+                (Path(tmp) / (name + ".py")).write_text("", encoding="utf-8")
+            (Path(tmp) / "_opf_worklog.py").write_text(stand_in, encoding="utf-8")
+            (Path(tmp) / "opf.py").write_bytes(source)
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", str(Path(tmp) / "opf.py"), "upgrade"],
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+                got = (child.returncode, child.stdout)
+            except subprocess.TimeoutExpired:
+                got = ("killed at its 120 s bound", b"")
+        if lines is KeyboardInterrupt:
+            # Python ends a run whose interrupt nothing caught with its traceback and the SIGINT status.
+            if (got[0] != -signal.SIGINT or not got[1].startswith(b"Traceback (most recent call last):\n")
+                    or any(text.startswith(b"opf") for text in got[1].splitlines())):
+                failures.append("main exit script {}: exited {!r} printing {!r} (expected the interrupt to end "
+                                "it at status {} with a traceback and no opf line)".format(
+                                    label, got[0], got[1], -signal.SIGINT))
+            continue
+        if got != (EXIT_MALFORMED, want):
+            failures.append("main exit script {}: exited {!r} printing {!r} (expected exit {} printing "
+                            "{!r})".format(label, got[0], got[1], EXIT_MALFORMED, want))
+    return failures
+
+
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. It runs at the entry line, not inside
 # main(), because the CLI self-test calls main() in process many times and some of its fixtures set
@@ -23360,5 +23847,8 @@ def _child_status_refusal_exit(name):
 
 
 
+# _main_exit ends the process by raising SystemExit itself: code main() loads can replace sys.exit. The
+# child-status guard runs first, inside it, and a refusal ends the process at once with its own line and
+# status (os._exit(2)), before main() runs.
 if __name__ == "__main__":
-    sys.exit(_child_status_refusal_exit("opf.py") or main())
+    _main_exit(lambda: _child_status_refusal_exit("opf.py") or main())

@@ -3920,6 +3920,23 @@ def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, impor
     walk(machine_rel, 0)
 
 
+# This tooling's adoption journal home: the parent of the adoption engine's journal root
+# (_opf_adopt_apply.JOURNAL_REL is journal_root("adoption")), derived from the shared constructor.
+_ADOPTION_JOURNAL_HOME = _opf_store.journal_root("adoption").rsplit("/", 1)[0]
+
+
+def _adoption_journal_present(root_fd):
+    """True when this tooling's adoption journal home (`.working/journals/adoption/`) is a real directory
+    beneath root_fd: ONE no-follow lstat of that home, never a listing or a read of the journal itself (spec
+    4.2: the doctor never reads the machine-local journal). Absent, of another type, or unobservable reads
+    False, so a legacy store's journals/ keeps its legacy grading: a fault grades, never exempts."""
+    try:
+        st = _journal._lstat_contained(root_fd, _ADOPTION_JOURNAL_HOME)
+    except (_journal.JournalError, OSError):
+        return False
+    return st is not None and stat.S_ISDIR(st.st_mode)
+
+
 def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, *, in_repo=None):
     """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
     (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
@@ -3958,7 +3975,12 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     imports_root = cls.imports_root
     staging_root = _opf_store.STAGING_REL
     # A legacy store keeps its legacy grading: staging/, journals/, imported/ and archive/ are ordinary
-    # paths there, graded as unregistered like any other. Homes 2 registers them (spec 4.2).
+    # paths there, graded as unregistered like any other. Homes 2 registers them (spec 4.2). The one
+    # legacy exception is this tooling's adoption journal: a coupled first adoption journals at
+    # .working/journals/adoption/ under the engine's held lock before any adoption evidence exists, so
+    # once that home is a real directory the store has started an adoption and the walk leaves journals/
+    # out (containment makes no recovery claim, spec 4.2); a store without it, which has started no
+    # adoption, grades journals/ exactly as before (_adoption_journal_present).
     homes2 = cls.homes >= 2
     staged_roots = (imports_root, staging_root) if homes2 else (imports_root,)
     kind_roots = tuple(staging_root + "/" + k for k in _opf_store.STAGING_KINDS) if homes2 else ()
@@ -4071,6 +4093,8 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
             # Evidence bytes have their own exact inventory check, distinct from record rotation.
             if full in skipped_roots:
                 continue
+            if full == _opf_store.JOURNALS_REL and _adoption_journal_present(root_fd):
+                continue     # a legacy store's adoption journal home: probed only once journals/ is met
             if _under_any(full, valid_unmanaged) or full == archive_root:
                 continue     # a valid declared-unmanaged subtree is never read; the archive is C-ARCHIVE-ENUM's
             if not managed_dir(full):
@@ -10244,6 +10268,26 @@ def self_test():
             check("history-flag-{}-existing-row-finding".format(_imp_label),
                   verdicts(_impr, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY") == ("PASS", "FINDING")
                   and any("C-HISTORY-APPEND-ONLY" in f and "rewritten" in f for f in _impr.findings))
+        # Imported rows form a prefix of the ledger (spec 6.1): an imported row appended after the witnessed
+        # rows is a C-VERSION-LEDGER finding naming the prefix rule. With the prefix rule removed from
+        # validate_version the same store passes C-VERSION-LEDGER, so the vector is red without it.
+        import _opf_release
+        from unittest.mock import patch as _imp_patch
+
+        def imp_late_run():
+            m = clean_machine()
+            m["version.toml"]["release"] = m["version.toml"]["release"] + [imp_row("9.0.0")]
+            return run(m, obs=copy.deepcopy(clean_prior()))
+
+        _impl = imp_late_run()
+        check("rel-imported-doctor-after-witnessed-finding",
+              verdicts(_impl, "C-VERSION-LEDGER") == ("FINDING",)
+              and any("prefix of the ledger" in f for f in _impl.findings))
+        with _imp_patch.object(_opf_release, "_imported_prefix_findings", lambda releases: []):
+            _impl_off = imp_late_run()
+        check("rel-imported-doctor-after-witnessed-red-without-rule",
+              verdicts(_impl_off, "C-VERSION-LEDGER") == ("PASS",)
+              and not any("prefix of the ledger" in f for f in _impl_off.findings))
         # WHOLE STORE, end to end: a store with a declared VERSION view whose ledger and prior carry an
         # imported row, with the changelog tiling all three releases, grades VALID with no finding and no
         # cant. Every composed ledger reader is on this path: C-VERSION-LEDGER, the changelog gates, the

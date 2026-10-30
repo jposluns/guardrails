@@ -512,6 +512,10 @@ _CONTRACT = {
         _D('- status: working, published, or superseded.'),
         _D('- digest: required once status is published or superseded; the freeze digest of the corresponding CHANGELOG.md entry (section 7.2).'),
         _D('- superseded_by: present exactly when status is superseded; the covers token of the rollup summary that replaced this one.'),
+        _D('- imported: optional boolean, permitted only as true and only on a summary row whose digest rests on imported provenance under section 14.3.'),
+        'A flagged row MUST have status published or superseded, MUST NOT cover "unreleased", and every version it covers MUST be an imported-flagged [[release]] row, and a validator MUST refuse a flagged row that breaks any of these conditions.',
+        'Unlike the release-row flag, the summary flag MAY be removed from an existing row, and its removal is a curator act.',
+        'A curator MAY likewise add the flag to an existing summary row, as a curator act, only where every version the row covers is an imported-flagged [[release]] row.',
         'Summary rows MUST hold digests and ranges only, never prose.',
         'Prose MUST live in exactly one place: the root CHANGELOG.md.',
     ),
@@ -981,7 +985,8 @@ _CONTRACT = {
     ),
     "14.3": (
         _D('An adopter with an existing single-source release pipeline (for example, a release-notes TOML that generates a version file and a changelog) migrates by recording its releases in version.toml as imported-flagged [[release]] rows (the optional imported flag of section 6.1) and its per-release notes as published per-release [[summary]] rows.'),
-        'Pre-migration releases have no worklog entries: their spans MUST be empty and their summary digests MUST be recorded as imported facts, flagged as resting on imported provenance rather than on a witnessed release cut.',
+        'Pre-migration releases have no worklog entries: their spans MUST be empty and their summary digests MUST be recorded as imported facts, flagged when the summary row is recorded by the optional summary-row imported key of section 6.1 as resting on imported provenance rather than on a witnessed release cut.',
+        'A curator MAY later remove that flag under section 6.1.',
         'This is the historical-release path: the ledger is not an imported record type, its spans MUST NOT refer to imported:WL IDs, and import MUST NOT create a separate version or changelog TOML file.',
         "Changelog prose MUST still come from the curator's act.",
     ),
@@ -3506,6 +3511,7 @@ def boundary_self_test():
     import copy
     import hashlib
     import inspect
+    import os
     from types import SimpleNamespace
     from unittest.mock import patch
     import _journal as journal
@@ -3692,14 +3698,44 @@ def boundary_self_test():
     def graded(report, path):
         return any(repr(path) in message for message in report.findings)
 
+    # This tooling's adoption journal home. Containment decides a legacy store has started an adoption
+    # from ONE probe of it (an lstat in the shipped helper, answered here from the fixture), never by
+    # listing journals/ (the listing mock above refuses that).
+    adoption_journal = store.journal_root("adoption").rsplit("/", 1)[0]
+    probed = []
+
+    def journal_probe(_fd):
+        probed.append(adoption_journal)
+        return adoption_journal in directories
+
+    def drop(path, depth):
+        # Remove one fixture file and the `depth` directories beneath it that add() created for it.
+        del files[path]
+        directories.difference_update(path.rsplit("/", n)[0] for n in range(1, depth + 1))
+
     with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", read_toml), \
-            patch.object(doctor, "_read_bytes", read_bytes):
+            patch.object(doctor, "_read_bytes", read_bytes), \
+            patch.object(doctor, "_adoption_journal_present", journal_probe):
         stage = ".working/staging/import/" + run + "/plan.toml"
         add(stage)
         add(".working/journals/import/journal/inflight/frames.log", b"torn")
-        # A legacy store keeps its legacy grading: each homes-2 name is one unregistered path.
+        # A legacy store that has started no adoption keeps its legacy grading (spec 4.2): each homes-2
+        # name, journals/ included, is one unregistered path.
         check("legacy-staging-graded", lambda: graded(containment(), ".working/staging"))
         check("legacy-journals-graded", lambda: graded(containment(), ".working/journals"))
+        # Once this tooling's adoption journal home is a directory the store has started an adoption: its
+        # journals/ is left out unlisted, decided by the probe alone. The same name as a FILE is no
+        # journal home, so journals/ is graded again.
+        txn = adoption_journal + "/journal/" + adopt_run + "/frames.log"
+        add(txn, b"torn")
+        del probed[:]
+        check("legacy-adoption-journal-excluded", lambda: not graded(containment(), ".working/journals")
+              and not any("journals" in m for m in containment().cannot)
+              and probed != [] and ".working/journals" not in listed)
+        drop(txn, 3)
+        add(adoption_journal, b"not a journal home")
+        check("legacy-adoption-journal-file-graded", lambda: graded(containment(), ".working/journals"))
+        drop(adoption_journal, 0)
         check("legacy-staging-not-partial", lambda: not containment(True).triage
               and any("no active" in message for message in containment(True).findings))
         check("staging-steady-finding", lambda: any(stage in s for s in containment(model=manifest2).findings))
@@ -3986,7 +4022,8 @@ def boundary_self_test():
         with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", doctor_toml), \
                 patch.object(store, "_read_toml_contained", side_effect=worklog_toml), \
                 patch.object(journal, "_lstat_contained", side_effect=worklog_stat), \
-                patch.object(doctor, "_read_bytes", read_bytes):
+                patch.object(doctor, "_read_bytes", read_bytes), \
+                patch.object(doctor, "_adoption_journal_present", journal_probe):
             report = doctor._Report()
             doctor._validate_opened_store(0, None, machine, None, {}, None, "default", True, report)
         return report.result(), list(listed)
@@ -4015,6 +4052,59 @@ def boundary_self_test():
                       and p not in allocation_homes for p in homes2_listed))
     check("doctor-lists-allocation-homes", lambda: sorted(
         p for p in homes2_listed if p.startswith(".working/journals/")) == sorted(allocation_homes))
+    # The shipped probe over a real tree: one no-follow lstat of the adoption journal home, never a listing,
+    # True only for a real directory there (a file, a symlink to a directory, a sibling kind and an absent
+    # journals/ each read False, so journals/ keeps its legacy grading).
+    def probe_tree(plant):
+        with tempfile.TemporaryDirectory(prefix="opf-homes-probe-") as tmp:
+            plant(Path(tmp))
+            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
+            seen = []
+            real_lstat = journal._lstat_contained
+            try:
+                with patch.object(journal, "_lstat_contained", lambda f, rel: seen.append(rel) or real_lstat(f, rel)), \
+                        patch.object(doctor, "_list_contained", side_effect=AssertionError("journals listed")):
+                    return doctor._adoption_journal_present(fd), seen
+            finally:
+                os.close(fd)
+
+    def home_dir(root):
+        (root / adoption_journal / "journal").mkdir(parents=True)
+
+    def home_file(root):
+        (root / adoption_journal).parent.mkdir(parents=True)
+        (root / adoption_journal).write_bytes(b"not a journal home\n")
+
+    def home_symlink(root):
+        (root / ".working/elsewhere").mkdir(parents=True)
+        (root / adoption_journal).parent.mkdir(parents=True)
+        os.symlink("../elsewhere", str(root / adoption_journal))
+
+    def sibling_kind(root):
+        (root / ".working/journals/import/journal").mkdir(parents=True)
+
+    for label, plant, want in (("directory", home_dir, True), ("file", home_file, False),
+                               ("symlink", home_symlink, False), ("sibling-kind", sibling_kind, False),
+                               ("absent", lambda root: (root / ".working").mkdir(), False)):
+        check("adoption-journal-probe-" + label, lambda p=plant, w=want: probe_tree(p) == (w, [adoption_journal]))
+
+    # A probe that cannot observe the home reads False even over a real home directory, so journals/ keeps
+    # its legacy grading: a fault grades, never exempts (red against a probe that reads its fault as present).
+    def probe_faulting(fault):
+        def faulty(_fd, rel):
+            raise fault
+        with tempfile.TemporaryDirectory(prefix="opf-homes-probe-") as tmp:
+            home_dir(Path(tmp))
+            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with patch.object(journal, "_lstat_contained", faulty):
+                    return doctor._adoption_journal_present(fd)
+            finally:
+                os.close(fd)
+
+    for label, fault in (("oserror", PermissionError(13, "an injected EACCES")),
+                         ("journal-error", journal.JournalError("an injected containment refusal"))):
+        check("adoption-journal-probe-unobservable-grades-" + label, lambda f=fault: probe_faulting(f) is False)
     # The render source gate is the one roster's source checks: a homes-2 evidence finding refuses it,
     # and a report that ran only the pre-homes checks is still gated on the homes-2 and imported checks.
     flagged = dict.fromkeys(doctor.DOCTOR_ROSTER, "PASS")
@@ -6937,7 +7027,7 @@ def _self_test_vectors():
         ("delattr-literal", "planted.py", "import _opf_store\n\ndelattr(_opf_store, 'HOMES')\n",
          "import _opf_store\n\ndelattr(_opf_store, 'HOMES_SEEN')\n", (3, rebound)),
         # Rule 4's bounded refusal: a writer used other than as a plain call given a literal name is red,
-        # whatever the spelling (QA round 6's ten forms, then other members of the class). The HOMES string
+        # whatever the spelling (the first ten forms, then other members of the class). The HOMES string
         # each passes outside a red writer call is red too, at its own site.
         ("writer-starred-name", "planted.py", importing + "setattr(_opf_store, *('HOMES', 1))\n", plain,
          (3, writer.format("setattr(_opf_store, *('HOMES', 1))", "<module>"))),
@@ -6986,7 +7076,7 @@ def _self_test_vectors():
         ("writer-class-pattern", "planted.py",
          importing + "match _opf_store:\n    case object(__setattr__=put):\n        put('HOMES', 1)\n", plain,
          [(4, writer.format("__setattr__", "<module>")), (5, homes_name.format("put('HOMES', 1)", "<module>"))]),
-        # QA round 7's x1 to x4: an exclusion admits only its own site, by its fully qualified function (not
+        # x1 to x4: an exclusion admits only its own site, by its fully qualified function (not
         # a same-named one elsewhere) and the exact comparison a string constant is an operand of (not any use
         # of the string in that function); a name handed to the real excluded writer is never the literal HOMES.
         ("x1-excluded-string-other-use", "opf.py",

@@ -194,7 +194,8 @@ ENFORCEMENT_DESTINATIONS = (
     (".cursor/rules/opf.mdc", PACK_MIRROR_ROOT + "/enforcement/cursor/opf.mdc"),
 )
 # The store control area an adoption plan never selects or writes, in every homes generation: the reserved
-# children archive/, imported/, staging/ and journals/ (spec 14.2, which carries no homes qualifier) and the
+# children archive/, imported/, staging/ and journals/ (spec 14.2, which carries no homes qualifier; the
+# adoption journal's own home lives under journals/) and the
 # legacy imports tree homes 1 already reserves. The plan's own preservation copies under this run's adoption
 # archive and move destinations strictly beneath the Move archive are the only writes that land there.
 ADOPTION_CONTROL_ROOTS = tuple(WORKING_DIRNAME + "/" + name for name in RESERVED_MACHINE_SUBDIRS)
@@ -1248,9 +1249,10 @@ def protected_destination(path, run_id=None, root="."):
     Protected: any path that is not a normalized, contained relative file path (_is_contained_filepath: an
     empty, `.` or `..` segment, an absolute or backslash form, or a control character), refused here
     whatever its callers already filter; a `.git` or `.aiqt` component at any depth
-    (STORE_ROOT_CONTROL_DIRS: the version-control area and AIQT's tree, the legacy adoption journal
-    included); the product-root pointers `.opf.toml` and `.opf.local.toml` (spec 4.3); the store control
-    area (ADOPTION_CONTROL_ROOTS, spec 14.2) other than strictly beneath this run's own adoption archive,
+    (STORE_ROOT_CONTROL_DIRS: the version-control area and AIQT's tree); the product-root pointers
+    `.opf.toml` and `.opf.local.toml` (spec 4.3); the store control
+    area (ADOPTION_CONTROL_ROOTS, spec 14.2, the adoption journal's own `journals/` home among its
+    reserved children) other than strictly beneath this run's own adoption archive,
     this run's own evidence bundle or the Move archive root; and the store tree's `.gitignore`. The control
     area and `.gitignore` compose under the store root `root`; the pointers stay at the product root.
     Protected names compare case-insensitively (str.casefold), so on a case-insensitive filesystem `.GIT/x`,
@@ -1274,7 +1276,7 @@ def protected_destination(path, run_id=None, root="."):
     for name in STORE_ROOT_CONTROL_DIRS:
         if name.casefold() in parts:
             return ("{!r} names the store control root {}/ at some depth: the version-control area and the "
-                    ".aiqt tree, the legacy adoption journal included, are never adoption destinations or "
+                    ".aiqt tree are never adoption destinations or "
                     "apply operands".format(path, name))
     for pointer in (POINTER_REL, LOCAL_POINTER_REL):
         if _is_under(folded, pointer.casefold()):
