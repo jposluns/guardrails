@@ -11,7 +11,7 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
+     opf/tools/_opf_sync.py, tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
      tools/check_verifier_delivery.py; the constant and both functions) and in the
      hooks dispatcher and its generated plugin copy (the constant and the probe) are each defined once at the
      top level and AST-identical (ast.dump, docstrings included) to the canonical text, and each is bound
@@ -21,7 +21,7 @@ with exit 2). This gate holds where it runs:
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
      ends the process by raising SystemExit itself, never through sys.exit), and for every other,
      sys.exit(_child_status_refusal_exit("<basename>") or main()), except that of each SELF_TEST_COPIES entry
-     (the three opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
+     (the four opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
      (SELF_TEST_ENTRY, held to opf.py's own _ENTRY_STATEMENT) then that second form, with self_test bound once
      in the module, by one undecorated top-level def whose first statement after the docstring is the guard
      call _child_status_refusal_exit("<basename>"); opf.py's _main_exit, which receives the guard inside that
@@ -110,8 +110,9 @@ walked; an unresolved dynamic load), the live refusal, or usage. There is no war
 
 Disclosed residuals, not closed by this gate: R1 an ignore or SA_NOCLDWAIT set below Python after interpreter
 start (a native extension, ctypes, an embedding host) is not seen by the disposition read, and the fork probe runs
-only where a guard is called: at entry and, in opf.py's opf-adopt-state leg, mid-process (that leg calls
-opf/tools/_opf_adopt_state.py's self_test() in process); after that, the in-situ checks in opf/tools/_opf_emit.py
+only where a guard is called: at entry and, in opf.py's opf-sync and opf-adopt-state legs, mid-process (those legs
+call opf/tools/_opf_sync.py's and opf/tools/_opf_adopt_state.py's self_test() in process); after that, the
+in-situ checks in opf/tools/_opf_emit.py
 stay the only later defence and they read the disposition only; R2 a child that ignores SIGCHLD itself loses
 its own children's statuses (opf.py's own
 self-test does this in process for fixtures that test the refusal), which no parent guard sees and this gate
@@ -124,7 +125,7 @@ platform without SIGCHLD or fork the guard refuses nothing; R7 a direct launch o
 is unguarded until the floor prelude refuses (DIRECT_LAUNCH_RESIDUAL); R8 tools/run_all_checks.sh continues
 after the probe fails, so later gates may print PASS lines in a run that ends RESULT: FAIL; R9 a fork in a
 multi-threaded process warns, so every guard runs at entry or at the top of the dispatcher's main, except the
-mid-process call in R1, which runs after opf.py's earlier self-test legs; R10 the
+mid-process calls in R1, which run after opf.py's earlier self-test legs; R10 the
 static scan over-approximates through whole-closure imports, and it does not see a spawn reached (a) inside a
 module it does not read, the standard library or a third-party package (platform.architecture and
 ctypes.util.find_library each start a child through subprocess), (b) through getattr, sys.modules.get, a
@@ -193,6 +194,7 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_adopt_complete.py", "_opf_adopt_complete.py"),
               ("opf/tools/_opf_adopt_state.py", "_opf_adopt_state.py"),
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
+              ("opf/tools/_opf_sync.py", "_opf_sync.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
@@ -224,7 +226,7 @@ MAIN_EXIT_CALL = "status = main()"
 # exactly that statement then the CLI entry line, and the guard call SELF_TEST_GUARD is the first statement of
 # self_test() after its docstring, so the --self-test path refuses too.
 SELF_TEST_COPIES = ("opf/tools/_opf_adopt_complete.py", "opf/tools/_opf_adopt_state.py",
-                    "opf/tools/_opf_import_complete.py")
+                    "opf/tools/_opf_import_complete.py", "opf/tools/_opf_sync.py")
 SELF_TEST_ENTRY = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
 SELF_TEST_GUARD = '_child_status_refusal_exit("{}")'
 # The file whose _ENTRY_STATEMENT SELF_TEST_ENTRY copies: it must bind that name once, at the top level, to a string
@@ -2179,6 +2181,8 @@ def _behaviour(probe, base):
             ("behaviour/adopt-state-self-test-refuses", "opf/tools/_opf_adopt_state.py", ("--self-test",)),
             ("behaviour/import-complete-refuses", "opf/tools/_opf_import_complete.py", ()),
             ("behaviour/import-complete-self-test-refuses", "opf/tools/_opf_import_complete.py", ("--self-test",)),
+            ("behaviour/sync-refuses", "opf/tools/_opf_sync.py", ()),
+            ("behaviour/sync-self-test-refuses", "opf/tools/_opf_sync.py", ("--self-test",)),
             ("behaviour/gitleaks-pin-refuses", "tools/check_gitleaks_pin.py", ()),
             ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ())):
         got = via("ignore", python + [str(ROOT / rel)] + list(args), cwd=str(ROOT))
@@ -2392,6 +2396,7 @@ def self_test(lane, report_path=None):
                                 ("behaviour/adopt-state-refuses", 0), ("behaviour/adopt-state-self-test-refuses", 0),
                                 ("behaviour/import-complete-refuses", 0),
                                 ("behaviour/import-complete-self-test-refuses", 0),
+                                ("behaviour/sync-refuses", 0), ("behaviour/sync-self-test-refuses", 0),
                                 ("behaviour/gitleaks-pin-refuses", 0), ("behaviour/must-deliver-refuses", 0),
                                 ("control/opf-cli-default-runs", 0),
                                 ("control/launcher-cli-default-runs", 0), ("control/coverage-gate-default-runs", 0),

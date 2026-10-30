@@ -43,9 +43,9 @@ spec 5.6 before any fetch or push: the resolved pointer (where it names a remote
 repository's own single recorded remote must agree with the recorded sync_target, by canonical
 host+path where both sides canonicalize and by exact string equality otherwise; a destination that
 appears from anywhere else is surfaced and refused, never fetched from or pushed to. 6. Fetch by
-explicit URL (never by remote name) on the store's CURRENT branch, recording only FETCH_HEAD; a
-detached or unborn HEAD refuses. 7. Compare with `merge-base --is-ancestor` both ways and report, or
-run the one requested step:
+explicit URL (never by remote name) on the store's CURRENT branch, recording only FETCH_HEAD from
+the target; a detached or unborn HEAD refuses. 7. Compare with `merge-base --is-ancestor` both ways
+and report, or run the one requested step:
 
 - BEHIND + --pull: the section 9.2 refusals are applied AGAIN to the manifest the fetched state
   carries, with discovery's one-manifest rule over the fetched `.working/` tree, so a fast-forward
@@ -68,7 +68,8 @@ fast-forward and its doctor, or across the push, and released BEFORE the outcome
 success is never reported over a still-held or failed-to-release claim. The claim and its release
 are not themselves store operations; the fast-forward is one, and a push is one too (it writes the
 recorded target), while a fetch is not: a fetch writes only git transport state (objects and
-FETCH_HEAD under .git), never the store tree, which is disclosed here rather than gated.
+FETCH_HEAD under .git, and the refs/bundles/* refs of a repository fetch.bundleURI, below), never
+the store tree, which is disclosed here rather than gated.
 
 The transport boundary (fetch and push only; every other git call runs under the read-only scrubbed
 boundary of _opf_observe._run_git): the adopter's global and system git configuration IS honoured,
@@ -83,18 +84,21 @@ global-or-system value (or plain `ssh` where none is set), so a repository-local
 never executes while a global one is honoured as the adopter's own setting. Two enumerations then
 gate every fetch and push, both fail-closed. First, the repository scopes (--local and --worktree)
 are listed by name, and a credential helper, core.askpass, core.gitProxy, an http.sslVerify /
-sslCAInfo / sslCAPath server-trust override, a url.*.insteadOf / pushInsteadOf rewrite, and
-include.path / includeIf.*.path are each REFUSED: a repository-planted helper is a program launch,
-a repository trust override can authenticate an interposed https server, and a repository-local
-include is read by the transport but not expanded by a scoped listing, so its keys could not be
-verified by name. Second, the EFFECTIVE url.* rewrites are read under the exact environment and
-override pairs the transport call runs with, so every source git would honour (global, system,
-local, worktree, include, command) is the source checked, and any insteadOf or pushInsteadOf whose
-prefix matches the verified URL refuses: the URL the destination agreement verified is then, byte
-for byte, the URL the transport uses. Refusal is chosen over an override in both gates because a
-GIT_CONFIG_* pair appends to a multi-valued key rather than resetting it (an empty insteadOf value
-is itself a match-everything rewrite), while an unrelated rewrite of the adopter's own matches
-nothing here and keeps working.
+sslCAInfo / sslCAPath server-trust override, an http.cookieFile / saveCookies cookie path, a
+url.*.insteadOf / pushInsteadOf rewrite, and include.path / includeIf.*.path are each REFUSED, in
+the plain and the subsection form alike (http.cookieFile and http.<url>.cookieFile): a
+repository-planted helper is a program launch, a repository trust override can authenticate an
+interposed https server, a repository cookie path makes the https transport read cookies from, or
+write a cookie jar to, a file the repository chooses (a filesystem effect, not routing or shaping),
+and a repository-local include is read by the transport but not expanded by a scoped listing, so
+its keys could not be verified by name. Second, the EFFECTIVE url.* rewrites are read under the
+exact environment and override pairs the transport call runs with, so every source git would honour
+(global, system, local, worktree, include, command) is the source checked, and any insteadOf or
+pushInsteadOf whose prefix matches the verified URL refuses: the URL the destination agreement
+verified is then, byte for byte, the URL the transport uses. Refusal is chosen over an override in
+both gates because a GIT_CONFIG_* pair appends to a multi-valued key rather than resetting it (an
+empty insteadOf value is itself a match-everything rewrite), while an unrelated rewrite of the
+adopter's own matches nothing here and keeps working.
 
 DISCLOSED RESIDUALS: the lease is NOT made observable at the sync target in this build; the planned
 mechanism for the writes sync itself makes is a lock ref at the target (for example refs/opf/lease)
@@ -110,17 +114,26 @@ moves the WHOLE repository, so a store nested below the toplevel of a shared rep
 exit 2 rather than moving content outside the store. The push runs the TARGET repository's own
 receive-side hooks, as any git push does: the target is the adopter's recorded companion repository
 and its receive side is its own trust domain. Repository-scope configuration that stays effective
-on the transport after the refusals above is routing and shaping only: http.proxy (and
-http.<url>.proxy) can route the https connection, but the server is still authenticated against the
-adopter's own trust roots (the repository-scope trust overrides are refused), so the verified
-destination cannot be silently replaced and a wrong proxy fails the transport closed;
-http.extraHeader and the tuning keys (http.postBuffer, the pack and fetch sizing family,
-protocol.version) shape an already-authenticated connection to the verified URL and can at worst
-fail it; ssh.variant shapes the arguments of the pinned ssh and names no program; remote.<name>.*
-is never consulted (fetch and push go by explicit URL, never by remote name); and a per-protocol
-protocol.<name>.allow at repository scope can re-widen a protocol, but the verified URL is already
-restricted to file, https and ssh before any launch and URL rewriting is refused, so a widened
-protocol is reachable only through the verified target's own redirect, inside that trust domain.
+on the transport after the refusals above never replaces the verified destination, and is one of
+the following. Routing: http.proxy (and http.<url>.proxy) and http.curloptResolve (which remaps the
+host and port a connection reaches) can route the https connection, but the server is still
+authenticated against the adopter's own trust roots (the repository-scope trust overrides are
+refused), so the verified destination cannot be silently replaced and a wrong proxy or mapping
+fails the transport closed. Shaping: http.extraHeader and the tuning keys (http.postBuffer, the
+pack and fetch sizing family, protocol.version) shape an already-authenticated connection to the
+verified URL and can at worst fail it; ssh.variant shapes the arguments of the pinned ssh and names
+no program; remote.<name>.* is never consulted (fetch and push go by explicit URL, never by remote
+name); and a per-protocol protocol.<name>.allow at repository scope can re-widen a protocol, but
+the verified URL is already restricted to file, https and ssh before any launch and URL rewriting
+is refused, so a widened protocol is reachable only through the verified target's own redirect,
+inside that trust domain. File reads: http.sslCert / sslKey, the proxy TLS paths
+(http.proxySSLCert / proxySSLKey / proxySSLCAInfo) and http.pinnedPubkey make the transport READ a
+file the repository names, to present a client certificate to the verified server or its proxy, to
+trust the proxy's own TLS, or to narrow the server's trust; they write nothing and leave the
+server's authentication to the adopter's trust roots. Extra fetch source: fetch.bundleURI makes a
+fetch also download bundles from the location it names, writing their objects and refs/bundles/*
+refs under .git (transport state, like FETCH_HEAD); FETCH_HEAD, the only fetched state the
+comparison and the fast-forward read, still comes from the verified URL alone.
 The destination agreement compares by exact string
 where a form (a file path, a file:// URL) has no canonical host+path, so two spellings of one
 filesystem target (a path and its symlink) read as disagreement and over-refuse, never under-refuse.
@@ -169,15 +182,21 @@ _HELPER_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9+.]*::")
 # Repository-SCOPE config keys the transport refuses by name, over both the --local and --worktree
 # listings (section/key folded, the subsection kept): a URL rewrite silently redirects the verified
 # destination; a repository-planted credential helper, askpass or git proxy is a program launch on
-# fetch or push; a repository-scope https trust override can authenticate an interposed server; and
-# a repository-local include is read by the transport but not expanded by a scoped listing, so its
-# keys could not be verified by name. Overriding these would also discard the adopter's own global
-# configuration, so presence refuses instead; the effective url.* rewrites of EVERY scope are
-# additionally matched against the verified URL before each transport call.
-_LOCAL_REDIRECT_SUFFIXES = (".insteadof", ".pushinsteadof")
-_LOCAL_EXEC_KEYS = ("credential.helper", "core.askpass", "core.gitproxy")
-_LOCAL_TRUST_SUFFIXES = (".sslverify", ".sslcainfo", ".sslcapath")
-_LOCAL_INCLUDE_KEYS = ("include.path", "includeif.<condition>.path")
+# fetch or push; a repository-scope https trust override can authenticate an interposed server; a
+# repository-scope cookie file or cookie save makes the https transport read cookies from, or write a
+# cookie jar to, a path the repository chooses; and a repository-local include is read by the
+# transport but not expanded by a scoped listing, so its keys could not be verified by name.
+# Overriding these would also discard the adopter's own global configuration, so presence refuses
+# instead; the effective url.* rewrites of EVERY scope are additionally matched against the verified
+# URL before each transport call. Each entry is a folded section.key, and a name refuses when it is
+# that key with or without a subsection between the two (http.sslVerify and http.<url>.sslVerify,
+# url.<base>.insteadOf, includeIf.<condition>.path); _refuse_local_redirect_config reads these lists
+# and nothing else, so the stated and the enforced lists are one.
+_LOCAL_REDIRECT_KEYS = (b"url.insteadof", b"url.pushinsteadof")
+_LOCAL_EXEC_KEYS = (b"credential.helper", b"core.askpass", b"core.gitproxy")
+_LOCAL_TRUST_KEYS = (b"http.sslverify", b"http.sslcainfo", b"http.sslcapath")
+_LOCAL_COOKIE_KEYS = (b"http.cookiefile", b"http.savecookies")
+_LOCAL_INCLUDE_KEYS = (b"include.path", b"includeif.path")
 _TRANSPORT_TIMEOUT_S = 120
 _TRANSPORT_MAX_OUTPUT = 8 << 20
 # The one fast-forward command; --ff-only is load-bearing (a divergence must never merge).
@@ -533,16 +552,48 @@ def _transport_overrides(git):
             ("core.sshCommand", _global_ssh_command(git) or "ssh")]
 
 
+def _local_key_listed(low, keys):
+    """Whether one folded config name is a listed section.key, with or without a subsection between
+    the section and the key (http.sslverify and http.<url>.sslverify both match http.sslverify)."""
+    for listed in keys:
+        section, _dot, key = listed.partition(b".")
+        if low.startswith(section + b".") and low.endswith(b"." + key):
+            return True
+    return False
+
+
 def _refuse_local_redirect_config(git, store_root):
-    """Refuse, by name, a repository-scope config key that would redirect, exec or weaken the trust
-    decision on the transport call: url.*.insteadOf / pushInsteadOf (a silent rewrite of the
-    verified URL), a credential helper, core.askpass, core.gitProxy, an http.sslVerify / sslCAInfo
-    / sslCAPath server-trust override, and include.path / includeIf.*.path (the transport reads the
-    included file, but a scoped listing does not expand it, so the included keys could not be
-    verified by name). Both repository scopes are enumerated, --local and --worktree (without the
-    worktreeConfig extension the latter reads the same .git/config), through the scrubbed read-only
-    boundary (--name-only: no value, so a malicious command body is never read); an unreadable
-    scope is a cannot-evaluate, never read as empty."""
+    """Refuse, by name, a repository-scope config key that would redirect, exec, weaken the trust
+    decision or reach a repository-chosen path on the transport call: url.*.insteadOf /
+    pushInsteadOf (a silent rewrite of the verified URL), a credential helper, core.askpass,
+    core.gitProxy, an http.sslVerify / sslCAInfo / sslCAPath server-trust override, an
+    http.cookieFile / saveCookies cookie path (the https transport reads cookies from, or writes a
+    cookie jar to, a file the repository names), and include.path / includeIf.*.path (the transport
+    reads the included file, but a scoped listing does not expand it, so the included keys could not
+    be verified by name). The names are matched from the _LOCAL_* lists alone (_local_key_listed).
+    Both repository scopes are enumerated, --local and --worktree (without the worktreeConfig
+    extension the latter reads the same .git/config), through the scrubbed read-only boundary
+    (--name-only: no value, so a malicious command body is never read); an unreadable scope is a
+    cannot-evaluate, never read as empty."""
+    refusals = (
+        (_LOCAL_REDIRECT_KEYS,
+         ", a URL rewrite that would silently redirect the verified destination (spec 5.6); remove "
+         "it from the repository config and re-run (fail-closed)"),
+        (_LOCAL_EXEC_KEYS,
+         ", a repository-planted program launch on fetch or push; credentials belong in the "
+         "adopter's own global configuration (spec 5.6); remove it and re-run (fail-closed)"),
+        (_LOCAL_INCLUDE_KEYS,
+         ": the transport reads the included file, but this scoped enumeration does not expand it, "
+         "so the included keys cannot be verified by name; move the settings you own into your "
+         "global configuration or inline them here, remove the include, and re-run (fail-closed)"),
+        (_LOCAL_TRUST_KEYS,
+         ", a repository-scope override of the https server trust; the trust decision belongs to "
+         "the adopter's own global or system configuration (spec 5.6); remove it and re-run "
+         "(fail-closed)"),
+        (_LOCAL_COOKIE_KEYS,
+         ", a repository-chosen cookie path: the https transport would read cookies from, or write "
+         "a cookie jar to, a file the repository names; cookie storage belongs to the adopter's own "
+         "global configuration (spec 5.6); remove it and re-run (fail-closed)"))
     for scope in ("--local", "--worktree"):
         listing = _opf_observe._run_git(git, store_root,
                                         ["config", scope, "-z", "--name-only", "--list"])
@@ -562,34 +613,10 @@ def _refuse_local_redirect_config(git, store_root):
             if not kb:
                 continue
             low = kb.lower()
-            key = kb.decode("utf-8", "replace")
-            if low.startswith(b"url.") and (low.endswith(b".insteadof")
-                                            or low.endswith(b".pushinsteadof")):
-                raise SyncError("the store repository's git configuration carries {!r}, a URL "
-                                "rewrite that would silently redirect the verified destination "
-                                "(spec 5.6); remove it from the repository config and re-run "
-                                "(fail-closed)".format(key))
-            if (low == b"credential.helper"
-                    or (low.startswith(b"credential.") and low.endswith(b".helper"))
-                    or low in (b"core.askpass", b"core.gitproxy")):
-                raise SyncError("the store repository's git configuration carries {!r}, a "
-                                "repository-planted program launch on fetch or push; credentials "
-                                "belong in the adopter's own global configuration (spec 5.6); "
-                                "remove it and re-run (fail-closed)".format(key))
-            if low == b"include.path" or (low.startswith(b"includeif.") and low.endswith(b".path")):
-                raise SyncError("the store repository's git configuration carries {!r}: the "
-                                "transport reads the included file, but this scoped enumeration "
-                                "does not expand it, so the included keys cannot be verified by "
-                                "name; move the settings you own into your global configuration or "
-                                "inline them here, remove the include, and re-run "
-                                "(fail-closed)".format(key))
-            if low.startswith(b"http.") and low.endswith((b".sslverify", b".sslcainfo",
-                                                          b".sslcapath")):
-                raise SyncError("the store repository's git configuration carries {!r}, a "
-                                "repository-scope override of the https server trust; the trust "
-                                "decision belongs to the adopter's own global or system "
-                                "configuration (spec 5.6); remove it and re-run "
-                                "(fail-closed)".format(key))
+            for keys, why in refusals:
+                if _local_key_listed(low, keys):
+                    raise SyncError("the store repository's git configuration carries {!r}{}".format(
+                        kb.decode("utf-8", "replace"), why))
 
 
 def _refuse_effective_url_rewrite(git, store_root, env, url):
@@ -983,11 +1010,12 @@ def self_test():
     bare report, the fast-forward pull with its doctor gate, the authorized push with its
     destination agreement, the held-lease refusal (never seized), the hostile-repository-config
     neutralization, the effective URL-rewrite refusal over every config scope, the
-    repository-scope include/helper/trust refusals, the pre-git target validation, and the
-    fetch/detached/unborn refusals. The
+    repository-scope include/helper/trust/cookie refusals (every listed key in its plain and its
+    subsection form), the pre-git target validation, and the fetch/detached/unborn refusals. The
     load-bearing guards are each also run with the guard dropped (an attribute-patched flip), so the
     vector that watches it is shown to go red. Judged on exit codes, repository state and lease
     bytes, never by output grepping alone. Returns 0 clean, 1 on a failure, 2 on a harness error."""
+    _child_status_refusal_exit("_opf_sync.py")
     failures = []
     checked = [0]
 
@@ -1521,6 +1549,57 @@ def _self_test_units(check):
             rc, out = run(["--root", sv_root])
             check("a repository-scope https trust override refuses before any transport",
                   rc == EXIT_MALFORMED and "trust" in out)
+            # a repository-scope cookie path refuses, both keys in both forms (each set alone on an
+            # equal store, so the refusal is the only thing between it and exit 0); a name just past
+            # a listed key matches nothing and the run reports EQUAL
+            ck_root, _ck_bare = _paired("cookie")
+            ck_head = _head(ck_root)
+            ck_jar = os.path.join(base, "cookie-jar")
+            for ck_key, ck_value in (("http.cookieFile", ck_jar), ("http.saveCookies", "true"),
+                                     ("http.https://example.invalid/.cookieFile", ck_jar),
+                                     ("http.https://example.invalid/.saveCookies", "true")):
+                _git(ck_root, "config", "--local", ck_key, ck_value)
+                rc, out = run(["--root", ck_root])
+                _git(ck_root, "config", "--local", "--unset", ck_key)
+                check("a repository-scope {} refuses before any transport".format(ck_key),
+                      rc == EXIT_MALFORMED and "cookie" in out and _head(ck_root) == ck_head
+                      and not os.path.exists(ck_jar))
+            for ck_key in ("http.cookieFileX", "http.xcookieFile"):
+                _git(ck_root, "config", "--local", ck_key, ck_jar)
+                rc, out = run(["--root", ck_root])
+                _git(ck_root, "config", "--local", "--unset", ck_key)
+                check("{}, a name just past a listed key, matches nothing and sync runs".format(ck_key),
+                      rc == EXIT_OK and "EQUAL" in out)
+            # the named flip: with the cookie list emptied the refusal no longer fires, so the
+            # refusal reads the list, not a copy of it
+            _git(ck_root, "config", "--local", "http.cookieFile", ck_jar)
+            with patch.object(module, "_LOCAL_COOKIE_KEYS", ()):
+                rc, _out = run(["--root", ck_root])
+            _git(ck_root, "config", "--local", "--unset", "http.cookieFile")
+            check("emptying the cookie list lets the repository cookie path through (shown red)",
+                  rc == EXIT_OK)
+            # every entry of every _LOCAL_* list refuses, plain, under a subsection and in any case,
+            # through the same enumeration (its listing stubbed), while a name one character past
+            # the entry does not: a list entry the refusal stopped enforcing shows here
+            listed_misses = []
+            for family in (_LOCAL_REDIRECT_KEYS, _LOCAL_EXEC_KEYS, _LOCAL_TRUST_KEYS,
+                           _LOCAL_COOKIE_KEYS, _LOCAL_INCLUDE_KEYS):
+                for listed in family:
+                    section, _dot, key = listed.partition(b".")
+                    for name, refuses in ((listed, True), (listed.upper(), True),
+                                          (section + b".https://example.invalid/." + key, True),
+                                          (listed + b"x", False), (section + b".x" + key, False)):
+                        listing = _opf_observe._GitOutcome(True, 0, name + b"\x00", "")
+                        with patch.object(_opf_observe, "_run_git", lambda *a, **k: listing):
+                            try:
+                                _refuse_local_redirect_config(git, base)
+                                refused = False
+                            except SyncError:
+                                refused = True
+                        if refused != refuses:
+                            listed_misses.append(name)
+            check("every listed repository-scope key refuses in each form and a name just past it "
+                  "does not ({})".format(listed_misses), not listed_misses)
 
             # -- a dangerous or typed sync_target refuses before any git launch ------------------
             bad_targets = (("git:--upload-pack=/bin/false", "begins with"),
@@ -1599,8 +1678,74 @@ def _self_test_units(check):
     return False
 
 
+def main():
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
+    print("usage: _opf_sync.py --self-test (the verb is `opf sync`)", file=sys.stderr)
+    return EXIT_MALFORMED
+
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This module launches git for every
+# fetch, push and read and judges each exit status, and its self-test does the same over real fixtures,
+# so under an ignored SIGCHLD a failed fetch or push would read as a success. `opf sync` runs under
+# opf.py's own guard; this copy guards a direct launch of this file. It runs as the first statement of
+# self_test(), before any launch, and at the entry line before main(); the entry line comes after the
+# --self-test statement that opf.py requires first in the __main__ block. The import opf.py makes of
+# this module runs nothing; opf.py's opf-sync leg calls self_test() in process, so the guard runs there
+# too, after opf.py's own guard at its entry line.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
-    print("usage: _opf_sync.py --self-test (the verb is `opf sync`)", file=sys.stderr)
-    sys.exit(EXIT_MALFORMED)
+    sys.exit(_child_status_refusal_exit("_opf_sync.py") or main())
