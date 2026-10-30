@@ -39,18 +39,34 @@ relocated. The next `opf migrate` reconciles an interrupted run FIRST, under the
 its own operation: before verification nothing durable was staged, so the run is marked reconciled
 and any partially written destination is reported, never deleted; at or after verification the run
 completes forward when the source still holds its journaled state, and rolls the staged product
-change back (pointer preimage restored, `.working/` restored from HEAD) when it does not.
+change back (pointer preimage restored, `.working/` restored from HEAD) when it does not. Recovery
+fails closed on a missing journal (spec 4.2/5.4): a journal frame that is unreadable, incomplete or
+gone refuses rather than guessing, and a staged, uncommitted pointer change that no journal run
+accounts for refuses the next operation outright.
 
-Spec sentences this module relies on that the published specification does not state yet (their
-amendment is drafted separately): the relocation journal kind with the `reloc-` run-id grammar; the
-relocation journal, the destination repository, the pointer files and the temporary clone-back as
-named exceptions to the no-state-outside-`.working/` rule (spec 4.2); the relocation worklog entry
-as a separate journaled append at the destination after verification, outside the counters ban on
-the transfer itself (spec 8.2); the append-only renewal posture for adoption bundles (the bundle
-bytes relocate unchanged; no plan or inventory is rewritten); the committed pointer staying
-publishable as a relative `dir:` path after a local-only relocation (spec 4.3/5.8); rewritten commit
-ids with lost signatures as a disclosed residual of history-preserving extraction (spec 17); and the
-review-branch landing for a relocation into the product repository.
+The relocation contract is the published one. The run-id grammar is _opf_store's journal-only
+`relocation` kind with its reserved `reloc-` prefix (spec 4.2); only the journal HOME is this
+module's own, because the spec puts the migrate journal in the git common directory (spec 5.4),
+beside the operation-lock substrate, where it survives the removal of an in-repo source tree, and
+the store constructors can name only the in-tree `journals/relocation/` home. The journal, the
+destination repository, the pointer files and the temporary clone-back are the only state written
+outside `.working/` (spec 4.2). The worklog entry is a separate journaled append at the destination
+after verification, outside the counters ban on the transfer itself (spec 8.2). The committed
+pointer stays publishable as a relative `dir:` path, refused before anything is written otherwise
+(spec 4.3/5.4). Rewritten commit ids with lost signatures are a disclosed residual (spec 17). A
+relocation into the product repository lands through a review branch (spec 5.4). `github:` and
+`gitlab:` targets refuse as unregistered providers until a reviewed registration lands (spec 5.6).
+A destination outside the product root refuses while any admitted adoption run whose retirement is
+unrecorded holds a default Move row (spec 14.2). Where the adoption home exists, the relocation
+must pass the completion check 5 probe at the destination before the old tree is removed
+(spec 14.1/14.2): this build supplies no wiring prober and the shipped enforcement pack carries no
+live probe adapter, so that probe cannot pass here and a store whose adoption home exists refuses
+fail-closed. The spec 14.1 append-only renewal record is owed only by a relocation that completes
+over such a store, so no relocation this build performs owes one; its writer belongs to the build
+that can pass the probe, whose doctor must first admit the renewal file that today's evidence
+enumeration reads as off-inventory. The bundle bytes themselves relocate unchanged: the clone-back
+requires the whole `imported/` tree identical at HEAD, so `plan.toml`, the approval and the sealed
+inventories stay byte-identical (spec 14.1).
 """
 
 import hashlib
@@ -77,11 +93,20 @@ EXIT_OK = 0
 EXIT_MALFORMED = 2
 
 _GIT_TIMEOUT_S = 120
-# The relocation run-id grammar: the shared homes run shape under the reserved `reloc` prefix.
-_RUN_ID_RE = re.compile(r"reloc-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\Z")
+# The journal-only store kind this verb runs as: its reserved `reloc-` prefix and run-id grammar
+# come from _opf_store's journal vocabulary (spec 4.2), never from a private copy.
+_RELOCATION_KIND = "relocation"
 # The relocation journal home, in the PRODUCT repository's git common directory (never inside the
-# tree being relocated), beside the operation-lock substrate.
+# tree being relocated), beside the operation-lock substrate (spec 5.4). The store constructors
+# name only the in-tree `journals/relocation/` home, which cannot express this directory, so the
+# home is the one piece of the journal addressing that is this module's own.
 JOURNAL_DIRNAME = "opf-reloc"
+# The sealed retirement inventory of an adoption run's bundle: its presence is how a retirement is
+# recorded (spec 14.1/14.2), so its absence is the unrecorded state the stranded-move refusal reads.
+_RETIREMENT_INVENTORY_NAME = "inventory-retirement.toml"
+# The host-convenience providers the reference tooling does not register: until a reviewed provider
+# registration lands, a github: or gitlab: target refuses as an unregistered provider (spec 5.6).
+_UNREGISTERED_PROVIDERS = ("github", "gitlab")
 # The ordered phase frames one run writes; reconciliation reads presence, never mtimes.
 _FRAMES = ("intent", "extracted", "transferred", "verified", "product-written", "recorded",
            "complete", "reconciled")
@@ -251,6 +276,11 @@ def _require_local_directory_target(value):
         target = _opf_store.classify_target(value)
     except _opf_store.StoreError as exc:
         raise MigrateError("the target {!r} is malformed: {}".format(value, exc))
+    if target.kind in _UNREGISTERED_PROVIDERS:
+        raise MigrateError("the target {!r} names the {} provider, which this tooling does not "
+                           "register: until a reviewed provider registration lands, a {}: target "
+                           "refuses as an unregistered provider (spec 5.6)".format(
+                               value, target.kind, target.kind))
     if not target.local:
         raise MigrateError("the target {!r} names a remote {} target; this build relocates to local "
                            "dir: targets only, and an unregistered remote provider is unavailable "
@@ -353,21 +383,46 @@ def _refuse_open_runs(resolution):
         _opf_store._close_fd_exc_safe(root_fd)
 
 
-def _refuse_stranded_moves(resolution, dest_outside_product):
-    """A non-occupying move disposition executes only after its plan-bound green completion check, and
-    the default move destination refuses a store outside the product root (spec 14.2). Refuse a
-    relocation that would strand such a pending move: a persisted plan whose non-occupying move source
-    is still live in the tree."""
+def _is_default_move(plan, row):
+    """Whether a plan move row takes the spec 14.2 DEFAULT destination,
+    `.working/archive/moved/<source-path>`. A non-occupying move row records the destination as its
+    preservation; an occupying one records it on the plan's move-file op. A move row whose
+    destination cannot be read is graded default, fail-closed: an unprovable named destination
+    never excuses the refusal."""
+    path = row.get("path")
+    if not isinstance(path, str):
+        return True
+    try:
+        default = _opf_store.moved_dest(path)
+    except ValueError:
+        return True
+    if row.get("occupying") is False:
+        return row.get("preservation") == default
+    for op in plan.get("ops", ()):
+        if isinstance(op, dict) and op.get("op") == "move-file" and op.get("source") == path:
+            return op.get("destination") == default
+    return True
+
+
+def _refuse_stranded_moves(store_root, dest_outside_product):
+    """Refuse a destination outside the product root while any admitted adoption run whose retirement
+    is unrecorded holds a default Move row (spec 14.2): the default Move destination refuses a store
+    resolved outside the product root until a multi-root coordinator exists, so relocating the store
+    out while such a row is pending would strand it. A retirement is recorded only by the sealed
+    retirement inventory in the run's bundle, so a bundle holding a persisted plan with no such
+    inventory is the unrecorded state, whether or not the row's source file is still live."""
     import tomllib
     if not dest_outside_product:
         return
-    store_root = Path(resolution.store_root)
+    store_root = Path(store_root)
     bundles = store_root / _opf_store.IMPORTED_REL / "adoption"
     if not bundles.is_dir():
         return
     for run in sorted(os.listdir(str(bundles))):
         plan_path = bundles / run / "plan.toml"
         if not plan_path.is_file():
+            continue
+        if (bundles / run / _RETIREMENT_INVENTORY_NAME).is_file():
             continue
         try:
             with open(str(plan_path), "rb") as fh:
@@ -376,15 +431,14 @@ def _refuse_stranded_moves(resolution, dest_outside_product):
             raise MigrateError("the persisted adoption plan {} cannot be read ({}); fail-closed".format(
                 plan_path, exc))
         for row in plan.get("sources", ()):
-            if not isinstance(row, dict):
+            if not isinstance(row, dict) or row.get("disposition") != "move":
                 continue
-            if row.get("disposition") == "move" and row.get("occupying") is False:
-                path = row.get("path")
-                if isinstance(path, str) and (store_root / path).exists():
-                    raise MigrateError("the adoption plan of run {} holds a pending non-occupying move "
-                                       "of {!r}; its default destination refuses a store outside the "
-                                       "product root (spec 14.2), so this relocation would strand it".format(
-                                           run, path))
+            if _is_default_move(plan, row):
+                raise MigrateError("the adoption run {} holds a default Move row ({!r}) and its "
+                                   "retirement is unrecorded (no {} in its bundle); the default move "
+                                   "destination refuses a store outside the product root (spec 14.2), "
+                                   "so this relocation would strand it".format(
+                                       run, row.get("path"), _RETIREMENT_INVENTORY_NAME))
 
 
 # --- destination validation -----------------------------------------------------------------------------
@@ -454,9 +508,24 @@ def _journal_home(product_root):
     return _git_common_dir(product_root) / JOURNAL_DIRNAME
 
 
+def _is_run_id(name):
+    """Whether name is a relocation run id, judged by the store's own journal-run constructor for
+    the `relocation` kind (spec 4.2): the reserved `reloc-` prefix with the shared timestamp/hash
+    shape, and nothing else."""
+    try:
+        _opf_store._home_run(_RELOCATION_KIND, name, _opf_store.JOURNAL_KINDS)
+    except ValueError:
+        return False
+    return True
+
+
 def _new_run_id():
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    return "reloc-{}-{}".format(stamp, secrets.token_hex(8))
+    run_id = "{}-{}-{}".format(_opf_store._HOME_RUN_PREFIXES[_RELOCATION_KIND], stamp,
+                               secrets.token_hex(8))
+    # The constructor is the one grammar authority: a generated id it refuses is a harness error.
+    _opf_store._home_run(_RELOCATION_KIND, run_id, _opf_store.JOURNAL_KINDS)
+    return run_id
 
 
 def _emit_frame_toml(mapping):
@@ -707,6 +776,44 @@ def _verify_adoption_archive(store_root):
     return checked
 
 
+def _require_wiring_probe(root):
+    """Spec 14.2: where the adoption home exists, the relocation must pass the completion check 5
+    probe (spec 14.1) at the destination before the old tree is removed, and a destination that
+    fails that probe refuses the relocation. This build supplies no wiring prober and the shipped
+    enforcement pack carries no live probe adapter, so check 5 cannot grade VALID here: a store
+    whose adoption home exists refuses fail-closed, naming the first run, until a build that can
+    run the probes lands. That refusal also fail-closes the spec 14.1 renewal obligation: no
+    relocation this build completes carries an adoption bundle, so none owes the append-only
+    renewal record. Returns the number of runs probed (0 where no adoption home exists)."""
+    root = Path(root)
+    runs = set()
+    for rel in ("{}/adoption".format(_opf_store.IMPORTED_REL),
+                "{}/adoption".format(_opf_store.ARCHIVE_REL)):
+        home = root / rel
+        if not home.is_dir():
+            continue
+        try:
+            runs.update(os.listdir(str(home)))
+        except OSError as exc:
+            raise MigrateError("the adoption home {} cannot be listed ({}); fail-closed".format(
+                home, exc))
+    if not runs:
+        return 0
+    import _opf_adopt_complete
+    for run in sorted(runs):
+        results = _opf_adopt_complete.evaluate(root, run, prober=None)
+        wiring = results.get(_opf_adopt_complete.WIRING)
+        detail = "no verdict"
+        if wiring is not None and wiring.findings:
+            detail = wiring.findings[0]
+        if wiring is None or wiring.status != _opf_adopt_complete.VALID:
+            raise MigrateError("the adoption home exists and the completion check 5 probe did not "
+                               "pass at the destination for run {} ({}); a destination that fails "
+                               "that probe refuses the relocation, before the old tree is removed "
+                               "(spec 14.1/14.2)".format(run, detail))
+    return len(runs)
+
+
 def _blob_bytes(repo, spec):
     rc, out, _err = _run_git(repo, ["cat-file", "blob", spec])
     if rc != 0:
@@ -816,7 +923,12 @@ def _verify_clone_back(ctx):
             if code != EXIT_OK:
                 raise MigrateError("the review branch store is not doctor-VALID (status {}); "
                                    "refused".format(result.status))
-        return {"archived_copies": archived, "working_tree": src_working or ""}
+        # The spec 14.1/14.2 completion check 5 probe runs at the DESTINATION, before anything is
+        # staged or removed; a review-branch destination is probed through the clone-back, its one
+        # checked-out image.
+        probed = _require_wiring_probe(repo if ctx["direction"] == "into-product" else ctx["dest"])
+        return {"archived_copies": archived, "working_tree": src_working or "",
+                "probed_runs": probed}
     finally:
         shutil.rmtree(str(clone_dir), ignore_errors=True)
 
@@ -920,12 +1032,57 @@ def _pending_runs(jdir):
     pending = []
     for name in sorted(os.listdir(str(jdir))):
         run_dir = Path(jdir) / name
-        if not run_dir.is_dir() or _RUN_ID_RE.fullmatch(name) is None:
+        if not run_dir.is_dir() or not _is_run_id(name):
             continue
         if (run_dir / "complete.toml").is_file() or (run_dir / "reconciled.toml").is_file():
             continue
         pending.append(run_dir)
     return pending
+
+
+def _intent_field(frame, key, run_dir):
+    """A required field of a journaled frame; a frame that lost one is a damaged journal, and
+    recovery fails closed on it rather than guessing (spec 4.2/5.4)."""
+    if not isinstance(frame, dict) or key not in frame:
+        raise MigrateError("the relocation journal run {} is missing {!r} in its journaled frame; "
+                           "recovery fails closed on a missing or damaged journal "
+                           "(spec 4.2/5.4)".format(Path(run_dir).name, key))
+    return frame[key]
+
+
+def _require_journal_for_staged_change(product_root, jdir):
+    """Spec 5.4: requested recovery of an interrupted relocation fails closed on a missing journal.
+    The staged, uncommitted committed-pointer change is the durable footprint a relocation leaves at
+    or after its verified phase, so a working-tree pointer that differs from HEAD with no relocation
+    journal run accounting for those bytes means the journal that would drive recovery is gone, and
+    this run refuses rather than operate over state it cannot reconcile."""
+    path = Path(product_root) / _opf_store.POINTER_REL
+    working = None
+    if os.path.lexists(str(path)):
+        try:
+            with open(str(path), "rb") as fh:
+                working = fh.read(_opf_store.MAX_STORE_READ_BYTES + 1)
+        except OSError as exc:
+            raise MigrateError("the committed pointer {} cannot be read ({}); fail-closed".format(
+                path, exc))
+    rc, out, _err = _run_git(product_root, ["cat-file", "blob",
+                                            "HEAD:{}".format(_opf_store.POINTER_REL)])
+    committed = out if rc == 0 else None
+    if working == committed:
+        return
+    staged_hex = "absent" if working is None else working.hex()
+    jdir = Path(jdir)
+    if jdir.is_dir():
+        for name in sorted(os.listdir(str(jdir))):
+            run_dir = jdir / name
+            if not run_dir.is_dir():
+                continue
+            intent = _read_frame(run_dir, "intent")
+            if intent is not None and intent.get("pointer_post_hex") == staged_hex:
+                return
+    raise MigrateError("the committed pointer at {} differs from HEAD with no relocation journal "
+                       "run accounting for it; recovery of an interrupted relocation fails closed "
+                       "on a missing journal (spec 4.2/5.4)".format(product_root))
 
 
 def _reconcile_run(run_dir, product_root):
@@ -953,29 +1110,41 @@ def _reconcile_run(run_dir, product_root):
                                  "inert and lands or is deleted through review"})
         return ("{}: the prepared review branch is left for review; no store or pointer was "
                 "touched".format(run_dir.name)), None
-    store_root = Path(intent["store_root"])
+    store_root = Path(_intent_field(intent, "store_root", run_dir))
     head_now = _git_out(store_root, ["rev-parse", "HEAD"])
-    pointer_post = bytes.fromhex(intent["pointer_post_hex"])
-    pointer_pre = None if intent["pointer_pre_hex"] == "absent" \
-        else bytes.fromhex(intent["pointer_pre_hex"])
-    remove_working = bool(intent["remove_working"])
-    if head_now != intent["source_head"]:
+    try:
+        pointer_post = bytes.fromhex(_intent_field(intent, "pointer_post_hex", run_dir))
+        pre_hex = _intent_field(intent, "pointer_pre_hex", run_dir)
+        pointer_pre = None if pre_hex == "absent" else bytes.fromhex(pre_hex)
+    except ValueError:
+        raise MigrateError("the relocation journal run {} holds an unreadable pointer image; "
+                           "recovery fails closed on a damaged journal (spec 4.2/5.4)".format(
+                               run_dir.name))
+    remove_working = bool(_intent_field(intent, "remove_working", run_dir))
+    if head_now != _intent_field(intent, "source_head", run_dir):
         _rollback_product_change(product_root, pointer_pre, remove_working)
         _write_frame(run_dir, "reconciled",
                      {"outcome": "rolled back: the source changed after extraction"})
         return ("{}: the source HEAD moved after extraction; the staged product change was rolled "
                 "back (pointer restored, {} restored from HEAD) and the relocation is refused".format(
                     run_dir.name, _opf_store.WORKING_DIRNAME)), None
+    # A verified run was extracted first, so a missing extracted frame is a damaged journal; refuse
+    # BEFORE re-staging anything (spec 4.2/5.4).
+    extracted = _read_frame(run_dir, "extracted")
+    if extracted is None:
+        raise MigrateError("the relocation journal run {} reached its verified frame with no "
+                           "extracted frame; recovery fails closed on a missing journal frame "
+                           "(spec 4.2/5.4)".format(run_dir.name))
     # Complete forward: re-establish the staged product change idempotently under the caller's lease.
     _write_pointer(product_root, pointer_post)
     if remove_working and os.path.lexists(str(Path(product_root) / _opf_store.WORKING_DIRNAME)):
         _remove_working_tree(product_root)
-    extracted = _read_frame(run_dir, "extracted") or {}
 
     def continuation():
         if _read_frame(run_dir, "recorded") is None:
-            _record_relocation(product_root, intent["old_desc"], intent["new_desc"],
-                               extracted.get("mapping_digest", "?"))
+            _record_relocation(product_root, _intent_field(intent, "old_desc", run_dir),
+                               _intent_field(intent, "new_desc", run_dir),
+                               _intent_field(extracted, "mapping_digest", run_dir))
             _write_frame(run_dir, "recorded", {"forward": True})
         res = _opf_store.resolve_store(Path(product_root))
         if res.status != _opf_store.RESOLVED:
@@ -1056,6 +1225,7 @@ def _migrate(rest):
             print("opf migrate: reconciled: {}".format(line), file=sys.stderr)
         raise MigrateError("an interrupted relocation was reconciled first; re-run the "
                            "operation (spec 5.7)")
+    _require_journal_for_staged_change(product_root, jdir)
     target = _require_local_directory_target(store_value)
     dest = Path(os.path.abspath(_opf_store._target_store_root(target, product_root)))
     if dest == store_root:
@@ -1082,7 +1252,7 @@ def _migrate(rest):
         if direction == "into-product":
             _require_clean_source(product_root)
         _refuse_open_runs(res)
-        _refuse_stranded_moves(res, dest != product_root)
+        _refuse_stranded_moves(store_root, dest != product_root)
         _require_valid_source(res)
         if direction == "into-product":
             if os.path.lexists(str(product_root / _opf_store.WORKING_DIRNAME)):
@@ -1256,6 +1426,7 @@ def cli(rest):
 def self_test():
     """Isolate fixture configuration (HOME, XDG, system git config) and restore the caller even on
     failure, the house self-test envelope."""
+    _child_status_refusal_exit("_opf_migrate.py")
     import tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-migrate-selftest-home-") as home:
@@ -1519,13 +1690,22 @@ def self_test_isolated():
         # --- remote and bare-path targets refuse, nothing written (the local-directory provider only) ---
         p_ref = _st_build_store(base, "p-ref")
         before = _st_snapshot(p_ref)
-        for value in ("git:git@git.example.invalid:acme/ops.git", "github:acme/ops",
-                      "gitlab:acme/ops", "https://git.example.invalid/acme/ops.git",
+        for value in ("git:git@git.example.invalid:acme/ops.git",
+                      "https://git.example.invalid/acme/ops.git",
                       "git@git.example.invalid:acme/ops.git"):
             rc, _out, err = _st_run(["--store", value, "--root", str(p_ref)])
             check("a remote target {!r} refuses".format(value),
                   rc == EXIT_MALFORMED and "remote" in err and "dir: targets only" in err,
                   err.strip()[:120])
+        for value in ("github:acme/ops", "gitlab:acme/ops"):
+            rc, _out, err = _st_run(["--store", value, "--root", str(p_ref)])
+            check("the host target {!r} refuses as an unregistered provider".format(value),
+                  rc == EXIT_MALFORMED and "unregistered provider" in err, err.strip()[:120])
+        with patch.object(this, "_UNREGISTERED_PROVIDERS", ()):
+            rc_flip, _out, err_flip = _st_run(["--store", "github:acme/ops", "--root", str(p_ref)])
+        check("emptying the unregistered-provider roster turns the spec 5.6 refusal red",
+              rc_flip == EXIT_MALFORMED and "unregistered provider" not in err_flip,
+              err_flip.strip()[:120])
         rc, _out, err = _st_run(["--store", "/abs/elsewhere", "--root", str(p_ref)])
         check("a bare path target refuses toward dir:",
               rc == EXIT_MALFORMED and "dir:<path>" in err, err.strip()[:120])
@@ -1533,6 +1713,34 @@ def self_test_isolated():
         check("relocating an in-repo store onto itself refuses",
               rc == EXIT_MALFORMED and "the source" in err, err.strip()[:120])
         check("the refused targets wrote nothing", _st_snapshot(p_ref) == before)
+
+        # --- the relocation run-id grammar is the store's own journal vocabulary (spec 4.2) -------------
+        rid = _new_run_id()
+        check("a fresh run id satisfies the store's relocation grammar", _is_run_id(rid), rid)
+        for bad in ("record-20260101T000000Z-0123456789abcdef", "reloc-20260101T000000Z-XYZ",
+                    "RELOC-20260101T000000Z-0123456789abcdef",
+                    "reloc-20260101T000000Z-0123456789abcdef/x"):
+            check("the store grammar refuses the run id {!r}".format(bad), not _is_run_id(bad))
+        with patch.object(_opf_store, "JOURNAL_KINDS", _opf_store.STAGING_KINDS + ("record",)):
+            check("dropping the relocation kind from the store vocabulary turns the grammar red",
+                  not _is_run_id(rid))
+        foreign = _git_common_dir(p_ref) / JOURNAL_DIRNAME / "record-20260101T000000Z-0123456789abcdef"
+        foreign.mkdir(parents=True)
+        check("a foreign-kind name in the journal home is never a pending relocation run",
+              _pending_runs(_git_common_dir(p_ref) / JOURNAL_DIRNAME) == [])
+        shutil.rmtree(str(_git_common_dir(p_ref) / JOURNAL_DIRNAME))
+
+        # --- a target no publishable committed pointer can express refuses before anything is written ---
+        rc, _out, err = _st_run(["--store", "dir:../bad?dest", "--root", str(p_ref)])
+        check("an unpublishable pointer spelling refuses before anything is written",
+              rc == EXIT_MALFORMED and "publishable" in err
+              and not (base / "bad?dest").exists()
+              and not (_git_common_dir(p_ref) / JOURNAL_DIRNAME).exists(), err.strip()[:160])
+        p_bad = _st_build_store(base, "p-bad-pointer")
+        with patch.object(this, "_POINTER_SAFE_RE", re.compile(r"[^\0]+\Z")):
+            rc_flip, _out, _err = _st_run(["--store", "dir:../bad?dest", "--root", str(p_bad)])
+        check("widening the pointer alphabet turns the publishable-pointer refusal red",
+              rc_flip == EXIT_OK, "rc {}".format(rc_flip))
 
         # --- admission refuses before the lease (spec 9.2) ----------------------------------------------
         import _opf_emit
@@ -1813,8 +2021,8 @@ def self_test_isolated():
               rc == EXIT_MALFORMED and "journal" in err, err.strip()[:160])
         shutil.rmtree(str(p2 / _opf_store.JOURNALS_REL))
 
-        # a pending non-occupying move refuses a destination outside the product root (its own
-        # fixture: the persisted plan and the still-live source are committed store content)
+        # a default Move row with an unrecorded retirement refuses a destination outside the product
+        # root (its own fixture: the persisted plan and the live source are committed store content)
         import json
         p2c = _st_build_store(base, "p2c")
         plan_dir = p2c / _opf_store.IMPORTED_REL / "adoption" / "adopt-20260101T000000Z-0123456789abcdef"
@@ -1830,6 +2038,56 @@ def self_test_isolated():
         rc, _out, err = _st_run(["--store", "dir:../p2c-dest", "--root", str(p2c)])
         check("a pending default move refuses an outside destination",
               rc == EXIT_MALFORMED and "strand" in err, err.strip()[:160])
+        # a recorded retirement (the sealed retirement inventory in the bundle) ends the refusal
+        (plan_dir / _RETIREMENT_INVENTORY_NAME).write_text("sealed = true\n", encoding="utf-8")
+        try:
+            _refuse_stranded_moves(p2c, True)
+            recorded_ends = True
+        except MigrateError:
+            recorded_ends = False
+        check("a recorded retirement ends the stranded-move refusal", recorded_ends)
+        os.unlink(str(plan_dir / _RETIREMENT_INVENTORY_NAME))
+        # the refusal reads the recorded state, not the live file: a source gone out of band with
+        # its retirement still unrecorded refuses the same way
+        os.unlink(str(p2c / "legacy-notes.md"))
+        try:
+            _refuse_stranded_moves(p2c, True)
+            gone_refuses = False
+        except MigrateError as exc:
+            gone_refuses = "strand" in str(exc)
+        check("an unrecorded retirement refuses even after the source file is gone", gone_refuses)
+        check("an inside-product destination never trips the stranded-move refusal",
+              _refuse_stranded_moves(p2c, False) is None)
+        with patch.object(this, "_refuse_stranded_moves",
+                          lambda store_root, dest_outside_product: None):
+            rc_flip, _out, err_flip = _st_run(["--store", "dir:../p2c-dest", "--root", str(p2c)])
+        check("dropping the stranded-move refusal turns its vector red", "strand" not in err_flip,
+              err_flip.strip()[:160])
+        # an explicitly named destination is not the default row the refusal covers, for a
+        # non-occupying row (its preservation IS the destination) and for an occupying row (the
+        # plan's move-file op names it); a default occupying row still refuses through its op
+        for name, body, wants_refusal in (
+                ("mv-explicit", "[[sources]]\npath = \"a.md\"\ndisposition = \"move\"\n"
+                                "occupying = false\npreservation = \"docs/a.md\"\n", False),
+                ("mv-occ-named", "[[sources]]\npath = \"b.md\"\ndisposition = \"move\"\n"
+                                 "occupying = true\n[[ops]]\nop = \"move-file\"\nsource = \"b.md\"\n"
+                                 "destination = \"docs/b.md\"\n", False),
+                ("mv-occ-default", "[[sources]]\npath = \"c.md\"\ndisposition = \"move\"\n"
+                                   "occupying = true\n[[ops]]\nop = \"move-file\"\nsource = \"c.md\"\n"
+                                   "destination = \".working/archive/moved/c.md\"\n", True),
+                ("mv-occ-unreadable", "[[sources]]\npath = \"d.md\"\ndisposition = \"move\"\n"
+                                      "occupying = true\n", True)):
+            mv_root = base / name
+            mv_dir = mv_root / _opf_store.IMPORTED_REL / "adoption" / "adopt-20260101T000000Z-0123456789abcdef"
+            mv_dir.mkdir(parents=True)
+            (mv_dir / "plan.toml").write_text(body, encoding="utf-8")
+            try:
+                _refuse_stranded_moves(mv_root, True)
+                refused = False
+            except MigrateError:
+                refused = True
+            check("the {} move row {} the outside-destination refusal".format(
+                name, "trips" if wants_refusal else "does not trip"), refused == wants_refusal)
 
         # --- the extraction and verification mutants over fresh fixtures --------------------------------
         # flattening the replay to one commit is caught by the independent commit-count reconcile
@@ -1936,7 +2194,15 @@ def self_test_isolated():
             return real_verify_archive(root)
 
         p6 = _st_build_store(base, "p6")
-        with patch.object(this, "_verify_adoption_archive", recording):
+        probe_calls = []
+        real_probe = _require_wiring_probe
+
+        def recording_probe(root):
+            probe_calls.append(Path(root))
+            return real_probe(root)
+
+        with patch.object(this, "_verify_adoption_archive", recording), \
+                patch.object(this, "_require_wiring_probe", recording_probe):
             rc, _out, err = _st_run(["--store", "dir:../p6-dest", "--root", str(p6)])
         check("the archive re-verification runs on the clone-back", rc == EXIT_OK and len(calls) >= 1,
               (err or "rc {}".format(rc))[:160])
@@ -1947,6 +2213,50 @@ def self_test_isolated():
             except MigrateError:
                 refused = True
         check("dropping the archive re-verification turns the corrupt-copy vector red", not refused)
+
+        # --- the completion check 5 probe at the destination (spec 14.1/14.2) ---------------------------
+        check("the completion probe gate runs at the destination on the verification reconcile",
+              probe_calls == [base / "p6-dest"], repr(probe_calls))
+        check("no adoption home needs no probe", _require_wiring_probe(base / "p6-dest") == 0)
+        probed = base / "probe-bundle"
+        arun2 = "adopt-20260202T000000Z-fedcba9876543210"
+        probed_dir = probed / _opf_store.IMPORTED_REL / "adoption" / arun2
+        probed_dir.mkdir(parents=True)
+        (probed_dir / "plan.toml").write_text("[[sources]]\npath = \"x.md\"\n", encoding="utf-8")
+        try:
+            _require_wiring_probe(probed)
+            probe_refuses = False
+        except MigrateError as exc:
+            probe_refuses = "completion check 5" in str(exc) and arun2 in str(exc)
+        check("an adoption bundle refuses at the completion check 5 probe, naming the run",
+              probe_refuses)
+        arch_only = base / "probe-archive-only"
+        copy_dir = arch_only / _opf_store.ARCHIVE_REL / "adoption" / arun2
+        copy_dir.mkdir(parents=True)
+        (copy_dir / "notes.txt").write_bytes(b"frozen\n")
+        try:
+            _require_wiring_probe(arch_only)
+            arch_refuses = False
+        except MigrateError as exc:
+            arch_refuses = "completion check 5" in str(exc)
+        check("an adoption archive with no bundle refuses at the probe the same way", arch_refuses)
+        with patch.object(this, "_require_wiring_probe", lambda root: 0):
+            check("dropping the probe gate turns the adoption-home refusal red",
+                  _require_wiring_probe(probed) == 0)
+        # a probe refusal on the live path refuses the relocation with nothing durable staged, and
+        # before any old tree is removed
+
+        def raising_probe(root):
+            raise MigrateError("the adoption home exists and the completion check 5 probe did not "
+                               "pass at the destination (spec 14.1/14.2)")
+
+        p6b = _st_build_store(base, "p6b")
+        with patch.object(this, "_require_wiring_probe", raising_probe):
+            rc, _out, err = _st_run(["--store", "dir:../p6b-dest", "--root", str(p6b)])
+        check("a probe refusal on the live path refuses before anything durable is staged",
+              rc == EXIT_MALFORMED and "completion check 5" in err
+              and not (p6b / _opf_store.POINTER_REL).exists()
+              and (p6b / _opf_store.WORKING_DIRNAME).is_dir(), err.strip()[:200])
 
         # --- interruption, reconcile-first, and forward completion --------------------------------------
         def kill_at(phase_name):
@@ -2032,6 +2342,91 @@ def self_test_isolated():
               rc_flip == EXIT_MALFORMED and "reconciled" not in err_flip
               and len(p10_runs) == 1 and not (p10_runs[0] / "complete.toml").is_file()
               and not (p10_runs[0] / "recorded.toml").is_file(), err_flip.strip()[:200])
+
+        # --- recovery fails closed on a missing or damaged journal (spec 4.2/5.4) ------------------------
+        p11 = _st_build_store(base, "p11")
+        rc, _out, err = _st_run(["--store", "dir:../p11-dest", "--root", str(p11)])
+        check("the p11 relocation succeeds", rc == EXIT_OK, err.strip()[:200])
+        _st_git(base / "p11-dest", "add", "--", ".working/toml")
+        _st_git(base / "p11-dest", "commit", "-q", "-m", "land the relocation record")
+        shutil.rmtree(str(_git_common_dir(p11) / JOURNAL_DIRNAME))
+        rc, _out, err = _st_run(["--store", "dir:../p11-dest2", "--root", str(p11)])
+        check("a staged product change with no journal refuses fail-closed",
+              rc == EXIT_MALFORMED and "missing journal" in err, err.strip()[:200])
+        check("the missing-journal refusal writes no second destination",
+              not (base / "p11-dest2").exists())
+        with patch.object(this, "_require_journal_for_staged_change",
+                          lambda product_root, jdir: None):
+            rc_flip, _out, _err = _st_run(["--store", "dir:../p11-dest2", "--root", str(p11)])
+        check("dropping the missing-journal refusal turns its vector red", rc_flip == EXIT_OK,
+              "rc {}".format(rc_flip))
+
+        p14 = _st_build_store(base, "p14")
+        p14_journal = _git_common_dir(p14) / JOURNAL_DIRNAME
+        jrun = p14_journal / _new_run_id()
+        _write_frame(jrun, "intent", {"direction": "out-of-repo"})
+        _write_frame(jrun, "verified", {})
+        rc, _out, err = _st_run(["--store", "dir:../p14-dest", "--root", str(p14)])
+        check("an intent frame that lost its fields fails recovery closed, never a guess",
+              rc == EXIT_MALFORMED and "fails closed" in err, err.strip()[:300])
+        shutil.rmtree(str(jrun))
+        jrun2 = p14_journal / _new_run_id()
+        head14 = _st_git(p14, "rev-parse", "HEAD")
+        _write_frame(jrun2, "intent",
+                     {"direction": "out-of-repo", "store_root": str(p14), "source_head": head14,
+                      "remove_working": False, "pointer_pre_hex": "absent",
+                      "pointer_post_hex": _pointer_bytes("dir:../p14-dest").hex(),
+                      "old_desc": "old", "new_desc": "new"})
+        _write_frame(jrun2, "verified", {})
+        rc, _out, err = _st_run(["--store", "dir:../p14-dest", "--root", str(p14)])
+        check("a verified run without its extracted frame fails recovery closed before any staging",
+              rc == EXIT_MALFORMED and "fails closed" in err
+              and not (p14 / _opf_store.POINTER_REL).exists(), err.strip()[:300])
+        shutil.rmtree(str(jrun2))
+        jrun3 = p14_journal / _new_run_id()
+        _write_frame(jrun3, "intent", {"direction": "out-of-repo"})
+        _write_frame(jrun3, "verified", {})
+        flip_red = False
+        with patch.object(this, "_intent_field", lambda frame, key, run_dir: frame[key]):
+            try:
+                rc_flip, _out, _err = _st_run(["--store", "dir:../p14-dest", "--root", str(p14)])
+            except Exception:  # noqa: BLE001  the raw access escapes as an uncaught exception
+                flip_red = True
+        check("raw frame access turns the damaged-journal vector red", flip_red)
+        shutil.rmtree(str(p14_journal))
+
+        # --- a global-scope url rewrite under the one shared git environment ----------------------------
+        # The refusal is read under the SAME scrubbed environment every transfer git call runs with
+        # (_opf_observe._scrubbed_env neutralizes global and system config), so a global rewrite is
+        # neither honoured by the transfer nor surfaced by the refusal.
+        p15 = _st_build_store(base, "p15")
+        redirect_global = base / "redirect-global"
+        redirect_global.mkdir()
+        gconfig = Path(os.environ["HOME"]) / ".gitconfig"
+        gconfig.write_text("[url \"{}\"]\n\tinsteadOf = {}\n".format(redirect_global, base),
+                           encoding="utf-8")
+        rc, _out, err = _st_run(["--store", "dir:../p15-dest", "--root", str(p15)])
+        check("a global-scope rewrite is neither honoured by the transfer nor a refusal",
+              rc == EXIT_OK and os.listdir(str(redirect_global)) == []
+              and (base / "p15-dest" / _opf_store.WORKING_DIRNAME).is_dir(),
+              (err or "rc {}".format(rc)).strip()[:200])
+        # an environment that DID honour global configuration surfaces the same rewrite to the
+        # refusal first, because the enumeration runs under the transfer's own environment
+        _st_git(base / "p15-dest", "add", "--", ".working/toml")
+        _st_git(base / "p15-dest", "commit", "-q", "-m", "land the relocation record")
+        real_env = _opf_observe._scrubbed_env
+
+        def honouring_env():
+            env = real_env()
+            env.pop("GIT_CONFIG_GLOBAL", None)
+            return env
+
+        with patch.object(_opf_observe, "_scrubbed_env", honouring_env):
+            rc_flip, _out, err_flip = _st_run(["--store", "dir:../p15-dest2", "--root", str(p15)])
+        check("an environment honouring global config surfaces the rewrite to the refusal, under "
+              "the one shared runner", rc_flip == EXIT_MALFORMED
+              and "rewrites the destination" in err_flip, err_flip.strip()[:200])
+        os.unlink(str(gconfig))
     except Exception as exc:  # noqa: BLE001  a fixture that cannot be built or read is a harness
         # error (cannot evaluate), never a pass
         import traceback
@@ -2047,15 +2442,81 @@ def self_test_isolated():
         for f in failures:
             print("  - " + f, file=sys.stderr)
         return 1
-    print("opf-migrate self-test: PASS ({} checks: grammar, admission, in-repo to local, local to "
-          "local, the review-branch return, destination and lease refusals, extraction and "
-          "verification mutants, the adoption-archive re-verification, and interruption "
-          "reconciliation)".format(checked[0]))
+    print("opf-migrate self-test: PASS ({} checks: grammar, the store run-id vocabulary, admission, "
+          "the unregistered providers, the publishable pointer, in-repo to local, local to local, "
+          "the review-branch return, destination and lease refusals, the stranded default move, "
+          "extraction and verification mutants, the adoption-archive re-verification, the "
+          "completion check 5 probe, interruption reconciliation, the fail-closed journal "
+          "recovery, and the shared transfer environment)".format(checked[0]))
     return EXIT_OK
+
+
+def main():
+    if sys.argv[1:] in (["--self-test"], ["--selftest"]):
+        return self_test()
+    print("usage: _opf_migrate.py --self-test (the verb is `opf migrate`)", file=sys.stderr)
+    return EXIT_MALFORMED
+
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This module launches git children
+# and reads their exit statuses throughout, and its self-test replays whole stores through them, so
+# under an ignored SIGCHLD a failing child would read as a pass. The guard runs as the first
+# statement of self_test(), and at the entry line before main(); the entry line comes after the
+# --self-test statement that opf.py requires first in the __main__ block. An import of this module
+# runs nothing.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
-    print("usage: _opf_migrate.py --self-test (the verb is `opf migrate`)", file=sys.stderr)
-    sys.exit(EXIT_MALFORMED)
+    sys.exit(_child_status_refusal_exit("_opf_migrate.py") or main())

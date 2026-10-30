@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c5901891a3828ba4b734aaf83bc632c2d91973f79bfed670c607c4a35279b923"
+tree-sha256 = "f7c3c198049a93e0bf3084a0faabf69872a14994bfd810477be6129d8a344b33"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2871,8 +2871,8 @@ sha256 = "098312f9a1694c39c4deaf4fb78d0da5ac6330ee0be152df8bc19c496a359797"
 
 [[sources]]
 path = "opf/tools/_opf_migrate.py"
-bytes = 113337
-sha256 = "6e56d2f1a3c4e1535d7a814ce52fbaf3c35e51d560006021dd6b8527d28f0a11"
+bytes = 140978
+sha256 = "0b0ab8f7a2fd2ebb39bbe8dc10eac10bb22623322cbc948193298ff9c527c691"
 
 [[sources]]
 path = "opf/tools/_opf_observe.py"
@@ -3431,8 +3431,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 158490
-sha256 = "c3bd103f28aa5c8cf482c5aadb4bb00b3c8470bf1ff81a3a2d85ee9a196b5b83"
+bytes = 158609
+sha256 = "e496c4815039790a95b085af6745b867143d5590a06bdfaa011a2407d072fe6a"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
