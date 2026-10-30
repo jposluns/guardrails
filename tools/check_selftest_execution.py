@@ -1308,6 +1308,18 @@ def self_test():
         expect("st/child-fail-stated",
                "execution set complete; child reported assertion failures" in out, True)
 
+        # 12b: a member diagnostic on STDOUT is forwarded, and the exit 1 of the child stays a FAIL
+        # (exit 1): failure evidence a suite prints to stdout is never downgraded to the CANNOT
+        # EVALUATE that any stderr byte becomes (the suites declare 0 stderr bytes).
+        diag = ("print(" + repr("CONFIG-INJECTION demo member "
+                                "(exited 3 before its bound fired): evidence") + ")\n")
+        code, out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 1, before_exit=diag)))
+        expect("st/child-fail-stdout-diagnostic-1", code, 1)
+        expect("st/child-fail-stdout-forwarded",
+               "CONFIG-INJECTION demo member (exited 3 before its bound fired): evidence" in out,
+               True)
+        expect("st/child-fail-stdout-no-cannot", "CANNOT EVALUATE" in err, False)
+
         # 13: child rc 0 with an incomplete report: missing ids -> 1 naming them; truncated JSON -> 2
         code, out, _err = run(build(_manifest_text(), _report_body(["a/one"], 0)))
         expect("st/rc0-missing-1", code, 1)

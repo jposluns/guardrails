@@ -579,6 +579,23 @@ ALLOWLIST = (
      _MUTANT + " (each route mutant, written to the self-test's temporary directory first)"),
     ("opf/tools/check_opf_init.py", "_suite_isolated.load_plain", "code", 1,
      _MUTANT + " (each boot mutant, written to the self-test's temporary directory first)"),
+    ("tools/_load_bound.py", "_acquiring_popen", "shell", 1,
+     "ownership spawn: subclasses the current subprocess.Popen so run() holds the handle before the"
+     " fork; the subclass forwards run()'s own argv list and keywords, and no call in this file"
+     " turns shell on"),
+    ("tools/_load_bound.py", "_acquiring_popen.Acquiring._execute_child", "code", 1,
+     "pid capture: types.FunctionType rebuilds the standard library's own Popen._execute_child code"
+     " object with its globals copied and only _fork_exec wrapped to record the pid; no external"
+     " code"),
+    ("tools/_load_bound.py", "vector_failures", "shell", 14,
+     _SAVED + " (the real Popen each vector's fault or recording double subclasses, set back in a"
+     " finally; the fork-window vector also reads its _execute_child through that saved class)"),
+    ("tools/_load_bound.py", "vector_failures.bounded", "shell", 1,
+     _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
+    ("tools/_load_bound.py", "vector_failures.mid_read_fault", "shell", 1,
+     _SAVED + " (the real Popen the mid-read fault double subclasses, restored in a finally)"),
+    ("tools/_load_bound.py", "vector_failures.drained_stop", "shell", 1,
+     _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
 )
 
 
