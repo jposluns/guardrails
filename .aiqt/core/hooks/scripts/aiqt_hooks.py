@@ -4436,32 +4436,47 @@ def _diff_possibles(readings, added, shared):
 # a construct came before it ('cat <<<x; git diff', a here-document then 'git switch --orphan x'). Each such
 # guard reads the command again on its parse-failure path, in a form the lexer reads (_here_data_rewrite): each
 # here-string becomes a here-document under a quoted delimiter (_HERE_DATA_STRING_DELIM) whose body is empty, its
-# word dropped, and each unquoted delimiter is quoted. A here-string's word and a here-document's body are data
-# either way, so only what the command reads on that descriptor changes, and every command word is kept, in
-# order. The guard takes only a deny from that reading (diff_source_pretool a confirmed console dump, branch_root
-# a deny of its judging loop, gate_weakening a verification run piped into a truncating sink,
-# orch_truncation_guard a background producer piped into a truncating sink) and otherwise keeps its own
-# fallback, so the reading adds denies and never removes one. The rewrite refuses (None: the guard's own
-# fallback stands, a disclosed residual) every form whose
-# reading by bash it does not model: a command substitution, backquote or process substitution anywhere, a
-# comment, a backslash-newline line continuation anywhere, a quote it cannot pair (an unterminated one, or an
-# ANSI-C quote holding a backslash), a here-string word that is not one literal word, a delimiter
-# _parse_heredoc_delim refuses, an unterminated body, and a backslash in a body under an unquoted delimiter (bash
-# removes it, and joins such a line with the next before it compares the delimiter). A here-string or
-# here-document on a numbered descriptor ('cat 3<<<x') is rewritten, but the lexer refuses that operator after a
-# descriptor number either way, so the guard's own fallback stands there too.
+# word dropped, and each unquoted delimiter is quoted. A here-string word the rewrite accepts is one literal word
+# (_HERE_DATA_WORD_RE), so it is data. A body under an unquoted delimiter is expanded: a command substitution in
+# it the rewrite refuses (below), and a function substitution in it (_HERE_DATA_FUNSUB_RE: '${' and then a space,
+# a tab, a newline or '|') runs its command as bash 5.3 expands the body, so that command is read as well, as a
+# command the lexer reads or, where the lexer refuses it, in its own here-data reading (_here_data_funsub_commands),
+# while the body is read as data for the rest of the command. So only what the command reads on that descriptor
+# changes, and every command word is kept, in order. The guard takes only a deny from those readings
+# (diff_source_pretool a confirmed console dump, branch_root a deny of its judging loop, gate_weakening a
+# verification run piped into a truncating sink, orch_truncation_guard a background producer piped into a
+# truncating sink) and otherwise keeps its own fallback, so each reading adds denies and never removes one.
+# Where the body's command is a builtin or a function, bash expands the body in the shell itself, so what such a
+# substitution's command changes there (a function it defines, a cd, a variable) holds for what follows; that is
+# not read, and a function substitution in a here-document inside such a command is not read again (that
+# command's own here-data reading reads its bodies as data): both keep the decision the reading of the body as
+# data gives. The rewrite refuses (None: the guard's own fallback stands, a disclosed residual) every form whose
+# reading by bash it does not model: a command substitution, backquote or process substitution anywhere (an
+# arithmetic expansion '$((' among them, by its text), a comment, a backslash-newline line continuation anywhere,
+# a quote it cannot pair (an unterminated one, or an ANSI-C quote holding a backslash), a here-string word other
+# than one unquoted run of the characters _HERE_DATA_WORD_RE names, one single-quoted string or one double-quoted
+# string holding no '$', backquote, backslash or '!' (so a word bash reads as one literal word, such as
+# 'it'\''s', a\ b or x{a,b}, is refused where it joins quoted parts, holds an escape or holds another character),
+# a delimiter _parse_heredoc_delim refuses, an unterminated body (an arithmetic command holding '<<', such as
+# '(( 1 << 2 ))', among them: the rewrite reads that '<<' as a here-document operator), and a backslash in a body
+# under an unquoted delimiter (bash removes it, and joins such a line with the next before it compares the
+# delimiter). A here-string or here-document on a numbered descriptor ('cat 3<<<x') is rewritten, but the lexer
+# refuses that operator after a descriptor number either way, so the guard's own fallback stands there too.
 _HERE_DATA_STOP_RE = re.compile(r"[\\'\"#<\n]")
 _HERE_DATA_WORD_RE = re.compile(r"[A-Za-z0-9_./:=@%+,-]+|'[^'\n]*'|\"[^\"\n$`\\!]*\"")
 _HERE_DATA_WORD_END = frozenset(" \t\n;&|)<>")
+_HERE_DATA_FUNSUB_RE = re.compile(r"\$\{(?:\||(?=[ \t\n]))")
 _HERE_DATA_STRING_DELIM = "HERE_STRING"
 
 
-def _here_data_rewrite(command, expansions=True):
+def _here_data_rewrite(command, expansions=True, bodies=None):
     """command with each here-string read as a here-document under a quoted delimiter with an empty body and each
     here-document under an unquoted delimiter read under that delimiter quoted (HERE-DATA FLOOR, above
     _HERE_DATA_STOP_RE), or None where nothing is rewritten or the rewrite refuses the command. With expansions
     False it refuses as well a body under an unquoted delimiter that holds '${' or '$[', an expansion that can
-    assign a variable (${X:=v}), which the quoted delimiter would read as text."""
+    assign a variable (${X:=v}) or, as a function substitution, run a command, which the quoted delimiter would
+    read as text. Where bodies is a list, the text of each body under an unquoted delimiter that opens a function
+    substitution (_HERE_DATA_FUNSUB_RE) is appended to it, in order, for _here_data_funsub_commands."""
     if ("<<" not in command or "$(" in command or "`" in command or "<(" in command or ">(" in command
             or "\\\n" in command):
         return None
@@ -4501,10 +4516,13 @@ def _here_data_rewrite(command, expansions=True):
                 if delim is None:
                     edits.append((i, i, _HERE_DATA_STRING_DELIM + "\n"))
                     continue
+                body = i
                 while True:
                     nl = command.find("\n", i)
                     line = command[i:(nl if nl != -1 else n)]
                     if (line.lstrip("\t") if strip_tabs else line) == delim:
+                        if bodies is not None and not quoted and _HERE_DATA_FUNSUB_RE.search(command, body, i):
+                            bodies.append(command[body:i])
                         i = n if nl == -1 else nl + 1
                         break
                     if nl == -1 or (not quoted and ("\\" in line or (not expansions and ("${" in line
@@ -4547,6 +4565,45 @@ def _here_data_rewrite(command, expansions=True):
         last = end
     out.append(command[last:])
     return "".join(out)
+
+
+def _here_data_funsub_commands(command):
+    """The commands of the function substitutions in command's here-document bodies under an unquoted delimiter
+    (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), where the rewrite reads command: at most two command texts. The
+    first joins, one per line, the text of each substitution whose closing '}' the skip of a '${' expansion
+    (_skip_quoting, read on past each '}' where no reserved word can stand) finds after a ';', '&' or newline and
+    blanks, with no '<<' before it; the second joins, for each body where that fails, the text from that
+    substitution to the end of its body, which holds the substitution's command and whatever data follows it
+    there. A '${' inside the text of a substitution is read with that text, not again on its own. Empty where
+    command holds no such substitution or the rewrite refuses it. Bash runs such a substitution's command as it
+    expands the body, so each guard reads these texts as it reads a command the lexer reads, or, where the lexer
+    refuses one, in that text's own here-data reading (which reads no function substitution of its own), and takes
+    the deny of its floor there too; the body stays data for the rest of the command."""
+    bodies = []
+    if "${" not in command or _here_data_rewrite(command, bodies=bodies) is None:
+        return ()
+    closed, rest = [], []
+    for body in bodies:
+        at = 0
+        while True:
+            m = _HERE_DATA_FUNSUB_RE.search(body, at)
+            if m is None:
+                break
+            try:
+                end = _skip_quoting(body, m.start(), len(body))
+                # A '}' where no reserved word can stand is a word to bash (echo }), so the substitution reads on.
+                while not body[m.end():end - 1].rstrip(" \t").endswith((";", "&", "\n")):
+                    end = _skip_quoting_from(body, end, len(body), ["brace"])
+            except ValueError:
+                end = None
+            text = "" if end is None else body[m.end():end - 1]
+            if end is not None and "<<" not in text:
+                closed.append(text)
+                at = end
+                continue
+            rest.append(body[m.end():])
+            break
+    return tuple("\n".join(texts) for texts in (closed, rest) if texts)
 
 
 def _diff_source_verdict(command, readings, reading, reads):
@@ -4597,6 +4654,24 @@ def _diff_source_here_data_verdict(command):
     return _diff_source_verdict(rewritten, readings, reading, reads)
 
 
+def _diff_source_funsub_dumps(command):
+    """True where the command of a function substitution in a here-document body of command under an unquoted
+    delimiter (_here_data_funsub_commands) is a confirmed console dump, each read as a command the lexer reads
+    (_diff_source_verdict) or, where the lexer refuses it, in its here-data reading."""
+    for text in _here_data_funsub_commands(command):
+        reads = _SubstHeredocs.reads
+        try:
+            with _CommandReading(origins=True) as reading:
+                readings = _lex_readings(text)
+        except ValueError:
+            verdict = _diff_source_here_data_verdict(text)
+        else:
+            verdict = _diff_source_verdict(text, readings, reading, reads)
+        if verdict == "dump":
+            return True
+    return False
+
+
 def _diff_source_fallback(command):
     """FAIL-SAFE conservative check when _lex_command cannot parse the command (an unbalanced quote or an
     unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
@@ -4642,7 +4717,9 @@ def diff_source_pretool(data):
     it fails the fallback a lex that fails takes, which never denies, decides in place of this guard's
     allow. A command the lexer refuses for a here-string or a here-document under an unquoted delimiter is read
     again in its here-data reading (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), and a confirmed console dump
-    there DENIES as in a command the lexer reads (cat <<<x; git diff); any other outcome keeps the fallback."""
+    there DENIES as in a command the lexer reads (cat <<<x; git diff); so does one in the command of a function
+    substitution in a body under an unquoted delimiter, read as a command the lexer reads (a body line
+    '${ git diff; }' under cat <<E); any other outcome keeps the fallback."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -4690,8 +4767,11 @@ def diff_source_pretool(data):
         return _diff_source_fallback(command)
     except ValueError:
         # HERE-DATA FLOOR (above _HERE_DATA_STOP_RE): a confirmed console dump in the here-data reading denies as
-        # it does in a command the lexer reads; anything else takes the parse-failure fallback.
-        if _diff_source_here_data_verdict(command) != "dump":
+        # it does in a command the lexer reads, and so does one in the command of a function substitution in a
+        # body under an unquoted delimiter (_diff_source_funsub_dumps); anything else takes the parse-failure
+        # fallback.
+        verdict = _diff_source_here_data_verdict(command)
+        if verdict is None or (verdict != "dump" and not _diff_source_funsub_dumps(command)):
             return _diff_source_fallback(command)
         verdict = "dump"
     else:
@@ -14476,7 +14556,9 @@ def branch_root(data):
     restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote.
     A command the lexer refuses for a here-string or a here-document under an unquoted delimiter has the segments
     of its here-data reading (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE) judged as well, and a deny they reach
-    stands (cat <<<x; git switch --orphan x denies); any other outcome keeps the judgement of the recovered
+    stands (cat <<<x; git switch --orphan x denies), as does a deny of the segments of the command of a function
+    substitution in a body under an unquoted delimiter, read as a command the lexer reads (a body line
+    '${ git switch --orphan x; }' under cat <<E denies); any other outcome keeps the judgement of the recovered
     segments."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
@@ -14563,6 +14645,14 @@ def branch_root(data):
     kind, detail = _branch_root_verdict(data, command, segments, named, built)
     if kind != "deny" and floor_segments is not None:
         floor_kind, floor_detail = _branch_root_verdict(data, command, floor_segments, named, built)
+        # The command of a function substitution in a body under an unquoted delimiter, read as a command the
+        # lexer reads: a deny there stands too.
+        for text in _here_data_funsub_commands(command) if floor_kind != "deny" else ():
+            text_segments = _branch_root_text_segments(text)
+            if text_segments is not None:
+                floor_kind, floor_detail = _branch_root_verdict(data, text, text_segments, named, built)
+                if floor_kind == "deny":
+                    break
         if floor_kind == "deny":
             kind, detail = floor_kind, floor_detail
     if kind == "deny":
@@ -14584,6 +14674,17 @@ def _branch_root_here_data_segments(command):
             return _segments_read(rewritten, skip_empty=True)
     except ValueError:
         return None
+
+
+def _branch_root_text_segments(text):
+    """The (argv, sep_after) segments of text, the command of a function substitution in a here-document body
+    (_here_data_funsub_commands), read as branch_root reads a command the lexer reads, or, where the lexer refuses
+    text, those of its here-data reading (_branch_root_here_data_segments); None where neither reads it."""
+    try:
+        with _WordSpellings():
+            return _segments_read(text, skip_empty=True)
+    except ValueError:
+        return _branch_root_here_data_segments(text)
 
 
 def _branch_root_verdict(data, command, segments, named, built):
@@ -15897,12 +15998,13 @@ _GATE_PLAIN_WORD_RE = re.compile(r"[A-Za-z0-9_./:,@%+=][A-Za-z0-9_./:,@%+=-]*\Z"
 # letters, digits or '-'), with no word starting '-v' after printf (its one option, which assigns a variable);
 # at least one here-document under a quoted delimiter; no redirection of its own output and no other input
 # redirection; and nothing else in its raw text (no quote, '$', backslash or descriptor number outside the
-# delimiter). cat prints the body, and echo and printf print at most text their own words spell; none of them
-# can change the run's environment, options or configuration, and a quoted body is never expanded. A
-# here-string, and a here-document under an unquoted delimiter, which the shared lexer refuses, reach this shape
-# through the here-data floor (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), which reads each as a here-document
-# under a quoted delimiter; for this guard that floor refuses a body under an unquoted delimiter holding '${' or
-# '$[', which can assign a variable, so such a stage keeps the note.
+# delimiter). Where the word names the builtin or utility, not a function or alias (which the hook cannot see),
+# cat prints the body, and echo and printf print at most text their own words spell; none of them can then
+# change the run's environment, options or configuration, and a quoted body is never expanded. A here-string,
+# and a here-document under an unquoted delimiter, which the shared lexer refuses, reach this shape through the
+# here-data floor (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), which reads each as a here-document under a
+# quoted delimiter; for this guard that floor refuses a body under an unquoted delimiter holding '${' or '$[',
+# which can assign a variable or, as a function substitution, run a command, so such a stage keeps the note.
 _GATE_HERE_DATA_PRINTERS = frozenset(("cat", "echo", "printf"))
 _GATE_HERE_DATA_OPTION_RE = re.compile(r"-[A-Za-z0-9-]+\Z")
 _GATE_HERE_DATA_WORD_RE = re.compile(r"[A-Za-z0-9-]+(?=[ \t<]|\Z)")
@@ -16230,6 +16332,23 @@ def _gate_here_data_sink(command):
     return next((hit for hit in (_verification_sink(reading) for reading in readings) if hit is not None), None)
 
 
+def _gate_funsub_sink(command):
+    """The _verification_sink hit of the first command of a function substitution in a here-document body of
+    command under an unquoted delimiter (_here_data_funsub_commands) that holds one, each read as a command the
+    lexer reads (the first of its readings that holds a hit) or, where the lexer refuses it, in its here-data
+    reading (_gate_here_data_sink), or None where none holds a hit."""
+    for text in _here_data_funsub_commands(command):
+        try:
+            readings = _lex_readings(text, skip_empty=_SKIP_EMPTY_REPEATS)
+        except ValueError:
+            hit = _gate_here_data_sink(text)
+        else:
+            hit = next((found for found in map(_verification_sink, readings) if found is not None), None)
+        if hit is not None:
+            return hit
+    return None
+
+
 def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, here_data=False):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
@@ -16249,7 +16368,9 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, here
     denies here and before the note, so a command these denies refuse keeps their message and one they would
     only note or allow ($G commit -nv <<<x) denies. That branch passes here_data too: after every deny above, a
     verification run piped into a truncating sink in the here-data reading (_gate_here_data_sink) denies as the
-    deny tier denies it in a parsed command, where this would note or allow (cat <<<x; pytest | head)."""
+    deny tier denies it in a parsed command, where this would note or allow (cat <<<x; pytest | head), and so
+    does one in the command of a function substitution in a here-document body under an unquoted delimiter
+    (_gate_funsub_sink), which bash runs as it expands the body."""
     kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
@@ -16278,6 +16399,8 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, here
             return _gate_runtime_deny(runtime_hit)
     if here_data:
         sink_hit = _gate_here_data_sink(command)
+        if sink_hit is None:
+            sink_hit = _gate_funsub_sink(command)
         if sink_hit is not None:
             reason, banner = _verification_sink_message(sink_hit)
             return _deny(reason, banner)
@@ -17549,6 +17672,10 @@ def gate_weakening(data):
     -l <<<"hello", diff <(sort "a.txt") <(sort "b.txt")) keeps the raw probes' decision, which on a
     roster-verb git segment (git commit -m "fix bug" <<<x) is the closed grammar's deny, and a bypass
     spelled so that no such reading assembles it (a variable, an alias) is the open-grammar residual.
+    After those, a verification run piped into a truncating sink in the here-data reading denies
+    (_gate_here_data_sink), and so does one in the command of a function substitution in a here-document body
+    under an unquoted delimiter, read as a command the lexer reads (_gate_funsub_sink; HERE-DATA FLOOR, above
+    _HERE_DATA_STOP_RE).
     The failed-main-reading floor keeps the conservative raw probes alone (a disclosed narrowing of the
     floor, not of the parse-failure fallback).
     Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A
@@ -17706,7 +17833,8 @@ def gate_weakening(data):
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message; so is the here-data reading's verification
-            # sink (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), after them.
+            # sink (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), and the one in the command of a function
+            # substitution in a body under an unquoted delimiter, after them.
             return _gate_weakening_fallback(command, runtime=True, here_data=True)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
@@ -23222,6 +23350,22 @@ def _orch_oos_unreadable_input_note(detail):
         "run_in_background to make it readable.".format(detail))
 
 
+def _orch_text_segments(text):
+    """The (argv, sep_after) segments of text, the command of a function substitution in a here-document body
+    (_here_data_funsub_commands), read as orch_truncation_guard reads a background dispatch's command the lexer
+    reads, or, where the lexer refuses text, those of its here-data reading; None where neither reads it."""
+    try:
+        return _segments_read(text)
+    except ValueError:
+        rewritten = _here_data_rewrite(text)
+    if rewritten is None:
+        return None
+    try:
+        return _segments_read(rewritten)
+    except ValueError:
+        return None
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: its
     background ALLOW test performs NO shell parsing, so no lexical or quoting edge can fabricate a capture
@@ -23608,9 +23752,11 @@ def orch_truncation_guard(data):
     # lexer cannot judge under both readings: that '#' is exactly where one reading ends the line and the
     # other reads on into a possible '| head', so it denies; and except where the here-data reading of the
     # command lexes (HERE-DATA FLOOR, above _HERE_DATA_STOP_RE), whose segments are read for the sink in its
-    # place. The command reading (_CommandReading) adds the
+    # place, beside those of the command of each function substitution in a body under an unquoted delimiter. The
+    # command reading (_CommandReading) adds the
     # commands of each backquote substitution, read whole, so a pipe into a sink inside one ('x=`make | head`',
     # which the lexer splits at the '|' into words that keep the backquotes) is read as a pipe too.
+    _rewritten = None
     try:
         _segs = _segments_read(command)
     except _ReadingLimitError:
@@ -23635,9 +23781,11 @@ def orch_truncation_guard(data):
             "could not decide (rules trkasy/vrfdlv, fail-closed).")
     except ValueError:
         # HERE-DATA FLOOR (above _HERE_DATA_STOP_RE): the here-data reading's segments are read for the sink
-        # instead, where the rewrite reads the command and its reading lexes; a sink there denies as below, and
-        # anything else keeps the note. The foreground detach reading above already reads such a command
-        # through its raw scan, and outside registry scope no deny of this guard turns on the command text.
+        # instead, where the rewrite reads the command and its reading lexes, and so are those of the command of
+        # each function substitution in a body under an unquoted delimiter (_orch_text_segments); a sink there
+        # denies as below, and anything else keeps the note. The foreground detach reading above already reads
+        # such a command through its raw scan, and outside registry scope no deny of this guard turns on the
+        # command text.
         _segs = None
         _rewritten = _here_data_rewrite(command)
         if _rewritten is not None:
@@ -23645,7 +23793,10 @@ def orch_truncation_guard(data):
                 _segs = _segments_read(_rewritten)
             except ValueError:
                 _segs = None
-    if _segs:
+    _readings = [_segs] if _segs else []
+    if _rewritten is not None and _segs is not None:
+        _readings.extend(filter(None, map(_orch_text_segments, _here_data_funsub_commands(command))))
+    for _segs in _readings:
         for _i, (_argv, _sep) in enumerate(_segs):
             if _i == 0:
                 continue

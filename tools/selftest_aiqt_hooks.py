@@ -145,10 +145,11 @@ at 64 KB, 256 KB and 1 MB within CPU-time bounds set from a measured run and the
 (a case over that gate alone is re-timed once before it fails), under a 60-second hang guard. Every handler the
 hooks manifest ships at default "block" has a timed deny case or a reasoned exemption (dl-shape-deny-coverage),
 and a deny form behind each filler (git words, a here-string, a here-document, backquote bodies past the command
-reading's body budget, five uncertain '#', and the here-data forms the here-data floor refuses) is never weaker
-than bare, except the disclosed pairs _DEADLINE_PAD_RESIDUALS lists, each of which must still be weaker
-(dl-pad-monotone, dl-pad-residual-stale); padded benign forms, and both sides of the bound of a stage that only
-prints here-data, keep pinned decisions (dl-pad-keeps). The timer and timing checks run in a child process.
+reading's body budget, five uncertain '#', the here-data forms the here-data floor refuses, and a body holding a
+function substitution) is never weaker than bare, except the disclosed pairs _DEADLINE_PAD_RESIDUALS lists, each
+of which must still be weaker (dl-pad-monotone, dl-pad-residual-stale); padded benign forms, both sides of the
+bound of a stage that only prints here-data, and a function substitution's command in a here-document body keep
+pinned decisions (dl-pad-keeps). The timer and timing checks run in a child process.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -4663,11 +4664,34 @@ _DEADLINE_SHAPES = {
     "waitloop_after": lambda n, base: ("Bash", {"command": _repeat(
         "true; ", n, "while true; do gh pr checks 42; sleep 30; done &")}),
     "write_relative": lambda n, base: ("Write", {"file_path": "notes.txt", "content": "a" * n}),
+    # git_discard's deny of a command that defines a git alias for itself, which reads neither the repository
+    # nor the session, and a Write run from the orchestration fixture into the plain fixture beside it, a target
+    # outside the session's repository, which write_scope_guard denies.
+    "alias_discard_after": lambda n, base: ("Bash", {"command": _repeat("git ", n,
+                                                                        "; git -c alias.zz='reset --hard' zz")}),
+    "write_outside": lambda n, base: ("Write", {"file_path": os.path.join(os.path.dirname(base), "deadline-plain",
+                                                                          "notes.txt"), "content": "a" * n}),
     "herestr_diff_after": lambda n, base: ("Bash", {"command": _repeat("cat <<<x; ", n, "git diff")}),
     "heredoc_orphan_after": lambda n, base: ("Bash", {"command": _repeat("cat <<E\nx\nE\n", n,
                                                                          "git switch --orphan x")}),
     "herestr_bg_sink_after": lambda n, base: ("Bash", {"command": _repeat("cat <<<x; ", n, "make | head"),
                                                        "run_in_background": True}),
+    # Here-documents under an unquoted delimiter, each body holding a function substitution, then one whose
+    # substitution runs a hazard (each such command is read as a command the lexer reads, _here_data_funsub_commands),
+    # and a body of '${' openers whose close the skip never finds, so the text from the first one to the end of
+    # the body is judged whole (at 1 MB about 1.4 to 1.8 s of CPU for each guard timed on them, one in-process
+    # run on an 80-core host with Python 3.14.4, 2026-10-30 UTC).
+    "funsub_diff_after": lambda n, base: ("Bash", {"command": _repeat("cat <<E\n${ true; }\nE\n", n,
+                                                                      "cat <<E\n${ git diff; }\nE\n")}),
+    "funsub_orphan_after": lambda n, base: ("Bash", {"command": _repeat(
+        "cat <<E\n${ true; }\nE\n", n, "cat <<E\n${ git switch --orphan x; }\nE\n")}),
+    "funsub_bg_sink_after": lambda n, base: ("Bash", {"command": _repeat("cat <<E\n${ true; }\nE\n", n,
+                                                                         "cat <<E\n${ make | head; }\nE\n"),
+                                                      "run_in_background": True}),
+    "funsub_open_run": lambda n, base: ("Bash", {"command": "cat <<E\n" + _repeat("${ echo {\n", n - 9, "E\n")}),
+    "funsub_open_run_background": lambda n, base: ("Bash", {"command": "cat <<E\n" + _repeat("${ echo {\n", n - 9,
+                                                                                             "E\n"),
+                                                            "run_in_background": True}),
     # One key run of quoted '-c' mirror options with no '.mirror' and no blank, which the single
     # mirror-configuration regex read in time quadratic in its length (about 0.8 s of CPU at 64 KB and 6.2
     # to 6.5 s at 180 KB for one call of the push backstop alone, in-process on a 24-core host with Python
@@ -4773,21 +4797,22 @@ _DEADLINE_CASES = {
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens", "nest_cmdsubst", "dq_case_substs",
                             "dq_case_substs_after"),
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens", "procsubst_run_after", "orphan_after",
-                    "heredoc_orphan_after"),
+                    "heredoc_orphan_after", "funsub_orphan_after", "funsub_open_run"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq", "identity_after"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after",
-                            "herestr_diff_after"),
+                            "herestr_diff_after", "funsub_diff_after", "funsub_open_run"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
                        "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after",
                        "fg_setsid_options"),
     "gensrc_guard": ("write_content", "write_deep_path"),
-    "git_discard": ("git_segments_reset", "nest_parens", "procsubst_run_after"),
+    "git_discard": ("git_segments_reset", "nest_parens", "procsubst_run_after", "alias_discard_after"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens", "ansi_c_herestr"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
-    "orch_truncation_guard": ("nest_cmdsubst_background", "git_words", "bg_sink_after", "herestr_bg_sink_after"),
+    "orch_truncation_guard": ("nest_cmdsubst_background", "git_words", "bg_sink_after", "herestr_bg_sink_after",
+                              "funsub_bg_sink_after", "funsub_open_run_background"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst", "waitloop_after"),
     "orch_yield_tool": ("wakeup_long",),
     "pgrep_self_match": ("git_words", "nest_parens", "pgrep_distinct", "pgrep_self_after"),
@@ -4806,29 +4831,39 @@ _DEADLINE_PLAIN_CASES = {
                               "fg_heredoc_ops_open", "fg_subshells", "fg_nested_glued_substs",
                               "fg_quoted_heredoc_amps", "fg_setsid_options"),
 }
+# Cases run from the orchestration repository for a handler the table above runs from the plain cwd:
+# write_scope_guard's deny of a write outside the session's repository, which needs a cwd inside one.
+_DEADLINE_ORCH_CASES = {
+    "write_scope_guard": ("write_outside",),
+}
 # The (handler, shape) cases whose hazard must still be denied, each within its bound. Every handler the hooks
 # manifest ships at default "block" has one here or a reasoned entry in _DEADLINE_DENY_EXEMPT
 # (dl-shape-deny-coverage).
 _DEADLINE_DENY_CASES = frozenset((
     ("absolute_paths", "write_relative"), ("bash_absolute_paths", "dq_case_substs_after"),
     ("branch_root", "orphan_after"), ("branch_root", "heredoc_orphan_after"),
-    ("commit_identity", "identity_after"),
+    ("branch_root", "funsub_orphan_after"), ("commit_identity", "identity_after"),
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
-    ("diff_source_pretool", "herestr_diff_after"),
+    ("diff_source_pretool", "herestr_diff_after"), ("diff_source_pretool", "funsub_diff_after"),
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
+    ("git_discard", "alias_discard_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"), ("orch_truncation_guard", "bg_sink_after"),
-    ("orch_truncation_guard", "herestr_bg_sink_after"), ("orch_untracked_wait_loop", "waitloop_after"),
+    ("orch_truncation_guard", "herestr_bg_sink_after"), ("orch_truncation_guard", "funsub_bg_sink_after"),
+    ("orch_untracked_wait_loop", "waitloop_after"),
     ("pgrep_self_match", "pgrep_self_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
-    ("protected_line", "procsubst_run_after"), ("secrets_shift_left", "secret_after")))
-# The blocking handlers with no deny case above, each with the reason none can be pinned on these fixtures.
+    ("protected_line", "procsubst_run_after"), ("secrets_shift_left", "secret_after"),
+    ("write_scope_guard", "write_outside")))
+# The blocking handlers with no deny case above, each with the reason no hazard deny of it can be pinned on these
+# fixtures. A deny of a malformed payload (one with no tool_name, say) is outside what these shapes time.
 _DEADLINE_DENY_EXEMPT = {
-    "git_discard": ("its deny turns on the repository it probes: a discard it cannot snapshot, which on the "
-                    "plain fixture is so only because that directory is no repository, and that turns on where "
-                    "the host's temporary directory lies"),
-    "git_stash_ref": "it never denies: a bare stash pop or apply allows with a note (its no-ask posture)",
-    "gensrc_guard": ("it denies only a Write or Edit onto an entry of a per-repo .aiqt/gensrc.json, which "
-                     "neither fixture carries (an absent registry is its inert allow)"),
+    "git_stash_ref": ("it has no hazard deny: a bare stash pop or apply allows with a note (its no-ask posture), "
+                      "and its one deny is of a payload with no tool_name"),
+    "gensrc_guard": ("its hazard deny is of a Write or Edit onto an entry of a per-repo .aiqt/gensrc.json, which "
+                     "neither fixture carries (an absent registry is its inert allow); its other denies are of a "
+                     "payload with no tool_name, a present but unreadable or malformed registry, and a present but "
+                     "malformed authoring marker on a matching authoring-scoped entry, none of which a fixture "
+                     "carries"),
     "orch_ask_guard": ("it denies a question only in unattended mode, read from a mode file neither fixture "
                        "writes"),
     "orch_stop_guard": "a Stop handler: the shapes here time PreToolUse handlers only",
@@ -4838,20 +4873,19 @@ _DEADLINE_DENY_EXEMPT = {
                         "(wakeup_long allows there)"),
     "review_dispatch_pin": "it is inert without a review_dispatch binding, which the fixture's registry lacks",
     "review_workdir_hold": "it is inert where no review-hold marker directory exists, and neither fixture has one",
-    "write_scope_guard": ("its deny on these fixtures is the fail-closed one for a write whose repository root "
-                          "does not resolve, which turns on the plain fixture lying outside every repository, "
-                          "that is on where the host's temporary directory lies"),
 }
 # PADDING NEVER WEAKENS A DENY (dl-pad-monotone). Each deny form (_DEADLINE_PAD_FORMS: a guard, a command it denies
 # bare, and whether the call is a background dispatch; the orch_ guards run from the orchestration fixture) is
 # run bare and behind each filler (_DEADLINE_PAD_FILLERS: git words, a here-string, a here-document under an
-# unquoted delimiter, backquote bodies past the command reading's body budget, five uncertain '#', and the
-# here-data forms the here-data floor refuses), and the padded decision must be no weaker than the bare one
-# (_DEADLINE_PAD_RANK: deny over allow-note over allow). The exceptions are the (guard, filler) pairs
+# unquoted delimiter, backquote bodies past the command reading's body budget, five uncertain '#', the here-data
+# forms the here-data floor refuses, and a body holding a function substitution, which the floor reads as data
+# for what follows while it judges the substitution's command), and the padded decision must be no weaker than
+# the bare one (_DEADLINE_PAD_RANK: deny over allow-note over allow). The exceptions are the (guard, filler) pairs
 # _DEADLINE_PAD_RESIDUALS lists, each a disclosed residual that the guard's manifest residue states, and each
 # must still be weaker for at least one of the guard's forms (dl-pad-residual-stale), so a pair the code no
-# longer weakens leaves the table. A guard whose deny turns on repository or session state (git_discard,
-# write_scope_guard) has no form here.
+# longer weakens leaves the table. git_discard's form is its deny of a command that defines a git alias for
+# itself, which reads neither the repository nor the session; write_scope_guard judges no Bash command, so it has
+# no form here.
 _DEADLINE_PAD_FORMS = (
     ("diff_source_pretool", "git diff", False),
     ("branch_root", "git switch --orphan x", False),
@@ -4867,6 +4901,7 @@ _DEADLINE_PAD_FORMS = (
     ("pgrep_self_match", "pgrep -f job7 || run job7", False),
     ("commit_identity", "git commit -m x --author='Claude <noreply@anthropic.com>'", False),
     ("secrets_shift_left", "export GITHUB_TOKEN=" + "ghp_" + "A" * 30, False),
+    ("git_discard", "git -c alias.zz='reset --hard' zz", False),
 )
 _DEADLINE_PAD_FILLERS = (
     ("git_words", "git " * 1024 + "; "),
@@ -4880,6 +4915,14 @@ _DEADLINE_PAD_FILLERS = (
     ("here_string_backquote", "cat <<<x; echo `true`; "),
     ("here_string_comment", "cat <<<x # it's\n"),
     ("here_string_ansi_c", "cat <<<x; echo $'it\\'s'; "),
+    ("here_document_funsub", "cat <<E\n${ true; }\nE\n"),
+    ("here_string_joined_word", "cat <<<'it'\\''s'; "),
+    ("here_string_escaped_word", "cat <<<a\\ b; "),
+    ("here_string_brace_word", "cat <<<x{a,b}; "),
+    ("here_string_dq_escaped_word", 'cat <<<"a\\"b"; '),
+    ("here_document_arith", "cat <<E\n$((1))\nE\n"),
+    ("here_string_arith", "cat <<<x; echo $((1)); "),
+    ("here_string_arith_command", "cat <<<x; (( 1 << 2 )); "),
 )
 _DEADLINE_PAD_RANK = {"allow": 0, "allow-note": 1, "deny": 2, "hard-block": 2}
 _PAD_PROCSUBST = "the here-data floor refuses a command holding a process substitution"
@@ -4890,6 +4933,17 @@ _PAD_BACKQUOTE = "the here-data floor refuses a command holding a backquote"
 _PAD_COMMENT = "the here-data floor refuses a command holding a comment (here one holding a lone quote)"
 _PAD_ANSI_C = ("the here-data floor refuses an ANSI-C quote holding a backslash, whose escapes may hide its "
                "closing quote")
+_PAD_FUNSUB = ("for this guard the here-data floor refuses a here-document body under an unquoted delimiter holding "
+               "'${', an expansion that can assign a variable or, as a function substitution ('${ ...; }'), run a "
+               "command, so the stage is no benign prefix and the pipeline after it notes; the substitution's "
+               "command is still read for a sink, as a command the lexer reads")
+_PAD_WORD = ("the here-data floor refuses a here-string word other than one unquoted run of plain characters, one "
+             "single-quoted string or one double-quoted string with no '$', backquote, backslash or '!', though "
+             "bash reads this one as one literal word")
+_PAD_ARITH = ("the here-data floor refuses a command holding an arithmetic expansion, whose '$((' it reads as the "
+              "start of a command substitution")
+_PAD_ARITH_COMMAND = ("the here-data floor reads the '<<' of an arithmetic command as a here-document operator "
+                      "whose body never ends, and refuses the command")
 _PAD_PREFIX = ("the deny tier holds only where every earlier command is a benign prefix (_gate_benign_prefix), and "
                "a git command or an echo of command substitutions is outside that set (an earlier command can "
                "change the run's environment, options or configuration), so the pipeline notes, as it does after "
@@ -4904,12 +4958,26 @@ _DEADLINE_PAD_RESIDUALS = {
     ("diff_source_pretool", "here_string_backquote"): _PAD_BACKQUOTE,
     ("diff_source_pretool", "here_string_comment"): _PAD_COMMENT,
     ("diff_source_pretool", "here_string_ansi_c"): _PAD_ANSI_C,
+    ("diff_source_pretool", "here_string_joined_word"): _PAD_WORD,
+    ("diff_source_pretool", "here_string_escaped_word"): _PAD_WORD,
+    ("diff_source_pretool", "here_string_brace_word"): _PAD_WORD,
+    ("diff_source_pretool", "here_string_dq_escaped_word"): _PAD_WORD,
+    ("diff_source_pretool", "here_document_arith"): _PAD_ARITH,
+    ("diff_source_pretool", "here_string_arith"): _PAD_ARITH,
+    ("diff_source_pretool", "here_string_arith_command"): _PAD_ARITH_COMMAND,
     ("branch_root", "here_string_procsubst"): _PAD_PROCSUBST,
     ("branch_root", "here_string_subst"): _PAD_SUBST,
     ("branch_root", "here_document_subst"): _PAD_BODY_SUBST,
     ("branch_root", "here_string_backquote"): _PAD_BACKQUOTE,
     ("branch_root", "here_string_comment"): _PAD_COMMENT,
     ("branch_root", "here_string_ansi_c"): _PAD_ANSI_C,
+    ("branch_root", "here_string_joined_word"): _PAD_WORD,
+    ("branch_root", "here_string_escaped_word"): _PAD_WORD,
+    ("branch_root", "here_string_brace_word"): _PAD_WORD,
+    ("branch_root", "here_string_dq_escaped_word"): _PAD_WORD,
+    ("branch_root", "here_document_arith"): _PAD_ARITH,
+    ("branch_root", "here_string_arith"): _PAD_ARITH,
+    ("branch_root", "here_string_arith_command"): _PAD_ARITH_COMMAND,
     ("gate_weakening", "git_words"): _PAD_PREFIX,
     ("gate_weakening", "backquote_budget"): _PAD_PREFIX,
     ("gate_weakening", "here_string_procsubst"): _PAD_PROCSUBST,
@@ -4918,12 +4986,27 @@ _DEADLINE_PAD_RESIDUALS = {
     ("gate_weakening", "here_string_backquote"): _PAD_BACKQUOTE,
     ("gate_weakening", "here_string_comment"): _PAD_COMMENT,
     ("gate_weakening", "here_string_ansi_c"): _PAD_ANSI_C,
+    ("gate_weakening", "here_document_funsub"): _PAD_FUNSUB,
+    ("gate_weakening", "here_string_joined_word"): _PAD_WORD,
+    ("gate_weakening", "here_string_escaped_word"): _PAD_WORD,
+    ("gate_weakening", "here_string_brace_word"): _PAD_WORD,
+    ("gate_weakening", "here_string_dq_escaped_word"): _PAD_WORD,
+    ("gate_weakening", "here_document_arith"): _PAD_ARITH,
+    ("gate_weakening", "here_string_arith"): _PAD_ARITH,
+    ("gate_weakening", "here_string_arith_command"): _PAD_ARITH_COMMAND,
     ("orch_truncation_guard", "here_string_procsubst"): _PAD_PROCSUBST,
     ("orch_truncation_guard", "here_string_subst"): _PAD_SUBST,
     ("orch_truncation_guard", "here_document_subst"): _PAD_BODY_SUBST,
     ("orch_truncation_guard", "here_string_backquote"): _PAD_BACKQUOTE,
     ("orch_truncation_guard", "here_string_comment"): _PAD_COMMENT,
     ("orch_truncation_guard", "here_string_ansi_c"): _PAD_ANSI_C,
+    ("orch_truncation_guard", "here_string_joined_word"): _PAD_WORD,
+    ("orch_truncation_guard", "here_string_escaped_word"): _PAD_WORD,
+    ("orch_truncation_guard", "here_string_brace_word"): _PAD_WORD,
+    ("orch_truncation_guard", "here_string_dq_escaped_word"): _PAD_WORD,
+    ("orch_truncation_guard", "here_document_arith"): _PAD_ARITH,
+    ("orch_truncation_guard", "here_string_arith"): _PAD_ARITH,
+    ("orch_truncation_guard", "here_string_arith_command"): _PAD_ARITH_COMMAND,
     ("orch_untracked_wait_loop", "here_string"): _PAD_DEFERS,
     ("orch_untracked_wait_loop", "here_document"): _PAD_DEFERS,
     ("orch_untracked_wait_loop", "here_string_procsubst"): _PAD_DEFERS,
@@ -4932,6 +5015,14 @@ _DEADLINE_PAD_RESIDUALS = {
     ("orch_untracked_wait_loop", "here_string_backquote"): _PAD_DEFERS,
     ("orch_untracked_wait_loop", "here_string_comment"): _PAD_DEFERS,
     ("orch_untracked_wait_loop", "here_string_ansi_c"): _PAD_DEFERS,
+    ("orch_untracked_wait_loop", "here_document_funsub"): _PAD_DEFERS,
+    ("orch_untracked_wait_loop", "here_string_joined_word"): _PAD_DEFERS,
+    ("orch_untracked_wait_loop", "here_string_escaped_word"): _PAD_DEFERS,
+    ("orch_untracked_wait_loop", "here_string_brace_word"): _PAD_DEFERS,
+    ("orch_untracked_wait_loop", "here_string_dq_escaped_word"): _PAD_DEFERS,
+    ("orch_untracked_wait_loop", "here_document_arith"): _PAD_DEFERS,
+    ("orch_untracked_wait_loop", "here_string_arith"): _PAD_DEFERS,
+    ("orch_untracked_wait_loop", "here_string_arith_command"): _PAD_DEFERS,
 }
 # PADDED FORMS THAT KEEP THEIR DECISION (dl-pad-keeps). Each command of _DEADLINE_PAD_KEEPS is decided by the four
 # guards that read the here-data reading (_DEADLINE_PAD_KEEP_GUARDS, in that order) exactly as the pinned base commit
@@ -4981,6 +5072,33 @@ _DEADLINE_PAD_PRINTER_ROWS = (
     ("cat <<-E\n\tx\n\tE\npytest | head", "deny"),
     ("cat <<<x && pytest | head", "deny"),
     ("cat <<'E'\nx\nE\npytest | head", "deny"),
+)
+# A function substitution in a here-document body under an unquoted delimiter (_here_data_funsub_commands in
+# aiqt_hooks), each row a (guard, command, background, decision), with what bash 5.3.9 runs confirmed through
+# logging stand-ins (2026-10-30). Bash runs the substitution's command as it expands the body, so a deny form there
+# denies, where the pinned base commit noted or allowed: opened by '${' and a space, a '|', a newline or a tab, in
+# a '${X:-...}' default, past a '}' bash reads as a word (echo }), and past a here-document inside it. That command
+# is read as a command the lexer reads, so one gate_weakening notes bare (echo }; pytest | head) notes here too. A
+# body whose substitution runs no deny form keeps the base decision (a date, a diff redirected to a file), and so
+# does a body under a quoted delimiter and a command after a substitution that defines a function (read as data
+# for what follows, as on the base commit).
+_DEADLINE_PAD_FUNSUB_ROWS = (
+    ("diff_source_pretool", "cat <<E\n${ git diff; }\nE\n", False, "deny"),
+    ("branch_root", "cat <<E\n${| git switch --orphan x; }\nE\n", False, "deny"),
+    ("gate_weakening", "cat <<E\n${\npytest | head\n}\nE\n", False, "deny"),
+    ("orch_truncation_guard", "cat <<E\n${\tmake | head; }\nE\n", True, "deny"),
+    ("orch_truncation_guard", "cat <<E\n${X:-${ make | head; }}\nE\n", True, "deny"),
+    ("diff_source_pretool", "cat <<E\n${ echo }; git diff; }\nE\n", False, "deny"),
+    ("branch_root", "cat <<E\n${ cat <<G\nx\nG\ngit switch --orphan x; }\nE\n", False, "deny"),
+    ("gate_weakening", "cat <<E\n${ echo }; pytest | head; }\nE\n", False, "allow-note"),
+    ("diff_source_pretool", "cat > notes.md <<E\nBuilt on ${ date; }\nRun git diff before you commit.\nE\n", False,
+     "allow-note"),
+    ("branch_root", "cat <<E\nToday is ${ date; }\nE\n", False, "allow"),
+    ("gate_weakening", "cat <<E\n${ date; }\nE\npytest", False, "allow"),
+    ("orch_truncation_guard", "cat <<E\n${ date; }\nE\nmake", True, "allow-note"),
+    ("diff_source_pretool", "cat <<E\n${ git diff > d.txt; }\nE\n", False, "allow-note"),
+    ("diff_source_pretool", "cat <<'E'\n${ git diff; }\nE\n", False, "allow"),
+    ("branch_root", "true <<E\n${ git() { :; }; }\nE\ngit switch --orphan x", False, "deny"),
 )
 # The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
 # a detach or detacher (fg_detach_after, fg_setsid_options), a construct left open at the end of the
@@ -5083,6 +5201,10 @@ def _deadline_shape_runs(tmp, sizes):
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
+    for name, shapes in sorted(_DEADLINE_ORCH_CASES.items()):
+        for shape in shapes:
+            for size in sorted(sizes):
+                runs.append((name, shape, size, str(orch)) + _deadline_shape_case(name, shape, size, str(orch)))
     with _no_registry_above(plain):
         for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items()):
             for shape in shapes:
@@ -5306,12 +5428,14 @@ def _deadline_pad_failures(tmp, decide=_deadline_pad_decision):
 
 def _deadline_pad_keep_failures(tmp, decide=_deadline_pad_decision):
     """(dl-pad-keeps) Each command of _DEADLINE_PAD_KEEPS gets its pinned decision from each guard of
-    _DEADLINE_PAD_KEEP_GUARDS, and each row of _DEADLINE_PAD_PRINTER_ROWS its pinned decision from gate_weakening
-    (decide, from the fixtures _deadline_fixtures builds under tmp)."""
+    _DEADLINE_PAD_KEEP_GUARDS, each row of _DEADLINE_PAD_PRINTER_ROWS its pinned decision from gate_weakening, and
+    each row of _DEADLINE_PAD_FUNSUB_ROWS its pinned decision from its guard (decide, from the fixtures
+    _deadline_fixtures builds under tmp)."""
     plain, orch = _deadline_fixtures(tmp)
     rows = [(name, command, background, want) for command, background, wants in _DEADLINE_PAD_KEEPS
             for name, want in zip(_DEADLINE_PAD_KEEP_GUARDS, wants)]
     rows += [("gate_weakening", command, False, want) for command, want in _DEADLINE_PAD_PRINTER_ROWS]
+    rows += list(_DEADLINE_PAD_FUNSUB_ROWS)
     out = []
     for name, command, background, want in rows:
         got = decide(name, command, background, str(orch if name.startswith(("orch_", "review_")) else plain))
