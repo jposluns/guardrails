@@ -918,7 +918,7 @@ def _add_skill_surface(base):
     (corpus_aiqt / "selftest-integ.md").write_text(_INTEG, encoding="utf-8")
     (corpus_aiqt / "selftest-trust.md").write_text(_TRUST, encoding="utf-8")
     (base.joinpath(*gen_skill.CORPUS_PARTS) / "security" / "selftest-secc.md").write_text(_SECC, encoding="utf-8")
-    # gen_skill.build_outputs derives the public attribution line (GD-56) from the [plugin] author-name in
+    # gen_skill.build_outputs derives the public attribution line from the [plugin] author-name in
     # the identity manifest; the skill-drift fixtures do not install the hooks surface, so provide a minimal
     # one when it is absent (never clobbering a manifest a hooks-surface caller already wrote).
     manifest = base.joinpath(*gen_skill.IDENTITY_MANIFEST_PARTS)
@@ -1394,7 +1394,7 @@ def self_test_main():
 
         # 12. An unreadable .aiqt/ PARENT (not the standards/core dirs themselves) must fail closed:
         #     dir_or_absent() stats THROUGH it and raises EACCES, so the run fails as exit 2 rather than
-        #     reading the children as absent -> NOT APPLICABLE (the F-35 fail-open, where is_dir()
+        #     reading the children as absent -> NOT APPLICABLE (a fail-open, where is_dir()
         #     swallows EACCES). Here map_keys()'s rebind trips first. Same root-vs-nonroot guard.
         badparent = tmp / "badparent"
         badparent.mkdir()

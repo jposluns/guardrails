@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Claude Code enforcement-plugin surface from the hooks manifest (GD-24).
+"""Generate the Claude Code enforcement-plugin surface from the hooks manifest.
 
 The pack's mechanical-enforcement controls are declared in .aiqt/core/hooks/manifest.toml (one
 [[hook]] per control) with the handler implementations beside it under .aiqt/core/hooks/scripts/.
