@@ -6,6 +6,9 @@
 #                                               the installer writes) at each git commit, but not for
 #                                               the operations listed under Residuals
 #   sh opf/enforcement/precommit/pre-commit     by hand, from the repository top level
+#   sh opf/enforcement/precommit/pre-commit pre-merge-commit
+#                                               as the pre-merge-commit hook (the installer's second
+#                                               stub): see Merge commits below
 #
 # It checks the snapshot the commit would record, never the working tree:
 #   1. git write-tree records the staged index as a tree. Git points GIT_INDEX_FILE at the index it is
@@ -39,17 +42,30 @@
 # exits 2 when this file is missing or unreadable in the working tree being committed (a branch that
 # predates the pack, say), so a missing hook is never silent.
 #
+# Merge commits: git commit runs the pre-commit hook, but a merge that git merge (or git pull) concludes
+# without stopping for a conflict runs the pre-merge-commit hook instead, and githooks(5) gives that hook
+# no documented way to name the merged commit. The installer's pre-merge-commit stub runs this file with
+# the operand pre-merge-commit, which runs no check and exits 2 with a message telling the operator to
+# conclude the merge with git commit; a non-zero exit makes git merge stop before it creates the commit.
+# The self-test confirms, on the git it runs, that the stop leaves the merge result in the index and
+# MERGE_HEAD naming the merged commit, so git commit concludes the merge through this hook. A git that
+# leaves no MERGE_HEAD there has stopped the merge altogether, so the message also tells the operator, in
+# that case, to rerun it as git merge --no-commit and conclude it with git commit.
+#
 # Residuals this hook does not close (spec 14.1):
 #   - Per-clone installation: the stub is local to the clone. It is not cloned or pushed, so a clone that
 #     never ran install.sh runs no hook.
-#   - Bypass: git commit --no-verify skips the hook, and the same user can remove the stub or edit this
-#     file. A core.hooksPath set later, in any configuration scope, makes git stop running the stub,
-#     silently.
+#   - Bypass: git commit --no-verify skips the hook, and git merge --no-verify (git pull --no-verify)
+#     skips the pre-merge-commit stub, so a merge commits without stopping and unchecked; the same user
+#     can remove either stub or edit this file. A core.hooksPath set later, in any configuration scope,
+#     makes git stop running the stubs, silently.
 #   - Operations git commits without running any pre-commit hook: cherry-pick, revert, rebase (and
-#     pull --rebase), am, and a merge that commits without stopping for a conflict (git merge or git
-#     pull; git runs pre-merge-commit there, which the pack does not install). Each records a commit
-#     this hook never checks; a merge that stops for a conflict and is concluded with git commit is
-#     checked.
+#     pull --rebase) and am. Each records a commit this hook never checks. A merge that git merge or
+#     git pull would commit without stopping is stopped by the pre-merge-commit stub (above), and a merge
+#     concluded with git commit is checked.
+#   - Merge commits: the history checks compare with HEAD alone, which in a merge commit is its first
+#     parent, so the merged branch's committed changes are graded as this commit's and no comparison
+#     with the merged commit is made; a merge commit's status changes are not graded.
 #   - The hook runs checked-out code: the stub runs the working-tree copy of this file, and this file
 #     runs the working-tree opf.py (OPF_TOOL), not the staged ones. Checking out a branch, merge or pull
 #     request that changes them runs the changed code, with the user's privileges, at the next git
@@ -65,8 +81,14 @@
 #     clean or smudge filter that configuration defines is not applied to the snapshot.
 #   - Only this repository's staged tree is snapshotted; a store that lives in another repository is not.
 set -u
+# Run as pre-merge-commit, it runs no check (see Merge commits above) and refuses the merge commit, so
+# that git merge stops before creating it and git commit concludes the merge through this hook.
+if [ "$#" -eq 1 ] && [ "$1" = pre-merge-commit ]; then
+    echo "opf-pre-commit: refused as pre-merge-commit: git merge records a merge commit without the pre-commit check, so this merge is not committed. Conclude it with git commit, which runs the check. If git rev-parse -q --verify MERGE_HEAD prints nothing (a git that leaves no merge in progress here), rerun the merge as git merge --no-commit and conclude it with git commit." >&2
+    exit 2
+fi
 if [ "$#" -gt 0 ]; then
-    echo "opf-pre-commit: usage: sh pre-commit (no operands; run it from the repository top level)" >&2
+    echo "opf-pre-commit: usage: sh pre-commit [pre-merge-commit] (no other operand; run it from the repository top level)" >&2
     exit 2
 fi
 fail() {

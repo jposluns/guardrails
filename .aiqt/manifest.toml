@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "aa1f9a13a1de13742534baaf08d8247f597f6ad65000abbb4385830c9a23688b"
+tree-sha256 = "74c567a2f8b27b286b146160af9a4aeffff7a00b843b61f60dc7c617b095e4da"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 544757
-sha256 = "8fadd2b671dc5b336eb582a2db19e98013a6e80613d04a026c8beddf4f3825e7"
+bytes = 545794
+sha256 = "178e348f1e6ebbe6980d4d0bbc5014f32f2d7fda9aa7c2d26896e5f5bb250bec"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2521,13 +2521,13 @@ sha256 = "d073f5e3e09a55c716ad6f71b24a68eb9ec1c7f5c36bae68f7d8f3dc0f21d4c5"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
-bytes = 27465
-sha256 = "cd48ca45fc01a32cf5c134e8b3e12a2509f0195ab6a299d5a1bda1fe984eec2a"
+bytes = 31145
+sha256 = "fe3016f9c81db55069056e4033c0fcb0e2d742aca34d4c27d4ce6ea60fe2694e"
 
 [[sources]]
 path = "opf/enforcement/precommit/pre-commit"
-bytes = 10627
-sha256 = "02f97b775948be98897e6ffb2b28999a37c387ad4170104dc72ea38f5cd8bc64"
+bytes = 12823
+sha256 = "88767712c3a6a993a65b8710643a24038de442f1c9a27b1206e31333051d5c9e"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/SKILL.md"
@@ -3091,8 +3091,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 368620
-sha256 = "4ec0521ece0ad24bc12402d969a93b8c71ff71c3b5a6ff64672c1407803cbde0"
+bytes = 378734
+sha256 = "53cc5c5e9a651e0e06f787bdb72f7060cf0d5fec0d4f8de70e98afd1a39a7924"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"

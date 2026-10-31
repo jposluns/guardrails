@@ -84,10 +84,12 @@ launched isolated (-I -B). The tempdir is removed in a finally (test-hermeticity
 self-test SKIPs clean (a committed HEAD is required for the tracked/prior observations).
 
 The pre-commit floor (opf/enforcement/precommit: the staged-snapshot hook and its per-clone installer, which
-writes a pre-commit stub into the clone's untracked hooks directory and never sets core.hooksPath) rides
-fixtures of the same kind, each holding a copy of the pack at its pack path. The installer writes the stub,
-a rerun is a no-op, and other hooks are kept; it refuses (2, nothing changed) any core.hooksPath, the
-tracked pack directory included, an existing pre-commit hook, an unreadable pack hook or hooks directory
+writes a pre-commit stub and a pre-merge-commit stub into the clone's untracked hooks directory and never
+sets core.hooksPath) rides fixtures of the same kind, each holding a copy of the pack at its pack path. The
+installer writes both stubs, a rerun is a no-op, a clone holding the pre-commit stub alone gains the
+pre-merge-commit stub with its pre-commit stub kept, and other hooks are kept; it refuses (2, nothing
+changed) any core.hooksPath, the tracked pack directory included, an existing pre-commit or pre-merge-commit
+hook, an unreadable pack hook or hooks directory
 (unprivileged user only) and a hooks path that is not a directory; an inherited GIT_DIR naming another
 repository cannot redirect it, and a missing dirname run from another repository's pack directory installs
 nowhere (2). Inherited GIT_TRACE and GIT_TRACE2 destinations naming another repository's tracked file leave
@@ -103,8 +105,8 @@ holds the git directory, a git directory inside the main worktree's core.worktre
 (one outside it installs), a registry entry naming a top level of /, a linked worktree at the hooks
 directory, a hand-written .git file naming the git directory, a linked worktree moved by hand, an empty
 core.worktree (a stand-in git answers one), and a termination signal mid-install, which rolls back. A
-refusal after rollback names what is at the hooks directory, the stub path and the private directory by
-file type: a signal just after the ln or the final rmdir leaves nothing and says so; one just after the
+refusal after rollback names what is at the hooks directory, the two stub paths and the private directory by
+file type: a signal just after either ln or the final rmdir leaves nothing and says so; one just after the
 hooks directory's or the private directory's mkdir leaves that empty directory and names it; one that
 arrives before the hooks directory's mkdir leaves no hooks directory and names none; a stub the rollback
 cannot read is named, not taken as gone; a hooks directory that cannot be searched leaves the paths in it
@@ -144,6 +146,12 @@ when the snapshot removal fails (no rm), and a missing dirname stops the hook be
 CI residual is held as behaviour and text: a staged tamper the hook refuses, committed with --no-verify,
 passes the CI recipe, and the shipped files say so; git cherry-pick records the same tamper with the stub
 installed and no hook run, and the shipped files name the operations git commits without the hook.
+Through real `git merge` runs: a merge git merge would commit without stopping is stopped by the
+pre-merge-commit stub with HEAD unmoved, MERGE_HEAD naming the merged commit and the merge result staged;
+git commit then concludes it as a two-parent merge through the pre-commit check, and refuses one whose
+result carries a tamper by doctor's finding; the same merge without the stubs commits. Run as
+pre-merge-commit, the hook runs no step and exits 2. The shipped files disclose that git merge --no-verify
+skips the stubs and that a merge commit's status changes are not graded.
 A SECOND, git-independent self-test leg verifies the enforcement pack's Claude Code deny hook
 (OPF-ENFORCE-PACK slice (b)): the shipped opf/enforcement/claude/pretooluse_deny.py is launched as a
 child (python -I, the doc-confirmed PreToolUse stdin/stdout contract) over throwaway store fixtures,
@@ -1267,17 +1275,20 @@ def _self_test_isolated():
                 return False
             return True
 
-        def _stub(root):
-            # The text of the installed pre-commit stub in the clone's untracked hooks directory, or None.
-            path = root / ".git" / "hooks" / "pre-commit"
+        def _stub(root, name="pre-commit"):
+            # The text of the installed stub `name` in the clone's untracked hooks directory, or None.
+            path = root / ".git" / "hooks" / name
             if not path.is_file() or not os.access(str(path), os.X_OK):
                 return None
             return path.read_text(encoding="utf-8")
 
         def _stub_ok(root):
-            # True when the stub is installed and names the pack hook at its pack path.
-            text = _stub(root)
-            return text is not None and ("hook='./" + rel + "/pre-commit'") in text
+            # True when both stubs are installed and name the pack hook at its pack path, the
+            # pre-merge-commit stub running it as pre-merge-commit.
+            text, merge_text = _stub(root), _stub(root, "pre-merge-commit")
+            hook = "hook='./" + rel + "/pre-commit'"
+            return (text is not None and hook in text and merge_text is not None and hook in merge_text
+                    and 'sh "$hook" pre-merge-commit\n' in merge_text)
 
         def _head(root):
             return _git_out(root, "rev-parse", "-q", "--verify", "HEAD")
@@ -1351,8 +1362,34 @@ def _self_test_isolated():
             # sets no core.hooksPath (0); a rerun is a no-op (0). ---
             inst = _fixture("install")
             expect("install-writes-stub", (_install(inst), _stub_ok(inst), _hookspath(inst)), (EXIT_OK, True, None))
-            first = _stub(inst)
-            expect("install-rerun-no-op", (_install(inst), _stub(inst) == first), (EXIT_OK, True))
+            first = (_stub(inst), _stub(inst, "pre-merge-commit"))
+            expect("install-rerun-no-op", (_install(inst), (_stub(inst), _stub(inst, "pre-merge-commit")) == first),
+                   (EXIT_OK, True))
+            # A pre-merge-commit hook already there, other than the stub, is refused like a pre-commit one:
+            # it is left as it was and no pre-commit stub is written either.
+            merge_planted = _fixture("install-planted-merge")
+            (merge_planted / ".git" / "hooks").mkdir(exist_ok=True)
+            (merge_planted / ".git" / "hooks" / "pre-merge-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(str(merge_planted / ".git" / "hooks" / "pre-merge-commit"), 0o755)
+            expect("install-refuses-existing-merge-hook",
+                   (_install(merge_planted),
+                    (merge_planted / ".git" / "hooks" / "pre-merge-commit").read_text(encoding="utf-8"),
+                    _entry(merge_planted / ".git" / "hooks" / "pre-commit")),
+                   (EXIT_ERROR, "#!/bin/sh\nexit 0\n", False))
+            # A clone that holds the pre-commit stub alone (an earlier installer wrote only that one) gains the
+            # pre-merge-commit stub on a rerun, and its pre-commit stub is kept as it was.
+            upgrade = _fixture("install-upgrade")
+            if _install(upgrade) != EXIT_OK:
+                raise OSError("could not install the stubs in {}".format(upgrade))
+            upgrade_pc = (upgrade / ".git" / "hooks" / "pre-commit").read_bytes()
+            upgrade_ino = os.lstat(str(upgrade / ".git" / "hooks" / "pre-commit")).st_ino
+            if _entry(upgrade / ".git" / "hooks" / "pre-merge-commit"):
+                os.remove(str(upgrade / ".git" / "hooks" / "pre-merge-commit"))
+            expect("install-adds-merge-stub-beside-earlier-stub",
+                   (_install(upgrade), _stub_ok(upgrade),
+                    (upgrade / ".git" / "hooks" / "pre-commit").read_bytes() == upgrade_pc,
+                    os.lstat(str(upgrade / ".git" / "hooks" / "pre-commit")).st_ino == upgrade_ino),
+                   (EXIT_OK, True, True, True))
             # A core.hooksPath set to any value (git would run no hook from the hooks directory) is refused
             # (2) and left as it was, including the tracked pack directory a former install set.
             other = _fixture("install-other")
@@ -1804,12 +1841,15 @@ def _self_test_isolated():
                 lines = err.read_text(encoding="utf-8", errors="replace").strip().split("\n")
                 return rc, lines, ".opf-pre-commit-install." + pid.read_text(encoding="utf-8").strip()
 
-            def _seen(reason, root, priv, hooks_kind, stub_kind="nothing", priv_kind="nothing"):
+            def _seen(reason, root, priv, hooks_kind, stub_kind="nothing", priv_kind="nothing", merge_kind=None):
+                if merge_kind is None:
+                    merge_kind = stub_kind
                 hooks_dir = root / ".git" / "hooks"
                 text = "opf-pre-commit install: refused: " + reason + "; after the removal, what is there: "
                 text += str(hooks_dir) + ": " + hooks_kind
                 if hooks_kind == "a directory":
                     text += "; " + str(hooks_dir / "pre-commit") + ": " + stub_kind
+                    text += "; " + str(hooks_dir / "pre-merge-commit") + ": " + merge_kind
                     text += "; " + str(hooks_dir / priv) + ": " + priv_kind
                 return text
 
@@ -1818,7 +1858,8 @@ def _self_test_isolated():
                 if not hooks_dir.is_dir():
                     return None
                 return sorted((n, sorted(os.listdir(str(hooks_dir / n))) if (hooks_dir / n).is_dir() else "file")
-                              for n in os.listdir(str(hooks_dir)) if n == "pre-commit" or n.startswith(".opf-"))
+                              for n in os.listdir(str(hooks_dir))
+                              if n in ("pre-commit", "pre-merge-commit") or n.startswith(".opf-"))
 
             def _shimmed(tag, tools):
                 env = _path_without(next(iter(tools)), install_tools, tag)
@@ -1832,8 +1873,9 @@ def _self_test_isolated():
                 return env
 
             # A signal that lands just after a write (the stand-in runs the real command, then sends TERM; the
-            # installer runs the trap as soon as that command returns). After the ln or the final rmdir it
-            # leaves no stub and no private directory and names nothing at either. After a mkdir, the trap
+            # installer runs the trap as soon as that command returns). After the first ln, the ln of the
+            # pre-merge-commit stub (the pre-commit stub this run placed before it is removed too) or the final
+            # rmdir it leaves no stub and no private directory and names nothing at any. After a mkdir, the trap
             # runs before the directory is recorded as this run's, so that empty directory is left and named
             # (the disclosed instant); after the private mkdir in a run that made the hooks directory too,
             # that hooks directory is left as well, holding it, and both are named.
@@ -1841,6 +1883,8 @@ def _self_test_isolated():
                                             ("private-mkdir", "mkdir", real_mkdir, '[ "$1" = -m ]'),
                                             ("private-mkdir-in-made-hooks", "mkdir", real_mkdir, '[ "$1" = -m ]'),
                                             ("ln", "ln", real_ln, ":"),
+                                            ("merge-ln", "ln", real_ln,
+                                             'case "$3" in */pre-merge-commit) true ;; *) false ;; esac'),
                                             ("rmdir", "rmdir", real_rmdir, ":")):
                 after = _fixture("install-signal-after-" + label)
                 after_hooks = after / ".git" / "hooks"
@@ -1886,9 +1930,9 @@ def _self_test_isolated():
                                                          else "private directory " + str(arrived_hooks / priv)),
                               arrived, priv, "a directory",
                               priv_kind="a directory" if label == "private" else "nothing")))
-            # A signal after the final rmdir, with the stub unreadable to the rollback's comparison once the
-            # temporary file is gone (a stand-in cmp fails then): the stub is kept and named as a regular
-            # file, not taken as gone.
+            # A signal after the final rmdir, with the pre-commit stub unreadable to the rollback's comparison
+            # once the temporary files are gone (a stand-in cmp fails then): that stub is kept and named as a
+            # regular file, not taken as gone, and the pre-merge-commit stub, which compares, is removed.
             unread = _fixture("install-signal-unreadable-stub")
             (unread / ".git" / "hooks").mkdir(exist_ok=True)
             unread_env = _shimmed("install-signal-unreadable-stub", {
@@ -1901,7 +1945,8 @@ def _self_test_isolated():
             expect("install-signal-unreadable-stub-named",
                    (rc, _opf_names(unread), lines[-1]),
                    (EXIT_ERROR, [("pre-commit", "file")],
-                    _seen("stopped by a signal", unread, priv, "a directory", stub_kind="a regular file")))
+                    _seen("stopped by a signal", unread, priv, "a directory", stub_kind="a regular file",
+                          merge_kind="nothing")))
             # A signal that arrives before the hooks directory's mkdir makes it (the stand-in sends TERM and
             # fails without making it): no hooks directory, and the refusal, alone on the error output, names
             # nothing there.
@@ -2229,6 +2274,87 @@ def _self_test_isolated():
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise OSError("could not run git cherry-pick in {} ({})".format(picked, exc))
             expect("cherry-pick-skips-hook", (proc.returncode, _head(picked) != before), (EXIT_OK, True))
+
+            # Merge commits, through a real git merge and git commit. A merge git merge would record without
+            # stopping (no conflict) is stopped by the pre-merge-commit stub with its message; the merge result
+            # stays in the index and MERGE_HEAD names the merged commit, so git commit concludes the merge
+            # through the pre-commit check: a clean merge commits with both parents, and a merge whose result
+            # tampers with a record is refused by doctor's finding. Without the stubs the same merge commits.
+            def _merge(root):
+                # A real `git merge --no-edit side`, so git itself runs the installed pre-merge-commit hook.
+                # Returns (exit status, combined output).
+                try:
+                    proc = subprocess.run([git, "--no-replace-objects", "-C", str(root),
+                                           "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
+                                           "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+                                           "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                                           "merge", "--no-edit", "side"],
+                                          cwd=str(root), env=_env(), stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT, timeout=300)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise OSError("could not run git merge in {} ({})".format(root, exc))
+                return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+            def _diverged(name, tamper=False, install=True):
+                # A fixture whose side branch adds SIDE.md (or tampers with a record) and whose main branch
+                # adds MAIN.md after the fork, so merging side into main makes a merge commit with no conflict.
+                root = _fixture(name)
+                if install and _install(root) != EXIT_OK:
+                    raise OSError("could not install the stubs in {}".format(root))
+                _git(root, home, "checkout", "-q", "-b", "side")
+                if tamper:
+                    _tamper(root)
+                    _git(root, home, "add", done_rel)
+                else:
+                    (root / "SIDE.md").write_text("side\n", encoding="utf-8")
+                    _git(root, home, "add", "SIDE.md")
+                _git(root, home, "commit", "-q", "--no-verify", "-m", "side")
+                _git(root, home, "checkout", "-q", "main")
+                (root / "MAIN.md").write_text("main\n", encoding="utf-8")
+                _git(root, home, "add", "MAIN.md")
+                _git(root, home, "commit", "-q", "--no-verify", "-m", "main")
+                return root
+
+            merge_message = ("opf-pre-commit: refused as pre-merge-commit", "Conclude it with git commit",
+                             "rerun the merge as git merge --no-commit and conclude it with git commit")
+            merged = _diverged("merge-clean")
+            merged_side = _git_out(merged, "rev-parse", "side")
+            before = _head(merged)
+            rc, text = _merge(merged)
+            expect("merge-stopped-by-pre-merge-commit",
+                   (rc != EXIT_OK, _head(merged) == before, all(m in " ".join(text.split()) for m in merge_message)),
+                   (True, True, True))
+            staged = _git_out(merged, "write-tree")
+            expect("merge-stopped-leaves-merge-in-progress",
+                   (_git_out(merged, "rev-parse", "-q", "--verify", "MERGE_HEAD") == merged_side,
+                    _git_out(merged, "rev-parse", ":SIDE.md") == _git_out(merged, "rev-parse", "side:SIDE.md"),
+                    _git_out(merged, "rev-parse", ":MAIN.md") == _git_out(merged, "rev-parse", "main:MAIN.md")),
+                   (True, True, True))
+            rc, moved = _committed(merged)
+            expect("merge-concluded-by-git-commit",
+                   (rc, moved, _git_out(merged, "rev-parse", "HEAD^1") == before,
+                    _git_out(merged, "rev-parse", "HEAD^2") == merged_side,
+                    _git_out(merged, "rev-parse", "HEAD^{tree}") == staged,
+                    _git_out(merged, "rev-parse", "-q", "--verify", "MERGE_HEAD")),
+                   (EXIT_OK, True, True, True, True, None))
+            # The merged result is checked when git commit concludes it: a tamper the side branch committed
+            # past the hook is refused by doctor's finding, HEAD unmoved and the merge still in progress.
+            merge_tamper = _diverged("merge-tamper", tamper=True)
+            before = _head(merge_tamper)
+            rc, text = _merge(merge_tamper)
+            expect("merge-tamper-stopped-by-pre-merge-commit",
+                   (rc != EXIT_OK, _head(merge_tamper) == before, merge_message[0] in text), (True, True, True))
+            expect("merge-tamper-refused-by-git-commit",
+                   (_refused(merge_tamper),
+                    _git_out(merge_tamper, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+                    == _git_out(merge_tamper, "rev-parse", "side")),
+                   ((True, True, True), True))
+            # Without the stubs the same merge commits without stopping, so it is the stub that stops it.
+            merge_bare = _diverged("merge-no-hook", install=False)
+            rc, text = _merge(merge_bare)
+            expect("merge-without-hook-commits",
+                   (rc, _git_out(merge_bare, "rev-parse", "HEAD^2") == _git_out(merge_bare, "rev-parse", "side")),
+                   (EXIT_OK, True))
             hook_text = " ".join((pack / "pre-commit").read_text(encoding="utf-8").replace("#", " ").split())
             inst_text = " ".join((pack / "install.sh").read_text(encoding="utf-8").replace("#", " ").split())
             expect("residuals-disclosed", (
@@ -2237,8 +2363,12 @@ def _self_test_isolated():
                 "The hook runs checked-out code" in hook_text,
                 "Operations git commits without running any pre-commit hook: cherry-pick, revert, rebase"
                 in hook_text,
-                "no pre-commit hook for cherry-pick, revert, rebase, am or a merge that commits without stopping"
-                in inst_text,
+                "no pre-commit hook for cherry-pick, revert, rebase or am" in inst_text
+                and "git merge --no-verify skip them" in inst_text
+                and "a merge commit's status changes are not graded" in inst_text
+                and "git merge --no-verify (git pull --no-verify) skips the pre-merge-commit stub" in hook_text
+                and "a merge commit's status changes are not graded" in hook_text
+                and "which the pack does not install" not in hook_text,
                 "so a missing hook is never silent" in hook_text,
                 "It never sets core.hooksPath" in inst_text,
                 "Requires git 2.32 or later" in hook_text,
@@ -2294,6 +2424,11 @@ def _self_test_isolated():
             expect("hook-abnormal-status-normalized", (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
             rc, calls, _f = _stubbed(stubbed, args=("x",))
             expect("hook-usage", (rc, calls), (EXIT_ERROR, []))
+            # Run as pre-merge-commit, the hook runs no step and refuses (2).
+            rc, calls, _f = _stubbed(stubbed, args=("pre-merge-commit",))
+            expect("hook-pre-merge-commit-refuses-without-steps", (rc, calls), (EXIT_ERROR, []))
+            rc, calls, _f = _stubbed(stubbed, args=("pre-merge-commit", "x"))
+            expect("hook-pre-merge-commit-surplus-usage", (rc, calls), (EXIT_ERROR, []))
             # Every snapshot is removed on exit.
             expect("hook-snapshots-removed", sorted(os.listdir(str(snaps))), [])
             # Fail closed, each before any step: a git older than the 2.32 floor, and an environment whose
