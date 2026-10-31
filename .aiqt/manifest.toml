@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a12883354857cc6a477c455c0edf812af16a15db54c46a045babf749a66df4b2"
+tree-sha256 = "5750b7196e872c56794133a77dcc2bd92f344c72aebd4eaac84e7391eae2906f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3501,8 +3501,8 @@ sha256 = "8dfc2f59805c973c295196b7bf618cb6c938da109e7a0fc3544449a8ab99fc49"
 
 [[sources]]
 path = "tools/check_import_closure.py"
-bytes = 409098
-sha256 = "08503db6f75be39cacb25ab033260c3fd8c910e28e7879b97275d5ea7e53741b"
+bytes = 422518
+sha256 = "27fb32f550b49c371334b3bc089ae9e72bb36f796e24a99d2ccec4c8401116f1"
 
 [[sources]]
 path = "tools/check_install_page.py"

@@ -2878,6 +2878,8 @@ _T_PLANTED = "planted = ('lib', '_vendor', 'lib/_vendor')\n"
 _T_DEEP = "/".join("d%d" % n for n in range(16)) + "/t.py"
 _T_GEN_COMMON = ("tools/_gen_common.py", "from pathlib import Path\ndef repo_root():\n    return Path('.')\n")
 _T_ELSEWHERE = ("tools/elsewhere.py", "from pathlib import Path\ndef repo_root():\n    return Path('elsewhere')\n")
+# The same module also defining the names the from-import rebinding vectors import, so each is a real rebinding.
+_T_ELSEWHERE_NAMES = (_T_ELSEWHERE[0], _T_ELSEWHERE[1] + "ROOT = Path('elsewhere')\nLIB = ROOT / 'lib'\n")
 # A name bound once to a read shape, then (in the rebinding vectors) one statement between it and its insertion.
 _T_NAMED = _T_PATH + "ROOT = str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor')\n" \
     "%ssys.path.insert(0, ROOT)\nimport pkg\n"
@@ -4155,10 +4157,10 @@ _CANNOT_VECTORS = (
                    source=_T_NAMED % "for ROOT in ('elsewhere',):\n    pass\n"),
     _unread_vector("name deleted", "ROOT", source=_T_NAMED % "del ROOT\n"),
     _unread_vector("name rebound by import", "ROOT", (("tools/ROOT.py", ""),), source=_T_NAMED % "import ROOT\n"),
-    _unread_vector("name rebound by a from-import", "ROOT", (_T_ELSEWHERE,),
+    _unread_vector("name rebound by a from-import", "ROOT", (_T_ELSEWHERE_NAMES,),
                    source=_T_NAMED % "from elsewhere import ROOT\n"),
     _unread_vector("name rebound as a with target", "ROOT",
-                   source=_T_NAMED % "with open('elsewhere') as ROOT:\n    pass\n"),
+                   source=_T_NAMED % "with open(__file__) as ROOT:\n    pass\n"),
     _unread_vector("name rebound by a walrus in a statement", "ROOT", source=_T_NAMED % "(ROOT := 'elsewhere')\n"),
     _unread_vector("name rebound by a walrus in an if test", "ROOT",
                    source=_T_NAMED % "if (ROOT := 'elsewhere'):\n    pass\n"),
@@ -4168,6 +4170,31 @@ _CANNOT_VECTORS = (
                    source=_T_NAMED % "try:\n    pass\nexcept OSError as ROOT:\n    pass\n"),
     _unread_vector("name rebound as a match capture", "ROOT",
                    source=_T_NAMED % "match 'elsewhere':\n    case ROOT:\n        pass\n"),
+    _unread_vector("name rebound as a function parameter", "ROOT",
+                   source=_T_NAMED % "def move(ROOT='elsewhere'):\n    return ROOT\n"),
+    _unread_vector("name rebound as a lambda parameter", "ROOT",
+                   source=_T_NAMED % "move = lambda ROOT='elsewhere': ROOT\n"),
+    _unread_vector("name rebound as a comprehension variable", "ROOT",
+                   source=_T_NAMED % "MOVED = [ROOT for ROOT in ('elsewhere',)]\n"),
+    _unread_vector("name rebound in a class body", "ROOT", source=_T_NAMED % "class Moved:\n    ROOT = 'elsewhere'\n"),
+    _unread_vector("name rebound as a type parameter", "ROOT", source=_T_NAMED % "class Moved[ROOT]:\n    pass\n"),
+    _unread_vector("name rebound as a parameter specification", "ROOT",
+                   source=_T_NAMED % "def move[**ROOT]():\n    pass\n"),
+    _unread_vector("name rebound as a type variable tuple", "ROOT", source=_T_NAMED % "def move[*ROOT]():\n    pass\n"),
+    _unread_vector("name rebound by a type alias", "ROOT", source=_T_NAMED % "type ROOT = str\n"),
+    _unread_vector("name rebound as a match star capture", "ROOT",
+                   source=_T_NAMED % "match ['elsewhere']:\n    case [*ROOT]:\n        pass\n"),
+    _unread_vector("name rebound as a match mapping rest", "ROOT",
+                   source=_T_NAMED % "match {'a': 'elsewhere'}:\n    case {**ROOT}:\n        pass\n"),
+    _unread_vector("name rebound by an aliased import", "ROOT", (_T_ELSEWHERE,),
+                   source=_T_NAMED % "import elsewhere as ROOT\n"),
+    _unread_vector("name rebound by an aliased from-import", "ROOT", (_T_ELSEWHERE,),
+                   source=_T_NAMED % "from elsewhere import repo_root as ROOT\n"),
+    _unread_vector("name rebound by a starred destructuring assignment", "ROOT",
+                   source=_T_NAMED % "*ROOT, OTHER = 'elsewhere', 'other'\n"),
+    _unread_vector("name rebound by an async def", "ROOT", source=_T_NAMED % "async def ROOT():\n    pass\n"),
+    _unread_vector("name rebound by a class", "ROOT", source=_T_NAMED % "class ROOT:\n    pass\n"),
+    _unread_vector("name declared global in a function", "ROOT", source=_T_NAMED % "def move():\n    global ROOT\n"),
     # One name past the bound, and two names bound to chains that start at each other.
     _unread_vector("pathlib chain through one name past the highest read", "str(LIB)",
                    source=_T_PATH + "BASE = Path(__file__).resolve().parents[1]\nROOT = BASE / 'lib'\n"
@@ -4199,12 +4226,12 @@ _CANNOT_VECTORS = (
     # The same names rebound by an import of a module that resolves: the gate reads neither binding.
     _unread_vector("outer pathlib-chain name rebound by import", "str(LIB / '_vendor')", (("tools/LIB.py", ""),),
                    source=_T_OUTER_NAME % "import LIB\n"),
-    _unread_vector("outer pathlib-chain name rebound by a from-import", "str(LIB / '_vendor')", (_T_ELSEWHERE,),
+    _unread_vector("outer pathlib-chain name rebound by a from-import", "str(LIB / '_vendor')", (_T_ELSEWHERE_NAMES,),
                    source=_T_OUTER_NAME % "from elsewhere import LIB\n"),
     _unread_vector("single pathlib-chain name rebound by import", "str(ROOT / 'lib' / '_vendor')",
                    (("tools/ROOT.py", ""),), source=_T_ONE_NAME % "import ROOT\n"),
     _unread_vector("single pathlib-chain name rebound by a from-import", "str(ROOT / 'lib' / '_vendor')",
-                   (_T_ELSEWHERE,), source=_T_ONE_NAME % "from elsewhere import ROOT\n"),
+                   (_T_ELSEWHERE_NAMES,), source=_T_ONE_NAME % "from elsewhere import ROOT\n"),
     # A str-valued name over a chain that starts at a name: its chain is read with no name to follow.
     _unread_vector("str-valued name over a pathlib chain that starts at a name", "LIBS",
                    source=_T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n"
@@ -4603,10 +4630,10 @@ _STR_NAME_FIRST_BINDING = "    if isinstance(node, ast.Name) and named == MAX_NA
     "        start = None if first is None else _path_chain(first, rel, bindings, MAX_NAME_HOPS - 1)\n" \
     "    elif isinstance(node, ast.Name) and named:\n        value = _assigned(bindings, node.id)\n" \
     "        start = None if"
-# That lookup with a branch ahead of it that drops the import and from-import bindings of the name read directly
-# inside the inserted str() before testing that the name is bound once.
-_STR_NAME_NO_IMPORTS = "    if isinstance(node, ast.Name) and named == MAX_NAME_HOPS:\n" \
-    '        kept = [b for b in _bindings_of(bindings, node.id) or () if b[0] not in ("import", "from")]\n' \
+# That lookup with a branch ahead of it that drops the bindings of one import kind ("import" or "from", put in at %s)
+# of the name read directly inside the inserted str() before testing that the name is bound once.
+_STR_NAME_DROPPED = "    if isinstance(node, ast.Name) and named == MAX_NAME_HOPS:\n" \
+    '        kept = [b for b in _bindings_of(bindings, node.id) or () if b[0] != %s]\n' \
     '        value = kept[0][1] if len(kept) == 1 and kept[0][0] == "assign" else None\n' \
     "        start = None if value is None else _path_chain(value, rel, bindings, named - 1)\n" \
     "    elif isinstance(node, ast.Name) and named:\n        value = _assigned(bindings, node.id)\n" \
@@ -4616,6 +4643,14 @@ _STR_NAME_NO_IMPORTS = "    if isinstance(node, ast.Name) and named == MAX_NAME_
 _BINDING_WALK = "    for node in ast.walk(tree):\n        names = ()\n"
 _IMPORT_BRANCH = "                elif isinstance(node, ast.Import):\n"
 _HANDLER_NAMES = "        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar,"
+_DEF_NAMES = "        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):\n"
+_ALIAS_BRANCH = '                if alias.name == "*" or alias.asname is not None:\n'
+# _file_bindings' parameter branch, and that branch skipping the parameters a walk marks as plain (_PARAMETERS_PLAIN,
+# the parameters of the node classes put in at %s).
+_ARG_BRANCH = "        elif isinstance(node, ast.arg):\n"
+_ARG_BRANCH_UNPLAIN = "        elif isinstance(node, ast.arg) and id(node) not in plain:\n"
+_PARAMETERS_PLAIN = "    plain |= {id(a) for n in ast.walk(tree) if isinstance(n, %s) for a in ast.walk(n.args) if " \
+    "isinstance(a, ast.arg)}\n"
 
 # Each mutant removes one check (or one fail-closed path), or puts back a widening or defect this gate replaces,
 # from the gate half of this file's source, the part before the
@@ -4731,15 +4766,12 @@ MUTANTS = (
      "single pathlib-chain name rebound in a function through global"),
     ("single-chain-name-bound-once-branch", _STR_NAME_LOOKUP, _STR_NAME_FIRST_BINDING,
      "single pathlib-chain name rebound in an if branch"),
-    # The same name with its import and from-import bindings dropped before the bound-once test: its rebinding by
-    # an import is then not seen.
-    ("outer-chain-name-import-seen", _STR_NAME_LOOKUP, _STR_NAME_NO_IMPORTS,
+    # The same name with its import (or its from-import) bindings dropped before the bound-once test: its rebinding
+    # by that kind of import is then not seen. The outer and the single name take the same branch, so one vector
+    # each binds a kind.
+    ("outer-chain-name-import-seen", _STR_NAME_LOOKUP, _STR_NAME_DROPPED % '"import"',
      "outer pathlib-chain name rebound by import"),
-    ("outer-chain-name-from-import-seen", _STR_NAME_LOOKUP, _STR_NAME_NO_IMPORTS,
-     "outer pathlib-chain name rebound by a from-import"),
-    ("single-chain-name-import-seen", _STR_NAME_LOOKUP, _STR_NAME_NO_IMPORTS,
-     "single pathlib-chain name rebound by import"),
-    ("single-chain-name-from-import-seen", _STR_NAME_LOOKUP, _STR_NAME_NO_IMPORTS,
+    ("single-chain-name-from-import-seen", _STR_NAME_LOOKUP, _STR_NAME_DROPPED % '"from"',
      "single pathlib-chain name rebound by a from-import"),
     ("str-name-chain-unnamed", "MAX_NAME_HOPS if named else 0", "MAX_NAME_HOPS",
      "str-valued name over a pathlib chain that starts at a name"),
@@ -4764,8 +4796,6 @@ MUTANTS = (
      "name rebound as a with target"),
     ("binding-walrus-targets", _BINDING_WALK, "    plain |= {id(n.target) for n in ast.walk(tree) if "
      "isinstance(n, ast.NamedExpr)}\n" + _BINDING_WALK, "name rebound by a walrus in a statement"),
-    ("binding-walrus-targets-if", _BINDING_WALK, "    plain |= {id(n.target) for n in ast.walk(tree) if "
-     "isinstance(n, ast.NamedExpr)}\n" + _BINDING_WALK, "name rebound by a walrus in an if test"),
     ("binding-destructuring-targets", _BINDING_WALK, "    plain |= {id(e) for n in ast.walk(tree) if "
      "isinstance(n, ast.Assign) for t in n.targets if isinstance(t, (ast.Tuple, ast.List)) for e in t.elts}\n" +
      _BINDING_WALK, "name rebound by a destructuring assignment"),
@@ -4773,6 +4803,50 @@ MUTANTS = (
      "name rebound as an except target"),
     ("binding-match-captures", _HANDLER_NAMES, "        elif isinstance(node, (ast.ExceptHandler, ast.MatchStar,",
      "name rebound as a match capture"),
+    # Every other binding branch of _file_bindings, or one binding form of it, dropped (_binding_branch_failures
+    # requires a mutant here for each branch the gate half's _file_bindings has).
+    ("binding-assign", '            bindings.setdefault(node.targets[0].id, []).append(("assign", node.value))\n', "",
+     "insertion of a name bound once to a read shape",
+     ("the refusal of an unread insertion", "outside the forms the gate reads")),
+    ("binding-function-defs", _DEF_NAMES, "        elif isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef)):\n",
+     "repo_root import shadowed by a def"),
+    ("binding-async-defs", _DEF_NAMES, "        elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):\n",
+     "name rebound by an async def"),
+    ("binding-classes", _DEF_NAMES, "        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):\n",
+     "name rebound by a class"),
+    ("binding-globals", "        elif isinstance(node, (ast.Global, ast.Nonlocal)):\n",
+     "        elif isinstance(node, ast.Nonlocal):\n", "name declared global in a function"),
+    ("binding-def-parameters", (_BINDING_WALK, _ARG_BRANCH),
+     (_PARAMETERS_PLAIN % "(ast.FunctionDef, ast.AsyncFunctionDef)" + _BINDING_WALK, _ARG_BRANCH_UNPLAIN),
+     "name rebound as a function parameter"),
+    ("binding-lambda-parameters", (_BINDING_WALK, _ARG_BRANCH),
+     (_PARAMETERS_PLAIN % "ast.Lambda" + _BINDING_WALK, _ARG_BRANCH_UNPLAIN), "name rebound as a lambda parameter"),
+    ("binding-comprehension-variables", _BINDING_WALK, "    plain |= {id(e) for n in ast.walk(tree) if "
+     "isinstance(n, ast.comprehension) for e in ast.walk(n.target)}\n" + _BINDING_WALK,
+     "name rebound as a comprehension variable"),
+    ("binding-class-body-names", _BINDING_WALK, "    plain |= {id(t) for n in ast.walk(tree) if "
+     "isinstance(n, ast.ClassDef) for s in n.body if isinstance(s, ast.Assign) for t in s.targets}\n" + _BINDING_WALK,
+     "name rebound in a class body"),
+    ("binding-type-variables", "ast.MatchStar, ast.TypeVar, ast.ParamSpec,", "ast.MatchStar, ast.ParamSpec,",
+     "name rebound as a type parameter"),
+    ("binding-parameter-specifications", "ast.TypeVar, ast.ParamSpec,\n", "ast.TypeVar,\n",
+     "name rebound as a parameter specification"),
+    ("binding-type-variable-tuples", "                               ast.TypeVarTuple)):\n",
+     "                               )):\n", "name rebound as a type variable tuple"),
+    ("binding-type-aliases", _BINDING_WALK, "    plain |= {id(n.name) for n in ast.walk(tree) if "
+     "isinstance(n, ast.TypeAlias)}\n" + _BINDING_WALK, "name rebound by a type alias"),
+    ("binding-match-stars", "ast.MatchAs, ast.MatchStar, ast.TypeVar,", "ast.MatchAs, ast.TypeVar,",
+     "name rebound as a match star capture"),
+    ("binding-match-mapping-rests", "            names = (node.rest,) if node.rest else ()\n",
+     "            names = ()\n", "name rebound as a match mapping rest"),
+    ("binding-aliased-imports", _ALIAS_BRANCH,
+     '                if alias.name == "*" or alias.asname is not None and isinstance(node, ast.ImportFrom):\n',
+     "name rebound by an aliased import"),
+    ("binding-aliased-from-imports", _ALIAS_BRANCH,
+     '                if alias.name == "*" or alias.asname is not None and isinstance(node, ast.Import):\n',
+     "name rebound by an aliased from-import"),
+    ("binding-starred-targets", _BINDING_WALK, "    plain |= {id(n.value) for n in ast.walk(tree) if "
+     "isinstance(n, ast.Starred)}\n" + _BINDING_WALK, "name rebound by a starred destructuring assignment"),
     ("import-identity", "found[0] == INSERT_IMPORTS[name]", "found[0][-1] == INSERT_IMPORTS[name][-1]",
      "repo_root imported from another module"),
     ("star-import-unread", 'return None if "*" in bindings else bindings.get(name, [])',
@@ -5364,6 +5438,131 @@ _UNCREDITED_RUNS = (
 )
 
 
+# Each branch of _file_bindings that records a binding (_binding_branches names it), and the MUTANTS that drop it
+# or one binding form it records.
+_BINDING_BRANCH_MUTANTS = (
+    ("ast.Assign", ("binding-assign",)),
+    ("ast.Name: id(node) not in plain", ("binding-other-forms", "binding-with-targets", "binding-walrus-targets",
+                                         "binding-destructuring-targets", "binding-comprehension-variables",
+                                         "binding-class-body-names", "binding-type-aliases",
+                                         "binding-starred-targets")),
+    ("ast.Import|ast.ImportFrom: alias.name == '*' or alias.asname is not None",
+     ("binding-aliased-imports", "binding-aliased-from-imports")),
+    ("ast.Import", ("binding-imports",)),
+    ("ast.Import|ast.ImportFrom: else", ("binding-from-imports",)),
+    ("ast.FunctionDef", ("binding-function-defs",)),
+    ("ast.AsyncFunctionDef", ("binding-async-defs",)),
+    ("ast.ClassDef", ("binding-classes",)),
+    ("ast.Global", ("binding-globals",)),
+    ("ast.arg", ("binding-def-parameters", "binding-lambda-parameters")),
+    ("ast.ExceptHandler", ("binding-except-targets",)),
+    ("ast.MatchAs", ("binding-match-captures",)),
+    ("ast.MatchStar", ("binding-match-stars",)),
+    ("ast.TypeVar", ("binding-type-variables",)),
+    ("ast.ParamSpec", ("binding-parameter-specifications",)),
+    ("ast.TypeVarTuple", ("binding-type-variable-tuples",)),
+    ("ast.MatchMapping", ("binding-match-mapping-rests",)),
+)
+# A binding branch no vector can catch a mutant of, with why.
+_EQUIVALENT_BINDING_BRANCHES = (
+    ("ast.Nonlocal", "a nonlocal name compiles only with a binding in an enclosing function, and another branch "
+     "records that binding, so dropping the nonlocal one never leaves the name bound once"),
+)
+
+
+def _binding_records(stmts):
+    """Whether stmts, outside any if statement nested in them, record a binding: set names, or call setdefault."""
+    stack = list(stmts)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.If):
+            continue
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "names" for t in node.targets):
+            return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "setdefault":
+            return True
+        stack.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _arm_classes(test):
+    """The node classes an if test names in its leading isinstance(node, ...), else ()."""
+    first = test.values[0] if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else test
+    if not (isinstance(first, ast.Call) and ast.unparse(first.func) == "isinstance" and len(first.args) == 2 and
+            ast.unparse(first.args[0]) == "node"):
+        return ()
+    kinds = first.args[1]
+    return tuple(ast.unparse(kind) for kind in (kinds.elts if isinstance(kinds, ast.Tuple) else (kinds,)))
+
+
+def _bindings_function(gate_source):
+    """_file_bindings' definition in gate_source, parsed."""
+    return next(node for node in ast.walk(ast.parse(gate_source))
+                if isinstance(node, ast.FunctionDef) and node.name == "_file_bindings")
+
+
+def _binding_branches(gate_source):
+    """Every branch of _file_bindings that records a binding, read from the gate half's own AST: one per node class
+    the branch's leading isinstance(node, ...) names, else the classes of the branch it lies in and its test (else,
+    for an else branch)."""
+    found = []
+
+    def visit(stmts, outer):
+        for stmt in stmts:
+            if not isinstance(stmt, ast.If):
+                for field in ("body", "orelse", "finalbody", "handlers"):
+                    visit(getattr(stmt, field, ()), outer)
+                continue
+            arm = stmt
+            while True:
+                classes = _arm_classes(arm.test)
+                if _binding_records(arm.body):
+                    found.extend(classes or ("%s: %s" % (outer, ast.unparse(arm.test)),))
+                visit(arm.body, "|".join(classes) or outer)
+                if len(arm.orelse) == 1 and isinstance(arm.orelse[0], ast.If):
+                    arm = arm.orelse[0]
+                    continue
+                if _binding_records(arm.orelse):
+                    found.append("%s: else" % outer)
+                visit(arm.orelse, outer)
+                break
+    visit(_bindings_function(gate_source).body, "")
+    return found
+
+
+def _binding_branch_failures(gate_source, credited):
+    """The failures of the binding-branch rule: every branch of gate_source's _file_bindings that records a binding
+    (_binding_branches) has a row in _BINDING_BRANCH_MUTANTS, each of whose mutants edits _file_bindings and was
+    credited by its vector in this run (credited, the ids), or a reason in _EQUIVALENT_BINDING_BRANCHES, never
+    both; a row naming no such branch fails too."""
+    branches = _binding_branches(gate_source)
+    rows = dict(_BINDING_BRANCH_MUTANTS)
+    equivalent = dict(_EQUIVALENT_BINDING_BRANCHES)
+    entries = dict((entry[0], entry) for entry in MUTANTS)
+    own = ast.dump(_bindings_function(gate_source))
+    failures = []
+    for branch in branches:
+        if branch not in rows and branch not in equivalent:
+            failures.append("binding branch %s of _file_bindings has no mutant registered against a vector" % branch)
+        elif branch in rows and branch in equivalent:
+            failures.append("binding branch %s has both mutants and a reason no mutant can be caught" % branch)
+    for branch in sorted(set(rows) | set(equivalent)):
+        if branch not in branches:
+            failures.append("binding branch %s is listed, but _file_bindings has no such branch" % branch)
+    for branch, mutants in _BINDING_BRANCH_MUTANTS:
+        for mutant in mutants:
+            if mutant not in credited:
+                failures.append("binding branch %s: mutant %s was not credited by its vector" % (branch, mutant))
+                continue
+            _id, old, new = entries[mutant][:3]
+            mutated = gate_source
+            for text, replacement in (tuple(zip(old, new, strict=True)) if isinstance(old, tuple) else ((old, new),)):
+                mutated = mutated.replace(text, replacement)
+            if ast.dump(_bindings_function(mutated)) == own:
+                failures.append("binding branch %s: mutant %s leaves _file_bindings unchanged" % (branch, mutant))
+    return failures
+
+
 def _load_mutant(source, directory, number):
     """Write one mutant module to the scratch directory and load it with importlib."""
     path = Path(directory) / ("import_closure_mutant_%d.py" % number)
@@ -5710,6 +5909,7 @@ def self_test_main():
         mutant_dir = tmp / "mutants"
         os.makedirs(mutant_dir)
         backstops = 0
+        credited_ids = set()
         for number, (mutant, old, new, vector, *backstop) in enumerate(MUTANTS, 1):
             backstop = backstop[0] if backstop else None
             if vector not in by_name:
@@ -5724,8 +5924,16 @@ def self_test_main():
                 failures.append("mutant %s: vector %r %s" % (mutant, vector, problem))
             else:
                 backstops += backstop is not None
+                credited_ids.add(mutant)
                 print("MUTANT %s caught by %s%s (%s)" % (mutant, vector, "" if backstop is None else
                                                          " through its backstop " + backstop[0], problem.split(",")[0]))
+        # Each branch of _file_bindings that records a binding, read from the gate half itself, has a mutant
+        # credited by its vector, or a reason none can be caught.
+        unclosed = _binding_branch_failures(gate_source, credited_ids)
+        failures.extend(unclosed)
+        if not unclosed:
+            print("BRANCHES each of _file_bindings' %d binding branches has a mutant caught by its vector (%d with a "
+                  "reason none can be)" % (len(_binding_branches(gate_source)), len(_EQUIVALENT_BINDING_BRANCHES)))
         # Each run the credit rule must refuse is credited by none, for the reason it names.
         for number, (label, old, new, vector, backstop, reason) in enumerate(_UNCREDITED_RUNS, len(MUTANTS) + 1):
             module, problem = _mutant_of(gate_source, marker + rest, old, new, mutant_dir, number)
