@@ -1,0 +1,98 @@
+# Adopter example: toolchain-pin gate (tools/check_toolchain_pins.py).
+# The gate holds the toolchains a verification runs on to one declared version each: the toolchain that
+# runs the gate (the runtime leg) and the version literals the CI files state (the declarations leg).
+# This file is deliberately NOT the gate's live path, so the gate stays NOT APPLICABLE until an adopter
+# opts in: copy it to .aiqt/toolchain-pins.toml, replace the examples below with the toolchains and CI
+# files of your project, and add the gate with --require-config to your local runner and your CI, so a
+# removed configuration fails (exit 2) instead of reading as NOT APPLICABLE. Unknown keys are refused.
+#
+# format-version            the integer 1 exactly (true and 1.0 are refused).
+#
+# [[toolchain]]             one per toolchain, at least one:
+#   id                      a unique kebab-case identifier.
+#   adapter                 "python-interpreter" or "command".
+#   version                 the exact baseline version, compared as a string once the adapter reads it;
+#                           there is no ordering. For python-interpreter it is MAJOR.MINOR.PATCH, and
+#                           the interpreter running the gate must be that release, a final build. For
+#                           command it is one word of letters, digits and . + _ -.
+#   argv                    command only: a bare command name, resolved on PATH, then its arguments; it
+#                           runs with no shell. A command that is not on PATH is a finding (exit 1).
+#   pattern                 command only: a regular expression that must match the whole of the
+#                           command's standard output once surrounding whitespace is removed, with one
+#                           named group, version.
+#   timeout-seconds         command only: 1 to 120, default 10.
+#
+# [[toolchain.lane]]        optional further lanes of the toolchain (a canary on a newer release, say):
+#   id                      unique within the toolchain; baseline is reserved for the entry's version.
+#   version                 the lane's version, in the adapter's grammar.
+#   role                    "required" or "exploratory": reported, never enforced.
+#
+# [[toolchain.declaration]] a CI file that states a version of this toolchain:
+#   path                    repo-relative, a regular file reached through no symlink.
+#   mention                 a case-insensitive substring that marks every line naming this pin.
+#   pattern                 a regular expression every mentioned line must match whole once stripped,
+#                           with one named group, version; a mentioned line outside it is cannot-evaluate.
+#   count                   the exact number of such lines (at least 1).
+#   lane                    optional: the lane whose version these lines must state (default baseline).
+#   indirect                optional: exact stripped lines accepted with no version (a matrix
+#                           expression, say); a mentioned line holding an expression not listed here is
+#                           cannot-evaluate.
+#   indirect-count          required with indirect: the exact number of mentioned lines that are one of
+#                           the indirect lines.
+#
+# [[wiring]]                optional: a line the gate requires in a file, so its own CI step cannot be
+#                           removed silently:
+#   path                    repo-relative, as for a declaration.
+#   line                    the exact line once stripped of surrounding whitespace (a list marker,
+#                           "- ", is part of it, so write the step's run: on a line of its own).
+#   count                   the exact number of such lines (at least 1).
+format-version = 1
+
+[[toolchain]]
+id = "python"
+adapter = "python-interpreter"
+version = "3.14.4"
+
+[[toolchain.lane]]
+id = "canary"
+version = "3.14.5"
+role = "exploratory"
+
+[[toolchain.declaration]]
+path = ".github/workflows/ci.yml"
+mention = "python-version"
+pattern = "python-version: '(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)'"
+count = 2
+indirect = ["python-version: ${{ matrix.python }}"]
+indirect-count = 1
+
+[[toolchain.declaration]]
+path = ".github/workflows/canary.yml"
+mention = "python-version"
+pattern = "python-version: '(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)'"
+count = 1
+lane = "canary"
+
+[[toolchain]]
+id = "gitleaks"
+adapter = "command"
+version = "8.30.1"
+argv = ["gitleaks", "version"]
+pattern = 'v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+)'
+timeout-seconds = 30
+
+[[toolchain.declaration]]
+path = ".github/workflows/ci.yml"
+mention = "GITLEAKS_VERSION:"
+pattern = 'GITLEAKS_VERSION: (?P<version>[0-9]+\.[0-9]+\.[0-9]+)'
+count = 1
+
+[[wiring]]
+path = ".github/workflows/ci.yml"
+line = "run: python3 -I -B tools/check_toolchain_pins.py --require-config"
+count = 2
+
+[[wiring]]
+path = ".github/workflows/canary.yml"
+line = "run: python3 -I -B tools/check_toolchain_pins.py --require-config --lane canary --only python"
+count = 1

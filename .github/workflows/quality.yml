@@ -167,6 +167,16 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_relied_exit_pipes.py
 
+      # Toolchain pins: an adopter-configured gate holding the toolchains a verification runs on, and the
+      # version literals its CI files state, to the versions the adopter declares.
+      # Adopter-declared: NOT APPLICABLE in this repo, which ships no .aiqt/toolchain-pins.toml.
+      - name: Toolchain pins self-test
+        shell: bash
+        run: python3 -I -B tools/check_toolchain_pins.py --self-test
+      - name: Toolchain pins
+        shell: bash
+        run: python3 -I -B tools/check_toolchain_pins.py
+
   site:
     name: Text and site
     runs-on: ubuntu-latest

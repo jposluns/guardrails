@@ -4740,6 +4740,12 @@ _SCAN_ALLOWED_UNPINNED = (
      " option-table introspection forms (init -q --template= of a scratch probe repo,"
      " --version, and per-subcommand -h / --git-completion-helper probes that exit inside"
      " option parsing), never a real maintenance-triggering run"),
+    ("tools/check_toolchain_pins.py", "_command_version", ("unresolved",),
+     "cannot-evaluate head: the runtime leg launches, with no shell, the version probe an"
+     " adopter declares in .aiqt/toolchain-pins.toml (its argv head resolved on PATH, never a"
+     " literal); this repository ships no such configuration, so the live leg is NOT APPLICABLE"
+     " here, and the self-test's launches run only stub sh scripts named tool from its"
+     " temporary directory; no git launch in this repository"),
     ("tools/check_newtab.py", "_self_test", ("unresolved",),
      "cannot-evaluate head: the launch iterates a literal command table whose heads are all"
      " sys.executable (the copied-tools self-test children); no git launch"),

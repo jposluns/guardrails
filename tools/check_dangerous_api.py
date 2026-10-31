@@ -465,6 +465,10 @@ ALLOWLIST = (
      "self-test mutant loader: exec_module of a copy, written under the self-test's temporary"
      " directory, of this gate's own source (read from __file__) with reviewed literal"
      " substitutions, or of the repository's own tools/check_python_floor.py; no external input"),
+    ("tools/check_toolchain_pins.py", "_copy", "code", 1,
+     "self-test mutant loader: exec_module of a copy, written under the self-test's temporary"
+     " directory, of this gate's own source (read from __file__) with one reviewed literal"
+     " substitution per flip, applied above its self-test marker; no external input"),
     ("tools/gen_crosswalk.py", "_fdopen_vectors.flipped", "code", 1,
      _MUTANT + " (each fdopen close revert, loaded by exec_module from a scratch file)"),
     ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,

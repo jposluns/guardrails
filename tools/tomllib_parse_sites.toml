@@ -1235,6 +1235,15 @@ count = 2
 class = "EXEMPT"
 reason = "test-code"
 
+# the self-test seam that swaps a loaded copy's tomllib for one whose loads raises an injected class
+[[site]]
+path = "tools/check_toolchain_pins.py"
+function = "_injected"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 [[site]]
 path = "tools/check_version_monotonicity.py"
 function = "self_test_main"

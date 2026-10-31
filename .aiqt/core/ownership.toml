@@ -209,6 +209,11 @@ class = "pack-immutable"
 note = "Adopter example for tools/check_record_sections.py; deliberately NOT the gate's live default path (.aiqt/record-sections.toml), so the gate stays NOT APPLICABLE until an adopter opts in."
 
 [[release-class]]
+path = ".aiqt/toolchain-pins.toml.example"
+class = "pack-immutable"
+note = "Adopter example for tools/check_toolchain_pins.py; deliberately NOT the gate's live default path (.aiqt/toolchain-pins.toml), so the gate stays NOT APPLICABLE until an adopter opts in."
+
+[[release-class]]
 path = ".claude/RULES-INDEX.md"
 class = "pack-immutable"
 
@@ -422,6 +427,11 @@ note = "Adopter-authored configuration for tools/check_derived_command_parameter
 path = ".aiqt/relied-exit-pipes.toml"
 class = "adopter-state"
 note = "Adopter-authored configuration for tools/check_relied_exit_pipes.py; reserved, never a pack-shipped file (absent = gate NOT APPLICABLE)."
+
+[[namespace-class]]
+path = ".aiqt/toolchain-pins.toml"
+class = "adopter-state"
+note = "Adopter-authored configuration for tools/check_toolchain_pins.py; reserved, never a pack-shipped file (absent = gate NOT APPLICABLE, unless the gate runs with --require-config)."
 
 [[namespace-class]]
 path = ".aiqt/pin.toml"
