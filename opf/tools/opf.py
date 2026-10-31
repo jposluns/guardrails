@@ -16828,7 +16828,9 @@ def _cmd_render(rest):
     and hands them to the same engine, which composes the store-integrity gate and permits the write only
     when source integrity is sound, printing the findings/cannot-evaluates and returning 2 (writing nothing)
     otherwise, so
-    a write can never read as a silent no-op. Exactly one of `--check`/`--write` is required: a bare
+    a write can never read as a silent no-op. Before it gathers anything on a RESOLVED store, `--write` runs
+    the spec 5.7 pre-operation reconciliation (_opf_sync.require_reconciled; interim: a store whose manifest
+    records a dedicated sync target refuses with exit 2, nothing written). Exactly one of `--check`/`--write` is required: a bare
     `opf render` is a usage error (a preview never defaults into a write). The parser is the house fail-closed
     idiom (unknown token, an empty or option-looking or duplicate --root value -> exit 2), matching
     _opf_views.render's own parser."""
@@ -16877,6 +16879,18 @@ def _cmd_render(rest):
             return EXIT_MALFORMED
         obs = None
         if res.status == _opf_store.RESOLVED:
+            # Spec 5.7: the pre-operation reconciliation runs before anything is gathered or written
+            # (interim: a dedicated-target store refuses). Only this CLI half calls it: `opf record`
+            # renders through the engine after its own check, under its own lease.
+            try:
+                _opf_sync.require_reconciled(res, "render --write")
+            except _opf_sync.SyncError as exc:
+                print("opf render: refused: {}; exit 2".format(exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            except Exception as exc:  # noqa: BLE001  a check escape must not become a silent write; fail closed
+                print("opf render: cannot evaluate: unexpected error in the pre-operation reconciliation "
+                      "({!r}); failing closed to exit 2".format(exc), file=sys.stderr)
+                return EXIT_MALFORMED
             try:
                 obs, notes = _opf_observe.gather(res)
             except Exception as exc:  # noqa: BLE001  a gather escape must not become a silent write; fail closed

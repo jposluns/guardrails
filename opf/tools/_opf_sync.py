@@ -308,9 +308,10 @@ repository's own .git directory, or to the target path, the very trust domain th
 and the bound on it is the filesystem permission there, not this module (disclosed, not gated).
 The pre-operation
 reconciliation spec 5.7 requires
-of EVERY other operation is not yet enforced by the other verbs; the shared pre-operation reconcile
-is its own later unit, and until it lands a writing verb on a dedicated-target store does not refuse
-a stale store (this module is the surfaced step it will name). A pull or push operates only on a
+of EVERY other operation is not yet enforced by the other verbs; the shared fetch-and-compare check
+is its own later unit, and until it lands `opf record` and `opf render --write` refuse a
+dedicated-target store outright through require_reconciled (this module is the surfaced step the
+check will name). A pull or push operates only on a
 store that is its repository's toplevel (`rev-parse --show-prefix` empty): a fast-forward or push
 moves the WHOLE repository, so a store nested below the toplevel of a shared repository refuses with
 exit 2 rather than moving content outside the store. The push runs the TARGET repository's own
@@ -630,6 +631,31 @@ def _refuse_no_dedicated_target(res):
     raise SyncError("this store has no dedicated sync target ([store].sync_target is empty): a "
                     "relocated local-only store has no behind/ahead axis, and durability is the "
                     "adopter's recorded backup responsibility (spec 5.3/5.7); fail-closed")
+
+
+def require_reconciled(res, verb, manifest=None):
+    """The spec 5.7 pre-operation reconciliation every writing verb runs on a RESOLVED store before its
+    first write: `opf record` after its step-1 journal recovery and manifest load, `opf render --write`
+    before it gathers anything. INTERIM body: the fetch-and-compare is not built yet, so a store whose
+    manifest records a dedicated sync target refuses outright; an empty target (the in-repo default, a
+    relocated local-only store) returns, leaving the verb's own lease and clean-state gates in force.
+    `manifest` is the caller's already-admitted model; None reads and admits it here (a read or
+    admission failure refuses, never proceeds). No git launch, no fetch, no lease, no write. The
+    target value is never echoed: a URL target can carry userinfo. Raises SyncError."""
+    if manifest is None:
+        manifest = _read_local_manifest(res)
+        manifest_rel = "{}/{}".format(res.machine_rel, _opf_store.MANIFEST_NAME)
+        _admit_manifest(manifest, "the store manifest {}".format(manifest_rel), "nothing written")
+    if _sync_target_of(manifest) == "":
+        return
+    raise SyncError(
+        "this store's manifest records a dedicated sync target ([store].sync_target is non-empty), and "
+        "the pre-operation reconciliation spec 5.7 requires before `opf {0}` writes (fetch the target, "
+        "compare the store against it) is not built in this build, so `opf {0}` does not write to a "
+        "dedicated-target store; `opf sync` reports the store's state against a git target (a "
+        "filesystem target is recorded as git:<absolute path>, never dir:) and `opf sync --pull` / "
+        "`--push` reconcile it, but neither lifts this refusal; nothing written "
+        "(fail-closed)".format(verb))
 
 
 # --- target validation and destination agreement (spec 5.5/5.6) ----------------------------------------
@@ -1830,7 +1856,10 @@ def cli(argv):
 
 def self_test():
     """Vectors over real local git repositories with bare sync targets over the file transport (no
-    network): the argument grammar, the no-dedicated-target refusals, the spec 9.2 admission of the
+    network): the argument grammar, the no-dedicated-target refusals, the interim pre-operation
+    reconciliation of the writing verbs (an empty target passes, a dedicated target refuses with
+    nothing fetched, written or leased, the caller's manifest governs, admission and an unreadable
+    manifest refuse first, and a flip shows the refusal watched), the spec 9.2 admission of the
     local and the fetched manifest, the equal/behind/ahead/divergent classification, the read-only
     bare report, the fast-forward pull with its doctor gate, the authorized push with its
     destination agreement, the held-lease refusal (never seized), the REMOTE-NAME and
@@ -1894,7 +1923,8 @@ def self_test():
         for f in failures:
             print("  - " + f, file=sys.stderr)
         return 1
-    print("opf-sync self-test: PASS ({} checks: grammar, pattern refusals, admission, "
+    print("opf-sync self-test: PASS ({} checks: grammar, pattern refusals, interim pre-operation "
+          "reconciliation, admission, "
           "classification, pull, push, destination agreement, remote-name and pushurl-value gates, "
           "legacy remote-store refusals, worktree-scope handling, path-target refusals, "
           "environment-config drop, "
@@ -2070,6 +2100,52 @@ def _self_test_units(check):
             rc, out = run(["--root", product])
             check("a relocated local-only store refuses, naming the named reason",
                   rc == EXIT_MALFORMED and "no dedicated sync target" in out and "local-only" in out)
+
+            # -- the interim pre-operation reconciliation of the writing verbs ----------------------
+            def _reconciled(root, verb="record", res=None, **kwargs):
+                if res is None:
+                    res = _opf_store.resolve_store(Path(root))
+                try:
+                    require_reconciled(res, verb, **kwargs)
+                except SyncError as exc:
+                    return str(exc)
+                return None
+
+            check("an in-repo store passes the interim pre-operation reconciliation",
+                  _reconciled(inrepo) is None and _no_fetch_head(inrepo))
+            rr_root, _rr_bare = _paired("reconcile")
+            before = (_head(rr_root), _status(rr_root))
+            msg = _reconciled(rr_root)
+            check("a dedicated-target store refuses the interim pre-operation reconciliation, "
+                  "naming the verb, with nothing fetched, written or leased",
+                  msg is not None and "`opf record` does not write to a dedicated-target store" in msg
+                  and _no_fetch_head(rr_root) and (_head(rr_root), _status(rr_root)) == before
+                  and not os.path.exists(_lease_path(rr_root)))
+            check("the interim refusal never echoes the recorded target",
+                  msg is not None and _rr_bare not in msg)
+            empty_model = _opf_init._manifest_model()
+            empty_model["store"]["sync_target"] = ""
+            check("the caller's admitted manifest governs the interim reconciliation",
+                  _reconciled(rr_root, manifest=empty_model) is None)
+            rh_root, _rh_bare = _paired("reconcile-homes", lambda m: m[_opf_store.STANDARD_TOKEN]
+                                        .__setitem__("homes", 1))
+            msg = _reconciled(rh_root)
+            check("the interim reconciliation admits the manifest before classifying the target",
+                  msg is not None and "homes" in msg and "dedicated-target" not in msg
+                  and _no_fetch_head(rh_root))
+
+            def unreadable(*_a, **_k):
+                raise _opf_store.StoreError("synthetic unreadable manifest")
+            # Resolved first: the resolver reads the manifest through the same reader.
+            rr_res = _opf_store.resolve_store(Path(rr_root))
+            with patch.object(_opf_store, "_read_toml_contained", unreadable):
+                msg = _reconciled(rr_root, res=rr_res)
+            check("an unreadable manifest refuses the interim reconciliation (cannot-evaluate), "
+                  "never passes", msg is not None and "cannot read the store manifest" in msg)
+            with patch.object(module, "_sync_target_of", lambda manifest: ""):
+                msg = _reconciled(rr_root)
+            check("flip: with the target read as empty the dedicated-target refusal is gone, so "
+                  "the refusal vector above watches it", msg is None)
 
             # -- equal: exit 0 in every mode, nothing written, no lease left --------------------
             eq_root, _eq_bare = _paired("equal")
