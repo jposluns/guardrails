@@ -210,7 +210,7 @@ ASSIGN = re.compile(
 
 # Values that are obviously not real credentials.
 PLACEHOLDER = re.compile(
-    r"(?i)^(x{3,}|\.{3,}|\*{3,}|<[^>]+>|\$\{[^}]+\}|\$[A-Z_]+|"
+    r"(?ai)^(x{3,}|\.{3,}|\*{3,}|<[^>]+>|\$\{[^}]+\}|\$[A-Z_]+|"
     r"(your|my|the)[_-]?\w*|change[_-]?me|placeholder|example|sample|dummy|"
     r"redacted|fake|test|todo|none|null|n/?a|actual_password_here)$"
 )
