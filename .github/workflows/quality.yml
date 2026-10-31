@@ -142,6 +142,12 @@ jobs:
       # check_leaks owns the FILE channel; check_msg_leaks (F-144) owns commit messages, PR title/body
       # and head ref, and runs in msg-leaks.yml so a title/body edit re-runs it alone.
 
+      # tools/push_branch.py runs check_msg_leaks --pre-push and the push in one process, so the
+      # check gates a first push before publication; only its hermetic self-test can run here.
+      - name: First-push helper self-test
+        shell: bash
+        run: python3 -I -B tools/push_branch.py --self-test
+
       # Portability is DISTINCT from the leak gate: the leak gate answers a confidentiality question
       # repo-wide, this answers whether the shippable surface can land on a stranger's machine unchanged
       # (no operator identity outside its attribution, no repo-operational vocabulary, no exemption
