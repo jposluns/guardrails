@@ -644,6 +644,9 @@ the input reaching that path fails the suite rather than passing silently. This 
 relied on as the check a change carries, not to an incidental negative assertion inside a check whose
 discrimination already rests on a positive assertion.
 
+For a fix to a text classifier, derive sibling cases from its specification, test changed and preserved
+outcomes at the affected boundaries, and show the changed outcomes fail with the fix reverted.
+
 ## Preserve compatibility or provide a migration path
 
 Externally observable interfaces, persisted formats, and defaults are preserved unless a breaking change is

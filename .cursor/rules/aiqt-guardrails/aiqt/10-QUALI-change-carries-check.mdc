@@ -29,3 +29,6 @@ durable companion case that asserts the outcome does appear without the feature,
 the input reaching that path fails the suite rather than passing silently. This attaches to an absence check
 relied on as the check a change carries, not to an incidental negative assertion inside a check whose
 discrimination already rests on a positive assertion.
+
+For a fix to a text classifier, derive sibling cases from its specification, test changed and preserved
+outcomes at the affected boundaries, and show the changed outcomes fail with the fix reverted.
