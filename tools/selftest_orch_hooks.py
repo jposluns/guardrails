@@ -13702,6 +13702,82 @@ def _main_isolated(report_path=None):
               _msg_vector_rows(_plain_lifted, (("_orch_message_lead_unread",
                                                 lambda command, _spans: "&" in command),)),
               [(m, False, "allow", "deny") for _t, m in _plain_lifted])
+        # An && separator or a 2>&1 redirect outside the form is no '&' after an unread lead
+        # (_orch_message_amps_outside). Each vector runs through real bash in the fixture repository, its
+        # body a touch of a marker, so a marker left means something ran the body; then again with git and
+        # echo defined as functions that print each argument in <>, so the first line bash prints shows the
+        # form reached git as one word, the body, and the second line shows bash ran the command after the
+        # operator as a command of its own, so the form's word ended before the operator. With no '&' in the
+        # body each allows, and fails closed against a mutant that reads no operator as outside the form;
+        # with a bare '&' in the body each still denies, and allows against a mutant that drops the body
+        # check (_orch_message_form_close).
+        _arg_probe = ("git() { printf '<%s>' \"$@\"; printf '\\n'; }; "
+                      "echo() { printf 'echo'; printf '<%s>' \"$@\"; printf '\\n'; }; ")
+        _operator_outside = (
+            ("git commit -m {form} && git push -u origin \"$(git branch --show-current)\"", "outside-and-push",
+             "<push><-u><origin><<branch><--show-current>>"),
+            ("git commit -m {form} && echo \"done $(date)\"", "outside-and-echo", "echo<done "),
+            ("git commit -m {form} 2>&1; git push origin \"$(git rev-parse --abbrev-ref HEAD)\"",
+             "outside-dup-push", "<push><origin><<rev-parse><--abbrev-ref><HEAD>>"))
+
+        def _outside_rows(amp, changes):
+            commands = [(template.format(form="\"$(cat <<'EOF'\ntouch " + str(msg_repo / (marker + amp))
+                                         + (" &" if amp else "") + "\nEOF\n)\""), marker + amp, second)
+                        for template, marker, second in _operator_outside]
+            for command, _marker, _second in commands:
+                try:
+                    subprocess.run(["/usr/bin/bash", "-c", command], cwd=str(msg_repo), env=_msg_env,
+                                   capture_output=True, timeout=30)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            deadline = time.monotonic() + 5
+            while (not all((msg_repo / marker).exists() for _command, marker, _second in commands)
+                   and time.monotonic() < deadline):
+                time.sleep(0.05)
+            rows = []
+            for command, marker, second in commands:
+                try:
+                    shown = subprocess.run(["/usr/bin/bash", "-c", _arg_probe + command], cwd=str(msg_repo),
+                                           env=_msg_env, capture_output=True, text=True,
+                                           timeout=30).stdout.split("\n")
+                except (OSError, subprocess.SubprocessError):
+                    shown = ["", ""]
+                rows.append((marker, (msg_repo / marker).exists(), shown[0], shown[1].startswith(second),
+                             _verdict(bg(command, rib=False)),
+                             _rdp_mutant(changes, lambda: _verdict(bg(command, rib=False)))))
+            return rows
+
+        check("trunc/fg-commit-message-operator-outside-allows",
+              _outside_rows("", (("_orch_message_amps_outside", lambda *_a: False),)),
+              [(m, False, "<commit><-m><touch " + str(msg_repo / m) + ">", True, "allow", "deny")
+               for _t, m, _s in _operator_outside])
+        check("trunc/fg-commit-message-operator-outside-body-amp-denies",
+              _outside_rows("-amp", (("_orch_message_form_close",
+                                      lambda command, opened, at: aiqt_hooks._subst_heredoc_close(
+                                          command, opened, at, len(command))),)),
+              [(m + "-amp", False, "<commit><-m><touch " + str(msg_repo / (m + "-amp")) + " &>", True,
+                "deny", "allow") for _t, m, _s in _operator_outside])
+        # Every other '&' after an unread lead still denies: one in a quoted string, a comment, an escape or
+        # an ANSI-C quote, an &> or |& operator, a '>&' onto a file, and any '&' after a form the lexer does
+        # not read as one double-quoted substitution ending at its own ')' (a form nested in another
+        # substitution or inside single quotes, or one whose body has a line starting with its delimiter).
+        # Each row allows against a mutant with no fail-closed rule for an unread lead.
+        _plain_form = "\"$(cat <<'EOF'\nmsg\nEOF\n)\""
+        _other_amps = ("git commit -m " + _plain_form + " && echo \"a & b $(date)\"",
+                       "git commit -m " + _plain_form + " && echo \"$(date)\" # a & b",
+                       "git commit -m " + _plain_form + " && echo \\&\\& \"$(date)\"",
+                       "git commit -m " + _plain_form + " && echo $'a && b' \"$(date)\"",
+                       "git commit -m " + _plain_form + " &> log; echo \"$(date)\"",
+                       "git commit -m " + _plain_form + " |& cat; echo \"$(date)\"",
+                       "git commit -m " + _plain_form + " >&log; echo \"$(date)\"",
+                       "echo \"$(echo \"$(cat <<'EOF'\nmsg\nEOF\n)\")\" && true",
+                       "printf %s '$(cat <<\"EOF\"\nmsg\nEOF\n)' && echo \"$(date)\"",
+                       "git commit -m \"$(cat <<'EOF'\nEOF)\nEOF\n)\" && echo \"$(date)\"")
+        check("trunc/fg-commit-message-other-amp-after-unread-denies",
+              [(_verdict(bg(v, rib=False)),
+                _rdp_mutant((("_orch_message_lead_unread", lambda *_a: False),),
+                            lambda: _verdict(bg(v, rib=False)))) for v in _other_amps],
+              [("deny", "allow")] * len(_other_amps))
         # Where the lexer refuses the command (an unquoted here-document, an open quote, a process
         # substitution, a here-string) the scan alone decides: its detach and open quote deny, and a
         # command it reads with no bare `&` allows.
