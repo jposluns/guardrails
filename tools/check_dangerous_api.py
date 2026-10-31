@@ -126,7 +126,10 @@ declared global or nonlocal), a nested function sees its enclosing functions but
 body, and a module, class or comprehension scope that binds a name may still see the outer
 binding, so every binding it could have is a candidate and the reference is a finding if any
 candidate is a sink. An unbound name falls back to the builtin of that name, where one exists,
-and an unbound __builtins__ to the builtins module (__builtins__.getattr is builtins.getattr).
+and a __builtins__ that may be unbound here to the builtins module (__builtins__.getattr is
+builtins.getattr), so a module-level, class-body or global-declared binding named __builtins__
+is still read as the builtins module (a conservative false report); only a function-local
+binding of it is not.
 A sink module reached as an attribute of another module names that module (shutil.os.system
 is os.system, and from logging.handlers import pickle binds pickle), except an attribute named
 like the module that holds it (timeit.timeit is a function). getattr(x, "name") is read as
@@ -238,7 +241,9 @@ target named like a name a line scan is stored to is read through the outer bind
 name, so its use is followed (a false report), and a module-level function named getattr is
 read as the builtin (a conservative false report), as is a module-level import, assignment,
 loop, except or with target, class-body binding, comprehension target or annotation named
-getattr; a lookaround, conditional or backreference group at either end is not entered
+getattr; a module-level, class-body or global-declared binding named __builtins__ (an
+assignment, or an import as __builtins__) is read as the builtins module (a conservative false
+report); a lookaround, conditional or backreference group at either end is not entered
 (^\\d+(?=$) is not read as anchored), nor is a group that closes the pattern with a quantifier
 after it (^(\\d+$)? is not read as anchored); a top-level alternation is read by its
 first and last tokens only, and neither it nor a group holding its own alternation is entered
@@ -405,8 +410,9 @@ STAR_MODULES = _sink_modules(SINK_INVENTORY)
 # An unbound name falls back to the builtin of that name only where one exists (any other
 # unbound name is a NameError when run, so it names nothing).
 BUILTIN_NAMES = frozenset(builtins.__dict__)
-# An unbound __builtins__ falls back to the builtins module (what it is in __main__), so
-# __builtins__.getattr is builtins.getattr.
+# A __builtins__ that may be unbound (any binding but a function-local one leaves it so) falls
+# back to the builtins module (what it is in __main__), so __builtins__.getattr is
+# builtins.getattr.
 _BUILTINS_MODULE = {"__builtins__": "builtins"}
 _GETATTR = frozenset({"getattr", "builtins.getattr"})
 # A getattr called with one of these literal names returns getattr itself (getattr(builtins,
@@ -2272,6 +2278,17 @@ _BUILTINS_DUNDER = (
     "        g = __builtins__.getattr\n        return g(self, 'P').fullmatch(t)\n",
     "__builtins__.exec(text)\n",
 )
+# The vectors that bind __builtins__ where it may still be unbound (module-level assignment,
+# import as __builtins__, class body, global declaration): each is still read as the builtins
+# module, a conservative false report, and passes with that reading removed. A function-local
+# binding is not read so (a negative below).
+_BUILTINS_BOUND = (
+    "__builtins__ = Shim()\n__builtins__.exec(text)\n",
+    "import shim as __builtins__\n__builtins__.exec(text)\n",
+    "class C:\n    __builtins__ = Shim()\n    run = __builtins__.exec\n",
+    "def f(text):\n    global __builtins__\n    __builtins__ = Shim()\n"
+    "    __builtins__.exec(text)\n",
+)
 
 # Positive vectors: (source, checks). Each must yield a finding with all checks on, and NO
 # finding with any one of its checks disabled, so every vector fails without its check. That
@@ -2720,6 +2737,8 @@ NEGATIVE_VECTORS = (
     "with patch.object(subprocess, 'run', fake):\n    pass\nsetattr(os, 'stat', fake)\n"
     "ok = hasattr(os, name)\ndef f():\n    code = make()\n    alias = code\n",
     "import pickle\ndef f():\n    pickle = Codec()\n    return pickle.loads(x)\n",
+    # A function-local binding of __builtins__ is not the builtins module.
+    "def f(text):\n    __builtins__ = Shim()\n    __builtins__.exec(text)\n",
     # A class body's binding is not visible inside its methods.
     "class C:\n    from pickle import loads\n    def f(self):\n        return loads(x)\n",
     # An unbound name that is not a builtin names nothing, so no chain is read through it.
@@ -3229,8 +3248,8 @@ def self_test():
                 failures.append("flagged with a scoped u not clearing ASCII: " + repr(source))
     finally:
         _SCOPE_UNICODE = unicode
-    # getattr called with the name "getattr" is held, and an unbound __builtins__ is the builtins
-    # module: with either reading removed, its vectors pass.
+    # getattr called with the name "getattr" is held, and a __builtins__ that may be unbound is
+    # the builtins module: with either reading removed, its vectors pass.
     global _GETATTR_NAMES, _BUILTINS_MODULE
     names, _GETATTR_NAMES = _GETATTR_NAMES, frozenset()
     try:
@@ -3239,9 +3258,13 @@ def self_test():
                 failures.append("flagged with getattr(x, \"getattr\") not held: " + repr(source))
     finally:
         _GETATTR_NAMES = names
+    # A module-level, class-body or global-declared __builtins__ is still the builtins module.
+    for source in _BUILTINS_BOUND:
+        if not any(item[4] == "code-ref" for item in scan_source(source)):
+            failures.append("bound __builtins__ not read as the builtins module: " + repr(source))
     dunder, _BUILTINS_MODULE = _BUILTINS_MODULE, {}
     try:
-        for source in _BUILTINS_DUNDER:
+        for source in _BUILTINS_DUNDER + _BUILTINS_BOUND:
             if scan_source(source):
                 failures.append("flagged with __builtins__ not the builtins module: "
                                 + repr(source))
@@ -3269,7 +3292,8 @@ def self_test():
           " without that reading.".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
-              len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME), len(_BUILTINS_DUNDER)))
+              len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
+              len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND)))
     return 0
 
 
