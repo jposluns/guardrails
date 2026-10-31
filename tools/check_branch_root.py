@@ -3,13 +3,16 @@
 
 The protected ref is supplied explicitly or derived from origin/HEAD. The candidate revision is
 supplied explicitly or defaults to HEAD. A merge-base exit status of 0 means rooted, 1 means
-ORPHANED, and every other status is cannot-evaluate. First-parent lag is always reported and becomes
-a blocking STALE verdict only when --max-lag is configured.
+ORPHANED, and every other status is cannot-evaluate. A rooted candidate that restores, at a path it
+changes from the merge base, the exact content a first-parent commit of the protected line replaced
+within the REVERT_WINDOW commits ending at that merge base is REVERTS, unless a commit in base..head
+carries a "Reverts: <full sha>" trailer naming every such commit. First-parent lag is always reported
+and becomes a blocking STALE verdict only when --max-lag is configured.
 
   check_branch_root.py [--root DIR] [--protected REF] [--head REV] [--max-lag N]
   check_branch_root.py --self-test
 
-Exit: 0 rooted (and fresh when configured); 1 ORPHANED or STALE; 2 usage/cannot-evaluate.
+Exit: 0 rooted (and fresh when configured); 1 ORPHANED, REVERTS or STALE; 2 usage/cannot-evaluate.
 Stdlib only; offline against the local object database.
 """
 import sys
@@ -39,11 +42,20 @@ from pathlib import Path
 # Liftable and stdlib-only: the default root is resolved from the working directory via git
 # rev-parse (_repo_root), with no dependency on any repository-local helper module.
 TIMEOUT = 30
+# The revert check looks back this many first-parent commits, the merge base included. It matches the
+# --max-lag 200 the CI legs pin, so a branch the staleness layer admits has its whole lag in view.
+REVERT_WINDOW = 200
 Result = namedtuple(
     "Result",
     ("code", "verdict", "protected_ref", "protected_sha", "head_ref", "head_sha",
-     "bases", "lag", "max_lag", "detail"),
+     "bases", "lag", "max_lag", "detail", "findings"),
+    defaults=((),),
 )
+# The window walk. --diff-merges=first-parent is named even though a current git (2.53 checked) implies
+# it from --first-parent, so a git that does not still diffs a merge on the protected line against its
+# first parent instead of printing no raw diff for it.
+_WINDOW_LOG_ARGS = ("log", "--first-parent", "--diff-merges=first-parent", "--raw", "--no-renames",
+                    "--no-abbrev", "--no-color", "--no-show-signature", "--format=%H")
 
 
 class CannotEvaluate(RuntimeError):
@@ -68,13 +80,13 @@ def _git_env():
     return env
 
 
-def _git(root, *args, input_text=None):
+def _git(root, *args, input_text=None, binary=False):
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args],
             input=input_text,
             capture_output=True,
-            text=True,
+            text=not binary,
             timeout=TIMEOUT,
             env=_git_env(),
         )
@@ -160,11 +172,105 @@ def _is_shallow(root):
     return value == "true"
 
 
-def evaluate(root, protected=None, head=None, max_lag=None):
+def _raw_records(root, *args):
+    """Run a git raw-diff command with -z and return its (commit, path, pre, post) records. Paths stay
+    bytes, so a space, newline or non-UTF-8 byte in a name is compared exactly. An image is a
+    (mode, oid) pair, or None where the path is absent on that side. commit is the preceding %H line
+    for log output and None for diff-tree."""
+    probe = _git(root, args[0], "-z", *args[1:], binary=True)
+    if probe.returncode != 0:
+        raise CannotEvaluate("git {} failed ({})".format(
+            args[0], probe.stderr.decode("utf-8", "replace").strip() or "no diagnostic"))
+    records = []
+    commit = None
+    tokens = iter(probe.stdout.split(b"\0"))
+    for token in tokens:
+        header = token.lstrip(b"\n")
+        if not header:
+            continue
+        if header.startswith(b":"):
+            fields = header[1:].split(b" ")
+            path = next(tokens, None)
+            if len(fields) != 5 or not path:
+                raise CannotEvaluate("git {} printed a malformed raw record".format(args[0]))
+            images = []
+            for mode, oid in ((fields[0], fields[2]), (fields[1], fields[3])):
+                images.append(None if mode == b"000000" else (mode.decode("ascii"), oid.decode("ascii")))
+            records.append((commit, path, images[0], images[1]))
+        elif all(char in b"0123456789abcdef" for char in header):
+            commit = header.decode("ascii")
+        else:
+            raise CannotEvaluate("git {} printed an unrecognized line".format(args[0]))
+    return records
+
+
+def _window_touches(root, base, window):
+    """(commit, path, pre, post) for every path each of the window first-parent commits ending at base
+    changed against its first parent, newest first. A shallow repository is judged only when the parent
+    of the oldest window commit is present: a shallow boundary commit diffs as if it added every file."""
+    if _is_shallow(root):
+        commits = _git(root, "rev-list", "--count", "--first-parent", "-n", str(window + 1), base)
+        if commits.returncode != 0 or not commits.stdout.strip().isdigit():
+            raise CannotEvaluate("cannot count the revert window in a shallow repository")
+        if int(commits.stdout.strip()) <= window:
+            raise CannotEvaluate(
+                "the repository is shallow and its history ends inside the {}-commit revert window "
+                "below {}; run `git fetch --unshallow` and retry".format(window, base))
+    return _raw_records(root, *_WINDOW_LOG_ARGS, "-n", str(window), base, "--")
+
+
+def _reverts_named(root, base, head_sha):
+    """The values of every Reverts trailer on the commits in base..head."""
+    probe = _git(root, "log", "--no-show-signature", "--no-color",
+                 "--format=%(trailers:key=Reverts,valueonly,unfold)", "-z",
+                 "{}..{}".format(base, head_sha), "--")
+    if probe.returncode != 0:
+        raise CannotEvaluate("cannot read Reverts trailers in {}..{} ({})".format(
+            base, head_sha, probe.stderr.strip() or "git log failed"))
+    return {value.strip() for value in probe.stdout.replace("\0", "\n").splitlines() if value.strip()}
+
+
+def _allowed(undone, named):
+    """A deliberate restoration passes only when a trailer names each undone commit by its full id."""
+    return all(commit in named for commit in undone)
+
+
+def _revert_findings(root, base, head_sha, window):
+    """(path, undone) for each path the head changes from base whose head image equals the pre-image of
+    a commit in the window; undone lists the window commits on that path from base back to that commit,
+    newest first. A deletion matches an add (an absent pre-image). Paths whose undone commits all carry
+    a Reverts trailer are dropped."""
+    changed = {path: post for _c, path, _pre, post in _raw_records(
+        root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", base, head_sha, "--")}
+    if not changed:
+        return []
+    touches = {}
+    for commit, path, pre, _post in _window_touches(root, base, window):
+        if path in changed:
+            touches.setdefault(path, []).append((commit, pre))
+    findings = []
+    for path in sorted(touches):
+        undone = []
+        for commit, pre in touches[path]:
+            undone.append(commit)
+            if pre == changed[path]:
+                findings.append((path, tuple(undone)))
+                break
+    if findings:
+        named = _reverts_named(root, base, head_sha)
+        findings = [(path, undone) for path, undone in findings if not _allowed(undone, named)]
+    return findings
+
+
+def evaluate(root, protected=None, head=None, max_lag=None, revert_window=None):
     # A malformed threshold is a cannot-evaluate (exit 2), never a silently-disabled or inverted guard
     # (guard-input-soundness / D11): a negative or non-integer --max-lag would make every lag "exceed" it.
     if max_lag is not None and (isinstance(max_lag, bool) or not isinstance(max_lag, int) or max_lag < 0):
         raise CannotEvaluate("--max-lag must be a non-negative integer, got {!r}".format(max_lag))
+    if revert_window is None:
+        revert_window = REVERT_WINDOW
+    if isinstance(revert_window, bool) or not isinstance(revert_window, int) or revert_window < 1:
+        raise CannotEvaluate("the revert window must be a positive integer, got {!r}".format(revert_window))
     root = _repo_root(root)
     protected_ref = protected if protected is not None else "origin/HEAD"
     head_ref = head if head is not None else "HEAD"
@@ -196,7 +302,17 @@ def evaluate(root, protected=None, head=None, max_lag=None):
     if not bases:
         raise CannotEvaluate("git merge-base exited 0 but returned no merge base")
 
-    lag = min(_count_lag(root, base, protected_sha) for base in bases)
+    # The revert check anchors on the base with the least lag (the first listed on a tie), the same base
+    # the reported lag measures.
+    lag, anchor = min(((_count_lag(root, base, protected_sha), base) for base in bases),
+                      key=lambda item: item[0])
+    findings = _revert_findings(root, anchor, head_sha, revert_window)
+    if findings:
+        return Result(
+            1, "REVERTS", protected_ref, protected_sha, head_ref, head_sha,
+            bases, lag, max_lag, "restores content the protected line replaced by merge base {}".format(anchor),
+            tuple(findings),
+        )
     if max_lag is not None and lag > max_lag:
         return Result(
             1, "STALE", protected_ref, protected_sha, head_ref, head_sha,
@@ -232,6 +348,19 @@ def _print_result(result):
         if result.max_lag is None
         else "configured maximum {}".format(result.max_lag)
     )
+    if result.verdict == "REVERTS":
+        lines = ["  {!r} undoes {}".format(path.decode("utf-8", "surrogateescape"), ", ".join(undone))
+                 for path, undone in result.findings]
+        print(
+            "VIOLATION: branch-root: {} {}: at {} path(s) it holds the exact content that a first-parent "
+            "commit of {} within the {} commits ending at that base replaced, so merging it reverts "
+            "that change:\n{}\nRebuild the branch from its own changes on top of the merge base, or, when "
+            "the restoration is deliberate, add a trailer `Reverts: <full sha>` naming each listed commit "
+            "to a commit in <merge base>..<head>. This gate never rewrites a branch itself.".format(
+                result.head_sha, result.detail, len(result.findings), result.protected_ref,
+                REVERT_WINDOW, "\n".join(lines))
+        )
+        return
     if result.verdict == "STALE":
         print(
             "VIOLATION: branch-root: {} is rooted at merge base(s) {}, but its nearest "
@@ -248,9 +377,10 @@ def _print_result(result):
     )
 
 
-def run(root, protected=None, head=None, max_lag=None):
+def run(root, protected=None, head=None, max_lag=None, revert_window=None):
     try:
-        result = evaluate(root, protected=protected, head=head, max_lag=max_lag)
+        result = evaluate(root, protected=protected, head=head, max_lag=max_lag,
+                          revert_window=revert_window)
     except CannotEvaluate as exc:
         print("ERROR: branch-root cannot evaluate: {}".format(exc), file=sys.stderr)
         return 2
@@ -258,7 +388,7 @@ def run(root, protected=None, head=None, max_lag=None):
     return result.code
 
 
-def _fixture_git(root, *args, identity=False, input_text=None):
+def _fixture_git(root, *args, identity=False, input_text=None, input_bytes=None):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _git_fixture_env import git_fixture_env
     env = git_fixture_env(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
@@ -271,6 +401,10 @@ def _fixture_git(root, *args, identity=False, input_text=None):
             "-c", "commit.gpgsign=false",
         ]
     cmd += list(args)
+    if input_bytes is not None:
+        return subprocess.run(
+            cmd, input=input_bytes, capture_output=True, check=True, timeout=TIMEOUT, env=env,
+        ).stdout.decode("ascii").strip()
     return subprocess.run(
         cmd,
         input=input_text,
@@ -305,6 +439,208 @@ def _commit_tree(root, tree, parents, message):
     for parent in parents:
         args += ["-p", parent]
     return _fixture_git(root, *args, identity=True, input_text=message + "\n")
+
+
+def _plumb_commit(root, files, parents, message):
+    """Write a flat tree of {path bytes: content bytes} with hash-object and mktree, then commit it, so
+    a fixture path may carry a space, a newline or a non-UTF-8 byte whatever the filesystem allows."""
+    entries = b"".join(
+        b"100644 blob " + _fixture_git(root, "hash-object", "-w", "--stdin", input_bytes=data).encode()
+        + b"\t" + path + b"\0"
+        for path, data in files.items())
+    tree = _fixture_git(root, "mktree", "-z", input_bytes=entries)
+    return _commit_tree(root, tree, parents, message)
+
+
+def _revert_vectors(temp, failures, case):
+    """R1-R14: the revert check. One repository holds every history; each case names its own refs."""
+    def ref(name, sha):
+        _fixture_git(repo, "update-ref", "refs/heads/" + name, sha)
+        return "refs/heads/" + name
+
+    def found(label, protected, head, want, revert_window=None):
+        try:
+            got = evaluate(repo, protected, head, revert_window=revert_window)
+        except CannotEvaluate as exc:
+            failures.append("{}: expected finding paths {!r}, got cannot-evaluate ({})".format(
+                label, sorted(want), exc))
+            return None
+        paths = {path for path, _undone in got.findings}
+        if paths != want:
+            failures.append("{}: expected finding paths {!r}, got {!r} ({})".format(
+                label, sorted(want), sorted(paths), got.verdict))
+        return got
+
+    repo = temp / "r-revert"
+    repo.mkdir()
+    _fixture_git(repo, "init", "-q", "-b", "protected")
+    old = {b"seed.txt": b"seed\n", b"c.txt": b"c1\n"}
+    base = _plumb_commit(repo, old, (), "seed")
+    c1 = _plumb_commit(repo, {**old, b"b.txt": b"b\n"}, (base,), "main adds b")
+    main_files = {**old, b"b.txt": b"b\n", b"c.txt": b"c2\n"}
+    c2 = _plumb_commit(repo, main_files, (c1,), "main changes c")
+    feature = {**old, b"f.txt": b"feature\n"}
+    branch = _plumb_commit(repo, feature, (base,), "feature")
+    main = ref("main-r", c2)
+
+    # R1: the incident fold: the branch's tree committed on the newer protected tip. Merge base is the
+    # tip, lag 0, so ancestry alone passes; the check names exactly the add and the change it reverts.
+    fold = _plumb_commit(repo, feature, (c2,), "folded")
+    case("R1 incident fold", 1, repo, main, ref("r1", fold))
+    r1 = found("R1 incident fold", main, "refs/heads/r1", {b"b.txt", b"c.txt"})
+    if r1 is not None and dict(r1.findings) != {b"b.txt": (c1,), b"c.txt": (c2,)}:
+        failures.append("R1 incident fold: expected b.txt undoing {} and c.txt undoing {}, got {!r}"
+                        .format(c1, c2, r1.findings))
+    # R2: the same tree folded onto the pinned merge base.
+    case("R2 pinned fold", 0, repo, main, ref("r2", _plumb_commit(repo, feature, (base,), "pinned")))
+    # R3: a stale but correct branch that was never rebased.
+    r3 = _plumb_commit(repo, {**feature, b"g.txt": b"g\n"}, (branch,), "feature two")
+    case("R3 stale unrebased", 0, repo, main, ref("r3", r3))
+
+    # R4: the same shape made through porcelain: check out the branch, mixed-reset onto the tip, add -A.
+    _fixture_git(repo, "switch", "-q", "-c", "r4", branch)
+    _fixture_git(repo, "reset", "-q", "--mixed", c2)
+    _fixture_git(repo, "add", "-A")
+    _fixture_git(repo, "commit", "-q", "-m", "reset fold", identity=True)
+    if _fixture_git(repo, "rev-parse", "r4^{tree}") != _fixture_git(repo, "rev-parse", fold + "^{tree}"):
+        failures.append("R4 reset fold: the porcelain fold did not reproduce the R1 tree")
+    case("R4 reset fold", 1, repo, main, "refs/heads/r4")
+    _fixture_git(repo, "switch", "-q", "--detach", base)
+
+    # R5: the protected line advances again after the fold: it drops b.txt and changes c.txt once more.
+    # Anchored on the merge base the findings are unchanged; anchored on the tip, b.txt would vanish.
+    drop = _plumb_commit(repo, {**old, b"c.txt": b"c2\n"}, (c2,), "main drops b")
+    again = _plumb_commit(repo, {**old, b"c.txt": b"c3\n"}, (drop,), "main changes c again")
+    advanced = ref("protected", again)
+    case("R5 main advanced", 1, repo, advanced, "refs/heads/r1")
+    found("R5 main advanced", advanced, "refs/heads/r1", {b"b.txt", b"c.txt"})
+    # R6: the branch rebased onto the tip.
+    case("R6 rebased", 0, repo, main, ref("r6", _plumb_commit(
+        repo, {**main_files, b"f.txt": b"feature\n"}, (c2,), "rebased")))
+
+    # R7: a revert inside a file the branch also edits is not detected: the head's blob is new. This
+    # pins the disclosed residual, so a change that starts catching it updates the residue too.
+    shared = _plumb_commit(repo, {**old, b"s.txt": b"s1\nshared\n"}, (base,), "main adds s")
+    shared2 = _plumb_commit(repo, {**old, b"s.txt": b"s2\nshared\n"}, (shared,), "main edits s")
+    case("R7 shared-file residual", 0, repo, ref("r7-main", shared2), ref("r7", _plumb_commit(
+        repo, {**old, b"s.txt": b"s1\nbranch\n"}, (shared2,), "fold over a shared edit")))
+
+    # R8: a deliberate delete of a file the protected line added is a finding, and passes only with a
+    # Reverts trailer naming the adding commit by its full id.
+    dropped = {**old, b"c.txt": b"c2\n"}
+    case("R8 deliberate delete", 1, repo, main, ref("r8", _plumb_commit(repo, dropped, (c2,), "drop b")))
+    case("R8 deliberate delete with trailer", 0, repo, main, ref("r8t", _plumb_commit(
+        repo, dropped, (c2,), "drop b\n\nReverts: {}".format(c1))))
+    # R9: a trailer naming another commit, or the right commit abbreviated, allows nothing.
+    case("R9 trailer names the wrong commit", 1, repo, main, ref("r9", _plumb_commit(
+        repo, dropped, (c2,), "drop b\n\nReverts: {}".format(c2))))
+    case("R9 abbreviated trailer", 1, repo, main, ref("r9a", _plumb_commit(
+        repo, dropped, (c2,), "drop b\n\nReverts: {}".format(c1[:12]))))
+
+    # R10: window boundary. w.txt changes, then three empty commits, so the change is the fourth commit
+    # ending at the base: inside a window of 5, exactly at a window of 4, outside a window of 3.
+    w0 = _plumb_commit(repo, {b"w.txt": b"w1\n"}, (), "w root")
+    tip = _plumb_commit(repo, {b"w.txt": b"w2\n"}, (w0,), "w change")
+    for i in range(3):
+        tip = _plumb_commit(repo, {b"w.txt": b"w2\n"}, (tip,), "w filler {}".format(i))
+    w_main = ref("r10-main", tip)
+    w_head = ref("r10", _plumb_commit(repo, {b"w.txt": b"w1\n"}, (tip,), "w revert"))
+    for label, window, want in (("inside", 5, {b"w.txt"}), ("at", 4, {b"w.txt"}), ("outside", 3, set())):
+        found("R10 window {} K={}".format(label, window), w_main, w_head, want, window)
+    if REVERT_WINDOW != 200:
+        failures.append("R10 window: REVERT_WINDOW must stay 200 to match the pinned --max-lag 200")
+
+    # R11: paths with a space, a newline and a non-UTF-8 byte are compared as exact bytes.
+    odd = {b"with space.txt": b"1\n", b"new\nline.txt": b"2\n", b"bad-\xff-byte.txt": b"3\n"}
+    q0 = _plumb_commit(repo, {b"q.txt": b"q\n"}, (), "q root")
+    q1 = _plumb_commit(repo, {b"q.txt": b"q\n", **odd}, (q0,), "main adds odd names")
+    q_head = ref("r11", _plumb_commit(repo, {b"q.txt": b"q\n"}, (q1,), "drops odd names"))
+    found("R11 odd path bytes", ref("r11-main", q1), q_head, set(odd))
+
+    # R13: a merge on the protected line's first-parent chain is diffed against its first parent.
+    t0 = _plumb_commit(repo, {b"a.txt": b"a1\n", b"m.txt": b"m1\n"}, (), "t root")
+    side = _plumb_commit(repo, {b"a.txt": b"a1\n", b"m.txt": b"m2\n"}, (t0,), "side changes m")
+    t1 = _plumb_commit(repo, {b"a.txt": b"a2\n", b"m.txt": b"m1\n"}, (t0,), "main changes a")
+    merged = _plumb_commit(repo, {b"a.txt": b"a2\n", b"m.txt": b"m2\n"}, (t1, side), "merge side")
+    found("R13 first-parent merge", ref("r13-main", merged), ref("r13", _plumb_commit(
+        repo, {b"a.txt": b"a2\n", b"m.txt": b"m1\n"}, (merged,), "reverts the merge's m")), {b"m.txt"})
+    if "--diff-merges=first-parent" not in _WINDOW_LOG_ARGS:
+        failures.append("R13 pin: the window walk must name --diff-merges=first-parent")
+
+    # R14: the push self-check names the same commit twice: nothing changed, nothing to judge.
+    case("R14 protected is head", 0, repo, main, main)
+
+    # R12: a shallow clone whose history ends inside the window is cannot-evaluate.
+    shallow = temp / "r12-shallow"
+    try:
+        shallow_ready = _shallow_clone(temp, repo, shallow) is not None
+    except (OSError, subprocess.SubprocessError, CannotEvaluate) as exc:
+        shallow_ready = False
+        _not_run(failures, "R12 shallow window", "a shallow file:// clone could not be built ({})".format(exc))
+    else:
+        if not shallow_ready:
+            _not_run(failures, "R12 shallow window", "the shallow-clone builder returned no clone")
+    if shallow_ready:
+        shallow_head = _plumb_commit(shallow, {**old, b"c.txt": b"c2\n"}, ("HEAD",), "revert c in shallow")
+        _fixture_git(shallow, "update-ref", "refs/heads/r12", shallow_head)
+        case("R12 shallow window", 2, shallow, "refs/heads/protected", "refs/heads/r12")
+
+
+def _mutant_vector(failures):
+    """Each mutant of the revert check, applied by replacing module attributes, must turn the named
+    R vector red in a nested self-test run."""
+    real_findings, real_touches, real_records = _revert_findings, _window_touches, _raw_records
+
+    def tip_anchored(root, _base, head_sha, window):
+        return real_findings(root, _resolve_commit(root, "refs/heads/protected", "protected"),
+                             head_sha, window)
+
+    def post_images(root, base, window):
+        return [(c, p, post, pre) for c, p, pre, post in real_touches(root, base, window)]
+
+    def absence_ignored(root, base, window):
+        return [record for record in real_touches(root, base, window) if record[2] is not None]
+
+    def without_z(root, *args):
+        probe = _git(root, *args)
+        records = []
+        commit = None
+        for line in probe.stdout.splitlines():
+            if line.startswith(":") and "\t" in line:
+                fields, path = line[1:].split("\t", 1)
+                fields = fields.split(" ")
+                records.append((commit, path.encode(),
+                                None if fields[0] == "000000" else (fields[0], fields[2]),
+                                None if fields[1] == "000000" else (fields[1], fields[3])))
+            elif line:
+                commit = line
+        return records
+
+    for label, injected, vector in (
+            ("check removed", {"_revert_findings": lambda *_a: []}, "R1 "),
+            ("anchored on the protected tip", {"_revert_findings": tip_anchored}, "R5 "),
+            ("post-images compared", {"_window_touches": post_images}, "R1 "),
+            ("absence ignored", {"_window_touches": absence_ignored}, "R1 "),
+            ("any trailer accepted", {"_allowed": lambda _undone, named: bool(named)}, "R9 "),
+            ("window one wider", {"_window_touches": lambda r, b, w: real_touches(r, b, w + 1)}, "R10 "),
+            ("window one narrower", {"_window_touches": lambda r, b, w: real_touches(r, b, w - 1)}, "R10 "),
+            ("parsed without -z", {"_raw_records": without_z}, "R11 "),
+            ("--diff-merges=first-parent dropped", {"_WINDOW_LOG_ARGS": tuple(
+                arg for arg in _WINDOW_LOG_ARGS if arg != "--diff-merges=first-parent")}, "R13 ")):
+        saved = {name: value for name, value in globals().items() if name in injected}
+        missing = sorted(name for name in injected if name not in saved)
+        if missing:
+            raise KeyError(", ".join(missing))
+        globals().update(injected)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = self_test(_vectors=False)
+        finally:
+            globals().update(saved)
+        if rc == 0 or not _recorded(out.getvalue(), vector):
+            failures.append("(mutant vector, {}) the mutant must turn {}red, got exit {}".format(
+                label, vector, rc))
 
 
 def _non_utf8_dir(parent):
@@ -532,6 +868,8 @@ def self_test(_vectors=True):
             _fixture_git(v11, "update-ref", "refs/heads/orphan", v11_orphan)
             case("V11 shallow orphan is cannot-evaluate", 2, v11,
                  "refs/heads/protected", "refs/heads/orphan")
+
+        _revert_vectors(temp, failures, case)
     except (OSError, subprocess.SubprocessError, CannotEvaluate) as exc:
         print("SELF-TEST ERROR: fixture setup/evaluation failed: {}".format(exc), file=sys.stderr)
         return 2
@@ -576,6 +914,7 @@ def self_test(_vectors=True):
 
     if _vectors:
         _not_run_vector(failures)
+        _mutant_vector(failures)
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -587,7 +926,8 @@ def self_test(_vectors=True):
                "default-root/cwd-unavailable")
     print("SELF-TEST PASS: V1-V13 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
           "(both cannot-evaluate) outcomes; verdicts are asserted by exit code; an unbuildable V10 or V11 "
-          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)")
+          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R14 cover the revert "
+          "check and each listed mutant of it turns its named R vector red")
     return 0
 
 

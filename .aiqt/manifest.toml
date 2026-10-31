@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0da71ca55f02c949167bd4cffbdadb72a17c33495541a8ae0fd6a529c294a1e4"
+tree-sha256 = "2b831a4f4bb113ed42534a423fdc53ae57546717aabffd3937ed5ccd79046071"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 530056
-sha256 = "976c7249756c049a8afe2d6744b29a69f385db84d939c9b9a350b0671d6f9781"
+bytes = 531134
+sha256 = "08e7108bdd8e1f2b4e2ad4693c52b6c2988baca9327183be743e32af6c93c0d3"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -821,8 +821,8 @@ sha256 = "0b38d8d8ebf794ff90d1966dd4032ceb40562575431b9dac1507e41f899aa16f"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 989702
-sha256 = "e9acd5dfbebf5d0bceb228a2243e390774b999cd7147c12a7452e7ef873af595"
+bytes = 990780
+sha256 = "f540bd3a9db87c0c30509f976c027ab9b2933119165dfe19b21189370ae6232b"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2361,8 +2361,8 @@ sha256 = "a774875eea19a3157fea5127bcd61fbc659d1d56679592bcd3d6e2d2c0d196b1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 608753
-sha256 = "d75442ecbb008cb6f00a87f351d0281a6a3495e99d15e2cd828348bb83233778"
+bytes = 609831
+sha256 = "99da99ae58e67d54d8b7c46c1425bbf89387c4136e2de487e690006083c9840c"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3261,8 +3261,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 668143
-sha256 = "a6480ba1bf264c55f12a294c99369e240dad8443ec7a9d021f53f87de927c07d"
+bytes = 669227
+sha256 = "4dcfd48cc3b379ae61514466a0d790e0ada2a35d5d5ef76f42355c6ff2f36e27"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3421,8 +3421,8 @@ sha256 = "670497debf8f21b516b24f4d4647f9ac0f2b165a7cd930f7a5d67e3c8f7b5ed0"
 
 [[sources]]
 path = "tools/check_branch_root.py"
-bytes = 29611
-sha256 = "8e1c6b93ccceb818cb6ccc411c8945591c1ab34d187ec38b3607fdee17ceece9"
+bytes = 49497
+sha256 = "d86da32d00ed1081078dba5d2341ccd6f0034dc188c427f942127c7fada1e027"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
