@@ -80,7 +80,7 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.7-4.9"/></svg></span>
         <h3><code>opf doctor</code></h3>
-        <p>Runs the whole-store integrity layer read-only and returns a valid, invalid, or cannot-evaluate verdict.</p>      </div>
+        <p>Runs the whole-store integrity layer read-only and returns a valid, invalid, or cannot-evaluate verdict. <code>--require-store</code> makes a missing store a cannot-evaluate for CI. <code>--store-identity</code> instead compares the committed pointer's target and the SHA-256 of the store's <code>init.toml</code> with the values pinned in <code>.github/opf-store-identity.toml</code> (<code>schema = 1</code>, <code>target</code>, <code>init_sha256</code>), and treats a <code>.opf.local.toml</code> override as a mismatch.</p>      </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20V6"/><path d="m6 12 6-6 6 6"/></svg></span>
         <h3><code>opf upgrade</code></h3>

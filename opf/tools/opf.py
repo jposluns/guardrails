@@ -28,7 +28,11 @@ deliverable failures can remain. `doctor` HAS landed: `opf doctor
 (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 `validate_store` store-integrity engine
 over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0;
 with `--require-store`, the enforcement-pack CI floor, it is a cannot-evaluate and exits 2 instead, so a
-repository whose store was removed cannot pass CI vacuously). Doctor is read-only; its
+repository whose store was removed cannot pass CI vacuously). `opf doctor --store-identity [--root DIR]`
+instead compares the store identity (the committed `.opf.toml` target and the SHA-256 of the machine store's
+`init.toml`) with the values pinned in `.github/opf-store-identity.toml` at the product root (`schema = 1`,
+`target`, `init_sha256`): 0 both match, 1 a value differs or a `.opf.local.toml` override is present, 2 any
+value absent, malformed, unreadable or unresolvable. Doctor is read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` is a
 recognized verb, but this tooling defines no store upgrade: `opf upgrade` refuses every argument list on
 every root at exit 2, parsing no argument, resolving no root, reading nothing and writing nothing.
@@ -16987,8 +16991,25 @@ def _doctor_report(result):
     print("  residuals (disclosed by-design, not gradeable): {}".format(len(result.residuals)))
 
 
+def _doctor_store_identity(root):
+    """`opf doctor --store-identity`: report _opf_store.check_store_identity at `root` and return its 0/1/2
+    exit (identity_exit_code). A cannot-evaluate goes to stderr; any residual escape fails closed to exit 2."""
+    try:
+        result = _opf_store.check_store_identity(Path(os.path.abspath(root)))
+    except Exception as exc:  # noqa: BLE001  fail-closed: an escape is cannot-evaluate, never a verdict
+        print("opf doctor: store identity: cannot evaluate: unexpected error at {!r} ({!r}); failing closed "
+              "to exit 2".format(root, exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    stream = sys.stderr if result.status == _opf_store.CANNOT_EVALUATE else sys.stdout
+    print("opf doctor: store identity: {} (pinned in {})".format(result.status, _opf_store.IDENTITY_REL),
+          file=stream)
+    for note in result.notes:
+        print("  {}".format(note), file=stream)
+    return _opf_store.identity_exit_code(result)
+
+
 def _cmd_doctor(rest):
-    """`opf doctor [--root DIR] [--require-store]`: the store-integrity verb.
+    """`opf doctor [--root DIR] [--require-store | --store-identity]`: the store-integrity verb.
 
     Doctor RESOLVES the store at --root (default: the cwd product repository root), gathers the inert
     git-derived observations (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 whole-store
@@ -17003,9 +17024,18 @@ def _cmd_doctor(rest):
     empty or option-looking or duplicate --root value, a duplicate --require-store -> exit 2), matching
     _cmd_render's --root loop. Every
     residual escape from the resolver, the git gather, or the engine fails closed to exit 2 (never a false
-    verdict), the same class-width backstop the render dispatch carries."""
+    verdict), the same class-width backstop the render dispatch carries.
+
+    `--store-identity` runs the store identity comparison INSTEAD of the integrity engine
+    (_opf_store.check_store_identity, spec 14.1 completion check 4): the committed pointer's target and the
+    SHA-256 of the machine store's init.toml against the values pinned in .github/opf-store-identity.toml at
+    the product root, a fixed path no argument selects. It exits 0 when both match, 1 when a readable value
+    differs or a .opf.local.toml override is present, and 2 when any required value is absent, malformed,
+    unreadable or unresolvable. It needs a store by construction, so --require-store beside it, or the flag
+    given twice, is a usage error (exit 2)."""
     root = None
     require_store = False
+    store_identity = False
     i = 0
     while i < len(rest):
         tok = rest[i]
@@ -17014,6 +17044,12 @@ def _cmd_doctor(rest):
                 print("opf doctor: --require-store given more than once", file=sys.stderr)
                 return EXIT_MALFORMED
             require_store = True
+            i += 1
+        elif tok == "--store-identity":
+            if store_identity:
+                print("opf doctor: --store-identity given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            store_identity = True
             i += 1
         elif tok == "--root":
             if i + 1 >= len(rest):
@@ -17033,6 +17069,12 @@ def _cmd_doctor(rest):
             print("opf doctor: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
     root = root if root is not None else "."
+    if store_identity:
+        if require_store:
+            print("opf doctor: --store-identity requires a store by itself; give it without --require-store",
+                  file=sys.stderr)
+            return EXIT_MALFORMED
+        return _doctor_store_identity(root)
     try:
         res = _opf_store.resolve_store(Path(os.path.abspath(root)))
     except Exception as exc:  # noqa: BLE001  fail-closed: a resolver escape is cannot-evaluate, never a verdict
@@ -20038,6 +20080,18 @@ def _cli_self_test():
         expect(["doctor", "--check", "--root", ""], EXIT_MALFORMED)   # unknown doctor flag (and empty root)
         expect(["doctor", "--bogus"], EXIT_MALFORMED)   # unknown doctor flag
         expect(["doctor", "--require-store", "--require-store"], EXIT_MALFORMED)   # duplicate CI-floor flag
+        # --store-identity grammar, judged on the parser's own message (a deleted flag also exits 2, as an
+        # unrecognized argument, so the code alone would not discriminate).
+        for argv, diagnostic in (
+                (["doctor", "--store-identity", "--store-identity"], "--store-identity given more than once"),
+                (["doctor", "--store-identity", "--require-store"], "give it without --require-store"),
+                (["doctor", "--require-store", "--store-identity"], "give it without --require-store")):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = main(argv)
+            if rc != EXIT_MALFORMED or diagnostic not in buf.getvalue():
+                failures.append("{}: rc={!r} (expected 2 + {!r}; {})".format(
+                    " ".join(argv), rc, diagnostic, buf.getvalue().strip()))
 
         # absorb verb ROUTING (OPF-CHANGELOG-ABSORB), judged on exit code only. These grammar cases fail
         # closed in the parser BEFORE any store resolution, so they need no store on disk. The NOT-ADOPTED
@@ -21936,9 +21990,151 @@ def _cli_self_test():
                 shutil.rmtree(rbase, ignore_errors=True)
             return None
 
+        def _store_identity_leg():
+            """Drive `doctor --store-identity` end to end over synthetic product roots, each a committed pointer
+            to a companion store with the expected identity pinned in .github/opf-store-identity.toml. Judged
+            on the exit code, and on the status line where the code alone would not tell a match from a
+            refused route. Returns None on success or EXIT_MALFORMED on a harness (fixture I/O) error."""
+            import hashlib
+            init = b'format = "opf.init.bootstrap/v1"\nsource_digest = "0"\n'
+            try:
+                ibase = os.path.realpath(tempfile.mkdtemp(prefix="opf-cli-identity-"))
+            except OSError as exc:
+                print("opf cli self-test: harness error: could not create the identity tempdir ({})".format(
+                    exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            seq = [0]
+
+            def build(machine="toml", init_bytes=init, pointer=None, pin=None, digest=None):
+                seq[0] += 1
+                prod = os.path.join(ibase, "prod-{:02d}".format(seq[0]))
+                store = os.path.join(ibase, "store-{:02d}".format(seq[0]))
+                mdir = os.path.join(store, ".working", machine)
+                os.makedirs(mdir)
+                os.makedirs(os.path.join(prod, ".github"))
+                with open(os.path.join(mdir, "manifest.toml"), "w", encoding="utf-8") as fh:
+                    fh.write('[opf]\nstandard = "opf"\n')
+                if init_bytes is not None:
+                    with open(os.path.join(mdir, "init.toml"), "wb") as fh:
+                        fh.write(init_bytes)
+                target = "dir:" + store
+                with open(os.path.join(prod, ".opf.toml"), "w", encoding="utf-8") as fh:
+                    fh.write(pointer if pointer is not None else '[store]\ntarget = "{}"\n'.format(target))
+                if pin is None:
+                    pin = 'schema = 1\ntarget = "{}"\ninit_sha256 = "{}"\n'.format(
+                        target, digest if digest is not None else hashlib.sha256(init).hexdigest())
+                if pin is not False:
+                    with open(os.path.join(prod, ".github", "opf-store-identity.toml"), "w",
+                              encoding="utf-8") as fh:
+                        fh.write(pin)
+                return prod, store, mdir
+
+            def run(label, prod, want, line=None):
+                buf = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        rc = main(["doctor", "--store-identity", "--root", prod])
+                except BaseException as exc:  # noqa: BLE001  a dispatcher crash is this vector's failure
+                    failures.append("doctor --store-identity {}: raised {!r}".format(label, exc))
+                    return
+                if rc != want or (line is not None and line not in buf.getvalue()):
+                    failures.append("doctor --store-identity {}: rc={!r} (expected {}{}; {})".format(
+                        label, rc, want, "" if line is None else " + {!r}".format(line),
+                        buf.getvalue().strip()))
+
+            try:
+                try:
+                    prod, store, mdir = build()
+                    run("exact match", prod, EXIT_OK, "opf doctor: store identity: MATCH")
+                    with open(os.path.join(mdir, "init.toml"), "ab") as fh:
+                        fh.write(b"#")
+                    run("init byte appended", prod, EXIT_FINDING, "store identity: MISMATCH")
+                    prod, store, mdir = build(machine="data")
+                    run("non-default machine dir", prod, EXIT_OK, ".working/data/init.toml")
+                    for label, form in (("trailing slash", "dir:{}/"), ("leading space", " dir:{}"),
+                                        ("bare path", "{}")):
+                        prod, store, mdir = build()
+                        with open(os.path.join(prod, ".opf.toml"), "w", encoding="utf-8") as fh:
+                            fh.write('[store]\ntarget = "{}"\n'.format(form.format(store)))
+                        run("target " + label, prod, EXIT_FINDING, "target: DIFFERS")
+                    crlf = init.replace(b"\n", b"\r\n")
+                    prod, store, mdir = build(init_bytes=crlf)
+                    run("crlf init against an lf pin", prod, EXIT_FINDING, "init_sha256: DIFFERS")
+                    prod, store, mdir = build(init_bytes=crlf, digest=hashlib.sha256(crlf).hexdigest())
+                    run("crlf init against a crlf pin", prod, EXIT_OK)
+                    prod, store, mdir = build()
+                    with open(os.path.join(prod, ".opf.local.toml"), "w", encoding="utf-8") as fh:
+                        fh.write('[store]\ntarget = "dir:{}"\n'.format(store))
+                    run("override present", prod, EXIT_FINDING, ".opf.local.toml is present")
+                    prod, store, mdir = build(pointer="not toml {{\n")
+                    run("malformed pointer", prod, EXIT_MALFORMED)
+                    prod, store, mdir = build(pointer="[store]\ntarget = 5\n")
+                    run("non-string pointer target", prod, EXIT_MALFORMED)
+                    prod, store, mdir = build()
+                    os.unlink(os.path.join(prod, ".opf.toml"))
+                    shutil.copytree(mdir, os.path.join(prod, ".working", "toml"))
+                    run("pointer absent, default store discoverable", prod, EXIT_MALFORMED,
+                        "default discovery is not a substitute")
+                    prod, store, mdir = build(init_bytes=None)
+                    run("init.toml missing", prod, EXIT_MALFORMED, "init.toml is absent")
+                    prod, store, mdir = build(pin=False)
+                    run("expectation file missing", prod, EXIT_MALFORMED, "no expected store identity is pinned")
+                    digest = hashlib.sha256(init).hexdigest()
+                    for label, body in (("unparseable", "schema = \n"),
+                                        ("no schema", 'target = "dir:{s}"\ninit_sha256 = "{d}"\n'),
+                                        ("no target", 'schema = 1\ninit_sha256 = "{d}"\n'),
+                                        ("no init_sha256", 'schema = 1\ntarget = "dir:{s}"\n'),
+                                        ("unknown key", 'schema = 1\ntarget = "dir:{s}"\ninit_sha256 = "{d}"\nx = 1\n'),
+                                        ("schema 2", 'schema = 2\ntarget = "dir:{s}"\ninit_sha256 = "{d}"\n'),
+                                        ("schema bool", 'schema = true\ntarget = "dir:{s}"\ninit_sha256 = "{d}"\n'),
+                                        ("empty target", 'schema = 1\ntarget = ""\ninit_sha256 = "{d}"\n'),
+                                        ("uppercase digest", 'schema = 1\ntarget = "dir:{s}"\ninit_sha256 = "{u}"\n'),
+                                        ("short digest", 'schema = 1\ntarget = "dir:{s}"\ninit_sha256 = "{h}"\n')):
+                        store_next = os.path.join(ibase, "store-{:02d}".format(seq[0] + 1))
+                        prod, store, mdir = build(pin=body.format(s=store_next, d=digest, u=digest.upper(),
+                                                                  h=digest[:63]))
+                        run("expectation " + label, prod, EXIT_MALFORMED)
+                    for label, rel in (("expectation", os.path.join(".github", "opf-store-identity.toml")),
+                                       ("pointer", ".opf.toml"), ("init", "init.toml")):
+                        for shape in ("symlink", "hardlink", "fifo"):
+                            prod, store, mdir = build()
+                            path = os.path.join(mdir, rel) if rel == "init.toml" else os.path.join(prod, rel)
+                            kept = os.path.join(ibase, "kept-{:02d}".format(seq[0]))
+                            if shape == "fifo":
+                                os.unlink(path)
+                                os.mkfifo(path)
+                            else:
+                                os.rename(path, kept)
+                                (os.symlink if shape == "symlink" else os.link)(kept, path)
+                            run("{} {}".format(label, shape), prod, EXIT_MALFORMED)
+                    # An unreadable init.toml, by an injected read fault (never permission bits).
+                    prod, store, mdir = build()
+                    store_journal = _opf_store._journal
+                    real_read = store_journal._read_contained
+
+                    def read_fault(root_fd, relpath, *args, **kwargs):
+                        if relpath.endswith("/init.toml"):
+                            raise store_journal.JournalError("injected read fault on {}".format(relpath))
+                        return real_read(root_fd, relpath, *args, **kwargs)
+                    store_journal._read_contained = read_fault
+                    try:
+                        run("init.toml unreadable", prod, EXIT_MALFORMED, "injected read fault")
+                    finally:
+                        store_journal._read_contained = real_read
+                except OSError as exc:
+                    print("opf cli self-test: harness error: could not build an identity fixture ({})".format(
+                        exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+            finally:
+                shutil.rmtree(ibase, ignore_errors=True)
+            return None
+
         harness_rc = _fixture_leg()
         if harness_rc is not None:
             return harness_rc
+        identity_rc = _store_identity_leg()
+        if identity_rc is not None:
+            return identity_rc
         import_rc = _import_leg()
         if import_rc is not None:
             return import_rc

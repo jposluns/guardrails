@@ -78,6 +78,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import collections.abc
 import datetime
+import hashlib
 import operator
 import os
 import posixpath
@@ -1408,6 +1409,188 @@ def resolve_store_fd(product_root_fd, product_root, allowance=None):
     return Resolution(NOT_ADOPTED, "no store found ({}); opf init is the remedy".format(detail),
                       store_root=product_root, pointer_source=source,
                       product_root=product_root), None
+
+
+# --- store identity for CI (spec 14.1 completion check 4) --------------------------------------------
+#
+# The identity is the committed pointer's [store].target string together with the SHA-256 of the raw bytes of
+# the discovered machine store's init.toml, which coupled init writes once and nothing rewrites. The expected
+# values are pinned OUTSIDE the store, in IDENTITY_REL at the product root: a fixed committed path that no
+# argument or environment variable can redirect, so a run can never be pointed at a file that agrees with it.
+
+IDENTITY_REL = ".github/opf-store-identity.toml"   # the pinned expected identity, relative to the PRODUCT root
+IDENTITY_KEYS = frozenset({"schema", "target", "init_sha256"})
+SUPPORTED_IDENTITY_SCHEMA = 1
+INIT_NAME = "init.toml"                            # the bootstrap provenance a coupled init writes (spec 9)
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+IDENTITY_MATCH = "MATCH"
+IDENTITY_MISMATCH = "MISMATCH"                     # a readable value differs, or an override is present
+
+
+class StoreIdentity:
+    __slots__ = ("status", "notes")
+
+    def __init__(self, status, notes):
+        self.status = status              # IDENTITY_MATCH / IDENTITY_MISMATCH / CANNOT_EVALUATE
+        self.notes = notes                # one line per value compared, refused, or not evaluated
+
+
+def identity_exit_code(result):
+    """0 when both values match, 1 when a readable value differs or an override is present, 2 otherwise."""
+    if result.status == IDENTITY_MATCH:
+        return 0
+    if result.status == IDENTITY_MISMATCH:
+        return 1
+    return 2
+
+
+def _parse_identity(data):
+    """The (target, init_sha256) pair of a parsed IDENTITY_REL document, or StoreError naming the first
+    malformation. The keys are exactly schema, target and init_sha256; schema is the integer 1 (a bool is
+    not an integer here); target is a non-empty string, kept exactly as decoded; init_sha256 is 64
+    lowercase hexadecimal digits."""
+    keys = set(data)    # a parsed TOML document: every key is a str, so the sets sort as they are
+    if keys != IDENTITY_KEYS:
+        raise StoreError("{} must hold exactly the keys {} (missing: {}; unknown: {})".format(
+            IDENTITY_REL, ", ".join(sorted(IDENTITY_KEYS)),
+            _safe_display(sorted(IDENTITY_KEYS - keys)), _safe_display(sorted(keys - IDENTITY_KEYS))))
+    schema = data["schema"]
+    if type(schema) is not int or schema != SUPPORTED_IDENTITY_SCHEMA:
+        raise StoreError("{} schema must be the integer {}, not {}".format(
+            IDENTITY_REL, SUPPORTED_IDENTITY_SCHEMA, _safe_display(schema)))
+    target = data["target"]
+    if type(target) is not str or not target:
+        raise StoreError("{} target must be a non-empty string, not {}".format(IDENTITY_REL, _safe_display(target)))
+    digest = data["init_sha256"]
+    if type(digest) is not str or not _SHA256_HEX_RE.fullmatch(digest):
+        raise StoreError("{} init_sha256 must be 64 lowercase hexadecimal digits, not {}".format(
+            IDENTITY_REL, _safe_display(digest)))
+    return target, digest
+
+
+def _read_identity_inputs(product_root_fd):
+    """Read the product-root inputs through the held descriptor, no-follow: the pinned expectation, the
+    presence of the local override, and the committed pointer's decoded [store].target string. Returns
+    (expected_target, expected_digest, override_present, pointer_target), override_present short-circuiting
+    with pointer_target None. StoreError when a required input is absent, malformed or unreadable, or when the
+    override cannot be inspected: a missing input never compares equal."""
+    raw = _read_store_bytes_contained(product_root_fd, IDENTITY_REL)
+    if raw is None:
+        raise StoreError("{} is absent: no expected store identity is pinned".format(IDENTITY_REL))
+    expected_target, expected_digest = _parse_identity(_parse_store_toml(IDENTITY_REL, raw))
+    try:
+        override = _journal._lstat_contained(product_root_fd, LOCAL_POINTER_REL)
+    except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
+        raise StoreError("cannot inspect {} ({})".format(LOCAL_POINTER_REL, exc))
+    if override is not None:
+        # Any entry under that name (a file, a link, a directory) is an override shape, refused uninspected:
+        # the identity is the COMMITTED pointer's, and an override would substitute its own target for it.
+        return expected_target, expected_digest, True, None
+    pointer = _read_toml_contained(product_root_fd, POINTER_REL)
+    if pointer is None:
+        raise StoreError("{} is absent: the identity names the committed pointer's target, and default "
+                         "discovery is not a substitute".format(POINTER_REL))
+    store = pointer.get("store")
+    if not isinstance(store, dict) or type(store.get("target")) is not str:
+        raise StoreError("{} has no string [store].target".format(POINTER_REL))
+    return expected_target, expected_digest, False, store["target"]
+
+
+def _read_init_digest(res):
+    """The SHA-256 hex digest of the raw bytes of the RESOLVED machine store's init.toml, read no-follow,
+    singly-linked and capped beneath the store root. StoreError when it is absent or unreadable."""
+    relpath = "{}/{}".format(res.machine_rel, INIT_NAME)
+    try:
+        store_root_fd = _open_store_root_fd(res.store_root, True)
+    except OSError as exc:
+        _journal._fd_release_fault(exc)    # the no-follow walk's close: raised as itself, never a cannot-evaluate
+        raise StoreError("cannot open store root {} ({})".format(res.store_root, exc))
+    try:
+        data = _read_store_bytes_contained(store_root_fd, relpath)
+    finally:
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame, so the frame test sees what is in flight
+        except OSError:
+            raise                       # raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
+    if data is None:
+        raise StoreError("{} is absent at {}".format(relpath, res.store_root))
+    return hashlib.sha256(data).hexdigest()
+
+
+def check_store_identity(product_root):
+    """Compare the store identity at a product root with the values pinned in IDENTITY_REL (spec 14.1
+    completion check 4; the identity of OPF-IMPLEMENTATION-PROMPT.md open point 18). Never raises for an
+    expected outcome; returns a StoreIdentity, graded by identity_exit_code.
+
+    In order: the expectation file is read and strictly validated; a present `.opf.local.toml` is a mismatch
+    (an override must not stand in for the committed pointer) and one that cannot be inspected is
+    cannot-evaluate; `.opf.toml`'s decoded [store].target is compared with the pinned target exactly, with no
+    normalization; resolve_store must report RESOLVED through the committed pointer (default discovery is not
+    a substitute) at the target it reads; and the raw bytes of the machine store's init.toml are hashed and
+    compared with the pinned digest. Any value absent, malformed, unreadable or unresolvable is
+    CANNOT-EVALUATE, which outranks a differing value. Residual (disclosed): the pointer is read here and
+    again by resolve_store, so a pointer rewritten between the two reads is caught only when the two parse to
+    different targets."""
+    product_root = Path(product_root)
+    notes = []
+    try:
+        product_root = Path(os.path.abspath(product_root))
+    except OSError as exc:
+        return StoreIdentity(CANNOT_EVALUATE, ["cannot resolve product root to an absolute path ({})".format(exc)])
+    if not _containment.probe():
+        return StoreIdentity(CANNOT_EVALUATE, ["race-free containment primitive absent; fail-closed"])
+    try:
+        product_root_fd = _open_root_fd(product_root)
+    except OSError as exc:
+        return StoreIdentity(CANNOT_EVALUATE, ["cannot open product root {} ({})".format(product_root, exc)])
+    try:
+        try:
+            expected_target, expected_digest, override, target = _read_identity_inputs(product_root_fd)
+        except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
+            return StoreIdentity(CANNOT_EVALUATE, [str(exc)])
+    finally:
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(product_root_fd)   # in THIS frame, so the frame test sees what is in flight
+        except OSError:
+            raise                       # raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
+    if override:
+        return StoreIdentity(IDENTITY_MISMATCH, ["{} is present: an override must not substitute for the "
+                                                 "committed pointer {}".format(LOCAL_POINTER_REL, POINTER_REL)])
+    target_ok = target == expected_target
+    notes.append("target: {} (pinned {}, committed {})".format(
+        "match" if target_ok else "DIFFERS", _safe_display(expected_target), _safe_display(target)))
+    res = resolve_store(product_root)
+    if res.status != RESOLVED or res.pointer_source != "committed":
+        notes.append("store: not resolved through the committed pointer ({}, source {}): {}".format(
+            res.status, res.pointer_source, res.detail))
+        return StoreIdentity(CANNOT_EVALUATE, notes)
+    try:
+        named = classify_target(target)
+    except StoreError as exc:
+        _journal._fd_release_fault(exc)
+        notes.append("store: the committed target no longer classifies ({})".format(exc))
+        return StoreIdentity(CANNOT_EVALUATE, notes)
+    if res.target is None or (res.target.kind, res.target.value) != (named.kind, named.value):
+        notes.append("store: {} changed between its two reads (fail-closed)".format(POINTER_REL))
+        return StoreIdentity(CANNOT_EVALUATE, notes)
+    try:
+        digest = _read_init_digest(res)
+    except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
+        notes.append("init_sha256: {}".format(exc))
+        return StoreIdentity(CANNOT_EVALUATE, notes)
+    digest_ok = digest == expected_digest
+    notes.append("init_sha256: {} (pinned {}, {}/{} {})".format(
+        "match" if digest_ok else "DIFFERS", expected_digest, res.machine_rel, INIT_NAME, digest))
+    return StoreIdentity(IDENTITY_MATCH if target_ok and digest_ok else IDENTITY_MISMATCH, notes)
 
 
 # --- SemVer and base_compat helpers (spec 9.1) -------------------------------------------------------
@@ -5272,6 +5455,192 @@ def self_test():
             got_kind, got_text = recursion_refusal(_ST_LONG_KEY_TOML, MemoryError)
         check("recursion-many-part-key-memory-independent-of-underlying-cap",
               got_kind == "MemoryError" and got_text.startswith(rec_head))
+
+        # Store identity (check_store_identity): each vector builds a product root whose committed pointer
+        # names a companion store, and pins the expected identity in IDENTITY_REL at the product root.
+        id_init = b'format = "opf.init.bootstrap/v1"\nsource_digest = "0"\n'
+        id_seq = [0]
+
+        def id_fixture(machine=DEFAULT_MACHINE_SUBDIR, init=id_init, target=None, pin_target=None,
+                       pin_digest=None, pin_text=None, pointer_text=None):
+            id_seq[0] += 1
+            prod = base / "identity-{:02d}".format(id_seq[0])
+            store = base / "identity-store-{:02d}".format(id_seq[0])
+            mdir = store / WORKING_DIRNAME / machine
+            mdir.mkdir(parents=True)
+            (mdir / MANIFEST_NAME).write_text(manifest_text(), encoding="utf-8")
+            if init is not None:
+                (mdir / INIT_NAME).write_bytes(init)
+            (prod / ".github").mkdir(parents=True)
+            target = "dir:{}".format(store) if target is None else target
+            if pointer_text is None:
+                pointer_text = '[store]\ntarget = "{}"\n'.format(target)
+            (prod / POINTER_REL).write_text(pointer_text, encoding="utf-8")
+            if pin_text is None:
+                pin_text = 'schema = 1\ntarget = "{}"\ninit_sha256 = "{}"\n'.format(
+                    target if pin_target is None else pin_target,
+                    hashlib.sha256(id_init).hexdigest() if pin_digest is None else pin_digest)
+            if pin_text is not False:
+                (prod / IDENTITY_REL).write_text(pin_text, encoding="utf-8")
+            return prod, store, mdir
+
+        def id_code(prod):
+            return _guard(lambda: identity_exit_code(check_store_identity(prod)))
+
+        def id_says(prod, text):
+            got = _guard(lambda: check_store_identity(prod))
+            return got != "RAISED" and got.status == CANNOT_EVALUATE and any(text in n for n in got.notes)
+
+        check("identity-path-fixed", IDENTITY_REL == ".github/opf-store-identity.toml")
+        check("identity-exit-codes", [identity_exit_code(StoreIdentity(s, [])) for s in (
+            IDENTITY_MATCH, IDENTITY_MISMATCH, CANNOT_EVALUATE, RESOLVED)] == [0, 1, 2, 2])
+        prod, _store, mdir = id_fixture()
+        check("identity-exact-match", id_code(prod) == 0)
+        (mdir / INIT_NAME).write_bytes(id_init[:-2] + b"1\n")
+        check("identity-init-byte-differs", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture(pin_digest="0" * 64)
+        check("identity-pinned-digest-differs", id_code(prod) == 1)
+        prod, store, _mdir = id_fixture(machine="data")
+        got = _guard(lambda: check_store_identity(prod))
+        check("identity-non-default-machine-dir",
+              got != "RAISED" and got.status == IDENTITY_MATCH
+              and any("{}/data/{}".format(WORKING_DIRNAME, INIT_NAME) in n for n in got.notes))
+        # The target compares as the exact decoded string: each pointer below resolves the same store as the
+        # pin names, so only a normalizing comparison would call it a match.
+        for label, pointed in (("trailing-slash", "dir:{}/"), ("leading-space", " dir:{}"),
+                               ("trailing-space", "dir:{} "), ("bare-path", "{}")):
+            prod, store, _mdir = id_fixture()
+            (prod / POINTER_REL).write_text('[store]\ntarget = "{}"\n'.format(pointed.format(store)),
+                                            encoding="utf-8")
+            check("identity-target-exact-{}-resolves".format(label),
+                  resolve_store(prod).status == RESOLVED)
+            check("identity-target-exact-{}".format(label), id_code(prod) == 1)
+        prod, store, _mdir = id_fixture(pin_target="dir:{}/".format(base / "elsewhere"))
+        check("identity-target-differs", id_code(prod) == 1)
+        # Raw bytes: CRLF line endings hash as written, never as text normalized to LF.
+        crlf = id_init.replace(b"\n", b"\r\n")
+        prod, _store, _mdir = id_fixture(init=crlf)
+        check("identity-crlf-against-lf-pin", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture(init=crlf, pin_digest=hashlib.sha256(crlf).hexdigest())
+        check("identity-crlf-against-crlf-pin", id_code(prod) == 0)
+        prod, _store, _mdir = id_fixture(init=id_init + b"\n")
+        check("identity-trailing-newline-differs", id_code(prod) == 1)
+        # A present override is a mismatch, whatever its shape; one that cannot be inspected is
+        # cannot-evaluate (an injected lstat fault, never permission bits).
+        prod, store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        check("identity-override-present", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).mkdir()
+        check("identity-override-directory", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).write_text("not toml {{\n", encoding="utf-8")
+        check("identity-override-malformed", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture()
+        real_lstat = _journal._lstat_contained
+
+        def lstat_fault(root_fd, relpath, *args, **kwargs):
+            if relpath == LOCAL_POINTER_REL:
+                raise OSError(5, "injected lstat fault")
+            return real_lstat(root_fd, relpath, *args, **kwargs)
+        _journal._lstat_contained = lstat_fault
+        try:
+            check("identity-override-uninspectable", id_says(prod, "cannot inspect {}".format(LOCAL_POINTER_REL)))
+        finally:
+            _journal._lstat_contained = real_lstat
+        # The committed pointer: malformed, or absent while a default store is discoverable, is
+        # cannot-evaluate (default discovery never stands in for the committed pointer).
+        for label, text in (("unparseable", "not toml {{\n"), ("no-target", '[store]\nother = "x"\n'),
+                            ("int-target", "[store]\ntarget = 5\n"), ("no-store", 'target = "x"\n')):
+            prod, _store, _mdir = id_fixture(pointer_text=text)
+            check("identity-pointer-{}".format(label), id_code(prod) == 2)
+            if label == "int-target":
+                check("identity-pointer-int-target-refused-here", id_says(prod, "no string [store].target"))
+        prod, _store, _mdir = id_fixture(target="dir:{}".format(base / "identity-missing-store"))
+        check("identity-pointer-unresolvable", id_code(prod) == 2)
+        prod, store, mdir = id_fixture()
+        os.unlink(str(prod / POINTER_REL))
+        (prod / WORKING_DIRNAME).mkdir()
+        shutil.copytree(str(mdir), str(prod / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR))
+        dres = resolve_store(prod)
+        check("identity-pointer-absent-default-resolves",
+              dres.status == RESOLVED and dres.pointer_source == "default")
+        check("identity-pointer-absent-default-store", id_says(prod, "default discovery is not a substitute"))
+        # init.toml absent is cannot-evaluate, even against the digest of empty bytes.
+        prod, _store, _mdir = id_fixture(init=None)
+        check("identity-init-missing", id_code(prod) == 2)
+        prod, _store, _mdir = id_fixture(init=None, pin_digest=hashlib.sha256(b"").hexdigest())
+        check("identity-init-missing-never-equal-empty", id_code(prod) == 2)
+        # The expectation file: absent, unparseable, and each field missing, unknown or malformed.
+        prod, _store, _mdir = id_fixture(pin_text=False)
+        check("identity-expectation-missing", id_says(prod, "no expected store identity is pinned"))
+        prod, _store, _mdir = id_fixture(pin_text=False)
+        os.rmdir(str(prod / ".github"))
+        check("identity-expectation-dir-missing", id_code(prod) == 2)
+        good_digest = hashlib.sha256(id_init).hexdigest()
+        for label, body in (
+                ("unparseable", "schema = 1\ntarget = \n"),
+                ("empty", ""),
+                ("no-schema", 'target = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("no-target", 'schema = 1\ninit_sha256 = "{d}"\n'),
+                ("no-digest", 'schema = 1\ntarget = "{t}"\n'),
+                ("unknown-key", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{d}"\nextra = 1\n'),
+                ("unknown-table", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{d}"\n[x]\n'),
+                ("schema-2", 'schema = 2\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("schema-0", 'schema = 0\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("schema-bool", 'schema = true\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("schema-float", 'schema = 1.0\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("schema-str", 'schema = "1"\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("target-empty", 'schema = 1\ntarget = ""\ninit_sha256 = "{d}"\n'),
+                ("target-int", 'schema = 1\ntarget = 1\ninit_sha256 = "{d}"\n'),
+                ("target-array", 'schema = 1\ntarget = ["{t}"]\ninit_sha256 = "{d}"\n'),
+                ("digest-upper", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{u}"\n'),
+                ("digest-63", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{s}"\n'),
+                ("digest-65", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{d}0"\n'),
+                ("digest-nonhex", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{g}"\n'),
+                ("digest-newline", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{d}\\n"\n'),
+                ("digest-int", 'schema = 1\ntarget = "{t}"\ninit_sha256 = 1\n')):
+            store = base / "identity-store-{:02d}".format(id_seq[0] + 1)
+            text = body.format(t="dir:{}".format(store), d=good_digest, u=good_digest.upper(),
+                               s=good_digest[:63], g="g" + good_digest[1:])
+            prod, _store, _mdir = id_fixture(pin_text=text)
+            check("identity-expectation-{}-store-named".format(label), _store == store)
+            check("identity-expectation-{}".format(label), id_code(prod) == 2)
+        # Symlinked, multiply-linked and special-file inputs are refused, never followed or opened.
+        for label, rel in (("expectation", IDENTITY_REL), ("pointer", POINTER_REL), ("init", INIT_NAME)):
+            for shape in ("symlink", "hardlink", "fifo"):
+                prod, _store, mdir = id_fixture()
+                path = (mdir / INIT_NAME) if rel == INIT_NAME else (prod / rel)
+                kept = base / "identity-kept-{:02d}".format(id_seq[0])
+                if shape == "fifo":
+                    os.unlink(str(path))
+                    os.mkfifo(str(path))
+                else:
+                    os.rename(str(path), str(kept))
+                    if shape == "symlink":
+                        os.symlink(str(kept), str(path))
+                    else:
+                        os.link(str(kept), str(path))
+                check("identity-{}-{}".format(label, shape), id_code(prod) == 2)
+        prod, _store, _mdir = id_fixture()
+        os.rename(str(prod / ".github"), str(prod / "github-real"))
+        os.symlink("github-real", str(prod / ".github"))
+        check("identity-expectation-parent-symlink", id_code(prod) == 2)
+        # Unreadable inputs, by an injected read fault on each one in turn.
+        real_read = _journal._read_contained
+        for label, rel in (("expectation", IDENTITY_REL), ("pointer", POINTER_REL), ("init", INIT_NAME)):
+            prod, _store, _mdir = id_fixture()
+
+            def read_fault(root_fd, relpath, *args, _rel=rel, **kwargs):
+                if relpath == _rel or relpath.endswith("/" + _rel):
+                    raise _journal.JournalError("injected read fault on {}".format(relpath))
+                return real_read(root_fd, relpath, *args, **kwargs)
+            _journal._read_contained = read_fault
+            try:
+                check("identity-{}-unreadable".format(label), id_code(prod) == 2)
+            finally:
+                _journal._read_contained = real_read
+            check("identity-{}-readable-after-fault".format(label), id_code(prod) == 0)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
