@@ -3,7 +3,9 @@
 
 The gate reads tools/run_all_checks.sh and the two CI workflows (CI_WORKFLOWS:
 .github/workflows/quality.yml and .github/workflows/msg-leaks.yml) as data. It
-executes none of them. Every path is absolute and derived from this file's
+executes none of them. Its checkout-credentials rule (CHECKOUT CREDENTIALS,
+below) also reads every workflow file under .github/workflows, as parsed
+YAML. Every path is absolute and derived from this file's
 resolved repository root. The --self-test alone also runs a scratch copy of the runner
 under bash, with stub python3 and gitleaks commands, to prove a failing gate is named
 (GATE FAILED: <name> (exit <n>)) and listed (FAILED GATES: ...) before RESULT: FAIL.
@@ -246,23 +248,93 @@ group step put back into quality.yml, and the whole self-test removed,
 repeated or moved out of the heavy jobs each turn the self-test red. The rule
 runs in the self-test, which reads the live files, not in the gate's own run.
 Not checked: which HEAVY_JOBS job runs the whole self-test.
+CHECKOUT CREDENTIALS. Unless its persist-credentials input is false,
+actions/checkout writes the job token into the git config of the checkout,
+where every later step of the job, each gate this repository runs among
+them, can read it; no job of these workflows pushes, fetches or otherwise
+uses git credentials after its checkout (read at this commit), so none
+needs the token there. Every regular file directly under
+.github/workflows whose name ends in .yml or .yaml (WORKFLOW_SUFFIXES,
+letter case aside) is read through read_runner_text and parsed WHOLE into
+its YAML structure by _WorkflowReader, never judged line by line: every
+mapping in the parsed tree whose uses: value names actions/checkout (the
+part before @, letter case aside), a step wherever it sits, must carry a
+with: mapping whose persist-credentials value is the boolean false (a plain
+false, False or FALSE, the YAML 1.2 core spellings). A missing with:, a
+with: without the key, true, an empty value and any string (a quoted
+'false', 'no' or a ${{ }} expression among them, though actions/checkout
+reads some of them as not true) are each a checkout-credentials finding
+(exit 1): the rule holds the one boolean, so a comment or a run: line that
+spells the key is not the key. The reader is a conservative block-YAML
+subset: block mappings with plain keys, block sequences (a mapping may
+open on an item's line), one-line plain, single-quoted and backslash-free
+double-quoted scalars, one-line flow sequences of plain words, literal (|)
+block scalars and comments; a workflow outside that subset is
+cannot-evaluate (exit 2), never skipped. Every component from the
+repository root to the workflows directory (.github and workflows; the
+root itself is resolved when the module loads) is read through lstat: a
+symlinked one can point this rule at another tree, so one the lstat sees
+is cannot-evaluate, not followed. A workflow entry that is not a regular
+file (a symlink, directory, FIFO or device, refused on its own lstat
+before any read of it), a workflow it cannot read (a stat
+or read error or a byte outside printable ASCII plus tab and newline) or
+parse (an empty file, a tab, a document marker or directive, an anchor,
+alias or tag, a flow mapping, a folded scalar, a multi-line plain or
+quoted scalar, an indentless or one-line nested sequence, a repeated key,
+a key that is not plain, a line the indentation does not place, nesting
+past the interpreter's recursion limit), a uses: that is not one string,
+a step's uses: key spelled in another letter case (a step is a
+sequence-item mapping; whether a workflow reader folds key case is not
+modelled, and a key of an env: or other non-step mapping is data, never
+held to this rule), a with: or persist-credentials key of a checkout step
+spelled in another letter case, a step uses: starting with ./ or .\\ (a
+dot then either path separator, however a runner reads the backslash) once
+its surrounding whitespace is stripped, whatever path it names (a step cannot
+call a reusable workflow, which is a job-level uses:, so it runs a local
+action, a composite one among them, whose steps are not in these files; a
+path under .github/workflows/ is no exception), a checkout's with: that
+is not a mapping, a directory that cannot be listed and one holding no
+workflow file are each cannot-evaluate (exit 2), never skipped. Each lstat
+is a path lookup apart from the later listing and reads, which follow
+symlinks: a concurrent writer to the tree during the run that swaps
+.github, workflows or a workflow entry for a symlink after its lstat has
+it followed, and one swapped for a FIFO can block the read; this is not
+closed, so the checks hold for a tree nothing writes while the gate runs.
+The rules are CHECKOUT_RULES (persist-credentials and fail-closed); the self-test
+removes each from the running module and shows every case of it red
+without it, and the main wiring vectors run main([]) itself, so the
+checkout leg cannot be cut out of the process exit. Not read: a checkout
+inside a remote action or a remote reusable workflow, whose steps are not
+in these files (a step's local uses: is cannot-evaluate instead); the
+target of a job-level uses:, which is not resolved (a local reusable
+workflow it calls is read only as a workflow file directly under
+.github/workflows/, like every other); another action that writes
+credentials; an INPUT_PERSIST-CREDENTIALS value set through env:; and any
+other route by which a step obtains the job token (an action input that
+defaults to it among them).
 
-Exit convention:
+Exit convention (the higher of the parity leg's and the checkout-credentials
+leg's exit):
   0  extraction succeeded, every difference has an active exception, no exception is
-     stale or reversed, and every mandatory member is present on both sides
+     stale or reversed, every mandatory member is present on both sides, and every
+     checkout step sets persist-credentials: false
   1  an evaluated parity finding, stale or reversed exception, missing mandatory
-     member, required-status, trigger, relocation or lane finding
+     member, required-status, trigger, relocation, lane or checkout-credentials
+     finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
-     action, circular runner invocation, or shadow-scan discrepancy
+     action, circular runner invocation, shadow-scan discrepancy, or a workflow
+     directory or file the checkout-credentials rule cannot list, read, parse or
+     judge
 
 DISCLOSED RESIDUAL. This is token-level set parity only. It does not compare
 environment values, operating systems, tool versions, execution order, multiplicity,
 step placement across jobs, labels, or whether the shell harness propagates a child
 failure. Interpreter-flag differences are intentionally removed from identity and are
-owned by check_python_launcher_isolation.py. Scope is exactly the three named files
-(the runner and CI_WORKFLOWS), so gates in other workflows, such as the scheduled
-currency.yml, are not enumerated. Argument order is identity-relevant,
+owned by check_python_launcher_isolation.py. Parity scope is exactly the three named
+files (the runner and CI_WORKFLOWS), so gates in other workflows, such as the scheduled
+currency.yml, are not enumerated; only the checkout-credentials rule reads every
+workflow file, for its checkout steps alone. Argument order is identity-relevant,
 making a harmless reorder fail loud. Coordinated removal of both of this gate's own
 invocations cannot be detected if nobody runs the remaining file manually. The repository
 contracts (REPO_GATES) and the cited-standards contract's --self-test are
@@ -462,6 +534,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import argparse
 import re
 import shlex
+import stat
 from collections import namedtuple
 from pathlib import Path
 
@@ -474,6 +547,13 @@ CI_SOURCE = ".github/workflows/quality.yml"
 MSG_LEAKS_CI_PATH = ROOT / ".github" / "workflows" / "msg-leaks.yml"
 MSG_LEAKS_CI_SOURCE = ".github/workflows/msg-leaks.yml"
 CI_WORKFLOWS = ((CI_SOURCE, CI_PATH), (MSG_LEAKS_CI_SOURCE, MSG_LEAKS_CI_PATH))
+# The directory every workflow file lives in, read whole by the
+# checkout-credentials rule (module docstring, CHECKOUT CREDENTIALS), and the
+# file name endings GitHub reads as workflows there (compared without regard
+# to letter case, so no spelling of them goes unread).
+WORKFLOWS_SOURCE = ".github/workflows"
+WORKFLOWS_PATH = ROOT / ".github" / "workflows"
+WORKFLOW_SUFFIXES = (".yml", ".yaml")
 
 # Runtime-derived values deliberately lose their concrete value while retaining the
 # flag in identity. A new runtime-valued flag is not masked automatically, so it
@@ -605,7 +685,8 @@ HEAVY_JOB_IF_LINE = (
     "(startsWith(github.head_ref, 'merge-train-') && "
     "github.event.pull_request.head.repo.full_name == github.repository)")
 HEAVY_JOBS = frozenset({
-    "opf-tooling", "selftest-execution", "git-fixture-env-core",
+    "opf-tooling-a", "opf-tooling-b", "opf-tooling-c", "selftest-execution",
+    "git-fixture-env-core",
     "opf-host-patch", "git-fixture-env-core-host-patch",
     "git-fixture-env-config-combined-host-patch",
     "git-fixture-env-config-malformed-host-patch",
@@ -1564,9 +1645,9 @@ def _text_format_diagnostic(text, source):
 # runs.
 STANDALONE_SOURCE = "opf/tools/run_all_checks.sh"
 # The checked directory binding: dirname's status, then a non-empty name, then
-# the cd; each guard exits 2 before any gate (vector 42 runs each guard red).
+# the cd; each guard exits 2 before any gate (vector 44 runs each guard red).
 # The cd runs with CDPATH cleared, so a relative start under a hostile CDPATH
-# never resolves into the CDPATH entry (vector 43 runs the bare cd red).
+# never resolves into the CDPATH entry (vector 45 runs the bare cd red).
 STANDALONE_BINDING_LINES = (
     'dir=$(dirname -- "$0") || exit 2',
     '[ -n "$dir" ] || exit 2',
@@ -4017,6 +4098,541 @@ def render(report):
     return "\n".join(lines)
 
 
+# CHECKOUT CREDENTIALS (module docstring). actions/checkout writes the job
+# token into the git config of the checkout unless its persist-credentials
+# input is false, and every later step of the job can read it there. The
+# rules of that leg: persist-credentials (every checkout step's with: sets
+# that input to the boolean false) and fail-closed (a workflow directory or
+# file that cannot be listed, read, parsed or judged is cannot-evaluate,
+# never skipped). The self-test removes each rule from the running module
+# and shows every case of that rule red without it.
+CHECKOUT_ACTION = "actions/checkout"
+CHECKOUT_INPUT = "persist-credentials"
+CHECKOUT_RULES = frozenset({"persist-credentials", "fail-closed"})
+# A step uses: opening with a dot then either path separator names a local
+# path, whichever separator a runner honours, so both are refused.
+LOCAL_STEP_PREFIXES = ("./", ".\\")
+CheckoutReport = namedtuple(
+    "CheckoutReport", "code files steps findings diagnostics")
+
+# The workflow reader's line grammar: a plain key, its colon, then nothing or
+# at least one space and the value; a literal block scalar header with an
+# optional chomping indicator, no indentation indicator and an optional
+# comment; and a flow sequence item, one plain word. Plain scalars resolve
+# booleans and null as the YAML 1.2 core schema does; every other plain
+# scalar stays the string it spells.
+_WORKFLOW_KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*):(?: +(.*))?")
+_LITERAL_HEADER_RE = re.compile(r"\|([+-]?)(?: +#.*| *)")
+_FLOW_ITEM_RE = re.compile(r"[A-Za-z0-9_./-]+")
+_YAML_BOOLEANS = {"true": True, "True": True, "TRUE": True,
+                  "false": False, "False": False, "FALSE": False}
+_YAML_NULLS = frozenset(("null", "Null", "NULL", "~"))
+# A value may not open with a flow mapping, a stray flow or entry indicator,
+# an anchor, alias or tag, a folded scalar, a directive or a reserved
+# character. A dash, question mark or colon followed by a space or the end
+# of the value opens a sequence, a complex key or a mapping value there.
+_VALUE_REFUSED_START = frozenset("{}],&*!>%@`")
+_ABSENT = object()
+
+
+class WorkflowShapeError(Exception):
+    """A workflow shape outside _WorkflowReader's subset, or a checkout step
+    the rule cannot judge: cannot-evaluate, never skipped."""
+
+    def __init__(self, line, message):
+        super().__init__(message)
+        self.line = line
+        self.message = message
+
+
+class _ParsedMapping(dict):
+    """A parsed block mapping; key_lines maps each key to its line number."""
+
+    def __init__(self):
+        super().__init__()
+        self.key_lines = {}
+
+
+def _plain_value(text):
+    """A plain scalar: a YAML 1.2 core boolean or null, else its string."""
+    if text in _YAML_BOOLEANS:
+        return _YAML_BOOLEANS[text]
+    return None if text in _YAML_NULLS else text
+
+
+class _WorkflowReader:
+    """Parse one workflow's text whole into mappings, lists and scalars
+    through a conservative block-YAML subset (module docstring, CHECKOUT
+    CREDENTIALS), refusing every shape outside it with WorkflowShapeError, so
+    a layout a YAML reader could build into another structure is never read
+    as this one. The text arrives through read_runner_text: printable ASCII
+    plus tab and newline, so a line breaks only at a newline."""
+
+    def __init__(self, text):
+        self.lines = text.split("\n")
+        if self.lines[-1] == "":
+            self.lines.pop()
+        self.index = 0
+
+    @staticmethod
+    def refuse(line, message):
+        raise WorkflowShapeError(line, message)
+
+    @staticmethod
+    def _item(content):
+        return content == "-" or content.startswith("- ")
+
+    def parse(self):
+        for number, line in enumerate(self.lines, 1):
+            if "\t" in line:
+                self.refuse(number, "a tab is outside the supported YAML "
+                            "subset")
+            if line.startswith(("---", "...", "%")):
+                self.refuse(number, "a document marker or directive is "
+                            "outside the supported YAML subset")
+        head = self._next()
+        if head is None or head[0] != 0:
+            self.refuse(head[2] if head else 1, "the workflow does not open "
+                        "with a top-level key at column 1")
+        tree = self._mapping(0)
+        tail = self._next()
+        if tail is not None:
+            self.refuse(tail[2], "a line the top-level mapping does not "
+                        "place")
+        return tree
+
+    def _next(self):
+        """Skip blank and comment lines; return (column, content, line) of
+        the next line, or None at the end of the text."""
+        while self.index < len(self.lines):
+            raw = self.lines[self.index]
+            content = raw.lstrip(" ")
+            if content and not content.startswith("#"):
+                return len(raw) - len(content), content, self.index + 1
+            self.index += 1
+        return None
+
+    def _mapping(self, column):
+        node = _ParsedMapping()
+        while True:
+            head = self._next()
+            if head is None or head[0] < column:
+                return node
+            at, content, number = head
+            if at > column:
+                self.refuse(number, "a line deeper than its mapping's keys")
+            if self._item(content):
+                self.refuse(number, "a sequence item where a mapping key "
+                            "belongs")
+            match = _WORKFLOW_KEY_RE.fullmatch(content)
+            if match is None:
+                self.refuse(number, "not a plain key, its colon and a space "
+                            "before any value: {!r}".format(content))
+            key = match.group(1)
+            if key in node:
+                self.refuse(number, "repeated key {!r}".format(key))
+            self.index += 1
+            node.key_lines[key] = number
+            node[key] = self._value(match.group(2) or "", number, column,
+                                    False)
+
+    def _sequence(self, column):
+        node = []
+        while True:
+            head = self._next()
+            if head is None or head[0] < column:
+                return node
+            at, content, number = head
+            if at > column:
+                self.refuse(number, "a line deeper than its sequence's "
+                            "items")
+            if not self._item(content):
+                self.refuse(number, "a mapping key where a sequence item "
+                            "belongs")
+            rest = content[1:].lstrip(" ")
+            if self._item(rest):
+                self.refuse(number, "a sequence nested on one line is "
+                            "outside the supported YAML subset")
+            if _WORKFLOW_KEY_RE.fullmatch(rest):
+                # A mapping that opens on the item's line: its keys sit at
+                # the column its first key starts, so the dash is read as
+                # indentation and the mapping is read from that line.
+                start = at + len(content) - len(rest)
+                self.lines[number - 1] = " " * start + rest
+                node.append(self._mapping(start))
+                continue
+            self.index += 1
+            node.append(self._value(rest, number, column, True))
+
+    def _value(self, text, number, column, item):
+        """The node an entry at column (a sequence item when item is true,
+        else a mapping key) holds, text being what follows its colon or
+        dash on line number."""
+        if not text or text.startswith("#"):
+            return self._nested(column, item)
+        if text.startswith("|"):
+            return self._literal(text, number, column)
+        if text.startswith("["):
+            node = self._flow_sequence(text, number)
+        elif text.startswith(("'", '"')):
+            node = self._quoted(text, number)
+        elif (text[0] in _VALUE_REFUSED_START
+              or (text[0] in "-?:" and text[1:2] in ("", " "))):
+            self.refuse(number, "a value opening with {!r} (a flow "
+                        "mapping, anchor, alias, tag, folded scalar or "
+                        "other indicator) is outside the supported YAML "
+                        "subset".format(text[0]))
+        else:
+            node = self._plain(text, number)
+        head = self._next()
+        if head is not None and head[0] > column:
+            self.refuse(head[2], "a line deeper than the one-line value "
+                        "before it (a multi-line scalar is outside the "
+                        "supported YAML subset)")
+        return node
+
+    def _nested(self, column, item):
+        """The block node under an entry at column whose value starts on a
+        later line: a deeper mapping or sequence, or null when the next line
+        is not deeper. A sequence at a key's own column (an indentless
+        sequence) is refused."""
+        head = self._next()
+        if head is None or head[0] < column:
+            return None
+        at, content, number = head
+        if at == column:
+            if not item and self._item(content):
+                self.refuse(number, "an indentless sequence is outside the "
+                            "supported YAML subset")
+            return None
+        if self._item(content):
+            return self._sequence(at)
+        return self._mapping(at)
+
+    def _literal(self, text, number, column):
+        """A literal (|) block scalar opened on line number by an entry at
+        column: its lines are deeper than column, read from the content
+        indentation its first non-blank line sets, with its chomping."""
+        header = _LITERAL_HEADER_RE.fullmatch(text)
+        if header is None:
+            self.refuse(number, "a block scalar header other than |, |- or "
+                        "|+ (an indentation indicator among them) is "
+                        "outside the supported YAML subset")
+        body = []
+        indent = None
+        while self.index < len(self.lines):
+            raw = self.lines[self.index]
+            content = raw.lstrip(" ")
+            at = len(raw) - len(content)
+            if content:
+                if indent is None:
+                    if at <= column:
+                        break
+                    indent = at
+                    if any(len(blank) > indent for blank in body):
+                        self.refuse(number, "a leading blank line indented "
+                                    "past the block's content is a layout "
+                                    "YAML rejects")
+                elif at < indent:
+                    break
+            body.append(raw)
+            self.index += 1
+        lines = [raw[indent:] if indent is not None else "" for raw in body]
+        trailing = 0
+        while lines and lines[-1] == "":
+            lines.pop()
+            trailing += 1
+        value = "\n".join(lines)
+        if header.group(1) == "+":
+            return value + "\n" * (trailing + (1 if lines else 0))
+        if header.group(1) == "-" or not lines:
+            return value
+        return value + "\n"
+
+    def _quoted(self, text, number):
+        """A one-line single- or double-quoted scalar and an optional
+        trailing comment; a double-quoted one carries no backslash."""
+        quote = text[0]
+        parts = []
+        start = 1
+        while True:
+            end = text.find(quote, start)
+            if end < 0:
+                self.refuse(number, "an unterminated quoted scalar (a "
+                            "multi-line quoted scalar is outside the "
+                            "supported YAML subset)")
+            parts.append(text[start:end])
+            if quote == "'" and text[end + 1:end + 2] == "'":
+                parts.append("'")
+                start = end + 2
+                continue
+            break
+        value = "".join(parts)
+        if quote == '"' and "\\" in value:
+            self.refuse(number, "a backslash in a double-quoted scalar is "
+                        "outside the supported YAML subset")
+        self._trailer(text[end + 1:], number)
+        return value
+
+    def _flow_sequence(self, text, number):
+        """A one-line flow sequence of plain words and an optional trailing
+        comment."""
+        end = text.find("]")
+        if end < 0:
+            self.refuse(number, "an unterminated flow sequence (a "
+                        "multi-line one is outside the supported YAML "
+                        "subset)")
+        self._trailer(text[end + 1:], number)
+        inner = text[1:end].strip(" ")
+        if not inner:
+            return []
+        items = []
+        for item in inner.split(","):
+            item = item.strip(" ")
+            if not _FLOW_ITEM_RE.fullmatch(item):
+                self.refuse(number, "a flow sequence item other than one "
+                            "plain word: {!r}".format(item))
+            items.append(_plain_value(item))
+        return items
+
+    def _plain(self, text, number):
+        """A one-line plain scalar, its trailing comment removed."""
+        cut = text.find(" #")
+        value = (text if cut < 0 else text[:cut]).rstrip(" ")
+        if ": " in value or value.endswith(":"):
+            self.refuse(number, "a colon and a space inside a plain scalar, "
+                        "where YAML reads a mapping: {!r}".format(value))
+        return _plain_value(value)
+
+    def _trailer(self, rest, number):
+        """Refuse anything after a closing quote or bracket but spaces and a
+        comment."""
+        if rest.strip(" ") and not (
+                rest.startswith(" ") and rest.lstrip(" ").startswith("#")):
+            self.refuse(number, "text after a closing quote or bracket: "
+                        "{!r}".format(rest))
+
+
+def _exact_key(mapping, key, line):
+    """mapping's value under key, or _ABSENT. A key spelling key in another
+    letter case is cannot-evaluate: whether a workflow reader folds key case
+    is not modelled."""
+    for other in mapping:
+        if other != key and other.lower() == key:
+            raise WorkflowShapeError(
+                mapping.key_lines.get(other, line),
+                "key {!r} spells {!r} in another letter case; whether a "
+                "workflow reader folds key case is not modelled".format(
+                    other, key))
+    return mapping.get(key, _ABSENT)
+
+
+def _local_step(uses):
+    """True when a step's uses: value names a local path: it starts with a
+    dot then a path separator (LOCAL_STEP_PREFIXES, ./ or .\\) once its
+    surrounding whitespace is stripped, so a quoted ' ./tools/act' and a
+    .\\tools\\act are not read as remote actions, however a runner reads the
+    backslash."""
+    return uses.strip().startswith(LOCAL_STEP_PREFIXES)
+
+
+def _checkout_steps(node, found, item=False):
+    """Append (line, uses, mapping) to found for every mapping in the parsed
+    tree whose uses: names actions/checkout (the part before @, letter case
+    aside), wherever it sits. Only a sequence-item mapping (a step) is held
+    to the uses: letter-case rule: a key of an env: or other non-step
+    mapping is data, not a step property. A step uses: naming a local path
+    (_local_step) is cannot-evaluate whatever it names: a step cannot call a
+    reusable workflow, so it runs a local action, whose steps are not in
+    these files. A job-level uses: (a reusable workflow call) is not held to
+    that rule."""
+    if isinstance(node, dict):
+        if item:
+            uses = _exact_key(node, "uses", 0)
+        else:
+            uses = node.get("uses", _ABSENT)
+        if uses is not _ABSENT:
+            line = node.key_lines["uses"]
+            if not isinstance(uses, str):
+                raise WorkflowShapeError(
+                    line, "a uses: value that is not one string: "
+                    "{!r}".format(uses))
+            name = uses.split("@", 1)[0].strip().lower()
+            if (name == CHECKOUT_ACTION
+                    or name.startswith(CHECKOUT_ACTION + "/")):
+                found.append((line, uses, node))
+            elif item and _local_step(uses):
+                raise WorkflowShapeError(
+                    line, "a step uses: of a local action ({!r}): a step "
+                    "cannot call a reusable workflow, and a local action's "
+                    "steps are not in these files".format(uses))
+        for value in node.values():
+            _checkout_steps(value, found)
+    elif isinstance(node, list):
+        for entry in node:
+            _checkout_steps(entry, found, item=True)
+
+
+def _persist_departure(step, line):
+    """None when the checkout step's with: sets persist-credentials to the
+    boolean false; otherwise the departure in words."""
+    inputs = _exact_key(step, "with", line)
+    if inputs is _ABSENT or inputs is None:
+        return ("it carries no with: inputs, so persist-credentials keeps "
+                "its default, true")
+    if not isinstance(inputs, dict):
+        raise WorkflowShapeError(step.key_lines["with"],
+                                 "a checkout step's with: is not a mapping")
+    value = _exact_key(inputs, CHECKOUT_INPUT, line)
+    if value is _ABSENT:
+        return ("its with: does not set persist-credentials, so it keeps "
+                "its default, true")
+    if value is False:
+        return None
+    if value is True:
+        return "it sets persist-credentials: true"
+    return ("it sets persist-credentials to {!r}, not the boolean false "
+            "(a plain false)".format(value))
+
+
+def checkout_credentials(directory=WORKFLOWS_PATH, reader=None):
+    """Judge every actions/checkout step of every workflow file directly
+    under directory (module docstring, CHECKOUT CREDENTIALS) and return a
+    CheckoutReport. Each file goes through read_runner_text, the ONE
+    byte-level reader, and is parsed whole by _WorkflowReader."""
+    fail_closed = "fail-closed" in CHECKOUT_RULES
+    diagnostics = []
+    findings = []
+    files = steps = 0
+    # Every component from the repository root to the workflows directory
+    # (.github and workflows; ROOT itself is resolved) is read through
+    # lstat, the outermost first: a symlinked one can point this rule at
+    # another tree, so one seen here is refused, not followed. The listing
+    # and reads below are later lookups, so a component swapped after this
+    # walk is not caught (module docstring, CHECKOUT CREDENTIALS).
+    names = ()
+    components = [directory, *directory.parents][
+        :len(Path(WORKFLOWS_SOURCE).parts)]
+    linked = None
+    try:
+        for component in reversed(components):
+            if stat.S_ISLNK(component.lstat().st_mode):
+                linked = component
+                break
+    except OSError as exc:
+        if fail_closed:
+            diagnostics.append(_diagnostic(
+                WORKFLOWS_SOURCE, 0, "workflow-directory",
+                "cannot list {} ({})".format(directory, type(exc).__name__)))
+    else:
+        if linked is not None:
+            if fail_closed:
+                diagnostics.append(_diagnostic(
+                    WORKFLOWS_SOURCE, 0, "workflow-directory",
+                    "a symlink on the path from the repository root to the "
+                    "workflows directory is not read: {}".format(linked)))
+        else:
+            try:
+                names = sorted(
+                    entry.name for entry in directory.iterdir()
+                    if entry.name.lower().endswith(WORKFLOW_SUFFIXES))
+            except OSError as exc:
+                if fail_closed:
+                    diagnostics.append(_diagnostic(
+                        WORKFLOWS_SOURCE, 0, "workflow-directory",
+                        "cannot list {} ({})".format(
+                            directory, type(exc).__name__)))
+            else:
+                if not names and fail_closed:
+                    diagnostics.append(_diagnostic(
+                        WORKFLOWS_SOURCE, 0, "workflow-directory",
+                        "no .yml or .yaml workflow file under "
+                        "{}".format(directory)))
+    for name in names:
+        source = WORKFLOWS_SOURCE + "/" + name
+        # Only a regular file is read: a symlink, directory, FIFO or device
+        # entry is refused on this lstat, before any read of it. The read
+        # below is a separate lookup that follows a symlink, so an entry
+        # swapped after this lstat by a concurrent writer is not caught
+        # (module docstring, CHECKOUT CREDENTIALS).
+        try:
+            regular = stat.S_ISREG((directory / name).lstat().st_mode)
+        except OSError as exc:
+            text, diagnostic = None, _diagnostic(
+                source, 0, "read-error", "cannot stat {} ({})".format(
+                    directory / name, type(exc).__name__))
+        else:
+            if regular:
+                text, diagnostic = read_runner_text(
+                    directory / name, source, reader=reader)
+            else:
+                text, diagnostic = None, _diagnostic(
+                    source, 0, "workflow-file", "not a regular file (a "
+                    "symlink, directory, FIFO or device entry is not read)")
+        if diagnostic is None:
+            try:
+                found = []
+                _checkout_steps(_WorkflowReader(text).parse(), found)
+                judged = [
+                    (line, uses, _persist_departure(step, line)
+                     if "persist-credentials" in CHECKOUT_RULES else None)
+                    for line, uses, step in found]
+            except WorkflowShapeError as exc:
+                diagnostic = _diagnostic(
+                    source, exc.line, "workflow-shape", exc.message)
+            except RecursionError:
+                diagnostic = _diagnostic(
+                    source, 0, "workflow-shape",
+                    "nesting deeper than this reader can follow")
+        if diagnostic is not None:
+            if fail_closed:
+                diagnostics.append(diagnostic)
+            continue
+        files += 1
+        steps += len(judged)
+        for line, uses, departure in judged:
+            if departure is not None:
+                findings.append(Finding(
+                    "checkout-credentials",
+                    "{}:{}".format(source, line),
+                    "the step uses {} and {}; actions/checkout then writes "
+                    "the job token into the checkout's git config, where "
+                    "every later step of the job can read it".format(
+                        uses, departure)))
+    code = 2 if diagnostics else (1 if findings else 0)
+    return CheckoutReport(code, files, steps, tuple(findings),
+                          _dedupe_diagnostics(diagnostics))
+
+
+def render_checkout(report):
+    """Render the checkout-credentials report deterministically."""
+    lines = ["CHECKOUT CREDENTIALS:"]
+    for diagnostic in report.diagnostics:
+        if diagnostic.line:
+            location = "{}:{}".format(diagnostic.source, diagnostic.line)
+        else:
+            location = diagnostic.source
+        lines.append("  {} [{}] {}".format(
+            location, diagnostic.code, diagnostic.message))
+    for finding in report.findings:
+        lines.append("  {} {}: {}".format(
+            finding.kind, finding.identity, finding.message))
+    if report.code == 2:
+        lines.append(
+            "CANNOT EVALUATE: checkout credentials were not determined.")
+    elif report.code == 1:
+        lines.append(
+            "FAIL: {} of {} actions/checkout step(s) do not set "
+            "persist-credentials: false.".format(
+                len(report.findings), report.steps))
+    else:
+        lines.append(
+            "PASS: {} actions/checkout step(s) in {} workflow file(s) each "
+            "set persist-credentials: false.".format(
+                report.steps, report.files))
+    return "\n".join(lines)
+
+
 # In-memory reversion of the failure-naming change, used only as the vector-26 flip.
 SILENT_RUNNER_REVERT = (
     ('  if "$@"; then :; else\n'
@@ -6291,7 +6907,7 @@ def self_test():
         return sites
     allowed_read_sites = {
         "tools/check_ci_parity.py": {
-            # The stub call log vector 43 writes, never a runner or workflow.
+            # The stub call log vector 45 writes, never a runner or workflow.
             ("_cdpath_outcome", "read_text"): 1,
             ("_cdpath_outcome", "splitlines"): 1,
             ("_naming_scenarios", "splitlines"): 1,
@@ -7731,9 +8347,10 @@ def self_test():
     # its finding.
     def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None,
                 top=CONCURRENCY_BLOCK, job_tail=(),
-                light_commands=None, opf_id="opf-tooling",
+                light_commands=None, opf_id="opf-tooling-a",
                 opf_commands=("python3 tools/b.py",), drop_heavy=()):
-        other_heavy = sorted(HEAVY_JOBS - {"opf-tooling"} - set(drop_heavy))
+        other_heavy = sorted(
+            HEAVY_JOBS - {"opf-tooling-a"} - set(drop_heavy))
         lines = ["name: Test"] + list(labeled_trigger) + list(top) + ["jobs:"]
         for job, commands, condition in (
                 ("secrets",
@@ -7793,8 +8410,8 @@ def self_test():
              ("carries no top-level concurrency: block",)),
             ("the pinned if: removed from a heavy job",
              evaluate(multi_local, lane_ci(heavy_if=None), ()),
-             ("heavy job 'opf-tooling' of {} carries no job-level if:".format(
-                 CI_SOURCE),)),
+             ("heavy job 'opf-tooling-a' of {} carries no job-level "
+              "if:".format(CI_SOURCE),)),
             ("both removed, the workflow before the lane change",
              evaluate(multi_local, lane_ci(heavy_if=None, top=()), ()),
              ("carries no top-level concurrency: block",
@@ -7937,7 +8554,7 @@ def self_test():
                 opf_commands=(heavy_member,)), ())
     lane_case("39j a renamed heavy job (needs: updated, if: removed) is a "
               "missing-heavy-job lane finding",
-              renamed, 1, "heavy job 'opf-tooling' is missing")
+              renamed, 1, "heavy job 'opf-tooling-a' is missing")
     lane_case("39j the renamed job's heavy member runs without the pinned "
               "if: and is a lane finding",
               renamed, 1,
@@ -8279,7 +8896,419 @@ def self_test():
                  "finding", "  push:\n    branches: [main]\n", 1,
                  "has no pull_request event")
 
-    # 42. Each runner's checked directory binding, RUN under bash: a missing
+    # 42 CHECKOUT CREDENTIALS: each case is a scratch workflow directory judged
+    # whole by checkout_credentials, the function main() runs (a file's data
+    # is its bytes, None for a directory or a str for a symlink target; the
+    # files value "symlink" makes the workflows directory itself a symlink
+    # to a compliant one; and an optional sixth member is the reader), and
+    # must return its code with its fragment in the rendered report. Every refused
+    # case then runs again with its rule removed from CHECKOUT_RULES in this
+    # running module and must pass there, so each is red on a mutant without
+    # that rule. The compliant control passes with or without a rule, so no
+    # removal can turn it red; its step and file counts show both workflow
+    # files read and the .txt file left unread.
+    import tempfile
+    from unittest.mock import patch
+
+    def checkout_file(step_lines, uses="actions/checkout@v4"):
+        return ("name: Fixture\non:\n  push:\n    branches: [main]\n"
+                "jobs:\n  one:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: " + uses + "\n"
+                + "".join(line + "\n" for line in step_lines)
+                + "      - uses: actions/setup-python@v5\n"
+                "        with:\n          python-version: '3.14'\n"
+                "      - name: Gate\n        shell: bash\n"
+                "        run: python3 -I -B tools/x.py\n").encode("ascii")
+
+    def persist_as(value):
+        return ("        with:", "          fetch-depth: 0",
+                "          persist-credentials: " + value)
+
+    compliant = (
+        "name: Fixture\n"
+        "on:\n  push:\n    branches: [main]\n  workflow_dispatch:\n"
+        "permissions:\n  contents: read\n"
+        "jobs:\n"
+        "  one:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n          fetch-depth: 0  # full history\n"
+        "          persist-credentials: false\n"
+        "      - uses: actions/setup-python@v5\n"
+        "        with:\n          python-version: '3.14'\n"
+        "      - name: Gate\n        shell: bash\n        run: |\n"
+        "          set -euo pipefail\n"
+        "          python3 -I -B tools/x.py\n"
+        "  two:\n    runs-on: ${{ matrix.os }}\n"
+        "    strategy:\n      matrix:\n"
+        "        os: [ubuntu-latest, macos-latest]\n"
+        "    steps:\n"
+        "      - with:\n          persist-credentials: False\n"
+        "        uses: 'Actions/Checkout@main'\n").encode("ascii")
+    other = ("name: Other\non: push\njobs:\n  three:\n"
+             "    runs-on: ubuntu-latest\n    steps:\n"
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          persist-credentials: false\n").encode("ascii")
+    unset = checkout_file(("        with:", "          fetch-depth: 0"))
+    uses_case = (
+        "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - Uses: actions/checkout@v4\n").encode("ascii")
+    flow_steps = (
+        "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+        "    steps: [{uses: actions/checkout@v4}]\n").encode("ascii")
+    env_uses = checkout_file(persist_as("false") + (
+        "      - name: Note", "        shell: bash", "        env:",
+        "          Uses: actions/checkout@v4", "        run: echo ok"))
+
+    def local_step(uses):
+        return checkout_file(persist_as("false") + ("      - uses: " + uses,))
+    local_action = local_step("./local/action")
+    job_call = (
+        "name: F\non: push\njobs:\n  call:\n"
+        "    uses: ./.github/workflows/other.yml\n"
+        "  one:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n        with:\n"
+        "          persist-credentials: false\n").encode("ascii")
+    leading_space = (("ci.yml", local_step("' ./tools/act'")),)
+    # A dot then a backslash, plain, single-quoted and doubled: each passed
+    # under the ./ prefix alone (the flip below).
+    backslash_cases = (
+        ("a step uses: of a .\\x local path is cannot-evaluate",
+         (("ci.yml", local_step(".\\x")),), True),
+        ("a step uses: of a single-quoted '.\\x' local path is "
+         "cannot-evaluate", (("ci.yml", local_step("'.\\x'")),), True),
+        ("a step uses: of a .\\\\x local path is cannot-evaluate",
+         (("ci.yml", local_step(".\\\\x")),), True),
+    )
+    # Each step uses: below names a local path a step can only run as a
+    # local action, so each is cannot-evaluate; the files value carries an
+    # act directory or a regular other.yml where the vector names one. The
+    # third member is true where the one-part rule (one_part_local_step)
+    # accepted the vector; the nested path and the trailing space were
+    # refused under it too.
+    local_cases = (
+        ("a step uses: of a directory under .github/workflows/ is "
+         "cannot-evaluate", (("ci.yml", local_step("./.github/workflows/act")),
+                             ("act", None)), True),
+        ("a step uses: of .. under .github/workflows/ is cannot-evaluate",
+         (("ci.yml", local_step("./.github/workflows/..")),), True),
+        ("a step uses: of . under .github/workflows/ is cannot-evaluate",
+         (("ci.yml", local_step("./.github/workflows/.")),), True),
+        ("a step uses: of a nested path under .github/workflows/ is "
+         "cannot-evaluate", (("ci.yml", local_step(
+             "./.github/workflows/act/action.yml")), ("act", None)), False),
+        ("a step uses: of a regular .yml under .github/workflows/ is "
+         "cannot-evaluate", (("ci.yml", local_step(
+             "./.github/workflows/other.yml")), ("other.yml", other)), True),
+        ("a step uses: of a local path after a quoted leading space is "
+         "cannot-evaluate", leading_space, True),
+        ("a step uses: of a local path before a quoted trailing space is "
+         "cannot-evaluate", (("ci.yml", local_step("'./tools/act '")),),
+         False),
+    ) + backslash_cases
+    persist = "persist-credentials"
+    closed = "fail-closed"
+
+    def unreadable(path):
+        raise PermissionError(13, "fixture read refusal", str(path))
+    checkout_cases = (
+        ("a compliant directory passes", (
+            ("ci.yml", compliant), ("other.yaml", other),
+            ("notes.txt", unset)), 0,
+         "PASS: 3 actions/checkout step(s) in 2 workflow file(s)", None),
+        ("a with: without the key is a finding", (("ci.yml", unset),), 1,
+         "does not set persist-credentials", persist),
+        ("a checkout with no with: is a finding",
+         (("ci.yml", checkout_file(())),), 1, "carries no with: inputs",
+         persist),
+        ("the key written only in a comment is a finding (keys are read, "
+         "not lines)", (("ci.yml", checkout_file((
+             "        with:", "          # persist-credentials: false",
+             "          fetch-depth: 0"))),), 1,
+         "does not set persist-credentials", persist),
+        ("the key written only inside a run: block is a finding",
+         (("ci.yml", checkout_file((
+             "      - name: Note", "        shell: bash", "        run: |",
+             "          echo persist-credentials: false"))),), 1,
+         "carries no with: inputs", persist),
+        ("true is a finding", (("ci.yml", checkout_file(persist_as("true"))),),
+         1, "sets persist-credentials: true", persist),
+        ("TRUE is a finding", (("ci.yml", checkout_file(persist_as("TRUE"))),),
+         1, "sets persist-credentials: true", persist),
+        ("the string 'no' is a finding",
+         (("ci.yml", checkout_file(persist_as("'no'"))),), 1,
+         "to 'no', not the boolean false", persist),
+        ("the single-quoted string 'false' is a finding",
+         (("ci.yml", checkout_file(persist_as("'false'"))),), 1,
+         "to 'false', not the boolean false", persist),
+        ("the double-quoted string false is a finding",
+         (("ci.yml", checkout_file(persist_as('"false"'))),), 1,
+         "to 'false', not the boolean false", persist),
+        ("an expression is a finding",
+         (("ci.yml", checkout_file(persist_as("${{ false }}"))),), 1,
+         "to '${{ false }}', not the boolean false", persist),
+        ("an empty value is a finding",
+         (("ci.yml", checkout_file(persist_as(""))),), 1,
+         "to None, not the boolean false", persist),
+        ("a .yaml workflow is read", (("ci.yaml", unset),), 1,
+         ".github/workflows/ci.yaml:", persist),
+        ("a checkout named in other letter case is judged",
+         (("ci.yml", checkout_file(
+             ("        with:", "          fetch-depth: 0"),
+             "Actions/Checkout@main")),), 1, "uses Actions/Checkout@main",
+         persist),
+        ("a checkout action subpath without with: is a finding",
+         (("ci.yml", checkout_file((), "actions/checkout/sub@v4")),), 1,
+         "uses actions/checkout/sub@v4 and it carries no with: inputs",
+         persist),
+        ("an upper-case CI.YML beside a compliant file is read",
+         (("ci.yml", compliant), ("CI.YML", unset)), 1,
+         ".github/workflows/CI.YML:", persist),
+        ("an env: key spelling Uses is data, not a step property",
+         (("ci.yml", env_uses),), 0,
+         "PASS: 1 actions/checkout step(s) in 1 workflow file(s)", None),
+        ("a step Uses: key in another letter case is cannot-evaluate",
+         (("ci.yml", uses_case),), 2, "in another letter case", closed),
+        ("a flow step list naming uses is cannot-evaluate",
+         (("ci.yml", flow_steps),), 2,
+         "a flow sequence item other than one plain word", closed),
+        ("a local-action step uses: is cannot-evaluate",
+         (("ci.yml", local_action),), 2,
+         "a step uses: of a local action", closed),
+    ) + tuple(
+        (label, files, 2, "a step uses: of a local action", closed)
+        for label, files, _ in local_cases) + (
+        ("a job-level uses: of a local reusable workflow is not held to "
+         "the step rule", (("ci.yml", job_call), ("other.yml", other)), 0,
+         "PASS: 2 actions/checkout step(s) in 2 workflow file(s)", None),
+        ("a symlinked workflows directory is cannot-evaluate, never "
+         "followed", "symlink", 2, "a symlink on the path from the "
+         "repository root to the workflows directory", closed),
+        ("a symlinked ancestor of the workflows directory is "
+         "cannot-evaluate, never followed", "ancestor-symlink", 2,
+         "a symlink on the path from the repository root to the "
+         "workflows directory", closed),
+        ("a workflow that cannot be read is cannot-evaluate",
+         (("ci.yml", compliant),), 2, "[read-error]", closed, unreadable),
+        ("a workflow entry that is a directory is cannot-evaluate",
+         (("ci.yml", compliant), ("broken.yml", None)), 2,
+         "[workflow-file]", closed),
+        ("a symlinked workflow is cannot-evaluate, never followed",
+         (("ci.yml", compliant), ("linked.yml", "ci.yml")), 2,
+         "[workflow-file]", closed),
+        ("a byte outside printable ASCII is cannot-evaluate",
+         (("ci.yml", checkout_file(persist_as("false")) + b"# caf\xc3\xa9\n"),),
+         2, "[text-format]", closed),
+        ("an empty workflow file is cannot-evaluate", (("ci.yml", b""),), 2,
+         "does not open with a top-level key", closed),
+        ("a flow mapping is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with: {persist-credentials: false}",))),), 2,
+         "a value opening with '{'", closed),
+        ("an alias is cannot-evaluate",
+         (("ci.yml", checkout_file(("        with: *inputs",))),), 2,
+         "a value opening with '*'", closed),
+        ("an anchor is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with: &inputs",
+            "          persist-credentials: false"))),), 2,
+         "a value opening with '&'", closed),
+        ("a folded scalar is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with:", "          persist-credentials: >",
+            "            false"))),), 2, "a value opening with '>'", closed),
+        ("a repeated key is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with:", "          persist-credentials: true",
+            "          persist-credentials: false"))),), 2,
+         "repeated key 'persist-credentials'", closed),
+        ("a tab is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with:", "          persist-credentials:\tfalse"))),), 2,
+         "a tab is outside", closed),
+        ("an unterminated quote is cannot-evaluate",
+         (("ci.yml", checkout_file(persist_as("'false"))),), 2,
+         "an unterminated quoted scalar", closed),
+        ("a document marker is cannot-evaluate",
+         (("ci.yml", b"---\n" + checkout_file(persist_as("false"))),), 2,
+         "a document marker", closed),
+        ("a line the indentation does not place is cannot-evaluate",
+         (("ci.yml", checkout_file((
+             "        with:", "            fetch-depth: 0",
+             "          persist-credentials: false"))),), 2,
+         "a line deeper than its mapping's keys", closed),
+        ("a multi-line plain scalar is cannot-evaluate",
+         (("ci.yml", checkout_file(persist_as("false") + (
+             "            and more",))),), 2, "a multi-line scalar", closed),
+        ("an indentless sequence is cannot-evaluate", (("ci.yml", (
+            "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n    - uses: actions/checkout@v4\n      with:\n"
+            "        persist-credentials: false\n").encode("ascii")),), 2,
+         "an indentless sequence", closed),
+        ("a key in another letter case is cannot-evaluate",
+         (("ci.yml", checkout_file((
+             "        with:", "          Persist-Credentials: false"))),),
+         2, "in another letter case", closed),
+        ("a uses: that is not one string is cannot-evaluate", (("ci.yml", (
+            "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses:\n        with:\n"
+            "          persist-credentials: false\n").encode("ascii")),), 2,
+         "a uses: value that is not one string", closed),
+        ("a with: that is not a mapping is cannot-evaluate",
+         (("ci.yml", checkout_file(
+             ("        with: [persist-credentials]",))),), 2,
+         "with: is not a mapping", closed),
+        ("nesting past the recursion limit is cannot-evaluate",
+         (("ci.yml", b"name: F\n" + b"".join(
+             b" " * depth + b"k:\n" for depth in range(600))),), 2,
+         "nesting deeper than this reader can follow", closed),
+        ("a directory with no workflow file is cannot-evaluate",
+         (("notes.txt", unset),), 2, "no .yml or .yaml workflow file",
+         closed),
+        ("a missing workflow directory is cannot-evaluate", None, 2,
+         "cannot list", closed),
+    )
+
+    def checkout_directory(case, files):
+        # The files value "ancestor-symlink" makes the workflows
+        # directory's parent a symlink to a directory holding a compliant
+        # one, the workflows directory itself a real directory.
+        directory = case / "workflows"
+        if files == "symlink":
+            real = case / "real"
+            real.mkdir(parents=True)
+            (real / "ci.yml").write_bytes(compliant)
+            directory.symlink_to(real)
+        elif files == "ancestor-symlink":
+            real = case.parent / (case.name + "-real")
+            (real / "workflows").mkdir(parents=True)
+            (real / "workflows" / "ci.yml").write_bytes(compliant)
+            case.symlink_to(real)
+        elif files is not None:
+            directory.mkdir(parents=True)
+            for name, data in files:
+                if data is None:
+                    (directory / name).mkdir()
+                elif isinstance(data, str):
+                    (directory / name).symlink_to(data)
+                else:
+                    (directory / name).write_bytes(data)
+        return directory
+
+    rules_shown = set()
+    with tempfile.TemporaryDirectory(prefix="ci-parity-checkout-") as tmp:
+        for number, (label, files, want, fragment, rule, *reader) in enumerate(
+                checkout_cases):
+            count += 1
+            reader = reader[0] if reader else None
+            directory = checkout_directory(
+                Path(tmp) / "case{}".format(number), files)
+            report = checkout_credentials(directory, reader=reader)
+            rendered = render_checkout(report)
+            if report.code != want or fragment not in rendered:
+                failures.append(
+                    "42 checkout {}: code {}, expected {} with {!r}\n{}".format(
+                        label, report.code, want, fragment, rendered))
+            if rule is None:
+                continue
+            rules_shown.add(rule)
+            with patch.object(sys.modules[__name__], "CHECKOUT_RULES",
+                              CHECKOUT_RULES - {rule}):
+                mutant = checkout_credentials(directory, reader=reader)
+            if mutant.code != 0:
+                failures.append(
+                    "42 checkout {}: not red on a mutant without the {} "
+                    "rule (the mutant exits {}, not 0)".format(
+                        label, rule, mutant.code))
+    if rules_shown != CHECKOUT_RULES:
+        failures.append(
+            "42 checkout: a rule with no case shown red without it: "
+            "{}".format(sorted(CHECKOUT_RULES - rules_shown)))
+
+    # Each flip restores an earlier acceptance in the running module, and
+    # every vector it reopens must pass there, so each is red without the
+    # change: the one-part rule that read a step uses: of
+    # ./.github/workflows/<name> as a workflow file this rule reads, the
+    # local check without whitespace stripping, the ./ prefix alone (a
+    # one-member LOCAL_STEP_PREFIXES), and an lstat of the workflows
+    # directory alone (a one-component WORKFLOWS_SOURCE).
+    def one_part_local_step(uses):
+        parts = uses[2:].split("/")
+        return uses.startswith("./") and not (
+            parts[:2] == [".github", "workflows"] and len(parts) == 3
+            and parts[2])
+
+    flips = tuple(
+        (label, files, "_local_step", one_part_local_step)
+        for label, files, reopened in local_cases if reopened) + (
+        ("a step uses: of a local path after a quoted leading space is "
+         "cannot-evaluate", leading_space, "_local_step",
+         lambda uses: uses.startswith("./")),
+    ) + tuple(
+        (label, files, "LOCAL_STEP_PREFIXES", ("./",))
+        for label, files, _ in backslash_cases) + (
+        ("a symlinked ancestor of the workflows directory is "
+         "cannot-evaluate, never followed", "ancestor-symlink",
+         "WORKFLOWS_SOURCE", "workflows"),
+    )
+    with tempfile.TemporaryDirectory(prefix="ci-parity-flip-") as tmp:
+        for number, (label, files, name, value) in enumerate(flips):
+            count += 1
+            directory = checkout_directory(
+                Path(tmp) / "case{}".format(number), files)
+            with patch.object(sys.modules[__name__], name, value):
+                flipped = checkout_credentials(directory)
+            if flipped.code != 0:
+                failures.append(
+                    "42 checkout {}: not red on the flip of {} (the flip "
+                    "exits {}, not 0)\n{}".format(
+                        label, name, flipped.code, render_checkout(flipped)))
+
+    # 43 MAIN WIRING: these vectors run main([]) itself, with WORKFLOWS_PATH
+    # pointed at a scratch directory, so the checkout-credentials leg cannot
+    # be cut out of the process exit: a finding directory must surface as
+    # exit 1 and a refused one as exit 2 through main([]), while the parity
+    # legs read the live repository files and pass. The flip stubs the leg
+    # always-green in the running module: main([]) must then return the
+    # parity legs' 0, proving the nonzero exits above are the leg's own.
+    import contextlib
+    import io
+
+    def run_main():
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = main([])
+        return code, buffer.getvalue()
+
+    with tempfile.TemporaryDirectory(prefix="ci-parity-main-") as tmp:
+        finding_dir = Path(tmp) / "finding"
+        finding_dir.mkdir()
+        (finding_dir / "ci.yml").write_bytes(unset)
+        refused_dir = Path(tmp) / "refused"
+        refused_dir.mkdir()
+        (refused_dir / "notes.txt").write_bytes(unset)
+        for label, directory, want, fragment in (
+                ("a checkout finding", finding_dir, 1,
+                 "does not set persist-credentials"),
+                ("a refused workflows directory", refused_dir, 2,
+                 "no .yml or .yaml workflow file")):
+            count += 1
+            with patch.object(sys.modules[__name__], "WORKFLOWS_PATH",
+                              directory):
+                code, output = run_main()
+            if code != want or fragment not in output:
+                failures.append(
+                    "43 main wiring: {} returns exit {} from main([]), "
+                    "expected {} with {!r} in the output".format(
+                        label, code, want, fragment))
+        count += 1
+        stubbed = CheckoutReport(0, 1, 1, (), ())
+        with patch.object(sys.modules[__name__], "WORKFLOWS_PATH",
+                          finding_dir), \
+                patch.object(sys.modules[__name__], "checkout_credentials",
+                             lambda *args, **kwargs: stubbed):
+            code, output = run_main()
+        if code != 0:
+            failures.append(
+                "43 main wiring: with the checkout leg stubbed green, "
+                "main([]) returns exit {}, not the parity legs' 0, so the "
+                "vectors above do not isolate the checkout leg".format(code))
+
+    # 44. Each runner's checked directory binding, RUN under bash: a missing
     # dirname, one that fails (printing .) and one that prints nothing each
     # exit 2 with no gate launched, while the true directory launches gates.
     # Each guard is held by its own named mutant: without the status check
@@ -8291,26 +9320,26 @@ def self_test():
                               (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
         runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
         if runner_diagnostic is not None:
-            failures.append("42 cannot read {}: {!r}".format(relative, runner_diagnostic))
+            failures.append("44 cannot read {}: {!r}".format(relative, runner_diagnostic))
             continue
         problems = dirname_guard_problems(runner_text, relative)
         if problems:
-            failures.append("42 {} dirname guard failed: {}".format(relative, problems))
+            failures.append("44 {} dirname guard failed: {}".format(relative, problems))
         for label, line, expected in (
                 ("status check removed", binding[0], ["failed"]),
                 ("non-empty check removed", binding[1], ["empty"])):
             if runner_text.count(line + "\n") != 1:
-                failures.append("42 {} binding drift: {}".format(relative, line))
+                failures.append("44 {} binding drift: {}".format(relative, line))
                 continue
             mutant = runner_text.replace(
                 line + "\n",
                 ("" if line is binding[1] else line[:-len(" || exit 2")] + "\n"), 1)
             got = dirname_guard_problems(mutant, relative)
             if got != expected:
-                failures.append("42 {} mutant ({}) gave {}, expected {}".format(
+                failures.append("44 {} mutant ({}) gave {}, expected {}".format(
                     relative, label, got, expected))
 
-    # 43. Each runner's cd runs with CDPATH cleared, RUN under bash: started by
+    # 45. Each runner's cd runs with CDPATH cleared, RUN under bash: started by
     # its relative path from its tree's root under a CDPATH naming a decoy tree
     # that holds the same relative directory, every gate still launches from the
     # true tree and nothing names the decoy. The pinned line without its CDPATH=
@@ -8322,20 +9351,20 @@ def self_test():
                               (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
         runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
         if runner_diagnostic is not None:
-            failures.append("43 cannot read {}: {!r}".format(relative, runner_diagnostic))
+            failures.append("45 cannot read {}: {!r}".format(relative, runner_diagnostic))
             continue
         problems = cdpath_problems(runner_text, relative)
         if problems:
-            failures.append("43 {} CDPATH binding failed: {}".format(relative, problems))
+            failures.append("45 {} CDPATH binding failed: {}".format(relative, problems))
         line = binding[2]
         if runner_text.count(line + "\n") != 1 or line.count("CDPATH= cd -- ") != 1:
-            failures.append("43 {} binding drift: {}".format(relative, line))
+            failures.append("45 {} binding drift: {}".format(relative, line))
             continue
         mutant = runner_text.replace(
             line + "\n", line.replace("CDPATH= cd -- ", "cd -- ") + "\n", 1)
         got = cdpath_problems(mutant, relative)
         if "moved" not in got:
-            failures.append("43 {} mutant (CDPATH= removed) gave {}, expected moved".format(
+            failures.append("45 {} mutant (CDPATH= removed) gave {}, expected moved".format(
                 relative, got))
 
     if failures:
@@ -8373,7 +9402,10 @@ def main(argv=None):
 
     report = run_paths(LOCAL_PATH, CI_PATH, extra_ci_paths=CI_WORKFLOWS[1:])
     print(render(report))
-    return report.code
+    checkout = checkout_credentials(WORKFLOWS_PATH)
+    print(render_checkout(checkout))
+    # The higher exit wins: cannot-evaluate (2) over a finding (1) over a pass.
+    return max(report.code, checkout.code)
 
 
 if __name__ == "__main__":
