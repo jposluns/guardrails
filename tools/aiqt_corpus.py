@@ -346,7 +346,7 @@ def parse_iso_date(value: str) -> datetime.date | None:
     malformed-but-present field (a finding, under fail-loud semantics) from an
     absent one (a legitimate skip).
     """
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value, re.ASCII):
         return None
     try:
         return datetime.date.fromisoformat(value)
@@ -490,16 +490,25 @@ def git(*args: str) -> str:
     string corrupts the first path's leading whitespace; removing only trailing
     newlines still drops the trailing newline that non-``-z`` callers rely on.
     Raises on non-zero exit.
+
+    Standard input is the null device, never the caller's: a caller running
+    inside a git hook (a pre-push hook receives its ref lines on stdin) would
+    otherwise let a stdin-reading git command consume them.
     """
-    return subprocess.check_output(["git", *args], text=True).rstrip("\n")
+    return subprocess.check_output(["git", *args], text=True,
+                                   stdin=subprocess.DEVNULL).rstrip("\n")
 
 
 def git_show(ref: str, path: str) -> str | None:
-    """Return file content at ``ref:path`` or ``None`` if the file is absent."""
+    """Return file content at ``ref:path`` or ``None`` if the file is absent.
+
+    Standard input is the null device, never the caller's, as in :func:`git`.
+    """
     try:
         return subprocess.check_output(
             ["git", "show", f"{ref}:{path}"],
             text=True,
+            stdin=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:

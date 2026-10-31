@@ -2487,7 +2487,7 @@ def _census_mapping_check(root):
         result = subprocess.run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
                                 capture_output=True, timeout=TIMEOUT * 4)
         err = result.stderr.decode("utf-8", "replace")
-        held = re.match(r"census-held (\d+)\n", err)
+        held = re.match(r"census-held (\d+)\n", err, re.ASCII)
         want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
                          + ": OSError(5, 'injected census read failure')")
         if result.returncode != 2 or not want or want not in err or "Traceback" in err:
@@ -2692,6 +2692,19 @@ def _self_test_isolated(red_on_revert):
             print("FAIL " + failure, file=sys.stderr)
         check("census-mapping", not mapping_failures)
         print("PASS census-mapping runs=" + str(mapping_runs) + " close-stage-legs=3")
+        # An in-process call of self_test() hands the caller's environment back exactly, with the
+        # git fixture scrub and the git wrapper in effect inside, after a return and after an
+        # exception: the entry point is run in a child around a stand-in _self_test_isolated,
+        # once with red_on_revert True and once with it False. The stand-in must receive the
+        # value passed each time, so a constant passed on in place of the parameter fails one run.
+        from _entry_restore_selftest import entry_restore_failures
+        restore_failures = (
+            entry_restore_failures(script, "self_test", "_self_test_isolated", args=(True,))
+            + entry_restore_failures(script, "self_test", "_self_test_isolated", args=(False,)))
+        for failure in restore_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("entry-restores-caller-env", not restore_failures)
+        print("PASS entry-restores-caller-env")
         if red_on_revert:
             source = script.read_text(encoding="utf-8")
             marker = "# SELF-TEST:" + " mutation targets are restricted to the production prefix above."

@@ -2527,6 +2527,11 @@ NEGATIVE = [
     "This layer does not provide tamper evidence; it detects accidents.",                # tight-adjacency denial ("does not provide tamper evidence")
     "This layer does not provide tamper evidence",                                       # tight-adjacency denial (bare form)
     "This is not a cryptographic guarantee.",                                            # honest denial: no release term; the site "guarantee" is cleared by the in-clause negator
+    # NEG_AUX_TAIL reads prose, so its \s and \w are Unicode: a no-break space or an accented adjective in the
+    # article form is still a tight-adjacency denial.
+    "This is not a\u00a0guarantee.",                                                     # no-break space after the article
+    "This is not a na\u00efve guarantee.",                                               # accented adjective
+    "This is not a caf\u00e9-grade guarantee.",                                          # accented hyphenated adjective
     "Releases are not signed with minisign.",                                            # tight-adjacency denial of the signing claim
     "Our releases are not cryptographically signed.",                                    # tight-adjacency denial of the bare crypto-signing claim (B1)
     "This layer is without tamper evidence.",                                            # SINGLE negation ("without" directly negates the term) -> clears
