@@ -3883,6 +3883,276 @@ def _gate_runtime_cost_failures(cost_inputs):
     return out
 
 
+# THE UNPARSEABLE-COMMAND COST (gw-unbal-cost). On the 1 MiB git_add_unbal shape (_DEADLINE_SHAPES: 'git add x '
+# repeated, then one unbalanced quote) gate_weakening's full lex fails at the last character, and the parse-failure
+# path then reads the whole command several more times (the partial lex, the git alias readings, the unread text's
+# de-quoted readings, the raw fallback probes). That path once lexed the command a second time for the partial lex,
+# ran the raw fallback probes over it three times where two readings differ, and in each ran the checker-keyword
+# search, a pass several times the cost of the swallow and sink searches, before them: 5.7 to 6.3 s of CPU, and up
+# to 8.8 s wall-clock under load against the hook's 8 s budget. The partial lex is now read from the failed lex's
+# own record (_LexFailures, _gate_failed_lex), the fallback is handed the kind already read, and the checker search
+# runs last. The row times the guard's whole call against a plain-Python reference pass over the same command in the
+# same process (_gw_unbal_reference_pass), so the host's speed cancels out: the call's CPU time must stay under
+# _GW_UNBAL_COST_RATIO times the least of _GW_UNBAL_REFERENCE_RUNS reference timings. Over three runs on one host
+# (Python 3.14.4, 2026-10-31 UTC) the call took 116 to 131 times the reference (about 4.2 s), and with the three
+# steps put back (_gw_unbal_restored) 162 to 180 times it (about 5.9 s), so the bound sits between them. A call over
+# the bound is timed again, up to _GW_UNBAL_COST_TIMINGS calls in all, and the least of them is compared, so one
+# stall of a loaded host does not fail the row while a restored step, over the bound on every call, does. The call
+# record (gw-unbal-passes) pins the same three steps by count, which no host's speed moves.
+_GW_UNBAL_COST_RATIO = 140.0
+_GW_UNBAL_COST_TIMINGS = 3
+_GW_UNBAL_REFERENCE_RUNS = 5
+_GW_UNBAL_COST_SIZE = 1048576
+_GW_UNBAL_PASSES_SIZE = 65536
+
+
+def _gw_unbal_command(size):
+    """The git_add_unbal deadline shape's command at size (_DEADLINE_SHAPES)."""
+    return _DEADLINE_SHAPES["git_add_unbal"](size, "/")[1]["command"]
+
+
+def _gw_unbal_reference_pass(command):
+    """The reference the cost row times: one plain-Python pass over command, each character read once in a loop and
+    compared with the two quote characters, the per-character unit of work each reading of a long command makes."""
+    quotes = 0
+    for char in command:
+        if char in "'\"":
+            quotes += 1
+    return quotes
+
+
+def _gw_unbal_checker_first(command):
+    """_gate_weakening_fallback_kind with the checker-keyword search run before the swallow and sink searches, as
+    it once was (_gw_unbal_restored)."""
+    if aiqt_hooks._RAW_NOVERIFY_VERB_RE.search(command) and aiqt_hooks._RAW_NOVERIFY_RE.search(command):
+        return "no-verify"
+    if aiqt_hooks._RAW_SHORT_NOVERIFY_VERB_RE.search(command) and aiqt_hooks._RAW_SHORT_N_RE.search(command):
+        return "short-n"
+    if aiqt_hooks._RAW_CHECKER_RE.search(command) and (
+            aiqt_hooks._RAW_SWALLOW_RE.search(command) or aiqt_hooks._RAW_TRUNCATE_RE.search(command)
+            or (aiqt_hooks._RAW_FLOW_RE.search(command) and aiqt_hooks._RAW_SINK_WORD_RE.search(command))):
+        return "swallow"
+    return None
+
+
+@contextlib.contextmanager
+def _gw_unbal_restored():
+    """While the block runs, gate_weakening's parse-failure path takes the three steps the cost rows pin out again:
+    the partial lex lexes the command afresh (_gate_failed_lex gives nothing), the raw fallback reads the kind again
+    whatever it is handed, and the kind runs the checker-keyword search first (_gw_unbal_checker_first). Every
+    decision is the one the guard gives outside the block; only the work done for it changes."""
+    saved = (aiqt_hooks._gate_failed_lex, aiqt_hooks._gate_weakening_fallback_kind, aiqt_hooks._gate_weakening_fallback)
+    fallback = saved[2]
+
+    def fallback_reading_again(command, heredoc_message=False, runtime=False, kind=None):
+        return fallback(command, heredoc_message, runtime)
+
+    aiqt_hooks._gate_failed_lex = lambda failed: None
+    aiqt_hooks._gate_weakening_fallback_kind = _gw_unbal_checker_first
+    aiqt_hooks._gate_weakening_fallback = fallback_reading_again
+    try:
+        yield
+    finally:
+        (aiqt_hooks._gate_failed_lex, aiqt_hooks._gate_weakening_fallback_kind,
+         aiqt_hooks._gate_weakening_fallback) = saved
+
+
+def _gw_unbal_cost_problems(gate, reference, decision):
+    """What one timing of the gw-unbal-cost row got wrong, as a list of phrases ([] for none): gate is the least CPU
+    time of the guard's calls, reference the least CPU time of the reference pass, and decision the guard's reduced
+    decision, which must be allow (the shape holds no hazard, so a deny or note would end the path early)."""
+    problems = []
+    if decision != "allow":
+        problems.append("the guard decided {}, so the row no longer times the parse-failure path to its end".format(
+            decision))
+    if gate >= _GW_UNBAL_COST_RATIO * reference:
+        problems.append("the call took {:.3f} s of CPU, {:.1f} times the plain-Python reference pass ({:.4f} s); the "
+                        "bound is under {:g} times it".format(
+                            gate, gate / reference if reference > 0 else float("inf"), reference,
+                            _GW_UNBAL_COST_RATIO))
+    return problems
+
+
+def _gw_unbal_cost_edge_failures():
+    """(gw-unbal-cost-edge) The row's own checks at each end: a call just under, exactly at and just over the bound's
+    multiple of the reference (the last two fail), and an allow-note decision (it fails), so a comparison turned the
+    wrong way or made inclusive at the wrong end is caught here rather than by a timing."""
+    out = []
+    reference = 0.04
+    bound = _GW_UNBAL_COST_RATIO * reference
+    for label, gate, decision, wanted in (
+            ("under", bound * 0.99, "allow", 0),
+            ("at", bound, "allow", 1),
+            ("over", bound * 1.01, "allow", 1),
+            ("note", 0.0, "allow-note", 1)):
+        got = _gw_unbal_cost_problems(gate, reference, decision)
+        if len(got) != wanted:
+            out.append("(gw-unbal-cost-edge-{}) the row's checks gave {} problem(s), want {}: {}".format(
+                label, len(got), wanted, got))
+    return out
+
+
+def _gw_unbal_cost_timing(command):
+    """(gate, reference, decision) for one gw-unbal-cost reading of command: the guard's call timed up to
+    _GW_UNBAL_COST_TIMINGS times, stopping once the least time is within the bound, and the reference pass timed
+    _GW_UNBAL_REFERENCE_RUNS times around them, each with time.process_time; gate and reference are the least."""
+    references = []
+    gates = []
+    decision = None
+
+    def time_reference():
+        t0 = time.process_time()
+        _gw_unbal_reference_pass(command)
+        references.append(time.process_time() - t0)
+
+    for _ in range(_GW_UNBAL_REFERENCE_RUNS):
+        time_reference()
+    for _ in range(_GW_UNBAL_COST_TIMINGS):
+        t0 = time.process_time()
+        decision = _decision(aiqt_hooks.gate_weakening, command)
+        gates.append(time.process_time() - t0)
+        time_reference()
+        if min(gates) < _GW_UNBAL_COST_RATIO * min(references):
+            break
+    return min(gates), min(references), decision
+
+
+def _gw_unbal_cost_failures():
+    """(gw-unbal-cost, gw-unbal-cost-path-*, gw-unbal-cost-red, gw-unbal-cost-red-decision) gate_weakening on the
+    1 MiB git_add_unbal shape must take less than
+    _GW_UNBAL_COST_RATIO times a plain-Python reference pass over the same command (_gw_unbal_cost_timing,
+    _gw_unbal_cost_problems), the full lex of that command must fail with an ordinary ValueError (not the
+    uncertain-'#' doubt), so the row times the path it names; and with the three steps put back (_gw_unbal_restored)
+    the same row must fail and the decision must stay allow."""
+    out = []
+    command = _gw_unbal_command(_GW_UNBAL_COST_SIZE)
+    try:
+        aiqt_hooks._lex_readings(command)
+        out.append("(gw-unbal-cost-path-lexes) the git_add_unbal command now lexes, so the row no longer times the "
+                   "parse-failure path")
+    except aiqt_hooks._UncertainHashError as exc:
+        out.append("(gw-unbal-cost-path-doubt) the git_add_unbal command raises the uncertain-'#' doubt {!r}, so the "
+                   "row no longer times the ordinary parse-failure path".format(exc))
+    except ValueError:
+        pass
+    gate, reference, decision = _gw_unbal_cost_timing(command)
+    for problem in _gw_unbal_cost_problems(gate, reference, decision):
+        out.append("(gw-unbal-cost) on the {}-character git_add_unbal command, {}".format(len(command), problem))
+    with _gw_unbal_restored():
+        gate, reference, decision = _gw_unbal_cost_timing(command)
+    problems = _gw_unbal_cost_problems(gate, reference, decision)
+    if decision != "allow":
+        out.append("(gw-unbal-cost-red-decision) with the three steps put back the guard decided {}, not "
+                   "allow".format(decision))
+    elif not problems:
+        out.append("(gw-unbal-cost-red) with the three steps put back the row passes ({:.3f} s of CPU, {:.1f} times "
+                   "the reference pass), so it no longer tells them apart".format(gate, gate / reference))
+    return out
+
+
+def _gw_unbal_counts(command):
+    """(passes, checker searches, raw-command kinds) one gate_weakening call on command makes: the lex passes
+    (_lex_pass calls), the checker-keyword searches (_RAW_CHECKER_RE), and the raw fallback kinds read over the raw
+    command itself (_gate_weakening_fallback_kind called with it, not with a de-quoted reading)."""
+    counts = [0, 0, 0]
+    lex_pass = aiqt_hooks._lex_pass
+    checker = aiqt_hooks._RAW_CHECKER_RE
+    kind = aiqt_hooks._gate_weakening_fallback_kind
+
+    def counted_pass(*args, **kwargs):
+        counts[0] += 1
+        return lex_pass(*args, **kwargs)
+
+    class _CountedChecker:
+        def search(self, text, *args):
+            counts[1] += 1
+            return checker.search(text, *args)
+
+    def counted_kind(text):
+        if text == command:
+            counts[2] += 1
+        return kind(text)
+
+    aiqt_hooks._lex_pass = counted_pass
+    aiqt_hooks._RAW_CHECKER_RE = _CountedChecker()
+    aiqt_hooks._gate_weakening_fallback_kind = counted_kind
+    try:
+        decision = _decision(aiqt_hooks.gate_weakening, command)
+    finally:
+        aiqt_hooks._lex_pass = lex_pass
+        aiqt_hooks._RAW_CHECKER_RE = checker
+        aiqt_hooks._gate_weakening_fallback_kind = kind
+    return tuple(counts), decision
+
+
+def _gw_unbal_passes_failures():
+    """(gw-unbal-passes, gw-unbal-passes-red) The call record of the cost row, on the 64 KiB git_add_unbal shape:
+    gate_weakening makes one lex pass of it, no checker-keyword search (it holds no swallow or sink spelling), and
+    reads the raw fallback kind of the raw command once, and decides allow; with the three steps put back
+    (_gw_unbal_restored, its checker search counted through the same attribute) it makes two passes, two checker
+    searches and two such kinds, with the same decision; and the partial lex it reads holds what a fresh one would
+    (_gw_unbal_reuse_failures)."""
+    out = []
+    command = _gw_unbal_command(_GW_UNBAL_PASSES_SIZE)
+    counts, decision = _gw_unbal_counts(command)
+    if counts != (1, 0, 1) or decision != "allow":
+        out.append("(gw-unbal-passes) on the {}-character git_add_unbal command gate_weakening made {} lex pass(es), "
+                   "{} checker-keyword search(es) and {} raw-command fallback kind(s) and decided {}; want 1, 0, 1 and "
+                   "allow".format(len(command), counts[0], counts[1], counts[2], decision))
+    with _gw_unbal_restored():
+        counts, decision = _gw_unbal_counts(command)
+    if counts != (2, 3, 2) or decision != "allow":
+        out.append("(gw-unbal-passes-red) with the three steps put back gate_weakening made {} lex pass(es), {} "
+                   "checker-keyword search(es) and {} raw-command fallback kind(s) and decided {}; want 2, 3, 2 and "
+                   "allow".format(counts[0], counts[1], counts[2], decision))
+    out.extend(_gw_unbal_reuse_failures(command))
+    return out
+
+
+def _gw_unbal_partial_view(result):
+    """A _gate_partial_lex result with every argv's spelling record beside its words (a _SpelledWords compares as
+    a plain list), so two results compare equal only where every field the readers read is the same."""
+    def words(argv):
+        return None if argv is None else (list(argv), getattr(argv, "spelling", None))
+
+    def segment(seg):
+        return None if seg is None else (words(seg.argv),) + tuple(seg[1:])
+
+    recovered, open_seg, (argvs, stops) = result
+    return ([segment(seg) for seg in recovered], segment(open_seg), [words(argv) for argv in argvs],
+            [(start, words(argv)) for start, argv in stops])
+
+
+def _gw_unbal_failed_lex(command):
+    """The ValueError gate_weakening's own full lex of command raises (inside _WordSpellings and _LexFailures)."""
+    with aiqt_hooks._WordSpellings(), aiqt_hooks._LexFailures():
+        try:
+            aiqt_hooks._lex_readings(command, skip_empty=aiqt_hooks._SKIP_EMPTY_REPEATS)
+        except ValueError as exc:
+            return exc
+    return None
+
+
+def _gw_unbal_reuse_failures(command):
+    """(gw-unbal-reuse-equal, gw-unbal-reuse-dropped) The partial lex gate_weakening reads from its failed full lex
+    (_gate_failed_lex) equals a fresh partial lex of the same command (_gate_partial_lex with no failed lex) field for
+    field, spelling records and the stop included; and on a command whose failed pass left out a repeated empty
+    record under skip_empty ('true; ; ; ' then an unbalanced quote) no record is read, so the fresh lex is made."""
+    out = []
+    failed = _gw_unbal_failed_lex(command)
+    reused = aiqt_hooks._gate_failed_lex(failed)
+    fresh = aiqt_hooks._gate_partial_lex(command)
+    if reused is None or _gw_unbal_partial_view(reused) != _gw_unbal_partial_view(fresh):
+        out.append("(gw-unbal-reuse-equal) the partial lex read from the failed lex of the {}-character git_add_unbal "
+                   "command is {}, not the fresh partial lex".format(
+                       len(command), "missing" if reused is None else "different"))
+    dropped = aiqt_hooks._gate_failed_lex(_gw_unbal_failed_lex("true; ; ; git status '"))
+    if dropped is not None:
+        out.append("(gw-unbal-reuse-dropped) a failed lex that left out a repeated empty record under skip_empty was "
+                   "read as the partial lex, whose records keep it")
+    return out
+
+
 _GW_FLOOR = 0.1
 _GW_SIZES = 9
 # The most a gw-lin row's t_2n/t_n may be, and how many timings of each size a ratio over it may take: a ratio
@@ -16427,6 +16697,11 @@ def _main_isolated(monitor):
         # (_gate_runtime_text), so the row fails the latter on every input; the clock is time.process_time.
         failures.extend(_gate_runtime_cost_edge_failures())
         failures.extend(_gate_runtime_cost_failures(_cost_inputs))
+        # The parse-failure path's cost on the 1 MiB git_add_unbal shape, against a plain-Python reference pass, and
+        # its call record (THE UNPARSEABLE-COMMAND COST, above _GW_UNBAL_COST_RATIO).
+        failures.extend(_gw_unbal_cost_edge_failures())
+        failures.extend(_gw_unbal_passes_failures())
+        failures.extend(_gw_unbal_cost_failures())
         # The other scanners main's lexer helpers carry read a comment their own way, beside the lexer:
         # the continuation join keeps a backslash-newline after a '#' at a word start ('(' included) and removes
         # one after a '#' glued to a substitution's ')'; the uncertainty causes report any '#' outside quotes

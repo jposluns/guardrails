@@ -575,6 +575,30 @@ class _LexStops:
         _LexStops.at = self.was
         return False
 
+
+class _LexFailures:
+    """A context in which a full lex (partial False) whose pass stops at a construct it cannot read, raising a
+    ValueError that is not an _UncertainHashError, records on that error, as recovered, what the partial-mode
+    return of the same pass would hold: (segments, in_progress, stop, misread), segments being the records it built
+    with the in-progress one appended where in_progress is True, stop the (start, words) pair _LexStops would record
+    for it, and misread True where that pass may have built other records than a partial lex of the same command
+    builds (it resumed a fork, left out a record under skip_empty, or read a body in a substitution, after which a
+    partial lex adds main's reading). A pass makes the same lex in both modes up to where it stops, so a caller that
+    has just had such an error from its own full lex reads the partial lex from it (_gate_partial_lex) instead of
+    lexing the command again. Outside the context nothing is recorded. It restores the previous setting on exit, as
+    _WordSpellings does."""
+
+    on = False
+
+    def __enter__(self):
+        self.was_on = _LexFailures.on
+        _LexFailures.on = True
+        return self
+
+    def __exit__(self, *exc_info):
+        _LexFailures.on = self.was_on
+        return False
+
 # THE '#' COMMENT RULE, shared by the scanners that decide where a comment starts in what the guards read as
 # commands (the shared lexer and its word reader, the substitution skip _skip_quoting, the redirect-target
 # check, the commit-proof raw audit, the poll-loop word scan and both rules of the foreground detach scan;
@@ -2799,6 +2823,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     hash_at = [-1, -1]
     unstarted = (-1, -1)  # (start, stop) of the last word read that stopped with nothing started
     tails = {} if fork is None else fork.tails
+    dropped = [fork is not None]  # a record left out under skip_empty, or ones built before the fork (_LexFailures)
     tail_key = None  # this resumed pass's state at the first newline it ends (_LexFork.tails), once reached
     tail_from = 0
     nesting_at = None  # the index of the first _HEREDOC_NESTING_RE match (n for none), once a body needs it
@@ -2833,6 +2858,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 del argv_spelling[:]
             del redirects[:]
             opaque[0] = False
+        else:
+            dropped[0] = True
         seg_start[0] = next_start
 
     def consume_redirect(op, oplen, at, src_fd):
@@ -3041,6 +3068,9 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                             # would repeat it (_empty_repeat), so none is built.
                             empty = []
                             segments.append(_Segment(empty, op, empty, "", False, empty, empty))
+                            dropped[0] = dropped[0] or count > 1
+                        else:
+                            dropped[0] = True
                         seg_start[0] = run
                         i = run
                     continue
@@ -3152,6 +3182,16 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 _LexStops.at.append((i, segments[-1].argv if in_progress and argv else None))
             remember((False, in_progress))
             return segments, False, in_progress
+        if _LexFailures.on and not partial and not isinstance(exc, _UncertainHashError):
+            # What the partial-mode return above would hold, for a caller that would otherwise lex the command
+            # again to read it (_LexFailures).
+            in_progress = bool(argv or redirects)
+            recovered = list(segments)
+            if in_progress:
+                recovered.append(_Segment(words(), "", list(redirects), command[seg_start[0]:], opaque[0],
+                                          list(argv_opaque), list(argv_leading_tilde)))
+            exc.recovered = (recovered, in_progress, (i, recovered[-1].argv if in_progress and argv else None),
+                             dropped[0] or (subst_heredocs is not None and subst_heredocs.floor))
         if isinstance(exc, _UncertainHashError) and exc.at is not None and exc.at == hash_at[0]:
             # Stopped at the '#' the token at i asks about, before the token changed anything: a reading
             # that maps that '#' resumes here (_LexFork).
@@ -16320,7 +16360,10 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
-def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
+_GATE_KIND_UNREAD = object()  # sentinel: _gate_weakening_fallback reads the kind itself (None is a kind)
+
+
+def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind=_GATE_KIND_UNREAD):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
@@ -16337,8 +16380,10 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies."""
-    kind = _gate_weakening_fallback_kind(command)
+    only note or allow ($G commit -nv <<<x) denies. kind, when given, is _gate_weakening_fallback_kind(command),
+    which a caller that has just read it passes so the raw probes are not run over the command again."""
+    if kind is _GATE_KIND_UNREAD:
+        kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -16564,14 +16609,17 @@ def _gate_weakening_fallback_kind(command):
     """The decision _gate_weakening_fallback gives command, by its raw probes: "no-verify" (a no-verify verb
     and a --no-ver spelling) and "short-n" (git commit or am and a short -n cluster) deny, "swallow" (a
     checker keyword and a swallow or truncating-pipe spelling) notes, and None allows. gate_weakening reads it
-    for its floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading)."""
+    for its floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading). The swallow test reads the checker keyword
+    last: every probe here is a search with no side effect, so the order decides nothing, and the keyword's long
+    alternation costs a pass several times that of the swallow and sink spellings over a long command that holds
+    none of them."""
     if _RAW_NOVERIFY_VERB_RE.search(command) and _RAW_NOVERIFY_RE.search(command):
         return "no-verify"
     if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
         return "short-n"
-    if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
-            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+    if ((_RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+         or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command)))
+            and _RAW_CHECKER_RE.search(command)):
         return "swallow"
     return None
 
@@ -16603,19 +16651,42 @@ def _gate_partial_resumes(doubt):
     return doubt is not None and not doubt.reading_failed
 
 
-def _gate_partial_lex(command, doubt=None):
+def _gate_partial_lex(command, doubt=None, failed=None):
     """(complete, open_segment, lexed): the partial lex of _gate_partial_segments, and lexed, where that lex is a
     fresh partial lex of the whole command (_gate_partial_resumes is False), the (argvs, stops) of it that
     _git_alias_recovered reads instead of lexing the command again, else None. The fresh lex runs inside
     _WordSpellings and _LexStops, which record what the alias reading reads and leave every segment's words, the
-    only part the other checks of gate_weakening read, unchanged."""
+    only part the other checks of gate_weakening read, unchanged. failed, when given, is the ValueError that is not
+    an _UncertainHashError which gate_weakening's own full lex of command just raised inside _WordSpellings and
+    _LexFailures: that lex stopped in its first pass, which made the same lex as the fresh partial lex's one pass up
+    to there, so where that pass built what the partial lex builds (_gate_failed_lex) its record is read instead
+    of lexing the command a second time."""
     if _gate_partial_resumes(doubt):
         recovered, open_seg = _gate_partial_segments(command, doubt)
         return recovered, open_seg, None
+    reused = _gate_failed_lex(failed) if doubt is None else None
+    if reused is not None:
+        return reused
     with _WordSpellings(), _LexStops() as stops:
         recovered, open_seg = _gate_partial_segments(command, doubt)
     argvs = [seg.argv for seg in recovered] + ([open_seg.argv] if open_seg is not None else [])
     return recovered, open_seg, (argvs, stops.seen)
+
+
+def _gate_failed_lex(failed):
+    """What _gate_partial_lex returns for a fresh partial lex of the command whose full lex raised failed, read from
+    the record the failing pass made (_LexFailures), or None where there is none or it may differ: the pass resumed a
+    fork, left out a record under skip_empty or read a body in a substitution (a partial lex then adds main's reading),
+    or the lex ran inside _CommandReading (a partial lex then adds the command reading) or _LexPlaces (a fresh lex
+    records its spans afresh). Otherwise the partial lex makes that one pass, no reading after it, and stops where it
+    stopped, so it returns those segments and _LexStops records that one stop."""
+    record = getattr(failed, "recovered", None)
+    if record is None or record[3] or _CommandReading.on or _LexPlaces.spans is not None:
+        return None
+    segments, in_progress, stop, _misread = record
+    recovered, open_seg = (segments[:-1], segments[-1]) if in_progress else (segments, None)
+    argvs = [seg.argv for seg in recovered] + ([open_seg.argv] if open_seg is not None else [])
+    return recovered, open_seg, (argvs, [stop])
 
 
 def _gate_recovered_segments(command, doubt=None):
@@ -16812,7 +16883,8 @@ def _gate_any_word_bypass(words, first=None):
                 found = (w, "a --no-verify spelling")
             elif short_at is not None and w in _NOVERIFY_SHORT_N_VERBS:
                 found = (w, "the short -n (--no-verify) in {!r}".format(words[short_at][:40]))
-        if _has_long_prefix((w,), "no-verify"):
+        # _has_long_prefix reads only a word that starts with '--', so no other word is passed to it.
+        if w[:2] == "--" and _has_long_prefix((w,), "no-verify"):
             long_at = p
         elif w[:1] == "-" and w[1:2] != "-" and "n" in w:
             short_at = p
@@ -17687,7 +17759,9 @@ def gate_weakening(data):
         # tier stops only at one ending in a pipe, and the deny tier's _gate_benign_prefix, _gate_conditional_run
         # and stage walk answer the same for each of a run), so a long run of separators, which every reading of
         # an uncertain '#' after it shares, builds and is read as one record, not one per separator per reading.
-        with _WordSpellings():
+        # A pass that stops at a construct it cannot read records what a partial lex would recover from it
+        # (_LexFailures), which the branch below reads in place of a second lex of the command (_gate_partial_lex).
+        with _WordSpellings(), _LexFailures():
             readings = _lex_readings(command, skip_empty=_SKIP_EMPTY_REPEATS)
     except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
@@ -17695,7 +17769,8 @@ def gate_weakening(data):
         # otherwise the raw fallback stands. The sink check drops the in-progress segment the lexer was
         # inside, since its unseen tokens could change it; a construct that begins a new segment (a lone quote
         # after 'pytest | head;') leaves every recovered segment complete, so none is dropped.
-        recovered, open_seg, lexed = _gate_partial_lex(command, exc if isinstance(exc, _UncertainHashError) else None)
+        doubt = exc if isinstance(exc, _UncertainHashError) else None
+        recovered, open_seg, lexed = _gate_partial_lex(command, doubt, exc if doubt is None else None)
         for seg in recovered + ([open_seg] if open_seg is not None else []):
             # the same fail-closed wrapper judgement as the parsed path, over each recovered segment's
             # dequoted argv, so a git bypass hidden behind an unresolved or unlisted wrapper on an
@@ -17772,7 +17847,8 @@ def gate_weakening(data):
             # each ANSI-C quote's escapes decoded). Quoting alone is no ground to deny: a quoted argument that
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
             # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
-            if (_gate_weakening_fallback_kind(command) not in _GATE_FALLBACK_DENIES
+            raw_kind = _gate_weakening_fallback_kind(command)
+            if (raw_kind not in _GATE_FALLBACK_DENIES
                     and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
                             for text in _decoded_readings(command))):
                 return _deny(
@@ -17788,8 +17864,9 @@ def gate_weakening(data):
                     "verification-hook bypass (rule gatdis, fail-safe).")
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
-            # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True)
+            # above and each of the fallback's keeps its message. The fallback is given the raw probes' kind read
+            # above rather than reading it again.
+            return _gate_weakening_fallback(command, runtime=True, kind=raw_kind)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -17948,8 +18025,9 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command, heredoc_message=True)
+        floor_kind = _gate_weakening_fallback_kind(command)
+        if floor_kind in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True, kind=floor_kind)
     # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
     # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
     # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
@@ -17963,8 +18041,8 @@ def gate_weakening(data):
     if flow_note is not None:
         return _allow_note(flow_note)
     if floor:
-        # its note, or the allow, in place of this allow
-        return _gate_weakening_fallback(command, heredoc_message=True)
+        # its note, or the allow, in place of this allow (the raw probes' kind read above)
+        return _gate_weakening_fallback(command, heredoc_message=True, kind=floor_kind)
     return _allow()
 
 
