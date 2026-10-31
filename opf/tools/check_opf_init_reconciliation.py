@@ -6,7 +6,9 @@ then parses the crosswalk: every residue obligation has exactly one "## Obligati
 obligation outside the roster, the Migrate/Move entry keeps each of its three "### Split:" children exactly
 once, every entry carries an Owner and an Ownership, and an entry whose Disposition is "transferred" names as
 its Successor a backlog id from the closed list in TODO.md at the repository root and an Owner other than
-"none yet". Headings and fields inside a fenced code block or an HTML comment do not count. It checks
+"none yet". An Owner, Ownership, Disposition or Successor line under a heading that is not an entry, or
+before the first entry, belongs to no entry and is refused. Headings, fields and TODO.md table rows inside a
+fenced code block or an HTML comment do not count. It checks
 STRUCTURE only: it never reads a cited symbol, so a green run says nothing about whether any obligation is
 implemented or whether a named successor accepted the work.
 
@@ -73,6 +75,9 @@ NO_OWNER = ("", "none", "none yet")
 _OBLIGATION_RE = re.compile(r"^## Obligation: (.+?)\s*$")
 _SPLIT_RE = re.compile(r"^### Split: (.+?)\s*$")
 _FIELD_RE = re.compile(r"^- ([A-Za-z ]+): ?(.*?)\s*$")
+_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]|$)")
+# The fields the checks below read; one outside an entry is refused, never attached to the entry above.
+READ_FIELDS = ("owner", "ownership", "disposition", "successor")
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 # A backlog table row in TODO.md: "| ID | Status | Item | Tags |", one id per row.
 _BACKLOG_ROW_RE = re.compile(r"^\| ([A-Z0-9]+(?:-[A-Z0-9]+)*) \|")
@@ -121,21 +126,23 @@ def residue_obligations(manifest_text):
     if RESIDUE_END not in tail:
         raise CannotEvaluate("the {} residue obligation list has no end".format(RESIDUE_GATE))
     listed = tail.split(RESIDUE_END, 1)[0].rstrip(".")
+    # str.split always gives at least one part, so an empty list shows as one empty name.
     parts = [p.strip() for p in listed.split(",")]
-    if parts and parts[-1].startswith("and "):
+    if parts[-1].startswith("and "):
         parts[-1] = parts[-1][4:]
     names = [_norm(p) for p in parts]
-    if not names or any(not n for n in names):
+    if any(not n for n in names):
         raise CannotEvaluate("the {} residue obligation list is empty or malformed".format(RESIDUE_GATE))
     return names
 
 
 def backlog_ids(todo_text):
-    """The closed successor list: the first cell of each row of every TODO.md table headed "| ID |". A TODO.md
+    """The closed successor list: the first cell of each row of every TODO.md table headed "| ID |", read
+    through _visible_lines, so a row inside a fenced code block or an HTML comment names no id. A TODO.md
     that lists no id cannot evaluate, so an unreadable backlog never lets a transferred entry pass."""
     ids = set()
     in_table = False
-    for line in todo_text.split("\n"):
+    for line in _visible_lines(todo_text):
         if line.startswith("| ID |"):
             in_table = True
             continue
@@ -152,10 +159,12 @@ def backlog_ids(todo_text):
 
 
 def _visible_lines(text):
-    """The crosswalk's lines minus fenced code blocks and HTML comments, so a heading or field a reader does
-    not see as one never counts. A fence closes on a line of the same character at least as long, and an
-    unclosed fence hides the rest of the file. A comment hides from "<!--" through the whole line holding its
-    closing "-->" (as a Markdown comment block does); text before "<!--" on its opening line stays."""
+    """A Markdown text's lines minus fenced code blocks and HTML comments, so a heading, field or table row a
+    reader does not see as one never counts. A fence closes on a line of the same character at least as
+    long, and an unclosed fence hides the rest of the file. A backtick line whose info string holds a
+    backtick (```x```) is inline code, not a fence opener (CommonMark). A comment hides from "<!--" through
+    the whole line holding its closing "-->" (as a Markdown comment block does); text before "<!--" on its
+    opening line stays."""
     fence = None
     in_comment = False
     for line in text.split("\n"):
@@ -167,6 +176,8 @@ def _visible_lines(text):
             if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
                 fence = None
             continue
+        if m and m.group(1)[0] == "`" and "`" in m.group(2):
+            m = None
         if m:
             fence = m.group(1)
             continue
@@ -179,26 +190,45 @@ def _visible_lines(text):
 
 def parse_crosswalk(text):
     """[(level, name, fields, parent)]: level is "obligation" or "split", fields a dict of the entry's
-    "- Field: value" lines (a repeated field keeps every value), parent the enclosing obligation."""
+    "- Field: value" lines (a repeated field keeps every value), parent the enclosing obligation. Any other
+    heading ends the entry above it (a level 1 or 2 heading also ends the obligation a split sits under), so
+    a field below it attaches to no entry: a field this gate reads (READ_FIELDS) there, or before the first
+    entry, is kept as a ("stray", field, {}, None) record for _check_stray to refuse."""
     entries = []
     parent = None
+    fields = None
     for line in _visible_lines(text):
         m = _OBLIGATION_RE.match(line)
         if m:
             parent = _norm(m.group(1))
-            entries.append(("obligation", parent, {}, None))
+            fields = {}
+            entries.append(("obligation", parent, fields, None))
             continue
         m = _SPLIT_RE.match(line)
         if m:
-            entries.append(("split", _norm(m.group(1)), {}, parent))
+            fields = {}
+            entries.append(("split", _norm(m.group(1)), fields, parent))
             continue
-        if line.startswith("## ") or line.startswith("# "):
-            parent = None
+        m = _HEADING_RE.match(line)
+        if m:
+            fields = None
+            if len(m.group(1)) <= 2:
+                parent = None
             continue
         m = _FIELD_RE.match(line)
-        if m and entries:
-            entries[-1][2].setdefault(m.group(1).strip().casefold(), []).append(m.group(2))
+        if m:
+            field = m.group(1).strip().casefold()
+            if fields is not None:
+                fields.setdefault(field, []).append(m.group(2))
+            elif field in READ_FIELDS:
+                entries.append(("stray", field, {}, None))
     return entries
+
+
+def _fielded(entries):
+    """The obligation and split entries, without the stray records. A stray record has no fields, so only the
+    checks that refuse an absent field need this filter."""
+    return [e for e in entries if e[0] != "stray"]
 
 
 def _check_missing(entries, roster, backlog):
@@ -230,7 +260,7 @@ def _check_split(entries, roster, backlog):
 
 def _check_disposition(entries, roster, backlog):
     found = []
-    for level, name, fields, _parent in entries:
+    for level, name, fields, _parent in _fielded(entries):
         values = fields.get("disposition", [])
         if len(values) != 1 or values[0] not in DISPOSITIONS:
             found.append("disposition: {} {!r} needs exactly one Disposition from {}".format(
@@ -251,7 +281,7 @@ def _check_successor(entries, roster, backlog):
 
 def _check_owner(entries, roster, backlog):
     found = []
-    for level, name, fields, _parent in entries:
+    for level, name, fields, _parent in _fielded(entries):
         for field in ("owner", "ownership"):
             values = fields.get(field, [])
             if len(values) != 1 or not values[0]:
@@ -269,6 +299,11 @@ def _check_transferred_owner(entries, roster, backlog):
     return found
 
 
+def _check_stray(entries, roster, backlog):
+    return ["stray: field {} sits under a heading that is not an entry, or before the first entry, so it "
+            "belongs to no entry".format(e[1].capitalize()) for e in entries if e[0] == "stray"]
+
+
 CHECKS = {
     "missing": _check_missing,
     "duplicate": _check_duplicate,
@@ -278,6 +313,7 @@ CHECKS = {
     "successor": _check_successor,
     "owner": _check_owner,
     "transferred-owner": _check_transferred_owner,
+    "stray": _check_stray,
 }
 
 
@@ -435,6 +471,63 @@ def _gate_cannot_evaluate(manifest_text, message="gates manifest does not parse:
     return code == 2 and err.startswith("CANNOT EVALUATE check_opf_init_reconciliation: " + message)
 
 
+# Manifests whose residue this gate cannot read, each with the start of the refusal it must give. Without the
+# guard each names, the first and third raise AttributeError and the fourth IndexError, the second and fifth
+# pass on the first match (exit 0), and the last two read a wrong list (residue drift, exit 1).
+_RESIDUE_SHAPES = (
+    ("gate-entry-not-a-table", "gate = [1]\n", "gates manifest has no single "),
+    ("two-residue-gates", _MANIFEST_FIXTURE * 2, "gates manifest has no single "),
+    ("residue-not-a-string", '[[gate]]\nid = "opf-init-p0"\nresidue = 1\n', "gates manifest has no single "),
+    ("no-lead", _MANIFEST_FIXTURE.replace("review: ", "review "), "the opf-init-p0 residue no longer carries "),
+    ("two-leads", _MANIFEST_FIXTURE.replace("Migrate/Move;", "Migrate/Move; and " + RESIDUE_LEAD + "x;"),
+     "the opf-init-p0 residue no longer carries "),
+    ("no-end", _MANIFEST_FIXTURE.replace("Migrate/Move;", "Migrate/Move."),
+     "the opf-init-p0 residue obligation list has no end"),
+    ("empty-name", _MANIFEST_FIXTURE.replace("coordination, ", "coordination, , "),
+     "the opf-init-p0 residue obligation list is empty or malformed"),
+)
+
+# TODO.md rows a reader does not see: a fenced block and an HTML comment, each holding an "| ID |" table.
+_HIDDEN_BACKLOG = ("```\n| ID | Status |\n| OPF-FENCED | x |\n```\n"
+                   "<!--\n| ID | Status |\n| OPF-COMMENTED | x |\n-->\n")
+
+
+class _StubRoot:
+    """A ROOT stand-in under which every file reads as `data` (bytes), or raises `data` (an exception)."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def __truediv__(self, rel):
+        return self
+
+    def read_bytes(self):
+        if isinstance(self.data, BaseException):
+            raise self.data
+        return self.data
+
+
+def _run_over_root(root):
+    """(exit code, stderr) of run_gate reading every file through the real _read under `root`; an exception
+    that escapes run_gate gives a None exit code."""
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with mock.patch.object(sys.modules[__name__], "ROOT", root), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = run_gate()
+    except Exception:
+        code = None
+    return code, err.getvalue()
+
+
+def _findings_or_none(text, backlog, disabled=frozenset()):
+    """findings(), or None when it raises, so a parser that crashes fails its vector instead of the run."""
+    try:
+        return findings(text, backlog, disabled=disabled)
+    except Exception:
+        return None
+
+
 def self_test():
     failures = []
     total = 0
@@ -456,6 +549,8 @@ def self_test():
             residue_obligations(bad)
         except CannotEvaluate:
             expect(True, label)
+        except Exception:
+            expect(False, label)
         else:
             expect(False, label)
     dropped = _MANIFEST_FIXTURE.replace("git staging, ", "")
@@ -471,9 +566,17 @@ def self_test():
         if index < _TYPEERROR_GATES:
             with mock.patch.object(module, "_gate_tables", _unguarded_gate_tables):
                 expect(_run(_files(manifest=bad))[0] is None, "non-list-gate/{}-red-without-guard".format(label))
+    for label, bad, message in _RESIDUE_SHAPES:
+        expect(_gate_cannot_evaluate(bad, message), "residue-shape/{}".format(label))
+    for label, data in (("not-utf8", b"\xff"), ("os-error", FileNotFoundError("absent"))):
+        code, err = _run_over_root(_StubRoot(data))
+        expect(code == 2 and "cannot read " in err, "read/{}-cannot-evaluate".format(label))
 
     backlog = backlog_ids(_BACKLOG_FIXTURE)
     expect(backlog == {"OPF-ADOPT-ORCH", "OPF-IMPORT-COMPLETION"}, "backlog/ids-from-id-tables-only")
+    expect(backlog_ids(_BACKLOG_FIXTURE + _HIDDEN_BACKLOG) == backlog, "backlog/hidden-rows-name-no-id")
+    code, _out, err = _run(_files(backlog="# TODO\n\n" + _HIDDEN_BACKLOG))
+    expect(code == 2 and "lists no backlog id" in err, "backlog/only-hidden-ids-cannot-evaluate")
     expect(_run(_files())[0] == 0, "gate/clean-passes")
     code, _out, err = _run(_files(backlog=None))
     expect(code == 2 and "cannot read TODO.md" in err, "backlog/absent-cannot-evaluate")
@@ -496,12 +599,29 @@ def self_test():
            "clean/entry-after-closed-fence-counts")
     expect(findings(_good(override={"coordination": _entry("coordination") + "<!-- a note -->\n"}), backlog) == [],
            "clean/entry-after-closed-comment-counts")
+    expect(_findings_or_none(_good(drop="git staging", extra="```x```\n\n" + _entry("git staging")), backlog) == [],
+           "clean/inline-code-line-opens-no-fence")
+    expect(_findings_or_none(_good().replace("### Split: move", "### Notes\n\nA note.\n\n### Split: move"),
+                             backlog) == [], "clean/level-3-heading-keeps-split-parent")
+    expect(_findings_or_none(_good(extra="## Appendix\n\n- Note: unread.\n"), backlog) == [],
+           "clean/unread-field-outside-entry-ignored")
+    # The reported shape: the last entry lacks its Owner and a field under "## Appendix" supplied it.
+    appendix = _good().replace(_entry("whole-store relocation", header="### Split: "), "".join(
+        line for line in _entry("whole-store relocation", header="### Split: ").splitlines(True)
+        if not line.startswith("- Owner:"))) + "## Appendix\n\n- Owner: none yet.\n"
+    expect(_run(_files(crosswalk=appendix))[0] == 1, "stray/appendix-owner-fails-gate")
 
     # Each fixture: (label, crosswalk text, the one check that must hold it red).
     fixtures = [("missing", _good(drop="git staging"), "missing")]
     for hidden, label in (("```\n{}```\n", "backtick-fence"), ("~~~\n{}```\n", "unclosed-fence"),
                           ("<!--\n{}-->\n", "comment"), ("<!--\n{}", "unclosed-comment")):
         fixtures.append(("missing-hidden-" + label,
+                         _good(drop="git staging", extra=hidden.format(_entry("git staging"))), "missing"))
+    # A line that does not close the open fence: another character, a shorter run, or an info string; the
+    # entry after it stays hidden until the real close. A tilde fence may carry a backtick in its info string.
+    for hidden, label in (("~~~\n```\n{}~~~\n", "other-character"), ("````\n```\n{}````\n", "shorter-run"),
+                          ("```\n``` x\n{}```\n", "info-string"), ("~~~ `x`\n{}~~~\n", "tilde-backtick-info")):
+        fixtures.append(("missing-fence-not-closed-" + label,
                          _good(drop="git staging", extra=hidden.format(_entry("git staging"))), "missing"))
     fixtures.append(("duplicate", _good(extra=_entry("coordination")), "duplicate"))
     fixtures.append(("unknown", _good(extra=_entry("store upgrade")), "unknown"))
@@ -534,13 +654,22 @@ def self_test():
     fixtures.append(("owner-empty", _good(override={"publication": _entry("publication", owner="")}), "owner"))
     fixtures.append(("ownership-duplicate", _good(override={
         "publication": _entry("publication") + "- Ownership: open.\n\n"}), "owner"))
-    for owner in ("none yet.", "None yet", "none"):
-        fixtures.append(("transferred-owner-" + owner.replace(" ", "-"), _good(override={
+    fixtures.append(("split-unknown-child", _good(children=SPLIT_CHILDREN + ("store upgrade",)), "split"))
+    # " none" (two spaces after the colon) needs the strip; the comment hides an owner a reader never sees.
+    for label, owner in (("none-yet.", "none yet."), ("None-yet", "None yet"), ("none", "none"),
+                         ("space-none", " none"), ("commented", "none yet. <!-- adoption work -->")):
+        fixtures.append(("transferred-owner-" + label, _good(override={
             "finalization": _transferred("finalization", owner=owner)}), "transferred-owner"))
+    fixtures.append(("stray-under-appendix", _good(extra="## Appendix\n\n- Successor: OPF-ADOPT-ORCH\n"), "stray"))
+    fixtures.append(("stray-before-first-entry", _good().replace("# Crosswalk\n\n", "# Crosswalk\n\n- Owner: x\n\n"),
+                     "stray"))
+    fixtures.append(("stray-under-level-3-heading", _good(override={
+        "publication": _entry("publication") + "### Notes\n\n- Disposition: open\n\n"}), "stray"))
     for label, text, check in fixtures:
-        red = findings(text, backlog)
+        red = _findings_or_none(text, backlog)
         expect(bool(red), "red/{}".format(label))
-        expect(findings(text, backlog, disabled=frozenset({check})) == [], "check-removed-green/{}".format(label))
+        expect(_findings_or_none(text, backlog, disabled=frozenset({check})) == [],
+               "check-removed-green/{}".format(label))
     expect({f[2] for f in fixtures} == set(CHECKS), "every-check-has-a-fixture")
     with mock.patch.dict(CHECKS, {"successor": _open_successor_rule}):
         for successor in _OPEN_RULE_SUCCESSORS:
@@ -566,4 +695,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())

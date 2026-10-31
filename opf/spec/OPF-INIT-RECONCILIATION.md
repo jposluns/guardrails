@@ -12,7 +12,9 @@ closed only in the sense the closing rule below allows, by an accepted successor
 obligation has exactly one entry, the Migrate/Move entry keeps its three split children, every
 entry carries an Owner and an Ownership, and an entry whose disposition is `transferred` names as
 its successor a backlog id listed in `TODO.md` at the repository root and an Owner other than
-`none yet`. Headings inside a fenced code block or an HTML comment do not count. Where `TODO.md`
+`none yet`. An Owner, Ownership, Disposition or Successor line under a heading that is not an
+entry belongs to no entry and is refused. Headings, fields and `TODO.md` table rows inside a fenced
+code block or an HTML comment do not count. Where `TODO.md`
 cannot be read, as in a copy of `opf/` alone, the check cannot evaluate. It does not judge whether
 a cited symbol meets its requirement or whether a named successor accepted the work.
 
@@ -64,11 +66,13 @@ transfer below rests on the acceptance reading above, which is this record's inf
   equivalent acceptance check is the section 14.1 plan binding of product and store identities and
   the observed revision, with completion checks 1 (authority and freshness) and 4 (the store
   resolves to the planned identity); these check the binding wherever the store resolves. The
-  remaining work sits behind the same refusal as coordination
-  (`_opf_adopt_apply._store_posture_or_refuse`), and an out-of-root store also meets that
-  function's lease-join refusal, so binding over it cannot land before coordination's lease join
-  does. That dependency does not remove the equivalent check; coordination stays open because no
-  section 14.1 check covers a lease join, not because of the shared refusal.
+  remaining work sits behind the same function as coordination's refusal
+  (`_opf_adopt_apply._store_posture_or_refuse`), which refuses a pointer to an out-of-root store
+  first, with its own message (adoption evidence and archives belong at that store root, which the
+  apply shell does not support), before its lease-join refusal is reached. Binding over such a
+  store therefore needs that support as well as coordination's lease join. That dependency does not
+  remove the equivalent check; coordination stays open because no section 14.1 check covers a lease
+  join, not because of the shared function.
 - Disposition: transferred
 - Successor: OPF-ADOPT-ORCH
 
