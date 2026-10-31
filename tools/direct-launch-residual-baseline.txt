@@ -9,6 +9,10 @@
 #
 # Grammar: these leading # comment lines, then one repository path per line, sorted and unique, every line
 # ending in LF. Anything else, or a missing or unreadable file, is cannot-evaluate (exit 2).
+#
+# Raises: opf/tools/check_opf_init_contract.py and tools/check_footer.py, added to DIRECT_LAUNCH_RESIDUAL on
+# the main branch before this baseline existed there (each reads a child's exit status and carries no guard of
+# its own), so the baseline starts by holding them; guarding either removes its line again.
 .github/check_cited_standards_contract.py
 .preview/char-policy-write.py
 .preview/clock-inject.py
@@ -50,6 +54,7 @@ opf/tools/check_opf_doctor.py
 opf/tools/check_opf_drift.py
 opf/tools/check_opf_homes.py
 opf/tools/check_opf_init.py
+opf/tools/check_opf_init_contract.py
 opf/tools/check_opf_init_observe.py
 opf/tools/check_opf_init_p0.py
 opf/tools/check_opf_init_qa.py
@@ -69,6 +74,7 @@ tools/check_ci_parity.py
 tools/check_clauses.py
 tools/check_crosswalk.py
 tools/check_entry_guard.py
+tools/check_footer.py
 tools/check_gensrc_failclose.py
 tools/check_git_option_table.py
 tools/check_hooks_preview.py

@@ -253,7 +253,7 @@ def _self_test():
          '<a href="HTTPS://evil.example/x">x</a>',
          ['p.html: external link \'HTTPS://evil.example/x\' is missing target="_blank"']),
     ]
-    # Fail-closed classes (round-5, Codex): a browser-divergent backslash authority, a malformed
+    # Fail-closed classes: a browser-divergent backslash authority, a malformed
     # http(s) URL, and a protocol-relative URL each classify EXTERNAL, so an unattributed one is a
     # finding. Expected strings are computed with %r to match page_findings' own {!r} formatting.
     for _h in ("https://evil.example\\@aiqt.ai/x", "https://[invalid/x", "//evil.example/x"):

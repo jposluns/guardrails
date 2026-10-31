@@ -108,7 +108,7 @@ _AUTH_KEYS = ("authorizer", "utc", "reason")
 
 
 def _validate_row_schema(row, index):
-    """Strict schema for a pin-history row (reconciliation 9, hardened for B8): the row is a table carrying
+    """Strict schema for a pin-history row (reconciliation 9, hardened): the row is a table carrying
     EXACTLY the fixed key set (plus the authorization sub-table), every field of its declared TYPE with NO
     coercion, action in the enum, and seq equal to the row index. Rejecting coercion is what closes the
     quorum=1 vs quorum="1" canonical-collision (an interior type edit is a schema FAIL, not a silent
@@ -227,7 +227,7 @@ def _read_contained_toml(root_fd, relpath):
         return tomllib.loads(data.decode("utf-8"))
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise PinError("cannot parse {} ({})".format(relpath, exc))
 
@@ -410,7 +410,7 @@ def _render_transition(txn):
 
 def _ensure_parent_dirs(root_fd, relpath):
     """Create the parent directory chain of relpath CONTAINED (no-follow, dir-fd-relative, idempotent), so
-    a symlinked ancestor cannot redirect a subsequent publish off-tree (B9). A no-op for a single-component
+    a symlinked ancestor cannot redirect a subsequent publish off-tree. A no-op for a single-component
     relpath (its parent is root)."""
     parts = relpath.split("/")
     if len(parts) > 1:
@@ -418,7 +418,7 @@ def _ensure_parent_dirs(root_fd, relpath):
 
 
 def _atomic_publish(root, relpath, text):
-    """Write text to relpath atomically AND contained (B9): the parent is resolved through held no-follow
+    """Write text to relpath atomically AND contained: the parent is resolved through held no-follow
     dir fds, the sibling temp is created via openat O_CREAT|O_EXCL|O_NOFOLLOW, fsync'd, renameat'd into
     place (the atomic publication point, 2.4 discipline), and the parent fd fsync'd; a symlinked parent
     component or target is refused rather than followed. A crash leaves either the old file or the new,
@@ -453,7 +453,7 @@ def _atomic_publish(root, relpath, text):
 
 
 def _remove_contained(root, relpath):
-    """Remove a contained file (no-follow, dir-fd-relative) and fsync its parent fd (B9). A no-op when the
+    """Remove a contained file (no-follow, dir-fd-relative) and fsync its parent fd. A no-op when the
     file or a parent component is already absent; a symlinked parent component is refused, not followed."""
     root_fd = _open_root_fd(root)
     try:
@@ -484,8 +484,8 @@ def _staged_reader(staged):
     return reader
 
 
-# _preimage_reader removed in round 3: the onboarding reverse is a CONTAINED reverse swap (10.3/10.6)
-# with no retained-byte reads, so no absolute-path preimage reader exists (closes the B9 reader leg).
+# _preimage_reader was removed: the onboarding reverse is a CONTAINED reverse swap (10.3/10.6)
+# with no retained-byte reads, so no absolute-path preimage reader exists (closes the off-tree reader leg).
 
 
 def _load_staged_ops(staged):
@@ -524,7 +524,7 @@ def _capture_pin_preimages(root, root_fd, transition_id, ops):
     absence for creates, existence + mode for directories) under .aiqt/pin-preimages/<transition-id>/,
     fsync'd, BEFORE any swap. The .aiqt/pin-preimages hierarchy and the per-transition directory are created
     CONTAINED (no-follow, dir-fd-relative), so a symlinked .aiqt/pin-preimages cannot redirect the preimage
-    store off-tree (B9); the engine's capture_preimages then writes into that verified-real directory. Uses
+    store off-tree; the engine's capture_preimages then writes into that verified-real directory. Uses
     NO part of the 9.3 journal transaction (no INTENT/COMPLETE framing, no lock). Mutates each op in place,
     adding its prestate. Refuses (fail-closed) if the per-transition directory already exists."""
     _journal.ensure_journal_dirs(root_fd, PREIMAGES_REL)
@@ -555,7 +555,7 @@ def _contained_swap(root_fd, ops, staged_reader):
 # --- flows --------------------------------------------------------------------------------------------
 
 def _read_release(staged):
-    """Read and VALIDATE the staged release record (guard-input-soundness on do_pin's DIRECT input, RB9):
+    """Read and VALIDATE the staged release record (guard-input-soundness on do_pin's DIRECT input):
     every identity field must be a non-empty string and quorum a positive int, with NO coercion. A
     malformed or empty release record is a fail-closed PinError (exit 2), never a pin published over empty
     identity."""
@@ -566,7 +566,7 @@ def _read_release(staged):
         # ValueError-family handler. tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply
         # nested array or inline table and, from CPython 3.14.8, on a key of more than 1000 dotted parts, and
         # MemoryError on a many-part key under a memory limit, which that handler would not catch
-        # (F-TOML-BARE-VALUEERROR-CLASS).
+        # (RecursionError and MemoryError are not ValueErrors).
         if isinstance(exc, ValueError):
             raise
         raise PinError("cannot parse release.toml ({})".format(exc)) from exc
@@ -613,10 +613,10 @@ def _blocking_open_transition(root_fd):
 def _blocking_open_journal(root, root_fd):
     """True if the migration cutover journal holds any OPEN (non-terminal) transaction, which blocks a new
     pin operation until recovered (the 9.3 gate line / 4.4). Enumerated through a no-follow dir fd,
-    rejecting a symlinked journal root or a symlinked entry (containment, B9); an unreadable or corrupt
+    rejecting a symlinked journal root or a symlinked entry (containment); an unreadable or corrupt
     journal fails closed (blocks). A journal holding only terminal transactions does not block. The
     entries are listed through a FRESH descriptor reopened as "." beneath the held journal fd
-    (F-JOURNAL-HELD-FD-LISTING: a listing read through a descriptor held from an earlier open can miss
+    (a listing read through a descriptor held from an earlier open can miss
     entries created since that open, so an open transaction created after the journal fd was opened
     would slip past this gate); each entry's stat and frame reads stay bound to the held fd (no path
     re-resolution)."""
@@ -677,12 +677,12 @@ def do_pin(root, staged, transition_id=None):
             raise PinError("a dangling pin-history is present with no live pin (last action {!r}, not a "
                            "terminal un-adopt); the state is malformed - run `recover` or `doctor` before "
                            "onboarding".format(_hist[-1].get("action")))
-        if _hist:                                          # VC-7 B3: chain-validate BEFORE any capture/mutate
+        if _hist:                                          # chain-validate BEFORE any capture/mutate
             _cf = verify_chain(_hist)
             if _cf:
                 raise PinError("onboarding pin requires a chain-valid pin-history before it mutates state; "
                                "the chain is invalid: {}".format("; ".join(_cf)))
-        if _journal._lstat_contained(root_fd, MIGRATION_REL) is not None:   # VC-7 N2: migration-gate consistency
+        if _journal._lstat_contained(root_fd, MIGRATION_REL) is not None:   # migration-gate consistency
             raise PinError("migration state (.aiqt/migration) is present; onboarding pin is refused while any "
                            "migration state exists (a pin created over it could not later be un-adopted, "
                            "10.6); resolve the migration first")
@@ -823,12 +823,12 @@ def _transition_ops(txn_rec):
     return ops
 
 
-# _op_at_prestate removed in round 5: unused after the contained reverse-swap redesign (dead code).
+# _op_at_prestate was removed: unused after the contained reverse-swap redesign (dead code).
 
 def _rmtree_contained(pfd, name):
     """Remove 'name' beneath parent fd pfd, depth-first, dir-fd-relative and no-follow: a symlink or a
     non-directory at any level is unlinked, never descended; a directory is emptied through its own
-    O_NOFOLLOW fd and then rmdir'd. Contained cleanup of our own pin-preimages namespace (B9)."""
+    O_NOFOLLOW fd and then rmdir'd. Contained cleanup of our own pin-preimages namespace."""
     try:
         st = os.stat(name, dir_fd=pfd, follow_symlinks=False)
     except FileNotFoundError:
@@ -992,7 +992,7 @@ def _validate_unadopt_intent(intent, txn_rec, pin_present):
                        "(inconsistent/forged); refusing")
 
 
-# _recover_open_journal removed in round 4: VC-7 DETECTS+BLOCKS an open migration journal
+# _recover_open_journal was removed: pin DETECTS+BLOCKS an open migration journal
 # (do_pin / do_recover / doctor) but does NOT recover it - reconciling a migration journal is
 # the deferred migration tool's job, and recovering it here reached the engine's absolute-path
 # preimage restore (an off-tree write). Detection uses is_terminal read-only (bounded R2).
@@ -1016,13 +1016,13 @@ def do_recover(root):
         return _fail(exc)
     try:
         if _blocking_open_journal(root, root_fd):
-            raise PinError("recover: an open migration cutover journal is present; VC-7 does not reconcile "
+            raise PinError("recover: an open migration cutover journal is present; pin does not reconcile "
                            "migration journals (that is the deferred migration tool's job); resolve it there")
         intent = read_unadopt(root_fd)
         if intent is not None:
             txn_rec = read_transition(root_fd)
             _validate_unadopt_intent(intent, txn_rec, read_pin(root_fd) is not None)
-            if _journal._lstat_contained(root_fd, MIGRATION_REL) is not None:   # VC-7 N3: mirror do_un_adopt's B1 gate
+            if _journal._lstat_contained(root_fd, MIGRATION_REL) is not None:   # mirror do_un_adopt's B1 gate
                 raise PinError("recover: migration state (.aiqt/migration) is present; refusing to complete "
                                "the interrupted un-adopt while migration state exists (completing it would "
                                "orphan that state into a MALFORMED post-state, 10.6); resolve the migration first")
@@ -1354,7 +1354,7 @@ def _recover_close_vectors(base, onop, onpay, rel1):
 
 
 def self_test():
-    """Adversarial synthetic-tree flow invariants (B10 root-cause fix: the r1 suite was too shallow and hid
+    """Adversarial synthetic-tree flow invariants (a shallow suite would hide
     B1-B9). Each scenario asserts the FAIL/refuse path first, so the guard is proven to bite, then the clean
     path. Real subprocess crash-injection (the engine KILL hook) exercises the recovery command."""
     import importlib.util
@@ -1465,7 +1465,7 @@ def self_test():
               "{!r}".format(nd_outcome, nd_err.getvalue()),
               nd_outcome is nd_exc and nd_exc.name == "_aiqt_absent_dependency" and nd_err.getvalue() == "")
 
-        # ---- TBIG (F-TOML-BARE-VALUEERROR-CLASS): an integer literal past CPython's 4300-digit int-string
+        # ---- TBIG (a bare parser ValueError): an integer literal past CPython's 4300-digit int-string
         # limit makes tomllib raise a BARE ValueError (not TOMLDecodeError); the contained TOML reader must
         # still refuse with PinError (exit 2), never let the ValueError escape (do_un_adopt catches only
         # PinError/OSError). The digit limit is pinned to the default 4300 (test-hermeticity). ----
@@ -1676,7 +1676,7 @@ def self_test():
         check("B1: un-adopt refuses while .aiqt/migration state is present (exit 2)", rc_ub1 == 2)
         check("B1: pin still present after the refused un-adopt", (ub1 / PIN_REL).is_file())
 
-        # ---- N2 (VC-7 round-8): onboarding pin REFUSES while migration state is present (mirror of B1) ----
+        # ---- N2: onboarding pin REFUSES while migration state is present (mirror of B1) ----
         n2r = tmp / "N2" / "root"; n2r.mkdir(parents=True)
         (n2r / MIGRATION_REL).mkdir(parents=True)
         rc_n2, _ = _run_cli(["pin", "--root", str(n2r), "--staged",
@@ -1684,7 +1684,7 @@ def self_test():
         check("N2: onboarding pin refuses while .aiqt/migration is present (exit 2)", rc_n2 == 2)
         check("N2: no pin created after the refused onboarding", not (n2r / PIN_REL).is_file())
 
-        # ---- B3 (VC-7 round-8): onboarding pin CHAIN-VALIDATES the history BEFORE it mutates ----
+        # ---- B3: onboarding pin CHAIN-VALIDATES the history BEFORE it mutates ----
         b3 = tmp / "B3" / "root"; b3.mkdir(parents=True)
         _run_cli(["pin", "--root", str(b3), "--staged",
                   str(_write_staged(tmp / "B3" / "s1", onop, onpay, rel1, []))])
@@ -1696,7 +1696,7 @@ def self_test():
         check("B3: onboarding refuses over a chain-invalid (interior-corrupt) history (exit 2)", rc_b3 == 2)
         check("B3: no pin installed after the refused onboarding (no mutation)", not (b3 / PIN_REL).is_file())
 
-        # ---- N3 (VC-7 round-8): recover REFUSES to complete an interrupted un-adopt while migration is present ----
+        # ---- N3: recover REFUSES to complete an interrupted un-adopt while migration is present ----
         n3 = tmp / "N3" / "root"; n3.mkdir(parents=True)
         _run_cli(["pin", "--root", str(n3), "--staged",
                   str(_write_staged(tmp / "N3" / "s", onop, onpay, rel1, []))])
@@ -1711,7 +1711,7 @@ def self_test():
         check("N3: recover refuses to complete the un-adopt while migration is present (exit 2)", rc_n3 == 2)
         check("N3: the un-adopt intent survives the refused recover", (n3 / UNADOPT_REL).is_file())
 
-        # ---- M2 (VC-7 round-8): every honesty-disclosure surface carries the interior/tail-edit/truncation qualifiers ----
+        # ---- M2: every honesty-disclosure surface carries the interior/tail-edit/truncation qualifiers ----
         _hdr_m2 = _render_history([row(0, 1, GENESIS)]).lower()
         for _tok in ("interior", "tail-edit", "truncation"):
             check("M2: generated pin-history header discloses '{}'".format(_tok), _tok in _hdr_m2)
@@ -1762,11 +1762,11 @@ def self_test():
                             str(_write_staged(tmp / "K" / "s", onop, onpay, rel1, []))])
         check("T12: a new pin is BLOCKED by the open journal exit 2", rc == 2 and "journal" in out.lower())
         rc, out = _run_cli(["recover", "--root", str(k)])
-        check("T12: recover REFUSES an open migration journal (VC-7 does not reconcile it) exit 2",
+        check("T12: recover REFUSES an open migration journal (pin does not reconcile it) exit 2",
               rc == 2 and "migration" in out.lower())
 
-        # ===== ROUND 3 blocker regressions =====
-        # T15 [RB1]: a TORN payload mid-write -> recover removes the torn create, clean (was: stranded).
+        # ===== regressions, group 3 =====
+        # T15: a TORN payload mid-write -> recover removes the torn create, clean (was: stranded).
         t15 = tmp / "T15" / "root"; t15.mkdir(parents=True)
         s15 = _write_staged(tmp / "T15" / "s", onop, onpay, rel1, [])
         rc = crash(["pin", "--root", str(t15), "--staged", str(s15)], "torn-payload:0")
@@ -1777,7 +1777,7 @@ def self_test():
         check("T15: recover removed the torn create", not (t15 / "aiqt-file").exists())
         check("T15: doctor clean after recover", dr(str(t15)) == 0)
 
-        # T16 [RB9]: a malformed (empty-field) release record -> pin REFUSES, nothing published.
+        # T16: a malformed (empty-field) release record -> pin REFUSES, nothing published.
         t16 = tmp / "T16" / "root"; t16.mkdir(parents=True)
         badrel = {"version": "", "tag-object-sha": "t", "commit-sha": "c", "root": "r", "manifest-digest": "m"}
         s16 = _write_staged(tmp / "T16" / "s", onop, onpay, badrel, [])
@@ -1785,14 +1785,14 @@ def self_test():
         check("T16: pin REFUSES a malformed release (empty version) exit 2", rc == 2)
         check("T16: no pin published on a malformed release", not (t16 / PIN_REL).exists())
 
-        # T17 [RB7d]: an onboarding plan with a write op -> pin REFUSES (create/mkdir only).
+        # T17: an onboarding plan with a write op -> pin REFUSES (create/mkdir only).
         t17 = tmp / "T17" / "root"; t17.mkdir(parents=True)
         s17 = _write_staged(tmp / "T17" / "s", [{"op": "write", "path": "aiqt-file", "mode": 0o644}],
                             onpay, rel1, [])
         rc, out = _run_cli(["pin", "--root", str(t17), "--staged", str(s17)])
         check("T17: pin REFUSES a write op in an onboarding plan exit 2", rc == 2 and "create/mkdir" in out)
 
-        # T18 [RB7]: a directory-mode change on an installed mkdir -> doctor FAIL.
+        # T18: a directory-mode change on an installed mkdir -> doctor FAIL.
         t18 = tmp / "T18" / "root"; t18.mkdir(parents=True)
         s18 = _write_staged(tmp / "T18" / "s",
                             [{"op": "mkdir", "path": "d", "mode": 0o750},
@@ -1804,7 +1804,7 @@ def self_test():
         check("T18: doctor FAILs a directory-mode change", dr(str(t18)) == 1)
         os.chmod(t18 / "d", 0o750)
 
-        # T19 [RB6/BL-4]: deleting the transition record must NOT let the doctor pass over a tampered file,
+        # T19: deleting the transition record must NOT let the doctor pass over a tampered file,
         # and recover must NOT sweep a live pin's preimages.
         t19 = tmp / "T19" / "root"; t19.mkdir(parents=True)
         _run_cli(["pin", "--root", str(t19), "--staged",
@@ -1817,7 +1817,7 @@ def self_test():
         check("T19: the pin and its preimages survive the refused recover",
               (t19 / PIN_REL).is_file() and (t19 / PREIMAGES_REL).exists())
 
-        # T20 [RB2]: an interrupted un-adopt (intent present) -> doctor FAILs, recover COMPLETES it.
+        # T20: an interrupted un-adopt (intent present) -> doctor FAILs, recover COMPLETES it.
         t20 = tmp / "T20" / "root"; t20.mkdir(parents=True)
         _run_cli(["pin", "--root", str(t20), "--staged",
                   str(_write_staged(tmp / "T20" / "s", onop, onpay, rel1, []))])
@@ -1837,7 +1837,7 @@ def self_test():
         rc, _ = _run_cli(["recover", "--root", str(t20)])
         check("T20: recover idempotent after completion", rc == 0)
 
-        # T21 [RB5]: a crashed RE-ADOPTION (pin -> un-adopt -> pin) recovers to the prior un-adopted state.
+        # T21: a crashed RE-ADOPTION (pin -> un-adopt -> pin) recovers to the prior un-adopted state.
         t21 = tmp / "T21" / "root"; t21.mkdir(parents=True)
         _run_cli(["pin", "--root", str(t21), "--staged",
                   str(_write_staged(tmp / "T21" / "s1", onop, onpay, rel1, []))])
@@ -1863,14 +1863,14 @@ def self_test():
         check("T21: no pin, no installed file after recover; doctor clean",
               not (t21 / PIN_REL).exists() and not (t21 / "aiqt-file").exists() and dr(str(t21)) == 0)
 
-        # T22 [RB4]: a symlinked journal ENTRY -> doctor open-journal MALFORMED (never followed).
+        # T22: a symlinked journal ENTRY -> doctor open-journal MALFORMED (never followed).
         t22 = tmp / "T22" / "root"; (t22 / JOURNAL_REL).mkdir(parents=True)
         out22 = tmp / "T22-out"; out22.mkdir()
         os.symlink(str(out22), str(t22 / JOURNAL_REL / "txn-sym"))
         check("T22: doctor is MALFORMED on a symlinked journal entry (not followed)", dr(str(t22)) == 2)
 
-        # ===== ROUND 4 blocker regressions =====
-        # T23 [X3-1]: recover REFUSES a forged/authless/mismatched un-adopt intent (never mutates on it).
+        # ===== regressions, group 4 =====
+        # T23: recover REFUSES a forged/authless/mismatched un-adopt intent (never mutates on it).
         t23 = tmp / "T23" / "root"; t23.mkdir(parents=True)
         _run_cli(["pin", "--root", str(t23), "--staged",
                   str(_write_staged(tmp / "T23" / "s", onop, onpay, rel1, []))])
@@ -1889,7 +1889,7 @@ def self_test():
         check("T23: recover REFUSES a mismatched-transition intent exit 2", rc == 2)
         check("T23: pin intact after the mismatched refusal", (t23 / PIN_REL).is_file())
 
-        # T24 [X3-2]: un-adopt SURFACES (never silently succeeds) when adopter content sits under a pin dir.
+        # T24: un-adopt SURFACES (never silently succeeds) when adopter content sits under a pin dir.
         t24 = tmp / "T24" / "root"; t24.mkdir(parents=True)
         s24 = _write_staged(tmp / "T24" / "s", [{"op": "mkdir", "path": "d", "mode": 0o755},
                                                 {"op": "create", "path": "d/f", "mode": 0o644}],
@@ -1902,7 +1902,7 @@ def self_test():
         check("T24: un-adopt did not falsely succeed (intent+pin remain for retry)",
               (t24 / PIN_REL).is_file() and (t24 / UNADOPT_REL).is_file())
 
-        # T25 [X3-3]: do_pin REFUSES over a dangling non-terminal history (pin.toml deleted).
+        # T25: do_pin REFUSES over a dangling non-terminal history (pin.toml deleted).
         t25 = tmp / "T25" / "root"; t25.mkdir(parents=True)
         _run_cli(["pin", "--root", str(t25), "--staged",
                   str(_write_staged(tmp / "T25" / "s1", onop, onpay, rel1, []))])
@@ -1912,7 +1912,7 @@ def self_test():
         check("T25: do_pin REFUSES over a dangling non-terminal history exit 2",
               rc == 2 and "malformed" in out.lower())
 
-        # T26 [X3-6]: a hardlinked installed file -> doctor FAIL.
+        # T26: a hardlinked installed file -> doctor FAIL.
         t26 = tmp / "T26" / "root"; t26.mkdir(parents=True)
         _run_cli(["pin", "--root", str(t26), "--staged",
                   str(_write_staged(tmp / "T26" / "s", onop, onpay, rel1, []))])
@@ -1922,13 +1922,13 @@ def self_test():
         (t26 / "hardlink-copy").unlink()
         check("T26: doctor clean after removing the hardlink", dr(str(t26)) == 0)
 
-        # T27 [X3-9]: a standalone .aiqt/migration file with no pin -> MALFORMED, not NA.
+        # T27: a standalone .aiqt/migration file with no pin -> MALFORMED, not NA.
         t27 = tmp / "T27" / "root"; (t27 / MIGRATION_REL).mkdir(parents=True)
         (t27 / MIGRATION_REL / "crosswalk.toml").write_text("x = 1\n", encoding="utf-8")
         check("T27: a standalone migration file (no pin) is MALFORMED, not NA", dr(str(t27)) == 2)
 
-        # ===== ROUND 5 blocker regressions =====
-        # T28 [F1]: orphan preimages over a TERMINAL un-adopt history -> recover SWEEPS (not stranded).
+        # ===== regressions, group 5 =====
+        # T28: orphan preimages over a TERMINAL un-adopt history -> recover SWEEPS (not stranded).
         t28 = tmp / "T28" / "root"; t28.mkdir(parents=True)
         _run_cli(["pin", "--root", str(t28), "--staged",
                   str(_write_staged(tmp / "T28" / "s", onop, onpay, rel1, []))])
@@ -1940,7 +1940,7 @@ def self_test():
         check("T28: preimages gone; doctor clean (terminal un-adopted)",
               not (t28 / PREIMAGES_REL).exists() and dr(str(t28)) == 0)
 
-        # T29 [F3]: un-adopt BLOCKS on an open migration journal (consistency with do_pin/do_recover).
+        # T29: un-adopt BLOCKS on an open migration journal (consistency with do_pin/do_recover).
         t29 = tmp / "T29" / "root"; t29.mkdir(parents=True)
         _run_cli(["pin", "--root", str(t29), "--staged",
                   str(_write_staged(tmp / "T29" / "s", onop, onpay, rel1, []))])
@@ -1956,20 +1956,20 @@ def self_test():
         rc, out = _run_cli(["un-adopt", "--root", str(t29), "--authorizer", "ops", "--reason", "x"])
         check("T29: un-adopt BLOCKS on an open migration journal exit 2", rc == 2 and "journal" in out.lower())
 
-        # T30 [F4]: a symlinked .aiqt/migration -> doctor MALFORMED, NOT an uncaught traceback/crash.
+        # T30: a symlinked .aiqt/migration -> doctor MALFORMED, NOT an uncaught traceback/crash.
         t30 = tmp / "T30" / "root"; (t30 / ".aiqt").mkdir(parents=True)
         out30 = tmp / "T30-out"; out30.mkdir()
         os.symlink(str(out30), str(t30 / MIGRATION_REL))
         check("T30: doctor is MALFORMED (not a crash) on a symlinked .aiqt/migration", dr(str(t30)) == 2)
 
-        # T31 [F7]: do_pin REFUSES an op targeting the .aiqt/ adopter-state namespace.
+        # T31: do_pin REFUSES an op targeting the .aiqt/ adopter-state namespace.
         t31 = tmp / "T31" / "root"; t31.mkdir(parents=True)
         s31 = _write_staged(tmp / "T31" / "s", [{"op": "create", "path": ".aiqt/evil", "mode": 0o644}],
                             {".aiqt/evil": b"x\n"}, rel1, [])
         rc, out = _run_cli(["pin", "--root", str(t31), "--staged", str(s31)])
         check("T31: do_pin REFUSES an op targeting .aiqt/ exit 2", rc == 2 and ".aiqt" in out)
 
-        # F-JOURNAL-HELD-FD-LISTING: an open cutover transaction created AFTER the journal fd was
+        # An open cutover transaction created AFTER the journal fd was
         # opened still blocks a new pin operation: _blocking_open_journal lists the journal through a
         # FRESH descriptor reopened beneath the held one (a held descriptor's listing can miss entries
         # created since its open). The os.open spy creates the open (INTENT-only) transaction right

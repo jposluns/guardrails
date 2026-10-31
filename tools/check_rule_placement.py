@@ -71,7 +71,7 @@ Emits the deterministic section 6.6 codes: loose, unknown-family, nested-dir, ba
 tier-code-mismatch, numbered-non-aiqt, apex-nonstandard, frontmatter-drift, missing-provenance. Each
 violation line is `<relpath>: <code>: <detail>` per section 6.2. The adopter .corpus-config.yml support
 (6.4/6.5 families and metadata, 6.7 pending: tolerance) and the pack-drift WARNING treatment (6.6) serve
-the not-yet-built adopter cleanup workflow and are deferred (recorded as GD-9); this gate runs fail-closed
+the not-yet-built adopter cleanup workflow and are deferred; this gate runs fail-closed
 on the built-in aiqt/security/external families and accepts both pack- and adopter-origin rules.
 """
 import sys
