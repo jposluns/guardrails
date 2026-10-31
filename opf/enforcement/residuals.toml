@@ -1,0 +1,64 @@
+# opf/enforcement/residuals.toml: the OPF enforcement pack's residual register (OPF-SPEC 14.1).
+#
+# Spec 14.1 requires the pack to disclose that per-clone hook installation and bypass, canonical hand
+# edits, shell or interpreter wrapping, same-user tampering and unverified platform denial are not
+# eliminated by it, and states that server-side branch protection is adopter-attested. One [[residual]]
+# row per token of _opf_adopt.ENFORCEMENT_RESIDUALS, in that tuple's order (opf/tools/_opf_adopt.py).
+# Every pack member is named by at least one row; this file and platforms.toml are registers, not
+# members. platforms.toml carries each assistant platform's residual tokens; this file says where each
+# member discloses each residual.
+#
+# No tool reads this file yet: the rows are disclosure, and nothing checks the anchors against the
+# members. A change to a member's residual wording must keep its anchor here present verbatim.
+#
+# Fields per [[residual]]:
+#   id         the token (_opf_adopt.ENFORCEMENT_RESIDUALS)
+#   spec       the 14.1 phrase the row discharges, quoted from opf/spec/OPF-SPEC.md (a line break in
+#              the spec reads as one space)
+#   members    every member the residual applies to, relative to opf/enforcement/
+#   anchors    member path to a phrase that member contains verbatim
+#   statement  the residual in one plain sentence
+
+format-version = 1
+
+[[residual]]
+id = "server-side-protection-adopter-attested"
+spec = "Server-side branch protection is adopter-attested"
+members = ["ci/github-actions.yml", "ci/opf-ci.sh"]
+anchors = {"ci/github-actions.yml" = "branches: [main]", "ci/opf-ci.sh" = "Inert until adoption installs it"}
+statement = "The CI checks block a merge only where the adopter's server-side branch protection requires them, and the pack neither configures nor verifies that protection."
+
+[[residual]]
+id = "per-clone-installation-and-bypass"
+spec = "Per-clone hook installation and bypass"
+members = ["claude/pretooluse_deny.py", "claude/settings.opf.json", "precommit/install.sh", "precommit/pre-commit"]
+anchors = {"claude/pretooluse_deny.py" = "Per-clone installation and bypass: the settings.json registration is local configuration", "claude/settings.opf.json" = "PreToolUse", "precommit/install.sh" = "the stub is local to this clone", "precommit/pre-commit" = "Per-clone installation: the stub is local to the clone."}
+statement = "The deny hook registration and the pre-commit stub are local to each clone, so a clone that never installed them runs neither, and the same user can skip or remove them."
+
+[[residual]]
+id = "canonical-hand-edits"
+spec = "canonical hand edits"
+members = ["claude/pretooluse_deny.py", "ci/opf-ci.sh", "precommit/pre-commit"]
+anchors = {"claude/pretooluse_deny.py" = "(same-user tampering, canonical hand edits)", "ci/opf-ci.sh" = "a hand-written canonical, self-consistent record passes both checks", "precommit/pre-commit" = "Canonical hand edits: a hand-written canonical, self-consistent record passes both checks."}
+statement = "A hand edit that writes a canonical, self-consistent record passes the doctor and render checks, and the deny hook does not see an edit made outside Claude Code."
+
+[[residual]]
+id = "shell-or-interpreter-wrapping"
+spec = "shell or interpreter wrapping"
+members = ["claude/pretooluse_deny.py", "codex/AGENTS.opf.md", "gemini-cli/GEMINI.opf.md", "cursor/opf.mdc"]
+anchors = {"claude/pretooluse_deny.py" = "R5 is a lexical floor, not a sandbox.", "codex/AGENTS.opf.md" = "Shell or interpreter wrapping (`shell-or-interpreter-wrapping`)", "gemini-cli/GEMINI.opf.md" = "Shell or interpreter wrapping (`shell-or-interpreter-wrapping`)", "cursor/opf.mdc" = "Shell or interpreter wrapping (`shell-or-interpreter-wrapping`)"}
+statement = "A shell command or interpreter can reach a protected path without spelling it, which the deny hook's lexical check does not see and the instructions members cannot stop."
+
+[[residual]]
+id = "same-user-tampering"
+spec = "same-user tampering"
+members = ["claude/pretooluse_deny.py", "codex/AGENTS.opf.md", "gemini-cli/GEMINI.opf.md", "cursor/opf.mdc", "precommit/install.sh", "precommit/pre-commit"]
+anchors = {"claude/pretooluse_deny.py" = "spec 14.1 accepts same-user tampering as a residual", "codex/AGENTS.opf.md" = "Same-user tampering (`same-user-tampering`)", "gemini-cli/GEMINI.opf.md" = "Same-user tampering (`same-user-tampering`)", "cursor/opf.mdc" = "Same-user tampering (`same-user-tampering`)", "precommit/install.sh" = "same-user races are residuals, not defects", "precommit/pre-commit" = "the same user can remove the stub"}
+statement = "Anyone acting as the same user can edit, deregister or replace a member, its registration or the files it protects."
+
+[[residual]]
+id = "unverified-platform-denial"
+spec = "unverified platform denial"
+members = ["codex/AGENTS.opf.md", "gemini-cli/GEMINI.opf.md", "cursor/opf.mdc"]
+anchors = {"codex/AGENTS.opf.md" = "No verified platform guard (`unverified-platform-denial`)", "gemini-cli/GEMINI.opf.md" = "No verified platform guard (`unverified-platform-denial`)", "cursor/opf.mdc" = "No verified platform guard (`unverified-platform-denial`)"}
+statement = "Codex, Gemini CLI and Cursor get instructions only, because no denial on those platforms was verified, so nothing there stops a write to a protected path."

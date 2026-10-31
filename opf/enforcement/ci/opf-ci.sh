@@ -17,6 +17,7 @@
 #   OPF_PYTHON  the interpreter (default: python3); always launched isolated (-I -B)
 #   OPF_TOOL    the path to opf.py (default: ../../tools/opf.py beside this file, the pack layout)
 #
+# Residual (spec 14.1): a hand-written canonical, self-consistent record passes both checks.
 # Inert until adoption installs it; the CI receipt-identity comparison is a later release (U25).
 set -u
 if [ "$#" -gt 1 ]; then

@@ -576,7 +576,7 @@ _SHIPPED_RECIPE = "enforcement/ci/opf-ci.sh"
 # without regenerating fails tools/gen_secret_patterns.py --check in CI. Never hand-edit this region.
 # BEGIN generated OPF CI floor digests (source: opf/enforcement/ci/; regenerate with tools/gen_secret_patterns.py)
 _SHIPPED_TEMPLATE_SHA256 = '3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262'
-_SHIPPED_RECIPE_SHA256 = '0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104'
+_SHIPPED_RECIPE_SHA256 = '4e0ffdc6c33ac4affec871513b28aeb0aa1e545d31bc5a1d29066aa14f0d11ce'
 # END generated OPF CI floor digests
 # Spec 14.1 check 4 requires that "CI asserts store presence and identity". The shipped recipe asserts
 # presence only (doctor --require-store, then render --check); the CI identity assertion is the deferred
