@@ -2885,6 +2885,14 @@ _T_NAMED = _T_PATH + "ROOT = str(Path(__file__).resolve().parents[1] / 'lib' / '
 # one is bound, so that the outer one's value follows the rebinding and not the first binding.
 _T_TWO_NAMES = _T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n%sLIB = ROOT / 'lib'\n" \
     "sys.path.insert(0, str(LIB / '_vendor'))\nimport pkg\n"
+# The same two names, the outer one (LIB, read directly inside the inserted str()) then, in the rebinding vectors,
+# rebound before the insertion, so that the insertion follows the rebinding and not the first binding.
+_T_OUTER_NAME = _T_PATH + "ROOT = Path(__file__).resolve().parents[1]\nLIB = ROOT / 'lib'\n" \
+    "%ssys.path.insert(0, str(LIB / '_vendor'))\nimport pkg\n"
+# One name bound to a pathlib chain and read directly inside the inserted str(), then, in the rebinding vectors,
+# rebound before the insertion.
+_T_ONE_NAME = _T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n" \
+    "%ssys.path.insert(0, str(ROOT / 'lib' / '_vendor'))\nimport pkg\n"
 
 
 def _unread_refusal(argument, rel="tools/t.py", sroot="lib/_vendor"):
@@ -3624,9 +3632,8 @@ _GREEN_VECTORS = (
     # with the cannot-evaluate vectors that change it.
     ("insertion of a name bound once to a read shape", (("tools/t.py", _T_NAMED % ""),),
      dict(search_roots=_T_ROOTS)),
-    ("insertion through a name bound once to a pathlib chain",
-     (("tools/t.py", _T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n"
-                     "sys.path.insert(0, str(ROOT / 'lib' / '_vendor'))\nimport pkg\n"),), dict(search_roots=_T_ROOTS)),
+    ("insertion through a name bound once to a pathlib chain", (("tools/t.py", _T_ONE_NAME % ""),),
+     dict(search_roots=_T_ROOTS)),
     # At the name bound: two names, the second bound to the chain the first starts at (one more is refused below).
     ("insertion through two names, each bound once to a pathlib chain",
      (("tools/t.py", _T_TWO_NAMES % ""),), dict(search_roots=_T_ROOTS)),
@@ -4161,6 +4168,20 @@ _CANNOT_VECTORS = (
                    source=_T_TWO_NAMES % "def move():\n    global ROOT\n    ROOT = Path('elsewhere')\nmove()\n"),
     _unread_vector("inner pathlib-chain name rebound in an if branch", "str(LIB / '_vendor')",
                    source=_T_TWO_NAMES % "if os.environ.get('ELSEWHERE'):\n    ROOT = Path('elsewhere')\n"),
+    # The name read directly inside the inserted str(), the outer one of two or a single one, bound once and then
+    # rebound: the gate reads neither binding.
+    _unread_vector("outer pathlib-chain name rebound later at module level", "str(LIB / '_vendor')",
+                   source=_T_OUTER_NAME % "LIB = Path('elsewhere')\n"),
+    _unread_vector("outer pathlib-chain name rebound in a function through global", "str(LIB / '_vendor')",
+                   source=_T_OUTER_NAME % "def move():\n    global LIB\n    LIB = Path('elsewhere')\nmove()\n"),
+    _unread_vector("outer pathlib-chain name rebound in an if branch", "str(LIB / '_vendor')",
+                   source=_T_OUTER_NAME % "if os.environ.get('ELSEWHERE'):\n    LIB = Path('elsewhere')\n"),
+    _unread_vector("single pathlib-chain name rebound later at module level", "str(ROOT / 'lib' / '_vendor')",
+                   source=_T_ONE_NAME % "ROOT = Path('elsewhere')\n"),
+    _unread_vector("single pathlib-chain name rebound in a function through global", "str(ROOT / 'lib' / '_vendor')",
+                   source=_T_ONE_NAME % "def move():\n    global ROOT\n    ROOT = Path('elsewhere')\nmove()\n"),
+    _unread_vector("single pathlib-chain name rebound in an if branch", "str(ROOT / 'lib' / '_vendor')",
+                   source=_T_ONE_NAME % "if os.environ.get('ELSEWHERE'):\n    ROOT = Path('elsewhere')\n"),
     # A str-valued name over a chain that starts at a name: its chain is read with no name to follow.
     _unread_vector("str-valued name over a pathlib chain that starts at a name", "LIBS",
                    source=_T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n"
@@ -4549,6 +4570,16 @@ def _case_failure(module, case):
 
 
 _SELF_TEST_MARKER = "\n# " + "-" * 64 + " self-test\n"
+# _path_chain's name lookup, and that lookup with a branch ahead of it that reads the name directly inside the
+# inserted str() at its first plain module-level binding; the lookup itself is left byte for byte, so the anchors of
+# the other mutants on it stay found exactly once.
+_STR_NAME_LOOKUP = "    if isinstance(node, ast.Name) and named:\n        value = _assigned(bindings, node.id)\n" \
+    "        start = None if"
+_STR_NAME_FIRST_BINDING = "    if isinstance(node, ast.Name) and named == MAX_NAME_HOPS:\n" \
+    '        first = next((b[1] for b in _bindings_of(bindings, node.id) or () if b[0] == "assign"), None)\n' \
+    "        start = None if first is None else _path_chain(first, rel, bindings, MAX_NAME_HOPS - 1)\n" \
+    "    elif isinstance(node, ast.Name) and named:\n        value = _assigned(bindings, node.id)\n" \
+    "        start = None if"
 
 # Each mutant removes one check (or one fail-closed path), or puts back a widening or defect this gate replaces,
 # from the gate half of this file's source, the part before the
@@ -4649,6 +4680,21 @@ MUTANTS = (
     ("chain-name-bound-once-branch", "        value = _assigned(bindings, node.id)\n        start = None if",
      '        value = next((b[1] for b in _bindings_of(bindings, node.id) or () if b[0] == "assign"), None)\n'
      "        start = None if", "inner pathlib-chain name rebound in an if branch"),
+    # The name read directly inside the inserted str() (named at MAX_NAME_HOPS) read at its first plain module-level
+    # binding, every other binding ignored, in a branch ahead of the lookup: each rebinding of the outer name of two,
+    # or of a single name, is then read as the root it first spelled.
+    ("outer-chain-name-bound-once", _STR_NAME_LOOKUP, _STR_NAME_FIRST_BINDING,
+     "outer pathlib-chain name rebound later at module level"),
+    ("outer-chain-name-bound-once-global", _STR_NAME_LOOKUP, _STR_NAME_FIRST_BINDING,
+     "outer pathlib-chain name rebound in a function through global"),
+    ("outer-chain-name-bound-once-branch", _STR_NAME_LOOKUP, _STR_NAME_FIRST_BINDING,
+     "outer pathlib-chain name rebound in an if branch"),
+    ("single-chain-name-bound-once", _STR_NAME_LOOKUP, _STR_NAME_FIRST_BINDING,
+     "single pathlib-chain name rebound later at module level"),
+    ("single-chain-name-bound-once-global", _STR_NAME_LOOKUP, _STR_NAME_FIRST_BINDING,
+     "single pathlib-chain name rebound in a function through global"),
+    ("single-chain-name-bound-once-branch", _STR_NAME_LOOKUP, _STR_NAME_FIRST_BINDING,
+     "single pathlib-chain name rebound in an if branch"),
     ("str-name-chain-unnamed", "MAX_NAME_HOPS if named else 0", "MAX_NAME_HOPS",
      "str-valued name over a pathlib chain that starts at a name"),
     ("str-wrapper-required", "    return _os_path_join(node, rel, bindings)\n",
