@@ -31,12 +31,11 @@ whatever the tree currently holds can sweep in unrelated work, and where committ
 for a fixture or test, an isolated checkout provides it rather than reshaping the shared working
 tree in place.
 
-The preference is to remove the ambient dependency, not merely to check it: an explicit binding
-removes that ambient dependency, whereas a confirmed ambient binding is correct only until the
-surrounding state next shifts. This is the prefer-removing-a-path preference applied to how an
-action names its referent, and it sits beside confirm-execution-target, which governs the residual
-case where only an ambient binding exists, and absolute-paths, its file-path instance. An explicit
-binding is still not proof of intent: a named target can be the wrong target, and confirming it is
-confirm-execution-target's obligation. When an ambient binding would discard uncommitted work or
-absorb unrelated changes into a change set, preserve-uncommitted-work and separate-task-changes
-govern that loss; this rule governs the prior choice of what the action was bound to.
+The preference is to remove the ambient dependency, not merely to check it: a confirmed ambient
+binding is correct only until the surrounding state next shifts. This applies prefer-removing-a-path
+to how an action names its referent and sits beside confirm-execution-target, which governs the case
+where only an ambient binding exists, and absolute-paths, its file-path instance. An explicit binding
+does not prove intent; confirming a named target is confirm-execution-target's obligation. When an
+ambient binding would discard uncommitted work or absorb unrelated changes into a change set,
+preserve-uncommitted-work and separate-task-changes govern that loss; this rule governs the prior
+binding choice.
