@@ -319,18 +319,32 @@ or to quality.yml and not to it would drop out of the scheduled run without
 a sound. Every member of the local runner and of quality.yml (read as above;
 msg-leaks.yml is not a source here) must be a member of the weekly file,
 read by the same extract_ci, or carry an entry in WEEKLY_EXCLUSIONS, an
-(identity, reason) pair whose reason is a non-empty string. Only the weekly
-file's member set and its cannot-evaluate diagnostics are read: the
-required-status, lane and trigger rules hold quality.yml's shape and are not
-applied to it. A member in neither place is a weekly-missing finding; an
-entry whose reason is empty or blank is a weekly-exclusion-reason finding
-and excludes nothing; an entry naming no member of either source, or one the
-weekly file already runs, is a weekly-exclusion-stale finding; a repeated
-entry is a weekly-exclusion-repeat finding (each exit 1). The live gates and
-drift checks the weekly file leaves out carry an entry each as well, so a
-new command in either source is a finding until it is added to the weekly
-file or excluded with its reason. An input it cannot read is cannot-evaluate
-(exit 2).
+(identity, reason) pair whose reason is one of WEEKLY_REASONS, the module's
+named reason constants. Only the weekly file's member set and its
+cannot-evaluate diagnostics are read: the required-status, lane and trigger
+rules hold quality.yml's shape and are not applied to it. A member in
+neither place is a weekly-missing finding; an entry whose reason is not one
+of WEEKLY_REASONS is a weekly-exclusion-reason finding and excludes nothing;
+an entry naming no member of either source, or one the weekly file already
+runs, is a weekly-exclusion-stale finding; a repeated entry is a
+weekly-exclusion-repeat finding (each exit 1). The live gates and drift
+checks the weekly file leaves out carry an entry each as well, so a new
+command in either source is a finding until it is added to the weekly file
+or excluded with its reason. The runner-dependent live legs of
+WEEKLY_RUNNER_LEGS (the git option table and byte canon) are held to their
+quality.yml placement, both files parsed whole by _WorkflowReader: the
+runner labels of the jobs that run the leg (a one-label runs-on, or
+matrix.os over a plain list) must be the same set, and for byte canon only
+jobs in which a step running git config --global core.autocrlf true comes
+before the first actions/checkout step count, so the byte-canon run in
+quality.yml's registry job, over a default checkout, is not one the weekly
+file must repeat. A departure is a weekly-runner-autocrlf finding when a
+weekly job runs the leg without that setting first, else a
+weekly-runner-platform finding (each exit 1). The Python version, a
+job-level if: and continue-on-error of those jobs are not compared. An
+input it cannot read, an exclusion entry that is not an (identity, reason)
+pair with a string identity, and a runs-on or matrix outside that shape are
+cannot-evaluate (exit 2).
 
 Exit convention (the higher of the parity leg's, the checkout-credentials
 leg's and the weekly self-test leg's exit):
@@ -4656,6 +4670,30 @@ _WEEKLY_HOST_PIN = (
     "in the quality.yml host-patch jobs; its self-test runs in the weekly file")
 _WEEKLY_DIGEST = (
     "the advisory reference digest exits 0 on a finding and gates nothing")
+_WEEKLY_PULL_REQUEST = (
+    "quality.yml runs this form only on a pull_request event, and it reads "
+    "GITHUB_EVENT_NAME and GITHUB_BASE_REF, which a scheduled run does not "
+    "carry")
+_WEEKLY_NO_PARENT = (
+    "quality.yml reaches this form only on a push whose HEAD^ does not "
+    "resolve; a scheduled run of a commit with a parent never takes it")
+_WEEKLY_HISTORY = (
+    "a live gate that reads the git history of the commit it judges (a "
+    "parent, a merge base or an earlier release), which quality.yml judged "
+    "on the push that made that commit")
+_WEEKLY_LOCAL_GITLEAKS = (
+    "local-only: quality.yml does not run it; it checks the gitleaks binary "
+    "on the host PATH against the pinned version, and a weekly runner "
+    "installs none")
+_WEEKLY_LOCAL_HISTORY = (
+    "local-only: quality.yml does not run this form; it reads the git "
+    "history of the local branch against its protected line")
+# Every reason an entry may carry: a reason outside these is a
+# weekly-exclusion-reason finding, so an entry cannot pass on a stray mark.
+WEEKLY_REASONS = (
+    _WEEKLY_LIVE, _WEEKLY_EVENT, _WEEKLY_GROUP, _WEEKLY_HOST_PIN,
+    _WEEKLY_DIGEST, _WEEKLY_PULL_REQUEST, _WEEKLY_NO_PARENT, _WEEKLY_HISTORY,
+    _WEEKLY_LOCAL_GITLEAKS, _WEEKLY_LOCAL_HISTORY)
 WEEKLY_EXCLUSIONS = (
     ("opf/tools/opf.py --self-test-group adopt", _WEEKLY_GROUP),
     ("opf/tools/opf.py --self-test-group core", _WEEKLY_GROUP),
@@ -4681,7 +4719,7 @@ WEEKLY_EXCLUSIONS = (
     ("opf/tools/check_opf_prompt_pack.py", _WEEKLY_LIVE),
     ("tools/check_applies.py", _WEEKLY_LIVE),
     ("tools/check_artifact_checksums.py", _WEEKLY_LIVE),
-    ("tools/check_branch_root.py --max-lag 200", _WEEKLY_LIVE),
+    ("tools/check_branch_root.py --max-lag 200", _WEEKLY_LOCAL_HISTORY),
     ("tools/check_child_status_coverage.py", _WEEKLY_LIVE),
     ("tools/check_ci_parity.py", _WEEKLY_LIVE),
     ("tools/check_cited_standards.py --config .aiqt/cited-standards.toml",
@@ -4694,7 +4732,7 @@ WEEKLY_EXCLUSIONS = (
     ("tools/check_entry_guard.py", _WEEKLY_LIVE),
     ("tools/check_footer.py", _WEEKLY_LIVE),
     ("tools/check_gensrc_failclose.py", _WEEKLY_LIVE),
-    ("tools/check_gitleaks_pin.py", _WEEKLY_LIVE),
+    ("tools/check_gitleaks_pin.py", _WEEKLY_LOCAL_GITLEAKS),
     ("tools/check_hooks_preview.py", _WEEKLY_LIVE),
     ("tools/check_install_page.py", _WEEKLY_LIVE),
     ("tools/check_instruction_budget.py", _WEEKLY_LIVE),
@@ -4704,7 +4742,7 @@ WEEKLY_EXCLUSIONS = (
     ("tools/check_links.py", _WEEKLY_LIVE),
     ("tools/check_manifest.py", _WEEKLY_LIVE),
     ("tools/check_mappings.py", _WEEKLY_LIVE),
-    ("tools/check_mistakes_register.py", _WEEKLY_LIVE),
+    ("tools/check_mistakes_register.py", _WEEKLY_HISTORY),
     ("tools/check_must_deliver.py", _WEEKLY_LIVE),
     ("tools/check_newtab.py", _WEEKLY_LIVE),
     ("tools/check_no_dashes.py", _WEEKLY_LIVE),
@@ -4723,17 +4761,17 @@ WEEKLY_EXCLUSIONS = (
     ("tools/check_python_launcher_isolation.py", _WEEKLY_LIVE),
     ("tools/check_record_drift.py", _WEEKLY_LIVE),
     ("tools/check_reference_facts.py", _WEEKLY_LIVE),
-    ("tools/check_release_build.py", _WEEKLY_LIVE),
-    ("tools/check_release_cut.py", _WEEKLY_LIVE),
-    ("tools/check_release_delta.py", _WEEKLY_LIVE),
+    ("tools/check_release_build.py", _WEEKLY_HISTORY),
+    ("tools/check_release_cut.py", _WEEKLY_PULL_REQUEST),
+    ("tools/check_release_delta.py", _WEEKLY_HISTORY),
     ("tools/check_relied_exit_pipes.py", _WEEKLY_LIVE),
     ("tools/check_rule_placement.py", _WEEKLY_LIVE),
     ("tools/check_secrets.py", _WEEKLY_LIVE),
     ("tools/check_site.py", _WEEKLY_LIVE),
     ("tools/check_site_versions.py", _WEEKLY_LIVE),
     ("tools/check_sized_instructions.py", _WEEKLY_LIVE),
-    ("tools/check_version_monotonicity.py", _WEEKLY_LIVE),
-    ("tools/check_version_monotonicity.py --base HEAD^", _WEEKLY_LIVE),
+    ("tools/check_version_monotonicity.py", _WEEKLY_NO_PARENT),
+    ("tools/check_version_monotonicity.py --base HEAD^", _WEEKLY_HISTORY),
     ("tools/check_versions.py", _WEEKLY_LIVE),
     ("tools/conformance.py --root .", _WEEKLY_LIVE),
     ("tools/doctor.py --root .", _WEEKLY_LIVE),
@@ -4782,11 +4820,11 @@ def weekly_findings(source_members, weekly_members,
                 "excluded more than once in WEEKLY_EXCLUSIONS"))
             continue
         seen.add(identity)
-        if not isinstance(reason, str) or not reason.strip():
+        if not isinstance(reason, str) or reason not in WEEKLY_REASONS:
             findings.append(Finding(
                 "weekly-exclusion-reason", identity,
-                "the WEEKLY_EXCLUSIONS entry carries no reason, so it "
-                "excludes nothing"))
+                "the WEEKLY_EXCLUSIONS entry carries no reason from "
+                "WEEKLY_REASONS, so it excludes nothing"))
             continue
         if identity not in source_members:
             findings.append(Finding(
@@ -4807,10 +4845,175 @@ def weekly_findings(source_members, weekly_members,
     return frozenset(excluded), tuple(findings)
 
 
+def _weekly_exclusion_shape(exclusions):
+    """Cannot-evaluate diagnostics for an exclusion list whose shape
+    weekly_findings cannot read: a list that is not a tuple or list, or an
+    entry that is not an (identity, reason) pair with a string identity."""
+    if not isinstance(exclusions, (tuple, list)):
+        return [_diagnostic(
+            "WEEKLY_EXCLUSIONS", 0, "weekly-exclusion-shape",
+            "WEEKLY_EXCLUSIONS is not a tuple or list")]
+    diagnostics = []
+    for number, entry in enumerate(exclusions, 1):
+        if (not isinstance(entry, (tuple, list)) or len(entry) != 2
+                or not isinstance(entry[0], str)):
+            diagnostics.append(_diagnostic(
+                "WEEKLY_EXCLUSIONS", number, "weekly-exclusion-shape",
+                "entry {} is not an (identity, reason) pair with a string "
+                "identity: {!r}".format(number, entry)))
+    return diagnostics
+
+
+# The runner-dependent live legs the weekly file runs (module docstring,
+# WEEKLY SELF-TESTS), each with whether its job must set core.autocrlf true
+# before its checkout, as quality.yml's byte-canon-matrix job does.
+WEEKLY_RUNNER_LEGS = (
+    ("tools/check_git_option_table.py", False),
+    ("tools/check_byte_canon.py", True),
+)
+WEEKLY_AUTOCRLF = "git config --global core.autocrlf true"
+_MATRIX_OS = re.compile(r"\$\{\{\s*matrix\.os\s*\}\}")
+
+
+def _step_identities(run):
+    """The normalized members a step's run: text invokes, read line by line
+    as _classify_ci_command reads them."""
+    identities = set()
+    for line in run.split("\n"):
+        code = _strip_comment(line).strip()
+        tokenized = _tokenize(code)
+        if not code or not tokenized.ok or not tokenized.value:
+            continue
+        tokens = tokenized.value
+        if (tokens[0] in INTERPRETERS or tokens[0] in SHELLS
+                or tokens[0].lstrip("./") == "gitleaks"):
+            normalized = normalize(tokens, raws=_raw_lexemes(code, tokens))
+            if normalized.ok:
+                identities.add(normalized.value)
+    return identities
+
+
+def _job_platforms(job_id, job):
+    """The runner labels job runs on: a one-label runs-on, or ${{ matrix.os
+    }} over a strategy.matrix.os list with no include: or exclude:. Any
+    other shape is WorkflowShapeError (cannot-evaluate)."""
+    line = job.key_lines.get("runs-on", 0)
+    runs_on = _exact_key(job, "runs-on", line)
+    if not isinstance(runs_on, str):
+        raise WorkflowShapeError(line, "job {!r} runs-on: is not one "
+                                 "string: {!r}".format(job_id, runs_on))
+    if "${{" not in runs_on:
+        return frozenset((runs_on,))
+    strategy = _exact_key(job, "strategy", line)
+    matrix = (_exact_key(strategy, "matrix", line)
+              if isinstance(strategy, dict) else _ABSENT)
+    labels = (_exact_key(matrix, "os", line)
+              if isinstance(matrix, dict) else _ABSENT)
+    if (not _MATRIX_OS.fullmatch(runs_on)
+            or not isinstance(matrix, dict)
+            or "include" in matrix or "exclude" in matrix
+            or not isinstance(labels, list) or not labels
+            or not all(isinstance(label, str) for label in labels)):
+        raise WorkflowShapeError(line, "job {!r} runs-on: {!r} is not a "
+                                 "matrix.os over a plain list of runner "
+                                 "labels".format(job_id, runs_on))
+    return frozenset(labels)
+
+
+def _autocrlf_first(steps):
+    """True when a step running WEEKLY_AUTOCRLF comes before the job's first
+    actions/checkout step, so the checkout is made under it."""
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        run = step.get("run")
+        if isinstance(run, str) and run.strip() == WEEKLY_AUTOCRLF:
+            return True
+        uses = step.get("uses")
+        if isinstance(uses, str):
+            name = uses.split("@", 1)[0].strip().lower()
+            if (name == CHECKOUT_ACTION
+                    or name.startswith(CHECKOUT_ACTION + "/")):
+                return False
+    return False
+
+
+def _runner_leg_placements(tree, identity):
+    """(platforms where a job running identity checks out under
+    WEEKLY_AUTOCRLF, platforms of every job running it, ids of jobs running
+    it without that setting first) for one parsed workflow."""
+    jobs = _exact_key(tree, "jobs", 0) if isinstance(tree, dict) else _ABSENT
+    if not isinstance(jobs, dict):
+        raise WorkflowShapeError(0, "no jobs: mapping")
+    hostile = set()
+    every = set()
+    plain = []
+    for job_id, job in jobs.items():
+        steps = (_exact_key(job, "steps", jobs.key_lines.get(job_id, 0))
+                 if isinstance(job, dict) else _ABSENT)
+        if not isinstance(steps, list):
+            continue
+        if not any(isinstance(step, dict)
+                   and isinstance(step.get("run"), str)
+                   and identity in _step_identities(step["run"])
+                   for step in steps):
+            continue
+        platforms = _job_platforms(job_id, job)
+        every |= platforms
+        if _autocrlf_first(steps):
+            hostile |= platforms
+        else:
+            plain.append(job_id)
+    return frozenset(hostile), frozenset(every), tuple(plain)
+
+
+def weekly_runner_findings(ci_tree, weekly_tree, legs=WEEKLY_RUNNER_LEGS):
+    """Hold each runner-dependent leg to quality.yml's placement: the same
+    runner platforms and, for a leg that needs it, core.autocrlf true set
+    before the checkout in the job that runs it (module docstring, WEEKLY
+    SELF-TESTS)."""
+    findings = []
+    for identity, needs_autocrlf in legs:
+        try:
+            want_hostile, want_every, _plain = _runner_leg_placements(
+                ci_tree, identity)
+        except WorkflowShapeError as exc:
+            exc.source = CI_SOURCE
+            raise
+        got_hostile, got_every, plain = _runner_leg_placements(
+            weekly_tree, identity)
+        want = want_hostile if needs_autocrlf else want_every
+        got = got_hostile if needs_autocrlf else got_every
+        if got == want:
+            continue
+        if needs_autocrlf and plain and not got_every <= got:
+            findings.append(Finding(
+                "weekly-runner-autocrlf", identity,
+                "{} runs it in job(s) {} without {!r} before the checkout; "
+                "{} runs it under that setting on {}, {} on {}".format(
+                    WEEKLY_SOURCE, ", ".join(sorted(plain)), WEEKLY_AUTOCRLF,
+                    CI_SOURCE, sorted(want), WEEKLY_SOURCE, sorted(got))))
+        else:
+            findings.append(Finding(
+                "weekly-runner-platform", identity,
+                "{} runs it on {}{}, {} on {}".format(
+                    CI_SOURCE, sorted(want),
+                    " after {!r}".format(WEEKLY_AUTOCRLF)
+                    if needs_autocrlf else "",
+                    WEEKLY_SOURCE, sorted(got))))
+    return findings
+
+
 def evaluate_weekly(local_text, ci_text, weekly_text,
-                    exclusions=WEEKLY_EXCLUSIONS):
+                    exclusions=WEEKLY_EXCLUSIONS, legs=WEEKLY_RUNNER_LEGS):
     """Extract the three member sets and judge them; only the weekly file's
-    members and cannot-evaluate diagnostics are read, never its findings."""
+    members and cannot-evaluate diagnostics are read, never its findings.
+    The runner-dependent legs are then held to quality.yml's placement."""
+    diagnostics = _weekly_exclusion_shape(exclusions)
+    if diagnostics:
+        return WeeklyReport(
+            2, frozenset(), frozenset(), frozenset(), (),
+            _dedupe_diagnostics(diagnostics))
     local = extract_local(local_text)
     ci = extract_ci(ci_text)
     weekly = extract_ci(weekly_text, WEEKLY_SOURCE)
@@ -4824,6 +5027,25 @@ def evaluate_weekly(local_text, ci_text, weekly_text,
     weekly_members = frozenset(weekly.members)
     excluded, findings = weekly_findings(
         required, weekly_members, exclusions)
+    # A shape error is the weekly file's unless the step that raised it
+    # names quality.yml (weekly_runner_findings marks its own).
+    source = CI_SOURCE
+    try:
+        ci_tree = _WorkflowReader(ci_text).parse()
+        source = WEEKLY_SOURCE
+        weekly_tree = _WorkflowReader(weekly_text).parse()
+        runner = weekly_runner_findings(ci_tree, weekly_tree, legs)
+    except WorkflowShapeError as exc:
+        return WeeklyReport(
+            2, frozenset(), frozenset(), frozenset(), (),
+            (_diagnostic(getattr(exc, "source", source), exc.line,
+                         "workflow-shape", exc.message),))
+    except RecursionError:
+        return WeeklyReport(
+            2, frozenset(), frozenset(), frozenset(), (),
+            (_diagnostic(source, 0, "workflow-shape",
+                         "nesting deeper than this reader can follow"),))
+    findings = tuple(findings) + tuple(runner)
     return WeeklyReport(
         1 if findings else 0, required, weekly_members, excluded, findings,
         ())
@@ -9419,11 +9641,10 @@ def self_test():
             ("a self-test present", sources, (), set()),
             ("flip: that self-test dropped", sources - {present}, (),
              {("weekly-missing", present)}),
-            ("a self-test missing", sources - {gone}, (),
-             {("weekly-missing", gone)}),
-            ("flip: that self-test added back", sources, (), set()),
+            ("a self-test missing (its flip is the first vector)",
+             sources - {gone}, (), {("weekly-missing", gone)}),
             ("an exclusion with a reason", sources - {live},
-             ((live, "a live gate"),), set()),
+             ((live, _WEEKLY_LIVE),), set()),
             ("flip: that exclusion removed", sources - {live}, (),
              {("weekly-missing", live)}),
             ("an exclusion with no reason", sources - {live}, ((live, ""),),
@@ -9431,16 +9652,25 @@ def self_test():
             ("an exclusion with a blank reason", sources - {live},
              ((live, " "),),
              {("weekly-exclusion-reason", live), ("weekly-missing", live)}),
-            ("flip: that exclusion given a reason", sources - {live},
-             ((live, "a live gate"),), set()),
+            ("an exclusion whose reason is a zero-width space",
+             sources - {live}, ((live, "\u200b"),),
+             {("weekly-exclusion-reason", live), ("weekly-missing", live)}),
+            ("an exclusion whose reason is a dash", sources - {live},
+             ((live, "-"),),
+             {("weekly-exclusion-reason", live), ("weekly-missing", live)}),
+            ("an exclusion whose reason is words outside WEEKLY_REASONS",
+             sources - {live}, ((live, "a live gate"),),
+             {("weekly-exclusion-reason", live), ("weekly-missing", live)}),
+            ("flip: that exclusion given a named reason", sources - {live},
+             ((live, _WEEKLY_HISTORY),), set()),
             ("an exclusion naming no source command", sources,
-             (("tools/z.py", "gone"),),
+             (("tools/z.py", _WEEKLY_LIVE),),
              {("weekly-exclusion-stale", "tools/z.py")}),
             ("an exclusion the weekly file runs", sources,
-             ((present, "run"),),
+             ((present, _WEEKLY_LIVE),),
              {("weekly-exclusion-stale", present)}),
             ("a repeated exclusion", sources - {live},
-             ((live, "a live gate"), (live, "again")),
+             ((live, _WEEKLY_LIVE), (live, _WEEKLY_EVENT)),
              {("weekly-exclusion-repeat", live)})):
         count += 1
         _excluded, found = weekly_findings(sources, weekly, exclusions)
@@ -9461,6 +9691,30 @@ def self_test():
         "      - name: Secret scan self-test\n"
         "        shell: bash\n"
         "        run: python3 -I -B tools/check_secrets.py --self-test\n\n")
+    # The runner-dependent legs: each edit below moves a leg off quality.yml's
+    # placement, and the live tree (the first vector) is the flip of each.
+    autocrlf_step = (
+        "      - name: Hostile checkout line-ending setting (before "
+        "checkout)\n"
+        "        shell: bash\n"
+        "        run: git config --global core.autocrlf true\n")
+    matrix_checkout = (
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          persist-credentials: false\n")
+    canon_live_step = (
+        "      - name: Byte canon (full gate on this platform)\n"
+        "        shell: bash\n"
+        "        run: python3 -I -B tools/check_byte_canon.py\n")
+    registry_canon_step = (
+        "      - name: Byte canon self-test\n"
+        "        shell: bash\n"
+        "        run: python3 -I -B tools/check_byte_canon.py --self-test\n")
+    matrix_os = "        os: [ubuntu-latest, macos-latest]\n"
+    registry_runner = (
+        "    name: Records, manifest and parity self-tests\n"
+        "    runs-on: ubuntu-latest\n")
+    canon = "tools/check_byte_canon.py"
     if None not in live_texts:
         local_text, ci_text, weekly_text = live_texts
         for label, text, exclusions, want_code, want in (
@@ -9470,7 +9724,38 @@ def self_test():
                  WEEKLY_EXCLUSIONS, 1,
                  {("weekly-missing", "tools/check_secrets.py --self-test")}),
                 ("flip: the live tree without its exclusion list",
-                 weekly_text, (), 1, None)):
+                 weekly_text, (), 1, None),
+                ("the live weekly file with core.autocrlf set after the "
+                 "byte-canon checkout", weekly_text.replace(
+                     autocrlf_step + matrix_checkout,
+                     matrix_checkout + autocrlf_step),
+                 WEEKLY_EXCLUSIONS, 1, {("weekly-runner-autocrlf", canon)}),
+                ("the live weekly file without its core.autocrlf step",
+                 weekly_text.replace(
+                     autocrlf_step + matrix_checkout, matrix_checkout),
+                 WEEKLY_EXCLUSIONS, 1, {("weekly-runner-autocrlf", canon)}),
+                ("the live weekly file with macOS dropped from the byte-canon "
+                 "matrix", weekly_text.replace(
+                     matrix_os, "        os: [ubuntu-latest]\n"),
+                 WEEKLY_EXCLUSIONS, 1, {("weekly-runner-platform", canon)}),
+                ("the live weekly file with the live byte-canon step moved "
+                 "into the registry job", weekly_text.replace(
+                     canon_live_step, "").replace(
+                     registry_canon_step,
+                     registry_canon_step + canon_live_step),
+                 WEEKLY_EXCLUSIONS, 1, {("weekly-runner-autocrlf", canon)}),
+                ("the live weekly file with the git option table on another "
+                 "runner", weekly_text.replace(
+                     registry_runner, registry_runner.replace(
+                         "ubuntu-latest", "ubuntu-24.04")),
+                 WEEKLY_EXCLUSIONS, 1,
+                 {("weekly-runner-platform",
+                   "tools/check_git_option_table.py")}),
+                ("the live weekly file with a matrix include: on the "
+                 "byte-canon job", weekly_text.replace(
+                     matrix_os, matrix_os + "        include:\n"
+                     "          - os: windows-latest\n"),
+                 WEEKLY_EXCLUSIONS, 2, None)):
             count += 1
             if label != "the live tree" and text == weekly_text and exclusions:
                 failures.append("44 weekly {}: the flip changed nothing".format(
@@ -9484,6 +9769,31 @@ def self_test():
                     "44 weekly {}: exit {} with {!r}, expected {} with "
                     "{!r}".format(label, report.code, sorted(got), want_code,
                                   None if want is None else sorted(want)))
+
+        # A malformed exclusion entry is cannot-evaluate, never an
+        # exception; the well-formed list is the flip of each.
+        for label, exclusions, want_code in (
+                ("a well-formed exclusion list", WEEKLY_EXCLUSIONS, 0),
+                ("an entry of one member",
+                 WEEKLY_EXCLUSIONS + (("tools/c.py",),), 2),
+                ("an entry of three members",
+                 WEEKLY_EXCLUSIONS + (("tools/c.py", _WEEKLY_LIVE, "x"),), 2),
+                ("an entry whose identity is a list",
+                 WEEKLY_EXCLUSIONS + ((["tools/c.py"], _WEEKLY_LIVE),), 2),
+                ("an entry that is a string",
+                 WEEKLY_EXCLUSIONS + ("tools/c.py",), 2),
+                ("an exclusion list that is a string", "tools/c.py", 2)):
+            count += 1
+            try:
+                report = evaluate_weekly(
+                    local_text, ci_text, weekly_text, exclusions)
+            except (TypeError, ValueError) as exc:
+                failures.append("44 weekly {}: raised {}".format(
+                    label, type(exc).__name__))
+                continue
+            if report.code != want_code:
+                failures.append("44 weekly {}: exit {}, expected {}".format(
+                    label, report.code, want_code))
 
     count += 1
     with patch.object(sys.modules[__name__], "WEEKLY_PATH",
