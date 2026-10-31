@@ -1972,6 +1972,12 @@ def _self_test_main_isolated(real_git=None):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # An in-process call of self_test_main() hands the caller's environment back exactly (HOME,
+    # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
+    # fixture scrub in effect inside: the entry point is run in a child around a stand-in main.
+    from _entry_restore_selftest import entry_restore_failures
+    failures.extend(entry_restore_failures(__file__, "self_test_main", "_self_test_main_isolated"))
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:

@@ -179,9 +179,9 @@ ONFAILURE_EVENTS = ("PreToolUse",)
 # either name in the script. It returns that margin, from which check_authored_timeouts derives the
 # floor an authored timeout must clear with the switch on (no second literal for it here).
 DEADLINE_MIN_MARGIN = 1
-_HOOK_TIMEOUT_LINE_RE = re.compile(r"^HOOK_TIMEOUT_SECONDS = (\d+)$", re.M)
+_HOOK_TIMEOUT_LINE_RE = re.compile(r"^HOOK_TIMEOUT_SECONDS = (\d+)$", re.M | re.ASCII)
 _PRETOOL_BUDGET_LINE_RE = re.compile(
-    r"^PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - (\d+(?:\.\d+)?)$", re.M)
+    r"^PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - (\d+(?:\.\d+)?)$", re.M | re.ASCII)
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
