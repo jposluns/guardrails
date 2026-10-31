@@ -15196,6 +15196,29 @@ def _main_isolated(report_path=None):
         nd_reg = json.loads(nd_reg_path.read_text(encoding="utf-8"))
         nd_reg["deliverable_dirs"] = [str(nd_staging), str(nd_handback)]
         nd_reg_path.write_text(json.dumps(nd_reg), encoding="utf-8")
+        # Make the staging directory its own git repository with a diff.external that writes the
+        # marker, so a git command whose effective working directory is inside the staging directory
+        # runs worker-controlled repository config (the escape a git segment inside a declared
+        # directory opens). The nested .git sits inside a declared directory, so it is never consulted
+        # from a session rooted outside it.
+        subprocess.run(["git", "init", "-q", str(nd_staging)],
+                       check=True, capture_output=True, cwd=str(tmp))
+        (nd_staging / "ext.sh").write_text('#!/bin/sh\n: > "$NRD_MARK"\n', encoding="utf-8")
+        (nd_staging / "ext.sh").chmod(0o755)
+        subprocess.run(["git", "-C", str(nd_staging), "config", "diff.external",
+                        str(nd_staging / "ext.sh")], check=True, capture_output=True)
+        (nd_staging / "a.txt").write_text("a\n", encoding="utf-8")
+        (nd_staging / "b.txt").write_text("b\n", encoding="utf-8")
+        # a worker-supplied registry the cp-destination vector tries to overwrite the live one with
+        (nd_staging / "reg.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+        # an existing copy OUTSIDE the declared directories (the sanctioned 'run the copy' target) and
+        # the directories into which the registry/hook destination vectors would write
+        (nd_outside / "copy.py").write_text(_nrd_py_mark, encoding="utf-8")
+        (nd_outside / "copy.sh").write_text(_nrd_sh_mark, encoding="utf-8")
+        (nd_outside / "copy.sh").chmod(0o755)
+        (nd.root / ".git" / "hooks").mkdir(parents=True, exist_ok=True)
+        import cProfile as _nrd_cprofile
+        _nrd_cprof = _nrd_cprofile.__file__
         st, hb, outd = str(nd_staging), str(nd_handback), str(nd_outside)
 
         def nrd(cmd, cwd=None, project=None):
@@ -15254,8 +15277,11 @@ def _main_isolated(report_path=None):
             # The pair a vector is judged on: (guard verdict, whether real bash ran the deliverable).
             return (_verdict(nrd(cmd, cwd=cwd, project=project)), nrd_ran(cmd, run_cwd))
 
-        DENY_RAN = ("deny", True)        # a review-vector form: denied, and real bash runs the file
+        DENY_RAN = ("deny", True)        # a non-allowlisted form: denied, and real bash runs the file
         ALLOW_INERT = ("allow", False)   # an allowlisted form: allowed, and the file does not run
+        ALLOW_RAN = ("allow", True)      # a sanctioned copy-out-and-run: allowed, and the copy runs
+        DENY_INERT = ("deny", False)     # denied; the single call writes no marker (the danger is a
+        #                                  disarmed guard or a hook a LATER command would fire)
 
         # --- the closed read-only allowlist: allowed, and the deliverable does not run ---
         check("nrd/cat-allows", nrd_got("cat {}/x.py".format(st)), ALLOW_INERT)
@@ -15295,9 +15321,27 @@ def _main_isolated(report_path=None):
         check("nrd/symlink-out-allows",
               _verdict(nrd("python3 -I {}".format(nd.root / "link-plain.py"))), "allow")
 
+        # --- read-only git from a working directory outside the declared directories, with the patch
+        # controls and a -C into a directory outside them: these run no worker config and are allowed ---
+        check("nrd/git-C-outside-apply-check-allows",
+              nrd_got("git -C {} apply --check {}/d.diff".format(outd, hb)), ALLOW_INERT)
+        check("nrd/git-apply-opts-allows",
+              nrd_got("git apply -p1 --index --3way --whitespace=fix --directory=sub --reject "
+                      "{}/d.diff".format(hb)), ALLOW_INERT)
+        check("nrd/git-diff-noindex-dashU-allows",
+              nrd_got("git diff --no-index -U5 -- {}/a.txt {}/b.txt".format(st, st)), ALLOW_INERT)
+        # the sanctioned copy-out-and-run step is treated the same whether the copy is run by a shell
+        # or by python3 -I: when the copy already exists outside every declared directory, both allow
+        # (and run the copy); when it does not yet exist at check time, both deny (below).
+        check("nrd/cp-then-bash-existing-copy-allows",
+              nrd_got("cp {}/x.sh {}/copy.sh && bash {}/copy.sh".format(st, outd, outd)), ALLOW_RAN)
+        check("nrd/cp-then-py-existing-copy-allows",
+              nrd_got("cp {}/x.py {}/copy.py; python3 -I {}/copy.py".format(st, outd, outd)), ALLOW_RAN)
+
         # --- accepted over-denies: the allowlist refuses forms that do not run the file ---
         # Each is denied by construction (not an allowlisted form) though real bash runs nothing; the
-        # escape is a reader script outside the directories taking the path as data.
+        # escape is to read the file, or to hand its path to a reader script kept outside the declared
+        # directories (that reader may itself run the path; the guard does not prevent that).
         for cid, cmd in (
                 ("nrd/over-deny-c-hashlib",
                  'python3 -I -c "import hashlib;print(hashlib.sha256(open(\'{}/x.py\',\'rb\')'
@@ -15313,7 +15357,7 @@ def _main_isolated(report_path=None):
                 ("nrd/over-deny-unquoted-heredoc", "cat <<EOF\n{}/x.py\nEOF\n".format(st))):
             check(cid, _verdict(nrd(cmd)), "deny")
 
-        # --- the review's bypass forms: now denied, and real bash shows each runs the deliverable ---
+        # --- non-allowlisted forms in scope: denied, and real bash shows each runs the deliverable ---
         check("nrd/py-script-denies", nrd_got("python3 -I -B {}/x.py".format(st)), DENY_RAN)
         check("nrd/py-script-handback-denies", nrd_got("python3 -I -B {}/x.py".format(hb)), DENY_RAN)
         check("nrd/sh-script-denies", nrd_got("bash {}/x.sh".format(st)), DENY_RAN)
@@ -15392,7 +15436,69 @@ def _main_isolated(report_path=None):
         check("nrd/ld-so-denies",
               _verdict(nrd("/lib64/ld-linux-x86-64.so.2 {}/x.sh".format(st))), "deny")
 
-        # --- the out-of-repository working-directory layout (the review's inert case) ---
+        # --- bash -n is a syntax-only read ONLY on one script operand with no other option; a '+'
+        # token or a second option turns bash's noexec back off, so the script runs ---
+        check("nrd/bash-n-plus-denies", nrd_got("bash -n +n {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/bash-n-plus-o-denies", nrd_got("bash -n +o noexec {}/x.sh".format(st)), DENY_RAN)
+        # --- a python reader script named on /dev or /proc is a program on a stream, not a file ---
+        check("nrd/py-dev-stdin-denies",
+              nrd_got("python3 -I /dev/stdin < {}/x.py".format(st)), DENY_RAN)
+        check("nrd/py-dev-fd-denies",
+              nrd_got("python3 -I /dev/fd/3 3< {}/x.py".format(st)), DENY_RAN)
+        check("nrd/py-proc-fd-denies",
+              nrd_got("python3 -I /proc/self/fd/0 < {}/x.py".format(st)), DENY_RAN)
+        # --- a stdlib program-running module file used as the reader runs its argument ---
+        check("nrd/py-cprofile-denies",
+              nrd_got("python3 -I {} {}/x.py".format(_nrd_cprof, st)), DENY_RAN)
+        # --- a nested shell -c body is classified recursively: a declared directory hidden by a quote
+        # splice in the body is still reached ---
+        check("nrd/nested-c-splice-denies",
+              nrd_got("bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd), DENY_RAN)
+        # --- a relative cd while CDPATH is set (here or inherited) is unresolvable: it can land in a
+        # declared directory through a CDPATH entry, so the command denies ---
+        check("nrd/cdpath-export-denies",
+              nrd_got("export CDPATH={}; cd nrd-stage; bash x.sh".format(tmp), run_cwd=outd), DENY_RAN)
+        check("nrd/cdpath-prefix-denies",
+              nrd_got("CDPATH={} cd nrd-stage; bash x.sh".format(tmp), run_cwd=outd), DENY_RAN)
+        _nrd_prev_cdpath = os.environ.get("CDPATH")
+        os.environ["CDPATH"] = str(tmp)
+        try:
+            check("nrd/cdpath-inherited-denies",
+                  nrd_got("cd nrd-stage; bash x.sh", run_cwd=outd), DENY_RAN)
+        finally:
+            if _nrd_prev_cdpath is None:
+                os.environ.pop("CDPATH", None)
+            else:
+                os.environ["CDPATH"] = _nrd_prev_cdpath
+        # --- $'...' ANSI-C quoting: the directory spelling the lexer drops is read for scope ---
+        check("nrd/ansi-c-quote-denies",
+              nrd_got("bash $'{}/nrd-sta\\x67e/x.sh'".format(tmp), run_cwd=outd), DENY_RAN)
+        # --- git whose effective working directory, or a -C target, is inside a declared directory
+        # runs that directory's repository config (diff.external) ---
+        check("nrd/git-cwd-inside-denies",
+              nrd_got("git diff --no-index a.txt b.txt", run_cwd=st, cwd=st, project=str(nd.root)),
+              DENY_RAN)
+        check("nrd/git-C-into-declared-denies",
+              nrd_got("git -C {} apply --check {}/d.diff".format(st, hb)), DENY_INERT)
+        # --- a cp destination or write redirect under a .git/hooks directory or at a registry file the
+        # guard reads: the single call writes no marker, but it would re-point a later git command or
+        # disarm this guard ---
+        check("nrd/cp-git-hook-denies",
+              nrd_got("cp {}/x.sh {}/hookrepo/.git/hooks/post-checkout".format(st, outd)), DENY_INERT)
+        check("nrd/redirect-git-hook-denies",
+              nrd_got("cat {}/x.sh > {}/hookrepo/.git/hooks/pre-commit".format(st, outd)), DENY_INERT)
+        check("nrd/cp-registry-denies",
+              nrd_got("cp {}/reg.json {}/live/.aiqt/orchestration.local.json".format(st, outd)),
+              DENY_INERT)
+        # --- cp-out-and-run where the copy does not yet exist at check time: the shell and the python
+        # reader deny alike (neither can verify a not-yet-existing file), consistent with the existing-
+        # copy allow pair above; the escape is to copy in one call and run the existing copy in the next
+        check("nrd/cp-then-bash-new-copy-denies",
+              nrd_got("cp {}/x.sh {}/new.sh && bash {}/new.sh".format(st, outd, outd)), DENY_RAN)
+        check("nrd/cp-then-py-new-copy-denies",
+              nrd_got("cp {}/x.py {}/new.py; python3 -I {}/new.py".format(st, outd, outd)), DENY_RAN)
+
+        # --- the out-of-repository working-directory layout ---
         # The staging directory sits outside the repository and the session cwd is inside it; the guard
         # arms through the project-directory env anchor, so sitting in a declared directory cannot
         # disarm it. Each run uses cwd=staging, project=repo.
@@ -15409,42 +15515,67 @@ def _main_isolated(report_path=None):
         check("nrd/outrepo-arming-env-only-denies",
               _verdict(nrd("python3 {}/x.py".format(st), cwd=st, project=str(nd.root))), "deny")
 
-        # --- the flip: restore per-form matching and show the review's forms allowed again ---
-        # A per-form stand-in that only denies a direct interpreter segment naming a declared script
-        # (what the retired design did) is installed over the scope scan; the review's compound,
-        # backtick and wrapper forms, which the real guard denies, pass under it. This shows the
-        # inversion is what closes them, not an added per-form rule.
-        def _nrd_flip_scan(command, cwd, dirs):
-            eff = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+        # --- the flips: each patches ONE real helper the real scope scan calls back to its pre-fix
+        # behaviour (a mutant), and shows the matching in-scope vector flips from deny to allow. The
+        # real _nrd_scope_scan runs throughout, so these prove each fix is load-bearing, not a
+        # stand-in. Each restores the helper in a finally so no mutant leaks into a later check.
+        def _flip_verdict(attr, repl, cmd, cwd=None, project=None):
+            # patch ONE real helper to its pre-fix behaviour, run the vector through the real guard,
+            # restore the helper, and return the verdict (the check id stays a literal at the call site)
+            real = getattr(aiqt_hooks, attr)
+            setattr(aiqt_hooks, attr, repl)
             try:
-                segs = aiqt_hooks._lex_command(command)
-            except ValueError:
-                return None
-            for seg in segs:
-                if not seg.argv:
-                    continue
-                head = seg.argv[0].rsplit("/", 1)[-1]
-                if aiqt_hooks._NRD_PY_WORD_RE.match(head) or head in aiqt_hooks._NRD_SHELL_WORDS:
-                    for tok in seg.argv[1:]:
-                        if not tok.startswith("-") and aiqt_hooks._nrd_match(tok, eff, dirs) is True:
-                            return (tok, "per-form direct interpreter match")
-            return None
+                return _verdict(nrd(cmd, cwd=cwd, project=project))
+            finally:
+                setattr(aiqt_hooks, attr, real)
 
-        _nrd_real_scan = aiqt_hooks._nrd_scope_scan
-        aiqt_hooks._nrd_scope_scan = _nrd_flip_scan
+        # removing the nested -c recursion (the body is never classified) lets the quote-spliced body
+        # through, since the outer raw text names no declared directory
+        check("nrd/flip-nested-c-allows",
+              _flip_verdict("_nrd_shell_c_body", lambda seg: None,
+                            "bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)), "allow")
+        # restoring the old reader test (resolves-outside only, no existing-regular-file or /dev//proc
+        # check) lets a program on /dev/stdin back in
+        check("nrd/flip-py-dev-stdin-allows",
+              _flip_verdict("_nrd_outside_regular_file",
+                            lambda s, c, d: aiqt_hooks._nrd_match(s, c, d) is False,
+                            "python3 -I /dev/stdin < {}/x.py".format(st)), "allow")
+        # restoring the old git shape (no effective-working-directory check) lets git run worker config
+        # from inside a declared directory
+        check("nrd/flip-git-cwd-allows",
+              _flip_verdict("_nrd_git_allowed",
+                            lambda args, eff, dirs: bool(args) and (
+                                (args[0] == "apply")
+                                or (args[0] == "diff" and "--no-index" in args[1:])),
+                            "git diff --no-index a.txt b.txt", cwd=st, project=str(nd.root)), "allow")
+        # restoring the old write-destination test (resolve-outside only) lets a cp into a .git/hooks
+        # directory through
+        check("nrd/flip-write-dest-allows",
+              _flip_verdict("_nrd_write_forbidden", lambda p, c: False,
+                            "cp {}/x.sh {}/hookrepo/.git/hooks/post-checkout".format(st, outd)),
+              "allow")
+        # neutralising the bash -n narrowing (the old lenient acceptance) lets bash -n +n through
+        check("nrd/flip-bash-n-allows",
+              _flip_verdict("_nrd_shell_allowed",
+                            lambda rest, c, d: bool(rest) and rest[0] == "-n"
+                            and all(t == "--" or not t.startswith("-") for t in rest[1:]),
+                            "bash -n +n {}/x.sh".format(st)), "allow")
+        # neutralising the ANSI-C scope decode hides the directory spelling again
+        check("nrd/flip-ansi-c-allows",
+              _flip_verdict("_nrd_ansi_c_spelling", lambda c: c,
+                            "bash $'{}/nrd-sta\\x67e/x.sh'".format(tmp)), "allow")
+        # neutralising the CDPATH scope widening lets a relative cd through an inherited CDPATH escape
+        _nrd_prev_cdpath2 = os.environ.get("CDPATH")
+        os.environ["CDPATH"] = str(tmp)
         try:
-            check("nrd/flip-compound-allows",
-                  _verdict(nrd("if python3 {}/x.py; then :; fi".format(st))), "allow")
-            check("nrd/flip-backtick-allows",
-                  _verdict(nrd("echo `python3 {}/x.py`".format(st))), "allow")
-            check("nrd/flip-wrapper-allows",
-                  _verdict(nrd("command python3 {}/x.py".format(st))), "allow")
-            # the real scan still denies the plain direct form under the flip (a control: the flip only
-            # loosens, it does not disarm)
-            check("nrd/flip-direct-still-denies",
-                  _verdict(nrd("python3 -I {}/x.py".format(st))), "deny")
+            check("nrd/flip-cdpath-allows",
+                  _flip_verdict("_nrd_cdpath_active", lambda segs: False,
+                                "cd nrd-stage; bash x.sh"), "allow")
         finally:
-            aiqt_hooks._nrd_scope_scan = _nrd_real_scan
+            if _nrd_prev_cdpath2 is None:
+                os.environ.pop("CDPATH", None)
+            else:
+                os.environ["CDPATH"] = _nrd_prev_cdpath2
 
         # --- scope and fail-closed postures (unchanged contracts) ---
         check("nrd/failopen-nonbash", _verdict(aiqt_hooks.orch_deliverable_exec_guard(

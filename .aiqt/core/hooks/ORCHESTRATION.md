@@ -494,21 +494,39 @@ directory itself resolves into one. Out of scope the call passes untouched. IN S
 DENIED unless EVERY lexed segment is a closed-allowlist read-only form with its registered options:
 `cat`, `wc`, `head`, `tail`, `ls`, `file`, `grep`, `diff`, and the coreutils hash tools (`sha256sum`,
 `sha1sum`, `sha224sum`, `sha384sum`, `sha512sum`, `md5sum`, `b2sum`, `cksum`, `sum`); `cp` with the
-declared file only as a SOURCE (the last operand must resolve outside every declared directory, and
-`cp`'s link and target-directory spellings are off the grammar); `git apply` (with `--check`,
-`--stat`, `--numstat`, `--summary` and the quiet/verbose flags) and `git diff --no-index`; `bash -n`
-(and the other shells) with no `-c` (a syntax-only read); `python3 -I` with a reader SCRIPT that
-resolves outside every declared directory, taking the deliverable's path only as a DATA argument (no
-`-c`, no `-m`, no program on stdin); and `cd` to one literal absolute directory outside the declared
-directories (the session's exit from a declared cwd). The command word must be a BARE allowlisted name
-(a name with a slash, so a file named like a reader that sits inside a declared directory, never
-matches), and a segment carrying any assignment prefix, wrapper, builtin, reserved word, substitution,
-backtick, glob, brace, tilde, `xargs`, `find`, or any unlisted word is simply not on the allowlist and
-denies. A command the lexer cannot read (an unquoted heredoc, a here-string, a process substitution,
-an unbalanced quote) has no segments to match and denies whole while in scope. Each judged operand and
-each declared directory is compared both as written and through realpath, so a symlink into or out of
-a directory is caught either way; a write-shaped redirect must provably land outside every declared
-directory, while reads and quoted-heredoc bodies fed to an allowlisted reader pass.
+declared file only as a SOURCE (the last operand must resolve outside every declared directory, must
+not land under a `.git/hooks` directory or at an orchestration registry file this guard reads, and
+`cp`'s link and target-directory spellings are off the grammar); `git apply` (with `--check`, `--stat`,
+`--numstat`, `--summary`, the quiet/verbose flags, `-p<n>`, `--index`, `--cached`, `--3way`, `--reject`,
+`--recount`, `--allow-empty`, `--unidiff-zero` and the `--whitespace=`/`--directory=`/`--exclude=`/
+`--include=` value options) and `git diff --no-index` (with the report flags, `-U<n>` and a `--`
+separator), BOTH only when the git process's effective working directory and every `-C` target resolve
+OUTSIDE every declared directory (the only accepted global option is a literal `-C` to such a directory;
+a `-C`, `--git-dir` or `--work-tree` into a declared directory, or any other global option, denies,
+since git reads that directory's repository config and attributes before any operand); `bash -n` on
+EXACTLY one script operand with no other option and no `+`-prefixed token (a `+n`, `+o noexec` or a
+second option turns bash's noexec back off, so the script would run); `python3 -I`, or a shell, running
+ONE script that is an EXISTING REGULAR FILE resolving outside every declared directory and outside
+`/dev` and `/proc` (so `/dev/stdin`, `/dev/fd/N` and `/proc/self/fd/N` are refused) and that is not one
+of the standard library's program-running module files (`cProfile`, `profile`, `trace`, `pdb`, `runpy`,
+`doctest`, resolved against the installed library); and `cd` to one literal absolute directory outside
+the declared directories (the session's exit from a declared cwd). The reader or script the python/shell
+form runs may ITSELF import or run a path it is handed as data; the guard does not read it and does not
+prevent that. The command word must be a BARE allowlisted name (a name with a slash, so a file named
+like a reader that sits inside a declared directory, never matches), and a segment carrying any
+assignment prefix, wrapper, builtin, reserved word, substitution, backtick, glob, brace, tilde, an
+ANSI-C `$'...'` quote, `xargs`, `find`, or any unlisted word is simply not on the allowlist and denies.
+A command the lexer cannot read (an unquoted heredoc, a here-string, a process substitution, an
+unbalanced quote) has no segments to match and denies whole while in scope. A nested shell `-c` body is
+classified recursively, so a declared directory a quote splice hides from the raw text is still reached;
+a relative `cd`/`pushd` while CDPATH is set (assigned in the command or inherited from the payload
+environment) is unresolvable and puts the command in scope, since the cd may land in a declared
+directory through a CDPATH entry; and a declared directory spelled inside an ANSI-C `$'...'` quote is
+read for scope from a decoded copy of the command. Each judged operand and each declared directory is
+compared both as written and through realpath, so a symlink into or out of a directory is caught either
+way; a write-shaped redirect must provably land outside every declared directory and not under a
+`.git/hooks` directory or at a registry file, while reads and quoted-heredoc bodies fed to an
+allowlisted reader pass.
 
 The guard finds its registry and `deliverable_dirs` INDEPENDENTLY of the payload working directory:
 it consults the project directory the hook environment names (`CLAUDE_PROJECT_DIR`, the path the
@@ -523,19 +541,31 @@ denies on a declared path even where it only reads: `python3 -c` with a hashlib/
 (`timeout`, `command`, `env`), and a reader whose command word carries an option outside the tool's
 registered grammar. An unquoted heredoc or any other construct the lexer cannot read denies whole
 while in scope even where it would only print. `cp` into a declared directory denies even though `cp`
-runs nothing. The escape for each is the same: read the file with the Read tool, use an allowlisted
-reader, or run a reader script kept outside the declared directories that takes the path as a DATA
-argument under `python3 -I`.
+runs nothing, and a one-call `cp` to a copy outside the directories FOLLOWED by running that copy
+(`cp ... && bash <copy>` or `cp ...; python3 -I <copy>`) denies alike, since the copy is not yet an
+existing regular file when the guard checks: neither the shell nor the python reader form can verify
+it, so both deny (consistent). The escape for each is the same: read the file with the Read tool, use
+an allowlisted reader, or hand the path to a reader script kept outside the declared directories (copy
+in one call, run the existing copy in the next).
 
 Residuals (not caught, by construction). A command that reaches a declared file WITHOUT naming it or
 its directory in the call text and from a working directory that is not itself declared: a path held
 in a shell variable assigned in an earlier call, a path built by concatenation or an expansion the
 lexer reads as opaque, or a symlink or hard link made ELSEWHERE that points into a declared directory
-while the command names only the alias outside it. Nothing in such a call's text or payload
-distinguishes it. Running an UNREAD copy outside the directories is also not caught: the rule's "full
-reading" half stays judgement-level, because no hook state could prove a full reading (Read limits and
-truncation stand in the way). A symlink swapped between the check and the run is not prevented; one
-already in place is caught in either direction by the lexical-plus-realpath union.
+while the command names only the alias outside it. `bash -n` sources a `BASH_ENV` file set in an
+EARLIER call (an earlier-call variable the call text does not carry), the remaining disclosed path for
+the syntax-check form. The CDPATH and ANSI-C handling closes the in-call spellings: a relative `cd`
+with CDPATH set in THIS call or inherited denies, and a declared directory spelled in an ANSI-C
+`$'...'` quote is read for scope; a CDPATH assigned in an EARLIER call is the same earlier-call-variable
+residual. A write destination is constrained only at a `.git/hooks` directory and at the registry files
+this guard reads; any OTHER write target outside the declared directories (another file in a live
+checkout, a user dotfile, a PATH directory, a crontab) is unconstrained by this guard and left to the
+write-scope guard and the operator. Nothing in such a call's text or payload distinguishes the first
+class. Running an UNREAD copy outside the directories is also not caught: the rule's "full reading" half
+stays judgement-level, because no hook state could prove a full reading (Read limits and truncation
+stand in the way). A reader or script run outside the directories may itself import or run a path it is
+handed as data; the guard does not read it. A symlink swapped between the check and the run is not
+prevented; one already in place is caught in either direction by the lexical-plus-realpath union.
 
 The key is validated fail-closed with a limited blast radius: an entry that is not a non-empty
 absolute NUL-free string, normalizes to the filesystem root, or holds the session repository root
