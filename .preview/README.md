@@ -175,7 +175,7 @@ the authority, and the summary further down this page only points to it.
 
 ## Also in the pack's plugin
 
-Since plugin version 0.5.0, the pack's Claude Code plugin, `aiqt-guardrails-hooks`, carries the controls of
+Since plugin version 0.6.0, the pack's Claude Code plugin, `aiqt-guardrails-hooks`, carries the controls of
 `clock-inject.py` and `future-stamp-write.py` as two handlers of its own hook dispatcher, `clock_inject` and
 `future_stamp_write` in `.aiqt/core/hooks/scripts/aiqt_hooks.py`. The two files here stay published
 unchanged, and they behave differently from the plugin's handlers:
