@@ -7742,8 +7742,9 @@ def _heredoc_text_mark_failures():
 
 
 def main():
-    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
-    scrub_git_environment()
+    # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
+    # scrub before it would make it save, and so restore, the already scrubbed values.
+    from _git_fixture_env import fixture_git_lifecycle
     with fixture_git_lifecycle():
         return _main_with_recorder()
 
@@ -28206,6 +28207,11 @@ def _main_isolated(monitor):
     failures.extend(_ask_label_failures())
     failures.extend(_duplicate_label_failures())
     failures.extend(_stop_field_claim_failures())
+    # An in-process call of main() hands the caller's environment back exactly (HOME,
+    # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
+    # fixture scrub in effect inside: the entry point is run in a child around a stand-in main.
+    from _entry_restore_selftest import entry_restore_failures
+    failures.extend(entry_restore_failures(__file__, "main", "_main_with_recorder"))
 
     verdict = _selftest_exit_code(failures, cannot_evaluate)
     if verdict == 1:

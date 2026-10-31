@@ -409,6 +409,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/check_opf_prompt_pack.py",
     "opf/tools/check_opf_record.py",
     "opf/tools/selftest_commonmark_conformance.py",
+    "tools/_entry_restore_selftest.py",
     "tools/_qa_adapter.py",
     "tools/aei_backlog_md.py",
     "tools/aiqt_corpus.py",
