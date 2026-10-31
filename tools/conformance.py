@@ -236,8 +236,9 @@ def _agents_drift(root, corpus):
         return (NA, "no AGENTS.md surface installed")
     try:
         registry = adapter_compose.load_registry(root, absent_is_legacy=True)
+        first = gen_agents.must_deliver_ids(root / ".aiqt" / "core")  # AGENTS.md alone puts these first
         content = adapter_compose.compose(gen_agents.AGENTS_REL, gen_agents.HEADER,
-                                          gen_agents.ordered_bodies(corpus), registry).data
+                                          gen_agents.ordered_bodies(corpus, first), registry).data
         current = out.read_bytes()
         current.decode("utf-8")  # an undecodable AGENTS.md is MALFORMED, as before the raw-byte compare
     except (ValueError, OSError) as exc:
@@ -1227,6 +1228,39 @@ def self_test_main():
                 failures.append("adapter-registry ({}) expected exit {} + C2 {}, got exit {}:\n{}".format(
                     label, want_code, want, code, out))
 
+        # 2b''. A must-deliver list that changes the AGENTS.md order: it names seci001, which the plain AIQT
+        #       order puts after accur01. The plain-order AGENTS.md _build_conformant wrote is then C2 FAIL
+        #       (the list really moves a rule). AGENTS.md regenerated through gen_agents' own corpus reader
+        #       (gen_agents.agents_bodies, which reads the list beside the corpus) must carry seci001 ahead
+        #       of accur01, and _agents_drift, which reads the list itself, must then be C2 PASS. A generator
+        #       that drops the list fails the order assertion; a mirror that drops it reads the regenerated
+        #       AGENTS.md as C2 FAIL.
+        mdorder = tmp / "must-deliver-order"
+        mdorder.mkdir()
+        _build_conformant(mdorder)
+        (mdorder / ".aiqt" / "core" / "must-deliver.toml").write_text(
+            'format-version = 1\nwarn-margin-bytes = 512\n\n[[rule]]\nid = "seci001"\nreason = "self-test"\n',
+            encoding="utf-8")
+        code, out = run_capture(mdorder)
+        if code != 1 or status_of(out, "C2") != FAIL:
+            failures.append("must-deliver-order: a plain-order AGENTS.md under a list naming seci001 expected "
+                            "exit 1 + C2 FAIL, got exit {}:\n{}".format(code, out))
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            regen = adapter_compose.run(mdorder, False, [(gen_agents.AGENTS_REL, gen_agents.HEADER)],
+                                        "tools/gen_agents.py", gen_agents.agents_bodies)
+        agents = (mdorder / "AGENTS.md").read_bytes()
+        seci_at = agents.find(b"\n## Validate external input\n")
+        accur_at = agents.find(b"\n## Read before characterizing\n")
+        if regen != 0 or not 0 <= seci_at < accur_at:
+            failures.append("must-deliver-order: gen_agents must write the listed seci001 ahead of accur01 "
+                            "(exit {}, seci001 at {}, accur01 at {}):\n{}".format(
+                                regen, seci_at, accur_at, buf.getvalue()))
+        code, out = run_capture(mdorder)
+        if code != 0 or status_of(out, "C2") != PASS:
+            failures.append("must-deliver-order: the regenerated AGENTS.md expected exit 0 + C2 PASS (the "
+                            "mirror must read the same list), got exit {}:\n{}".format(code, out))
+
         # 2c. An orphaned .mdc inside the reserved Cursor subtree (no source rule) -> C2 FAIL.
         corphan = tmp / "cursor-orphan"
         corphan.mkdir()
@@ -1805,7 +1839,9 @@ def self_test_main():
           "asserted both tight and broad fail; a composed AGENTS.md passes, a local edit or a CRLF "
           "conversion fails, a missing block source, a wrong-typed registry field, a symlinked registry or "
           "an adapter that is not UTF-8 is MALFORMED, and an absent registry reads as every target legacy "
-          "(a composed AGENTS.md then fails, a legacy install passes); the hooks plugin "
+          "(a composed AGENTS.md then fails, a legacy install passes); a must-deliver list that moves a "
+          "rule makes a plain-order AGENTS.md fail, and the generator and this mirror both put the listed "
+          "rule first; the hooks plugin "
           "surface (C5) verifies when present, "
           "degrades to NOT APPLICABLE when the opt-in plugin is absent, and fails on drift, a hooks "
           "orphan, or an orphaned surface with no source; absent input (corpus, "

@@ -81,7 +81,8 @@
       "sources": [
         "AGENTS.md",
         ".aiqt/core/rules/",
-        ".aiqt/core/adapter-blocks.toml"
+        ".aiqt/core/adapter-blocks.toml",
+        ".aiqt/core/must-deliver.toml"
       ],
       "target": ".aiqt/release/first-pin-demonstration.toml"
     },
@@ -184,7 +185,8 @@
       "regenerate": "python3 tools/gen_agents.py",
       "sources": [
         ".aiqt/core/rules/",
-        ".aiqt/core/adapter-blocks.toml"
+        ".aiqt/core/adapter-blocks.toml",
+        ".aiqt/core/must-deliver.toml"
       ],
       "target": "AGENTS.md"
     },

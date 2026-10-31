@@ -21,7 +21,9 @@ reason; every id must be a corpus-id with a measured span. An absent, unreadable
 malformed or EMPTY list is exit 2 (a missing input is a failure, never "nothing to check"), per the
 check-fails-closed-on-unreadable rule. The gate prints every listed rule's end offset and margin on every
 run, and a WARNING (still exit 0) when the tightest margin drops under warn-margin-bytes, so growth is
-visible before a listed rule falls out.
+visible before a listed rule falls out. tools/gen_agents.py writes the listed rules right after the apex,
+ahead of every unlisted rule (gen_agents.ordered_pairs), so only the header and the listed rules' own
+text use up the margin; a rule added or grown outside the list cannot.
 
 DISCLOSED RESIDUAL (disclose-guard-residuals): a PR that removes a rule from the list passes this gate
 (review must judge the removal); a listed rule cut down to a stub still passes (content is not judged);
@@ -226,8 +228,19 @@ def main():
 #       offsets relative to the rule region, without the rules_start shift, passes);
 #   T13 the margin report: the unlisted-rule line, and a WARNING line under warn-margin-bytes that still
 #       exits 0 (a mutant whose warning exits non-zero, or margin off by one, fails).
+#   T14 listed rules come first by construction: a listed rule ending exactly warn-margin-bytes inside the
+#       cap keeps that margin, with no WARNING, after an unlisted rule that sorts ahead of it in plain AIQT
+#       order grows by 100 bytes. The flip reruns the vector with gen_agents.ordered_pairs patched to the
+#       plain sort_key order and requires it to fail there with the listed rule's margin at 412;
+#   T15 the generator's own read of the list (gen_agents.must_deliver_ids): an absent list names no rule,
+#       a valid one names exactly its ids, and a symlink, a directory, invalid UTF-8, bad TOML and a row
+#       with an integer id are each refused (a mutant falling back to the plain order on a bad list passes).
+#       An empty rule list names no rule (a mutant refusing it fails; the gate's own refusal is T8), and
+#       an unreadable list raises OSError, injected at gen_agents._read_list_bytes on every runner and as
+#       a mode-000 file where the mode binds the runner (a mutant mapping a read error to no rule fails).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
+import gen_agents  # noqa: E402  the AGENTS.md order (ordered_pairs) and its read of the list
 
 
 def _decl(root, rows, warn=512, raw=None):
@@ -536,6 +549,107 @@ def self_test_main():
         if code != 0 or "WARNING" in out:
             failures.append("T13: margin equal to warn-margin-bytes must not warn, got {}\n{}".format(
                 code, out))
+
+        # T14. An unlisted rule (ruaaaa; slug fixture-ruaaaa sorts ahead of fixture-ruleaa) grows by 100
+        # bytes; listed ruleaa, written first, keeps its margin of exactly warn-margin-bytes.
+        def t14(where):
+            problems = []
+            _decl(where, both, warn=512)  # before the tree, so the fixture is composed in the listed order
+            specs = [("prjint1", True, 0), ("ruaaaa", False, 0), ("ruleaa", False, 20000)]
+            delta = CAP - 512 - gfpd._write_tree(where, specs)["ruleaa"][1]
+            specs = [(c, a, p + delta if c == "ruleaa" else p) for c, a, p in specs]
+            for label, grow in (("before the growth", 0), ("after the growth", 100)):
+                sp = gfpd._write_tree(where, [(c, a, p + grow if c == "ruaaaa" else p) for c, a, p in specs])
+                code, out = capture(where)
+                if code != 0 or "WARNING" in out or "ruleaa  end {:6d}  margin 512".format(CAP - 512) not in out:
+                    problems.append("T14 {}: ruleaa must keep margin 512 with no WARNING (end {}), got {}\n{}"
+                                    .format(label, sp["ruleaa"][1], code, out))
+            return problems, out
+
+        failures.extend(t14(tmp / "t14")[0])
+        real_ordered_pairs = gen_agents.ordered_pairs
+        gen_agents.ordered_pairs = lambda pairs, first=frozenset(): sorted(
+            pairs, key=lambda pf: gen_agents.sort_key(pf[1]))
+        try:
+            flipped, out = t14(tmp / "t14-flip")
+        finally:
+            gen_agents.ordered_pairs = real_ordered_pairs
+        if not flipped or "WARNING: tightest margin 412 is below warn-margin-bytes 512" not in out:
+            failures.append("T14 flip: under the plain sort_key order the growth must push ruleaa to "
+                            "margin 412 and fail the vector, got {}\n{}".format(flipped, out))
+
+        # T15. gen_agents.must_deliver_ids: absent names none, valid names its ids, every bad list refused.
+        t15 = tmp / "t15"
+        core = t15 / ".aiqt" / "core"
+        core.mkdir(parents=True)
+        if gen_agents.must_deliver_ids(core) != frozenset():
+            failures.append("T15: an absent list must name no rule")
+        decl = _decl(t15, both)
+        if gen_agents.must_deliver_ids(core) != frozenset({"prjint1", "ruleaa"}):
+            failures.append("T15: a valid list must name exactly its ids, got {}".format(
+                gen_agents.must_deliver_ids(core)))
+        aside = t15 / "aside.toml"
+        aside.write_text(decl.read_text(encoding="utf-8"), encoding="utf-8")
+        decl.unlink()
+        os.symlink(aside, decl)
+        for label, setup in (("a symlink", None), ("a directory", "dir"),
+                             ("invalid UTF-8", b"format-version = 1\n\xff\n"),
+                             ("bad TOML", b"format-version = = 1\n"),
+                             ("an integer id", b'format-version = 1\n[[rule]]\nid = 1\nreason = "x"\n')):
+            if setup == "dir":
+                decl.unlink()
+                decl.mkdir()
+            elif setup is not None:
+                if decl.is_dir():
+                    decl.rmdir()
+                decl.write_bytes(setup)
+            try:
+                got = gen_agents.must_deliver_ids(core)
+            except ValueError as exc:
+                if DECL_REL not in str(exc):
+                    failures.append("T15 {}: the refusal must name the list, got {}".format(label, exc))
+            else:
+                failures.append("T15 {}: must be refused, got {}".format(label, got))
+        # An empty rule list names no rule, so the generator keeps the plain order (the gate refuses that
+        # list, T8). An unreadable list is an OSError, never a fallback to the plain order: injected at the
+        # reader's one read on every runner, and a mode-000 list where the mode binds this runner.
+        decl.write_bytes(b"format-version = 1\nwarn-margin-bytes = 512\nrule = []\n")
+        try:
+            got = gen_agents.must_deliver_ids(core)
+        except ValueError as exc:
+            got = exc
+        if got != frozenset():
+            failures.append("T15 an empty rule list: must name no rule, got {!r}".format(got))
+        _decl(t15, both)
+        real_list_read = gen_agents._read_list_bytes
+
+        def list_denied(path):
+            raise PermissionError(13, "Permission denied (injected by the self-test)", str(path))
+
+        gen_agents._read_list_bytes = list_denied
+        try:
+            got = gen_agents.must_deliver_ids(core)
+        except OSError as exc:
+            got = exc
+        finally:
+            gen_agents._read_list_bytes = real_list_read
+        if not isinstance(got, OSError) or "injected by the self-test" not in str(got):
+            failures.append("T15 an injected read error: must raise OSError, got {!r}".format(got))
+        os.chmod(decl, 0)
+        try:
+            if os.access(decl, os.R_OK):  # root or a DAC bypass: mode 000 is still readable
+                print("SELF-TEST NOTE: T15 mode-000 vector not applicable (file still readable)")
+                skipped.append("the generator's mode-000 list read (the injected OSError covered the "
+                               "unreadable case)")
+            else:
+                try:
+                    got = gen_agents.must_deliver_ids(core)
+                except OSError as exc:
+                    got = exc
+                if not isinstance(got, OSError):
+                    failures.append("T15 a mode-000 list: must raise OSError, got {!r}".format(got))
+        finally:
+            os.chmod(decl, 0o644)
     finally:
         for dirpath, _dirnames, filenames in os.walk(tmp):
             for fn in filenames:
@@ -556,8 +670,10 @@ def self_test_main():
           "symlinked, unreadable (an injected read error) or unparseable list fail closed (exit 2); the "
           "demonstration's own lists are never read; an unknown or clause id fails closed naming it; the "
           "cap is read from check_release_build.CAP_BYTES at call time; a before-rules block moves the "
-          "spans it measures; and the margin report, the unlisted-rule line and the warn-margin WARNING "
-          "(still exit 0) are printed exactly. {}".format(
+          "spans it measures; the margin report, the unlisted-rule line and the warn-margin WARNING "
+          "(still exit 0) are printed exactly; a listed rule keeps its margin when an unlisted rule sorted "
+          "ahead of it grows (and loses it under the plain sort_key order); and the generator's read of "
+          "the list refuses every bad or unreadable list and reads an empty one as naming no rule. {}".format(
               "SKIPPED on this runner: {}.".format("; ".join(skipped)) if skipped
               else "No case was skipped (the mode-000 list ran too)."))
     return 0
