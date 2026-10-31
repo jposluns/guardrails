@@ -98,6 +98,24 @@ pull request (CLAUDE.md, Gates and CI).
    above, the bump also changes the outputs of `python3 tools/gen_renderers.py` (`.aiqt/core/renderers.toml`)
    and `python3 tools/gen_gensrc.py` (`.aiqt/gensrc.json`). Finally run each generator with `--check`
    (again `gen_manifest.py --check` last); every one must exit 0.
+
+   OPF declaration checklist (OPF-SPEC section 16.1). The reference tooling's declaration file is
+   `opf/tools/opf-declaration.toml`, and the shipped-file digest is carried in
+   `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is the pack release
+   version, so each release cut sets, in one change: `release` in that file;
+   `RELEASE_IDENTITY`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
+   `_opf_declaration.py`; and the restatement below, in `opf/site/tooling.html` and in
+   `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
+   storage generation (`_opf_store.py`) changes the same places. `python3 -I -B
+   tools/check_opf_declaration.py` must then exit 0. It refuses a restatement that differs from the file
+   and a release other than `VERSION`. This release declares:
+
+   ```toml opf-declaration
+   release = "1.0.5"
+   spec_version = "2.0.0"
+   homes = 2
+   worklog = 1
+   ```
 2. Compute. From the repository root on the frozen tree, run
    `sha256sum site/downloads/aiqt-skill-<skill version>.zip site/downloads/aiqt-instructions.txt` (the one
    version-numbered zip present under `site/downloads/`). These two files are the release artifacts (the

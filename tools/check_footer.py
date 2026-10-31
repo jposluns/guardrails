@@ -232,7 +232,9 @@ def _close_vectors(base):
     (fdopen taking fd, `fd = -1` as the with body's first statement) and must be red there by NOFIRE alone:
     the failed wrapper's own close released fd first, so the finally's close was a second close of a number
     already free. Returns (failures, runs)."""
+    import importlib.util
     import inspect
+    import tempfile
     import _close_selftest
     page = base / "page.html"
     page.write_text("<nav></nav>", encoding="utf-8")
@@ -274,10 +276,16 @@ def _close_vectors(base):
     if source.count(new) != 1:
         return failures + ["check_footer _read_regular_page revert: target found {} times".format(
             source.count(new))], runs
-    reverted = dict(ns)
-    exec(compile(source.replace(new, old), __file__, "exec"), reverted)
-    red = _close_selftest._st_close_run(read_page("wrap", reverted["_read_regular_page"]), True,
-                                        lambda e: e is sent, False)
+    # The reverted body is written to a scratch module and loaded over a copy of this module's globals.
+    with tempfile.TemporaryDirectory(prefix="footer-close-revert-") as tmp:
+        path = Path(tmp) / "read_regular_page_reverted.py"
+        path.write_text(source.replace(new, old), encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("_footer_close_revert", path)
+        reverted = importlib.util.module_from_spec(spec)
+        reverted.__dict__.update((k, v) for k, v in ns.items() if not k.startswith("__"))
+        spec.loader.exec_module(reverted)
+        red = _close_selftest._st_close_run(read_page("wrap", reverted._read_regular_page), True,
+                                            lambda e: e is sent, False)
     runs += 1
     if [problem.split(":")[0] for problem in red] != ["NOFIRE"]:
         failures.append("check_footer site _read_regular_page under the pre-fix fdopen ownership: expected red "

@@ -3,7 +3,16 @@
 
   opf.py --self-test                run every registered OPF helper self-test (Linux CI leg)
   opf.py --self-test-group NAME     run one named group of them (SELF_TEST_GROUPS; local runner)
+  opf.py --declaration              the documented run of the spec 16.1 runtime check and its report
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
+
+Spec 16.1: before it dispatches render, doctor, init, absorb, record or adopt, the dispatcher runs the runtime
+check of the declaration file opf-declaration.toml installed beside it (_opf_declaration.runtime_check); an
+installed copy that is absent, unreadable, not the shipped bytes (the shipped-file digest is
+_opf_declaration.SHIPPED_DECLARATION_SHA256), malformed or contradictory refuses the verb at exit 2 before any
+store is resolved. upgrade, import and the not-yet-implemented verbs read and write nothing and are not gated.
+`--declaration` and doctor write the spec 16.1 report (the declaration restated as shipped, both digests and
+the runtime result) on stdout.
 
 This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
 self-test wired in; store verbs that have not yet landed are recognized names that report
@@ -172,7 +181,7 @@ def _bootstrap():
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
-    global _opf_adopt_state
+    global _opf_adopt_state, _opf_declaration
     try:
         import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
@@ -190,6 +199,7 @@ def _bootstrap():
         import _opf_adopt_apply  # OPF-ADOPT U1+U2+U3+U4+U5+U7: the apply shell (the three file ops, init-store, the registration ops, enable-hook and the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
+        import _opf_declaration  # spec 16.1: the declaration file's runtime check and the report emitter
     except ImportError as exc:
         try:
             line = "opf: cannot bootstrap: {} (cannot evaluate)".format(_init_inert(exc.name or str(exc)))
@@ -976,6 +986,7 @@ _ENTRY_FLOOR_EXEMPT = {
     "opf-close-exc-safe-vectors": "the dispatcher's in-flight-exception close vectors (#377, "
                                   "_close_exc_safe_vectors_self_test)",
     "opf-cli": "the dispatcher's command-line suite (_cli_self_test)",
+    "opf-declaration-cli": "the dispatcher's spec 16.1 declaration suite (_declaration_cli_self_test)",
 }
 
 
@@ -23344,6 +23355,382 @@ def _close_exc_safe_vectors_self_test():
     return EXIT_OK
 
 
+# Spec 16.1: main() runs the declaration's runtime check (_opf_declaration.runtime_check) before it dispatches any
+# verb that can touch a store, and a state other than ok refuses that verb at exit 2 before it resolves a store.
+# upgrade, import and the not-yet-implemented verbs read and write nothing, so they are not gated; nor are the
+# --self-test legs, which run over their own fixtures. Doctor also writes the spec 16.1 report on stdout.
+_DECLARATION_GATED = ("render", "doctor", "init", "absorb", "record", "adopt")
+_DECLARATION_REPORTING = ("doctor",)
+
+
+def _installed_declaration():
+    """The installed copy of the declaration file: _opf_declaration.DECLARATION_NAME beside this file's real
+    path."""
+    return Path(__file__).resolve().parent / _opf_declaration.DECLARATION_NAME
+
+
+def _running_build_declaration():
+    """A context manager for a self-test vector that raises _opf_store's HOMES, SPEC_VERSION
+    or SUPPORTED_WORKLOG in process to exercise the build those constants describe. Entered after the raise, it
+    presents the declaration that build ships: the four fields rendered from RELEASE_IDENTITY and the constants
+    as they stand on entry (the raised values are read, never restated), written to a fresh scratch directory,
+    with _installed_declaration, the shipped bytes and the shipped-file digest pointed at that file until exit,
+    when all three are restored and the directory is removed. The runtime check itself runs unpatched over it,
+    so constants raised without it, or changed after entry, still refuse as contradictory, and every run outside
+    it reads the installed copy beside this file."""
+    import contextlib
+    import hashlib
+    import tempfile
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+
+    @contextlib.contextmanager
+    def presented():
+        data = _opf_declaration.declaration_bytes(
+            _opf_declaration.RELEASE_IDENTITY, _opf_store.SPEC_VERSION, _opf_store.HOMES,
+            _opf_store.SUPPORTED_WORKLOG)
+        with tempfile.TemporaryDirectory(prefix="opf-raised-declaration-") as tmp:
+            path = Path(tmp) / _opf_declaration.DECLARATION_NAME
+            path.write_bytes(data)
+            with patch.object(here, "_installed_declaration", lambda: path), \
+                    patch.object(_opf_declaration, "SHIPPED_DECLARATION_BYTES", data), \
+                    patch.object(_opf_declaration, "SHIPPED_DECLARATION_SHA256", hashlib.sha256(data).hexdigest()):
+                yield path
+    return presented()
+
+
+def _declaration_run(rest):
+    """`opf.py --declaration`: the documented run of the spec 16.1 runtime check and the emitter. It resolves no
+    store and writes the report on stdout, at exit 0 where the check yields ok (runtime result fail: the run
+    performs no store operation) and at exit 2 where it does not (cannot_evaluate). It takes no argument."""
+    if rest:
+        print("opf --declaration: takes no argument, not {!r}".format(rest[0]), file=sys.stderr)
+        return EXIT_MALFORMED
+    check = _opf_declaration.runtime_check(_installed_declaration())
+    if not check.ok:
+        print(_opf_declaration.refusal_line("--declaration", check), file=sys.stderr)
+        print("opf --declaration: {}".format(check.detail), file=sys.stderr)
+    _opf_declaration.emit_report(check, False, sys.stdout)
+    return EXIT_OK if check.ok else EXIT_MALFORMED
+
+
+def _declaration_capture(argv):
+    """main(argv) with stdout and stderr captured: (rc, stdout, stderr)."""
+    import contextlib
+    import io
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = main(list(argv))
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _declaration_tree(root):
+    """Every path beneath root with its bytes (None for a directory), for the unchanged-tree assertions."""
+    return dict((str(path.relative_to(root)), None if path.is_dir() else path.read_bytes())
+                for path in sorted(Path(root).rglob("*")))
+
+
+def _declaration_expected(data, installed, result):
+    """The report a run writes, built here from the declaration bytes, not by the emitter under test."""
+    return ("[declaration]\n" + data.decode("ascii") + "\n[runtime]\nshipped_file_sha256 = \"{}\"\n"
+            "installed_copy_sha256 = \"{}\"\nruntime_result = \"{}\"\n").format(
+                _declaration_sha256(data), installed, result)
+
+
+def _declaration_sha256(data):
+    """The lowercase hex SHA-256 digest of data."""
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def _declaration_gate_refuses(tmp, installed, state, shipped_sha256=None):
+    """Every gated verb run with the installed copy at `installed`: (ok, detail), ok where each one refuses at
+    exit 2 with the refusal line naming `state`, no verb handler runs and the root is left unchanged. With
+    shipped_sha256 the shipped-file digest is patched to it (the malformed and contradictory states are reachable
+    only on bytes that pass the digest step)."""
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    root = Path(tmp) / "root"
+    root.mkdir()
+    (root / "keep.txt").write_bytes(b"keep\n")
+    digest = _opf_declaration.SHIPPED_DECLARATION_SHA256 if shipped_sha256 is None else shipped_sha256
+    called = []
+
+    def recorder(name):
+        def handler(rest):
+            called.append(name)
+            return EXIT_OK
+        return handler
+    argvs = (["doctor", "--root", str(root)], ["render", "--check", "--root", str(root)],
+             ["render", "--write", "--root", str(root)], ["init", "--root", str(root)],
+             ["absorb", "--root", str(root)], ["record", "create", "--root", str(root)],
+             ["adopt", "plan", "--root", str(root)], ["adopt", "status", "--root", str(root)],
+             ["adopt", "apply", "--root", str(root)], ["adopt", "reconcile", "--root", str(root)])
+    before = _declaration_tree(root)
+    rows = []
+    with patch.object(here, "_installed_declaration", lambda: installed), \
+            patch.object(_opf_declaration, "SHIPPED_DECLARATION_SHA256", digest), \
+            patch.multiple(here, _cmd_doctor=recorder("doctor"), _cmd_render=recorder("render"),
+                           _cmd_init=recorder("init"), _cmd_absorb=recorder("absorb"),
+                           _cmd_record=recorder("record"), _cmd_adopt=recorder("adopt")):
+        for argv in argvs:
+            rc, out, err = _declaration_capture(argv)
+            line = ("opf {}: cannot evaluate: implementation declaration {} (spec 16.1); no store operation "
+                    "was performed\n").format(argv[0], state)
+            rows.append((argv[0], argv[1], rc, err.startswith(line)))
+    ok = all(rc == EXIT_MALFORMED and refused for _verb, _arg, rc, refused in rows)
+    return ok and not called and _declaration_tree(root) == before, (state, rows, called)
+
+
+def _dv_gate_refuses_every_store_verb(tmp):
+    absent = Path(tmp) / "absent" / _opf_declaration.DECLARATION_NAME
+    return _declaration_gate_refuses(tmp, absent, _opf_declaration.ABSENT)
+
+
+# The gate refuses on every state other than ok, not on absent alone: each refusing state of the runtime check,
+# where the shipped bytes are in place behind it (a symlink to them, a file of them the mode makes unreadable)
+# or the digest is patched to the bytes' own, so a gate that refused on absent alone would dispatch.
+def _dv_gate_refuses_symlink(tmp):
+    target = Path(tmp) / "target.toml"
+    target.write_bytes(_opf_declaration.SHIPPED_DECLARATION_BYTES)
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.symlink_to(target)
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+
+
+def _dv_gate_refuses_crlf(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(_opf_declaration.SHIPPED_DECLARATION_BYTES.replace(b"\n", b"\r\n"))
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.DIGEST_MISMATCH)
+
+
+def _dv_gate_refuses_empty(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(b"")
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.DIGEST_MISMATCH)
+
+
+def _dv_gate_refuses_directory(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.mkdir()
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+
+
+def _dv_gate_refuses_fifo(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    os.mkfifo(installed)
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+
+
+def _dv_gate_refuses_oversize(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(b"#" * (_opf_declaration.MAX_DECLARATION_BYTES + 1))
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+
+
+def _dv_gate_refuses_unreadable_mode(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(_opf_declaration.SHIPPED_DECLARATION_BYTES)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:   # chmod cannot make a file unreadable to root
+        print("opf declaration cli self-test: DISCLOSED SKIP: gate-refuses-unreadable-mode not run (uid 0 is not "
+              "bound by mode bits)", file=sys.stderr)
+        return True, "skipped: uid 0 is not bound by mode bits"
+    installed.chmod(0)
+    try:
+        return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+    finally:
+        installed.chmod(0o600)
+
+
+def _dv_gate_refuses_malformed(tmp):
+    data = _opf_declaration.SHIPPED_DECLARATION_BYTES + b"# a comment\n"
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(data)
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.MALFORMED, _declaration_sha256(data))
+
+
+def _dv_gate_refuses_contradictory(tmp):
+    data = _opf_declaration.SHIPPED_DECLARATION_BYTES.replace(
+        "homes = {}\n".format(_opf_store.HOMES).encode("ascii"),
+        "homes = {}\n".format(_opf_store.HOMES + 1).encode("ascii"))
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(data)
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.CONTRADICTORY, _declaration_sha256(data))
+
+
+def _dv_ungated_verbs_read_no_declaration(tmp):
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    root = Path(tmp) / "root"
+    root.mkdir()
+    absent = Path(tmp) / "absent" / _opf_declaration.DECLARATION_NAME
+    calls = []
+    real = _opf_declaration.runtime_check
+
+    def counting(path):
+        calls.append(path)
+        return real(path)
+    with patch.object(here, "_installed_declaration", lambda: absent), \
+            patch.object(_opf_declaration, "runtime_check", counting):
+        upgrade = _declaration_capture(["upgrade", "--root", str(root)])
+        imported = _declaration_capture(["import", "--scan", "--root", str(root)])
+        stubs = [_declaration_capture([verb]) for verb in KNOWN_VERBS if verb not in _DECLARATION_GATED
+                 and verb not in ("upgrade", "import")]
+    ok = (upgrade == (EXIT_MALFORMED, "", "opf upgrade: " + UPGRADE_NONE + "\n")
+          and imported[0] == EXIT_MALFORMED and IMPORT_RETIRED in imported[2] and imported[1] == ""
+          and stubs and all(rc == EXIT_MALFORMED and "not yet implemented" in err for rc, _out, err in stubs))
+    return ok and not calls, (upgrade, imported, stubs, calls)
+
+
+def _dv_report_documented_run(tmp):
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    shipped = _installed_declaration().read_bytes()
+    live = _declaration_capture(["--declaration"])
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(shipped)
+    with patch.object(here, "_installed_declaration", lambda: installed):
+        copy = _declaration_capture(["--declaration"])
+    want = (EXIT_OK, _declaration_expected(shipped, _declaration_sha256(shipped), "fail"), "")
+    restated = live[1].split("[declaration]\n", 1)[-1].split("\n[runtime]\n", 1)[0].encode("ascii")
+    return live == want and copy == want and restated == shipped, (live, copy)
+
+
+def _dv_report_cannot_evaluate_run(tmp):
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    shipped = _installed_declaration().read_bytes()
+    absent = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    with patch.object(here, "_installed_declaration", lambda: absent):
+        rc, out, err = _declaration_capture(["--declaration"])
+        usage = _declaration_capture(["--declaration", "--root"])
+    line = ("opf --declaration: cannot evaluate: implementation declaration absent (spec 16.1); no store "
+            "operation was performed\n")
+    ok = (rc == EXIT_MALFORMED and out == _declaration_expected(shipped, "not-read", "cannot_evaluate")
+          and err.startswith(line) and usage[0] == EXIT_MALFORMED and usage[1] == "")
+    return ok, (rc, out, err, usage)
+
+
+def _dv_doctor_carries_report(tmp):
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    shipped = _installed_declaration().read_bytes()
+    root = Path(tmp) / "not-adopted"
+    root.mkdir()
+    rc, out, err = _declaration_capture(["doctor", "--root", str(root)])
+    report = _declaration_expected(shipped, _declaration_sha256(shipped), "fail")
+    resolved = []
+    absent = Path(tmp) / "absent" / _opf_declaration.DECLARATION_NAME
+    with patch.object(here, "_installed_declaration", lambda: absent), \
+            patch.object(_opf_store, "resolve_store", lambda *a, **k: resolved.append(a)):
+        refused = _declaration_capture(["doctor", "--root", str(root)])
+    ok = (rc == EXIT_OK and out.startswith("opf doctor: NOT APPLICABLE") and out.endswith("\n" + report)
+          and refused[0] == EXIT_MALFORMED
+          and refused[1] == _declaration_expected(shipped, "not-read", "cannot_evaluate") and not resolved)
+    return ok, (rc, out, err, refused, resolved)
+
+
+def _dv_raised_build_reads_its_declaration(tmp):
+    """A build raised in process (SUPPORTED_WORKLOG one past the shipped generation; HOMES is never patched by
+    name, which the homes-1 scan of check_opf_homes refuses) passes the gate only inside
+    _running_build_declaration, over the declaration that build ships: doctor is refused as contradictory with
+    the constant raised before the context, inside it once that constant moves again after entry, and after it;
+    inside it doctor dispatches and its report restates the raised declaration, and with the constant restored
+    it dispatches over the installed copy again, the presented file gone and the shipped bytes restored."""
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    root = Path(tmp) / "root"
+    root.mkdir()
+    called = []
+
+    def doctor(rest):
+        called.append(rest)
+        return EXIT_OK
+    installed = _installed_declaration()
+    shipped = _opf_declaration.SHIPPED_DECLARATION_BYTES
+    raised = _opf_store.SUPPORTED_WORKLOG + 1
+    data = _opf_declaration.declaration_bytes(_opf_declaration.RELEASE_IDENTITY, _opf_store.SPEC_VERSION,
+                                              _opf_store.HOMES, raised)
+    argv = ["doctor", "--root", str(root)]
+    rows = {}
+    with patch.object(here, "_cmd_doctor", doctor):
+        with patch.object(_opf_store, "SUPPORTED_WORKLOG", raised):
+            rows["raised"] = _declaration_capture(argv)
+            with _running_build_declaration() as presented:
+                rows["presented"] = _declaration_capture(argv)
+                presented_bytes = presented.read_bytes()
+                with patch.object(_opf_store, "SUPPORTED_WORKLOG", raised + 1):
+                    rows["moved"] = _declaration_capture(argv)
+            rows["exited"] = _declaration_capture(argv)
+        rows["restored"] = _declaration_capture(argv)
+    line = ("opf doctor: cannot evaluate: implementation declaration contradictory (spec 16.1); no store "
+            "operation was performed\n")
+    refused = all(rows[key][0] == EXIT_MALFORMED and rows[key][2].startswith(line)
+                  for key in ("raised", "moved", "exited"))
+    ok = (refused and presented_bytes == data
+          and rows["presented"] == (EXIT_OK, _declaration_expected(data, _declaration_sha256(data), "fail"), "")
+          and rows["restored"] == (EXIT_OK, _declaration_expected(shipped, _declaration_sha256(shipped), "fail"), "")
+          and len(called) == 2 and not presented.exists() and _installed_declaration() == installed
+          and _opf_declaration.SHIPPED_DECLARATION_BYTES == shipped)
+    return ok, (rows, presented_bytes, called)
+
+
+_DECLARATION_CLI_VECTORS = (
+    ("gate-refuses-every-store-verb", _dv_gate_refuses_every_store_verb),
+    ("gate-refuses-symlink", _dv_gate_refuses_symlink),
+    ("gate-refuses-crlf", _dv_gate_refuses_crlf),
+    ("gate-refuses-empty", _dv_gate_refuses_empty),
+    ("gate-refuses-directory", _dv_gate_refuses_directory),
+    ("gate-refuses-fifo", _dv_gate_refuses_fifo),
+    ("gate-refuses-oversize", _dv_gate_refuses_oversize),
+    ("gate-refuses-unreadable-mode", _dv_gate_refuses_unreadable_mode),
+    ("gate-refuses-malformed", _dv_gate_refuses_malformed),
+    ("gate-refuses-contradictory", _dv_gate_refuses_contradictory),
+    ("ungated-verbs-read-no-declaration", _dv_ungated_verbs_read_no_declaration),
+    ("report-documented-run", _dv_report_documented_run),
+    ("report-cannot-evaluate-run", _dv_report_cannot_evaluate_run),
+    ("doctor-carries-report", _dv_doctor_carries_report),
+    ("raised-build-reads-its-declaration", _dv_raised_build_reads_its_declaration),
+)
+
+
+def run_declaration_cli_vector(name):
+    """Run the dispatcher's spec 16.1 vector `name` in a fresh scratch directory: (ok, detail). An exception
+    the vector lets escape is that vector's failure, named in its detail."""
+    import tempfile
+    if _bootstrap() != EXIT_OK:
+        return False, "the helpers could not be bootstrapped"
+    fn = dict(_DECLARATION_CLI_VECTORS)[name]
+    with tempfile.TemporaryDirectory(prefix="opf-declaration-cli-") as tmp:
+        try:
+            ok, detail = fn(tmp)
+        except Exception as exc:  # noqa: BLE001  an escaping error is that vector's failure, never a pass
+            return False, "raised {!r}".format(exc)
+    return ok is True, detail
+
+
+def _declaration_cli_self_test():
+    """The dispatcher's spec 16.1 vectors: the gate refuses every store verb before dispatch on an absent,
+    symlinked, CRLF, empty, directory, FIFO, oversize, mode-unreadable, malformed or contradictory declaration,
+    upgrade, import and the stub verbs never read it, `--declaration` writes the expected report
+    (exit 0, and exit 2 with not-read and cannot_evaluate when absent), doctor appends the report, and a build
+    raised in process passes the gate only over the declaration _running_build_declaration presents for it.
+    tools/check_opf_declaration.py runs each under its registered check id and shows it red under its revert."""
+    failures = []
+    for name, _fn in _DECLARATION_CLI_VECTORS:
+        ok, detail = run_declaration_cli_vector(name)
+        if not ok:
+            failures.append((name, detail))
+    if failures:
+        print("opf declaration cli self-test: FAIL ({} of {} vectors)".format(
+            len(failures), len(_DECLARATION_CLI_VECTORS)), file=sys.stderr)
+        for name, detail in failures:
+            print("  {}: {!r}".format(name, detail), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf declaration cli self-test: PASS ({} vectors)".format(len(_DECLARATION_CLI_VECTORS)))
+    return EXIT_OK
+
+
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
 # Built by a function rather than a module-level tuple because the _opf_* helpers it references are bound by
@@ -23374,6 +23761,8 @@ def _self_tests():
     ("opf-retained-close-offpath", _retained_close_offpath_self_test),
     ("opf-close-exc-safe-vectors", _close_exc_safe_vectors_self_test),
     ("opf-cli", _cli_self_test),
+    ("opf-declaration", _opf_declaration.self_test),
+    ("opf-declaration-cli", _declaration_cli_self_test),
 )
 
 
@@ -23387,7 +23776,8 @@ def _self_tests():
 SELF_TEST_GROUPS = (
     ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
               "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
-              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli")),
+              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli",
+              "opf-declaration", "opf-declaration-cli")),
     ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
     ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
 )
@@ -23523,12 +23913,28 @@ def main(argv=None):
     if not args or args[0] in ("-h", "--help"):
         print(__doc__, file=sys.stderr)
         return EXIT_MALFORMED
+    if args[0] == "--declaration":
+        return _declaration_run(args[1:])
     verb = args[0]
     rest = args[1:]
+    check = None
+    if verb in _DECLARATION_GATED:
+        # Spec 16.1: the runtime check gates every verb that can touch a store, before it resolves one.
+        check = _opf_declaration.runtime_check(_installed_declaration())
+        if not check.ok:
+            print(_opf_declaration.refusal_line(verb, check), file=sys.stderr)
+            print("opf {}: {}".format(verb, check.detail), file=sys.stderr)
+            if verb in _DECLARATION_REPORTING:
+                _opf_declaration.emit_report(check, False, sys.stdout)
+            return EXIT_MALFORMED
     if verb == "render":
         return _cmd_render(rest)
     if verb == "doctor":
-        return _cmd_doctor(rest)
+        rc = _cmd_doctor(rest)
+        if check is not None and verb in _DECLARATION_REPORTING:
+            # Doctor is read-only: it performs no store operation, so its runtime result is fail.
+            _opf_declaration.emit_report(check, False, sys.stdout)
+        return rc
     if verb == "init":
         return _cmd_init(rest)
     if verb == "upgrade":

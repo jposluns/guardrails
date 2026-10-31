@@ -1961,6 +1961,12 @@ _HOMES_COMPARE_EXCLUSIONS = {
     ("_opf_oplock.py", "_t_e4_distinct_nested_stores", "len(homes) == len(rels) + 1"):
         "an oplock self-test vector counting the distinct lock anchors it collects in a set named homes; "
         "no homes generation is read",
+    ("_opf_declaration.py", "parse_declaration",
+     "declaration_bytes(table['release'], table['spec_version'], table['homes'], table['worklog']) != data"):
+        "the implementation declaration's canonical-form test: it compares the declaration file's bytes with "
+        "the canonical rendering of its own four fields, so the declared homes is an operand of a byte "
+        "rendering, not a generation test; it refuses non-canonical bytes, and _contradiction holds the "
+        "declared homes to HOMES",
 }
 # String constants naming the deleted record journal root that may stay, with the reason each is not a
 # path any code builds or opens. Keyed by (module, owner, exact text: the constant), each admitting exactly
