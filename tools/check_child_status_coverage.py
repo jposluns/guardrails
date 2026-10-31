@@ -12,19 +12,19 @@ with exit 2). This gate holds where it runs:
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
      tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
-     tools/check_verifier_delivery.py and tools/check_fixture_pins.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
-     (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
-     and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
-     for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
-     name reaches the copy. The binding count (_bindings) is the one binding counter of legs 2 and 3; it is a
-     static walk of
-     every node that runs in the module's own scope: nested if, try, with, for, while and match blocks, tuple,
-     list and starred targets, walrus, for, with-as, except-as and match names, import and from-import aliases
-     (a star import counts), del, and a global declaration of the name in any function. Every attribute or
-     subscript store or delete at module scope or in a class body (_entry.__code__ = ..., globals()["_entry"] =
-     ...) is counted for every name and is never clean: through an alias it can reach the module namespace or
-     the function. A rebinding made by a call (setattr, globals().update), by a store inside a function body
-     other than through a global declaration, or from another module is not seen.
+     tools/check_verifier_delivery.py and tools/check_fixture_pins.py), in opf/tools/_opf_declaration.py and
+     tools/check_opf_declaration.py (the constant and both functions) and in the hooks dispatcher and its
+     generated plugin copy (the constant and the probe) are each bound exactly once at module scope, by one
+     top-level definition (an undecorated one for a function), and AST-identical (ast.dump, docstrings
+     included) to the canonical text, so a call by that name reaches the copy. The binding count (_bindings) is
+     the one binding counter of legs 2 and 3; it is a static walk of every node that runs in the module's own
+     scope: nested if, try, with, for, while and match blocks, tuple, list and starred targets, walrus, for,
+     with-as, except-as and match names, import and from-import aliases (a star import counts), del, and a
+     global declaration of the name in any function. Every attribute or subscript store or delete at module
+     scope or in a class body (_entry.__code__ = ..., globals()["_entry"] = ...) is counted for every name and
+     is never clean: through an alias it can reach the module namespace or the function. A rebinding made by a
+     call (setattr, globals().update), by a store inside a function body other than through a global
+     declaration, or from another module is not seen.
   3. entries: each CLI copy's __main__ body is exactly its cli_entry line: for opf/tools/opf.py,
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
      ends the process by raising SystemExit itself, never through sys.exit), and for every other,

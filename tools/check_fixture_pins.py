@@ -11,10 +11,16 @@ renamed or deleted is a missing table (exit 2), never one that silently drops ou
 
 The manifest carries exactly format-version = 1 and [[table]] rows of exactly source (a repo-relative .py
 path) and name (an identifier). It must be a tracked regular non-symlink UTF-8 TOML file with at least one
-row and no repeated (source, name) pair. Each source is read as a regular non-symlink file and AST-parsed,
-never imported. The name must be bound exactly once in the module's own scope (a static walk that does not
-descend into function or class bodies), by a top-level assignment whose value is a dict literal; every key
-and value must be a string literal (a ** unpacking, an f-string, a computed path or a name is a non-literal
+row and no repeated (source, name) pair. Each source must be tracked and committed in HEAD as a regular blob,
+and is read from the working tree as a regular non-symlink file and AST-parsed, never imported. The name must
+be bound exactly once in the module's own scope, by a top-level assignment whose value is a dict literal. The
+binding count is a static walk of every node evaluated in that scope (function, lambda and class bodies are
+not entered; their decorators, argument defaults, bases and class keywords are): every non-load ast.Name
+(assignment, augmented, annotated, for, with-as, walrus, del, type alias), a def or class of the name, an
+import or from-import alias (a star import counts), a global declaration, and every binding held in a string
+field (NAME_FIELDS: an except or except* handler's name, a match capture, star or mapping rest). Any store,
+augmented store or delete on a subscript or attribute of the name in that scope is refused. Every key and
+value must be a string literal (a ** unpacking, an f-string, a computed path or a name is a non-literal
 entry), keys are checked for duplicates on the AST before any dict is built, and an empty table is refused.
 A key is a repo-relative POSIX path of the closed character set PIN_PATH_RE with no '.' or '..' component;
 a value is 64 lowercase hex digits.
@@ -27,16 +33,25 @@ Each pin is then checked, every finding reported rather than the first:
               with it (no ancestor symlink), and the file opened O_NOFOLLOW|O_NONBLOCK is regular and hashes to
               the pin.
 The same path pinned to two different digests by two tables is a finding. git is resolved once on PATH and
-run with the caller's environment minus every GIT_-prefixed variable (_git_fixture_env.caller_env_without_git).
+run with the caller's environment minus every GIT_-prefixed variable (_git_fixture_env.caller_env_without_git),
+and every git read carries --no-replace-objects, so a local refs/replace/* entry cannot make another blob or
+an older commit read as HEAD's.
 
 DISCLOSED RESIDUAL: a pin table nobody declared in the manifest is out of scope, and so is a fixture a
 self-test reads without a pin; the manifest itself is hand-written, so removing a row passes this gate and
-only review can judge it. A rebinding of a table name made inside a function, by a call (setattr,
-globals().update) or from another module is not seen. A symlink swapped in between the lstat and the open of
-the final component is refused by O_NOFOLLOW, but an ancestor directory swapped between the real-path check
-and the open is not detected. A matching digest shows the bytes are the pinned ones, not that the fixture is
-adequate, and a pass is about fixture integrity, not about the health of any self-test. A path outside
-PIN_PATH_RE (a space or any non-ASCII character) cannot be pinned.
+only review can judge it. A rebinding or mutation of a table made inside a function body, by a call
+(setattr, globals().update, or a method such as PINNED.update or PINNED.pop), through an alias of the table,
+or from another module is not seen. A table source that is tracked and in HEAD is still read from the
+working tree, as the manifest is, so an uncommitted edit to a committed source decides the result. The
+legacy .git/info/grafts file is not disabled (--no-replace-objects does not cover it). Four self-test flips
+(MESSAGE_ONLY_FLIPS) keep the vector's exit code and change only its report, because another leg still fails
+the vector closed; the tracked, lstat and git-exit legs each have a second vector whose flip changes the exit
+code, but a git that cannot launch fails every read, so its flip is shown by the report alone. A symlink
+swapped in between the lstat and the open of the final component is refused by O_NOFOLLOW, but an ancestor
+directory swapped between the real-path check and the open is not detected. A matching digest shows the
+bytes are the pinned ones, not that the fixture is adequate, and a pass is about fixture integrity, not about
+the health of any self-test. A path outside PIN_PATH_RE (a space or any non-ASCII character) cannot be
+pinned.
 
   check_fixture_pins.py                                check the live tree
   check_fixture_pins.py --self-test                    run the vectors in throwaway repositories
@@ -45,10 +60,10 @@ PIN_PATH_RE (a space or any non-ASCII character) cannot be pinned.
 Exit convention: 0 every declared table produced at least one pin and every pin verified; 1 a pin finding
 (untracked, not in HEAD, committed as a symlink or non-regular entry, HEAD blob mismatch, missing, symbolic
 link, ancestor symlink, non-regular, working-tree mismatch, conflicting pins); 2 cannot evaluate (a missing,
-unreadable, malformed or table-less manifest; an unreadable or unparseable source; a table not found, bound
-twice, not a dict literal, empty, non-literal, holding a duplicate key, or holding a malformed path or digest;
-git unavailable, a git error or timeout; a read error other than a missing file; an unknown argument). 2 takes
-precedence over 1.
+unreadable, malformed or table-less manifest; a source not tracked, not committed in HEAD, unreadable or
+unparseable; a table not found, bound twice, altered by a subscript or attribute store, not a dict literal,
+empty, non-literal, holding a duplicate key, or holding a malformed path or digest; git unavailable, a git
+error or timeout; a read error other than a missing file; an unknown argument). 2 takes precedence over 1.
 """
 import sys
 
@@ -98,8 +113,8 @@ def _git(git, root, env, *args):
     """stdout bytes of one git read in root; any launch failure, timeout or nonzero exit is CannotEvaluate."""
     try:
         result = subprocess.run([git, "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
-                                 "-C", str(root), *args], capture_output=True, env=env, timeout=GIT_TIMEOUT,
-                                check=False)
+                                 "-C", str(root), "--no-replace-objects", *args], capture_output=True, env=env,
+                                timeout=GIT_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CannotEvaluate("git {} could not run ({})".format(args[0], type(exc).__name__))
     if result.returncode != 0:
@@ -201,26 +216,58 @@ def _manifest_rows(root, index):
     return rows
 
 
-def _module_bindings(tree, name):
-    """Every node that binds name in the module's own scope (function and class bodies are not entered)."""
-    found, stack = [], list(tree.body)
+# The binding forms whose target is a plain string field rather than an ast.Name: an except or except* handler's
+# "as" name, a match capture (case NAME, case [*NAME], case {**NAME}).
+NAME_FIELDS = ((ast.ExceptHandler, "name"), (ast.MatchAs, "name"), (ast.MatchStar, "name"),
+               (ast.MatchMapping, "rest"))
+
+
+def _module_scope_nodes(tree):
+    """Every node evaluated in the module's own scope. A function, lambda or class body is not entered, but its
+    decorators, argument defaults, bases and class keywords are, since they run in the enclosing scope."""
+    stack = list(tree.body)
     while stack:
         node = stack.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == name:
-                found.append(node)
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            stack.extend(getattr(node, "decorator_list", []))
+            stack.extend(default for default in node.args.defaults + node.args.kw_defaults if default is not None)
             continue
-        if isinstance(node, ast.Lambda):
+        if isinstance(node, ast.ClassDef):
+            stack.extend(node.decorator_list + node.bases + node.keywords)
             continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _module_bindings(tree, name):
+    """Every node that binds name in the module's own scope."""
+    found = []
+    for node in _module_scope_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
+            found.append(node)
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             found.extend(node for alias in node.names
                          if alias.name == "*" or (alias.asname or alias.name.split(".")[0]) == name)
-            continue
         if isinstance(node, ast.Name) and node.id == name and not isinstance(node.ctx, ast.Load):
+            found.append(node)
+        if any(isinstance(node, kind) and getattr(node, field) == name for kind, field in NAME_FIELDS):
             found.append(node)
         if isinstance(node, ast.Global) and name in node.names:
             found.append(node)
-        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _module_stores(tree, name):
+    """Every store, augmented store or delete in the module's own scope on a subscript or attribute of name
+    (name["k"] = ..., name["k"] += ..., name.attr = ..., del name["k"], and the same through a longer chain)."""
+    found = []
+    for node in _module_scope_nodes(tree):
+        if isinstance(node, (ast.Subscript, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
+            base = node.value
+            while isinstance(base, (ast.Subscript, ast.Attribute)):
+                base = base.value
+            if isinstance(base, ast.Name) and base.id == name:
+                found.append(node)
     return found
 
 
@@ -239,9 +286,14 @@ def _is_str(node):
     return isinstance(node, ast.Constant) and isinstance(node.value, str)
 
 
-def _table_pins(root, source, name):
+def _table_pins(root, source, name, index, head):
     """[(path, digest)] of one declared table, read from its source's AST; any defect is CannotEvaluate."""
     where = "{}:{}".format(source, name)
+    if source not in index:
+        raise CannotEvaluate("{}: source not tracked".format(where))
+    entry = head.get(source)
+    if entry is None or entry[0] not in REGULAR_MODES or entry[1] != "blob":
+        raise CannotEvaluate("{}: source not committed in HEAD as a regular file".format(where))
     real_root = os.path.realpath(root)
     path = os.path.join(root, source)
     if os.path.realpath(path) != os.path.join(real_root, source):
@@ -256,6 +308,10 @@ def _table_pins(root, source, name):
         raise CannotEvaluate("{}: table not found".format(where))
     if len(bindings) > 1:
         raise CannotEvaluate("{}: table bound {} times in the module scope".format(where, len(bindings)))
+    stores = _module_stores(tree, name)
+    if stores:
+        raise CannotEvaluate("{}: table altered by a subscript or attribute store at module scope, line {}".format(
+            where, stores[0].lineno))
     table = _literal_dict(tree, name)
     if table is None:
         raise CannotEvaluate("{}: table is not a dict literal assigned at the top level".format(where))
@@ -358,7 +414,7 @@ def evaluate(root, git, env):
     cannot, findings, pins = [], [], {}
     for source, name in rows:
         try:
-            table = _table_pins(root, source, name)
+            table = _table_pins(root, source, name, index, head)
         except CannotEvaluate as exc:
             cannot.append(str(exc))
             continue
@@ -399,6 +455,14 @@ def _live():
 SELF_TEST_MARKER = "# --- self-test ---"
 SUITE_ID = "fixture-pins-selftest"
 CHECKS_MANIFEST = Path(__file__).resolve().parent / "selftest_checks.toml"
+# Flips that keep the vector's exit code and change only its report, because another leg of the gate still
+# fails the vector closed: an untracked fixture is also not in HEAD, a final-component link to another file
+# also fails the real-path leg, and a git that cannot launch or exits nonzero on every read leaves an empty
+# index, so the manifest reads as untracked. Every other flip must change the exit code. The tracked, lstat
+# and git-exit legs each have a second vector whose flip does (index-only-removal, symlink-loop,
+# head-blob-object-missing); the launch-error leg has none.
+MESSAGE_ONLY_FLIPS = ("flip/untracked-as-tracked", "flip/symlink-lstat-dropped", "flip/git-launch-error-swallowed",
+                      "flip/git-exit-ignored")
 FAILURES = []
 EXECUTED = []
 _EXECUTED_SET = set()
@@ -451,10 +515,14 @@ def _repo(root, source=GOOD_SOURCE, manifest=_manifest("PINNED"), extra=None, in
         _write(root, rel, data)
     if init:
         _fixture_git(root, "init", "-q")
-        _fixture_git(root, "add", "-A")
-        _fixture_git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                     "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture")
+        _commit(root)
     return root
+
+
+def _commit(root):
+    _fixture_git(root, "add", "-A")
+    _fixture_git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture")
 
 
 def _pins_source(**pins):
@@ -588,6 +656,75 @@ def _v_fifo(root):
     return root
 
 
+def _v_symlink_loop(root):
+    # A link to itself: its real path is its own path, so only the lstat leg reports it as a link.
+    _repo(root)
+    (root / "fx/a.txt").unlink()
+    (root / "fx/a.txt").symlink_to("a.txt")
+    return root
+
+
+def _v_index_removed(root):
+    # Removed from the index only: HEAD and the working tree still hold the pinned bytes.
+    _repo(root)
+    _fixture_git(root, "rm", "-q", "--cached", "fx/a.txt")
+    return root
+
+
+def _v_blob_missing(root):
+    # HEAD names the blob but the object database lacks it, so only git cat-file's exit status reports it.
+    _repo(root)
+    oid = _fixture_git(root, "rev-parse", "HEAD:fx/a.txt").strip()
+    (root / ".git" / "objects" / oid[:2] / oid[2:]).unlink()
+    return root
+
+
+def _v_blob_replaced(root):
+    # HEAD holds BRAVO; a replace ref makes its blob read as ALPHA, the pinned bytes.
+    _repo(root)
+    alpha = _fixture_git(root, "rev-parse", "HEAD:fx/a.txt").strip()
+    _write(root, "fx/a.txt", BRAVO)
+    _commit(root)
+    _write(root, "fx/a.txt", ALPHA)
+    _fixture_git(root, "replace", _fixture_git(root, "rev-parse", "HEAD:fx/a.txt").strip(), alpha)
+    return root
+
+
+def _v_commit_replaced(root):
+    # HEAD holds BRAVO; a replace ref makes HEAD read as the older commit that held ALPHA.
+    _repo(root)
+    older = _fixture_git(root, "rev-parse", "HEAD").strip()
+    _write(root, "fx/a.txt", BRAVO)
+    _commit(root)
+    _write(root, "fx/a.txt", ALPHA)
+    _fixture_git(root, "replace", _fixture_git(root, "rev-parse", "HEAD").strip(), older)
+    return root
+
+
+def _v_source_index_removed(root):
+    _repo(root)
+    _fixture_git(root, "rm", "-q", "--cached", TABLES_REL)
+    return root
+
+
+def _v_source_staged(root):
+    _repo(root, manifest=_manifest("PINNED") + '\n[[table]]\nsource = "tools/staged_tables.py"\nname = "STAGED"\n')
+    _write(root, "tools/staged_tables.py", 'STAGED = {\n    "fx/a.txt": "%s",\n}\n' % ALPHA_PIN)
+    _fixture_git(root, "add", "tools/staged_tables.py")
+    return root
+
+
+def _v_source_untracked(root):
+    _repo(root, manifest=_manifest("PINNED") + '\n[[table]]\nsource = "tools/loose_tables.py"\nname = "LOOSE"\n')
+    _write(root, "tools/loose_tables.py", 'LOOSE = {\n    "fx/a.txt": "%s",\n}\n' % ALPHA_PIN)
+    return root
+
+
+def _with_source(tail):
+    """A builder for a repository whose table source is the good one followed by tail."""
+    return lambda root: _repo(root, source=GOOD_SOURCE + tail)
+
+
 def _load_mutant(source, directory, tag):
     """Write one flip of this gate's own source under the self-test's scratch directory and load it with
     importlib (never a dynamic code string). This helper is the self-test's ONE code-loading site, so the
@@ -686,13 +823,67 @@ def _self_test_cases(base, git):
              'return b""'),
             ("vector/outside-repository", "flip/git-exit-ignored", "control/outside-repository", _v_outside_repo, git,
              2, "git ls-files exited 128", "if result.returncode != 0:", "if False:"),
+            ("vector/index-only-removal", "flip/index-removal-as-tracked", "control/index-only-removal",
+             _v_index_removed, git, 1, "fx/a.txt (tools/fixture_tables.py:PINNED): not tracked",
+             "if rel not in index:", "if False:"),
+            ("vector/symlink-loop", "flip/symlink-loop-lstat-dropped", "control/symlink-loop", _v_symlink_loop, git,
+             1, "is a symbolic link in the working tree",
+             "if stat.S_ISLNK(info.st_mode):\n        return [", "if False:\n        return ["),
+            ("vector/head-blob-object-missing", "flip/blob-read-exit-ignored", "control/head-blob-object-missing",
+             _v_blob_missing, git, 2, "git cat-file exited 128", "if result.returncode != 0:", "if False:"),
+            ("vector/blob-replaced", "flip/blob-replace-honoured", "control/blob-replaced", _v_blob_replaced, git, 1,
+             "HEAD blob digest mismatch",
+             '"-C", str(root), "--no-replace-objects", *args]', '"-C", str(root), *args]'),
+            ("vector/commit-replaced", "flip/commit-replace-honoured", "control/commit-replaced", _v_commit_replaced,
+             git, 1, "HEAD blob digest mismatch",
+             '"-C", str(root), "--no-replace-objects", *args]', '"-C", str(root), *args]'),
+            ("vector/bound-by-match-as", "flip/match-as-binding-unseen", "control/bound-by-match-as",
+             _with_source("match 0:\n    case PINNED:\n        pass\n"), git, 2, "table bound 2 times",
+             '(ast.MatchAs, "name")', '(ast.MatchAs, "lineno")'),
+            ("vector/bound-by-match-star", "flip/match-star-binding-unseen", "control/bound-by-match-star",
+             _with_source("match []:\n    case [*PINNED]:\n        pass\n"), git, 2, "table bound 2 times",
+             '(ast.MatchStar, "name")', '(ast.MatchStar, "lineno")'),
+            ("vector/bound-by-match-rest", "flip/match-rest-binding-unseen", "control/bound-by-match-rest",
+             _with_source("match {}:\n    case {**PINNED}:\n        pass\n"), git, 2, "table bound 2 times",
+             '(ast.MatchMapping, "rest")', '(ast.MatchMapping, "lineno")'),
+            ("vector/bound-by-except-as", "flip/except-binding-unseen", "control/bound-by-except-as",
+             _with_source("try:\n    pass\nexcept ValueError as PINNED:\n    pass\n"), git, 2, "table bound 2 times",
+             '(ast.ExceptHandler, "name")', '(ast.ExceptHandler, "lineno")'),
+            ("vector/bound-by-except-star-as", "flip/except-star-binding-unseen", "control/bound-by-except-star-as",
+             _with_source("try:\n    pass\nexcept* ValueError as PINNED:\n    pass\n"), git, 2, "table bound 2 times",
+             '(ast.ExceptHandler, "name")', '(ast.ExceptHandler, "lineno")'),
+            ("vector/bound-by-walrus-decorator", "flip/decorator-walk-dropped", "control/bound-by-walrus-decorator",
+             _with_source("@(PINNED := lambda f: f)\ndef g():\n    pass\n"), git, 2, "table bound 2 times",
+             'stack.extend(getattr(node, "decorator_list", []))', "pass"),
+            ("vector/bound-by-walrus-default", "flip/default-walk-dropped", "control/bound-by-walrus-default",
+             _with_source("def g(x=(PINNED := 1)):\n    pass\n"), git, 2, "table bound 2 times",
+             "stack.extend(default for default in node.args.defaults + node.args.kw_defaults if default is not None)",
+             "pass"),
+            ("vector/bound-by-walrus-class-base", "flip/class-base-walk-dropped", "control/bound-by-walrus-class-base",
+             _with_source("class C((PINNED := object)):\n    pass\n"), git, 2, "table bound 2 times",
+             "stack.extend(node.decorator_list + node.bases + node.keywords)", "pass"),
+            ("vector/subscript-store", "flip/store-check-dropped", "control/subscript-store",
+             _with_source('PINNED["fx/a.txt"] = "%s"\n' % BRAVO_PIN), git, 2,
+             "table altered by a subscript or attribute store at module scope, line 4", "if stores:", "if False:"),
+            ("vector/source-index-removed", "flip/source-tracked-check-dropped", "control/source-index-removed",
+             _v_source_index_removed, git, 2, "tools/fixture_tables.py:PINNED: source not tracked",
+             "if source not in index:", "if False:"),
+            ("vector/source-staged-only", "flip/source-head-check-dropped", "control/source-staged-only",
+             _v_source_staged, git, 2, "tools/staged_tables.py:STAGED: source not committed in HEAD",
+             'if entry is None or entry[0] not in REGULAR_MODES or entry[1] != "blob":', "if False:"),
     ):
         tag = vector_id.partition("/")[2]
         root = build(base / tag)
         check(vector_id, _outcome(this, root, use_git, env, marker), (want, True))
         mutant = _flip(old, new, flips, tag)
         flipped = mutant if isinstance(mutant, str) else _outcome(mutant, root, use_git, env, marker)
-        check(flip_id, (not isinstance(mutant, str), flipped != (want, True)), (True, True))
+        # An uncaught exception exits the process 1; a string that is not a crash means no flip was built.
+        flipped_exit = flipped[0] if isinstance(flipped, tuple) else 1 if flipped.startswith("crashed") else None
+        if flip_id in MESSAGE_ONLY_FLIPS:
+            red = flipped_exit == want and flipped != (want, True)
+        else:
+            red = flipped_exit is not None and flipped_exit != want
+        check(flip_id, (not isinstance(mutant, str), red), (True, True))
         print("{}: intact {!r}, flipped {!r}".format(flip_id, (want, True), flipped))
         check(control_id, _outcome(this, root, use_git, env, marker), (want, True))
     # Vectors with no flip: the remaining fail-closed legs, each a single red or green outcome.
@@ -706,6 +897,15 @@ def _self_test_cases(base, git):
             ("vector/manifest-unknown-key", _v_manifest_unknown_key, 2, "unknown key(s) extra"),
             ("vector/table-bound-twice", _v_bound_twice, 2, "table bound 2 times"),
             ("vector/fifo-not-regular", _v_fifo, 1, "is not a regular file in the working tree"),
+            ("vector/bound-by-walrus-lambda-default", _with_source("f = lambda x=(PINNED := 1): x\n"), 2,
+             "table bound 2 times"),
+            ("vector/subscript-augmented-store", _with_source('PINNED["fx/a.txt"] += ""\n'), 2,
+             "table altered by a subscript or attribute store at module scope, line 4"),
+            ("vector/attribute-store", _with_source("PINNED.extra = 1\n"), 2,
+             "table altered by a subscript or attribute store at module scope, line 4"),
+            ("vector/subscript-delete", _with_source('if True:\n    del PINNED["fx/a.txt"]\n'), 2,
+             "table altered by a subscript or attribute store at module scope, line 5"),
+            ("vector/source-untracked", _v_source_untracked, 2, "tools/loose_tables.py:LOOSE: source not tracked"),
     ):
         root = build(base / vector_id.partition("/")[2])
         check(vector_id, _outcome(this, root, git, env, marker), (want, True))
@@ -757,9 +957,10 @@ def self_test(report_path=None):
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: {} unique checks executed (each vector red or green on its throwaway repository; "
-          "each flip/ check edits one gate line and shows the vector's result change, and each control/ check "
-          "reruns the intact gate on it); execution set reconciled against tools/selftest_checks.toml".format(
-              len(EXECUTED)))
+          "each flip/ check edits one gate line and shows the vector's exit code change, except {} {}, which "
+          "keep the exit code and show only the report change; each control/ check reruns the intact gate on "
+          "it); execution set reconciled against tools/selftest_checks.toml".format(
+              len(EXECUTED), len(MESSAGE_ONLY_FLIPS), ", ".join(MESSAGE_ONLY_FLIPS)))
     return 0
 
 

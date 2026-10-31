@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "097171615bb9b5a7ffa559642a6452103eb46cc1aae6ca55eb3fd011a625d1d9"
+tree-sha256 = "add2ee3fa12cf7b46fca587061b6abfd73e51e227a6d75b13eb804efdf3fd252"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2736,8 +2736,8 @@ sha256 = "7e2a33aeb02898da84fbb3e9aa956f9618a676f21c10982e73475e400cb8fd37"
 
 [[sources]]
 path = "opf/tools/_child_status.py"
-bytes = 14677
-sha256 = "c18de47d4f37e1fd507656b834f3e61b2bf8117a4ec559b55f9bcaaf1cd1558c"
+bytes = 14728
+sha256 = "d73f4b44701d77baa2632994b8bc4f55412addb2d00de35069663c1c87041346"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"
@@ -3437,7 +3437,7 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 [[sources]]
 path = "tools/check_child_status_coverage.py"
 bytes = 212410
-sha256 = "d6cb1ccaddb4c147449bbd4b1bc8754b345f9b00d1c4169b4d62548a80a54935"
+sha256 = "39181c1b9844e56520997d71d1890593ab1203c5f04fc52a54c519acb9325209"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3476,8 +3476,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_fixture_pins.py"
-bytes = 38989
-sha256 = "4a250b5cbdbbc802a28b8b622edcd96d931ef22e09f0bdfaff936f8b9fa04151"
+bytes = 51874
+sha256 = "f1d83447de57f3334bde4e6f3be85501f5fb341f8b50f02ca369161854034456"
 
 [[sources]]
 path = "tools/check_footer.py"
@@ -3911,8 +3911,8 @@ sha256 = "0febdedc0da68c98bc985b32d2960e9cbb07171caac60cc8e6c468ea7b43912b"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 187086
-sha256 = "5c9566b272c9f667811f3c3c08069b3a3531ade543821329ef9747023f4f986f"
+bytes = 189110
+sha256 = "7184ccc60b7801629b2d991402838fd7bd87088ecff8f38bcd9d5a4a58fedd6a"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
