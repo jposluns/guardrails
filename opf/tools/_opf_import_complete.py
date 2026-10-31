@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""OPF import completion: the read-only per-source evaluator (OPF-SPEC 1.3.0 section 14.1).
+"""OPF import completion: the read-only per-source evaluator (OPF-SPEC 2.0.0 section 14.1, "One approval
+and completion").
 
 Spec sections implemented: 14.1's per-source import completion ("For each migrate-disposed source, import
 completion MUST verify the preserved original's digest (the archived copy under section 14.2 for a source
 that occupied a managed destination, the frozen live file and its apply-archived retirement preimage
 otherwise), at least one imported record referencing that source or a recorded skip under the approved
 policy, and doctor VALID over both the strict store and the imported series, evaluated on the live
-tree"); 14.1's homes-1 clause (the completion checks re-read inventories and payload digests themselves,
-because C-EVIDENCE-ENUM is inactive until homes 2), whose re-reads this evaluator keeps on homes 2 as well,
-as defence in depth; and 8.8's correction chain ("Such a corrected import is a fresh run ... and source
-completion (section 14.1) evaluates the correcting run"). Recording the result in the receipt's
-outcome-event chain, the retirement transaction, `import_status` and the `opf import` modes are later units;
+tree"); 14.1's explicit evidence coverage (the completion checks "MUST re-read inventories and payload
+digests themselves, as defence in depth beside C-EVIDENCE-ENUM rather than relying on it"); and 8.8's
+correction chain ("Such a corrected import is a fresh run ... and source completion (section 14.1)
+evaluates the correcting run"). Recording the result in the receipt's outcome-event chain, the retirement transaction, `import_status` and the `opf import` modes are later units;
 this module decides and records nothing.
 
 evaluate_source(product_root, run_id, source, doctor=...) grades ONE migrate-disposed source of the
@@ -31,7 +31,7 @@ adoption run `run_id`, in four legs, each reporting under one SourceResult:
     inventory; and a non-occupying source's frozen live file still holds its plan digest (an occupying
     source left the live tree at apply);
   imports: the imported records referencing the source are those, in the imported managed leaves
-    (<type>.imported.index.toml per type except legacy_fragment, and worklog.imported.toml, inline in the
+    (<type>.imported.index.toml per type other than worklog, and worklog.imported.toml, inline in the
     machine store), whose import.source is exactly the source's preserved original
     .working/imported/import/<import-run>/originals/<source-path> of their own import.run. Every import run
     holding such a record re-reads its bundle inventory (the doctor's own row validator, kind import) and
@@ -130,7 +130,9 @@ from _opf_emit import emit_checked   # noqa: E402
 
 VALID, INVALID, CANNOT_EVALUATE = store.VALID, store.INVALID, store.CANNOT_EVALUATE
 # The imported managed leaves (spec 4.2, 8.3), inline in the machine store in either layout: one index per
-# enabled type except the importer-only legacy_fragment, and the imported worklog on its own number line.
+# enabled type other than worklog (spec 4.2: the same enabled-type roster as the clean series), and the
+# imported worklog on its own number line. The tooling's importer-only legacy_fragment type is not in
+# IMPORTED_TYPES: its LF namespace is outside records.IMPORTED_NAMESPACES, so it has no imported leaf.
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
 IMPORTED_TYPES = tuple(sorted(

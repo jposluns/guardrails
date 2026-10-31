@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""OPF adoption apply engine: the apply SHELL (slice 1), the three file ops (slice 2), init-store (slice 3), the two registration ops (slice 4), the three finish ops (slice 5) and the enable-hook op (OPF-SPEC 1.3.0).
+"""OPF adoption apply engine: the apply SHELL (slice 1), the three file ops (slice 2), init-store (slice 3), the two registration ops (slice 4), the three finish ops (slice 5) and the enable-hook op (OPF-SPEC 2.0.0).
 
 Slice 1 (the clean-start adoption track's first apply unit) supplies the engine SKELETON, shaped by spec
-1.3.0 sections 4.2, 5.7 and 14: run identity; the evidence-bundle, archive and Move homes, all
+2.0.0 sections 4.2, 5.7 and 14: run identity; the evidence-bundle, archive and Move homes, all
 derived from the `_opf_store` homes constructors (never re-spelled here); the `opf.evidence.inventory/v1`
 inventory DERIVED from the run's own transaction op list and published in that SAME transaction as the
 retained bytes it lists (spec 4.2), a base `inventory.toml` then one `inventory-<phase>.toml` per later
@@ -216,7 +216,7 @@ binding too, and a planted lock alone carries no binding, so a dead owner's lock
 is); before init renders the store `.gitignore`, the journal is trackable
 by git (benign: journals are machine-local, and a clone without them cannot recover those transactions,
 spec 4.2); the shipped `retire-file` vocabulary row declares a
-single `remove`, while spec 1.3.0 preserves the retirement preimage at apply and removes only after the green check, so the file ops
+single `remove`, while spec 2.0.0 preserves the retirement preimage at apply and removes only after the green check, so the file ops
 split each retire and move row across the two stages, and the base transaction's create of the archive
 copy is the declared row's unlisted first half; the RETIREMENT_PHASE transaction refuses on a resolved
 store exactly as every transaction here does (no lease join yet), so once init-store executes, a real

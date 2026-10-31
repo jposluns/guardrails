@@ -343,11 +343,12 @@ def homes_generation(manifest_data):
                  and version == HOMES2_SPEC_VERSION) else 1
 
 
-# The imported-series machine-store leaves (spec 8.2/4.2): a store that declares spec_version
-# IMPORTED_SPEC_VERSION or later keeps imported history beside the clean-series files, one leaf per
-# enabled type except legacy_fragment; worklog, a ledger, uses worklog.imported.toml instead of an
-# imported index. Inert until activation: the gate below requires this tooling's OWN support
-# (SUPPORTED_SPEC_VERSION, currently 1.2.0, at or above IMPORTED_SPEC_VERSION), never the declared
+# The imported-series machine-store leaves (spec 4.2): imported history sits beside the clean-series
+# files, one leaf per enabled type; worklog, a ledger, uses worklog.imported.toml instead of an imported
+# index. This tooling registers them on a store that declares spec_version IMPORTED_SPEC_VERSION or
+# later, and grants no leaf to its importer-only legacy_fragment type, whose LF namespace is outside
+# _IMPORTED_SERIES_NAMESPACES below. Inert until activation: the gate below requires this tooling's
+# OWN support (SUPPORTED_SPEC_VERSION, currently 1.2.0, at or above IMPORTED_SPEC_VERSION), never the declared
 # version alone, because C-MANIFEST ACCEPTS one newer declaration today, the reserved spec_version
 # 2.0.0 / homes = 2 pair (spec 4.2).
 IMPORTED_SPEC_VERSION = "1.3.0"        # the first base spec_version whose stores carry the imported series
