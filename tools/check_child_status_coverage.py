@@ -372,6 +372,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     ".preview/stamp-truth-stop.py",
     ".preview/unbounded-wait.py",
     ".preview/ungated-record.py",
+    "opf/tools/_fail_closed_child.py",
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",
     "opf/tools/_opf_adopt_apply.py",

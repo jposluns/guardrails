@@ -178,7 +178,7 @@ def _bootstrap():
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
-    global _opf_adopt_state, _opf_declaration
+    global _opf_adopt_state, _opf_declaration, _fail_closed_child
     try:
         import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
@@ -197,6 +197,7 @@ def _bootstrap():
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
         import _opf_declaration  # spec 16.1: the declaration file's runtime check and the report emitter
+        import _fail_closed_child  # the shared fail-closed child contract (hooks, record, minimal parent)
     except ImportError as exc:
         try:
             line = "opf: cannot bootstrap: {} (cannot evaluate)".format(_init_inert(exc.name or str(exc)))
@@ -23840,6 +23841,7 @@ def _self_tests():
     ("opf-cli", _cli_self_test),
     ("opf-declaration", _opf_declaration.self_test),
     ("opf-declaration-cli", _declaration_cli_self_test),
+    ("opf-fail-closed-child", _fail_closed_child.self_test),
 )
 
 
@@ -23854,7 +23856,7 @@ SELF_TEST_GROUPS = (
     ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
               "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
               "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli",
-              "opf-declaration", "opf-declaration-cli")),
+              "opf-declaration", "opf-declaration-cli", "opf-fail-closed-child")),
     ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
     ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
 )

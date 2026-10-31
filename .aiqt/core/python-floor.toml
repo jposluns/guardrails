@@ -49,6 +49,7 @@ guarded-surfaces = [
     ".preview/ungated-record.py",
     "opf/enforcement/claude/pretooluse_deny.py",
     "opf/tools/_child_status.py",
+    "opf/tools/_fail_closed_child.py",
     "opf/tools/_journal.py",
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",
