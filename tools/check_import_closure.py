@@ -370,17 +370,20 @@ surface. Search roots: the own-directory root and the IMPORT_SEARCH_ROOTS rows a
 model of sys.path; a row is held live by a sys.path.insert or sys.path.append call whose argument is one of a closed
 set of shapes, the ones this tree's rows write, read by spelling and never evaluated: str() around a pathlib chain;
 os.path.join(os.path.dirname(os.path.abspath(__file__)), LITERAL, ...), in exactly that nesting; or a module-level
-name bound to one of those. A pathlib chain starts at Path(__file__).resolve() followed by .parent (1 to 17 times) or
-by one .parents[N] (N an int literal, 0 to 16), at repo_root(), or at a module-level name bound to a pathlib chain
-(followed through at most two names, so a name bound to a chain that starts at a third name is not read), and
-continues with / and a LITERAL any number of times. Every LITERAL is one path component, [A-Za-z0-9_.-]+ and
-neither . nor .., so an absolute, empty, separator-holding or trailing-slash component never occurs, and a shape
-that climbs above the repository root is not read. A name is read only where the whole file binds it exactly once, by a plain
-module-level NAME = shape statement with one target naming no further name, and nowhere else in any form (annotated,
-augmented, chained or destructuring assignment, for, with, except, match or comprehension target, walrus, del,
-global, nonlocal, import, def, class, parameter or type parameter, in any scope); Path is read only where the file's
-one binding of it is from pathlib import Path, os only where it is import os, and repo_root only where it is from
-_gen_common import repo_root (this tree's helper, read as the repository root by its contract, not executed);
+name bound to one of those, a str() there around a chain that starts at no name (a str-valued name over a chain that
+starts at a name, LIBS = str(ROOT / 'lib') with ROOT a name, is not read, and neither is the insertion of a name bound
+to another name). A pathlib chain starts at Path(__file__).resolve() followed by .parent (1 to 17 times) or by one
+.parents[N] (N an int literal, 0 to 16), at repo_root(), or, only inside a str() that is itself the insertion
+argument, at a module-level name bound to a pathlib chain, which may itself start at one more such name, whose chain
+starts at no name (at most two names, so a chain that reaches a third name is not read), and continues with / and a
+LITERAL any number of times. Every LITERAL is one path component, [A-Za-z0-9_.-]+ and neither . nor .., so an
+absolute, empty, separator-holding or trailing-slash component never occurs, and a shape that climbs above the
+repository root is not read. A name is read only where the whole file binds it exactly once, by a plain module-level
+NAME = value statement with one target, and nowhere else in any form (annotated, augmented, chained or destructuring
+assignment, for, with, except, match or comprehension target, walrus, del, global, nonlocal, import, def, class,
+parameter or type parameter, in any scope); Path is read only where the file's one binding of it is from pathlib
+import Path, os only where it is import os, and repo_root only where it is from _gen_common import repo_root
+(this tree's helper, read as the repository root by its contract, not executed);
 __file__ and str only where the file binds them nowhere; and a star import anywhere in the file leaves every name
 unread. Every other argument (a bare string literal, an unwrapped pathlib value, another os.path call or nesting) is
 refused (cannot evaluate), naming the file, the row and the argument's spelling, where no read insertion resolves the
@@ -1212,8 +1215,9 @@ DYNAMIC_IMPORT_SITES = (
       "#2: '_load'",
       "#3: '_load'",
       "#4: '_load'"),
-     "the string _load names this gate's own _load helper, which the self-test replaces with a stand-in to "
-     "raise at that site; not pickle's _load, never resolved as a loader"),
+     "the string _load names this gate's own _load helper, which the self-test replaces for each site it raises "
+     "at: with a stand-in that raises (#1, #2), or with lambda: None so that the raise comes from the _read_regular "
+     "stand-in or the stand-in opf's _bootstrap instead (#3, #4); not pickle's _load, never resolved as a loader"),
     ("tools/check_opf_enforce_platforms.py", MODULE_SCOPE,
      ("#1: import importlib.util",),
      "imports importlib.util for load_hook"),
@@ -2877,6 +2881,10 @@ _T_ELSEWHERE = ("tools/elsewhere.py", "from pathlib import Path\ndef repo_root()
 # A name bound once to a read shape, then (in the rebinding vectors) one statement between it and its insertion.
 _T_NAMED = _T_PATH + "ROOT = str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor')\n" \
     "%ssys.path.insert(0, ROOT)\nimport pkg\n"
+# Two names bound to pathlib chains, the inner one (ROOT) then, in the rebinding vectors, rebound before the outer
+# one is bound, so that the outer one's value follows the rebinding and not the first binding.
+_T_TWO_NAMES = _T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n%sLIB = ROOT / 'lib'\n" \
+    "sys.path.insert(0, str(LIB / '_vendor'))\nimport pkg\n"
 
 
 def _unread_refusal(argument, rel="tools/t.py", sroot="lib/_vendor"):
@@ -3621,8 +3629,7 @@ _GREEN_VECTORS = (
                      "sys.path.insert(0, str(ROOT / 'lib' / '_vendor'))\nimport pkg\n"),), dict(search_roots=_T_ROOTS)),
     # At the name bound: two names, the second bound to the chain the first starts at (one more is refused below).
     ("insertion through two names, each bound once to a pathlib chain",
-     (("tools/t.py", _T_PATH + "ROOT = Path(__file__).resolve().parents[1]\nLIB = ROOT / 'lib'\n"
-                     "sys.path.insert(0, str(LIB / '_vendor'))\nimport pkg\n"),), dict(search_roots=_T_ROOTS)),
+     (("tools/t.py", _T_TWO_NAMES % ""),), dict(search_roots=_T_ROOTS)),
     ("insertion through repo_root imported from _gen_common",
      (("tools/t.py", _T_PATH + "from _gen_common import repo_root\n"
                      "sys.path.insert(0, str(repo_root() / 'lib' / '_vendor'))\nimport pkg\n"), _T_GEN_COMMON),
@@ -4147,6 +4154,17 @@ _CANNOT_VECTORS = (
     _unread_vector("names bound to pathlib chains that start at each other", "str(LIB / '_vendor')",
                    source=_T_PATH + "LIB = ROOT / 'lib'\nROOT = LIB / 'up'\n"
                    "sys.path.insert(0, str(LIB / '_vendor'))\nimport pkg\n"),
+    # The inner name of two pathlib-chain names bound once and then rebound: the gate reads neither binding.
+    _unread_vector("inner pathlib-chain name rebound later at module level", "str(LIB / '_vendor')",
+                   source=_T_TWO_NAMES % "ROOT = Path('elsewhere')\n"),
+    _unread_vector("inner pathlib-chain name rebound in a function through global", "str(LIB / '_vendor')",
+                   source=_T_TWO_NAMES % "def move():\n    global ROOT\n    ROOT = Path('elsewhere')\nmove()\n"),
+    _unread_vector("inner pathlib-chain name rebound in an if branch", "str(LIB / '_vendor')",
+                   source=_T_TWO_NAMES % "if os.environ.get('ELSEWHERE'):\n    ROOT = Path('elsewhere')\n"),
+    # A str-valued name over a chain that starts at a name: its chain is read with no name to follow.
+    _unread_vector("str-valued name over a pathlib chain that starts at a name", "LIBS",
+                   source=_T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n"
+                   "LIBS = str(ROOT / 'lib' / '_vendor')\nsys.path.insert(0, LIBS)\nimport pkg\n"),
     _unread_vector("repo_root defined in the file", "str(repo_root() / 'lib' / '_vendor')",
                    source=_T_PATH + "def repo_root():\n    return Path('elsewhere')\n"
                    "sys.path.insert(0, str(repo_root() / 'lib' / '_vendor'))\nimport pkg\n"),
@@ -4620,6 +4638,19 @@ MUTANTS = (
      ".parents index one past the highest read"),
     ("name-hops-bound", "_path_chain(value, rel, bindings, named - 1)", "_path_chain(value, rel, bindings, named)",
      "pathlib chain through one name past the highest read"),
+    # A pathlib-chain name read at its first plain module-level binding, every other binding of it ignored: each
+    # rebinding of the inner name of two is then read as the root it first spelled.
+    ("chain-name-bound-once", "        value = _assigned(bindings, node.id)\n        start = None if",
+     '        value = next((b[1] for b in _bindings_of(bindings, node.id) or () if b[0] == "assign"), None)\n'
+     "        start = None if", "inner pathlib-chain name rebound later at module level"),
+    ("chain-name-bound-once-global", "        value = _assigned(bindings, node.id)\n        start = None if",
+     '        value = next((b[1] for b in _bindings_of(bindings, node.id) or () if b[0] == "assign"), None)\n'
+     "        start = None if", "inner pathlib-chain name rebound in a function through global"),
+    ("chain-name-bound-once-branch", "        value = _assigned(bindings, node.id)\n        start = None if",
+     '        value = next((b[1] for b in _bindings_of(bindings, node.id) or () if b[0] == "assign"), None)\n'
+     "        start = None if", "inner pathlib-chain name rebound in an if branch"),
+    ("str-name-chain-unnamed", "MAX_NAME_HOPS if named else 0", "MAX_NAME_HOPS",
+     "str-valued name over a pathlib chain that starts at a name"),
     ("str-wrapper-required", "    return _os_path_join(node, rel, bindings)\n",
      "    return _os_path_join(node, rel, bindings) or _path_chain(node, rel, bindings, named)\n",
      "unwrapped pathlib value"),
