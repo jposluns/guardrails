@@ -1232,6 +1232,9 @@ def _config_poison_fixture(base):
 # --ci-job opf-closure-e (added when every closure leg whose command these lanes run was bounded
 # at or above its deadline here, since the closure work then no longer fit in fewer than five
 # jobs), so each of those three counts is three higher on a tree carrying all three new members.
+# On 2026-10-31 the change that adds opf-release-history-selftest registers a sixth, --ci-job
+# opf-closure-f (added when that leg fit in none of the five jobs without lowering the headroom
+# multiplier job C allows), so each of those counts is one higher again on a tree carrying it.
 # One measured member, opf/tools/check_opf_upgrade.py --self-test (one of the six shorter
 # opf/tools self-tests, timed in every run), was later removed with the store-upgrade engine, so
 # the account constants below omit it: 100 account members, 88 timed, 10 measured in the
@@ -1268,7 +1271,7 @@ def _config_poison_fixture(base):
 # outside the account. It never lowers the count of malformed-lane members not measured in that
 # lane, which reflects only the account's malformed-lane run, nor the account's own count of
 # members with no recorded time, whose members the account does not name.
-# The five tools/check_opf_standalone_closure.py --self-test --ci-job entries are such bounds:
+# The six tools/check_opf_standalone_closure.py --self-test --ci-job entries are such bounds:
 # the members have standalone times of the pre-split whole self-test only, but for one standalone
 # time of the opf-closure-c member when it held one leg, none a config-lane time, and each carries
 # its own entry below, sized outside SIZING. On the merged tree of 2026-10-20
@@ -1276,7 +1279,8 @@ def _config_poison_fixture(base):
 # 27 had no recorded time (the 12 account members the account does not name, and the 15 later
 # members SIZING_LATER_MEASURED does not cover), and the closure gate's two self-test halves had
 # pre-split standalone times only; 106 malformed-lane members were not measured in that lane.
-# The three --ci-job members registered on 2026-10-23 each carry a SIZING_LATER_MEASURED entry.
+# The three --ci-job members registered on 2026-10-23 each carry a SIZING_LATER_MEASURED entry,
+# and so does the one registered on 2026-10-31.
 # On the tree of 2026-10-24 (counted by _roster_figures; dated, not pinned), which carries all
 # five --ci-job members and two later members more (tools/check_rule_placement.py and the
 # rule-placement-selftest suite run), the roster had 123 members, 121 of them in the malformed
@@ -1322,15 +1326,16 @@ CONFIG_MEMBER_BOUNDS = {
     # MEASURED lane times (see SIZING): 207.87 s, 220.76 s, 229.02 s (whole roster) and 219.70 s
     # (malformed). ESTIMATED: 229.02 * 20 / 3 = 1526.8, so 1800 s.
     ("opf/tools/check_opf_init.py", "--self-test"): 1800,
-    # The closure gate's self-test runs as FIVE registered members since the closure CI work was
+    # The closure gate's self-test runs as SIX registered members since the closure CI work was
     # split between CI jobs (--ci-job: the gate partitions its legs between the jobs, and the flip
-    # runs in the job whose legs hold opf-tooling-selftest); this comment sizes all five. Each part
+    # runs in the job whose legs hold opf-tooling-selftest); this comment sizes all six. Each part
     # sweeps only its own part of the current roster, plus the same fast vectors, so each part's
     # sweep is a proper part of the whole self-test's over the same tree; that is NOT a subset of
     # what the measured pre-split runs below swept, since opf-closure-c holds two legs
-    # (opf-adopt-state-selftest and opf-adopt-complete-selftest) absent from the tree those runs
-    # measured. Every part keeps the whole self-test's 3600 s entry as a
-    # deliberate shorter deadline rather than a bound sized from a run of its own.
+    # (opf-adopt-state-selftest and opf-adopt-complete-selftest) and opf-closure-f one
+    # (opf-release-history-selftest) absent from the tree those runs measured. Every part keeps the
+    # whole self-test's 3600 s entry rather than a bound sized from a run of its own: a deliberate
+    # shorter deadline for every part but opf-closure-f (see below).
     # Sized outside SIZING (no config-lane time of this member is known: the lane runs below
     # reached the 1200 s default, so they have no known length and none is fed to the formula).
     # Every run below is of the PRE-SPLIT whole self-test (one sweep over every leg plus the flip).
@@ -1351,13 +1356,16 @@ CONFIG_MEMBER_BOUNDS = {
     # 2.159), covers load5 up to about 51.8 scaled from the run's start (its starting load5, 22.8,
     # sits below the 24 CPUs, where the model adds no growth, so it scales from 24: 24 x 2.159 =
     # 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
-    # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case, READ FROM
-    # SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
+    # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case but F's, READ
+    # FROM SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
     # member's legs' bounds, one 10 s cleanup deadline per leg, the flip and its cleanup where it
     # runs, and the 350 s vector allowance), 13322 s (opf-closure-a), 10585 s (b), 7780 s (c),
     # 9840 s (d) and 9526 s (e), and below each CI job's worst case (21193 s, 21420 s, 15810 s,
-    # 19930 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
-    # as the default's comment above sanctions: this lane owns no member's
+    # 19930 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself). For
+    # opf-closure-f, whose worst case is 1620 s (its one leg's 1260 s bound, one cleanup deadline
+    # and the vector allowance; its CI job's is 3490 s), the same 3600 s sits ABOVE that worst case,
+    # so for that member alone it is no shorter deadline. For the other five it is a shorter
+    # deadline exactly as the default's comment above sanctions: this lane owns no member's
     # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
     # member. The member's OWN inner bounds are read differently: when one of its legs is killed at
     # its leg bound, ended by a signal, or its flip is not evaluated, the member itself exits 2, and
@@ -1371,12 +1379,14 @@ CONFIG_MEMBER_BOUNDS = {
     # its then worst case, 1620 s; it now sweeps five legs, so it takes the 3600 s of the others.
     # MEASURED (2026-10-23, at the tree of that one-leg member, plain, on a 24-CPU host, load5 5.4 at
     # the start and 5.9 at the end): one complete standalone run of it took 110.3 s wall and passed,
-    # its homes leg 53.4 s. No config-lane time of any of the five members is known.
+    # its homes leg 53.4 s. No config-lane time of any of the six members is known, and no run of
+    # the opf-closure-f member at all.
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-a"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-b"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): 3600,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-f"): 3600,
     # Sized outside SIZING, by its formula (no config-lane time of this member is known: its lane
     # runs reached the 1200 s default in two of three config lanes of one CI run, so they have no
     # known length and none is fed to the formula; the same lanes had passed on the same tree in an
@@ -1543,6 +1553,9 @@ SIZING_LATER_MEASURED = {
         "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
         " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): (
+        "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
+        " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-f"): (
         "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
         " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
     ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): (
@@ -4337,6 +4350,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
+    "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
     "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",

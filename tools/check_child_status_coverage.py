@@ -392,6 +392,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/_opf_pack_manifest.py",
     "opf/tools/_opf_record.py",
     "opf/tools/_opf_release.py",
+    "opf/tools/_opf_release_history.py",
     "opf/tools/_opf_schema.py",
     "opf/tools/_opf_store.py",
     "opf/tools/_opf_views.py",
