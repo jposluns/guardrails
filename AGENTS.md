@@ -1111,7 +1111,9 @@ Classify a decision before enacting it: is it yours to make (ACT), the maintaine
 procedure standing in for them, search the decision record for that subject: a maintainer ruling answers it
 and outranks any predicted one, but counts only when recorded in an artefact the maintainer controls and the
 assistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is
-unclear, the ASK goes ahead.
+unclear, the ASK goes ahead. An ASK whose options act on a target states the target state each option
+depends on as observed for that ASK, not recalled: whether the target exists, what triggers it, and whether
+the name an option selects it by is unique to it.
 
 ## Repeated failure triggers premise review
 

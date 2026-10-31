@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "aa1f9a13a1de13742534baaf08d8247f597f6ad65000abbb4385830c9a23688b"
+tree-sha256 = "f82613d83e738d0663bf76de18fa6a43c369683de19e97f40b9376632a73d63f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -41,8 +41,8 @@ sha256 = "e8206a17458f86b423d9c17f84145a13ceb485d52e38d11769cc89976acbf552"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 312166
-sha256 = "a7a74feaaa716202f1fc5486a17417e1aa03801c1e31d541e704842cc2179d7d"
+bytes = 312638
+sha256 = "adbf4c27721fd05cbe7c4dd03041d2b38eb1c56479e7f2ffdb26cf5d5ec76ae3"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -96,8 +96,8 @@ sha256 = "d42ab3af8a05ed2102b507875bfaf3a4348b13765afabd51268dcdcff3c5428c"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 38869
-sha256 = "74d2f4385f9b8b393be4660038f2c2a9433e8d6ff5530917779c4bcbcb70d1e6"
+bytes = 38918
+sha256 = "71c35107d3cc4f612178dcda5b4c9309cd8f9dd7662979b8c4444b595467a17a"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
@@ -361,8 +361,8 @@ sha256 = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[sources]]
 path = ".aiqt/core/rules/progr-decision.md"
-bytes = 847
-sha256 = "dae06196008c0bf9f98c4c82961af2943e601b8374abf2717d0fba38ef78f476"
+bytes = 1078
+sha256 = "16d57e500ffc3c8ded580eef5992f6e97b489a4d3244063567812cd4f2c38ba4"
 
 [[sources]]
 path = ".aiqt/core/rules/progr-repeated-failure-triggers-premise-review.md"
@@ -842,7 +842,7 @@ sha256 = "0fca72838333bd7d207d0430cbd416691e3dcd23dd71cb9fe9d0eed0da7d6608"
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
 bytes = 1104
-sha256 = "24489946f0fc57563cb7194f0b17b978ddc2c0f3fefb1f1ece6c5cd69be8d0d3"
+sha256 = "b63d56fca9f7f9f9d64a72844463db86b726a18f5575399857859dec4fdac46f"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -1346,8 +1346,8 @@ sha256 = "ca2a29d56f95091c3f50db083deae2655f01b54d7d44e2686f8d29b45ada76ff"
 
 [[sources]]
 path = ".claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
-bytes = 847
-sha256 = "dae06196008c0bf9f98c4c82961af2943e601b8374abf2717d0fba38ef78f476"
+bytes = 1078
+sha256 = "16d57e500ffc3c8ded580eef5992f6e97b489a4d3244063567812cd4f2c38ba4"
 
 [[sources]]
 path = ".claude/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md"
@@ -2011,8 +2011,8 @@ sha256 = "8bee98cee9477ac40263ff07811fcd3278e1c4fa28eba1eed4c747ea89601a41"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc"
-bytes = 629
-sha256 = "ea1765720a8b6c9ca474caf56a56a75b37264b086bba05186e1df330c5028aa1"
+bytes = 860
+sha256 = "78dc9395d9e1cf61fa8bdc9c5216a3da4816d592d7bbd48ae19ffb8b1f956cc1"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-repeated-failure-triggers-premise-review.mdc"
@@ -2281,8 +2281,8 @@ sha256 = "3d035f2568508929d740e651b7fa5d9373e6d2fc7293ec8568c4f5332953b88f"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 117732
-sha256 = "34a2718aa84053d1704ea7d41750e30cc989e4e3dc7f712bdaa05f26714242b9"
+bytes = 117963
+sha256 = "942f0ae8caa8b29e1972bab1abd9f14e2f9cbb42b5d73ed8373a66a55b6fc68d"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2346,8 +2346,8 @@ sha256 = "35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 117693
-sha256 = "4fbe063f20c34072ee6d3b0994720cdc7f6fd49152248daf610a287a3efdf4d9"
+bytes = 117924
+sha256 = "29641db96f656bd5d67ca1c4399f157ff3bfcbc3ac30e3d96e67b372d3374b71"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2366,8 +2366,8 @@ sha256 = "132faac38b2638ddb0384fe22e6a8908bb03d1807833a610434a0b569efa46c0"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 117728
-sha256 = "0ceeb71771713a376f4cd0d674e4dd0000452bafd62a22ab6e36d3629d839d4c"
+bytes = 117959
+sha256 = "25aa9d972b02b7fd7a1e70760abc84a96e76eab2bb179c23c26f3753c3a9676c"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
@@ -4448,7 +4448,7 @@ sha256 = "ca2a29d56f95091c3f50db083deae2655f01b54d7d44e2686f8d29b45ada76ff"
 artifact-id = "rules:.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
 path = ".claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
 kind = "file"
-sha256 = "dae06196008c0bf9f98c4c82961af2943e601b8374abf2717d0fba38ef78f476"
+sha256 = "16d57e500ffc3c8ded580eef5992f6e97b489a4d3244063567812cd4f2c38ba4"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md"
@@ -5246,7 +5246,7 @@ sha256 = "8bee98cee9477ac40263ff07811fcd3278e1c4fa28eba1eed4c747ea89601a41"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc"
 kind = "file"
-sha256 = "ea1765720a8b6c9ca474caf56a56a75b37264b086bba05186e1df330c5028aa1"
+sha256 = "78dc9395d9e1cf61fa8bdc9c5216a3da4816d592d7bbd48ae19ffb8b1f956cc1"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/20-PROGR-repeated-failure-triggers-premise-review.mdc"
@@ -5564,13 +5564,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "34a2718aa84053d1704ea7d41750e30cc989e4e3dc7f712bdaa05f26714242b9"
+sha256 = "942f0ae8caa8b29e1972bab1abd9f14e2f9cbb42b5d73ed8373a66a55b6fc68d"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "4fbe063f20c34072ee6d3b0994720cdc7f6fd49152248daf610a287a3efdf4d9"
+sha256 = "29641db96f656bd5d67ca1c4399f157ff3bfcbc3ac30e3d96e67b372d3374b71"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -5583,7 +5583,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "0ceeb71771713a376f4cd0d674e4dd0000452bafd62a22ab6e36d3629d839d4c"
+sha256 = "25aa9d972b02b7fd7a1e70760abc84a96e76eab2bb179c23c26f3753c3a9676c"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
