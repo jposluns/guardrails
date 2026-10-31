@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "b1c5279731f85b681c91dffa1cce72cae66e48999b198e33a20857f1d9952410"
+tree-sha256 = "3aa416191f3cde56f9f96f183b99bb4982d7a9a2a7b9427f2beef1d44f0793ae"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3451,8 +3451,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 130694
-sha256 = "2d6b27cffa0e665b980a1fdb5cce047d41960826df313796270e8205ab35be23"
+bytes = 131086
+sha256 = "a13a4e867d4f94131d18b2e0ee1fab8e554e7c0b664a14b87481f4ae8e79bd82"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -3586,8 +3586,8 @@ sha256 = "355fa85c86b2d132f70ec0e131fbd66437292f22149ae90b55b7a8a2972f63f6"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
-bytes = 343966
-sha256 = "dc4eb4054acf441915ff723037e49499c8552f53ee5a0f72b66b9b1599bd609e"
+bytes = 358178
+sha256 = "b7ff7d76934dd021afc39a64ac774f81ec1d33e968d65c7451103630b347c627"
 
 [[sources]]
 path = "tools/check_record_drift.py"
