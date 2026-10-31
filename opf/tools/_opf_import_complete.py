@@ -10,8 +10,9 @@ policy, and doctor VALID over both the strict store and the imported series, eva
 tree"); 14.1's explicit evidence coverage (the completion checks "MUST re-read inventories and payload
 digests themselves, as defence in depth beside C-EVIDENCE-ENUM rather than relying on it"); and 8.8's
 correction chain ("Such a corrected import is a fresh run ... and source completion (section 14.1)
-evaluates the correcting run"). Recording the result in the receipt's outcome-event chain, the retirement transaction, `import_status` and the `opf import` modes are later units;
-this module decides and records nothing.
+evaluates the correcting run"). Recording the result in the receipt's outcome-event chain, the retirement
+transaction, `import_status` and the `opf import` modes are later units; this module decides and records
+nothing.
 
 evaluate_source(product_root, run_id, source, doctor=...) grades ONE migrate-disposed source of the
 adoption run `run_id`, in four legs, each reporting under one SourceResult:
@@ -241,11 +242,11 @@ def _bind(ev):
 
 def _bundle(ev):
     """(verification, {inventory path: parsed inventory or None}) of the run's adoption bundle, verified ONCE
-    per evaluation by _opf_adopt_apply.verify_bundle (spec 14.1's homes-1 re-read: every inventory and every
-    payload it lists). Each bundle-root inventory is parsed from the exact bytes that verification read,
-    never a second read, admitted canonical and held to the apply shell's own inventory validator; one it
-    grades INVALID (the legacy ingest format) maps to None and claims nothing. A verification or an
-    inventory that cannot evaluate raises Unevaluable to every leg that asks."""
+    per evaluation by _opf_adopt_apply.verify_bundle (the completion checks' own re-read of spec 14.1: every
+    inventory and every payload it lists). Each bundle-root inventory is parsed from the exact bytes that
+    verification read, never a second read, admitted canonical and held to the apply shell's own inventory
+    validator; one it grades INVALID (the legacy ingest format) maps to None and claims nothing. A
+    verification or an inventory that cannot evaluate raises Unevaluable to every leg that asks."""
     if ev.bundle is None:
         try:
             read = {}
@@ -392,8 +393,9 @@ def _check_preserved(ev, rep):
     """Spec 14.1: 'the preserved original's digest (the archived copy under section 14.2 for a source that
     occupied a managed destination, the frozen live file and its apply-archived retirement preimage
     otherwise)'. The run's evidence bundle verifies from disk first, every inventory and every payload it
-    lists (the homes-1 re-read of spec 14.1, kept on homes 2), and the preserved copy must be one the
-    bundle inventory claims, read from the bytes that verification read (_bundle)."""
+    lists (spec 14.1: the completion checks "MUST re-read inventories and payload digests themselves"),
+    and the preserved copy must be one the bundle inventory claims, read from the bytes that verification
+    read (_bundle)."""
     row = ev.row
     verified, docs = _bundle(ev)
     for f in verified.findings:

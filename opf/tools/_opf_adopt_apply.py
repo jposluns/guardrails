@@ -6,8 +6,9 @@ Slice 1 (the clean-start adoption track's first apply unit) supplies the engine 
 derived from the `_opf_store` homes constructors (never re-spelled here); the `opf.evidence.inventory/v1`
 inventory DERIVED from the run's own transaction op list and published in that SAME transaction as the
 retained bytes it lists (spec 4.2), a base `inventory.toml` then one `inventory-<phase>.toml` per later
-phase, never rewritten; the homes-1 bundle verification the completion checks carry themselves while
-C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payload digests from disk;
+phase, never rewritten; the bundle verification the completion checks carry themselves beside
+C-EVIDENCE-ENUM (spec 14.1), which RE-READS the inventories and payload digests from disk (on homes 1,
+whose doctor roster carries no C-EVIDENCE-ENUM, it is this tooling's only such re-read);
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
 transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed ten-op
 ADOPT_OPS vocabulary. Slice 2 makes the three pure file ops executable (EXECUTABLE_OPS: create-file,

@@ -4087,10 +4087,10 @@ def _legacy_import_staging(machine_rel):
 
 
 def _adoption_state(root_fd, machine_rel, in_repo, rep):
-    """The homes-1 adoption state through the read-only `_opf_adopt_state` reader (spec 4.2, 11, 14.2, 17),
-    or None after a CANNOT-EVALUATE: any fault inside the reader is a named cannot-evaluate, never a silent
-    fallback to the not-adopting grading. The reader is imported lazily, so the doctor gains no top-level
-    import of the adoption modules."""
+    """The adoption state through the read-only `_opf_adopt_state` reader (spec 4.2, 11, 14.2, 17), on
+    homes 1, or None after a CANNOT-EVALUATE: any fault inside the reader is a named cannot-evaluate, never
+    a silent fallback to the not-adopting grading. The reader is imported lazily, so the doctor gains no
+    top-level import of the adoption modules."""
     try:
         import _opf_adopt_state
         return _opf_adopt_state.adoption_state(root_fd, machine_rel, in_repo=in_repo)
@@ -9429,11 +9429,15 @@ def self_test():
         def handoff_msgs(res):
             return res.by_check.get("C-HANDOFF", []) if res is not None else []
 
-        # C-HANDOFF with the imported series INACTIVE: the section 8.6 firewall is keyed on provenance,
-        # never on activation (it covers every record whose actor.kind is importer, whatever the
-        # imported series' activation state), so an importer-authored clean current handoff beside
-        # the maintainer's is exempt history and the store stays VALID (red if the exemption is ever
-        # gated on the activation flag).
+        # C-HANDOFF with the imported series INACTIVE: section 8.6 excludes every record whose
+        # actor.kind is importer from the C-HANDOFF current-state join, and this tooling applies that
+        # exclusion whatever the imported series' activation state, so an importer-authored clean
+        # current handoff beside the maintainer's raises no C-HANDOFF finding (red if the exclusion is
+        # ever gated on the activation flag). Section 8.6 also says a clean-series record MUST NOT
+        # carry actor.kind = "importer" and makes each such record a C-IMPORTED-SEGREGATION finding;
+        # the VALID verdict asserted here is this tooling's behaviour while the imported series is
+        # inactive (SUPPORTED_SPEC_VERSION 1.2.0, which does not run the imported-series checks), not
+        # a spec requirement.
         f = clean_machine()
         f["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
                                                        actor={"kind": "importer", "id": "import-assistant"})])
