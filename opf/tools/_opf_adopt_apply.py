@@ -138,14 +138,14 @@ postimage model, observations, a receipt, init-store's own sequencing) refuses b
 written, naming it. A plan with a plant-governance row then takes ONE release-pack gather
 (gather_release_pack): the release manifest, root.txt and exactly those rows' source members, read beside
 the running opf/ and held in memory, so both composition passes compose from identical bytes and a gather
-refusal (an absent or unreadable file) still writes nothing; verify_pack_member stays the only judge of
-the gathered bytes. Apply then composes, into the one base transaction, the preservation pass
-(compose_preservation), then every plan op in plan order in the apply stage, each handler with its typed
-context (_driver_contexts: ONE OpContext for the file ops, ONE RegistrationContext for the registration
-ops, a HookContext for enable-hook) or, for every other handler, the context table (`ops`, the
-transaction's ApplyOps; `plan`; `approval`; `product_root`, run_apply's own argument; `stage`; and `pack`,
-the gathered release pack, only when the plan has a plant-governance row), then
-the driver's mandatory receipt stage (DRIVER_STAGES; spec 14 ends apply with the receipt and its
+refusal (an absent or unreadable file, or a release root that is the product root) still writes nothing;
+verify_pack_member stays the only judge of the gathered bytes. Apply then composes, into the one base
+transaction, the preservation pass (compose_preservation), then every plan op in plan order in the apply
+stage, each handler with its typed context (_driver_contexts: ONE OpContext for the file ops, ONE
+RegistrationContext for the registration ops, a HookContext for enable-hook) or, for every other handler,
+the context table (`ops`, the transaction's ApplyOps; `plan`; `approval`; `product_root`, run_apply's own
+argument; `stage`; and `pack`, the gathered release pack, only when the plan has a plant-governance row),
+then the driver's mandatory receipt stage (DRIVER_STAGES; spec 14 ends apply with the receipt and its
 outcome-event chain, which no plan row can carry). It refuses any composed remove or write of a plan
 source that occupies no managed destination (such a source stays frozen in place until the retirement
 stage after a green completion check, and apply takes only its preimage), and any source requiring an
@@ -744,7 +744,8 @@ def emit_inventory(run_id, rows, phase=None, plan_digest=None):
         raise AdoptApplyError("inventory cannot be emitted canonically ({}); fail-closed".format(exc))
 
 
-def _open_product_root(product_root):
+def _open_product_root(product_root, what="product root"):
+    # `what` names the directory a failed open refuses: the release-pack gather opens its release root here.
     if not isinstance(product_root, (str, os.PathLike)):
         raise AdoptApplyError("product_root must be an absolute path")
     root = Path(product_root)
@@ -754,8 +755,8 @@ def _open_product_root(product_root):
         return store._open_dir_nofollow(root)
     except OSError as exc:
         _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
-        raise AdoptApplyError("cannot open product root {!r} contained ({}); "
-                              "fail-closed".format(str(root), exc))
+        raise AdoptApplyError("cannot open {} {!r} contained ({}); "
+                              "fail-closed".format(what, str(root), exc))
 
 
 def verify_bundle(product_root, run_id, *, inventory_bytes=None):
@@ -5781,18 +5782,26 @@ def _context_plan(context):
 
 # The release manifest and its ROOT report, each read only at its own path under _RELEASE_ROOT: the
 # directory holding the opf/ this module runs from (the _opf_adopt_complete._PACK_ROOT idiom, one level
-# higher), never the product root, an environment variable, a CLI argument or the network. Only the
-# self-test redirects the root, by patching this module attribute over a fixture release tree.
+# higher), never an environment variable, a CLI argument or the network. When the opf/ being run is the
+# mirror plant rows install inside a product, _RELEASE_ROOT IS that product root, so the gather compares
+# the two directory identities and refuses when they are one directory: the release is never read from
+# the product it plants into. Only the self-test redirects the root, by patching this module attribute
+# over a fixture release tree.
 RELEASE_MANIFEST_REL = ".aiqt/manifest.toml"
 RELEASE_ROOT_TXT_REL = ".aiqt/release/root.txt"
 _RELEASE_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def gather_release_pack(source_members):
+def gather_release_pack(source_members, product_root):
     """The pack verify_pack_member judges, observed from the release shipped beside the running opf/: the
     release manifest (RELEASE_MANIFEST_REL) and root.txt (RELEASE_ROOT_TXT_REL) under _RELEASE_ROOT, and
     the bytes of exactly the named `source_members`, each read at its own source path under that same
-    root, nothing else. Every read is contained, no-follow, regular and single-linked (_read_live), and an
+    root, nothing else. A release root that is the directory `product_root` names (compared by device and
+    inode of the two held descriptors, so no path spelling or alias can pass) refuses before any file is
+    read: the opf/ being run is then the mirror installed inside the product, and no supported flow reads
+    the release from there (a mirror path is its own pack source, so its plant row would read the very
+    product path its create-only plant must find absent). An unopenable release root refuses naming the
+    release root. Every read is contained, no-follow, regular and single-linked (_read_live), and an
     absent or unreadable file raises AdoptApplyError naming its path: there is no fallback location. This
     gather makes NO trust decision: every returned byte is judged by verify_pack_member against the plan's
     agreed ROOT, so a wrong or substituted release tree refuses there, never here. Disclosed: an opf-only
@@ -5802,8 +5811,23 @@ def gather_release_pack(source_members):
     present; root.txt sits in the same writable tree as the manifest, so it is no independent anchor
     (independence is the plan's captured anchor_sha256, verify_pack_member's first gate); and each member
     is read in full, bounded by the journal's contained-read cap, before any digest judges it."""
-    root_fd = _open_product_root(_RELEASE_ROOT)
+    root_fd = _open_product_root(_RELEASE_ROOT, "release root")
     try:
+        product_fd = _open_product_root(product_root)
+        try:
+            same = os.path.samestat(os.fstat(root_fd), os.fstat(product_fd))
+        except OSError as exc:
+            raise AdoptApplyError("cannot compare the release root {!r} with the product root ({}); "
+                                  "fail-closed".format(str(_RELEASE_ROOT), exc))
+        finally:
+            store._close_fd_exc_safe(product_fd)
+        if same:
+            raise AdoptApplyError(
+                "the release root {!r} beside the running opf/ is the product root itself: the opf/ being "
+                "run is the copy installed inside the product, and the release a plan plants is never read "
+                "from the product it plants into; run the opf/ of the release being adopted, from outside "
+                "the product root (fail-closed)".format(str(_RELEASE_ROOT)))
+
         def read(rel):
             _fst, data = _read_live(root_fd, rel)
             if data is None:
@@ -6958,10 +6982,10 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     takes ONE release-pack gather (gather_release_pack, after that refusal and before any composition): the
     release manifest, root.txt and exactly the plant rows' source members, read beside the running opf/ and
     held in memory, so the preflight and the transaction compose from the same bytes and a release tree
-    swapped mid-run changes nothing planted; a gather refusal (an absent or unreadable file, named) also
-    precedes the journal, so it writes nothing, and a plan with no plant-governance row reads no release at
-    all. The gathered bytes carry no trust of their own: verify_pack_member alone judges them, against the
-    plan's agreed ROOT.
+    swapped mid-run changes nothing planted; a gather refusal (an absent or unreadable file, named, or a
+    release root that is the product root itself) also precedes the journal, so it writes nothing, and a
+    plan with no plant-governance row reads no release at all. The gathered bytes carry no trust of their
+    own: verify_pack_member alone judges them, against the plan's agreed ROOT.
 
     Composition is the driver's, and so are its rules. One compose function stages the plan, approval and
     sealed planning-inventory bytes (the inventory rederive_bound_or_refuse returned, proved to seal to the
@@ -7022,7 +7046,7 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
                               "anything is written (fail-closed)".format("; ".join(unsupplied)))
     plant_members = [row["source_member"] for row in rows
                      if OP_HANDLERS.get(row["op"]) is _plant_governance]
-    pack = gather_release_pack(plant_members) if plant_members else None
+    pack = gather_release_pack(plant_members, product_root) if plant_members else None
     frozen = set(row["path"] for row in plan_doc["sources"] if not row["occupying"])
 
     def compose(ops):
@@ -14087,8 +14111,10 @@ def _self_test_checks():
         release_root, manifest, _agreed = release_fixture(
             base, dict([(member_rel, member_payload)]), absent=dict([(spare_rel, b"a row, no file\n")]))
         root_txt = (release_root / RELEASE_ROOT_TXT_REL).read_bytes()
+        product = base / "product"      # the product root each unit gather names: never the release root
+        product.mkdir()
         with mock.patch.object(here, "_RELEASE_ROOT", release_root):
-            pack, err = attempt(gather_release_pack, [member_rel])
+            pack, err = attempt(gather_release_pack, [member_rel], product)
         # the gather returns the release tree's exact bytes, judged by nothing here (red against a gather
         # reading another location, whose bytes differ or are absent).
         check("release-pack-reads-beside-opf", err is None
@@ -14102,14 +14128,14 @@ def _self_test_checks():
         bare = base / "bare"
         (bare / ".aiqt").mkdir(parents=True)
         with mock.patch.object(here, "_RELEASE_ROOT", bare):
-            err = refusal(gather_release_pack, [member_rel])
+            err = refusal(gather_release_pack, [member_rel], product)
         check("release-pack-manifest-absent-refused", RELEASE_MANIFEST_REL in (err or "")
               and "beside opf/" in (err or "") and "no fallback" in (err or ""), observed=err)
         noroot = base / "noroot"
         (noroot / ".aiqt").mkdir(parents=True)
         (noroot / RELEASE_MANIFEST_REL).write_bytes(manifest)
         with mock.patch.object(here, "_RELEASE_ROOT", noroot):
-            err = refusal(gather_release_pack, [])
+            err = refusal(gather_release_pack, [], product)
         check("release-pack-root-txt-absent-refused", RELEASE_ROOT_TXT_REL in (err or "")
               and "beside opf/" in (err or ""), observed=err)
         linked = base / "linked"
@@ -14117,20 +14143,35 @@ def _self_test_checks():
         (linked / RELEASE_MANIFEST_REL).unlink()
         os.symlink(str(linked / RELEASE_ROOT_TXT_REL), str(linked / RELEASE_MANIFEST_REL))
         with mock.patch.object(here, "_RELEASE_ROOT", linked):
-            err = refusal(gather_release_pack, [])
+            err = refusal(gather_release_pack, [], product)
         check("release-pack-symlinked-manifest-refused", "not a regular file" in (err or "")
               and RELEASE_MANIFEST_REL in (err or ""), observed=err)
         hard = base / "hard"
         shutil.copytree(release_root, hard)
         os.link(str(hard / member_rel), str(hard / "opf/enforcement/codex/second-link"))
         with mock.patch.object(here, "_RELEASE_ROOT", hard):
-            err = refusal(gather_release_pack, [member_rel])
+            err = refusal(gather_release_pack, [member_rel], product)
         check("release-pack-hardlinked-member-refused", member_rel in (err or "")
               and "hard links" in (err or ""), observed=err)
         with mock.patch.object(here, "_RELEASE_ROOT", release_root):
-            err = refusal(gather_release_pack, ["../" + member_rel])
+            err = refusal(gather_release_pack, ["../" + member_rel], product)
         check("release-pack-traversing-source-refused",
               "not a contained relative file path" in (err or ""), observed=err)
+        # the release root IS the product root (the opf/ being run is the mirror installed inside the
+        # product): a complete, self-consistent release there still refuses, before any file is read,
+        # naming the release root (red against a gather without the identity comparison, which returns
+        # this release's bytes).
+        with mock.patch.object(here, "_RELEASE_ROOT", release_root):
+            pack, err = attempt(gather_release_pack, [member_rel], release_root)
+        check("release-pack-release-root-is-product-root-refused", pack is None
+              and "is the product root itself" in (err or "") and str(release_root) in (err or ""),
+              observed=err)
+        # an unopenable release root is named as the release root, never as a product root (red against
+        # a gather opening it through the product-root refusal text).
+        with mock.patch.object(here, "_RELEASE_ROOT", base / "missing"):
+            err = refusal(gather_release_pack, [member_rel], product)
+        check("release-pack-unopenable-release-root-named",
+              "cannot open release root" in (err or "") and "product root" not in (err or ""), observed=err)
 
     # the release beside THIS running module: a repository or installed tree ships a self-consistent
     # release (root.txt names the manifest's ROOT, every opf/tools/ source row reads back at its recorded
@@ -14138,25 +14179,27 @@ def _self_test_checks():
     # absent-manifest refusal instead, so both shipped shapes are pinned. The branch probes the LITERAL
     # shipped path, so a wrong RELEASE_MANIFEST_REL or RELEASE_ROOT_TXT_REL is red here on a repository
     # tree: the first branch's gather then refuses on the misnamed constant.
-    if (_RELEASE_ROOT / ".aiqt" / "manifest.toml").is_file():
-        head_pack, err = attempt(gather_release_pack, [])
-        document, graded = (None, None) if err is not None else pack_manifest.parse_manifest(
-            head_pack["manifest"])
-        tool_rows = [row for row in (document or dict()).get("sources", [])
-                     if row["path"].startswith("opf/tools/")]
-        tools_pack, terr = (None, "no opf/tools/ source rows gathered") if not tool_rows else attempt(
-            gather_release_pack, [row["path"] for row in tool_rows])
-        check("release-pack-real-tree", err is None and graded is not None and graded.status == VALID
-              and pack_manifest.parse_root_txt(head_pack["root"])
-              == pack_manifest.compute_root(head_pack["manifest"])
-              and bool(tool_rows) and terr is None and all(
-                  len(tools_pack["members"][row["path"]]) == row["bytes"]
-                  and _sha256(tools_pack["members"][row["path"]]) == row["sha256"] for row in tool_rows),
-              observed=(err, terr))
-    else:
-        err = refusal(gather_release_pack, [])
-        check("release-pack-real-tree", RELEASE_MANIFEST_REL in (err or "")
-              and "beside opf/" in (err or ""), observed=err)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as elsewhere:
+        elsewhere = Path(elsewhere).resolve()       # a product root outside the release
+        if (_RELEASE_ROOT / ".aiqt" / "manifest.toml").is_file():
+            head_pack, err = attempt(gather_release_pack, [], elsewhere)
+            document, graded = (None, None) if err is not None else pack_manifest.parse_manifest(
+                head_pack["manifest"])
+            tool_rows = [row for row in (document or dict()).get("sources", [])
+                         if row["path"].startswith("opf/tools/")]
+            tools_pack, terr = (None, "no opf/tools/ source rows gathered") if not tool_rows else attempt(
+                gather_release_pack, [row["path"] for row in tool_rows], elsewhere)
+            check("release-pack-real-tree", err is None and graded is not None and graded.status == VALID
+                  and pack_manifest.parse_root_txt(head_pack["root"])
+                  == pack_manifest.compute_root(head_pack["manifest"])
+                  and bool(tool_rows) and terr is None and all(
+                      len(tools_pack["members"][row["path"]]) == row["bytes"]
+                      and _sha256(tools_pack["members"][row["path"]]) == row["sha256"] for row in tool_rows),
+                  observed=(err, terr))
+        else:
+            err = refusal(gather_release_pack, [], elsewhere)
+            check("release-pack-real-tree", RELEASE_MANIFEST_REL in (err or "")
+                  and "beside opf/" in (err or ""), observed=err)
 
     # 11d (driver): run_apply over a planner-frozen fixture whose plant rows run their REAL handler.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -14246,12 +14289,21 @@ def _self_test_checks():
         check("driver-apply-pack-gather-refusal-writes-nothing",
               RELEASE_MANIFEST_REL in (err or "") and "beside opf/" in (err or "")
               and _snapshot(root) == before and not (root / JOURNAL_REL).exists(), observed=err)
+        # the running opf/ is the mirror inside THIS product (the release root resolves to the product
+        # root): the apply refuses at the gather, naming that, with the tree byte-identical and no journal
+        # directory created (red against a gather without the identity comparison, which reads the
+        # product's decoy release and refuses later, at verify_pack_member, naming another ROOT).
+        with plant_driver(), mock.patch.object(here, "_RELEASE_ROOT", root):
+            err = refusal(run_apply, root, plant_plan, plant_approval, sheet)
+        check("driver-apply-release-root-is-product-root-refused",
+              "is the product root itself" in (err or "")
+              and _snapshot(root) == before and not (root / JOURNAL_REL).exists(), observed=err)
         gathered = []
         real_gather = gather_release_pack
 
-        def counting_gather(source_members):
+        def counting_gather(source_members, product_root):
             gathered.append(sorted(set(source_members)))
-            return real_gather(source_members)
+            return real_gather(source_members, product_root)
         # the REAL plant-governance handler end to end: run_apply gathers ONCE beside the (patched) release
         # root, both composition passes compose from those held bytes, and every planted path carries its
         # own fixture payload byte-identically; the product root's decoy release stays unjudged and
