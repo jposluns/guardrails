@@ -675,4 +675,4 @@ mechanisms = ["hook:orch-truncation-guard"]
 [[rule]]
 corpus-id = "wowo01"
 status = "partial"
-mechanisms = ["hook:write-scope"]
+mechanisms = ["hook:orch-deliverable-exec-guard", "hook:write-scope"]
