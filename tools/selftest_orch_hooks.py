@@ -8897,6 +8897,108 @@ def _citecheck_step_cases(tmp):
            "masking": [(3, ["unread", "unread"], ["warn"], False)] + late})
 
 
+def _citecheck_split_oracle_cases(tmp):
+    """A split-delimiter command whose quoted here-document sits in a frame the shared lexer refuses by default
+    (a '${', a subscript's '[', a marked '((', an array assignment's '(', a substitution opened after the '<<',
+    or a backquote substitution the '<<' sits in closed before its body) names its -F file as not read, with a
+    note, and is never allowed silently. Real bash (_ORACLE_BASH,
+    with the recording git fixture of the differential oracle) hands git commit -F m1.txt in every vector, so
+    the file the note names is one git reads. The citation check's lexing (split_delims) reads such a '<<', and
+    a later '<<' on its line (subscript-later), on as an operator and skips the line's bodies with none of the
+    newline's refusals, so the scan as written
+    keeps the file the lexing names (_citechk_commands); each lift decides its vectors, shown by a variant of
+    _lex_pass without it (_hook_variant), under which the lexing fails, the scan names no file and the
+    command allows with no note. Controls: the default lexing (split_delims False) still refuses every vector
+    with main's message, and a '((' command with no split delimiter, which bash also runs, is still refused by
+    the check's lexing, so its -F file goes unnamed (the disclosed residual of a command the lexer refuses)."""
+    repo = _CiteRepo(tmp / "citecheck-split-oracle", {"tools/a.py": b"a1\na2\n", "m1.txt": b"see tools/a.py:1\n"})
+    oracle = tmp / "citecheck-split-oracle-bash"
+    bindir, work, base = oracle / "bin", oracle / "work", tmp / "citecheck-split-oracle-variants"
+    for folder in (bindir, work, base):
+        folder.mkdir(parents=True)
+    (bindir / "git").write_text(_oracle_fake_git_source(), encoding="utf-8")
+    os.chmod(str(bindir / "git"), 0o755)
+    record = oracle / "argv.jsonl"
+    body, brace = "OF\nbody\nEOF\n", aiqt_hooks._HEREDOC_DOLLAR_BRACE_OPEN
+    bracket, arith = aiqt_hooks._HEREDOC_BRACKET_OPEN, aiqt_hooks._HEREDOC_ARITH_OPEN
+    vectors = (("dollar-brace", "echo ${x:-$(git commit -F m1.txt <<'E'\\\nOF)}", brace),
+               ("subscript", "a[$(git commit -F m1.txt <<'E'\\\nOF)]=1", bracket),
+               ("arith-newline", "(( git commit -F m1.txt <<'E'\\\n" + body + ") )\n", arith),
+               ("dollar-brace-body", "echo ${x:-$(git commit -F m1.txt <<'E'\\\n" + body + ")}\n", brace),
+               ("subscript-body", "a[$(git commit -F m1.txt <<'E'\\\n" + body + ")]=1\n", bracket),
+               ("subscript-later", "a[$(cat <<'E'\\\nOF; git commit -F m1.txt <<'Y')]=1\nx\nEOF\ny\nY\n", bracket),
+               ("array-body", "a=( $(git commit -F m1.txt <<'E'\\\n" + body + ") )\n",
+                aiqt_hooks._HEREDOC_ARRAY_OPEN),
+               ("subst-late", "git commit -F m1.txt <<'E'\\\nOF $(true\nbody\nEOF\n)\n",
+                aiqt_hooks._HEREDOC_SUBST_LATE),
+               ("backquote-closed", "git commit -F m1.txt `cat <<'E'\\\nOF `\nbody\nEOF\n",
+                aiqt_hooks._HEREDOC_BACKQUOTE_CLOSED))
+    unsplit = "(( git commit -F m1.txt <<'EOF'\nbody\nEOF\n) )\n"
+    split_unread = ["-F m1.txt: " + aiqt_hooks._CITECHK_SPLIT_UNREAD]
+
+    def read(command, session):
+        """One check of command: the verdict, whether the note names -F m1.txt, and each row's parse,
+        sources and sources not read."""
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, "-F m1.txt" in note,
+                [(r["detail"]["parse"], r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows])
+
+    def refusal(command):
+        try:
+            aiqt_hooks._lex_command(command)
+        except ValueError as exc:
+            return str(exc)
+        return None
+    ran, named, default = {}, {}, {}
+    for name, command, _message in vectors + (("unsplit", unsplit, arith),):
+        ran[name] = _oracle_run_argv(str(bindir), work, str(record), command)
+        named[name] = read(command, "split-oracle-" + name)
+        default[name] = refusal(command)
+    check("citeledger/split-oracle-bash-runs-commit", ran,
+          {name: [["commit", "-F", "m1.txt"]] for name in ran})
+    by_split = ("warn", True, [("raw", ["command text"], split_unread)])
+    check("citeledger/split-oracle-file-named", named,
+          dict({name: by_split for name, _command, _message in vectors},
+               unsplit=("allow", False, [("raw", ["command text"], [])])))
+    check("citeledger/split-oracle-default-refuses", default,
+          dict({name: message for name, _command, message in vectors}, unsplit=arith))
+    # Each lift of _lex_pass, removed by a variant, and the vectors it decides: under it those vectors allow
+    # with no note naming the file and no file in the row.
+    lifts = (("split_delims and (split_pending or _heredoc_word_split(",
+              "split_delims and (False or _heredoc_word_split(", ("subscript-later",)),
+             ('if op == "<<" and "${" in nest and not split_operator(i):', 'if op == "<<" and "${" in nest:',
+              ("dollar-brace", "dollar-brace-body")),
+             ('if op == "<<" and "((" in nest and not split_operator(i):', 'if op == "<<" and "((" in nest:',
+              ("arith-newline",)),
+             ("if mark is not None and not split_operator(i):", "if mark is not None:",
+              ("subscript", "subscript-body", "subscript-later", "array-body")),
+             ('if "${" in nest and not split_pending:', 'if "${" in nest:', ("dollar-brace-body",)),
+             ('if "((" in nest and not split_pending:', 'if "((" in nest:', ("arith-newline",)),
+             ("if mark is not None and not split_pending:", "if mark is not None:",
+              ("subscript-body", "array-body")),
+             ('if ("$(" in nest or "`" in nest) and not split_pending:', 'if "$(" in nest or "`" in nest:',
+              ("subst-late",)),
+             ("nest.low <= nest.heredoc_bq and not split_pending:", "nest.low <= nest.heredoc_bq:",
+              ("backquote-closed",)))
+    commands = {name: command for name, command, _message in vectors}
+    text, unlifted = _hook_functions("_lex_pass").get("_lex_pass", ""), {}
+    for index, (old, new, names) in enumerate(lifts):
+        variant = _hook_variant(base, "_lex_pass", text, old, new)
+        if variant is None:
+            unlifted[index] = "no variant: {!r} does not occur exactly once in _lex_pass".format(old)
+            continue
+        original = aiqt_hooks._lex_pass
+        aiqt_hooks._lex_pass = variant
+        try:
+            unlifted[index] = {name: read(commands[name], "split-oracle-variant-{}-{}".format(index, name))
+                               for name in names}
+        finally:
+            aiqt_hooks._lex_pass = original
+    silent = ("allow", False, [("raw", ["command text"], [])])
+    check("citeledger/split-oracle-lift-variants", unlifted,
+          {index: {name: silent for name in names} for index, (_old, _new, names) in enumerate(lifts)})
+
+
 # The command shapes whose cost the citation check's residue gives (_citecheck_cost_cases), each (name, head,
 # unit, tail, rows): the unit repeated as often as fits the length asked for, between head and tail, then
 # blanks to that exact length, and the rows (_CITECHK_COST_ROWS) its command gives at or under the command
@@ -22001,6 +22103,7 @@ def _main_isolated(report_path=None):
             _citecheck_suffix_cases(tmp)
             _citeledger_walk_cases(tmp)
             _citecheck_step_cases(tmp)
+            _citecheck_split_oracle_cases(tmp)
             _citecheck_cost_cases(tmp)
             _cite_roadmap_cases(tmp)
         finally:

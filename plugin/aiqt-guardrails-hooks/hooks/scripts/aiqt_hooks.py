@@ -2586,11 +2586,16 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False, heredoc
     command only as written, never acts on this lex, and names text in that body that bash can run
     (_citechk_swallowed). A split delimiter that is quoted once the backslash-newline is removed (<<'E'\\, a
     newline and OF) is read as bash reads it under either value. With split_delims True, a '<<' whose
-    delimiter word a backslash-newline splits (_heredoc_word_split), quoted or not, is read as an operator
-    even while a marked '((' is open, and the bodies of its line are skipped with no uncertain-end refusal
-    (the raises in _lex_pass): the citation check scans every such command only as written
-    (_citechk_split_delim) and reads this lex only to name what it did not read. The default False reads
-    every joined word as bash does and keeps those refusals, the reading every other caller relies on.
+    delimiter word a backslash-newline splits (_heredoc_word_split), quoted or not, and every later '<<' on
+    its line, is read as an operator even while a '${', a marked '((' or one of THE TEXT MARKS is open (the
+    three raises at a '<<' in _lex_pass), and the newline that starts the bodies of that line and the skip of
+    those bodies take none of their raises (a '${', a marked '((' or one of THE TEXT MARKS still open, a
+    substitution opened after the line's first '<<' still open, a backquote substitution a '<<' sits in
+    closed, and an uncertain body end): the citation check scans every such command only as written
+    (_citechk_split_delim) and reads this lex only to name what it did not read. A raise met before the first
+    such '<<', or on another line, still fails the lex, and the check then names no file the command holds.
+    The default False reads every joined word as bash does and keeps every one of those raises, the reading
+    every other caller relies on.
 
     An unquoted '#' opens a comment only in a certain context (the comment rule above _nest_track). A command
     holding an uncertain '#' is lexed under both readings of each one (_lex_readings), and the segments of
@@ -2947,6 +2952,12 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
         return k2
 
+    def split_operator(at):
+        # With split_delims, whether the '<<' at index at is read on as an operator while a '${', a marked '(('
+        # or one of THE TEXT MARKS is open: its delimiter word a backslash-newline splits, or one queued on its
+        # line does (split_pending), and the citation check scans that command only as written (_lex_command).
+        return split_delims and (split_pending or _heredoc_word_split(command, at + 2, n))
+
     try:
         if "\x00" in command:
             raise ValueError("NUL in command")
@@ -2962,8 +2973,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 i += 1
                 if pending_heredocs:
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
-                    # literal data, then resume lexing after the closing delimiter line(s).
-                    if "${" in nest:
+                    # literal data, then resume lexing after the closing delimiter line(s). With split_delims, a
+                    # line whose heredoc has a split delimiter word takes none of the raises below: the citation
+                    # check scans that command only as written and reads this lex only to name what it did not
+                    # read (_lex_command).
+                    if "${" in nest and not split_pending:
                         # A '${' opened after the '<<' on this line is still open at this newline. Inside a
                         # '${...}' parameter expansion the newline is text to bash, which starts the bodies
                         # only at the newline after the expansion closes, so a body skipped from here can
@@ -2973,7 +2987,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         # is UNCERTAIN, as at a '<<' read while a '${' is open (the raise at that operator
                         # below): raise so the whole lex fails.
                         raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
-                    if "((" in nest:
+                    if "((" in nest and not split_pending:
                         # A '((' marked after the '<<' on this line is still open at this newline. Inside
                         # arithmetic the newline is text to bash, which starts the bodies only at the newline
                         # after the arithmetic closes (bash 5.3.9 runs the git in cat <<'EOF' $(( 1 +, then
@@ -2989,12 +3003,12 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     # closed before this newline (bash reads that here-document no body here). Each makes the
                     # reading UNCERTAIN (above _HEREDOC_TEXT_MARKS): raise so the whole lex fails.
                     mark = _heredoc_text_mark(nest)
-                    if mark is not None:
+                    if mark is not None and not split_pending:
                         raise ValueError(mark)
-                    if "$(" in nest or "`" in nest:
+                    if ("$(" in nest or "`" in nest) and not split_pending:
                         if any(entry in ("$(", "`") for entry in nest[nest.low:]):
                             raise ValueError(_HEREDOC_SUBST_LATE)
-                    if 0 <= nest.heredoc_bq and nest.low <= nest.heredoc_bq:
+                    if 0 <= nest.heredoc_bq and nest.low <= nest.heredoc_bq and not split_pending:
                         raise ValueError(_HEREDOC_BACKQUOTE_CLOSED)
                     body_at = i
                     bodies = None if heredocs is None else []
@@ -3016,7 +3030,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     # searched once per pass, so the test stays linear however many bodies follow).
                     # No body opened while a '${', a marked '((' or one of THE TEXT MARKS was still open on the
                     # stack reaches here: the lex already failed at that '<<' (the uncertain operator raises
-                    # below).
+                    # below), except, with split_delims, on a line whose heredoc has a split delimiter word.
                     if nesting_at is None:
                         nesting = _HEREDOC_NESTING_RE.search(command)
                         nesting_at = n if nesting is None else nesting.start()
@@ -3141,7 +3155,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         i = run
                     continue
                 if kind == "cannot":
-                    if op == "<<" and "${" in nest:
+                    if op == "<<" and "${" in nest and not split_operator(i):
                         # A '<<' read while a '${' is open on the nesting stack. Inside a '${...}' parameter
                         # expansion bash reads it as text and opens no here-document, so a body skipped here
                         # would hide the lines after it, which bash runs (bash 5.3.9 runs the git in
@@ -3156,25 +3170,25 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         # UNCERTAIN: raise so the whole lex fails and every guard takes its fail-closed
                         # fallback, as at the uncertain body end above (a disclosed over-refusal of a
                         # here-document in such a substitution). The newline that would start a body
-                        # follows the same rule (the raise above, where the bodies are skipped).
+                        # follows the same rule (the raise above, where the bodies are skipped). With
+                        # split_delims, a split one is read on as an operator (split_operator).
                         raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
-                    if op == "<<" and "((" in nest and not (split_delims
-                                                            and _heredoc_word_split(command, i + oplen, n)):
+                    if op == "<<" and "((" in nest and not split_operator(i):
                         # A '<<' read while a marked '((' is open anywhere on the stack: a shift to bash inside
                         # arithmetic, where it opens no here-document, and an operator in nested subshells; the
                         # mark cannot tell which (THE ARITHMETIC MARK, above _HEREDOC_ARITH_OPEN), so the
                         # reading is UNCERTAIN: raise so the whole lex fails and every guard takes its
                         # fail-closed fallback. The newline that would start a body follows the same rule.
-                        # With split_delims, one whose delimiter word a backslash-newline splits is read on as
-                        # an operator: the citation check scans that command only as written (_lex_command).
+                        # With split_delims, a split one is read on as an operator (split_operator).
                         raise ValueError(_HEREDOC_ARITH_OPEN)
                     if op == "<<":
                         # A '<<' read while one of THE TEXT MARKS is open anywhere on the stack: text to bash in
                         # a '$[', a subscript or a pattern, and a syntax error in an array assignment, after
                         # which bash reads the next line (above _HEREDOC_TEXT_MARKS); the reading is UNCERTAIN:
                         # raise so the whole lex fails. The newline that would start a body follows the same rule.
+                        # With split_delims, a split one is read on as an operator (split_operator).
                         mark = _heredoc_text_mark(nest)
-                        if mark is not None:
+                        if mark is not None and not split_operator(i):
                             raise ValueError(mark)
                         parsed = _parse_heredoc_delim(command, i + oplen, n)
                         if (split_delims and parsed is not None and not parsed[0]
