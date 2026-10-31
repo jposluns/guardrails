@@ -978,10 +978,14 @@ class _LexPlaces:
     inside it is recorded apart from the body below), "comment" for a '#' comment the lex reads to the end of
     its line, "heredoc" for the body of a quoted here-document the lex skips whose consumer is proven not to run
     it (one simple cat or tee write, or a fixed data-reading git built-in, on the command's first line, or the
-    commit message form's body in a substitution, from its '<<' to the ')' that closes it), and "body" for such
+    commit message form's body in a substitution, from its '<<' to the ')' that closes it, when the segment
+    holding that word is a plain git commit, _git_commit_message_lifts), and "body" for such
     a body whose end the lex cannot prove is where bash ends it OR whose consumer is not proven to leave it
     unrun (a body a shell reads; the span comment in
-    _lex_pass, _heredoc_body_consumer_lifts and _git_consumer_lifts). An ANSI-C $'...' quote and an
+    _lex_pass, _heredoc_body_consumer_lifts, _git_consumer_lifts and _git_commit_message_lifts). The commit
+    message form's span is "message" from the word reader until its segment ends, then "heredoc" or, for
+    any other consumer, "message-body" (_orch_message_body_detach reads that body as code); it stays
+    "message" (never lifting) where the lex stops before that segment ends. An ANSI-C $'...' quote and an
     escape are not recorded. The spans of one pass nest or are disjoint, and each pass clears the list
     first, so it holds the last pass's spans (_SubstHeredocRetry); a lex that resumes a fork (_LexFork) would
     lose the spans before it, so a recording lex is one reading lexed from the start. Outside the context
@@ -1253,7 +1257,9 @@ def _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened
                 heredoc.read = True
                 heredoc.floor = heredoc.floor or _subst_heredoc_misread(command, opened, close, n)
                 if _LexPlaces.spans is not None:
-                    _LexPlaces.spans.append((i, close, "heredoc"))
+                    # "message" until the segment that holds this word ends: _lex_pass then makes it
+                    # "heredoc" only when that segment is a plain git commit (_git_commit_message_lifts).
+                    _LexPlaces.spans.append((i, close, "message"))
                 i = close
                 continue
             heredoc.on = False
@@ -2538,16 +2544,20 @@ def _git_consumer_lifts(argv):
     standard input is read only as data. The word directly after git must be one of the fixed built-in
     subcommands in _ORCH_GIT_LIFT_SUBCOMMANDS, so no global option (-c, -C, --exec-path, --git-dir,
     --work-tree, --config-env, or any other word starting with '-') comes before the subcommand: a global
-    option can define a `!shell` alias the next word runs, or set core.editor to a shell. The subcommand's
+    option can define a `!shell` alias the next word runs, or set core.editor to a shell, so every global
+    option is denied (fails closed) whether or not that one runs anything. The subcommand's
     own words must pass its rule: hash-object lifts only with --stdin (the body is hashed as bytes); apply
     lifts (the body is a patch; apply writes files and runs nothing); commit lifts only when it reads the
     message from standard input (the adjacent pair -F - or the word --file=-) and every other option word is
     in _ORCH_GIT_COMMIT_LIFT_OPTIONS, which keeps out -e, --edit and every unknown or bundled option, since
-    an editor taken from core.editor or GIT_EDITOR can run the message file. A built-in name cannot be
-    shadowed by a git alias (git ignores an alias named after a built-in command), so the alias routes
-    cannot reach these three subcommands. RESIDUAL (disclosed): `git commit` still runs this repository's
-    own hooks (pre-commit, commit-msg and the rest), pre-existing scripts that run at every commit whatever
-    this guard decides; they receive the body only as the message file's content, as data."""
+    an editor taken from core.editor or GIT_EDITOR can run the message file; so commit lifts only with
+    exactly those words, and every other option (-a, -q and -s included) denies though it opens no editor.
+    A built-in name cannot be shadowed by a git alias (git ignores an alias named after a built-in command),
+    so the alias routes cannot reach these three subcommands. RESIDUAL (disclosed, pre-existing
+    configuration): repository filter drivers (a clean or smudge command) and hooks (pre-commit, commit-msg
+    and the rest) configured before the command starts run whatever this guard decides, and can run the
+    body or the patched content as code: a clean filter under hash-object --stdin --path, a smudge filter
+    under apply, a commit-msg hook given the message file under commit."""
     if len(argv) < 2:
         return False
     sub = argv[1]
@@ -2575,6 +2585,55 @@ def _git_consumer_lifts(argv):
     return reads_stdin
 
 
+# The separators that may end the segment consuming the commit message form: none of them hands git's own
+# output to another command (a pipe could feed the commit summary, which repeats the message's first line,
+# to a shell) or runs git in the background.
+_ORCH_GIT_MESSAGE_SEPS = frozenset(("", ";", "&&", "||"))
+
+
+def _git_commit_message_lifts(segments, argv, argv_opaque, redirects, sep):
+    """True when the segment about to end, argv (its words, argv_opaque parallel to them), redirects and the
+    separator sep that ends it, proves the commit message form "$(cat <<'EOF' ... EOF)" it holds is read only
+    as the commit message, so the lexer may record that body as a lifting "heredoc" (the "message" span of
+    _skip_quoting). segments are the segments the lex ended before it, which must be none: the consuming
+    segment is the command's first, so no function or alias definition, hash -p, PATH or other assignment,
+    or git configuration written earlier in the same command can redefine git or what a commit runs, the
+    first-line rule the here-document path applies. The words must be git and the built-in commit with no
+    global option or environment-assignment prefix (a prefix such as GIT_EDITOR=sh or GIT_CONFIG_COUNT=1
+    is the first word, so the first word is not git), and every later word must be the pair -m and its
+    value, an option in _ORCH_GIT_COMMIT_LIFT_OPTIONS, or a non-option word; at least one -m pair must be
+    present. Every other option word fails closed, which keeps out -e, --edit and every bundled or unknown
+    option that could open an editor taken from core.editor or GIT_EDITOR on the message file (git -c
+    core.editor=sh commit -e -m, GIT_EDITOR=sh git commit -e -m, a configured core.editor with -e), and a
+    -c alias that runs a shell (git -c alias.x='!sh -c' x) fails as a global option and as a subcommand
+    other than commit. Only the -m value may carry an expansion or substitution and no redirect target may,
+    so the body is the message and not a file name or another word; sep must be in _ORCH_GIT_MESSAGE_SEPS.
+    Any other consumer (eval, sh -c, an assignment, any other command) records "body" (fail closed).
+    RESIDUAL (disclosed, as on the -F - path): git commit still runs this repository's own hooks and
+    filters, configured before the command starts."""
+    if segments or sep not in _ORCH_GIT_MESSAGE_SEPS or len(argv) < 3:
+        return False
+    if argv[0] != "git" or argv[1] != "commit" or argv_opaque[0] or argv_opaque[1]:
+        return False
+    if any(redirect.target_class == "opaque" for redirect in redirects):
+        return False
+    reads_message = False
+    k = 2
+    while k < len(argv):
+        word = argv[k]
+        if word == "-m":
+            if k + 1 >= len(argv):
+                return False
+            reads_message = True
+            k += 2
+            continue
+        if argv_opaque[k] or (word.startswith("-") and word != "-"
+                              and word not in _ORCH_GIT_COMMIT_LIFT_OPTIONS):
+            return False
+        k += 1
+    return reads_message
+
+
 def _heredoc_body_consumer_lifts(segments):
     """True when segments, the segments of the one line that opened a top-level quoted here-document, prove its
     consumer does not run the body, so the bare-`&` narrowing of _orch_foreground_detach_lexed may lift a `&`
@@ -2585,9 +2644,9 @@ def _heredoc_body_consumer_lifts(segments):
     ';', '&', '&&' or '||' sequence, compound command or other command word routes the body to one. The span
     recording in _lex_pass also requires the opening line to be the command's FIRST line, so no function or
     alias definition, hash -p, PATH or other assignment, or anything else on an earlier line of the same
-    command can redefine the command word before it runs; a definition the shell already holds BEFORE the
-    command starts (an inherited function, alias, hash entry or PATH) is still not seen, the disclosed
-    trust-the-word residual. Any other line (a shell owner, a pipe into a shell, a compound command, an
+    command can redefine the command word before it runs; a definition of cat, tee or git the shell already
+    holds BEFORE the command starts (an inherited function, alias, hash entry or PATH) is still not seen,
+    the disclosed trust-the-word residual. Any other line (a shell owner, a pipe into a shell, a compound command, an
     expanded command word, a second command) has more than one segment or an opaque or other word, and the
     body is read as code (fail closed). NAMED OVER-REFUSALS of this rule (observed; nothing in them detaches,
     yet each denies a bare `&` in the body): a body piped to a filter (cat <<'EOF' | grep A) or owned by one
@@ -2596,10 +2655,10 @@ def _heredoc_body_consumer_lifts(segments):
     by ';' and another command (cat > f <<'EOF' ... ; chmod 644 f); an absolute or command-prefixed cat
     (/usr/bin/cat <<'EOF', command cat <<'EOF'); and a body fed to a non-shell interpreter (python3 -
     <<'EOF'). The commit-message form "$(cat <<'EOF' ... EOF)" is the other lifted shape; the lexer records
-    it where it skips that substitution, not here, so a body fed onward through that substitution's VALUE,
-    as in eval "$(cat <<'EOF' ... EOF)" or sh -c "$(cat <<'EOF' ... EOF)", is still lifted: the
-    here-document's own consumer is cat, and the eval or sh of the captured string is a separate hop this
-    rule does not see, a disclosed residual."""
+    it where it skips that substitution, not here, and lifts it only where the segment consuming the
+    captured value is a plain git commit (_git_commit_message_lifts); a body fed onward through that value
+    to any other consumer (eval, sh -c, an editor or alias git opens) is read as code
+    (_orch_message_body_detach)."""
     if len(segments) != 1:
         return False
     seg = segments[0]
@@ -2657,6 +2716,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     # at that '#', since that read already asked whether the reading takes the '#' as word text (_LexFork).
     if _LexPlaces.spans is not None:
         del _LexPlaces.spans[:]  # a pass records afresh, so a pass that starts again drops the last one's
+    span_mark = [0]  # the index in _LexPlaces.spans where the current segment's spans begin (end_segment)
     # The index in segments where the current line's segments begin, so the span recording can read the one
     # line that owns a top-level here-document (_heredoc_body_consumer_lifts). A fork resumes mid-line and
     # never records spans, so the value there is unused.
@@ -2681,6 +2741,17 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         return list(argv) if argv_spelling is None or not argv else _SpelledWords(argv, argv_spelling)
 
     def end_segment(sep, op_start, next_start):
+        spans = _LexPlaces.spans
+        if spans is not None:
+            # A commit message form read in this segment ("message", _skip_quoting) lifts only when this
+            # segment is the plain git commit that consumes it (_git_commit_message_lifts); any other
+            # consumer can run or pass on the captured value, so its body records as "message-body",
+            # never a lifting place, which _orch_message_body_detach reads as code (fail closed).
+            for k in range(span_mark[0], len(spans)):
+                if spans[k][2] == "message":
+                    lifts = _git_commit_message_lifts(segments, argv, argv_opaque, redirects, sep)
+                    spans[k] = (spans[k][0], spans[k][1], "heredoc" if lifts else "message-body")
+            span_mark[0] = len(spans)
         # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde, argv_spelling
         # and opaque change only together with argv, so a skipped segment leaves them empty and False as well.
         if (argv or redirects or not skip_empty
@@ -21574,8 +21645,9 @@ def _orch_foreground_detach_kind(command, skip_bodies=True):
 # comment, and a quoted here-document's body a consumer does not run. They are the only narrowing of the
 # scan's detach. A here-document body whose end the lexer cannot prove is where bash ends it, OR whose
 # consumer is not proven to leave it unrun (anything but one simple first-line cat or tee write, a fixed
-# data-reading git built-in, or the commit message form), records as "body", not "heredoc" (the span comment
-# in _lex_pass), so it is never a lifting place: a body a shell runs keeps its `&` a detach.
+# data-reading git built-in, or the commit message form consumed by a plain git commit), records as "body"
+# or "message-body", not "heredoc" (the span comment in _lex_pass), so it is never a lifting place: a body a
+# shell runs keeps its `&` a detach.
 _ORCH_AMP_PLACES = frozenset(("quote", "comment", "heredoc"))
 
 
@@ -21624,6 +21696,41 @@ def _orch_lexed_amp_places(command, amps):
     return kinds
 
 
+# A command substitution that opens with cat and a here-document operator: the lead of the commit message form,
+# the only shape whose body the lexer records as "message-body" (_orch_message_body_detach).
+_ORCH_MESSAGE_LEAD_RE = re.compile(r"\$\([ \t]*cat[ \t]+<<")
+
+
+def _orch_message_body_detach(command):
+    """True when command holds a commit message form "$(cat <<'EOF' ... EOF)" whose consuming segment is not
+    a plain git commit (_git_commit_message_lifts) and whose body, read as shell code by the detach scan
+    (_orch_foreground_detach_kind), holds a bare `&` or cannot be read to its end while it holds an '&'.
+    The scan reads that body as double-quoted text, so a bare `&` in it is no detach to the scan; but the
+    consumer can run the captured value: an editor opened on the message file (git -c core.editor=sh commit
+    -e -m, GIT_EDITOR=sh git commit -e -m, a configured core.editor with -e), a git alias that runs a shell
+    (git -c alias.x='!sh -c' x), eval or sh -c. Every consumer but the plain git commit is read that way,
+    since none is proven to leave the value unrun. Where the lexer gives no single reading (an uncertain
+    '#'), a command holding the form's lead and an '&' fails closed. A command with no such lead is not
+    lexed again."""
+    if _ORCH_MESSAGE_LEAD_RE.search(command) is None:
+        return False
+    with _LexPlaces() as spans:
+        try:
+            _lex_reading(command, False, {})
+        except ValueError:
+            return "&" in command
+    for start, end, kind in spans:
+        if kind != "message-body":
+            continue
+        line_end = command.find("\n", start, end)
+        body = command[line_end + 1:end] if line_end != -1 else ""
+        if "&" not in body:
+            continue
+        if _orch_foreground_detach_kind(body) is not None:
+            return True
+    return False
+
+
 def _orch_foreground_detach_lexed(command, lifts=None):
     """The foreground detach verdict orch_truncation_guard acts on: "detach", "unbalanced" or None, as the raw
     scan (_orch_foreground_detach_kind) returns them, read beside the shared lexer. The lexer decides first
@@ -21646,11 +21753,13 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     redefine the command word) by one simple cat or tee command that writes the body to a file or its own
     output, or by git under a fixed data-reading built-in subcommand (_heredoc_body_consumer_lifts and
     _git_consumer_lifts), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact close
-    the lex itself resolves. A body a shell reads directly or through a pipe or compound command
+    the lex itself resolves, where the segment consuming the captured value is a plain git commit
+    (_git_commit_message_lifts). A body a shell reads directly or through a pipe or compound command
     (bash <<'EOF', cat <<'EOF' | sh) is code, and a bare `&` it holds backgrounds a job, so that body
-    records as "body" and denies; a body whose captured VALUE a later hop runs, eval "$(cat <<'EOF' ...
-    EOF)" or sh -c "$(cat <<'EOF' ... EOF)", is still lifted through the commit-message-form shape, a
-    disclosed residual. The cost is that a quoted body read by a non-shell consumer outside the proven
+    records as "body" and denies; a commit message form whose captured VALUE any other consumer takes
+    (eval, sh -c, an editor or a shell alias git opens) records as "message-body", and a bare `&` that
+    body holds read as code denies here even where the scan reads it as double-quoted text
+    (_orch_message_body_detach). The cost is that a quoted body read by a non-shell consumer outside the proven
     set (a pipe to a filter such as grep, a filter owner such as grep or sort, a tee to a fifo, a
     here-document after an && chain or ';' or on a later line, an absolute or command-prefixed cat, a
     non-shell interpreter such as python3 -) also denies though nothing runs. (2)
@@ -21682,6 +21791,8 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     except ValueError:
         return _orch_foreground_detach_kind(command)
     if any(seg.sep_after == "&" for seg in segments):
+        return "detach"
+    if _orch_message_body_detach(command):
         return "detach"
     kind = _orch_foreground_detach_kind(command)
     if kind is None and lifts is not None:
@@ -21753,13 +21864,15 @@ def _orch_foreground_detach(command):
     in the manifest. It judges only the `&` the top-level shell reads: a here-document body fed to a shell
     is read as code, and the guard's lexer narrowing lifts an `&` a quoted body holds only when the body's
     consumer is proven not to run it (one simple first-line cat or tee write, a fixed data-reading git
-    built-in, or the commit message form; _heredoc_body_consumer_lifts and _git_consumer_lifts), so a body
-    fed to a shell (`bash <<'EOF'` then `job &`, `cat <<'EOF' | sh`) denies, at the cost of denying a
-    quoted body read by a non-shell consumer outside the proven set (a pipe to a filter, a filter owner
-    such as grep or sort, a tee to a fifo, a here-document after an && chain or ';' or on a later line, an
-    absolute or command-prefixed cat, a non-shell interpreter such as python3 -); a body whose captured
-    value a later hop runs (eval "$(cat <<'EOF' ... EOF)", sh -c "$(cat <<'EOF' ... EOF)") is still lifted
-    through the commit-message-form shape, a disclosed residual, and a detacher the lexer path cannot read
+    built-in, or the commit message form consumed by a plain git commit; _heredoc_body_consumer_lifts,
+    _git_consumer_lifts and _git_commit_message_lifts), so a body fed to a shell (`bash <<'EOF'` then
+    `job &`, `cat <<'EOF' | sh`) denies, at the cost of denying a quoted body read by a non-shell consumer
+    outside the proven set (a pipe to a filter, a filter owner such as grep or sort, a tee to a fifo, a
+    here-document after an && chain or ';' or on a later line, an absolute or command-prefixed cat, a
+    non-shell interpreter such as python3 -); a commit message form whose captured value any other
+    consumer takes (eval "$(cat <<'EOF' ... EOF)", sh -c, an editor or shell alias git opens, an
+    assignment) denies a bare `&` its body holds read as code (_orch_message_body_detach), and a detacher
+    the lexer path cannot read
     (an unquoted here-document, a
     here-string, a process substitution, a construct the lexer refuses) is the lexer-path residual.
 
@@ -21779,14 +21892,15 @@ def _orch_foreground_detach(command):
     a body `&` under a quoted delimiter owned on the command's first line by one simple cat or tee write
     (`cat <<'EOF'` to a file or its own output) or by a fixed data-reading git built-in (git hash-object
     --stdin, git commit -F - or --file=- without an editor-opening option, git apply), or by the
-    commit-message form (`say "a & b"` in "$(cat <<'EOF' ... EOF)"), is allowed where the scan reads the
-    rest of the command to its end (_heredoc_body_consumer_lifts and _git_consumer_lifts). A body
+    commit-message form consumed by a plain git commit (`say "a & b"` in git commit -m "$(cat <<'EOF' ...
+    EOF)"), is allowed where the scan reads the rest of the command to its end
+    (_heredoc_body_consumer_lifts, _git_consumer_lifts and _git_commit_message_lifts). A body
     a shell reads (`bash <<'EOF'` then `job &`, `cat <<'EOF' | sh`) is NOT lifted: its `&` denies; the
     named over-refusals of the consumer rule (a pipe to a filter, grep or sort as the owner, a
     here-document after an && chain or ';' or on a later line, an absolute or command-prefixed cat,
-    python3 -) deny too, and a body whose captured value a later hop runs (eval "$(cat <<'EOF' ... EOF)",
-    sh -c "$(cat <<'EOF' ... EOF)") is still lifted through the commit-message-form shape, a disclosed
-    residual. A
+    python3 -) deny too, and so does a bare `&` in a commit message form's body whose captured value any
+    other consumer takes (eval, sh -c, an editor or shell alias git opens, an assignment, a commit after
+    an && chain or with an option outside the listed ones; _orch_message_body_detach). A
     body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
     to standard output, or one with no delimiter line; the lift reads only a bare `&`, not this no-`&`
     open-quote deny), or one whose quote leaves the scan open at the end,

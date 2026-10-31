@@ -13561,6 +13561,74 @@ def _main_isolated(report_path=None):
                   "command cat <<'EOF'\nsleep 30 &\nEOF",
                   "python3 - <<'EOF'\nprint(6 & 3)\nEOF")],
               ["deny"] * 7)
+        # The commit-message form "$(cat <<'EOF' ... EOF)" lifts a body `&` only when the segment consuming
+        # it is a plain git commit (_git_commit_message_lifts): git then commit, no global option or
+        # assignment prefix, only -m pairs and the listed options, the command's first segment. Each vector
+        # runs through real bash in a fixture repository whose own config sets core.editor=sh, its body a
+        # backgrounded touch of a marker file, so a body some consumer runs leaves the marker. An editor
+        # opened by -e (from -c core.editor, GIT_EDITOR or the configured core.editor) or a -c alias that
+        # runs a shell runs the body, and the guard must deny; the plain commit runs nothing, and the guard
+        # must allow. The flip runs each vector against a mutant whose consumer rule always lifts (for the
+        # deny rows) or never lifts (for the allow rows), and the verdict must change, so each row fails if
+        # the consumer rule stops deciding it.
+        msg_repo = tmp / "trunc-commit-message-repo"
+        msg_repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(msg_repo)], check=True,
+                       capture_output=True, timeout=30)
+        with open(str(msg_repo / ".git" / "config"), "a", encoding="utf-8") as _msg_cfg:
+            _msg_cfg.write("[core]\n\teditor = sh\n[user]\n\tname = T\n\temail = t@example.invalid\n"
+                           "[commit]\n\tgpgsign = false\n")
+        # The fixture environment (pinned git, no GIT_EDITOR), so only the vector itself picks the editor.
+        _msg_env = {k: v for k, v in os.environ.items() if k != "GIT_EDITOR"}
+
+        def _msg_form(lead, marker):
+            return lead + " \"$(cat <<'EOF'\ntouch " + str(msg_repo / marker) + " &\nEOF\n)\""
+
+        def _msg_run(command, marker):
+            # Whether real bash, run in the fixture repository, leaves the marker the body's touch writes.
+            try:
+                subprocess.run(["/usr/bin/bash", "-c", command], cwd=str(msg_repo), env=_msg_env,
+                               capture_output=True, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                return None
+            deadline = time.monotonic() + 5
+            while not (msg_repo / marker).exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            return (msg_repo / marker).exists()
+
+        def _msg_rows(vectors, flip_lifts):
+            rows = []
+            for lead, marker in vectors:
+                command = _msg_form(lead, marker)
+                flipped = _rdp_mutant((("_git_commit_message_lifts", lambda *_a: flip_lifts),),
+                                      lambda: _verdict(bg(command, rib=False)))
+                rows.append((marker, _msg_run(command, marker), _verdict(bg(command, rib=False)), flipped))
+            return rows
+
+        check("trunc/fg-commit-message-editor-or-alias-denies",
+              _msg_rows((("git -c core.editor=sh commit --allow-empty -e -m", "editor-c"),
+                         ("GIT_EDITOR=sh git commit --allow-empty -e -m", "editor-env"),
+                         ("git commit --allow-empty -e -m", "editor-config"),
+                         ("git -c alias.x='!sh -c' x", "alias-c")), True),
+              [(m, True, "deny", "allow") for m in ("editor-c", "editor-env", "editor-config", "alias-c")])
+        check("trunc/fg-commit-message-plain-commit-allows",
+              _msg_rows((("git commit --allow-empty -m", "plain"),
+                         ("git commit --allow-empty --no-edit -m", "plain-no-edit")), False),
+              [(m, False, "allow", "deny") for m in ("plain", "plain-no-edit")])
+        # Every other consumer of the captured value denies a body `&` the value would run as code: eval,
+        # sh -c, an assignment, any other command, git commit with an option outside the list (-a) or
+        # piped onward, and a commit after an && chain (not the first segment). A body `&` that is quoted
+        # text when read as code (say "a & b") is no detach there, and an unbalanced quote around a body
+        # `&` fails closed. Each row allows if a consumer other than the plain git commit is lifted.
+        check("trunc/fg-commit-message-other-consumer-denies",
+              [_verdict(bg(v + " \"$(cat <<'EOF'\nsleep 30 &\nEOF\n)\"", rib=False)) for v in (
+                  "eval", "sh -c", ":", "printf %s", "git commit -a -m", "git commit -q -m",
+                  "git -C . commit -m", "git add -A && git commit -m")]
+              + [_verdict(bg("x=\"$(cat <<'EOF'\nsleep 30 &\nEOF\n)\"", rib=False)),
+                 _verdict(bg("git commit -m \"$(cat <<'EOF'\nsleep 30 &\nEOF\n)\" | sh", rib=False)),
+                 _verdict(bg("eval \"$(cat <<'EOF'\nit's & b\nEOF\n)\"", rib=False)),
+                 _verdict(bg("eval \"$(cat <<'EOF'\necho 'a & b'\nEOF\n)\"", rib=False))],
+              ["deny"] * 11 + ["allow"])
         # Where the lexer refuses the command (an unquoted here-document, an open quote, a process
         # substitution, a here-string) the scan alone decides: its detach and open quote deny, and a
         # command it reads with no bare `&` allows.
@@ -13651,9 +13719,9 @@ def _main_isolated(report_path=None):
         # directory), recording ONLY whether $! is set afterwards, and the REGISTRY-SCOPE verdict
         # must agree with bash in both directions: a command after which bash sets $! (a real
         # detach) must DENY, and a command bash does not background must ALLOW on the rows the
-        # three-shape narrowing lifts (expected_allow below: a top-level or commit-message-form body
-        # '&' under a quoted delimiter with an exact closing line and no trailing job; every other
-        # non-detaching row may fail closed). A bash run that yields no BANG line, or a probe error,
+        # three-shape narrowing lifts (expected_allow below: a top-level body '&' under a quoted
+        # delimiter with an exact closing line and no trailing job; every other non-detaching row,
+        # the dq-subst rows whose consumer is ':' included, may fail closed). A bash run that yields no BANG line, or a probe error,
         # is missing fixture evidence and FAILS its row rather than passing it. The corpus is a
         # deterministic product of 506 cases, one short bash run each, well under the 60-second
         # budget for the whole oracle.
@@ -13679,14 +13747,12 @@ def _main_isolated(report_path=None):
             for _skey, _spec in _oracle_specs:
                 for _bkey, _body in _oracle_bodies:
                     for _tkey, _tail in _oracle_tails:
+                        # The dq-subst context's consumer is ':', not a plain git commit, so its body
+                        # '&' is never lifted (_git_commit_message_lifts) and may fail closed; the
+                        # trunc/fg-commit-message-* rows prove the plain git commit lift.
                         expected_allow = (
-                            _tkey == "alone"
-                            and ((_ckey == "top" and _skey in _oracle_lifted_specs
-                                  and _bkey == "amp")
-                                 # the commit-message form's exact close; its delimiter spec must
-                                 # hold no '$' (the shared close parser refuses one, fail closed)
-                                 or (_ckey == "dq-subst" and _skey in _oracle_lifted_specs
-                                     and _skey != "ansi" and _bkey in ("amp", "dq-amp"))))
+                            _tkey == "alone" and _ckey == "top" and _skey in _oracle_lifted_specs
+                            and _bkey == "amp")
                         oracle_cases.append(
                             ("/".join((_ckey, _skey, _bkey, _tkey)),
                              _template.format(s=_spec, b=_body, t=_tail), expected_allow))
