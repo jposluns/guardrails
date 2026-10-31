@@ -150,6 +150,8 @@ run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --sel
 run_gate "opf-init-operation-selftest" python3 -I -B opf/tools/_opf_init_operation.py --self-test
 run_gate "opf-init-p0-selftest" python3 -I -B opf/tools/check_opf_init_p0.py --self-test --red-on-revert
 run_gate "opf-init-observe-selftest" python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
+run_gate "opf-init-reconciliation-selftest" python3 -I -B opf/tools/check_opf_init_reconciliation.py --self-test
+run_gate "opf-init-reconciliation" python3 -I -B opf/tools/check_opf_init_reconciliation.py
 run_gate "opf-standalone-closure-selftest-a" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-a
 run_gate "opf-standalone-closure-selftest-b" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-b
 run_gate "opf-standalone-closure-selftest-c" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-c

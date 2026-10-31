@@ -467,6 +467,14 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
 
+      - name: OPF init obligation crosswalk gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init_reconciliation.py --self-test
+
+      - name: OPF init obligation crosswalk gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init_reconciliation.py
+
   # The closure work is split between five jobs because the whole roster's worst case does not fit
   # one job's time limit, nor four once every leg whose command the config lanes also run is bounded
   # at or above the deadline those lanes give that command plus the launch margin (each leg bound

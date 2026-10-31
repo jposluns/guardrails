@@ -172,6 +172,7 @@ _SUBSET = [
     ("opf-init-operation-selftest", "_opf_init_operation.py", ["--self-test"]),
     ("opf-init-p0-selftest", "check_opf_init_p0.py", ["--self-test", "--red-on-revert"]),
     ("opf-init-observe-selftest", "check_opf_init_observe.py", ["--self-test", "--red-on-revert"]),
+    ("opf-init-reconciliation-selftest", "check_opf_init_reconciliation.py", ["--self-test"]),
     ("commonmark-headings-selftest", "selftest_commonmark_headings.py", []),
     ("commonmark-conformance", "selftest_commonmark_conformance.py", []),
 ]
@@ -331,6 +332,9 @@ _LEG_CEILING_S = {
     "opf-init-operation-selftest": 100,  # INFERRED here (measured at 7bf8107f: 99.2 s at load5 24.6)
     "opf-init-p0-selftest": 40,  # INFERRED here (measured at 7bf8107f: 39.8 s at load5 24.3)
     "opf-init-observe-selftest": 2,  # INFERRED here (measured at 7bf8107f: 1.1 s at load5 24.3)
+    # opf-init-reconciliation-selftest: a leg added after that run; in-memory fixtures only, so 1 s is
+    # INFERRED (one run at 31066ff2 took under 0.1 s), never a measurement at 7bf8107f.
+    "opf-init-reconciliation-selftest": 1,
     "commonmark-headings-selftest": 13,  # INFERRED here (measured at 7bf8107f: 12.2 s at load5 24.3)
     "commonmark-conformance": 1,  # INFERRED here (measured at 7bf8107f: 0.2 s at load5 24.2)
 }
@@ -340,7 +344,7 @@ _LEG_CEILING_S = {
 # added or renamed together with its ceiling row, which leaves the two tables agreeing, is still drift.
 # A deliberate roster change records the new figures here in the same change (the drift line prints
 # them); this pin does not judge whether that change is right.
-_ROSTER_PIN = (28, "f0d1f4582b166a630e35f0f4540244968743eca4e9fbc9e9758a0d74da623eed")
+_ROSTER_PIN = (29, "923baf045d6feae33266efc4196505745823952ee8c10f2632f3703e593b6105")
 _LOAD_HEADROOM = 3
 _LAUNCH_MARGIN_S = 60
 # The post-kill cleanup deadline (_kill_and_reap): ONE absolute deadline that the output drain and the
@@ -449,6 +453,7 @@ _LEG_BOUND_FLOOR_S = {
     "opf-init-operation-selftest": 1260,
     "opf-init-p0-selftest": 1260,
     "opf-init-observe-selftest": 1260,
+    "opf-init-reconciliation-selftest": 1260,
     "commonmark-headings-selftest": 1260,
     "commonmark-conformance": 1260,
 }
@@ -536,6 +541,7 @@ _CI_JOB_LEGS = {
         "opf-adopt-state-selftest",
         "opf-adopt-hook-selftest",
         "opf-adopt-complete-selftest",
+        "opf-init-reconciliation-selftest",
     }),
     "opf-closure-d": frozenset({
         "opf-import-batch-selftest",

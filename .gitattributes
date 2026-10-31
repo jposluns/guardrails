@@ -546,6 +546,7 @@ opf/site/tooling.html text eol=lf
 opf/spec/OPF-IMPLEMENTATION-PROMPT.md text eol=lf
 opf/spec/OPF-INIT-D2B-REVIEW.md text eol=lf
 opf/spec/OPF-INIT-D2B.md text eol=lf
+opf/spec/OPF-INIT-RECONCILIATION.md text eol=lf
 opf/spec/OPF-QUICKSTART.md text eol=lf
 opf/spec/OPF-SPEC.md text eol=lf
 opf/tools/_byte_canon.py text eol=lf
@@ -627,6 +628,7 @@ opf/tools/check_opf_init_contract.py text eol=lf
 opf/tools/check_opf_init_observe.py text eol=lf
 opf/tools/check_opf_init_p0.py text eol=lf
 opf/tools/check_opf_init_qa.py text eol=lf
+opf/tools/check_opf_init_reconciliation.py text eol=lf
 opf/tools/check_opf_prompt_pack.py text eol=lf
 opf/tools/check_opf_record.py text eol=lf
 opf/tools/opf-declaration.toml binary
