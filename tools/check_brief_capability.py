@@ -280,9 +280,9 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        path in prose is never judged by P6: only a
                        declared input is, and an output the brief asks the worker to create is not declared, so
                        it is not judged. A brief the vendored parser cannot read, or one over the shared
-                       reading's bounds (its measured 64 KiB text ceiling, its whitespace-run and
-                       nesting prescans, its parse deadline, held by killing the parse child's process
-                       group), is CANNOT_EVALUATE, never read
+                       reading's bounds (its 102,400-byte text ceiling, the dispatcher's own brief cap,
+                       its whitespace-run and nesting prescans, its parse deadline, held by killing the
+                       parse child's process group), is CANNOT_EVALUATE, never read
                        another way;
                        conformance is exactly Marko
                        2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
@@ -629,6 +629,7 @@ import bisect
 import contextlib
 import errno
 import io
+import json
 import os
 import posixpath
 import re
@@ -3917,6 +3918,170 @@ THREAD_JOIN_PROBE = (
     "    m.read(text)\n"
     "except m.DeclarationError:\n"
     "    pass\n")
+# a stand-in parse child: _CHILD_PATH is pointed at a script that opens with this prefix (the text read
+# from stdin, the script's own directory as `here`) and then runs one vector's body, so each way a child
+# can end is shown against the parent's reading of it
+STAND_IN_PREFIX = ("import json, os, signal, subprocess, sys\n"
+                   "text = sys.stdin.buffer.read().decode('utf-8')\n"
+                   "here = os.path.dirname(os.path.abspath(__file__))\n")
+# the body of a stand-in that writes one complete well-formed empty document for its text
+STAND_IN_DOCUMENT = ("sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)], "
+                     "'children': []}}))\n"
+                     "sys.stdout.flush()\n")
+# a stand-in that leaves a grandchild running after a normal exit: it opens the fifo beside it for
+# writing (the self-test holds the read end), hands that descriptor to a grandchild in its process group
+# that sleeps for a bounded time, records the grandchild's pid, writes a complete document and exits 0;
+# the fifo reads end of file only once the grandchild is gone
+STAND_IN_GRANDCHILD = (
+    "held = os.open(os.path.join(here, 'fifo'), os.O_WRONLY | os.O_NONBLOCK)\n"
+    "grandchild = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(30)'],\n"
+    "                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+    "                              stderr=subprocess.DEVNULL, pass_fds=(held,))\n"
+    "with open(os.path.join(here, 'pid'), 'w') as handle:\n"
+    "    handle.write(str(grandchild.pid))\n" + STAND_IN_DOCUMENT)
+# how long a grandchild may take to be gone once the call returns, and how long a cleanup kill may take
+GRANDCHILD_WAIT_SECONDS = 5.0
+# a stand-in that records the names in its environment beside it, then writes a complete document
+STAND_IN_ENVIRON = ("with open(os.path.join(here, 'environ'), 'w') as handle:\n"
+                    "    handle.write(chr(10).join(sorted(os.environ)))\n" + STAND_IN_DOCUMENT)
+# a variable set in the self-test's own environment around the environment vector; the child must not see it
+ENVIRON_MARK = "INPUT_DECLARATIONS_SELFTEST_MARK"
+# the stand-in parent module of the child-import vectors: the child under test imports it as its parent
+# and serializes through it, so the document it returns names which copy it imported ("beside" for the
+# copy beside the child, "decoy" for the one installed in site-packages)
+STAND_IN_PARENT = ("class DeclarationError(Exception):\n"
+                   "    pass\n\n\n"
+                   "def _parse_document(text):\n"
+                   "    return text\n\n\n"
+                   "def _serialize(text):\n"
+                   "    return {{'kind': 'Document', 'span': [0, len(text)], 'children': [], 'from': {!r}}}\n")
+
+
+def _deep_tree_body(levels):
+    """The body of a stand-in that writes a document of `levels` nested Emphasis nodes under one paragraph
+    (levels + 3 deep, the document being level 1 and the innermost RawText the last), built as text so no
+    encoder recursion bounds it."""
+    return ("leaf = json.dumps({'kind': 'RawText', 'text': 'x'})\n"
+            "opening, closing = '{\"kind\": \"Emphasis\", \"children\": [', ']}'\n"
+            "nested = opening * %d + leaf + closing * %d\n"
+            "document = json.dumps({'kind': 'Document', 'span': [0, len(text)],\n"
+            "                       'children': [{'kind': 'Paragraph', 'children': ['NESTED']}]})\n"
+            "sys.stdout.write('{\"tree\": ' + document.replace('\"NESTED\"', nested) + '}')\n" % (levels, levels))
+
+
+def _stand_in_read(directory, body, text="Input notes.\n"):
+    """read()'s outcome on `text` with the parse child replaced by a stand-in script (STAND_IN_PREFIX, then
+    `body`) written in `directory`: ("ok", (inputs, bad)), "DeclarationError", or the name of any other
+    exception that escaped, so a reverted guard shows what it lets through."""
+    path = os.path.join(directory, "stand_in_child.py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(STAND_IN_PREFIX + body)
+    saved = _input_declarations._CHILD_PATH
+    _input_declarations._CHILD_PATH = path
+    try:
+        return ("ok", _input_declarations.read(text))
+    except _input_declarations.DeclarationError:
+        return "DeclarationError"
+    except Exception as caught:   # named, never swallowed: the escape the vector exists to show
+        return type(caught).__name__
+    finally:
+        _input_declarations._CHILD_PATH = saved
+
+
+def _writers_gone(reader, seconds):
+    """True once a non-blocking read of the fifo descriptor `reader` reads end of file (every writer has
+    closed it) within `seconds`; False while a writer still holds it open."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            if os.read(reader, 1) == b"":
+                return True
+        except BlockingIOError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _grandchild_outcome(base):
+    """(read()'s outcome, whether the grandchild a normally exiting stand-in left running is gone within
+    GRANDCHILD_WAIT_SECONDS of the call's return) for STAND_IN_GRANDCHILD, in a new directory under
+    `base`. A grandchild still running then is killed here by the pid its stand-in recorded (it holds the
+    fifo, so that pid is still its own), so none outlives the self-test."""
+    directory = tempfile.mkdtemp(dir=base)
+    fifo = os.path.join(directory, "fifo")
+    os.mkfifo(fifo)
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        outcome = _stand_in_read(directory, STAND_IN_GRANDCHILD)
+        gone = _writers_gone(reader, GRANDCHILD_WAIT_SECONDS)
+        if not gone:
+            with open(os.path.join(directory, "pid"), encoding="ascii") as handle:
+                os.kill(int(handle.read()), signal.SIGKILL)
+            _writers_gone(reader, GRANDCHILD_WAIT_SECONDS)
+    finally:
+        os.close(reader)
+    return outcome, gone
+
+
+def _environment_outcome(base):
+    """(read()'s outcome, whether the stand-in child saw ENVIRON_MARK) with ENVIRON_MARK set in this
+    process's environment around the call, in a new directory under `base`."""
+    directory = tempfile.mkdtemp(dir=base)
+    with _environ(**{ENVIRON_MARK: "1"}):
+        outcome = _stand_in_read(directory, STAND_IN_ENVIRON)
+    with open(os.path.join(directory, "environ"), encoding="utf-8") as handle:
+        names = handle.read().split("\n")
+    return outcome, ENVIRON_MARK in names
+
+
+def _child_import_outcomes(base, source):
+    """For the parse child source `source`, written beside a stand-in parent ("beside") and run under a
+    minimal virtual environment (a pyvenv.cfg beside a link to this interpreter) whose site-packages holds
+    a decoy parent ("decoy"): which parent the child read through, first with the decoy installed on the
+    module path, then with a site .pth line importing the decoy before the child runs. Each is "beside",
+    "decoy", "refused" (the child's declaration_error) or "failed"; a source of None (a flip that could
+    not be built) is "not built"."""
+    if source is None:
+        return ("not built", "not built")
+    directory = tempfile.mkdtemp(dir=base)
+    interpreter = os.path.realpath(sys.executable)
+    venv_python = os.path.join(directory, "venv", "bin", "python3")
+    site = os.path.join(directory, "venv", "lib", "python{}.{}".format(*sys.version_info[:2]), "site-packages")
+    tools = os.path.join(directory, "tools")
+    for path in (os.path.dirname(venv_python), site, tools):
+        os.makedirs(path)
+    os.symlink(interpreter, venv_python)
+    for path, text in ((os.path.join(directory, "venv", "pyvenv.cfg"),
+                        "home = {}\ninclude-system-site-packages = false\n".format(os.path.dirname(interpreter))),
+                       (os.path.join(tools, "_input_declarations_child.py"), source),
+                       (os.path.join(tools, "_input_declarations.py"), STAND_IN_PARENT.format("beside")),
+                       (os.path.join(site, "_input_declarations.py"), STAND_IN_PARENT.format("decoy"))):
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    outcomes = []
+    for preload in (False, True):
+        if preload:
+            with open(os.path.join(site, "preload.pth"), "w", encoding="utf-8") as handle:
+                handle.write("import _input_declarations\n")
+        try:
+            done = subprocess.run([venv_python, "-I", "-B", os.path.join(tools, "_input_declarations_child.py")],
+                                  input=b"x", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env={},
+                                  timeout=120)
+        except subprocess.TimeoutExpired:
+            outcomes.append("failed")
+            continue
+        try:
+            result = json.loads(done.stdout.decode("utf-8"))
+        except ValueError:
+            result = None
+        if done.returncode != 0 or not isinstance(result, dict):
+            outcomes.append("failed")
+        elif isinstance(result.get("tree"), dict):
+            outcomes.append(result["tree"].get("from", "failed"))
+        else:
+            outcomes.append("refused" if "declaration_error" in result else "failed")
+    return tuple(outcomes)
 
 
 def _preflight_repo(base):
@@ -4920,6 +5085,22 @@ def self_test(report_path=None):
     finally:
         _input_declarations.MAX_TEXT_BYTES = saved_ceiling
     check("parse/deadline-held-at-old-ceiling", held, [(True, True)] * 2)
+    # and at the current ceiling, on the in-bound shapes measured slowest there (an underscore-mark run and
+    # a paragraph of unclosed <? openers, each filled to the ceiling behind a parse-forcing lead): each is
+    # answered or refused within the deadline plus DEADLINE_MARGIN_SECONDS, timed in the parent the same way
+    ceiling = _input_declarations.MAX_TEXT_BYTES
+    ceiling_shapes = [parse_lead + unit * ((ceiling - len(parse_lead) - 1) // len(unit)) + "\n"
+                      for unit in ("_a", "x<?")]
+    held = []
+    for shape in ceiling_shapes:
+        began = time.monotonic()
+        try:
+            read_inputs(shape)
+        except _input_declarations.DeclarationError:
+            pass
+        held.append((len(shape.encode("utf-8")) <= ceiling, time.monotonic() - began
+                     <= _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS))
+    check("parse/deadline-held-at-ceiling", held, [(True, True)] * 2)
     # and shown red under the flip that restores the thread join: a probe child runs the flipped read on
     # each shape, has NOT returned at the deadline plus the same margin (join cannot fire while one regex
     # match holds the GIL), and its own process group is then killed, never left running
@@ -6288,11 +6469,93 @@ def self_test(report_path=None):
         # load-bearing for the quote-prefix vectors (their text never forces a parse)
         check("revert/nesting-quote-prefix-red", *parser_flip(
             [lambda: p6_code(">\xa0" * 30 + "x\n")], [0], MAX_NESTING_DEPTH=1 << 30))
+        # the text ceiling is the dispatcher's own brief cap, so a brief-like text the size of the largest
+        # real brief measured (92,342 bytes: headings, prose with markup, bullets) is read and answered;
+        # with the old 64 KiB ceiling restored it is refused for its size alone
+        brief_unit = ("## A section\n\nThe reading takes each paragraph as a reader shows it, with *emphasis*, "
+                      "`code` and a [link](https://example.invalid/x) applied.\n\n- one item\n- another item\n\n")
+        brief_like = brief_unit * (92342 // len(brief_unit))
+        brief_like += "x" * (92342 - len(brief_like) - 1) + "\n"
+        check("structure/text-ceiling-dispatch-cap",
+              (_input_declarations.MAX_TEXT_BYTES, len(brief_like.encode("utf-8")), _outcome(brief_like)),
+              (102400, 92342, (0, [])))
+        check("revert/text-ceiling-red", *parser_flip(
+            [lambda: p6_code(brief_like)], ["CannotEvaluate"], MAX_TEXT_BYTES=1 << 16))
+        # the parse child replaced by stand-ins: each way a child can end is judged on the parent's reading
+        # of it, and each guard goes red under the flip that restores the reading without it
+        stand_ins = str(inputs / "stand-ins")
+        os.makedirs(stand_ins)
+
+        def stand_in(body, text="Input notes.\n"):
+            return lambda: _stand_in_read(tempfile.mkdtemp(dir=stand_ins), body, text)
+
+        empty_reading = ("ok", ([], []))
+        # a grandchild the child left running when it exited normally is gone once the call returns; with
+        # the group kill patched out (the old normal-exit path killed nothing) it survives the call
+        check("parse/child-group-killed-after-exit", _grandchild_outcome(stand_ins), (empty_reading, True))
+        check("revert/child-group-kill-red", *parser_flip(
+            [lambda: _grandchild_outcome(stand_ins)], [(empty_reading, False)], _kill_group=lambda process: None))
+        # a child that writes a complete well-formed document and then exits non-zero, or is ended by a
+        # signal, is refused; exit 0 is read. With the status read patched out, both failures are read
+        exit_three = STAND_IN_DOCUMENT + "os._exit(3)\n"
+        terminated = STAND_IN_DOCUMENT + "os.kill(os.getpid(), signal.SIGTERM)\n"
+        check("parse/child-exit-status-refused",
+              [stand_in(body)() for body in (STAND_IN_DOCUMENT, exit_three, terminated)],
+              [empty_reading, "DeclarationError", "DeclarationError"])
+        check("revert/child-exit-status-red", *parser_flip(
+            [stand_in(exit_three), stand_in(terminated)], [empty_reading] * 2, _check_exit=lambda status: None))
+        # well-formed JSON of the wrong shape is a named refusal: a node with no kind, an integer in a node's
+        # place, a document with no children list, and a tree deeper than the recursive readings walk; with
+        # the shape check patched out each escapes as another exception or reads as an empty document
+        no_kind = ("sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)], "
+                   "'children': [{'span': [0, len(text)]}]}}))\n")
+        integer_node = ("sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)], "
+                        "'children': [7]}}))\n")
+        no_children = "sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)]}}))\n"
+        deep_tree = _deep_tree_body(5000)
+        shapes = [stand_in(body) for body in (no_kind, integer_node, no_children, deep_tree)]
+        check("parse/child-tree-shape-refused", [shape() for shape in shapes], ["DeclarationError"] * 4)
+        check("revert/child-tree-shape-red", *parser_flip(
+            shapes, ["KeyError", "AttributeError", empty_reading, "RecursionError"],
+            _checked_tree=lambda tree: tree))
+        # the depth bound, just inside, exactly at and just over MAX_TREE_DEPTH (the document is level 1)
+        check("structure/tree-depth-boundary",
+              [stand_in(_deep_tree_body(_input_declarations.MAX_TREE_DEPTH - 3 + offset))()
+               for offset in (-1, 0, 1)], [empty_reading, empty_reading, "DeclarationError"])
+        # JSON nested past the decoder's own stack bound is the same refusal; with RecursionError dropped
+        # from the decode failures it escapes from the decode
+        deep_json = stand_in("sys.stdout.write('{\"tree\": ' + '[' * 1000000 + ']' * 1000000 + '}')\n")
+        check("parse/child-result-recursion-refused", deep_json(), "DeclarationError")
+        check("revert/child-result-recursion-red", *parser_flip(
+            [deep_json], ["RecursionError"], CHILD_RESULT_ERRORS=(ValueError,)))
+        # the child starts with an empty environment, so a variable of the caller's never reaches it; with
+        # the caller's environment handed down again, it does
+        check("parse/child-environment-empty", _environment_outcome(stand_ins), (empty_reading, False))
+        check("revert/child-environment-red", *parser_flip(
+            [lambda: _environment_outcome(stand_ins)], [(empty_reading, True)], CHILD_ENVIRONMENT=None))
+        # the child imports its parent from its own directory first and checks the module's file is the one
+        # beside it: run under a minimal virtual environment holding a decoy parent in site-packages, the
+        # child reads through the copy beside it, and refuses when a site .pth line imported the decoy
+        # first. Each flip is built from the child's own source, only when its line is there exactly once:
+        # with the directory appended (the old search order) the installed decoy is imported first, and the
+        # origin check refuses it; with the origin check removed the pre-imported decoy is used; with both
+        # (the old child) the decoy is used either way
+        with open(_input_declarations._CHILD_PATH, encoding="utf-8") as handle:
+            child_source = handle.read()
+        front, appended = "sys.path.insert(0, _HERE)\n", "sys.path.append(_HERE)\n"
+        origin = "if _IMPORTED is None or os.path.realpath(_IMPORTED) != _BESIDE:\n"
+        path_flip = child_source.replace(front, appended) if child_source.count(front) == 1 else None
+        origin_flip = child_source.replace(origin, "if False:\n") if child_source.count(origin) == 1 else None
+        both_flips = path_flip.replace(origin, "if False:\n") if path_flip and origin_flip else None
+        check("parse/child-imports-beside", _child_import_outcomes(stand_ins, child_source), ("beside", "refused"))
+        check("revert/child-import-path-red", _child_import_outcomes(stand_ins, path_flip), ("refused", "refused"))
+        check("revert/child-import-origin-red", _child_import_outcomes(stand_ins, origin_flip), ("beside", "decoy"))
+        check("revert/child-import-old-red", _child_import_outcomes(stand_ins, both_flips), ("decoy", "decoy"))
     finally:
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 207)
+    check("revert/every-flip-ran", len(flipped), 213)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -6357,7 +6620,10 @@ def self_test(report_path=None):
           "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
           "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
           "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
-          "in a capped child that must exit 0; "
+          "in a capped child that must exit 0; the parse child's process group is killed after a normal "
+          "exit too, a non-zero or signalled child and a result of the wrong shape or depth are refused, "
+          "the child sees an empty environment and imports its parent only from beside it, each red with "
+          "its guard patched out; "
           "scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
           "missing, non-regular, backwards-range and unknown-family input exits 2); execution set reconciled "

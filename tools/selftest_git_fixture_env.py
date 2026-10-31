@@ -4743,6 +4743,11 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_newtab.py", "_self_test", ("unresolved",),
      "cannot-evaluate head: the launch iterates a literal command table whose heads are all"
      " sys.executable (the copied-tools self-test children); no git launch"),
+    ("tools/check_brief_capability.py", "_child_import_outcomes", ("unresolved",),
+     "cannot-evaluate head: a link to this interpreter (os.path.realpath(sys.executable)) in a"
+     " minimal virtual environment the self-test builds in its scratch directory, running the"
+     " parse child source under test beside stand-in parent modules; neither the child nor the"
+     " stand-ins spell a git command"),
     ("tools/check_release_build.py", "_materialized_check", ("unresolved",),
      "cannot-evaluate argv: replays the registry-enumerated gate commands (the generators'"
      " python3 --check forms and the manifest-integrity commands) inside a throwaway"

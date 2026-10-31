@@ -19,24 +19,28 @@ so the reading matches what a GFM reader shows. Conformance is exactly Marko 2.2
 CommonMark 0.31.2 example suite; see opf/tools/selftest_commonmark_conformance.py), so on rare edge inputs
 the reading diverges from a strict spec reading exactly where Marko does (a no-break space accepted after
 a closing fence, for one). A parse failure, a vendored tree that cannot be imported or fails its
-provenance pin, a text over MAX_TEXT_BYTES, a parse that misses PARSE_DEADLINE_SECONDS, or a document span
-that does not cover the text is DeclarationError, which both callers turn into their cannot-evaluate
-refusal, never a silent empty reading.
+provenance pin, a text over MAX_TEXT_BYTES, a parse that misses PARSE_DEADLINE_SECONDS, a parse child that
+exits non-zero or returns a result not of the serialized document's shape, or a document span that does
+not cover the text is DeclarationError, which both callers turn into their cannot-evaluate refusal, never
+a silent empty reading or another exception.
 
 BOUNDS. The one hard bound is wall clock, held by construction: the parse runs in its own child process
-(python3 -I -B on this module's sibling child script tools/_input_declarations_child.py, the text on
-stdin, one JSON result on stdout) in its own session, and a parse that has not delivered its result
-within PARSE_DEADLINE_SECONDS has its whole process group killed and the text refused, never read
-partially; a killed, crashed or silent child is the same fail-closed refusal. No in-process deadline can
-hold that bound, because a single regex match holds the GIL and the re engine reads some texts inside one
+(python3 -I -B on this module's sibling child script tools/_input_declarations_child.py, an empty
+environment, the text on stdin, one JSON result on stdout) in its own session, and a parse that has not
+delivered its result within PARSE_DEADLINE_SECONDS has its whole process group killed and the text
+refused, never read partially; the group is killed after a normal exit too, so nothing the child started
+outlives the call, and a killed, crashed, signalled, non-zero or silent child is the same fail-closed
+refusal. No in-process deadline can hold that bound, because a single regex match holds the GIL and the
+re engine reads some texts inside one
 match for minutes (an unclosed inline-HTML opener scans to its paragraph's end per opener; a run of
 fullwidth letters backtracks quadratically in the GFM autolink lookbehind), where a thread join waits out
 the match however short its timeout; and per-shape cost models over the text cannot enumerate every slow
 shape, so no such model is relied on for the bound. Before any parse, two cheap structural prescans
 refuse degenerate shapes up front with a named reason, each decided on the text alone: a text over
-MAX_TEXT_BYTES (sized from measurement; the constant's comment records the measurements) is refused in
-forbidden() whatever it holds; a text that can nest blocks more than MAX_NESTING_DEPTH levels deep
-(judged by _nesting_refused, a conservative prescan over marker runs and indentation whose running depth
+MAX_TEXT_BYTES (the dispatcher's own brief cap, so every brief that can be dispatched is read; it bounds
+one parse's memory, not its time, and the constant's comment records the timings measured at it) is
+refused in forbidden() whatever it holds; a text that can nest blocks more than MAX_NESTING_DEPTH levels
+deep (judged by _nesting_refused, a conservative prescan over marker runs and indentation whose running depth
 follows block structure, resetting where a new top-level block must start, so a block's outcome never
 depends on content before its block; after a quote marker it consumes one optional non-LF whitespace
 character as a column, exactly as the parser's own quote prefix does, so a no-break space or a
@@ -51,8 +55,9 @@ not. Named residuals, each availability only, never a wrong verdict: near the de
 in-bound text is answered or refused still depends on host load, so a text the ceiling admits can be
 refused on a busy host (the bound is deterministic, the answer is not); every parse pays one child start
 (an interpreter and the vendored-parser import); and a caller that ignores SIGCHLD reads a failed
-child's status as 0, so the result is trusted only on a complete well-formed JSON document on stdout,
-never on the exit status alone. A brief that is pure ASCII, holds no "nput" substring in any case and none of the characters that
+child's status as 0, so a non-zero status is refused but a status of 0 is never trusted alone: the
+result must also be one complete well-formed JSON document of the serialized document's shape
+(_checked_tree, at most MAX_TREE_DEPTH levels deep). A brief that is pure ASCII, holds no "nput" substring in any case and none of the characters that
 can make rendered text differ from source text (RENDERING_MARK_RE: a character reference's &, emphasis or
 strikethrough or code marks, a link bracket, inline HTML's <, a backslash escape) is answered without
 parsing: nothing in such a text can render, spell or disguise the label, and ASCII holds no format
@@ -128,23 +133,24 @@ import threading
 import unicodedata
 
 MARKO_VERSION = "2.2.4"           # the exact vendored pin; any other resolved version fails closed
-# the brief ceiling, enforced on every text before any other rule, SIZED FROM MEASUREMENT on the host
-# this reading runs on (an 80-cpu machine at one-minute load averages 35 to 43, each shape parsed once
-# per size in its own child on the vendored pin, 2026-10-31): at this ceiling (64 KiB) every brief-like
-# shape measured finishes well under half the 10 s deadline, and the ceiling cannot sit lower because the
-# largest real brief is under 64 KiB, so any lower ceiling would refuse a real brief up front. Measured
-# at 64 KiB: prose 0.30 s, headings 0.73 s, one-line paragraphs 3.3 s, flat bullets 5.0 s, setext pairs
-# 2.8 s, an 8-column table 1.2 s, a 2,000-column table 0.94 s, backtick runs 0.34 s, asterisk marks
-# 0.49 s, 20-deep quote lines 0.21 s, blank-separated 13-deep quote openings 4.3 s, 2,000-space runs
-# 3.0 s, no-break-space runs 3.5 s, a fullwidth-letter line 3.5 s. Degenerate walls of repeated marker
-# or opener lines measured 5 to 11 s at 64 KiB (unclosed <!-- openers 7.0 s, unclosed <? openers 10.6 s,
-# unclosed CDATA openers 5.7 s, link-reference-definition walls 7.6 s, 13-deep bullet walls 5.4 s, lazy
-# continuations under a 20-deep quote 5.9 s and under a 20-deep bullet lead 10.0 s), and a nested-bracket
-# run measured 12.5 s at 16 KiB already, so no ceiling that admits a real brief can hold every shape
-# under the deadline: those shapes are answered or refused at the deadline by the child kill (the bound
-# that holds whatever the shape), while every measured brief-like shape keeps at least half the deadline
-# as margin at this ceiling
-MAX_TEXT_BYTES = 1 << 16
+# the brief ceiling, enforced on every text before any other rule: the dispatcher's own brief cap, 102,400
+# bytes (the dispatcher refuses a larger brief before any worker reads it), so every brief that can be
+# dispatched is read here and none is refused for its size alone; real briefs run past 64 KiB (the
+# largest measured is 92,342 bytes). The ceiling no longer bounds the parse's time, which the child kill
+# holds for every shape at the deadline; it bounds only the memory one parse may take. Measured at this
+# ceiling on the host this reading runs on (an 80-cpu machine at one-minute load averages 37 to 50, each
+# text read once through read() and timed from the parent around the call, 2026-10-31): real briefs of
+# 65,766 to 79,833 bytes 0.23 to 0.50 s; brief-like shapes: prose 0.42 s, headings 0.58 s, one-line
+# paragraphs 0.98 s, flat bullets 1.6 s, setext pairs 2.0 s, an 8-column table 2.5 s, a 2,000-column
+# table 3.3 s, backtick runs 0.89 s, asterisk marks 0.39 s, lazy continuations under a 20-deep quote
+# 2.4 s and under a 20-deep bullet lead 3.4 s. Degenerate walls no real brief holds take most of the
+# deadline or all of it: no-break-space runs 4.5 s, 2,000-space runs 7.2 s, blank-separated 13-deep quote
+# openings 7.9 s, unclosed CDATA openers 8.1 s, a fullwidth-letter line 8.5 s and 13-deep bullet walls
+# 10.2 s were answered, and unclosed <!-- and <? openers, an underscore-mark run and a
+# link-reference-definition wall were refused at the deadline (10.0 s, the child killed). So no shape
+# outlasts the deadline, every brief-like shape keeps over half of it as margin, and whether a degenerate
+# wall near the deadline is answered or refused depends on host load
+MAX_TEXT_BYTES = 102400
 # the parse must deliver its result within this wall-clock bound or the parse child's process group is
 # killed and the text refused (DeclarationError), the fail-closed refusal an oversized text gets; the
 # bound holds by construction for every shape, because the kill needs no cooperation from the parser,
@@ -234,6 +240,24 @@ _LOADED = None                    # (marko module, gfm elements module) after a 
 # the parse child, a fixed path derived from THIS file's own absolute location (never the CWD): it reads
 # the text from stdin, parses it in its own process and session, and writes one JSON document to stdout
 _CHILD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_input_declarations_child.py")
+# the parse child's whole environment: empty, since the parse reads nothing from it (the interpreter runs
+# -I, which ignores every PYTHON* variable, the text arrives on stdin as bytes the child decodes as UTF-8,
+# and the result is ASCII JSON), so no variable of the caller's, a credential included, reaches the child.
+# A patchable seam for the callers' self-tests only: None hands the child the caller's whole environment
+CHILD_ENVIRONMENT = {}
+# the failures decoding the child's stdout that are this reading's refusal: bytes that are not UTF-8 or
+# not one JSON document (ValueError), and JSON nested past the decoder's own stack bound (RecursionError)
+CHILD_RESULT_ERRORS = (ValueError, RecursionError)
+# the deepest serialized document read (the root is level 1): the readings below walk the tree
+# recursively, one frame per level, so a deeper tree would end in RecursionError there. The vendored
+# parser's own recursion bound refuses deeper nesting first: the deepest document it returned measured
+# 498 levels (runs of nested emphasis, strong emphasis, images and links in emphasis, 2026-10-31), and
+# each of those shapes nested further failed in the child as a recursion error, its refusal; this bound
+# sits above that with room, and below what the recursive readings can walk under their callers' frames
+MAX_TREE_DEPTH = 600
+# the fields a serialized node may carry (_serialize) and the one type each must have
+NODE_FIELDS = {"kind": str, "span": list, "text": str, "children": list, "task": bool, "body": str,
+               "escape": bool}
 # a patchable seam for the callers' self-tests only: False restores the abandoned in-process thread join,
 # whose timeout cannot fire while one regex match holds the GIL, so a self-test can show the child kill
 # is what holds the wall-clock bound; production callers never set it
@@ -314,8 +338,9 @@ def _parse_document(text):
 def _serialize(element):
     """The parsed element as a tree of plain dicts, the one shape both sides of the process boundary
     read: kind (the element's class name), span (its source span), text (its string children), children
-    (its element children, a bare string child as kind "str"), task (it carries a task-list check state),
-    escape (a RawText's character-reference switch) and body (an HTML block's raw text). Every reading
+    (its element children, a bare string child as kind "str"; written whenever the element has a child
+    sequence, an empty one included, so a document always carries it), task (it carries a task-list check
+    state), escape (a RawText's character-reference switch) and body (an HTML block's raw text). Every reading
     this module makes of a parsed document is made of these fields alone, so the in-process seam and the
     child return identical documents by construction."""
     node = {"kind": type(element).__name__}
@@ -332,16 +357,51 @@ def _serialize(element):
     children = getattr(element, "children", None)
     if isinstance(children, str):
         node["text"] = children
-    elif children:
+    elif children is not None:
         node["children"] = [{"kind": "str", "text": child} if isinstance(child, str)
                             else _serialize(child) for child in children]
     return node
 
 
+def _checked_tree(tree):
+    """`tree` when it has the serialized document's shape (_serialize), else DeclarationError: a dict of
+    kind Document with a children list, and every node below it a dict whose kind is a string and whose
+    other fields are only NODE_FIELDS of their types, at most MAX_TREE_DEPTH levels deep. The walk is
+    iterative, so a tree of any depth is judged without recursing; a node with no kind, a number in a
+    node's place, a document with no children list and a tree too deep for the recursive readings below
+    are each this refusal, never another exception or an empty reading."""
+    if not isinstance(tree, dict) or tree.get("kind") != "Document" \
+            or not isinstance(tree.get("children"), list):
+        raise DeclarationError("the parsed result is not a document with a children list; the brief is "
+                               "refused, never read partially")
+    pending = [(tree, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if depth > MAX_TREE_DEPTH:
+            raise DeclarationError("the parsed document is nested more than {} levels deep, deeper than "
+                                   "this reading evaluates; the brief is refused".format(MAX_TREE_DEPTH))
+        if not isinstance(node, dict) or not isinstance(node.get("kind"), str):
+            raise DeclarationError("the parsed document holds a node with no kind; the brief is refused, "
+                                   "never read partially")
+        for name, value in node.items():
+            if name not in NODE_FIELDS or type(value) is not NODE_FIELDS[name]:
+                raise DeclarationError("the parsed document holds a {} node with a malformed {!r} field; "
+                                       "the brief is refused, never read partially".format(
+                                           node["kind"], name))
+        if "span" in node and (len(node["span"]) != 2 or any(type(end) is not int for end in node["span"])):
+            raise DeclarationError("the parsed document holds a {} node with a malformed span; the brief "
+                                   "is refused, never read partially".format(node["kind"]))
+        pending.extend((child, depth + 1) for child in node.get("children", ()))
+    return tree
+
+
 def _kill_group(process):
     """Kill the parse child's whole process group (it was started with start_new_session, so its group id
     is its pid and holds only processes it started), then the child itself where the group is already
-    gone; never a pid this module did not start."""
+    gone; never a pid this module did not start. After the child is reaped, its group id stays reserved
+    while any member of the group lives, so the kill reaches only what the child left behind; an empty
+    group's id is free again, and the kill then finds no group (barring a reuse of that id in the moment
+    between the reap and the kill)."""
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except OSError:
@@ -351,17 +411,29 @@ def _kill_group(process):
             pass
 
 
+def _check_exit(status):
+    """DeclarationError for a parse child's non-zero exit status, a negative one being the signal that
+    ended it: a child that failed is refused even when it wrote a complete well-formed document first."""
+    if status != 0:
+        raise DeclarationError("the parse child exited with status {} (a negative status is the signal "
+                               "that ended it); the brief is refused, never read partially".format(status))
+
+
 def _child_parse(text):
     """The serialized document from a parse of `text` in a child process (python3 -I -B _CHILD_PATH, its
-    own session, the text on stdin as UTF-8, one JSON document on stdout). The wall-clock bound holds by
-    construction: a child that has not delivered within PARSE_DEADLINE_SECONDS has its process group
-    killed and the text is refused. A child that cannot be started, dies, is killed, or writes anything
-    but one well-formed JSON document is the same refusal, never a partial read; the exit status alone is
-    never trusted (a caller that ignores SIGCHLD reads a failed child's status as 0)."""
+    own session, CHILD_ENVIRONMENT as its whole environment, the text on stdin as UTF-8, one JSON document
+    on stdout). The wall-clock bound holds by construction: a child that has not delivered within
+    PARSE_DEADLINE_SECONDS has its process group killed and the text is refused. The group is killed on
+    every other path too, a normal exit included, so nothing the child started outlives the call. A child
+    that cannot be started, dies, is killed, exits with a non-zero status or a signal, or writes anything
+    but one well-formed JSON document is the same refusal, never a partial read; an exit status of 0 is
+    never trusted alone (a caller that ignores SIGCHLD reads a failed child's status as 0), so the result
+    must be complete as well."""
     try:
         process = subprocess.Popen([sys.executable, "-I", "-B", _CHILD_PATH],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, start_new_session=True)
+                                   stderr=subprocess.DEVNULL, env=CHILD_ENVIRONMENT,
+                                   start_new_session=True)
     except OSError as exc:
         raise DeclarationError("cannot start the parse child {}: {}".format(_CHILD_PATH, exc)) from exc
     try:
@@ -376,18 +448,21 @@ def _child_parse(text):
         _kill_group(process)
         process.communicate()
         raise
+    # the child exited and is reaped, but a process it started and left running is still in its group
+    _kill_group(process)
+    _check_exit(process.returncode)
     try:
         result = json.loads(stdout.decode("utf-8"))
-    except ValueError as exc:
-        raise DeclarationError("the parse child returned no readable result over the brief (exit status "
-                               "{}); the brief is refused, never read partially".format(
-                                   process.returncode)) from exc
+    except CHILD_RESULT_ERRORS as exc:
+        raise DeclarationError("the parse child returned no readable result over the brief ({}); the "
+                               "brief is refused, never read partially".format(
+                                   type(exc).__name__)) from exc
     if not isinstance(result, dict):
         raise DeclarationError("the parse child returned a malformed result over the brief; the brief "
                                "is refused, never read partially")
     if "declaration_error" in result:
         raise DeclarationError(str(result["declaration_error"]))
-    if "error" in result or not isinstance(result.get("tree"), dict):
+    if "error" in result or "tree" not in result:
         raise DeclarationError("the CommonMark parser failed over the brief: {}".format(
             result.get("error", "the child returned no document")))
     return result["tree"]
@@ -427,9 +502,10 @@ def _parse(text):
     parse), then the parse runs in its own killed-at-the-deadline child process (_child_parse; the seam
     PARSE_IN_CHILD=False restores the old in-process thread join for the self-tests that show the join
     cannot hold the bound). A parse that misses the deadline, a parse exception (a recursion error
-    included), a child that dies or returns garbage, and a document span that does not cover `text` (the
-    parser's buffer rewrites are length-preserving only over LF-only text, which forbidden() guarantees
-    first) are DeclarationError, fail closed, never a partial read."""
+    included), a child that dies or returns garbage, a document not of the serialized shape
+    (_checked_tree), and a document span that does not cover `text` (the parser's buffer rewrites are
+    length-preserving only over LF-only text, which forbidden() guarantees first) are DeclarationError,
+    fail closed, never a partial read."""
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
         raise DeclarationError("the brief is larger than {} bytes, over this reading's ceiling".format(
             MAX_TEXT_BYTES))
@@ -437,7 +513,7 @@ def _parse(text):
         found = prescan(text)
         if found is not None:
             raise DeclarationError("the brief is over this reading's bounds: " + found[1])
-    document = _child_parse(text) if PARSE_IN_CHILD else _joined_parse(text)
+    document = _checked_tree(_child_parse(text) if PARSE_IN_CHILD else _joined_parse(text))
     if document.get("span") != [0, len(text)]:
         raise DeclarationError("the parsed document span does not cover the brief's text")
     return document

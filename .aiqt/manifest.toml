@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "4432f316d8cf7697632e575b85c255c5cfaf7094e16c1ffe67e599f8ff527b99"
+tree-sha256 = "f375bf665e0da97c4afb14b712ca4eeb089a78bf02c27e402c9ff83abaa65431"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3356,13 +3356,13 @@ sha256 = "f96440610c978d5138acf597d202323a5c661f90816452c03a38b3e3bf660978"
 
 [[sources]]
 path = "tools/_input_declarations.py"
-bytes = 52645
-sha256 = "49b4c5cc7775a1980d83357421b8d5007689fce2b0b5b27f7a9de5c8eff33876"
+bytes = 58506
+sha256 = "6bdeb1e245218e3934df8ab3cb3d46558de416aed219445bfbd0e0c42994a17a"
 
 [[sources]]
 path = "tools/_input_declarations_child.py"
-bytes = 1695
-sha256 = "d382f8331dba97dc24b7b038953a5a40d85f55b233ad2ab90960edf672959bf4"
+bytes = 2563
+sha256 = "26a3371c747fdfefde2b66126a6df4faaea5c890689347867c7b34f56db8b106"
 
 [[sources]]
 path = "tools/_load_bound.py"
@@ -3426,8 +3426,8 @@ sha256 = "8e1c6b93ccceb818cb6ccc411c8945591c1ab34d187ec38b3607fdee17ceece9"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 432403
-sha256 = "a88aa0d6bd4be35f482cbe1712b3d8fc1e739f63f9d389c74c144fcf4917d971"
+bytes = 449958
+sha256 = "defe904c119f7101cb1fc156e3bab6e0deb36a93acddfc284ad78703302e4dd5"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -3896,8 +3896,8 @@ sha256 = "76e57148e1ad7a82478091682afd175a1ea994d4a8b002b5fac6933e243b3d6e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 170599
-sha256 = "64c1e4dcbaa5a72a00932cf0e1a86e8fa9b3c591cf257135db52a2af3bc72e12"
+bytes = 171239
+sha256 = "33d6e226e78c0c198b926c60af71355cf000b7710f440d2666e001a0926e7cf7"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3906,8 +3906,8 @@ sha256 = "8d11b8cd543f2ca5da0fa0788d05b476a94635c9919df4e66ff8a19affbc7caa"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 440518
-sha256 = "dd38fa7c3491924fa7bcc4216532fdc2931ef1329d32b4a7416bc03f16bb6e1f"
+bytes = 440928
+sha256 = "7f815654f7547bd5611f14ce8c488cd46b88e17063b7675514842a3e9776865f"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
