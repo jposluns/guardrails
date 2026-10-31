@@ -104,7 +104,15 @@ jar to, a file the repository chooses (a filesystem effect, not routing or shapi
 bundle source makes a fetch also download a bundle from a location the repository chooses and
 write its objects and refs/bundles/* refs under .git (a fetch source the destination agreement
 never verified), and a repository-local include is read by the transport but not expanded by a
-scoped listing, so its keys could not be verified by name.
+scoped listing, so its keys could not be verified by name. The same enumeration refuses a
+repository-scope clean, smudge or process filter driver and a repository-scope external diff,
+textconv or merge driver: git runs the program such a key names while it materializes or compares
+working-tree content, so the --pull fast-forward's checkout (the first local step that writes the
+worktree, with .gitattributes assigning the driver to a changed path) would otherwise run a
+repository-chosen program before the post-pull doctor grades the result. Every local step reads
+global and system config as the null device (the scrubbed observation boundary), so the repository's
+own scope is the only one from which such a program is reachable, and it is refused before any fetch
+or checkout rather than forced off on each later local worktree step one by one.
 Second, the EFFECTIVE url.* rewrites are read under the exact environment and override pairs the
 transport call runs with, so every source git would honour (global, system, local, worktree,
 include, command) is the source checked, and any insteadOf or pushInsteadOf whose prefix matches
@@ -224,6 +232,20 @@ _LOCAL_TRUST_KEYS = (b"http.sslverify", b"http.sslcainfo", b"http.sslcapath")
 _LOCAL_COOKIE_KEYS = (b"http.cookiefile", b"http.savecookies")
 _LOCAL_BUNDLE_KEYS = (b"fetch.bundleuri",)
 _LOCAL_INCLUDE_KEYS = (b"include.path", b"includeif.path")
+# Repository-scope keys that name a program git runs while it MATERIALIZES or COMPARES working-tree
+# content (not on the fetch/push transport, which moves objects and never touches the worktree): a
+# filter.<name>.clean, smudge or process driver runs on the --pull fast-forward's checkout (the first
+# local step that writes the worktree, with .gitattributes assigning the driver to a changed path),
+# and before the post-pull doctor sees the result; a diff.<name>.command / textconv or merge.<name>
+# .driver names the external diff, textconv or merge program git would run the same way. Every local
+# step reads global and system config as the null device (the scrubbed observation env), so the
+# repository's OWN scope is the only one from which such a program is reachable on those steps: the key
+# is refused before any fetch or checkout, rather than the fast-forward and every later local worktree
+# step (check_clean's status, the post-pull doctor's reads) run with the driver forced off one by one,
+# because refusing here leaves no step from which a repository-chosen program is reachable. The driver
+# program belongs in the adopter's own global configuration (spec 5.6), like the exec keys above.
+_LOCAL_FILTER_KEYS = (b"filter.clean", b"filter.smudge", b"filter.process")
+_LOCAL_CONTENT_DRIVER_KEYS = (b"diff.command", b"diff.textconv", b"merge.driver")
 _TRANSPORT_TIMEOUT_S = 120
 _TRANSPORT_MAX_OUTPUT = 8 << 20
 # The one fast-forward command; --ff-only is load-bearing (a divergence must never merge).
@@ -604,9 +626,15 @@ def _refuse_local_redirect_config(git, store_root):
     http.cookieFile / saveCookies cookie path (the https transport reads cookies from, or writes a
     cookie jar to, a file the repository names), a fetch.bundleURI bundle source (a fetch also
     downloads a bundle from the location the repository names, writing its objects and
-    refs/bundles/* refs under .git), and include.path / includeIf.*.path (the transport
+    refs/bundles/* refs under .git), include.path / includeIf.*.path (the transport
     reads the included file, but a scoped listing does not expand it, so the included keys could not
-    be verified by name). The names are matched from the _LOCAL_* lists alone (_local_key_listed).
+    be verified by name), a filter.<name>.clean / smudge / process driver and a diff.<name>.command /
+    textconv or merge.<name>.driver driver (git runs the program such a key names while it
+    materializes or compares working-tree content: the --pull fast-forward's checkout runs the smudge
+    before the post-pull doctor sees the result, and the local steps read global and system config as
+    the null device, so the repository's own scope is the only one that could reach such a program,
+    refused here before any fetch or checkout). The names are matched from the _LOCAL_* lists alone
+    (_local_key_listed).
     Both repository scopes are enumerated, --local and --worktree (without the worktreeConfig
     extension the latter reads the same .git/config), through the scrubbed read-only boundary
     (--name-only: no value, so a malicious command body is never read); an unreadable scope is a
@@ -650,7 +678,18 @@ def _refuse_local_redirect_config(git, store_root):
          ", a repository-chosen bundle source: a fetch would also download a bundle from the "
          "location the repository names and write its objects and refs/bundles/* refs under .git; "
          "a bundle source belongs to the adopter's own global configuration (spec 5.6); remove it "
-         "and re-run (fail-closed)"))
+         "and re-run (fail-closed)"),
+        (_LOCAL_FILTER_KEYS,
+         ", a repository-scope clean, smudge or process filter driver: git runs the program it names "
+         "while it materializes or compares working-tree content, so the --pull fast-forward's "
+         "checkout (and any later worktree status or diff) would run a repository-chosen program "
+         "before the post-pull doctor sees the result; filter drivers belong to the adopter's own "
+         "global configuration (spec 5.6); remove it and re-run (fail-closed)"),
+        (_LOCAL_CONTENT_DRIVER_KEYS,
+         ", a repository-scope external diff, textconv or merge driver: git runs the program it "
+         "names while it materializes or compares working-tree content, the same working-tree "
+         "program-launch class as a filter driver; such drivers belong to the adopter's own global "
+         "configuration (spec 5.6); remove it and re-run (fail-closed)"))
     for scope in ("--local", "--worktree"):
         listing = _opf_observe._run_git(git, store_root,
                                         ["config", scope, "-z", "--name-only", "--list"])
@@ -1068,8 +1107,10 @@ def self_test():
     destination agreement, the held-lease refusal (never seized), the hostile-repository-config
     neutralization, the effective URL-rewrite refusal over every config scope, the repository-scope
     include/helper/signing/remote-program/protocol/trust/cookie/bundle refusals (every listed key
-    in its plain and its subsection form), the pre-git target validation, and the
-    fetch/detached/unborn refusals. The
+    in its plain and its subsection form), the repository-scope working-tree driver refusals
+    (filter clean/smudge/process and the diff/textconv/merge drivers, with the fast-forward checkout
+    shown running the smudge program once the refusal is dropped), the pre-git target validation, and
+    the fetch/detached/unborn refusals. The
     load-bearing guards are each also run with the guard dropped (an attribute-patched flip), so the
     vector that watches it is shown to go red. Judged on exit codes, repository state and lease
     bytes, never by output grepping alone. Returns 0 clean, 1 on a failure, 2 on a harness error."""
@@ -1097,8 +1138,8 @@ def self_test():
         return 1
     print("opf-sync self-test: PASS ({} checks: grammar, pattern refusals, admission, "
           "classification, pull, push, destination agreement, lease, transport neutralization, "
-          "URL-rewrite and repository-config refusals, target validation, fetch and HEAD "
-          "refusals, dropped-guard flips)".format(checked[0]))
+          "URL-rewrite and repository-config refusals, working-tree driver refusals, target "
+          "validation, fetch and HEAD refusals, dropped-guard flips)".format(checked[0]))
     return EXIT_OK
 
 
@@ -1761,13 +1802,72 @@ def _self_test_units(check):
             _git(rp_root, "config", "--local", "--unset", "remote.origin.vcs")
             check("emptying the remote-program list lets the repository remote program through "
                   "(shown red)", rc == EXIT_OK)
+            # -- a repository-scope working-tree driver program is refused before any fetch or
+            # checkout: a filter.<name>.clean / smudge / process driver runs on the --pull
+            # fast-forward's CHECKOUT (the first local step that writes the worktree), and a
+            # diff.<name>.command / textconv or merge.<name>.driver names the external diff, textconv
+            # or merge program git would run the same way while materializing or comparing worktree
+            # content. Each key is set alone at repository scope on a BEHIND store whose committed
+            # .gitattributes assigns the driver to data.txt; the pull refuses, the repository-chosen
+            # program never runs (its marker is never written) and HEAD and the worktree do not move.
+            def _driver_paired(name):
+                root, bare = _paired(name)
+                (Path(root) / ".gitattributes").write_text(
+                    "* filter=pwn diff=pwn merge=pwn\n", encoding="utf-8")
+                _git(root, "add", "-A")
+                _git(root, "commit", "-m", "assign working-tree drivers")
+                _git(root, "push", "origin", "main")
+                _writer_commit(bare, name)
+                return root, bare
+
+            drv_marker = os.path.join(base, "driver-marker")
+            drv_prog = Path(base) / "driver-prog"
+            drv_prog.write_text("#!/bin/sh\n: > {}\ncat\n".format(drv_marker), encoding="utf-8")
+            os.chmod(str(drv_prog), 0o755)
+            for dv_key in ("filter.pwn.clean", "filter.pwn.smudge", "filter.pwn.process",
+                           "diff.pwn.command", "diff.pwn.textconv", "merge.pwn.driver"):
+                dv_root, _dv_bare = _driver_paired("driver-{}".format(dv_key.replace(".", "-")))
+                _git(dv_root, "config", "--local", dv_key, str(drv_prog))
+                dv_head = _head(dv_root)
+                if os.path.exists(drv_marker):
+                    os.unlink(drv_marker)
+                rc, out = run(["--pull", "--root", dv_root])
+                check("a repository-scope {} refuses the pull before any fetch or checkout".format(
+                    dv_key),
+                    rc == EXIT_MALFORMED and "driver" in out and not os.path.exists(drv_marker)
+                    and _head(dv_root) == dv_head and not _status(dv_root))
+            for dv_key in ("filter.pwn.cleanx", "diff.pwn.commandx", "merge.pwn.driverx"):
+                dv_root, _dv_bare = _driver_paired("driver-miss-{}".format(dv_key.replace(".", "-")))
+                _git(dv_root, "config", "--local", dv_key, str(drv_prog))
+                rc, out = run(["--pull", "--root", dv_root])
+                refused_as_driver = (rc == EXIT_MALFORMED
+                                     and "the store repository's git configuration carries" in out
+                                     and "working-tree content" in out)
+                check("{}, a name just past a listed key, is not refused as a driver [{}]".format(
+                    dv_key, "" if not refused_as_driver else out[out.find("carries"):][:120]),
+                      not refused_as_driver)
+            # the named flip: with the filter list emptied the fast-forward's CHECKOUT runs the
+            # repository-chosen smudge program (the marker appears) before the post-pull doctor runs,
+            # so the refusal reads the list (not a copy of it) and the fast-forward is the local step
+            # this refusal protects
+            fl_root, fl_bare = _driver_paired("driver-flip")
+            _git(fl_root, "config", "--local", "filter.pwn.smudge", str(drv_prog))
+            if os.path.exists(drv_marker):
+                os.unlink(drv_marker)
+            with patch.object(module, "_LOCAL_FILTER_KEYS", ()), \
+                    patch.object(module, "_doctor", lambda root: valid_doctor):
+                rc, _out = run(["--pull", "--root", fl_root])
+            check("emptying the filter list lets the fast-forward checkout run the smudge program "
+                  "(shown red)",
+                  rc == EXIT_OK and os.path.exists(drv_marker) and _head(fl_root) == _tip(fl_bare))
             # every entry of every _LOCAL_* list refuses, plain, under a subsection and in any case,
             # through the same enumeration (its listing stubbed), while a name one character past
             # the entry does not: a list entry the refusal stopped enforcing shows here
             listed_misses = []
             for family in (_LOCAL_REDIRECT_KEYS, _LOCAL_EXEC_KEYS, _LOCAL_SIGN_KEYS,
                            _LOCAL_REMOTE_PROGRAM_KEYS, _LOCAL_PROTOCOL_KEYS, _LOCAL_TRUST_KEYS,
-                           _LOCAL_COOKIE_KEYS, _LOCAL_BUNDLE_KEYS, _LOCAL_INCLUDE_KEYS):
+                           _LOCAL_COOKIE_KEYS, _LOCAL_BUNDLE_KEYS, _LOCAL_INCLUDE_KEYS,
+                           _LOCAL_FILTER_KEYS, _LOCAL_CONTENT_DRIVER_KEYS):
                 for listed in family:
                     section, _dot, key = listed.partition(b".")
                     for name, refuses in ((listed, True), (listed.upper(), True),
