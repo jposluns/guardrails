@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "aa543ea2d14c123fc1bfdde4214cb6c632af22353d437f6d0ae9f9ee2cbbbee8"
+tree-sha256 = "5e65a694c5d0d084b02b48916affd14018976c85151e91482fd6f700f06dfd74"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3461,8 +3461,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 131383
-sha256 = "2f8a5fa6fd52cf9b9762d17b5ea9a0b610758324d9fd18afd2b93206c473661d"
+bytes = 131405
+sha256 = "4707db5da3427cf6228d71b1f0469d6ef157ec86b0bb65d7ce033a287e97648d"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -3626,8 +3626,8 @@ sha256 = "1510f0ee5ca0fd22b3f1d0e8865fad5589634021b63a1626d51e5a48637f77db"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 179057
-sha256 = "5cb1d387d1b6b2f486d920c07868a9719049b717c24d070099cad8a4af500bd7"
+bytes = 186520
+sha256 = "2531e71b1c62bda23d3cf5053e5ce49bc6f479a8c7849c555d3ce16baf99de0d"
 
 [[sources]]
 path = "tools/check_release_delta.py"
