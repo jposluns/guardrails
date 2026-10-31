@@ -345,7 +345,7 @@ def manifest_cases(check):
         add(key + "-type", ("opf", key), [])
         add(key + "-enum", ("opf", key), "unknown")
     add("homes-generation", ("opf", "homes"), True)
-    add("homes-off-pair", ("opf", "homes"), 2)
+    add("homes-off-pair", ("opf", "homes"), 1)        # base 2.0.0 admits only homes = 2
     add("worklog-generation", ("opf", "worklog"), True)
     add("worklog-ceiling", ("opf", "worklog"), 2)
     for section in ("store", "modules", "vendors", "types", "providers",

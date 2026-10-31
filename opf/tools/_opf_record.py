@@ -70,11 +70,10 @@ only receipts are importer-authored, spec 8.6): maintainer-only and requiring --
 before the store is touched, it mints the missing `done` receipt, linked `receipt_of`, and its own
 worklog entry in one publication, rewriting counters.toml, done.index.toml and worklog.toml only; the
 backlog index is read, never rewritten, and no status changes (spec 8.8). Its new id is claimed through
-the run's irrevocable id reservation (spec 8.2), which only a homes-2 store has, so on a homes-1 store
-it refuses, recording nothing (_require_reservation_home; like every subcommand, it first reconciles any
-interrupted earlier run, and that recovery, where one is needed, writes the store before the run refuses);
-while SUPPORTED_HOMES is 1 (below) that is every store this build writes, so the shipped verb refuses it
-until activation. The item must be seated once in the active backlog index at unqualified `done`,
+the run's irrevocable id reservation (spec 8.2), which only a homes-2 store has. The admission probe
+(below) refuses every readable manifest but the spec_version 2.0.0 / homes = 2 baseline before any
+reconciliation or write, so every store this subcommand reaches has that home; _require_reservation_home keeps a refusal of
+any other generation, recording nothing, as a fail-closed backstop. The item must be seated once in the active backlog index at unqualified `done`,
 schema-valid and authored by a clean-series author, and its row must be exactly the row the prior commit
 (HEAD) holds, read through the doctor's own prior-snapshot reader (_require_committed_item) while planning
 and read again under the held lease immediately before anything is reserved or published
@@ -123,20 +122,20 @@ record authoring (spec 8.8 is normative):
      result, the clock value, the planned-from bytes, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
      shell, moved from opf.py), held across publication, render, and the final doctor;
-  7. ONE journaled transaction publishes every operand (counters first), rooted at the generation's
-     record journal home (.aiqt/record/journal at homes 1; the typed capability home
-     .working/journals/record/journal at homes 2, written through the capability-bound _opf_journal
-     API, and preceded there by the run's irrevocable id reservation under the same held capability
-     and run id, _reserve_claim, spec 8.2), each operand pinned to the exact bytes it was planned from;
+  7. ONE journaled transaction publishes every operand (counters first), rooted at the typed capability
+     home .working/journals/record/journal (homes 2, the only generation; the homes-1 publication path
+     is deleted), written through the capability-bound _opf_journal API, and preceded there by the run's
+     irrevocable id reservation under the same held capability and run id (_reserve_claim, spec 8.2),
+     each operand pinned to the exact bytes it was planned from;
   8. render the declared views (--write), then require a full doctor VALID (a status change may leave
      only doctor's cannot-evaluate for exactly that record and from/to pair, pending until commit, and
      never a finding: _snapshot_pending);
   9. release the lease, THEN report: the ids, the files, and that the change is left UNCOMMITTED in the
      working tree (this verb never runs git add or commit).
 
-The allocation seam: homes 1 claims each id by advancing counters.toml as an operand INSIDE the journaled
-transaction, under the held lease, and reports ids only after the COMPLETE frame, so a rollback restores
-the counters without ever un-publishing an observed id. Homes 2 derives each next id per counter key as
+The allocation seam: only homes 2 claims (the homes-1 counters path is deleted; claim_ids refuses every
+other generation). counters.toml is still advanced as an operand INSIDE the journaled transaction, and
+ids are reported only after the COMPLETE frame. Homes 2 derives each next id per counter key as
 one more than the maximum of the counters.toml high-water and every reservation's [claims] value for
 that key across every journal kind's journals/<kind>/allocations home (the homes enumerated from
 _opf_store.JOURNAL_KINDS, each reservation validated against its own kind and file name; spec 8.2),
@@ -150,7 +149,7 @@ refuses this run (re-run), never a duplicate. The homes-2 publication boundary i
 (_publish_homes2) refuses to
 open a transaction unless the canonical reservation of the run id it publishes under stands with this
 plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
-never a silent fallback to the homes-1 counters path; a run killed after reserving and before
+never a fallback to another claim path (the homes-1 counters path is deleted); a run killed after reserving and before
 publishing leaves its reservation standing, its numbers conservatively still reserved, and the next run
 derives above them. The final doctor reads the reservations (the read-only read spec 4.2 at 2.0.0
 names for the spec 8.2 counter checks) and does not report a reserved number missing where the prior
@@ -160,15 +159,13 @@ only its run's new high-water per key, so where an orphaned run claimed several 
 its lower numbers are still reported missing and the next run is held at the post-publication gate
 (conservative). A deletion already committed in HEAD is visible only to a doctor run before that commit:
 a published record whose number a reservation records and whose deletion is committed is then graded as
-an orphaned reservation's number and not reported missing, unlike homes 1, where the counters high-water
-keeps that deletion a C-NO-DELETION finding. Spec 8.2 settles this direction: the doctor treats a
-reserved number as issued wherever its checks would otherwise report it missing. This homes-2 path is
-reached only once activation sets
-_opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
-SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
-write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
-.aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
-migration to carry it (spec 4.2).
+an orphaned reservation's number and not reported missing, where a counters high-water alone would
+keep that deletion a C-NO-DELETION finding. Spec 8.2 settles this direction: the doctor treats a
+reserved number as issued wherever its checks would otherwise report it missing. Every subcommand
+admits only a store declaring spec_version 2.0.0 with homes = 2 (_probe_admission refuses any other
+readable manifest before any reconciliation or write), so the shipped verb claims through homes 2
+only. .aiqt/ is AIQT-only content on such a store (spec 4.2): a leftover .aiqt/record/journal is
+neither read, recovered nor refused.
 
 Exit contract: 0 recorded and doctor-VALID, or carrying only that pending cannot-evaluate (uncommitted);
 2 refusal or cannot-evaluate, with recovery text where the working tree changed. Exit 1 is not used (it
@@ -239,8 +236,8 @@ record deleted before a later step failed, or a name the acquisition had itself 
 publication's staging name, or a new record its unwind removed), or saying that is not known when
 the error carries no report of it: an active record paired with a sibling worktree's still-present
 machine store until a homes-2 record run in the checkout owning that store reclaims it (its holder
-confirmed dead there; a homes-1 record run there never reclaims a capability record, taking the
-single-writer lease instead, which a present capability lease refuses); a holder read as possibly
+confirmed dead there; no other generation's record run exists to reclaim it, the homes-1 lease path
+being deleted); a holder read as possibly
 live until it releases normally, or exits and a later run confirms it dead; and every other refused
 leftover until its cause is removed, by hand for a record the gate cannot accept and by a later run
 once a transient condition has passed. That last group is NOT an exhaustive list of the gate's and
@@ -354,11 +351,8 @@ EXIT_MALFORMED = 2
 
 VERB = "record"
 SUBCOMMANDS = ("create", "transition", "done-with-receipt", "receipt-repair", "worklog-append")
-# The HOMES-1 journal root, at the STORE root and outside `.working/`, so it is never a store operand
-# and never enters the containment walk (the .aiqt/import/journal precedent). Homes 2 keeps its record
-# journal in the typed capability home instead (_record_journal_rel; spec 4.2/8.8).
-JOURNAL_REL = ".aiqt/record/journal"
-SESSION_ID = "opf-record"
+# The record journal lives only in the typed capability home (_record_journal_rel; spec 4.2/8.8): the
+# homes-1 journal root and every path that published, reconciled or leased through it are deleted.
 CLEAN_SCOPE = "record and render destinations"
 # Record authors. An importer records imported history through `opf import`, never through this verb.
 # The record a transition or done-with-receipt acts on must carry one of these too (_require_clean_author).
@@ -406,10 +400,6 @@ CONTRIBUTION = "contribution"
 # --receipt-ref adds to it on `sent -> acknowledged` (legal only at acknowledged).
 DELIVERY = "delivery"
 RECEIPT_KEYS = ("receipt_ref", "receipted_at")
-# The single-writer journal lock of one publication carries `opf-record.<token>` as its session, and the
-# transaction directory it opens ends `-<hash16>`, the token's first 16 hex digits (_record_run_id): a
-# leftover lock names its own transaction by that token (_txn_of_token).
-_TOKEN_RE = re.compile(r"^[0-9a-f]{32}\Z")
 
 
 class RecordError(Exception):
@@ -653,7 +643,9 @@ class Context:
         self.root = root
         self.root_fd = root_fd
         self.machine_rel = res.machine_rel
-        self.journal_rel = JOURNAL_REL   # the generation's record journal home (_record_journal_rel)
+        # No default home: only _record_journal_rel(_probe_admission(ctx)) sets it, and _journal_home
+        # refuses a context whose home is unset or is not the typed one.
+        self.journal_rel = None
         self.manifest = None
         self.homes = None
         self.types = None
@@ -673,18 +665,18 @@ class Context:
 
 def _load_manifest(ctx):
     """Read and validate the manifest (never an operand of this verb). It must be doctor-grade VALID at
-    the tooling spec_version, in the inline layout. Validation already refuses an older store (spec 9.2),
-    so the version refusal below meets only a VALID store at another version, the reserved homes-2 pair,
-    which no upgrade carries back: such a store takes the tooling that implements its version."""
+    the tooling spec_version, in the inline layout. Validation already refuses every other version
+    (spec 9.2), so the version refusal below is a second guard: such a store takes the tooling that
+    implements its version."""
     manifest = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
     mv = _opf_store.validate_manifest(manifest, manifest_rel=ctx.rel(_opf_store.MANIFEST_NAME))
     if mv.status != _opf_store.VALID:
         raise RecordError("the store manifest is not VALID ({}); fail-closed".format("; ".join(mv.findings)))
     base = manifest.get(_opf_store.STANDARD_TOKEN)
-    if base.get("spec_version") != _opf_store.SUPPORTED_SPEC_VERSION:
+    if base.get("spec_version") != _opf_store.SPEC_VERSION:
         raise RecordError("the store declares spec_version {!r}, not the tooling's {}; use the tooling "
                           "that implements it (fail-closed)".format(base.get("spec_version"),
-                                                       _opf_store.SUPPORTED_SPEC_VERSION))
+                                                       _opf_store.SPEC_VERSION))
     if base.get("layout") != "inline":
         raise RecordError("layout {!r} is not supported by this build (inline only); fail-closed".format(
             base.get("layout")))
@@ -711,12 +703,10 @@ def _counter_state(ctx, counters_model):
                              if _opf_check.imported_series_active(ctx.manifest) else None))
 
 
-def claim_ids(homes, high, demand, known_complete, reserved=None):
+def claim_ids(homes, high, demand, known_complete, reserved=None, imported_series=False):
     """THE allocation seam (exactly one). `demand` is the ordered list of namespaces to claim; returns
-    (ids, new_high). Homes 1: next_id per namespace from the proven-complete high-water map, with
-    `reserved` refused (the homes-1 counters path takes no reservation input); the caller publishes the
-    counters advance as an operand INSIDE the journaled transaction under the held lease, so the claim is
-    one atomic act (spec 8.2) and ids are reported only after COMPLETE. Homes 2: `reserved` is REQUIRED,
+    (ids, new_high). Only homes 2 claims; every other generation, homes 1 included, refuses
+    fail-closed (the homes-1 counters path is deleted). `reserved` is REQUIRED,
     the per-counter-key maximum over every existing reservation in every journal kind's
     journals/<kind>/allocations home (_reservation_high, each one a [claims] map, values in
     1..2**63 - 1, the reservation contract's TOML integer range), and the next id per demanded counter
@@ -729,12 +719,10 @@ def claim_ids(homes, high, demand, known_complete, reserved=None):
     claims again under the held capability and refuses a plan they no longer match; this function
     derives the plan only). A homes-2 call without the
     reservation scan, a malformed or out-of-range scan, and any other generation each refuse
-    fail-closed rather than claim through the homes-1 counters path."""
-    if type(homes) is int and homes == 1:
-        if reserved is not None:
-            raise RecordError("the homes-1 counters path takes no reservation input; fail-closed")
-        base = {}
-    elif type(homes) is int and homes == 2:
+    fail-closed rather than claim through the homes-1 counters path. `imported_series` is passed to
+    next_id unchanged: where the manifest activates the imported series the high-water map carries the
+    "imported:<NS>" rows too, which next_id refuses without the flag; this verb never demands one."""
+    if type(homes) is int and homes == 2:
         if reserved is None:
             raise RecordError("homes-2 id allocation requires the journals/<kind>/allocations "
                               "reservation scan (spec 8.2); refusing rather than claiming ids through "
@@ -755,7 +743,8 @@ def claim_ids(homes, high, demand, known_complete, reserved=None):
     ids = []
     for ns in demand:
         try:
-            rid, n = _opf_schema.next_id(cur, ns, known_complete=known_complete)
+            rid, n = _opf_schema.next_id(cur, ns, known_complete=known_complete,
+                                         imported_series=imported_series)
         except ValueError as exc:
             raise RecordError("cannot claim an id: {}; fail-closed".format(exc))
         if homes == 2 and n > _opf_journal._CLAIM_VALUE_MAX:
@@ -822,7 +811,8 @@ def _claim(ctx, demand):
         raise RecordError("counters.toml cannot license an allocation: {} (fail-closed)".format(
             "; ".join(findings)))
     reserved = _reservation_high(ctx) if ctx.homes == 2 else None
-    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved)
+    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved,
+                              imported_series=_opf_check.imported_series_active(ctx.manifest))
     new_model = copy.deepcopy(ctx.counters.model)
     new_model["counters"] = dict(new_model.get("counters") or {})
     for ns in demand:
@@ -1982,7 +1972,8 @@ def _expected_delta(req, ctx, raws, now):
     if findings:
         raise _postcondition_failed("the prior counters.toml cannot license the claim")
     reserved = _reservation_high(ctx) if ctx.homes == 2 else None
-    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved)
+    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved,
+                              imported_series=_opf_check.imported_series_active(ctx.manifest))
     table = dict(counters.get("counters") or {})
     for ns in demand:
         if new_high[ns] != max(table.get(ns, 0), (reserved or {}).get(ns, 0)) + 1:
@@ -2221,98 +2212,77 @@ def _postcondition(plan, req, ctx, now):
 # --- the journal: startup reconciliation and the one journaled publication ---------------------------
 
 def _record_journal_rel(homes):
-    """The record journal home of a homes generation (spec 8.8): the legacy .aiqt/record/journal at
-    homes 1, the typed capability home .working/journals/record/journal at homes 2 (spec 4.2, the
-    journal-only record kind); any other generation refuses fail-closed. The comparison is
-    type-exact: a bool or float never reads as a generation."""
-    if type(homes) is int and homes == 1:
-        return JOURNAL_REL
+    """The record journal home of a homes generation (spec 8.8): the typed capability home
+    .working/journals/record/journal at homes 2 (spec 4.2, the journal-only record kind); any other
+    generation, homes 1 included, refuses fail-closed. The comparison is type-exact: a bool or float
+    never reads as a generation."""
     if type(homes) is int and homes == 2:
         return _opf_store.journal_root("record")
     raise RecordError("unknown homes generation {} for the record journal; fail-closed".format(
         _opf_store._safe_display(homes)))
 
 
-def _probe_homes(ctx):
-    """The homes generation probed for the journal home BEFORE the manifest is validated (reconcile
-    runs first, so it cannot wait for _load_manifest): homes_generation over a best-effort manifest
-    read, unvalidated, which is that helper's own contract. On a read or parse failure the
-    generation is UNKNOWABLE (a homes-1 and a homes-2 store share one layout; only the manifest
-    tells them apart), so the store MAY be homes 2 and nothing may be written under .aiqt/: when a
-    no-follow existence probe finds a legacy record journal (an inspection used only to refuse,
-    never a read of AIQT material, spec 15) the run refuses fail-closed BEFORE any legacy
-    reconciliation could write there, and when none exists the probe reports 1, so homes-1
-    behaviour on a broken manifest is otherwise unchanged (reconcile finds nothing to do and
-    _load_manifest then refuses the unreadable manifest itself). A readable manifest whose `homes`
-    declaration is not the generation this tooling activates for it (a homes-2 declaration while
-    SUPPORTED_HOMES is 1, or without the homes-2 spec_version) also refuses fail-closed BEFORE any
-    reconciliation or write: probing it as generation 1 would reconcile the legacy .aiqt/record/journal
-    of what the store declares a homes-2 store (spec 9.2: an unknown generation is refused).
-    _load_manifest re-derives the generation from the validated manifest and _run_operation refuses
-    when the two differ."""
+def _probe_admission(ctx):
+    """The admission probe BEFORE the manifest is validated (reconcile runs first, so it cannot wait
+    for _load_manifest), over a best-effort manifest read, unvalidated. A readable manifest that does
+    not declare exactly spec_version 2.0.0 with the integer homes = 2 refuses fail-closed BEFORE any
+    reconciliation, capability acquisition or write (spec 9.2): this tooling defines no other
+    store. On a read or parse failure the typed home is returned and nothing under .aiqt/ is
+    touched: OPF keeps no record state there (spec 4.2), so reconcile runs on the typed home alone
+    and _load_manifest then refuses the unreadable manifest itself. Returns the homes generation, 2,
+    the only value _load_manifest can derive from a manifest it admits, so the two never differ."""
     try:
         model = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
-    except RecordError as probe_exc:
-        try:
-            st = _journal._lstat_contained(ctx.root_fd, JOURNAL_REL)
-        except (_journal.JournalError, OSError) as exc:
-            raise RecordError("cannot inspect the legacy record journal {} ({}); fail-closed".format(
-                JOURNAL_REL, exc))
-        if st is not None:
-            raise RecordError("the store manifest cannot be read ({}), so the homes generation cannot "
-                              "be told, and a record journal is present at {}: reconciling it could "
-                              "write under .aiqt/ on what may be a homes-2 store. Restore the manifest "
-                              "first. Nothing written (fail-closed)".format(probe_exc, JOURNAL_REL))
-        return 1
-    generation = _opf_store.homes_generation(model)
+    except RecordError:
+        return _opf_store.HOMES
     base = model.get(_opf_store.STANDARD_TOKEN) if isinstance(model, dict) else None
-    declared = base.get("homes", 1) if isinstance(base, dict) else 1
-    if type(declared) is not int or declared != generation:
-        raise RecordError("the store manifest declares homes generation {}, which this tooling does not "
-                          "activate (it activates homes {} at most, and homes 2 only with spec_version {}), "
-                          "so the record journal home cannot be told and reconciling a legacy journal could "
-                          "write under .aiqt/ on a homes-2 store. Nothing written (fail-closed)".format(
-                              _opf_store._safe_display(declared), _opf_store.SUPPORTED_HOMES,
-                              _opf_store.HOMES2_SPEC_VERSION))
-    return generation
+    version = base.get("spec_version") if isinstance(base, dict) else None
+    declared = base.get("homes") if isinstance(base, dict) else None
+    if (version != _opf_store.SPEC_VERSION or type(declared) is not int
+            or declared != _opf_store.HOMES):
+        # The remedy doctor's manifest finding gives (spec 9.2): a version below the baseline names no
+        # version the specification defines, so the tree's way in is the hand step and a first adoption;
+        # a later one is a store this tooling is too old for. A malformed or matching version gets neither.
+        parsed = _opf_store._parse(version) if isinstance(version, str) else None
+        remedy = ""
+        if parsed is not None and parsed < _opf_store._parse(_opf_store.SPEC_VERSION):
+            where = _opf_store._safe_display(ctx.rel(_opf_store.MANIFEST_NAME))
+            remedy = (" A spec_version below {} names no version this specification defines; to adopt "
+                      "this tree instead, first move {} aside by hand: its files are then ordinary "
+                      "foreign content for a first adoption.".format(_opf_store.SPEC_VERSION, where))
+        elif parsed is not None and parsed > _opf_store._parse(_opf_store.SPEC_VERSION):
+            remedy = " Upgrade the tooling before operating on this store."
+        raise RecordError("the store manifest declares spec_version {} with homes {}, but this tooling "
+                          "admits only spec_version {} with homes = {} (spec 9.2).{} Nothing written "
+                          "(fail-closed)".format(
+                              _opf_store._safe_display(version), _opf_store._safe_display(declared),
+                              _opf_store.SPEC_VERSION, _opf_store.HOMES, remedy))
+    return _opf_store.homes_generation(model)
 
 
 def _record_run_id(token):
-    """The journal transaction name of one publication (both homes): the record run id in the homes
-    grammar, record-<YYYYMMDD>T<HHMMSS>Z-<hash16>, whose hash16 is the first 16 hex digits of this
-    run's lock token, so a leftover lock still names its own transaction (_txn_of_token). The legacy
-    dotted record-<subcommand>.<pid>.<time_ns>.<token> shape an earlier build minted is still accepted
-    by recovery and by the leftover-lock binding, never minted."""
+    """The journal transaction name of one publication: the record run id in the homes
+    grammar, record-<YYYYMMDD>T<HHMMSS>Z-<hash16>, whose hash16 is the first 16 hex digits of a fresh
+    random token. The homes-1 journal lock that token once bound is deleted."""
     run_id = "record-{}-{}".format(time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()), token[:16])
     _opf_store.txn_record("record", run_id)    # the one grammar authority; raises on drift
     return run_id
 
 
-def _txn_of_token(name, token):
-    """Whether a journal transaction directory name is the one a dead run's lock token names: the
-    minted homes-grammar run id whose hash16 is the token's first 16 hex digits, or a legacy dotted
-    name ending with the whole token (an earlier build's shape, still reconciled and still bound)."""
-    if not isinstance(name, str) or not name.startswith("record-"):
-        return False
-    return name.rsplit(".", 1)[-1] == token or name.rsplit("-", 1)[-1] == token[:16]
+def _journal_home(ctx):
+    """The context's record journal home, required to be the typed capability home: a context whose home
+    is unset (one no admission probe set) or names any other path refuses, so no caller reaches a
+    journal, publication or lease through another home. Read-only."""
+    typed = _opf_store.journal_root("record")
+    if ctx.journal_rel != typed:
+        raise RecordError("the record journal home {!r} is not the typed capability home {} (only "
+                          "_record_journal_rel(_probe_admission(ctx)) sets it, spec 4.2/8.8); nothing "
+                          "written (fail-closed)".format(ctx.journal_rel, typed))
+    return typed
 
 
 def _journal_root(ctx):
-    return Path(ctx.res.store_root) / ctx.journal_rel
-
-
-def _journal_view(jr_fd, journal_root):
-    """(owner, txns, states): the journal lock owner, the transaction directories, and each one's durable
-    state. Read-only. JournalError on an unreadable lock or a corrupt journal."""
-    owner = _journal.read_lock_owner(journal_root)
-    txns = _journal._journal_txn_dirs(jr_fd, journal_root)
-    return owner, txns, {t.name: _journal.classify_state(jr_fd, t) for t in txns}
-
-
-def _refuse_live_owner(owner):
-    if owner is not None and not _journal.owner_confirmed_dead(owner):
-        raise RecordError("another opf record run holds the record journal lock (pid {}); it is never seized. "
-                          "Wait for it to finish, then re-run (fail-closed)".format(owner.get("pid")))
+    return Path(ctx.res.store_root) / _journal_home(ctx)
 
 
 def _planned_payloads(intent, ops):
@@ -2397,225 +2367,20 @@ def _unexplained_operands(root_fd, jr_fd, txns):
     return problems
 
 
-def _leftover_lock_outcome(owner, states):
-    """The outcome line when a dead run left only its journal lock (no transaction open; one it created
-    and never opened reads as nothing-opened, which is not terminal).
-    _publish takes the journal lock under the session `opf-record.<token>`, a fresh random token, and names
-    the one transaction it then opens record-<YYYYMMDD>T<HHMMSS>Z-<hash16> with hash16 the token's first
-    16 hex digits (an earlier build minted record-<subcommand>.<pid>.<time_ns>.<token>, still bound), so
-    the dead run's own transaction is the one its lock's token names (_txn_of_token): a binding the dead
-    run wrote itself in both places, which a reused pid or a later timestamp cannot reproduce. A lock
-    carrying no such token (one taken by recovery, or by an earlier build's recovery) is not attributed,
-    and the line says so."""
-    head = "a leftover journal lock of a dead run was released; no transaction was open"
-    session = owner.get("session") if isinstance(owner, dict) else None
-    prefix, sep, token = session.partition(".") if isinstance(session, str) else ("", "", "")
-    own = [name for name in states if _txn_of_token(name, token)]
-    if prefix != SESSION_ID or not sep or not _TOKEN_RE.match(token) or len(own) > 1:
-        return head + (" (which of them the dead run opened cannot be told: its lock carries no publication "
-                       "token naming exactly one transaction; git status shows whether its record files "
-                       "changed)")
-    if not own:
-        return head + " and the dead run had opened none, so it published nothing"
-    name = own[0]
-    state = states[name]
-    if state == "complete":
-        return head + (": the dead run's transaction {} is COMPLETE, so its publication was applied when it "
-                       "committed; its operands' current bytes are not re-checked by this recovery (unexplained "
-                       "operands are checked only for OPEN transactions), and whether its render and final "
-                       "doctor ran, and what they reported, is not recorded by the journal, so run opf doctor "
-                       "before relying on it".format(name))
-    return head + ": the dead run's transaction {} {}, so it published nothing".format(
-        name, "was rolled back" if state == "rolled-back" else "never opened")
-
-
-def _with_recovery_lease(ctx, pending, recover):
-    """Run `recover` holding the single-writer lease, claimed for RECOVERY through
-    _opf_write_guard.acquire_lease_for_recovery: the atomic claim publication uses, with the spec 5.7
-    never-seize and dead-run release clauses applied to exactly the present-lease refusal. A leftover
-    lease whose complete well-formed payload names a holder on THIS host confirmed dead (positive
-    evidence only) is released through this reconciliation and the claim retried once; a lease held by a
-    live or possibly-live holder, a cross-host holder, or one with a malformed payload refuses before any
-    recovery write and is never seized, and releasing any such lease stays the operator's explicit
-    reconciliation step. A
-    released leftover is REPORTED whatever follows it: it heads the outcome lines `recover` returns, a
-    RecordError that `recover` raises carries it appended, a WriteGuardError from the release after a
-    clean recovery carries it appended, and any other failure surfaces it on stderr (best-effort, never
-    displacing the failure), so no outcome reads as written-nothing over the released lease.
-    The lease release is attempted when the recovery body returns and when it raises an ordinary exception
-    (a signal may leave the lease: the module residual list); a release failure after a refusal is surfaced,
-    saying the lease may be left, and never displaces the refusal, whatever the release raised, with a
-    surfacing print that itself fails dropped rather than let it displace the refusal (PR D fix 12), and
-    a release failure after a clean recovery is the run's own failure."""
-    try:
-        lease, released = _opf_write_guard.acquire_lease_for_recovery(ctx.root_fd, ctx.machine_rel, VERB)
-    except _opf_write_guard.WriteGuardError as exc:
-        raise RecordError("an interrupted opf record publication needs reconciliation ({}), and reconciliation "
-                          "writes the store, so it runs only under the single-writer lease: {} No operand, "
-                          "journal entry or journal lock was written by this recovery (fail-closed)".format(
-                              pending, exc))
-    try:
-        result = recover()
-    except BaseException as failure:
-        try:
-            _release(ctx, lease)
-        except BaseException as rel_exc:  # noqa: BLE001  surfaced, never displaces the original failure
-            try:
-                print("opf record: additionally, releasing the lease failed ({}); it may be left in place "
-                      "(the release refuses a lease that is absent or was replaced as not this run's own, "
-                      "and a failure after its unlink leaves it removed, not durably), it is never seized "
-                      "(spec 5.7), and the failure above still governs.".format(rel_exc), file=sys.stderr)
-            except BaseException:
-                pass  # PR D fix 12: a failing diagnostic write never displaces the governing failure
-        if released is not None:
-            if isinstance(failure, RecordError):
-                raise RecordError("{} Before that refusal, {}.".format(failure, released)) from failure
-            try:
-                print("opf record: before that failure, {}.".format(released), file=sys.stderr)
-            except BaseException:
-                pass  # PR D fix 12: a failing diagnostic write never displaces the governing failure
-        raise
-    try:
-        _release(ctx, lease)
-    except BaseException as rel_exc:
-        if released is not None:
-            if isinstance(rel_exc, _opf_write_guard.WriteGuardError):
-                raise _opf_write_guard.WriteGuardError(
-                    "{} Before that failure, {}.".format(rel_exc, released)) from rel_exc
-            try:
-                print("opf record: before that failure, {}.".format(released), file=sys.stderr)
-            except BaseException:
-                pass  # PR D fix 12: a failing diagnostic write never displaces the governing failure
-        raise
-    if released is not None:
-        result = [released] + list(result or [])
-    return result
-
-
-def _recover_journal(ctx, jr_fd, journal_root):
-    """Recovery proper, under the held lease: None when (re-read under the lease) nothing needs it, else
-    the outcome lines. The clean-state rule runs BEFORE any journal or operand write: every open
-    transaction's operands must hold a state it explains, else the run refuses naming each path, leaving
-    the journal, its lock, and every operand exactly as found. Only then is a confirmed-dead owner's journal
-    lock broken after every transaction reconciles to terminal (_journal.reconcile_and_claim_stale), or an
-    unlocked open transaction recovered under a fresh journal lock. Recovery rolls each open transaction
-    FORWARD when every poststate already verifies, else back from its preimages."""
-    root_fd = ctx.root_fd
-    try:
-        owner, txns, before = _journal_view(jr_fd, journal_root)
-        opened = sorted(n for n, s in before.items() if s == "open")
-        if owner is None and not opened:
-            return None
-        _refuse_live_owner(owner)
-        problems = _unexplained_operands(root_fd, jr_fd, [t for t in txns if t.name in opened])
-        if problems:
-            raise RecordError(
-                "an interrupted opf record publication cannot be reconciled without overwriting a change made "
-                "since it was interrupted: {}. Nothing was written to the journal or to any operand; both "
-                "are left exactly as found. Either restore each path to its journaled preimage (under {}/<transaction>/"
-                "preimages, or from HEAD when it holds those bytes) and re-run, or keep the edit and retire the "
-                "transaction by moving its directory out of {} yourself (fail-closed)".format(
-                    "; ".join(problems), JOURNAL_REL, JOURNAL_REL))
-        if owner is not None:
-            if _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd, SESSION_ID) != "acquired":
-                raise RecordError("the record journal lock became live during reconciliation; it is never "
-                                  "seized. Re-run once no opf record run is live (fail-closed)")
-        else:
-            _journal.acquire_lock(journal_root, SESSION_ID)
-        try:
-            for txn in txns:
-                _journal.recover(jr_fd, txn, root_fd)
-            after = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
-        finally:
-            _journal.release_lock(journal_root)
-    except (_journal.JournalError, OSError) as exc:
-        raise RecordError("the record journal {} cannot be reconciled ({}); fail-closed".format(JOURNAL_REL, exc))
-    outcomes = []
-    for name in opened:
-        if after.get(name) == "complete":
-            outcomes.append("{} rolled FORWARD (its publication is present in the working tree, uncommitted; "
-                            "its render and final doctor never ran)".format(name))
-        elif after.get(name) == "rolled-back":
-            outcomes.append("{} rolled BACK to its prestate".format(name))
-        else:
-            raise RecordError("the record journal transaction {} did not reconcile to a terminal state ({}); "
-                              "fail-closed".format(name, after.get(name)))
-    return outcomes or [_leftover_lock_outcome(owner, after)]
-
-
 def _reconcile_journal(ctx):
-    """Reconcile an interrupted `opf record` publication BEFORE anything else, then refuse this run.
-    At homes 1, nothing to do, and nothing written, when the journal root is absent, or when no journal
-    lock is held and no transaction is open (on a homes-2 store, whose path this docstring ends with,
-    capability recovery can remove a confirmed-dead holder's lease and active record even while the
-    typed journal home is absent). Otherwise recovery is a STORE WRITE, so it runs only under the
-    rules publication runs under: a journal lock held by a possibly-live owner is never seized; the
-    single-writer lease is claimed exactly as publication claims it, so a present lease refuses before any
-    recovery write (_with_recovery_lease); and every OPEN transaction's operands must hold a state that
-    transaction explains (_unexplained_operands), so an intervening edit is surfaced and refused. Each
-    open transaction then ends exactly at its prestate or exactly at its poststate (a terminal
-    transaction's operands are not re-checked: a COMPLETE one's publication was applied when it
-    committed), the lease release is attempted with a failure surfaced, and the run refuses (exit 2)
-    naming each outcome: the operator inspects the result before re-running. On a homes-2 store the
-    record journal lives in the typed capability home instead: a legacy .aiqt/record/journal found
-    there is REFUSED read-only and never recovered (homes 2 has no homes migration, spec 4.2),
-    and the typed home is reconciled through the capability-bound API (_reconcile_capability_journal)."""
-    if ctx.journal_rel != JOURNAL_REL:
-        _refuse_legacy_journal(ctx)
-        _reconcile_capability_journal(ctx)
-        return
-    root_fd = ctx.root_fd
-    try:
-        st = _journal._lstat_contained(root_fd, JOURNAL_REL)
-    except (_journal.JournalError, OSError) as exc:
-        raise RecordError("cannot inspect the record journal {} ({}); fail-closed".format(JOURNAL_REL, exc))
-    if st is None:
-        return
-    if not stat.S_ISDIR(st.st_mode):
-        raise RecordError("the record journal {} is not a directory; fail-closed".format(JOURNAL_REL))
-    journal_root = _journal_root(ctx)
-    try:
-        jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
-    except (_journal.JournalError, OSError) as exc:
-        raise RecordError("cannot open the record journal {} ({}); fail-closed".format(JOURNAL_REL, exc))
-    try:
-        try:
-            owner, _txns, states = _journal_view(jr_fd, journal_root)
-        except (_journal.JournalError, OSError) as exc:
-            raise RecordError("the record journal {} cannot be reconciled ({}); fail-closed".format(
-                JOURNAL_REL, exc))
-        opened = sorted(n for n, s in states.items() if s == "open")
-        if owner is None and not opened:
-            return
-        _refuse_live_owner(owner)
-        pending = "open transaction(s) {}".format(", ".join(opened)) if opened else "a dead run's journal lock"
-        outcomes = _with_recovery_lease(ctx, pending, lambda: _recover_journal(ctx, jr_fd, journal_root))
-    finally:
-        _journal._close_fd_quietly(jr_fd)
-    if outcomes is None:
-        return
-    raise RecordError("an interrupted opf record run was reconciled before this operation: {}. Nothing was "
-                      "recorded by this run. Inspect the store paths (git status) and run opf doctor, then "
-                      "re-run".format("; ".join(outcomes)))
-
-
-def _refuse_legacy_journal(ctx):
-    """A legacy .aiqt/record/journal present on a homes-2 store is refused and never recovered: homes 2
-    has no homes migration to carry it (spec 4.2). Read-only."""
-    try:
-        st = _journal._lstat_contained(ctx.root_fd, JOURNAL_REL)
-    except (_journal.JournalError, OSError) as exc:
-        raise RecordError("cannot inspect the legacy record journal {} ({}); fail-closed".format(
-            JOURNAL_REL, exc))
-    if st is not None:
-        raise RecordError("a legacy record journal {} is present on a homes-2 store; it is never recovered: "
-                          "homes 2 has no homes migration (spec 4.2), and the legacy journal is left unread "
-                          "and unchanged. Nothing written (fail-closed)".format(JOURNAL_REL))
+    """Reconcile an interrupted `opf record` publication BEFORE anything else, then refuse this run. The
+    record journal lives only in the typed capability home (_journal_home refuses any other home),
+    reconciled through the capability-bound API (_reconcile_capability_journal). The homes-1 reconcile
+    of .aiqt/record/journal and its single-writer recovery lease are deleted: .aiqt/ is AIQT-only
+    content on an admitted store (spec 4.2), so a leftover .aiqt/record/journal is neither read,
+    recovered nor refused."""
+    _journal_home(ctx)
+    _reconcile_capability_journal(ctx)
 
 
 def _reconcile_capability_journal(ctx):
     """Reconcile an interrupted homes-2 record publication in the typed journal home, then refuse this
-    run, mirroring the homes-1 rules: no record-journal work to do, and no journal write made, when
+    run: no record-journal work to do, and no journal write made, when
     the home is absent (no mkdir), or when no transaction is open AND every terminal one has an entry
     at its terminal projection path (existence only: _projection_missing does not validate that entry
     as the projection); even with no journal work pending, capability recovery may still remove a
@@ -2680,8 +2445,8 @@ def _reconcile_capability_journal(ctx):
     removed), or saying that is not known when the error carries no report of it, and keeps refusing
     record runs until: for an active record paired with a sibling worktree's still-present machine
     store, a homes-2 record run in the checkout owning that store reclaims it (its holder confirmed
-    dead there; a homes-1 record run there never reclaims a capability record, taking the
-    single-writer lease instead, which a present capability lease refuses); for a holder read as
+    dead there; no other generation's record run exists to reclaim it, the homes-1 lease path being
+    deleted); for a holder read as
     possibly live, the holder releases normally, or exits and a later run confirms it dead; every
     other refused leftover needs its cause removed: manual intervention for a record the gate
     cannot accept, a later run once a transient condition has passed. That last group is NOT
@@ -2693,10 +2458,10 @@ def _reconcile_capability_journal(ctx):
     lease-pairing validation, the earlier schema-1 active record included, one whose recorded machine
     store cannot be confirmed present or absent, a staging leftover that cannot be removed or whose
     directory fsync fails, and a record that vanishes, changes identity or bytes, or cannot be unlinked
-    or fsynced during the recovery deletes. The homes-1 path (retired) keeps its own lease rules
-    unchanged."""
+    or fsynced during the recovery deletes. The homes-1 recovery path and its lease rules are
+    deleted."""
     root_fd = ctx.root_fd
-    rel = ctx.journal_rel
+    rel = _journal_home(ctx)
     leftover = _capability_leftover_present(ctx)
     try:
         st = _journal._lstat_contained(root_fd, rel)
@@ -2812,7 +2577,7 @@ def _capability_recovery_plan(ctx):
     reports nothing pending over open work.
     Read-only. Meaningful only under the held operation capability: publication runs under the same
     capability, so a plan derived under it cannot miss a peer's completed publication."""
-    rel = ctx.journal_rel
+    rel = _journal_home(ctx)
     try:
         st = _journal._lstat_contained(ctx.root_fd, rel)
     except (_journal.JournalError, OSError) as exc:
@@ -2837,7 +2602,7 @@ def _capability_journal_plan(ctx, jr_fd):
     checked on the SAME observation: every open transaction's operands must hold a state its journal
     explains (_unexplained_operands over the staged header, D-a4), else the plan refuses naming each
     path, so an intervening edit is surfaced and refused, never overwritten. Read-only."""
-    rel = ctx.journal_rel
+    rel = _journal_home(ctx)
     try:
         txns = _journal._journal_txn_dirs(jr_fd, _journal_root(ctx))
         states = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
@@ -2957,7 +2722,7 @@ def _staging_removed_outcome(cap):
 def _recover_capability_journal(ctx, opened, unprojected):
     """Recovery proper for the typed home: the operation capability is acquired FIRST (acquire refuses
     a live holder; recover=True clears only a CONFIRMED-DEAD holder's leftover lease and active
-    record, the same possibly-live-never-seized standard the homes-1 stale journal lock is held to),
+    record: a possibly-live holder is never seized),
     and the recovery plan is then re-derived UNDER the held capability (_capability_recovery_plan, which
     re-inspects the journal home and reopens it when present), so a peer publication that completed
     between the trigger read and this acquisition is seen and kept, never rolled back as if it were
@@ -2992,8 +2757,9 @@ def _recover_capability_journal(ctx, opened, unprojected):
                 "cleared only once its holder is confirmed dead)")
     # The outcome list is allocated BEFORE the acquisition (PR D fix 14): an allocation failure
     # between acquire_operation returning and the protected region would strand the just-acquired
-    # capability.
+    # capability. So is the failure in flight the cleanup reads (never sys.exc_info()).
     reconciled = []
+    pending = None
     try:
         cap = _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB, recover=True)
     except _opf_oplock.OpLockError as exc:
@@ -3027,22 +2793,27 @@ def _recover_capability_journal(ctx, opened, unprojected):
         outcomes = ([_reclaimed_outcome(cap, opened or unprojected)] if cap.recovered else []) + reconciled
         if cap.staging_removed and not cap.recovered:
             outcomes.insert(0, _staging_removed_outcome(cap))
+    except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
+        pending = exc
+        raise
     finally:
         try:
             _opf_oplock.release_operation(cap)
-        except _opf_oplock.OpLockError as exc:
-            print("opf record: additionally, releasing the operation capability failed ({}); the failure "
-                  "above still governs.".format(exc), file=sys.stderr)
+        except BaseException as rel_exc:  # noqa: BLE001  surfaced, never displaces a failure in flight
+            # An ordinary release failure on the clean exit stays surfaced, never fatal; any other
+            # raising release on the clean exit is the run's own failure.
+            if pending is None and not isinstance(rel_exc, _opf_oplock.OpLockError):
+                raise
+            try:
+                print("opf record: additionally, releasing the operation capability failed ({}); the failure "
+                      "above still governs.".format(rel_exc), file=sys.stderr)
+            except BaseException:
+                pass  # a failing diagnostic write never displaces the governing failure
     return (bool(reconciled), bool(cap.recovered), outcomes) if outcomes else None
 
 
 def _sha256(data):
     return hashlib.sha256(data).hexdigest()
-
-
-# How a failed publication's transaction is described when the journal lock is retained for reconciliation.
-_FAILED_STATE = {"open": "still open",
-                 "complete": "COMPLETE (its publication is present, with its render and final doctor never run)"}
 
 
 def _check_planned_ids(ctx, plan):
@@ -3138,133 +2909,12 @@ def _require_reservation(ctx, run_id):
 
 
 def _publish(ctx, plan, subcommand, cap=None, run_id=None):
-    """ONE journaled transaction publishes every operand, in dependency order (counters first). On a
-    homes-2 store the publication runs through the capability-bound API in the typed journal home
-    instead (_publish_homes2); the homes-1 path below is unchanged. Each
-    op is a `write` whose poststate is the planned bytes and whose `source-poststate` pins the exact bytes
-    and mode the plan was made from: capture refuses (nothing opened) if the file changed since it was
-    read, and apply re-verifies the captured preimage on the opened fd. A crash after the transaction
-    opens (its INTENT published) leaves an OPEN transaction recoverable to exactly its prestate or
-    exactly its poststate (_reconcile_journal on the next run; one already COMPLETE was applied when it
-    committed, its current bytes not re-checked there); a crash before that leaves nothing opened and no
-    operand touched (the lock, and whatever directories or preimages were already created, are left for
-    the next run's reconciliation, T56).
-    The INTENT header also carries every operand's planned bytes, so a later recovery can tell a write the
-    crash tore (a byte prefix of them) from an intervening edit (_unexplained_operands); a publication
-    whose INTENT would pass the journal-read cap is refused by the engine before it opens. Raises
-    RecordError; the journal lock's release is attempted on the clean exit and on an ordinary
-    exception (a failed release is surfaced saying the lock may be left, T55, with a surfacing write
-    that itself fails dropped, PR D fix 12; an ordinary release failure is never fatal here, and a
-    refusal in flight still governs, whatever the release raised, PR D fix 13, a refusal in flight
-    being one this run itself raised, never an embedding caller's handled exception, PR D fix 14) except a
-    run_transaction failure whose transaction reads as open, COMPLETE, or unreadable, which retains
-    the lock for the next run's reconciliation, and a lock acquisition failing after its O_EXCL
-    create, whose refusal says the created lock may be left in place (PR D fix 10)."""
-    if ctx.journal_rel != JOURNAL_REL:
-        return _publish_homes2(ctx, plan, subcommand, cap, run_id)
-    root_fd = ctx.root_fd
-    journal_root = _journal_root(ctx)
-    try:
-        _journal.require_containment()
-        _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
-        jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
-    except (_journal.JournalError, OSError) as exc:
-        raise RecordError("cannot prepare the record journal {} ({}); preparation may already have "
-                          "created its directories, and no operand, journal entry or lock was "
-                          "written (fail-closed)".format(JOURNAL_REL, exc))
-    # PR D fix 15: this one enclosing cleanup closes the journal root descriptor on every exit,
-    # the token allocation's failure and a raising clean-exit release included, exactly once.
-    try:
-        held = retain = False
-        # The run's own failure in flight, recorded by the except below (PR D fix 14): the cleanup reads
-        # this, never sys.exc_info(), which inside an embedding caller's except block reads the caller's
-        # handled exception as a refusal in flight (T67).
-        pending = None
-        # The token binds this run's journal lock to the one transaction it opens (_leftover_lock_outcome).
-        token = os.urandom(16).hex()
-        try:
-            try:
-                if _journal.read_lock_owner(journal_root) is not None:
-                    raise RecordError("the record journal lock is held; the journal preparation may already have "
-                                      "created its directories, and no operand, journal entry or lock was written "
-                                      "by this run (fail-closed)")
-                _journal.acquire_lock(journal_root, "{}.{}".format(SESSION_ID, token))
-            except _journal.JournalError as exc:
-                raise RecordError("cannot take the record journal lock ({}); the journal preparation may already "
-                                  "have created its directories, and no operand, journal entry or lock was written "
-                                  "by this run (fail-closed)".format(exc))
-            except OSError as exc:
-                # PR D fix 10 (R3): acquire_lock can fail AFTER its O_EXCL create (the payload write, its
-                # fsync, or the journal directory's), leaving the created lock; without this branch the
-                # OSError reached the cli's cannot-evaluate backstop, which said nothing about the lock.
-                raise RecordError("cannot take the record journal lock ({}); the journal preparation may already "
-                                  "have created its directories, the lock itself may be left in place (a failure "
-                                  "after its O_EXCL create leaves the created lock, which is for the next opf "
-                                  "record run's reconciliation), and no operand or journal entry was written by "
-                                  "this run (fail-closed)".format(exc))
-            held = True
-            ops = []
-            content = {}
-            for operand in plan.operands:
-                ops.append({"op": "write", "path": operand.rel,
-                            "poststate": {"kind": "file", "content-sha256": _sha256(operand.new_raw)},
-                            "source-poststate": {"kind": "file", "mode": operand.mode,
-                                                 "sha256": _sha256(operand.raw)}})
-                content[operand.rel] = operand.new_raw
-            txn_id = _record_run_id(token)
-            header = {"unit": SESSION_ID, "kind": "record-" + subcommand,
-                      "staged": [base64.b64encode(operand.new_raw).decode("ascii") for operand in plan.operands]}
-            try:
-                _journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
-                                         lambda op: content[op["path"]], SESSION_ID)
-            except (_journal.JournalError, OSError) as exc:
-                # An absent transaction directory reads as nothing-opened (read_frames), so a failure before
-                # INTENT (the budget refusal, a failed mkdir or preimage capture) is told apart from one after it.
-                try:
-                    state = _journal.classify_state(jr_fd, journal_root / txn_id)
-                except _journal.JournalError:
-                    state = None
-                if state == "nothing-opened":
-                    raise RecordError("the publication was refused before its transaction opened ({}); no operand "
-                                      "was touched and nothing recorded (fail-closed)".format(exc))
-                if state == "rolled-back":
-                    raise RecordError("the publication was refused and rolled back to the prestate ({}); nothing "
-                                      "recorded (fail-closed)".format(exc))
-                retain = True
-                raise RecordError("the publication FAILED and its transaction {} is {} ({}); the journal lock is "
-                                  "retained, leaving it for the next opf record run's reconciliation, which acts on "
-                                  "it only as far as each step succeeds (fail-closed)".format(
-                                      txn_id, _FAILED_STATE.get(state, "in an unreadable state"), exc))
-        except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
-            pending = exc
-            raise
-        finally:
-            if held and not retain:
-                try:
-                    _journal.release_lock(journal_root)
-                except BaseException as exc:  # noqa: BLE001  surfaced, never displaces a refusal in flight
-                    # Surfaced: a lock left in place is for the next run's reconciliation once this process
-                    # has exited (_reconcile_journal). This handler runs on the clean exit and under a
-                    # refusal in flight, one raised before the transaction opened (nothing-opened) included,
-                    # never only after a terminal transaction. An ordinary release failure is never fatal
-                    # here (T55); a refusal in flight still governs, whatever the release raised (PR D fix
-                    # 13); any other raising release on the clean exit is the run's own failure; and the
-                    # surfacing write itself failing is dropped (PR D fix 12). The refusal in flight is
-                    # read from this run's own record of it (pending), never from sys.exc_info(), which
-                    # inside an embedding caller's except block reads the caller's handled exception as a
-                    # refusal in flight, turning a clean-exit release failure into a warned success (PR D
-                    # fix 14, T67).
-                    if pending is None and not isinstance(exc, (_journal.JournalError, OSError)):
-                        raise
-                    try:
-                        print("opf record: the record journal lock under {} could not be released ({}); it may be "
-                              "left in place (a failure after its unlink leaves it removed, not durably), and a lock "
-                              "left there is for the next opf record run's reconciliation, which refuses once, naming "
-                              "the outcome.".format(JOURNAL_REL, exc), file=sys.stderr)
-                    except BaseException:
-                        pass
-    finally:
-        _journal._close_fd_quietly(jr_fd)
+    """ONE journaled transaction publishes every operand, in dependency order (counters first), through
+    the capability-bound API in the typed journal home (_publish_homes2). The context's journal home must
+    be the typed one (_journal_home refuses any other, so no caller reaches another journal root); the
+    homes-1 publication through .aiqt/record/journal is deleted. Raises RecordError."""
+    _journal_home(ctx)
+    return _publish_homes2(ctx, plan, subcommand, cap, run_id)
 
 
 def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
@@ -3281,9 +2931,7 @@ def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
     held capability, before the transaction opens, _require_reservation re-reads that run's
     canonical reservation and requires its claims to be this plan's. A call naming no run id, or one
     whose reservation is absent, unreadable, non-canonical or claims other numbers, refuses with no
-    transaction opened. _run_operation reaches this only once activation sets
-    _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
-    SUPPORTED_HOMES is 1, _probe_homes refuses a store declaring homes 2 first."""
+    transaction opened."""
     try:
         _journal.require_containment()
     except (_journal.JournalError, OSError) as exc:
@@ -3304,6 +2952,9 @@ def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
         content[operand.rel] = operand.new_raw
         staged.append(base64.b64encode(operand.new_raw).decode("ascii"))
     own = cap is None
+    # The run's own failure in flight, allocated before the acquisition and read by the cleanup below
+    # (never sys.exc_info()), as _run_operation's release does.
+    pending = None
     if own:
         try:
             cap = _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB)
@@ -3323,13 +2974,23 @@ def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
                               "transaction, or a terminal one missing its projection; none when it failed before "
                               "its transaction opened) is left for the next opf record run's recovery trigger "
                               "(fail-closed)".format(run_id, exc, ctx.journal_rel))
+    except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
+        pending = exc
+        raise
     finally:
         if own:
             try:
                 _opf_oplock.release_operation(cap)
-            except _opf_oplock.OpLockError as exc:
-                print("opf record: additionally, releasing the operation capability failed ({}); the "
-                      "outcome above still governs.".format(exc), file=sys.stderr)
+            except BaseException as rel_exc:  # noqa: BLE001  surfaced, never displaces a failure in flight
+                # An ordinary release failure on the clean exit stays surfaced, never fatal; any other
+                # raising release on the clean exit is the run's own failure.
+                if pending is None and not isinstance(rel_exc, _opf_oplock.OpLockError):
+                    raise
+                try:
+                    print("opf record: additionally, releasing the operation capability failed ({}); the "
+                          "outcome above still governs.".format(rel_exc), file=sys.stderr)
+                except BaseException:
+                    pass  # a failing diagnostic write never displaces the governing failure
 
 
 # --- render, the final doctor, recovery, and the release-then-report ordering --------------------------
@@ -3428,28 +3089,29 @@ def _recovery_text(ctx, scope):
     return "\n".join(lines)
 
 
-def _release(ctx, lease):
-    _opf_write_guard.release_lease(ctx.root_fd, ctx.machine_rel, lease, VERB)
-
-
 def _acquire_guard(ctx):
-    """The single-writer claim publication, render and the final doctor run under: the spec 5.7
-    write-guard lease at homes 1; at homes 2 the operation capability, whose mandatory lease leg IS
-    that lease (taking both would self-conflict on lease.toml), so the capability-bound journal API
-    and the single-writer guarantee are one claim."""
-    if ctx.journal_rel != JOURNAL_REL:
-        try:
-            return _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB)
-        except _opf_oplock.OpLockError as exc:
-            raise RecordError(str(exc))
-    return _opf_write_guard.acquire_lease(ctx.root_fd, ctx.machine_rel, VERB)
+    """The single-writer claim publication, render and the final doctor run under: the operation
+    capability, whose mandatory lease leg IS the spec 5.7 single-writer lease (taking both would
+    self-conflict on lease.toml), so the capability-bound journal API and the single-writer guarantee
+    are one claim. The context's journal home must be the typed one (_journal_home); the homes-1
+    write-guard lease path is deleted."""
+    _journal_home(ctx)
+    try:
+        return _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB)
+    except _opf_oplock.OpLockError as exc:
+        # The refusal names what the acquisition removed (_acquisition_removals), as the
+        # recovery acquisition's and the publication's do: a failure after a removal reaches
+        # here as an OpLockError carrying that report, an EMFILE or a JournalError included.
+        raise RecordError("{}. {}".format(exc, _acquisition_removals(exc)))
 
 
 def _release_guard(ctx, guard):
-    if ctx.journal_rel != JOURNAL_REL:
+    """Release what _acquire_guard took. An ordinary capability release failure (OpLockError) is a
+    refusal, never the cli's unexpected-error backstop; anything else propagates as itself."""
+    try:
         _opf_oplock.release_operation(guard)
-    else:
-        _release(ctx, guard)
+    except _opf_oplock.OpLockError as exc:
+        raise RecordError(str(exc))
 
 
 def _emit_success(report):
@@ -3466,7 +3128,7 @@ def _emit_success(report):
     print(json.dumps(report, sort_keys=True))
     print("opf record: review the change, then stage and commit these paths yourself (the journal under {} "
           "is local recovery evidence, not part of the change):".format(
-              report.get("journal_rel", JOURNAL_REL)))
+              report["journal_rel"]))
     print("  git -C {} --literal-pathspecs add -- {}".format(
         shlex.quote(report["store_root"]), " ".join(shlex.quote(p) for p in report["store_paths"])))
     for p in report["product_paths"]:
@@ -3595,17 +3257,15 @@ def _run_operation(req):
     try:
         ctx = Context(res, root, root_fd)
         # 1. an interrupted earlier run is reconciled (under the lease), and refuses this one, before
-        # any operand is read. The journal home is the generation's (spec 8.8), probed from the manifest
-        # BEFORE validation because reconcile runs first; _load_manifest re-derives it below and a
-        # disagreement (the manifest changed between the reads) refuses.
-        ctx.journal_rel = _record_journal_rel(_probe_homes(ctx))
+        # any operand is read. The admission probe refuses a readable manifest this tooling does not
+        # admit BEFORE validation because reconcile runs first; the journal home is the typed one
+        # (spec 8.8).
+        ctx.journal_rel = _record_journal_rel(_probe_admission(ctx))
         _reconcile_journal(ctx)
         # 2. read the models this operation plans from; the request checks that need the manifest run
-        # before any operand path is built from the request.
+        # before any operand path is built from the request. No probe-versus-validation comparison
+        # follows: the probe yields homes 2 or refuses, and _load_manifest yields homes 2 or refuses.
         _load_manifest(ctx)
-        if _record_journal_rel(ctx.homes) != ctx.journal_rel:
-            raise RecordError("the manifest's homes generation changed between the journal probe and its "
-                              "validation; nothing written; re-run (fail-closed)")
         _check_request(req, ctx)
         ctx.counters = _read_operand(root_fd, ctx.rel(_opf_check.COUNTERS_NAME))
         ctx.version = _read_operand(root_fd, ctx.rel(_opf_check.VERSION_NAME)).model
@@ -3657,15 +3317,12 @@ def _run_operation(req):
             # A receipt repair reads the prior commit (HEAD) again here, before anything is reserved or
             # published: git takes no lease, so HEAD may have moved since planning.
             _require_committed_held(ctx, req)
-            # 7. at homes 2 the run's irrevocable id reservation FIRST (_reserve_claim, under the
-            # held capability, spec 8.2), then ONE journaled publication under the same run id;
+            # 7. the run's irrevocable id reservation FIRST (_reserve_claim, under the held
+            # capability, spec 8.2), then ONE journaled publication under the same run id;
             # 8. render, then the final doctor.
-            if ctx.journal_rel != JOURNAL_REL:
-                run_id = _record_run_id(os.urandom(16).hex())
-                _reserve_claim(ctx, plan, lease, run_id)
-                _publish(ctx, plan, req.subcommand, cap=lease, run_id=run_id)
-            else:
-                _publish(ctx, plan, req.subcommand)
+            run_id = _record_run_id(os.urandom(16).hex())
+            _reserve_claim(ctx, plan, lease, run_id)
+            _publish(ctx, plan, req.subcommand, cap=lease, run_id=run_id)
             try:
                 _render(root, plan.transition)
                 snapshot_pending = _final_gate(root, plan.transition)
@@ -3676,11 +3333,8 @@ def _run_operation(req):
                       "change": "{} {} -> {}".format(*plan.transition) if plan.transition else None,
                       "doctor_pending": snapshot_pending, "files": [op.rel for op in plan.operands],
                       "store_root": str(res.store_root), "store_paths": list(scope["store"]),
-                      "product_root": str(product_root), "product_paths": list(scope["product"])}
-            if ctx.journal_rel != JOURNAL_REL:
-                # Homes-1 output stays byte-identical to the pre-D build (the D-a2 rename is the
-                # only homes-1 change); only the homes-2 report names its typed journal home.
-                report["journal_rel"] = ctx.journal_rel
+                      "product_root": str(product_root), "product_paths": list(scope["product"]),
+                      "journal_rel": ctx.journal_rel}
             _conclude(ctx, lease, report, released)
         except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
             # PR D fix 14 (T67): the cleanup reads this run's own failure, never sys.exc_info(),
@@ -3728,8 +3382,8 @@ def cli(argv):
 # --- self-test (the unit leg; the end-to-end discriminators ride check_opf_record.py) -------------------
 
 def self_test():
-    """Unit vectors over synthetic models: the argument grammar, the allocation seam (homes 1 live, homes 2
-    deriving over the reservation scan, spec 8.2), the counters completeness proof, the five planners
+    """Unit vectors over synthetic models: the argument grammar, the allocation seam (homes 1 refused, its
+    counters path deleted; homes 2 deriving over the reservation scan, spec 8.2), the counters completeness proof, the five planners
     (the derived `/proposed`, the recorded
     pre-proposal state and --reason of a rejection, the one-to-one receipt, the receipt repair), the
     released-span check, the byte-reproduction precondition, and the allowed-delta postcondition. Judged on
@@ -3832,10 +3486,12 @@ def _self_test_units(check):
           and req.values == {"--reason": "r", "--summary": "s"})
 
     # -- the allocation seam and the completeness proof ----------------------------------------------------
-    ids, high = claim_ids(1, {"BI": 4, "WL": 0}, ["BI", "BI", "WL"], known_complete=True)
-    check("homes-1 claims sequential ids", ids == ["BI-5", "BI-6", "WL-1"] and high == {"BI": 6, "WL": 1})
-    check("homes-1 refuses a reservation input",
-          _refuses(lambda: claim_ids(1, {"BI": 0}, ["BI"], True, reserved={}), "no reservation input"))
+    ids, high = claim_ids(2, {"BI": 4, "WL": 0}, ["BI", "BI", "WL"], known_complete=True, reserved={})
+    check("homes 2 claims sequential ids", ids == ["BI-5", "BI-6", "WL-1"] and high == {"BI": 6, "WL": 1})
+    for reserved in (None, {}):
+        check("homes 1 refuses the claim fail-closed (reserved {!r})".format(reserved),
+              _refuses(lambda reserved=reserved: claim_ids(1, {"BI": 0}, ["BI"], True, reserved=reserved),
+                       "unknown to this build"))
     check("homes 2 without the reservation scan refuses fail-closed",
           _refuses(lambda: claim_ids(2, {"BI": 0}, ["BI"], True), "reservation scan"))
     ids, high = claim_ids(2, {"BI": 4, "WL": 2}, ["BI", "WL"], True, reserved={})
@@ -3872,15 +3528,17 @@ def _self_test_units(check):
     ids, _hw = claim_ids(2, {"BI": 4}, ["BI"], True, reserved={"imported:BI": 9, "WL": 7})
     check("a reserved value under another counter key never moves the claimed key (spec 8.2)",
           ids == ["BI-5"])
-    for bad in (0, 3, True, "2", None):
+    for bad in (0, 1, 3, True, "2", None):
         check("an unknown homes generation refuses the claim ({!r})".format(bad),
               _refuses(lambda bad=bad: claim_ids(bad, {"BI": 0}, ["BI"], True), "unknown"))
     check("an absent counter without the proof refuses",
-          _refuses(lambda: claim_ids(1, {"WL": 0}, ["BI"], known_complete=False), "cannot claim"))
-    check("a non-taxonomy namespace refuses", _refuses(lambda: claim_ids(1, {"ZZ": 0}, ["ZZ"], True)))
+          _refuses(lambda: claim_ids(2, {"WL": 0}, ["BI"], known_complete=False, reserved={}), "cannot claim"))
+    check("a non-taxonomy namespace refuses",
+          _refuses(lambda: claim_ids(2, {"ZZ": 0}, ["ZZ"], True, reserved={}), "cannot claim"))
 
     # -- the record journal home and run identity (spec 4.2/8.8) -----------------------------------------
-    check("the record journal home at homes 1 is the legacy root", _record_journal_rel(1) == JOURNAL_REL)
+    check("the record journal home at homes 1 refuses fail-closed",
+          _refuses(lambda: _record_journal_rel(1), "unknown homes generation"))
     check("the record journal home at homes 2 is the typed capability home",
           _record_journal_rel(2) == ".working/journals/record/journal"
           and _record_journal_rel(2) == _opf_store.journal_root("record"))
@@ -3911,12 +3569,6 @@ def _self_test_units(check):
           and rid.endswith(token[:16])
           and _opf_store.txn_record("record", rid)
           == ".working/journals/record/runs/{}/transaction.toml".format(rid))
-    legacy = "record-create.4242.1758934800000000000.{}".format(token)
-    check("the lock token binds both the minted and the legacy transaction name shapes",
-          _txn_of_token(rid, token) and _txn_of_token(legacy, token)
-          and not _txn_of_token(rid.replace(token[:16], "f" * 16), token)
-          and not _txn_of_token(legacy.replace(token, "f" * 32), token)
-          and not _txn_of_token("imp-20260927T000000Z-" + token[:16], token))
     # A decide's chain rule reads the archive through the doctor's own walk (_chain_records), so the
     # synthetic contexts stand on an empty directory: no archive tree, nothing rotated.
     import tempfile
@@ -3927,7 +3579,7 @@ def _self_test_units(check):
     finally:
         os.close(empty_fd)
         os.rmdir(empty)
-    # The manifest route: _probe_homes reads the manifest through
+    # The manifest route: _probe_admission reads the manifest through
     # _read_operand, and tomllib builds a dotted [opf.homes.a.a ...] header of 100,000 parts into a
     # 100,000-level nested table. The refusal naming that declaration renders it bounded; pre-fix its {!r}
     # render raised RecursionError out of the probe. CPython 3.14.8 and later refuse a TOML key of more than
@@ -3950,15 +3602,15 @@ def _self_test_units(check):
     deep_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, deep_model)
     deep_probe = None
     try:
-        _probe_homes(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+        _probe_admission(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
     except RecordError as exc:
         deep_probe = str(exc)
     except RecursionError:
         pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
     finally:
         deep_globals["_read_operand"] = deep_read
-    check("a deeply nested manifest homes declaration refuses the homes probe with a bounded message",
-          deep_shape and deep_probe is not None and "declares homes generation" in deep_probe
+    check("a deeply nested manifest homes declaration refuses the admission probe with a bounded message",
+          deep_shape and deep_probe is not None and "admits only spec_version 2.0.0 with homes = 2" in deep_probe
           and "nested deeper than" in deep_probe
           and len(deep_probe) <= 512 + _opf_store._DISPLAY_MAX_CHARS + _opf_store._DISPLAY_MARKER_MAX)
 
@@ -3984,24 +3636,74 @@ def _self_test_units(check):
           old_refusal is not None
           and "'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'" in old_refusal)
 
-    # The one VALID manifest at another spec_version, the reserved homes-2 pair, reaches the version
-    # refusal, which is pinned whole: offering an upgrade, which never carries the pair back, is red.
+    # The init manifest, the 2.0.0 / homes = 2 baseline, passes both the admission probe and
+    # _load_manifest, which reads it as homes generation 2 (red when either refuses it, or when the
+    # load reads it as another generation).
     import _opf_init
     pair_model = tomllib.loads(_opf_init.build_manifest())
-    pair_model[_opf_store.STANDARD_TOKEN]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
-    pair_model[_opf_store.STANDARD_TOKEN]["homes"] = 2
     old_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, pair_model)
-    pair_refusal = None
+    pair_ctx = Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1)
+    pair_refusal = pair_probe = None
     try:
-        _load_manifest(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+        pair_probe = _probe_admission(pair_ctx)
+        _load_manifest(pair_ctx)
     except RecordError as exc:
         pair_refusal = str(exc)
     finally:
         old_globals["_read_operand"] = old_read
-    check("a VALID manifest at another spec_version is refused toward the tooling that implements it",
-          _opf_store.validate_manifest(pair_model).status == _opf_store.VALID
-          and pair_refusal == "the store declares spec_version '2.0.0', not the tooling's 1.2.0; use the "
-                              "tooling that implements it (fail-closed)")
+    check("the init manifest is admitted at homes 2",
+          pair_refusal is None and pair_probe == 2 and pair_ctx.homes == 2
+          and _record_journal_rel(pair_ctx.homes) == _opf_store.journal_root("record"))
+    # A readable manifest that is not the 2.0.0 / homes = 2 baseline refuses at the probe, before
+    # any reconciliation: 1.2.0 with homes absent, homes = 1, homes = 3, and 2.0.0 with homes absent.
+    probe_refusals = []
+    for version, homes in (("1.2.0", None), ("1.2.0", 1), ("2.0.0", 1), ("2.0.0", 3),
+                           ("2.0.0", None), ("2.0.0", True), ("2.0.1", 2)):
+        probe_model = tomllib.loads(_opf_init.build_manifest())
+        probe_model[_opf_store.STANDARD_TOKEN]["spec_version"] = version
+        if homes is None:
+            del probe_model[_opf_store.STANDARD_TOKEN]["homes"]
+        else:
+            probe_model[_opf_store.STANDARD_TOKEN]["homes"] = homes
+        old_globals["_read_operand"] = lambda root_fd, rel, m=probe_model: Operand(rel, b"", 0o644, m)
+        try:
+            _probe_admission(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+            probe_refusals.append(None)
+        except RecordError as exc:
+            probe_refusals.append(str(exc))
+        finally:
+            old_globals["_read_operand"] = old_read
+    check("a readable non-baseline manifest refuses at the admission probe",
+          all(r is not None and "admits only spec_version 2.0.0 with homes = 2" in r
+              for r in probe_refusals))
+    # The refusal carries doctor's spec 9.2 remedy: the hand step below 2.0.0, newer tooling above it,
+    # and neither for a 2.0.0 declaration whose homes is wrong (red when the probe names no remedy).
+    hand_step = ("A spec_version below 2.0.0 names no version this specification defines; to adopt this "
+                 "tree instead, first move '.working/toml/manifest.toml' aside by hand: its files are then "
+                 "ordinary foreign content for a first adoption.")
+    newer = "Upgrade the tooling before operating on this store."
+    check("the admission refusal below 2.0.0 states the spec 9.2 hand step",
+          all(r is not None and hand_step in r and newer not in r for r in probe_refusals[:2]))
+    check("the admission refusal above 2.0.0 asks for newer tooling",
+          probe_refusals[6] is not None and newer in probe_refusals[6] and hand_step not in probe_refusals[6])
+    check("the admission refusal at 2.0.0 with another homes names neither remedy",
+          all(r is not None and hand_step not in r and newer not in r for r in probe_refusals[2:6]))
+    # An unreadable manifest probes as the typed home and touches nothing under .aiqt/: the legacy
+    # journal is never inspected (red when the .aiqt lstat returns).
+    def unreadable(root_fd, rel):
+        raise RecordError("unreadable")
+    seen = []
+    lstat_prev = _journal._lstat_contained
+    old_globals["_read_operand"] = unreadable
+    _journal._lstat_contained = lambda fd, rel: seen.append(rel)
+    try:
+        unreadable_probe = _probe_admission(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    finally:
+        old_globals["_read_operand"] = old_read
+        _journal._lstat_contained = lstat_prev
+    check("an unreadable manifest probes as the typed home without inspecting .aiqt",
+          unreadable_probe == 2 and seen == []
+          and _record_journal_rel(unreadable_probe) == _opf_store.journal_root("record"))
 
 
 def _self_test_contexts(check, root_fd, now):
@@ -4009,7 +3711,7 @@ def _self_test_contexts(check, root_fd, now):
 
     def ctx_of(counters, version=None):
         ctx = Context(SimpleNamespace(machine_rel=".working/toml"), ".", root_fd)
-        ctx.homes = 1
+        ctx.homes = 2
         ctx.types = dict(_opf_store.BASELINE_TYPES)
         counters_model = {"schema": 1, "counters": dict(counters)}
         ctx.counters = Operand(".working/toml/counters.toml", _emit_bytes(counters_model), 0o644, counters_model)
@@ -4025,44 +3727,45 @@ def _self_test_contexts(check, root_fd, now):
     del partial["BI"]
     ctx = ctx_of(partial)
     check("a missing enabled namespace breaks the proof", _counter_state(ctx, ctx.counters.model)[1] != [])
-    # Where the imported series is active (the graded 2.0.0 / homes = 2 declaration under the tooling's
-    # imported-series support, the manifest here) the proof is the C-COUNTERS rule of
-    # that series (spec 8.2): the zero imported rows are accepted and each is required. Inactive
-    # (support below the series), an imported row still breaks it: at the shipped constants, and on
-    # the same 2.0.0 manifest with homes 2 supported but not the imported series.
+    # Where the imported series is active (the graded 2.0.0 / homes = 2 declaration, the manifest
+    # here) the proof is the C-COUNTERS rule of that series (spec 8.2): the zero imported rows are
+    # accepted and each is required. Inactive (no 2.0.0 / homes = 2 declaration), an imported row
+    # breaks it.
     imported_full = dict(full, **{"imported:" + ns: 0 for ns in full})
-    pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
-    prev_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
-    try:
-        _opf_store.SUPPORTED_HOMES = 2
-        ctx = ctx_of(imported_full)
-        ctx.manifest = pair
-        check("an imported row breaks the proof without imported-series support",
-              _counter_state(ctx, ctx.counters.model)[1] != [])
-        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-        check("the active-series proof holds with every imported row",
-              _counter_state(ctx, ctx.counters.model)[1] == [])
-        # A homes-1 store declaring the imported series' own spec_version 1.3.0 stays off under both
-        # toggles: the imported series activates only inside the homes-2 declaration, so an imported row
-        # breaks the proof and the clean map alone proves it (red when the flag drops homes_generation >= 2).
-        ctx = ctx_of(imported_full)
-        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
-        homes1_rows = _counter_state(ctx, ctx.counters.model)[1] != []
-        ctx = ctx_of(full)
-        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
-        check("an imported row breaks the proof on a 1.3.0 homes-1 manifest with imported-series support",
-              homes1_rows and _counter_state(ctx, ctx.counters.model)[1] == [])
-        imported_partial = dict(imported_full)
-        del imported_partial["imported:BI"]
-        ctx = ctx_of(imported_partial)
-        ctx.manifest = pair
-        check("a missing imported row breaks the active-series proof",
-              _counter_state(ctx, ctx.counters.model)[1] != [])
-    finally:
-        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = prev_gates
+    pair = {"opf": {"spec_version": _opf_store.SPEC_VERSION, "homes": 2}}
     ctx = ctx_of(imported_full)
-    check("an imported row breaks the proof at the shipped support",
+    ctx.manifest = pair
+    check("the active-series proof holds with every imported row",
+          _counter_state(ctx, ctx.counters.model)[1] == [])
+    # A store declaring the imported series' own spec_version 1.3.0 with homes 1 stays off: the
+    # imported series activates only inside the homes-2 declaration, so an imported row breaks the
+    # proof and the clean map alone proves it (red when the flag drops homes_generation >= 2).
+    ctx = ctx_of(imported_full)
+    ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+    homes1_rows = _counter_state(ctx, ctx.counters.model)[1] != []
+    ctx = ctx_of(full)
+    ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+    check("an imported row breaks the proof on a 1.3.0 homes-1 manifest",
+          homes1_rows and _counter_state(ctx, ctx.counters.model)[1] == [])
+    imported_partial = dict(imported_full)
+    del imported_partial["imported:BI"]
+    ctx = ctx_of(imported_partial)
+    ctx.manifest = pair
+    check("a missing imported row breaks the active-series proof",
           _counter_state(ctx, ctx.counters.model)[1] != [])
+    ctx = ctx_of(imported_full)
+    check("an imported row breaks the proof with no manifest declaration",
+          _counter_state(ctx, ctx.counters.model)[1] != [])
+    # The id claim on a ledger that carries the imported rows: with the imported-series flag the
+    # clean ids are claimed and every imported row is left as it was; without it next_id refuses the
+    # map (red when claim_ids stops passing the flag to next_id).
+    ids, new_high = claim_ids(2, dict(imported_full, BI=4), ["BI"], True, reserved={},
+                              imported_series=True)
+    check("the id claim succeeds on a ledger with imported rows",
+          ids == ["BI-5"] and new_high["BI"] == 5
+          and all(new_high[k] == imported_full[k] for k in imported_full if k.startswith("imported:")))
+    check("the id claim without the imported-series flag refuses a ledger with imported rows",
+          _refuses(lambda: claim_ids(2, dict(imported_full), ["BI"], True, reserved={}), "cannot claim"))
     # Schema markers are exact integers everywhere this verb reads one (the same rule at every site):
     # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
     for marker in (True, 1.0):
@@ -4568,7 +4271,8 @@ def _self_test_transitions(check, plan, post, full, now):
     _self_test_delivery(check, plan, post, full, now)
     _self_test_importer_operand(check, plan, post, full, now)
     _self_test_pending(check)
-    _self_test_leftover_lock(check)
+    _self_test_journal_home(check)
+    _self_test_acquire_guard(check)
 
 
 def _self_test_decisions(check, plan, post, full, now):
@@ -5380,42 +5084,65 @@ def _self_test_pending(check):
           not ok(result("CANNOT-EVALUATE", [other], [other], cid="C-ID-SPACE"), accepted))
 
 
-def _self_test_leftover_lock(check):
-    """A dead run's leftover journal lock over its COMPLETE transaction: the outcome states the durable fact
-    only, never that render and the final doctor did not run (a run whose lock release failed after
-    COMPLETE went on to render, run doctor, and report). The dead run's transaction is the one carrying its
-    lock's token, never one that merely shares its pid and a later timestamp (a reused pid)."""
-    utc = "2026-09-27T00:00:00Z"
-    since = int(datetime.datetime(2026, 9, 27, tzinfo=datetime.timezone.utc).timestamp())
-    token, other = "a" * 32, "b" * 32
-    owner = {"pid": 4242, "utc": utc, "session": "{}.{}".format(SESSION_ID, token)}
-    name = "record-create.4242.{}.{}".format((since + 1) * 10 ** 9, token)
-    line = _leftover_lock_outcome(owner, {name: "complete"})
-    check("a leftover lock over a COMPLETE transaction names it and asserts no render or doctor outcome",
-          name in line and "COMPLETE" in line and "not recorded" in line and "never run" not in line)
-    line = _leftover_lock_outcome(owner, {name: "rolled-back"})
-    check("a leftover lock over a rolled-back transaction says nothing was published",
-          "published nothing" in line)
-    reused = "record-transition.4242.{}.{}".format((since + 5) * 10 ** 9, other)
-    line = _leftover_lock_outcome(owner, {reused: "complete"})
-    check("a reused pid's later COMPLETE transaction is not attributed to the dead run",
-          reused not in line and "opened none" in line)
-    line = _leftover_lock_outcome(owner, {reused: "complete", name: "rolled-back"})
-    check("the token picks the dead run's own transaction among same-pid ones",
-          name in line and reused not in line and "rolled back" in line)
-    for label, lock in (("a recovery lock with no token", dict(owner, session=SESSION_ID)),
-                        ("a malformed token", dict(owner, session=SESSION_ID + ".xyz"))):
-        line = _leftover_lock_outcome(lock, {name: "complete"})
-        check("{} is not attributed, and says so".format(label), name not in line and "cannot be told" in line)
-    # The minted homes-grammar shape (D-a2): the lock token's first 16 hex digits name the transaction.
-    minted = "record-20260927T000100Z-" + token[:16]
-    decoy = "record-20260927T000500Z-" + other[:16]
-    line = _leftover_lock_outcome(owner, {minted: "complete"})
-    check("a leftover lock binds its homes-grammar transaction by the token's hash16",
-          minted in line and "COMPLETE" in line and "not recorded" in line and "never run" not in line)
-    line = _leftover_lock_outcome(owner, {decoy: "complete", minted: "rolled-back"})
-    check("the hash16 binding picks the dead run's own homes-grammar transaction",
-          minted in line and decoy not in line and "rolled back" in line)
+def _self_test_journal_home(check):
+    """A context whose record journal home is unset (a fresh Context: no admission probe ran) or names the
+    deleted homes-1 root, or any other path, refuses at the publication, the reconcile and the lease
+    before any acquisition, journal open or write is attempted: no caller reaches a homes-1 arm."""
+    from types import SimpleNamespace
+    fresh = Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1)
+    check("a fresh context has no record journal home", fresh.journal_rel is None)
+    reached = []
+    real = (_opf_oplock.acquire_operation, _opf_journal.run_transaction, _journal.require_containment)
+    _opf_oplock.acquire_operation = lambda *a, **k: reached.append("acquire")
+    _opf_journal.run_transaction = lambda *a, **k: reached.append("publish")
+    _journal.require_containment = lambda *a, **k: reached.append("containment")
+    try:
+        for label, home in (("unset", None), ("the deleted homes-1 root", ".aiqt/record/journal"),
+                            ("a lookalike typed home", _opf_store.journal_root("record") + "/")):
+            ctx = SimpleNamespace(journal_rel=home, root_fd=-1, machine_rel=".working/toml",
+                                  res=SimpleNamespace(store_root="."))
+            for verb, call in (("publication", lambda: _publish(ctx, None, "create", cap=object(),
+                                                                  run_id="record-x")),
+                               ("reconcile", lambda: _reconcile_journal(ctx)),
+                               ("lease", lambda: _acquire_guard(ctx))):
+                check("the {} refuses a context whose journal home is {}".format(verb, label),
+                      _refuses(call, "is not the typed capability home") and not reached)
+    finally:
+        _opf_oplock.acquire_operation, _opf_journal.run_transaction, _journal.require_containment = real
+
+
+def _self_test_acquire_guard(check):
+    """The homes-2 single-writer acquisition's refusal names what the acquisition removed: an EMFILE
+    after it removed a staging leftover reaches _acquire_guard as the OpLockError the lock module
+    raises in its place (carrying the removal report), and the refusal names that removal; an
+    acquisition that removed nothing says so. Red when the refusal carries only the error's text."""
+    import errno
+    from types import SimpleNamespace
+    staging = "lease staging leftover ." + _opf_check.LEASE_NAME + _opf_oplock._STAGING_MARKER + "0" * 32
+    failures = (_opf_oplock._with_removals(OSError(errno.EMFILE, "synthetic EMFILE"), (), None,
+                                           (staging,), ()),
+                _opf_oplock._tag_removals(_opf_oplock.OpLockError("synthetic contention"), (), None, (), ()))
+    ctx = SimpleNamespace(journal_rel=_opf_store.journal_root("record"), res=SimpleNamespace(store_root="."))
+    real = _opf_oplock.acquire_operation
+    refusals = []
+    for failure in failures:
+        def failing(store_root, operation, holder=None, recover=False, _failure=failure):
+            raise _failure
+        _opf_oplock.acquire_operation = failing
+        try:
+            _acquire_guard(ctx)
+            refusals.append(None)
+        except RecordError as exc:
+            refusals.append(str(exc))
+        finally:
+            _opf_oplock.acquire_operation = real
+    check("a homes-2 acquisition refusal after a removal names it",
+          isinstance(failures[0], _opf_oplock.OpLockError) and refusals[0] is not None
+          and "synthetic EMFILE" in refusals[0]
+          and "before it failed the acquisition removed " + staging in refusals[0])
+    check("a homes-2 acquisition refusal that removed nothing says so",
+          refusals[1] is not None and "synthetic contention" in refusals[1]
+          and "and the acquisition removed nothing" in refusals[1])
 
 
 if __name__ == "__main__":

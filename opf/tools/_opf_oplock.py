@@ -557,8 +557,10 @@ class OpLockError(Exception):
     `created_removed`, each name the acquisition itself created and then unlinked (a publication's
     retired staging name, a failed publication's cleanup, and the unwind's removal of its own new
     records), so every unlink the acquisition performed is reported; the unwind's replacement error
-    and the forked-continuation refusal (_refuse_continuation) carry the same four reports. An
-    OpLockError raised before that body (acquire_operation's argument and host validation, and
+    and the forked-continuation refusal (_refuse_continuation) carry the same four reports. Any
+    other Exception the body raises after a removal is replaced by an OpLockError naming it and
+    carrying the four reports (_with_removals), so a failure after a removal never reaches a caller
+    untagged. An OpLockError raised before that body (acquire_operation's argument and host validation, and
     _acquire_body's store-resolution refusal) carries none of them; no removal step runs before it.
     An exception a signal handler raises where acquire_operation delivers a deferred signal is the
     handler's own and carries none either."""
@@ -2507,6 +2509,36 @@ def _tag_removals(exc, recovered, recovered_operation, staging_removed, created_
     return exc
 
 
+def _removals_note(recovered, recovered_operation, staging_removed, created_removed):
+    """The note an interruption raised after an acquisition's removals carries: what it removed, in
+    removal order, worded as a caller's refusal words the same report on an OpLockError."""
+    parts = list(staging_removed)
+    if recovered:
+        parts.append("the stale operation capability {} of a holder its recovery gate confirmed dead "
+                     "({})".format(" and ".join(recovered), "its recorded operation not reported"
+                                   if recovered_operation is None else "its recorded operation {}".format(
+                                       _opf_store._safe_display(recovered_operation))))
+    parts.extend(created_removed)
+    return "opf-oplock: before it failed the acquisition removed {}".format("; ".join(parts))
+
+
+def _with_removals(exc, recovered, recovered_operation, staging_removed, created_removed):
+    """The exception a failed acquisition raises in place of `exc` once it has removed anything, so
+    no failure after a removal reaches the caller without the report of it. An OpLockError (already
+    tagged) and a failure before any removal are returned unchanged. Any other Exception (an EMFILE,
+    a JournalError) is replaced by an OpLockError naming it and tagged with the four reports, raised
+    from it, so a caller refuses fail-closed with the report instead of reaching its unexpected-error
+    backstop. An interruption (a BaseException that is not an Exception) is returned as itself, with
+    the report added as a note."""
+    if isinstance(exc, OpLockError) or not (recovered or staging_removed or created_removed):
+        return exc
+    if not isinstance(exc, Exception):
+        exc.add_note(_removals_note(recovered, recovered_operation, staging_removed, created_removed))
+        return exc
+    return _tag_removals(OpLockError("the acquisition failed ({!r}) and was unwound".format(exc)),
+                         recovered, recovered_operation, staging_removed, created_removed)
+
+
 def acquire_operation(store_root, operation, holder=None, recover=False):
     """Acquire the shared operation lock for the RESOLVED machine store at `store_root`.
 
@@ -2536,8 +2568,11 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     the containment probe, the `recover` type check, the empty-nodename refusal, the holder and
     operation field checks, and _acquire_body's store-resolution refusal, all raised before any
     removal step; nor does an exception a signal handler raises when a deferred signal is
-    delivered (the handler's own). An
-    interruption (a BaseException that is not an Exception) propagates as itself after the unwind.
+    delivered (the handler's own). Any other Exception the body raises after a removal (an EMFILE,
+    a JournalError) is replaced by an OpLockError that names it, carries the same four reports and
+    is raised from it (_with_removals). An interruption (a BaseException that is not an Exception)
+    propagates as itself after the unwind; once the body has removed anything, the report of those
+    removals is added to it as a note.
     Everything after the argument validation runs with the Python-handled signals deferred:
     a signal arriving meanwhile is delivered only once the acquisition has either failed
     and unwound or fully formed its capability, which is then released before the interruption
@@ -3040,6 +3075,8 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             if isinstance(exc, OpLockError):
                 _tag_removals(exc, removed_stale, recovered_operation, staging_removed,
                               created_removed)
+            raised = _with_removals(exc, removed_stale, recovered_operation, staging_removed,
+                                    created_removed)
             if unconfirmed:
                 closed = "{} ({!r})".format(_unconfirmed_closes(len(unconfirmed),
                                                                 "inherited descriptor"), interrupt)
@@ -3048,11 +3085,17 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                     "; ".join(problems))
             else:
                 closed = "it closed only its own descriptor copies"
-            exc.add_note("opf-oplock: this acquisition unwind ran in a forked child (pid {}) of "
-                         "the acquiring process (pid {}), so this unwind removed no record and did "
-                         "not unlock the anchor; {}".format(os.getpid(), acquirer_pid, closed))
+            raised.add_note("opf-oplock: this acquisition unwind ran in a forked child (pid {}) of "
+                            "the acquiring process (pid {}), so this unwind removed no record and "
+                            "did not unlock the anchor; {}".format(os.getpid(), acquirer_pid, closed))
             if interrupt is not None and isinstance(exc, Exception):
+                held = _with_removals(interrupt, removed_stale, recovered_operation,
+                                      staging_removed, created_removed)
+                if held is not interrupt:
+                    raise held from interrupt
                 raise interrupt
+            if raised is not exc:
+                raise raised from exc
             raise
         # Unwind in reverse leg order; every unwind failure is collected, never swallowed, and
         # every step (each leg, each close) is its own guarded step, so neither a
@@ -3159,6 +3202,10 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             detail = "; additionally the unwind failed: {}".format("; ".join(unwind)) if unwind else ""
             interrupt.add_note("opf-oplock: raised while unwinding a failed acquisition "
                                "({}){}".format(exc, detail))
+            held = _with_removals(interrupt, removed_stale, recovered_operation, staging_removed,
+                                  created_removed)
+            if held is not interrupt:
+                raise held from interrupt
             raise interrupt
         if unwind and isinstance(exc, Exception):
             raise _tag_removals(OpLockError("{}; additionally the unwind failed: {}".format(
@@ -3166,6 +3213,12 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                 staging_removed, created_removed) from exc
         if unwind:
             exc.add_note("opf-oplock: additionally the unwind failed: {}".format("; ".join(unwind)))
+        # Any failure after a removal carries its report: an OpLockError is tagged above, any other
+        # Exception is replaced by a tagged OpLockError, and an interruption gets it as a note.
+        raised = _with_removals(exc, removed_stale, recovered_operation, staging_removed,
+                                created_removed)
+        if raised is not exc:
+            raise raised from exc
         raise
 
 
@@ -4706,6 +4759,177 @@ def _t_x7_every_unlink_reported(d, env):
     os.unlink(active)                      # manual clear: the simulated continuation's records
     os.unlink(lease)
     release_operation(acquire_operation(root, "op"))
+
+
+_X8_REPORT = ("before it failed the acquisition removed the stale operation capability lease and "
+              "active record of a holder its recovery gate confirmed dead (its recorded operation "
+              "'recovered-op')")
+
+
+def _st_x8_failing_lease(d, env, make_exc):
+    """Recover a confirmed-dead holder's lease and active record in a fresh store, the acquisition's
+    own lease publication then raising make_exc() once; returns (what acquire_operation raised, the
+    active record's path, the lease's path)."""
+    root = _st_git_store(d, "repo", env)
+    release_operation(acquire_operation(root, "op"))
+    node = os.uname().nodename
+    dead_pid, dead_start = _st_reaped_child()
+    holder = _st_write_active_owned(root, dead_pid, dead_start, node, op_id="x8-op-id")
+    _st_write_lease_owned(root, holder=holder)
+    mod = sys.modules[__name__]
+    saved = mod._create_control_file
+
+    def _lease_fails(dir_fd, name, *a, **k):
+        if name == _opf_check.LEASE_NAME:
+            raise make_exc()
+        return saved(dir_fd, name, *a, **k)
+
+    mod._create_control_file = _lease_fails
+    failed = None
+    try:
+        release_operation(acquire_operation(root, "op", recover=True))
+    except BaseException as exc:  # noqa: BLE001  the interruption leg's KeyboardInterrupt included
+        failed = exc
+    finally:
+        mod._create_control_file = saved
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    assert not os.path.exists(active) and not os.path.exists(lease), \
+        "the dead holder's records are removed and none re-published"
+    return failed
+
+
+def _st_x8_exception_leg(d, env, make_exc):
+    """An Exception other than an OpLockError raised after the removals surfaces as an OpLockError
+    that names the original, is raised from it and carries the four reports."""
+    failed = _st_x8_failing_lease(d, env, make_exc)
+    assert isinstance(failed, OpLockError), ("surfaces as an OpLockError", repr(failed))
+    assert type(failed.__cause__) is type(make_exc()) and repr(failed.__cause__) in str(failed), \
+        ("names and is raised from the original failure", repr(failed.__cause__))
+    assert (getattr(failed, "recovered", None), getattr(failed, "recovered_operation", None)) \
+        == (("lease", "active record"), "recovered-op"), "carries the stale-record report"
+    assert failed.staging_removed == () and "its own new active record (unwind)" in \
+        getattr(failed, "created_removed", ()), failed.created_removed
+
+
+def _t_x8_emfile(d, env):
+    """T-x8-emfile: an EMFILE from the acquisition's own lease publication, after recovery removed
+    a confirmed-dead holder's lease and active record, surfaces as an OpLockError carrying that
+    report. FAILS WITHOUT THE FIX (_with_removals as the identity): the bare OSError escapes
+    untagged, and a caller reaches its unexpected-error backstop with no report."""
+    _st_x8_exception_leg(d, env, lambda: OSError(errno.EMFILE, "synthetic EMFILE on the lease "
+                                                              "publication"))
+
+
+def _t_x8_journal_error(d, env):
+    """T-x8-journal: the same for a JournalError from the lease publication. FAILS WITHOUT THE FIX
+    (_with_removals as the identity): the bare JournalError escapes untagged."""
+    _st_x8_exception_leg(d, env, lambda: _journal.JournalError("synthetic journal failure on the "
+                                                               "lease publication"))
+
+
+def _t_x8_interrupt(d, env):
+    """T-x8-interrupt: a KeyboardInterrupt from the lease publication after the same removals
+    propagates as itself, with their report added as a note. FAILS WITHOUT THE FIX (_with_removals
+    as the identity): the interrupt carries no note."""
+    interrupted = _st_x8_failing_lease(d, env, KeyboardInterrupt)
+    assert type(interrupted) is KeyboardInterrupt, ("propagates as itself", repr(interrupted))
+    notes = getattr(interrupted, "__notes__", None) or ()
+    assert any(_X8_REPORT in note for note in notes), ("carries the report as a note", notes)
+
+
+def _st_x8_forked_report(wfd, exc):
+    """The forked child's side of T-x8-forked: write what its acquisition raised to `wfd` as JSON
+    and end the child, never returning into the parent's frames."""
+    import json
+    code = 0
+    try:
+        cause = exc.__cause__
+        report = {"type": type(exc).__name__, "text": str(exc),
+                  "cause": None if cause is None else type(cause).__name__,
+                  "cause_repr": repr(cause),
+                  "recovered": list(exc.recovered) if hasattr(exc, "recovered") else None,
+                  "recovered_operation": getattr(exc, "recovered_operation", None),
+                  "staging_removed": list(getattr(exc, "staging_removed", ())),
+                  "created_removed": list(getattr(exc, "created_removed", ())),
+                  "notes": list(getattr(exc, "__notes__", None) or ())}
+        os.write(wfd, json.dumps(report).encode("utf-8"))
+    except BaseException:
+        code = 2
+    finally:
+        os._exit(code)
+
+
+def _t_x8_forked_unwind(d, env):
+    """T-x8-forked: an EMFILE raised in a FORKED CHILD of the acquiring process at its lease
+    publication, after recovery removed a confirmed-dead holder's lease and active record, takes
+    the forked-child unwind (it closes only the child's descriptor copies and removes nothing) and
+    reaches the child's caller as an OpLockError carrying that report, raised from the original
+    and noted as a forked-child unwind; the acquirer's own acquisition completes with both of its
+    records in place. FAILS WITHOUT THE FIX (_with_removals as the identity): the bare OSError
+    escapes the child's unwind untagged."""
+    import json
+    root = _st_git_store(d, "repo", env)
+    release_operation(acquire_operation(root, "op"))
+    node = os.uname().nodename
+    dead_pid, dead_start = _st_reaped_child()
+    holder = _st_write_active_owned(root, dead_pid, dead_start, node, op_id="x8-forked-op-id")
+    _st_write_lease_owned(root, holder=holder)
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    mod = sys.modules[__name__]
+    saved = mod._create_control_file
+    top = os.getpid()
+    child = {}
+
+    def _lease_forks(dir_fd, name, *a, **k):
+        if name == _opf_check.LEASE_NAME and os.getpid() == top and not child:
+            rfd, wfd = os.pipe()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            pid = os.fork()
+            if pid == 0:
+                os.close(rfd)
+                child["wfd"] = wfd
+                raise OSError(errno.EMFILE, "synthetic EMFILE in a forked child")
+            os.close(wfd)
+            child.update(pid=pid, rfd=rfd)
+        return saved(dir_fd, name, *a, **k)
+
+    mod._create_control_file = _lease_forks
+    held = None
+    try:
+        try:
+            cap = acquire_operation(root, "op", recover=True)
+        except BaseException as exc:  # noqa: BLE001  the child reports whatever its unwind raised
+            if os.getpid() != top:
+                _st_x8_forked_report(child["wfd"], exc)
+            raise
+        if os.getpid() != top:
+            os._exit(3)                    # a forked child must never receive a capability
+        held = (os.path.exists(active), os.path.exists(lease))
+        release_operation(cap)
+    finally:
+        mod._create_control_file = saved
+        collected = _st_collect(child["pid"], child["rfd"], 60) if "pid" in child else None
+    assert collected is not None, "the lease publication forked a child"
+    assert held == (True, True), ("the child's unwind removed none of the acquirer's records", held)
+    assert cap.recovered == ("lease", "active record"), cap.recovered
+    status, text, hung = collected
+    assert not hung and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (status, text)
+    got = json.loads(text)
+    assert got["type"] == "OpLockError", ("surfaces as an OpLockError", got["type"], got["text"])
+    assert got["cause"] == "OSError" and got["cause_repr"] in got["text"], \
+        ("names and is raised from the original failure", got["cause_repr"], got["text"])
+    assert (got["recovered"], got["recovered_operation"]) == (["lease", "active record"],
+                                                              "recovered-op"), \
+        ("carries the stale-record report", got["recovered"], got["recovered_operation"])
+    assert got["staging_removed"] == [] and len(got["created_removed"]) == 1 \
+        and got["created_removed"][0].startswith("the staging name ." + ACTIVE_NAME), \
+        ("carries the acquirer's own staging retirement and no unwind removal",
+         got["created_removed"])
+    assert any("unwind ran in a forked child" in note and "removed no record" in note
+               for note in got["notes"]), ("noted as a forked-child unwind", got["notes"])
 
 
 def _t_r3_crosshost_refuses(d, env):
@@ -9873,6 +10097,14 @@ def self_test_isolated():
          _t_x6_removal_reports),
         ("T-x7 every unlink an acquisition performs is reported, the forked-continuation refusal "
          "included", _t_x7_every_unlink_reported),
+        ("T-x8-emfile an EMFILE after the removals surfaces as an OpLockError carrying their report",
+         _t_x8_emfile),
+        ("T-x8-journal a JournalError after the removals surfaces as an OpLockError carrying their "
+         "report", _t_x8_journal_error),
+        ("T-x8-interrupt an interrupt after the removals propagates as itself with their report",
+         _t_x8_interrupt),
+        ("T-x8-forked an EMFILE after the removals in a forked child's unwind surfaces as an "
+         "OpLockError carrying their report", _t_x8_forked_unwind),
         ("T-r3-crosshost recover REFUSES a foreign-host holder", _t_r3_crosshost_refuses),
         ("T-c6/T-c7/T-med6 verified release preserves mismatches, legs collected",
          _t_c6_c7_med6_verified_release),

@@ -77,15 +77,16 @@
         <h3>Assistant-driven (recommended)</h3>
         <p>Your AI development assistant follows the adoption procedure in the prompt pack: it
           investigates your project, proposes one plan, and asks for one approval of that plan. The
-          reference CLI runs investigation and planning today; approval, apply and completion are
-          not executable yet, so the assistant stops there and reports. The standard requires no
+          reference CLI runs investigation and planning today, and prints the approval without
+          recording it; recording the approval, apply and completion are not executable yet, so the
+          assistant stops there and reports. The standard requires no
           particular assistant or tool.</p>
       </div>
       <div class="card">
         <h3>By hand (fallback)</h3>
         <p>Create the plain-TOML store, configure your own checks, and work records-first. The standard
           requires no particular tool. The reference tooling requires Python 3.14 or newer. It
-          validates spec 1.2.0 stores in either layout, with limits: it does not render or
+          validates spec 2.0.0 stores in either layout, with limits: it does not render or
           drift-check per-record views, and the baseline validator reports module-tier and importer
           record content schemas as cannot-evaluate.
           For a store with module-tier or importer records, or a per-record store that declares views,
@@ -125,15 +126,19 @@
             enforcement and postimage digests the worksheet supplies, not the bytes they name, with
             one exception: when a kept file registers into a store the plan creates, the digest
             planned for its manifest must be the default manifest's real digest.</li>
-          <li><code>opf adopt status</code> reports adoption runs and the adoption journal and writes
-            nothing.</li>
+          <li><code>opf adopt approve</code> re-derives the frozen plan over the live tree and prints
+            the approval that binds its digests, and records nothing.</li>
+          <li><code>opf adopt status</code> reports adoption runs and writes nothing.</li>
         </ul>
+        <p>At base 2.0.0, <code>opf adopt plan</code>, <code>approve</code> and <code>status</code>
+          run without reading the adoption journal, and <code>status</code> says the journal is not
+          read.</p>
       </div>
       <div class="card">
         <h3>What it does not run yet</h3>
-        <p><code>opf adopt approve</code>, <code>apply</code>, <code>complete</code> and
-          <code>reconcile</code> refuse with exit 2, so no approval is recorded, nothing is applied,
-          and nothing is retired. Installing the enforcement pack through adoption, and
+        <p><code>opf adopt apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0,
+          and <code>complete</code> refuses
+          with exit 2, so no approval is recorded, nothing is applied, and nothing is retired. Installing the enforcement pack through adoption, and
           post-adoption import, are not available either. An assistant following the pack stops at
           the approval step and reports, rather than doing the missing stages by hand.</p>
         <p>Recovery after a refused or reversed run: when an adoption transaction is refused after
@@ -154,8 +159,7 @@
       <code>opf doctor --require-store</code> and <code>opf render --check</code>. That route
       initializes a store; it is not an adoption. It records no plan, approval, receipt or
       completion check, and installs no enforcement. The reference tooling's <code>opf init</code>
-      does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the
-      standard's validation refuses (specification section 9.2).</p>
+      scaffolds a 2.0.0 store with <code>homes = 2</code>.</p>
   </div>
 </section>
 
@@ -191,9 +195,10 @@
       <code>absorb</code>, and <code>record</code>.</p>
 
     <h3 id="cmd-adopt"><code>opf adopt</code></h3>
-    <p><b style="color:var(--ink)">Status.</b> Partly implemented. The read-only <code>plan</code> and
-      <code>status</code> subcommands run; <code>approve</code>, <code>apply</code>,
-      <code>complete</code>, and <code>reconcile</code> refuse with exit 2 before reading anything.</p>
+    <p><b style="color:var(--ink)">Status.</b> Partly implemented. The read-only <code>plan</code>,
+      <code>approve</code> and <code>status</code> subcommands run; at base 2.0.0
+      <code>apply</code> and <code>reconcile</code> refuse with exit 2 before reading anything,
+      and <code>complete</code> refuses with exit 2.</p>
     <p><b style="color:var(--ink)">Purpose.</b> Guide setup and wiring of an existing project:
       investigate, plan, one approval, apply, and completion (specification section 14).</p>
     <p><b style="color:var(--ink)">How it works.</b> <code>plan --inputs FILE</code> reads a
@@ -202,8 +207,8 @@
       release, the prompt pack, one enforcement row per platform, and the skip policy). It
       re-investigates the tree, refuses if the inventory changed, and freezes the
       <code>opf.adoption.plan/v2</code> proposal with its plan and inventory digests.
-      <code>status</code> lists the adoption evidence bundles, checking each one, and reports any
-      open transaction or held lock in the adoption journal. Neither needs an existing store.</p>
+      <code>status</code> lists the adoption evidence bundles, checking each one; at base 2.0.0 it
+      does not read the adoption journal and says so. Neither needs an existing store.</p>
     <p><b style="color:var(--ink)">Result.</b> <code>plan</code> prints the frozen plan on stdout and
       exits 0, exits 1 when an operation or the plan breaks the plan schema, and exits 2 when it
       cannot evaluate (an unreadable worksheet, a malformed decision, a changed inventory, an
@@ -220,11 +225,19 @@
       target for an existing store, an existing pointer, foreign content already under
       <code>.working/</code>, or an existing root <code>CHANGELOG.md</code> or <code>VERSION</code>, and
       refuses rather than absorbing what it finds. It then builds the machine
-      sources in memory (the manifest, the ID counters, the version ledger, the worklog, and the eleven
-      typed indexes), takes the shared operation lock and repeats its checks under it, holds the lease
-      while it writes them under <code>.working/toml/</code>, writes the <code>.opf.toml</code>
-      pointer at the product root, and creates a starter <code>CHANGELOG.md</code>. Publication is
-      create-only: it writes new paths and does not overwrite an existing one.</p>
+      sources in memory (the manifest, the ID counters, the version ledger, the worklog, the eleven
+      typed indexes, the eleven imported indexes beside them, and the imported worklog), takes the
+      shared operation lock and repeats its checks under it, holds the lease while it writes them
+      under <code>.working/toml/</code>, writes the <code>.opf.toml</code> pointer at the product
+      root, and creates a starter <code>CHANGELOG.md</code>. It also writes
+      <code>.working/.gitignore</code> (specification section 4.2) after inspecting git's effective
+      ignore rules and index. That inspection cannot evaluate, and <code>init</code> exits 2 writing
+      nothing, while the environment carries a runtime git configuration override
+      (<code>GIT_CONFIG_GLOBAL</code>, <code>GIT_CONFIG_SYSTEM</code>, <code>GIT_CONFIG_COUNT</code>
+      with its key and value pairs, <code>GIT_CONFIG_PARAMETERS</code>, or <code>GIT_CONFIG</code>;
+      <code>GIT_CONFIG_NOSYSTEM</code> is allowed), since its answer could then differ from your
+      own git: unset them and retry. Publication is create-only: it writes new paths and does not
+      overwrite an existing one.</p>
     <p><b style="color:var(--ink)">Result.</b> A scaffolded store, a committed-store pointer, and a
       starter changelog, all left untracked for your review; <code>init</code> does not
       stage or commit them. See <a href="./core-files">core store files</a> for what the scaffold writes
@@ -409,7 +422,7 @@
     <p class="lead">OPFiles specifies formats, layout, naming, lifecycle, and enforcement posture, and
       requires no particular tool: the specification states that a project can conform with
       hand-maintained files and its own checks. The reference tooling requires Python 3.14 or newer.
-      It validates spec 1.2.0 stores in either layout, with limits: it does not render or drift-check
+      It validates spec 2.0.0 stores in either layout, with limits: it does not render or drift-check
       per-record views, and the baseline validator reports module-tier and importer record content
       schemas as cannot-evaluate.
       For a store with module-tier or importer records, or a per-record store that declares views,
@@ -417,9 +430,8 @@
     <p>The shape of the manual path is short: create the store (write the files from the
       specification and schemas), commit it, generate the views
       with <code>opf render --write</code> for a supported store or your own renderer, and then work
-      records-first. The reference tooling's <code>opf init</code> does not scaffold this store yet:
-      its scaffold still writes a 1.2.0 store, a format the standard's validation refuses
-      (specification section 9.2). Conformance you
+      records-first. The reference tooling's <code>opf init</code> scaffolds this store: base 2.0.0
+      with <code>homes = 2</code>. Conformance you
       assert by hand is self-asserted, and you should say so wherever you claim it, because no validator
       has checked it for you yet. The steps below fill that in.</p>
   </div>
@@ -461,11 +473,8 @@
     <p>Then write the committed pointer <code>.opf.toml</code> at your product repository root, so
       the store resolves from a stable location. A <code>[profiles.aiqt]</code> table is optional and
       is ignored by base-only tooling; a base adopter need not add it.</p>
-    <p>The reference tooling does not yet implement spec 2.0.0, the only base version the standard
-      defines; it validates spec 1.2.0 stores, as described above. Its <code>opf doctor</code>
-      grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code>
-      under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to
-      the standard; <code>opf upgrade</code> and <code>opf record</code> refuse such a store. The
+    <p>The reference tooling initializes and validates spec 2.0.0 stores with
+      <code>homes = 2</code>, the only base version the standard defines, as described above. The
       reference tooling defines no store upgrade: <code>opf upgrade</code> refuses every invocation
       with exit 2, reading and writing nothing.</p>
     <p>The illustrative base <code>[opf]</code> table of a manifest, not a complete manifest:

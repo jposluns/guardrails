@@ -47,17 +47,22 @@ landed handler (the enforcement pack is planted by plant-governance rows and its
 enable-hook); the completion checks, the stage driver's retirement stage (it opens the RETIREMENT_PHASE transaction the file ops compose into only after
 a green completion check, and no adoption interface opens that transaction in this build), and the
 `complete` CLI subcommand remains a later slice, as does the driver's receipt stage; the read-only
-`opf adopt` subcommands plan and status shipped with K9a, and `opf adopt reconcile` runs the
-journal-only recovery (reconcile_report) under the journal lock and its own store leases (releasing a
-dead run's leftover lease lands with the lease join). Live
+`opf adopt` subcommands plan and status shipped with K9a, and `opf adopt reconcile` is wired to the
+journal-only recovery (reconcile_report), whose engine body runs under the journal lock and its own
+store leases (releasing a dead run's leftover lease lands with the lease join). Live
 outside the self-test fixtures today: `opf adopt status` opens and lists the evidence home in opf.py
-through the _journal containment primitives, then grades each listed bundle through this module's
-_verify_bundle_at (beneath the HELD home descriptor it is passed) and the journal through
-journal_state, with _open_product_root anchoring both reads to one product-root descriptor; plan,
-approve and apply refuse over a non-clean adoption journal (require_clean_journal); the transaction
-shell and the dispatch table are reachable from `opf adopt apply` only past the unlanded-op gate and
-the driver's mandatory receipt stage (unlanded in this build), which no plan passes; reconcile() is
-reachable from `opf adopt reconcile` through reconcile_report; and compose_rows stays reachable only
+through the _journal containment primitives and grades each listed bundle through this module's
+_verify_bundle_at (beneath the HELD home descriptor it is passed), with _open_product_root anchoring
+those reads to one product-root descriptor; on base 2.0.0 it never reads the adoption journal
+(journal_state is not called) and prints JOURNAL_UNREAD instead. The engine bodies of approve and
+apply refuse over a non-clean adoption journal (require_clean_journal); on base 2.0.0 approve issues
+its approval without reading that journal (_capture_approval_journal_free), and apply and reconcile
+are fenced: opf.py refuses both before it resolves the root, and run_apply and reconcile_report refuse
+with ADOPTION_FENCE too. So on base 2.0.0 the transaction shell, the dispatch table and reconcile()
+are reachable only from the self-test, which drives the engine bodies directly. Past the fence, the
+shell and the dispatch table would be reachable from `opf adopt apply` only past the unlanded-op gate
+and the driver's mandatory receipt stage (unlanded in this build), which no plan passes, and
+reconcile() from `opf adopt reconcile` through reconcile_report; compose_rows stays reachable only
 from the self-test and the crash children it starts in a fresh interpreter through the
 `--selftest-child` flag (the `_opf_init_operation` crash-child precedent), a self-test harness entry,
 never an adoption interface, which runs whatever spec it is handed without an approval.
@@ -99,12 +104,16 @@ to resolve. reconcile() therefore never resolves the store. An rmdir may target 
 same transaction created and apply never removes a pre-existing directory, so `.working/` itself
 survives every rollback and the journal stays reachable at the fixed path while nothing resolves. This
 engine writes no state under `.aiqt/`: in homes 2 that is AIQT-owned material, never an OPF state home
-(spec 4.2, 15). That no-write rule is the homes-2 store's; homes-1 tooling still writes the legacy
-record journal at `.aiqt/record/journal` (_opf_record), outside this engine. A preparation that created
-`.working/` for the journal pins it to the planned store directory mode (_pin_created_working), so the
-mkdir's umask artefact never becomes the mode init-store's admission later holds `.working/` to. Homes 2
-is not activated in this build (SUPPORTED_HOMES = 1). Where it is (adoption_journal_fenced), apply and
-reconcile refuse before any `.aiqt` access, and plan, approve and status do not read this journal.
+(spec 4.2, 15). A preparation that created `.working/` for the journal pins it to the planned store
+directory mode (_pin_created_working), so the mkdir's umask artefact never becomes the mode init-store's
+admission later holds `.working/` to. Homes 2 is the only generation this build implements, and on it
+apply and reconcile refuse before they read or write anything (adoption_journal_fenced), and plan,
+approve and status do not read this journal. Each fenced entry (run_apply, reconcile_report) is that
+fence and then one call of its engine body (_run_apply_engine, _reconcile_report_engine);
+capture_approval is the fence choosing its journal-free body (_capture_approval_journal_free) over its
+engine body (_capture_approval_engine), the two sharing every step past the journal reads
+(_approval_over_live_tree). The self-test's engine vectors drive the engine bodies directly over this
+journal; the fence itself has no test switch.
 
 Journal discipline (reconcile-first, the `opf record` step-1 posture): every transaction inspects the
 adoption journal FIRST and REFUSES on a held lock (never seized) or any open (INTENT-without-terminal)
@@ -439,11 +448,12 @@ OPERATION = "adopt-apply"
 # resolution (see the module docstring; the self-test pins the literal spelling).
 JOURNAL_REL = store.journal_root("adoption")
 # The refusal of apply and reconcile on base 2.0.0 (adoption_journal_fenced).
-ADOPTION_FENCE = "adoption on base 2.0.0 lands with the adoption-journal move; nothing was read or written"
-# The cannot-evaluate of plan, approve and status on base 2.0.0 (adoption_journal_fenced): the journal is
-# not read there, so its state is unknown, never clean.
-JOURNAL_UNREAD = ("the adoption journal state on base 2.0.0 is unknown: the .aiqt adoption journal is not "
-                  "read, and its homes-2 home lands with the adoption-journal move")
+ADOPTION_FENCE = "adopt apply and reconcile are not enabled at base 2.0.0; nothing was read or written"
+# What status says on base 2.0.0 (adoption_journal_fenced): the journal at JOURNAL_REL is not read there,
+# so its state is unknown, never clean. Plan and approve run there without reading it
+# (_capture_approval_journal_free).
+JOURNAL_UNREAD = ("the adoption journal state on base 2.0.0 is unknown: this build does not read the "
+                  "adoption journal at " + JOURNAL_REL)
 # The only plan format apply may take (spec 14.1), the schema's own marker.
 PLAN_V2_FORMAT = schema.PLAN_FORMAT
 # The run's evidence-bundle members apply persists: the approved plan, its captured approval and the
@@ -1869,6 +1879,11 @@ def reconcile(product_root):
     return reconcile_report(product_root)[0]
 
 
+def _reconcile_engine(product_root):
+    """reconcile past the base 2.0.0 fence: _reconcile_report_engine without its stale-lock flag."""
+    return _reconcile_report_engine(product_root)[0]
+
+
 def _reconcile_intent(jr_fd, txn_dir, txn_fd=None):
     """(init_store, paths, binding, op_id) from an open transaction's durable INTENT. init_store is True only
     when the transaction's NAME carries the init-store phase AND its INTENT header says so (kind, phase and
@@ -2065,6 +2080,13 @@ def reconcile_report(product_root):
     before the product root is opened)."""
     if adoption_journal_fenced():
         raise AdoptApplyError(ADOPTION_FENCE)
+    return _reconcile_report_engine(product_root)
+
+
+def _reconcile_report_engine(product_root):
+    """reconcile_report past the base 2.0.0 fence: everything it does from opening the product root on.
+    The public entry and this body differ only by the fence; the self-test's engine vectors drive this
+    body, which still keeps the adoption journal at JOURNAL_REL."""
     root_fd = _open_product_root(product_root)
     taken = []      # (machine_rel, payload) of every store lease THIS call took: only these are released
     broke = []      # non-empty once THIS call's stale-lock break claimed its leases; its recovery follows
@@ -3807,15 +3829,17 @@ def _init_store_scaffold(first_adoption, changelog_created):
     """(manifest path, {path: digest or None}) of the COMPLETE creation set of the coupled-init
     substrate's scaffold: a sha256:<hex> digest for every payload the D1 builders fix at plan time
     (the machine ledgers, with a zero-seeded counters only on a first adoption; the per-type
-    indexes; the root pointer; and CHANGELOG.md when the plan creates it), and None where the bytes
-    are not knowable HERE before the operation runs: init.toml, which embeds the operation id, time
-    and HEAD and so is never plan-bindable (the row carries the explicit UNBOUND_DIGEST marker and
-    the live bytes are verified against the operation's validated recorded plan instead); and each
-    declared initial view and a re-adoption's seeded counters, which ARE plan-bindable (the planner
-    derives them from the pinned sources and snapshot), carried in the row and verified after
-    publication. The view destinations come from the default manifest's own declared views, and the
-    machine manifest digest pins the default manifest (baseline record types only, every module
-    tier off)."""
+    indexes; the empty imported leaves while the bootstrap model's imported series is active;
+    .working/.gitignore when it grades at homes generation 2; the root pointer; and CHANGELOG.md
+    when the plan creates it; exactly the sources bootstrap_source_roster names), and None where
+    the bytes are not knowable HERE before the operation runs: init.toml, which embeds the
+    operation id, time and HEAD and so is never plan-bindable (the row carries the explicit
+    UNBOUND_DIGEST marker and the live bytes are verified against the operation's validated
+    recorded plan instead); and each declared initial view and a re-adoption's seeded counters,
+    which ARE plan-bindable (the planner derives them from the pinned sources and snapshot),
+    carried in the row and verified after publication. The view destinations come from the
+    default manifest's own declared views, and the machine manifest digest pins the default
+    manifest (baseline record types only, every module tier off)."""
     import _opf_check
     import _opf_init
     manifest = _opf_init.build_manifest()
@@ -3828,11 +3852,16 @@ def _init_store_scaffold(first_adoption, changelog_created):
         documents["counters.toml"] = _opf_init.build_counters()
     for tname in _opf_init.INDEX_TYPES:
         documents[tname + _opf_check.INDEX_SUFFIX] = _opf_init.build_index(tname)
+    model = _opf_init._manifest_model()
+    documents.update(_opf_init.imported_leaf_documents(model))
     machine = "{}/{}".format(store.WORKING_DIRNAME, store.DEFAULT_MACHINE_SUBDIR)
     scaffold = {"{}/{}".format(machine, n): "sha256:" + _sha256(t.encode("utf-8"))
                 for n, t in documents.items()}
     if not first_adoption:
         scaffold[init_op.COUNTERS_RELPATH] = None
+    if store.homes_generation(model) == 2:
+        scaffold[init_op.GITIGNORE_RELPATH] = "sha256:" + _sha256(
+            store.render_homes_gitignore().encode("utf-8"))
     scaffold[store.POINTER_REL] = "sha256:" + _sha256(
         emit_checked({"store": {"target": "dir:."}}).encode("utf-8"))
     if changelog_created:
@@ -3905,7 +3934,7 @@ def _init_store_sources_or_refuse(plan):
     exists (codex round 3, finding 3): a malformed row refuses with nothing written, never
     reads as non-occupying, never freezes a source, never authorizes a copy."""
     findings = []
-    short = schema._validate_plan_sources(plan["sources"], plan["run_id"], 1, findings)
+    short = schema._validate_plan_sources(plan["sources"], plan["run_id"], findings)
     if short is not None or findings:
         raise AdoptApplyError("the context plan's sources rows do not validate ({}); every "
                               "consumed sources-row field (path, digest, disposition, occupying, "
@@ -6408,12 +6437,10 @@ def planning_inventory_rel(run_id):
 
 
 def adoption_journal_fenced():
-    """True while this tooling activates homes generation 2 (spec 4.2), whose stores keep no OPF state
-    under .aiqt: the adoption journal at JOURNAL_REL is a homes-1 location, and its homes-2 home has
-    not landed. While fenced, run_apply and reconcile_report refuse with ADOPTION_FENCE before any
-    .aiqt access, and plan, approve and status do not read the journal. False at the shipped
-    constants (SUPPORTED_HOMES 1), so every adoption path is unchanged there."""
-    return store.SUPPORTED_HOMES >= 2
+    """Always True: homes 2 is the only generation this tooling implements (spec 4.2), and adoption on
+    it has not landed. run_apply and reconcile_report therefore refuse with ADOPTION_FENCE before they
+    read or write anything, and plan, approve and status do not read the journal at JOURNAL_REL."""
+    return True
 
 
 def require_clean_journal(product_root):
@@ -6869,13 +6896,36 @@ def capture_approval(product_root, plan_bytes, worksheet, actor, now):
     approval bytes, in the receipt's APPROVAL_REQUIRED shape, binding the plan's plan_digest and
     inventory_digest. `now` is the clock instant of the approval. The adopter holds those bytes until apply,
     which persists them with the plan in the run's evidence bundle; nothing is written here. On base 2.0.0
-    (adoption_journal_fenced) the adoption journal is not read, so it refuses with JOURNAL_UNREAD before any
-    of this: no approval issues over a journal state that is unknown."""
+    (adoption_journal_fenced) the adoption journal is not read: _capture_approval_journal_free composes the
+    same approval with the two journal reads left out, so approve runs there whatever the journal holds."""
     if adoption_journal_fenced():
-        raise AdoptApplyError(JOURNAL_UNREAD)
+        return _capture_approval_journal_free(product_root, plan_bytes, worksheet, actor, now)
+    return _capture_approval_engine(product_root, plan_bytes, worksheet, actor, now)
+
+
+def _capture_approval_engine(product_root, plan_bytes, worksheet, actor, now):
+    """capture_approval past the base 2.0.0 fence: everything it does from re-proving the frozen plan on.
+    The public entry and this body differ only by the fence; the self-test's engine vectors drive this
+    body, which still reads the adoption journal at JOURNAL_REL."""
     plan_doc = frozen_plan(plan_bytes)
     require_clean_journal(product_root)
     _require_unapplied(product_root, plan_doc["run_id"])
+    return _approval_over_live_tree(product_root, plan_doc, plan_bytes, worksheet, actor, now)
+
+
+def _capture_approval_journal_free(product_root, plan_bytes, worksheet, actor, now):
+    """capture_approval on base 2.0.0 (adoption_journal_fenced), write-free and without the adoption
+    journal: the engine body with its two journal reads, the reconcile-first gate and the replay admission,
+    left out. Leaving out the replay admission issues no apply: apply is fenced on base 2.0.0, and its
+    engine body re-proves the admission itself."""
+    return _approval_over_live_tree(product_root, frozen_plan(plan_bytes), plan_bytes, worksheet, actor, now)
+
+
+def _approval_over_live_tree(product_root, plan_doc, plan_bytes, worksheet, actor, now):
+    """The steps both approve bodies share past the journal reads: re-derive the re-proved plan over the
+    live tree and its observed revision (rederive_or_refuse), refuse an instant that is not an aware UTC
+    clock instant or an approval approval_findings refuses (one before the plan froze included), then
+    return the canonical approval bytes binding the plan's plan_digest and inventory_digest."""
     rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
     if (type(now) is not datetime.datetime or type(now.tzinfo) is not datetime.timezone
             or now.utcoffset() != datetime.timedelta(0)):
@@ -6935,6 +6985,13 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     ADOPTION_FENCE before any of this, so nothing is read or written."""
     if adoption_journal_fenced():
         raise AdoptApplyError(ADOPTION_FENCE)
+    return _run_apply_engine(product_root, plan_bytes, approval_bytes, worksheet)
+
+
+def _run_apply_engine(product_root, plan_bytes, approval_bytes, worksheet):
+    """run_apply past the base 2.0.0 fence: everything it does from re-proving the frozen plan on. The
+    public entry and this body differ only by the fence; the self-test's engine vectors drive this body,
+    which still keeps the adoption journal at JOURNAL_REL."""
     plan_doc = frozen_plan(plan_bytes)
     approval = _canonical_toml(approval_bytes, "the adoption approval")
     gate = apply_plan(plan_doc, approval)
@@ -7073,10 +7130,10 @@ def self_test(section=None):
     (a child dispatch of THIS engine, SIGKILLed inside the substrate's publication), under that same
     throwaway HOME, as are the file-ops crash matrix's --selftest-child interpreters of this module,
     which inherit that environment. `section` (default None, the whole module) names one entry of
-    _SELF_TEST_SECTIONS to run alone (_self_test_section); an unknown name is refused with exit 2."""
-    if section is not None and section not in _SELF_TEST_SECTIONS:
+    _self_test_sections() to run alone (_self_test_section); an unknown name is refused with exit 2."""
+    if section is not None and section not in _self_test_sections():
         print("OPF-ADOPT-APPLY SELF-TEST: unknown section {!r} (known: {})".format(
-            section, ", ".join(sorted(_SELF_TEST_SECTIONS))), file=sys.stderr)
+            section, ", ".join(sorted(_self_test_sections()))), file=sys.stderr)
         return 2
     try:
         _journal.require_containment()
@@ -8195,7 +8252,7 @@ def _self_test_checks():
               and not (root / store.WORKING_DIRNAME).exists()
               and store.resolve_store(root).status == store.NOT_ADOPTED)
         check("reconcile-absent-journal-no-outcomes-no-writes",
-              reconcile(root) == [] and not (root / store.WORKING_DIRNAME).exists())
+              _reconcile_engine(root) == [] and not (root / store.WORKING_DIRNAME).exists())
 
     # 6: the pre-commit abort. A failure at the final op (after both removals) rolls the one transaction
     # back in reverse order: each source is restored byte-identical before its archive copy is discarded.
@@ -11115,7 +11172,7 @@ def _self_test_checks():
         check("restore-fault-retains-lock", not lock_free(root))
         _journal.release_lock(_journal_root(root))   # the crashed owner, in this in-process simulation
         check("restore-fault-reconciles-to-prestate",
-              (rid, "rolled-back") in reconcile(root) and snapshot(root) == before and lock_free(root))
+              (rid, "rolled-back") in _reconcile_engine(root) and snapshot(root) == before and lock_free(root))
 
     # 6d: rollback ORDER is pinned, not only final equality: at the moment each archive copy's create-undo
     # discards it, its source has ALREADY been restored byte-identical (spec 14.2: restore, verify, then
@@ -11198,7 +11255,7 @@ def _self_test_checks():
                   faulted is not None and "rolled back" not in faulted and "reconcile" in faulted
                   and txn_state(root, rid) == "open" and not lock_free(root))
             _journal.release_lock(_journal_root(root))   # the crashed owner, in this in-process simulation
-            outcomes, _why = attempt(reconcile, root)
+            outcomes, _why = attempt(_reconcile_engine, root)
             check(tag + "-reconciles-to-exact-prestate",
                   outcomes is not None and (rid, "rolled-back") in outcomes
                   and (root / keep).read_bytes() == prior
@@ -11241,7 +11298,7 @@ def _self_test_checks():
               faulted is not None and "rolled back" not in faulted and "reconcile" in faulted
               and txn_state(root, rid) == "open" and not lock_free(root))
         _journal.release_lock(_journal_root(root))   # the crashed owner, in this in-process simulation
-        outcomes, _why = attempt(reconcile, root)
+        outcomes, _why = attempt(_reconcile_engine, root)
         check("verify-read-fault-reconciles-to-exact-prestate",
               outcomes is not None and (rid, "rolled-back") in outcomes
               and (root / keep).read_bytes() == prior
@@ -11747,7 +11804,7 @@ def _self_test_checks():
     def reconcile_without_store(root):
         with mock.patch.object(store, "resolve_store", side_effect=AssertionError("reconcile resolved")):
             try:
-                return reconcile(root)
+                return _reconcile_engine(root)
             except (AssertionError, AdoptApplyError):
                 return []
 
@@ -11778,7 +11835,7 @@ def _self_test_checks():
             return real_restore(jr_fd, txn_dir, rfd, op, op_index)
 
         with mock.patch.object(_journal, "_restore_preimage", watching_restore):
-            outcomes, _why = attempt(reconcile, root)
+            outcomes, _why = attempt(_reconcile_engine, root)
         check("reconcile-restores-sources-before-archive-discard",
               outcomes is not None and (rid, "rolled-back") in outcomes and not misordered
               and snapshot(root) == before and lock_free(root))
@@ -11855,7 +11912,7 @@ def _self_test_checks():
                          utc="2026-09-17T12:00:00Z")
         owner_row["pid-start"] = ""
         (_journal_root(root) / "lock").write_text(json.dumps(owner_row), encoding="utf-8")
-        outcomes = reconcile(root) if dead is not None else []
+        outcomes = _reconcile_engine(root) if dead is not None else []
         check("stale-lock-reconcile-reports-true-outcomes",
               dead is not None and txn_state(root, rid) == "rolled-back"
               and (rid, "rolled-back") in outcomes and snapshot(root) == before and lock_free(root))
@@ -11889,8 +11946,8 @@ def _self_test_checks():
         check("held-lock-refuses-transaction", "it is never seized" in
               (refusal(run_adopt_transaction, root, rid, compose_full(files)) or ""))
         check("held-lock-refuses-reconcile",
-              "possibly-live owner" in (refusal(reconcile, root) or ""))
-        check("held-lock-reconcile-finding-named", finding_of(reconcile, root) == RECONCILE_LOCK_HELD)
+              "possibly-live owner" in (refusal(_reconcile_engine, root) or ""))
+        check("held-lock-reconcile-finding-named", finding_of(_reconcile_engine, root) == RECONCILE_LOCK_HELD)
         _journal.release_lock(journal_root)
 
     # 8b (round 3): reconcile reads the journal lock beneath the HELD contained journal-root fd (the
@@ -11921,7 +11978,7 @@ def _self_test_checks():
             return fd
 
         with mock.patch.object(_journal, "open_journal_root_fd", _racing_open_jr):
-            _res, why = attempt(reconcile, root)
+            _res, why = attempt(_reconcile_engine, root)
         check("reconcile-lock-read-beneath-held-jr-fd",
               _jr_swap_fired != [] and why is not None and "possibly-live owner" in why)
 
@@ -11943,10 +12000,11 @@ def _self_test_checks():
         lease.write_bytes(b"held\n")
         was = tree_state(root)
         check("reconcile-store-lease-beside-open-txn-refused-named",
-              finding_of(reconcile, root) == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was
+              finding_of(_reconcile_engine, root) == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was
               and txn_state(root, rid) == "open" and lock_free(root))
         lease.unlink()
-        check("reconcile-lease-gone-rolls-back", (rid, "rolled-back") in (attempt(reconcile, root)[0] or []))
+        check("reconcile-lease-gone-rolls-back",
+              (rid, "rolled-back") in (attempt(_reconcile_engine, root)[0] or []))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
         txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
@@ -11955,7 +12013,8 @@ def _self_test_checks():
         frames.write_bytes(frames.read_bytes() * 2)
         was = tree_state(root)
         check("reconcile-unclassifiable-transaction-refused-named",
-              txn == rid and finding_of(reconcile, root) == RECONCILE_UNCLASSIFIABLE and tree_state(root) == was)
+              txn == rid and finding_of(_reconcile_engine, root) == RECONCILE_UNCLASSIFIABLE
+              and tree_state(root) == was)
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
         txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
@@ -11965,12 +12024,12 @@ def _self_test_checks():
         owner_row["pid-start"] = ""
         product_files = snapshot(root)
         (_journal_root(root) / "lock").write_text(json.dumps(owner_row), encoding="utf-8")
-        report, _why = attempt(reconcile_report, root)
+        report, _why = attempt(_reconcile_report_engine, root)
         check("reconcile-report-names-released-dead-lock",
               dead is not None and txn == rid and report is not None and report[1] is True
               and (rid, "terminal") in report[0] and lock_free(root) and snapshot(root) == product_files)
         was = tree_state(root)
-        report, _why = attempt(reconcile_report, root)
+        report, _why = attempt(_reconcile_report_engine, root)
         check("reconcile-nothing-to-recover-writes-nothing", report == ([], False, False) and tree_state(root) == was)
 
     # 8d (FIX-527-R1): reconcile EXCLUDES store writers across its recovery, never only observes them. It
@@ -12025,7 +12084,7 @@ def _self_test_checks():
             writer.append(writer_lease(root, ".working/toml"))
             return real_acquire_lock(journal_root, session_id)
         with mock.patch.object(_journal, "acquire_lock", writer_after_check):
-            got = finding_of(reconcile, root)
+            got = finding_of(_reconcile_engine, root)
         check("reconcile-writer-lease-after-check-excluded-named",
               writer != [] and got == RECONCILE_STORE_LEASE_HELD and txn_state(root, rid) == "open"
               and lock_free(root) and (root / lease_rel).read_bytes() == writer[0]
@@ -12055,7 +12114,7 @@ def _self_test_checks():
         with mock.patch.object(_opf_write_guard, "acquire_lease", acquire_lease_seen), \
                 mock.patch.object(_journal, "release_lock", release_lock_seen), \
                 mock.patch.object(_journal, "_kill_point", restore_seen):
-            report, _why = attempt(reconcile_report, root)
+            report, _why = attempt(_reconcile_report_engine, root)
         leases = [e for e in seen if e[0] == "lease"]
         restores = [e for e in seen if e[0] == "restore"]
         check("reconcile-holds-store-lease-journal-lock-first-until-unlock",
@@ -12078,7 +12137,7 @@ def _self_test_checks():
             writer.append(writer_lease(root, ".working/toml"))
             return real_claim_stale(*args, **kwargs)
         with mock.patch.object(_journal, "reconcile_and_claim_stale", writer_before_break):
-            got = finding_of(reconcile, root)
+            got = finding_of(_reconcile_engine, root)
         check("reconcile-stale-break-writer-lease-excluded-named",
               dead is not None and writer != [] and got == RECONCILE_STORE_LEASE_HELD
               and txn_state(root, rid) == "open" and (_journal_root(root) / "lock").read_bytes() == stale
@@ -12096,8 +12155,8 @@ def _self_test_checks():
             writer.append(writer_lease(root, ".working/data"))
             return real_acquire_lock(journal_root, session_id)
         with mock.patch.object(_journal, "acquire_lock", writer_other_subdir):
-            claimed = finding_of(reconcile, root)
-        present = finding_of(reconcile, root)
+            claimed = finding_of(_reconcile_engine, root)
+        present = finding_of(_reconcile_engine, root)
         check("reconcile-lease-at-every-machine-subdirectory-named",
               writer != [] and claimed == RECONCILE_STORE_LEASE_HELD and present == RECONCILE_STORE_LEASE_HELD
               and txn_state(root, rid) == "open" and lock_free(root) and other.read_bytes() == writer[0]
@@ -12109,7 +12168,7 @@ def _self_test_checks():
         (root / store.POINTER_REL).write_bytes(b"[store]\ntarget = \"dir:../elsewhere\"\n")
         was = tree_state(root)
         check("reconcile-store-pointer-beside-open-txn-refused-named",
-              finding_of(reconcile, root) == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was
+              finding_of(_reconcile_engine, root) == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was
               and txn_state(root, rid) == "open")
 
     # recovery-failed after recovery began: PARTIAL as the journal records it (the archive copy already
@@ -12125,11 +12184,11 @@ def _self_test_checks():
                 fault_at.append(name)
                 raise OSError(5, "injected EIO at " + name)
         with mock.patch.object(_journal, "_kill_point", restore_fault):
-            got = finding_of(reconcile, root)
+            got = finding_of(_reconcile_engine, root)
         left_partial = (fault_at != [] and got == RECONCILE_FAILED and txn_state(root, rid) == "open"
                         and not discarded.exists() and lock_free(root) and not (root / lease_rel).exists()
                         and snapshot(root) != before)
-        outcomes, _why = attempt(reconcile, root)
+        outcomes, _why = attempt(_reconcile_engine, root)
         check("reconcile-recovery-failed-partial-then-resumed",
               left_partial and outcomes is not None and (rid, "rolled-back") in outcomes
               and snapshot(root) == before, (fault_at, got, outcomes))
@@ -12145,9 +12204,9 @@ def _self_test_checks():
         def fsync_fault(path):
             raise OSError(5, "injected EIO after the lock create")
         with mock.patch.object(_journal, "acquire_lock", eacces):
-            no_create = finding_of(reconcile, root)
+            no_create = finding_of(_reconcile_engine, root)
         with mock.patch.object(_journal, "_fsync_path_dir", fsync_fault):
-            created = finding_of(reconcile, root)
+            created = finding_of(_reconcile_engine, root)
         check("reconcile-pre-lock-faults-named-no-lock-left",
               no_create == RECONCILE_PRELOCK_FAULT and created == RECONCILE_PRELOCK_FAULT and lock_free(root)
               and txn_state(root, rid) == "open" and tree_state(root) == was, (no_create, created))
@@ -12167,7 +12226,7 @@ def _self_test_checks():
             planted.append(tree_state(root))
             return real_claim_stale(*args, **kwargs)
         with mock.patch.object(_journal, "reconcile_and_claim_stale", second_name_before_break):
-            got = finding_of(reconcile, root)
+            got = finding_of(_reconcile_engine, root)
         check("reconcile-stale-arbitration-refusal-named-pre-lock",
               dead is not None and planted != [] and got == RECONCILE_PRELOCK_FAULT
               and tree_state(root) == planted[0] and txn_state(root, rid) == "open", got)
@@ -12182,10 +12241,10 @@ def _self_test_checks():
         def second_after_first(journal_root, session_id):
             if not nested:
                 with mock.patch.object(_journal, "acquire_lock", real_acquire_lock):
-                    nested.append(reconcile_report(root))
+                    nested.append(_reconcile_report_engine(root))
             return real_acquire_lock(journal_root, session_id)
         with mock.patch.object(_journal, "acquire_lock", second_after_first):
-            report, _why = attempt(reconcile_report, root)
+            report, _why = attempt(_reconcile_report_engine, root)
         check("reconcile-race-second-run-reports-lock-taken-nothing-recovered",
               nested != [] and (rid, "rolled-back") in nested[0][0]
               and report == ([(rid, "terminal")], False, True) and lock_free(root), (nested, report))
@@ -12198,10 +12257,10 @@ def _self_test_checks():
         def peer_breaks_first(*args, **kwargs):
             if not nested:
                 with mock.patch.object(_journal, "reconcile_and_claim_stale", real_claim_stale):
-                    nested.append(reconcile_report(root))
+                    nested.append(_reconcile_report_engine(root))
             return real_claim_stale(*args, **kwargs)
         with mock.patch.object(_journal, "reconcile_and_claim_stale", peer_breaks_first):
-            report, _why = attempt(reconcile_report, root)
+            report, _why = attempt(_reconcile_report_engine, root)
         check("reconcile-race-peer-broke-stale-lock-not-claimed",
               dead is not None and nested != [] and nested[0][1] is True
               and report == ([(rid, "terminal")], False, True) and lock_free(root), (nested, report))
@@ -12212,7 +12271,7 @@ def _self_test_checks():
         os.rename(_journal_root(root) / rid, _journal_root(root) / (rid + "." + INIT_STORE_PHASE))
         (root / lease_rel).write_bytes(b"held\n")
         was = tree_state(root)
-        got = finding_of(reconcile, root)
+        got = finding_of(_reconcile_engine, root)
         check("reconcile-initstore-name-alone-keeps-lease-rule",
               got == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was, got)
 
@@ -12223,7 +12282,7 @@ def _self_test_checks():
         def release_fails(root_fd, machine_rel, payload, verb):
             raise _opf_write_guard.WriteGuardError("injected release failure")
         with mock.patch.object(_opf_write_guard, "release_lease", release_fails):
-            got = finding_of(reconcile, root)
+            got = finding_of(_reconcile_engine, root)
         check("reconcile-own-lease-release-failure-named",
               got == RECONCILE_LEASE_RELEASE_FAILED and txn_state(root, rid) == "rolled-back"
               and (root / lease_rel).exists() and lock_free(root), got)
@@ -12238,7 +12297,7 @@ def _self_test_checks():
                 (root / lease_rel).unlink()
                 peer.append(writer_lease(root, ".working/toml"))
         with mock.patch.object(_journal, "_kill_point", peer_replaces):
-            got = finding_of(reconcile, root)
+            got = finding_of(_reconcile_engine, root)
         check("reconcile-releases-only-its-own-lease",
               peer != [] and got == RECONCILE_LEASE_RELEASE_FAILED and (root / lease_rel).read_bytes() == peer[0]
               and lock_free(root), got)
@@ -12288,7 +12347,7 @@ def _self_test_checks():
         root, _before = interrupted_mid(temp)
         (_journal_root(root) / "stray").write_bytes(b"")
         was = tree_state(root)
-        got, why = refusal_of(reconcile, root)
+        got, why = refusal_of(_reconcile_engine, root)
         check("reconcile-strict-stray-entry-refused-named",
               got == RECONCILE_UNCLASSIFIABLE and "'stray'" in (why or "")
               and "neither a transaction directory" in (why or "") and tree_state(root) == was
@@ -12298,7 +12357,7 @@ def _self_test_checks():
         txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
         (_journal_root(root) / "stray").write_bytes(b"")
         was = tree_state(root)
-        got, why = refusal_of(reconcile_report, root)
+        got, why = refusal_of(_reconcile_report_engine, root)
         check("reconcile-strict-stray-entry-never-reads-nothing-to-reconcile",
               txn == rid and got == RECONCILE_UNCLASSIFIABLE and tree_state(root) == was, why)
 
@@ -12312,7 +12371,7 @@ def _self_test_checks():
         arb.write_bytes(b"")
         os.link(arb, root / "arbitration-second-name")
         was = tree_state(root)
-        got, why = refusal_of(reconcile, root)
+        got, why = refusal_of(_reconcile_engine, root)
         check("reconcile-strict-hardlinked-arbitration-refused-at-listing",
               dead is not None and got == RECONCILE_UNCLASSIFIABLE
               and "'lock.break' has 2 hard links" in (why or "") and tree_state(root) == was
@@ -12339,7 +12398,7 @@ def _self_test_checks():
             aside = _journal_root(root).parent.relative_to(root).as_posix() + "/aside/"
             return {rel: data for rel, data in snapshot(root).items() if not rel.startswith(aside)}
         with mock.patch.object(_journal, "_journal_txn_dirs", swap_after_listing):
-            got, why = refusal_of(reconcile, root)
+            got, why = refusal_of(_reconcile_engine, root)
         check("reconcile-swap-after-listing-refused-named",
               swapped != [] and got == RECONCILE_UNCLASSIFIABLE and repr(rid) in (why or "")
               and "renamed or replaced after this run listed it" in (why or "") and outside_aside(root) == was
@@ -12357,7 +12416,7 @@ def _self_test_checks():
                 swapped.append(swap_aside(root))
             return real_recover(jr_fd, txn_dir, root_fd)
         with mock.patch.object(_journal, "recover", swap_then_recover):
-            got, why = refusal_of(reconcile_report, root)
+            got, why = refusal_of(_reconcile_report_engine, root)
         check("reconcile-swap-during-recovery-never-reported-recovered",
               swapped != [] and got == RECONCILE_FAILED and repr(rid) in (why or "")
               and "never reported recovered" in (why or "") and state_at(swapped[0]) == "open"
@@ -12383,7 +12442,7 @@ def _self_test_checks():
             return real_read_frames(jr_fd, txn_dir, txn_fd=txn_fd)
         with mock.patch.object(_journal, "acquire_lock", lock_seen), \
                 mock.patch.object(_journal, "read_frames", read_seen):
-            got = finding_of(reconcile, root)
+            got = finding_of(_reconcile_engine, root)
         prelock = [through_held for after_lock, through_held in reads if not after_lock]
         check("reconcile-prelock-reads-through-held-descriptors",
               len(prelock) >= 3 and all(prelock), (got, reads))
@@ -12410,7 +12469,7 @@ def _self_test_checks():
             return out
         with mock.patch.object(_journal, "open_journal_root_fd", open_jr_recorded), \
                 mock.patch.object(_journal, "_journal_txn_dirs", txn_dirs_recorded):
-            got, _why = refusal_of(reconcile, root)
+            got, _why = refusal_of(_reconcile_engine, root)
         return got, rec, [fd for fd, _ident in _held_open(rec)], swapped
 
     closed = []
@@ -12433,7 +12492,7 @@ def _self_test_checks():
     # `opf adopt reconcile` prints as cannot evaluate; red against a refusal that names a finding for it.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         missing = Path(temp).resolve() / "missing"
-        got, why = refusal_of(reconcile, missing)
+        got, why = refusal_of(_reconcile_engine, missing)
         check("reconcile-unopenable-root-cannot-evaluate-not-a-finding",
               got == "unnamed" and "cannot open product root" in (why or "") and not missing.exists(), why)
     # 8f: journal state at the reserved home fails closed wherever it is read. A symlinked `.working/journals`
@@ -12450,7 +12509,7 @@ def _self_test_checks():
             os.close(root_fd)
 
     def journal_refusals(root):
-        return (journal_state_at(root)[1], refusal(require_clean_journal, root), refusal(reconcile, root),
+        return (journal_state_at(root)[1], refusal(require_clean_journal, root), refusal(_reconcile_engine, root),
                 refusal(run_adopt_transaction, root, rid, lambda ops: None))
 
     def symlinked_journals(root):
@@ -12499,7 +12558,7 @@ def _self_test_checks():
         err = refusal(run_adopt_transaction, root, rid, compose_refused)
         check("reserved-home-rogue-file-outside-coverage",
               state == (None, []) and refusal(require_clean_journal, root) is None
-              and reconcile(root) == [] and "injected compose refusal" in (err or "")
+              and _reconcile_engine(root) == [] and "injected compose refusal" in (err or "")
               and tree_state(root) == before, observed=(state, err))
 
     # 9: live re-observation over a throwaway fixture.
@@ -12677,7 +12736,7 @@ def _self_test_checks():
     move = pres_row("legacy/MOVE.md", "move", False, preservation=store.moved_dest("legacy/MOVE.md"))
     retire = pres_row("legacy/RETIRE.md", "retire", False)
     shape = []
-    schema._validate_plan_sources([migrate, occupying, keep, move, retire], rid, 1, shape)
+    schema._validate_plan_sources([migrate, occupying, keep, move, retire], rid, shape)
     check("preservation-vector-rows-plan-valid", shape == [])
     todo, todo_copy = ".working/TODO.md", archive_rel(rid, ".working/TODO.md")
     old_copy, retire_copy = archive_rel(rid, "legacy/OLD.md"), archive_rel(rid, "legacy/RETIRE.md")
@@ -13136,7 +13195,7 @@ def _self_test_checks():
 
         # approve: write-free, the receipt's approval shape, binding both plan digests.
         before = _snapshot(root)
-        approval_bytes, err = attempt(capture_approval, root, plan_bytes, sheet, "adopter", now)
+        approval_bytes, err = attempt(_capture_approval_engine, root, plan_bytes, sheet, "adopter", now)
         check("driver-approve-captures", isinstance(approval_bytes, bytes) and err is None)
         approval_bytes = approval_bytes or b""
         approval_doc = tomllib.loads(approval_bytes.decode("utf-8")) if approval_bytes else dict()
@@ -13171,7 +13230,7 @@ def _self_test_checks():
         fake = planner.AdoptResult(VALID, plan=plan_bytes, inventory=forged)
         with mock.patch.object(planner, "plan", lambda *a, **k: fake):
             err_direct = refusal(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
-            err_apply = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err_apply = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("rederive-refuses-inventory-not-sealed-to-plan",
               "is not the one the plan binds" in (err_direct or "")
               and "is not the one the plan binds" in (err_apply or "") and _snapshot(root) == before)
@@ -13183,32 +13242,32 @@ def _self_test_checks():
         fake = planner.AdoptResult(VALID, plan=plan_bytes, inventory=unsealed)
         with mock.patch.object(planner, "plan", lambda *a, **k: fake):
             err_direct = refusal(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
-            err_approve = refusal(capture_approval, root, plan_bytes, sheet, "adopter", now)
-            err_apply = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err_approve = refusal(_capture_approval_engine, root, plan_bytes, sheet, "adopter", now)
+            err_apply = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("rederive-refuses-inventory-not-self-sealed",
               "does not seal its own bytes" in (err_direct or "")
               and "does not seal its own bytes" in (err_approve or "")
               and "does not seal its own bytes" in (err_apply or "") and _snapshot(root) == before)
         check("driver-approve-multiline-actor-refused", "actor" in
-              (refusal(capture_approval, root, plan_bytes, sheet, "adopter\nsecond", now) or ""))
+              (refusal(_capture_approval_engine, root, plan_bytes, sheet, "adopter\nsecond", now) or ""))
         # the approval follows its plan: an approval instant before the plan's created_at is refused.
         check("driver-approve-before-plan-refused", "precedes" in
-              (refusal(capture_approval, root, plan_bytes, sheet, "adopter",
+              (refusal(_capture_approval_engine, root, plan_bytes, sheet, "adopter",
                        now - datetime.timedelta(days=1)) or ""))
         # revision-only drift: an EMPTY commit advances HEAD with every inventoried byte unchanged, so only
         # the observed revision can see it; approve and apply both refuse into a fresh plan.
         moved = _selftest_git_commit(root)
         check("driver-fixture-revision-moved", moved is not None and moved != head and _snapshot(root) == before)
         check("driver-approve-revision-drift-refused", "revision moved" in
-              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
+              (refusal(_capture_approval_engine, root, plan_bytes, sheet, "adopter", now) or ""))
         check("driver-apply-revision-drift-refused", "revision moved" in
-              (refusal(run_apply, root, plan_bytes, approval_bytes, sheet) or ""))
+              (refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet) or ""))
         check("driver-fixture-revision-restored", _selftest_git_set_head(root, head)
               and attempt(observe_revision, root)[0] == head)
         # an unobservable revision (no repository at the root) refuses, never assumed fresh.
         os.rename(root / ".git", root / "git-aside")
         check("driver-approve-unobservable-revision-refused", "revision" in
-              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
+              (refusal(_capture_approval_engine, root, plan_bytes, sheet, "adopter", now) or ""))
         os.rename(root / "git-aside", root / ".git")
         # git's own diagnosis (here a repository another user owns) reaches the refusal, printable and bounded.
         said = b"fatal: detected dubious ownership in repository at '/x'\n\x1b[31m" + b"y" * 2000
@@ -13220,13 +13279,13 @@ def _self_test_checks():
         # stale observation: a source's bytes change after the plan froze -> refuse into a fresh plan.
         (root / "legacy.md").write_bytes(b"edited after planning\n")
         check("driver-approve-stale-observation-refused", "fresh plan" in
-              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
+              (refusal(_capture_approval_engine, root, plan_bytes, sheet, "adopter", now) or ""))
         (root / "legacy.md").write_bytes(b"legacy rules\n")
         # a changed worksheet (an attributed decision revised) freezes a different plan -> refused.
         revised = _copy.deepcopy(sheet)
         revised["decisions"][1]["actor"] = "another"
         check("driver-approve-revised-worksheet-refused", "different plan" in
-              (refusal(capture_approval, root, plan_bytes, revised, "adopter", now) or ""))
+              (refusal(_capture_approval_engine, root, plan_bytes, revised, "adopter", now) or ""))
         # reconcile-first: an interrupted adoption transaction refuses the stage (the planner never reads
         # the adoption journal, so without this gate approve would capture over it).
         (root / JOURNAL_REL / "txn").mkdir(parents=True)
@@ -13236,7 +13295,24 @@ def _self_test_checks():
         finally:
             os.close(jfd)
         check("driver-approve-open-journal-refused", "must be reconciled" in
-              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
+              (refusal(_capture_approval_engine, root, plan_bytes, sheet, "adopter", now) or ""))
+        # on base 2.0.0 approve reads no journal state: over that same open transaction it issues the
+        # approval binding the plan's two digests, writing nothing, where the engine body refuses into
+        # reconcile-first (red when it refuses with JOURNAL_UNREAD, or runs the engine body's reconcile-first
+        # gate). The journal lies beneath `.working`, which investigation observes, so the plan both bodies
+        # take is frozen over the tree that holds the open transaction.
+        open_journal = _snapshot(root)
+        sheet_o = _sheet(root, head)
+        plan_bytes_o = _freeze(root, sheet_o)[0] or b""
+        plan_doc_o = tomllib.loads(plan_bytes_o.decode("utf-8")) if plan_bytes_o else dict()
+        approval_o, err_o = attempt(capture_approval, root, plan_bytes_o, sheet_o, "adopter", now)
+        approval_doc_o = tomllib.loads(approval_o.decode("utf-8")) if isinstance(approval_o, bytes) else dict()
+        check("driver-approve-journal-free-over-open-journal", plan_bytes_o != b"" and err_o is None
+              and approval_doc_o.get("plan_digest") == plan_doc_o.get("plan_digest")
+              and approval_doc_o.get("inventory_digest") == plan_doc_o.get("inventory_digest")
+              and "must be reconciled" in (refusal(_capture_approval_engine, root, plan_bytes_o, sheet_o,
+                                                   "adopter", now) or "")
+              and _snapshot(root) == open_journal, observed=err_o)
         check("driver-plan-stage-open-journal-refused", "must be reconciled" in
               (refusal(require_clean_journal, root) or ""))
         _clear_journal(root)
@@ -13247,7 +13323,7 @@ def _self_test_checks():
         # the refusing handler for this vector and the refusal names it among the plan ops (red against
         # run_apply's plan-op gate removed, which the receipt-stage gate below would otherwise hide).
         with mock.patch.dict(OP_HANDLERS, {"retire-file": _not_yet_executable}):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-unlanded-ops-refused", "not yet executable" in (err or "")
               and "plan op(s) " in (err or "") and "retire-file" in (err or "") and _snapshot(root) == before,
               observed=err)
@@ -13258,19 +13334,19 @@ def _self_test_checks():
         # retire row's gating is the retirement partition (the driver-retire-partition vectors below) and the
         # retirement stage after the green completion check, which no adoption interface opens in this
         # build. An approval for ANOTHER plan of the same tree refuses on the binding first.
-        err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-retire-gated-receipt-unlanded-refused", "not yet executable" in (err or "")
               and "mandatory receipt stage" in (err or "") and "retire-file" not in (err or "")
               and _bytes(root / "legacy.md") == b"legacy rules\n", observed=err)
         check("driver-apply-unlanded-writes-nothing", _snapshot(root) == before)
         other_plan = _freeze(root, sheet, nonce="fedcba9876543210")[0] or b""
         check("driver-apply-approval-binding-flip-refused", "does not bind" in
-              (refusal(run_apply, root, other_plan, approval_bytes, sheet) or ""))
+              (refusal(_run_apply_engine, root, other_plan, approval_bytes, sheet) or ""))
         check("driver-apply-edited-approval-refused", "canonical emitted form" in
-              (refusal(run_apply, root, plan_bytes, approval_bytes + b"# also\n", sheet) or ""))
+              (refusal(_run_apply_engine, root, plan_bytes, approval_bytes + b"# also\n", sheet) or ""))
         early = emit_checked(dict(approval_doc, approved_at="1999-01-01T00:00:00Z")).encode("utf-8")
         check("driver-apply-approval-before-plan-refused", "precedes" in
-              (refusal(run_apply, root, plan_bytes, early, sheet) or ""))
+              (refusal(_run_apply_engine, root, plan_bytes, early, sheet) or ""))
         check("driver-apply-refusals-write-nothing", _snapshot(root) == before)
 
         # landed ops (patched handlers that compose through the context table).
@@ -13343,12 +13419,12 @@ def _self_test_checks():
         # unlanded (red against a driver that enumerates plan rows only).
         rows_named = [row["op"] for row in plan_doc["ops"]]
         with landed(composing, stage=None):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-receipt-stage-unlanded-refused", "record-adoption" not in rows_named
               and "mandatory receipt stage" in (err or "") and "plan op(s)" not in (err or "") and not seen
               and _snapshot(root) == before)
         with landed(over_eager):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-retire-partition-flip-refused", "stays frozen" in (err or "") and "legacy.md" in (err or ""))
         # the partition refusal lands in the write-free preflight: the WHOLE tree is unchanged, no journal
         # directory included (red against a composition that first runs under the prepared journal).
@@ -13358,20 +13434,20 @@ def _self_test_checks():
         # whose refusal the handler swallows, and a transaction of the handler's own each refuse the apply
         # with the whole tree unchanged (each red against a driver that trusts its handlers).
         with landed(rogue_write):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-handler-direct-write-refused", "direct effect" in (err or "")
               and not (root / "rogue.txt").exists() and _snapshot(root) == before)
         with landed(swallowing):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-handler-swallowed-refusal-refused", "continued past the refusal" in (err or "")
               and not (root / "rogue-dir").exists() and _snapshot(root) == before)
         with landed(own_transaction):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-handler-own-transaction-refused", "nested adoption transaction" in (err or "")
               and _snapshot(root) == before)
         # a handler handing its write to a thread it starts (the guard arms per thread) refuses at the start.
         with landed(threaded):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-handler-thread-start-refused", "direct effect" in (err or "")
               and not (root / "via-thread").exists() and _snapshot(root) == before)
         # a refusal of the SECOND composition, under the journal lock after the preflight passed (a stateful
@@ -13379,7 +13455,7 @@ def _self_test_checks():
         # journal directories the run created are removed again (red against a driver that leaves them).
         del passes[:]
         with landed(composing, stage=second_pass_refusing):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-second-pass-refusal-tree-untouched", "second-pass refusal" in (err or "")
               and len(passes) == 2 and _snapshot(root) == before)
         # only the directories the run created: a journal ancestor that predates the run stays in place
@@ -13389,11 +13465,12 @@ def _self_test_checks():
         (root / JOURNAL_REL).parent.mkdir(parents=True)
         sheet_a = _sheet(root, head)
         plan_bytes_a = _freeze(root, sheet_a)[0] or b""
-        approval_bytes_a, _err_a = attempt(capture_approval, root, plan_bytes_a, sheet_a, "adopter", now)
+        approval_bytes_a, _err_a = attempt(_capture_approval_engine, root, plan_bytes_a, sheet_a, "adopter",
+                                           now)
         ancestor = _snapshot(root)
         del passes[:]
         with landed(composing, stage=second_pass_refusing):
-            err = refusal(run_apply, root, plan_bytes_a, approval_bytes_a or b"", sheet_a)
+            err = refusal(_run_apply_engine, root, plan_bytes_a, approval_bytes_a or b"", sheet_a)
         check("driver-apply-second-pass-refusal-keeps-prior-dirs", "second-pass refusal" in (err or "")
               and len(passes) == 2 and _snapshot(root) == ancestor)
         _clear_journal(root)
@@ -13404,7 +13481,7 @@ def _self_test_checks():
             os.mkdir(journal_rel.split("/")[0], dir_fd=root_fd)
             raise OSError("an injected journal preparation fault")
         with landed(composing), mock.patch.object(_journal, "ensure_journal_dirs", partial_journal):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-partial-journal-refusal-tree-untouched", "cannot prepare" in (err or "")
               and _snapshot(root) == before)
         _clear_journal(root)
@@ -13425,7 +13502,7 @@ def _self_test_checks():
             return real_open_parent(root_fd, relpath)
         with landed(composing), mock.patch.object(_journal, "ensure_journal_dirs", sealed_journal), \
                 mock.patch.object(_journal, "_open_parent", sealed_walk):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-sealed-journal-ancestor-removed", sealed_dirs and "cannot prepare" in (err or "")
               and "INCOMPLETE" not in (err or "") and _snapshot(root) == before)
         if os.path.lexists(root / store.WORKING_DIRNAME):
@@ -13441,7 +13518,7 @@ def _self_test_checks():
             (root / journal_rel / "stray").write_bytes(b"populated meanwhile\n")
             raise OSError("an injected journal preparation fault")
         with landed(composing), mock.patch.object(_journal, "ensure_journal_dirs", populated_journal):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         rels = ["/".join(JOURNAL_REL.split("/")[:i + 1]) for i in range(len(JOURNAL_REL.split("/")))]
         check("driver-apply-incomplete-cleanup-named", "cannot prepare" in (err or "")
               and "cleanup is INCOMPLETE" in (err or "") and "nothing written" not in (err or "")
@@ -13464,7 +13541,7 @@ def _self_test_checks():
             raise OSError("an injected fsync fault")
         with landed(composing), mock.patch.object(_journal, "ensure_journal_dirs", partial_journal), \
                 mock.patch.object(os, "fsync", fsync_failing):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-cleanup-fsync-failure-named", "cannot prepare" in (err or "")
               and "may not be durable" in (err or "") and "cleanup is UNCONFIRMED" in (err or "")
               and "nothing written" not in (err or "") and "INCOMPLETE" not in (err or "")
@@ -13476,7 +13553,7 @@ def _self_test_checks():
         def vanishing_lock(journal_root, session_id):
             raise FileNotFoundError(2, "No such file or directory", str(journal_root / "lock"))
         with landed(composing), mock.patch.object(_journal, "acquire_lock", vanishing_lock):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-lock-oserror-named-refusal", "cannot take the adoption journal lock" in (err or "")
               and "left no journal lock" in (err or "") and _snapshot(root) == before)
         _clear_journal(root)
@@ -13492,7 +13569,7 @@ def _self_test_checks():
         sheet_j = _sheet(root, head)
         plan_bytes_j = _freeze(root, sheet_j)[0] or b""
         check("driver-fixture-plan-frozen-over-journal", plan_bytes_j != b"")
-        approval_bytes_j, err_j = attempt(capture_approval, root, plan_bytes_j, sheet_j, "adopter", now)
+        approval_bytes_j, err_j = attempt(_capture_approval_engine, root, plan_bytes_j, sheet_j, "adopter", now)
         check("driver-approve-captures-over-journal",
               isinstance(approval_bytes_j, bytes) and err_j is None)
         approval_bytes_j = approval_bytes_j or b""
@@ -13510,30 +13587,30 @@ def _self_test_checks():
                 return real(*args)
             return faulty
         with landed(composing), mock.patch.object(_journal, "_fsync_path_dir", failing(real_fsync_dir, 1)):
-            err = refusal(run_apply, root, plan_bytes_j, approval_bytes_j, sheet_j)
+            err = refusal(_run_apply_engine, root, plan_bytes_j, approval_bytes_j, sheet_j)
         # its lock released durably and the journal listing as found, "nothing written" is the DERIVED claim
         check("driver-apply-lock-sync-failure-released", "cannot take the adoption journal lock" in (err or "")
               and "WAS created, then released again" in (err or "") and "may not be durable" not in (err or "")
               and (err or "").endswith("; nothing written (fail-closed)") and _snapshot(root) == prior)
         del faults[:]
         with landed(composing), mock.patch.object(_journal, "_fsync_path_dir", failing(real_fsync_dir, 2)):
-            err = refusal(run_apply, root, plan_bytes_j, approval_bytes_j, sheet_j)
+            err = refusal(_run_apply_engine, root, plan_bytes_j, approval_bytes_j, sheet_j)
         check("driver-apply-lock-release-unconfirmed-named", "released again, but the release may not be "
               "durable" in (err or "") and "nothing written" not in (err or "") and _snapshot(root) == prior)
         del faults[:]
         with landed(composing), mock.patch.object(_journal, "_fsync_path_dir", failing(real_fsync_dir, 1)), \
                 mock.patch.object(_journal, "release_lock", lambda journal_root: None):
-            err = refusal(run_apply, root, plan_bytes_j, approval_bytes_j, sheet_j)
+            err = refusal(_run_apply_engine, root, plan_bytes_j, approval_bytes_j, sheet_j)
         stayed = lock_path.is_file()
         with landed(composing):
-            later = refusal(run_apply, root, plan_bytes_j, approval_bytes_j, sheet_j)
+            later = refusal(_run_apply_engine, root, plan_bytes_j, approval_bytes_j, sheet_j)
         check("driver-apply-lock-left-named", "WAS created and STAYS" in (err or "")
               and "nothing written" not in (err or "") and stayed and "lock is held" in (later or ""))
         if os.path.lexists(lock_path):
             os.unlink(lock_path)
         del faults[:]
         with landed(composing), mock.patch.object(_journal, "_write_all", failing(real_write_all, 1)):
-            err = refusal(run_apply, root, plan_bytes_j, approval_bytes_j, sheet_j)
+            err = refusal(_run_apply_engine, root, plan_bytes_j, approval_bytes_j, sheet_j)
         check("driver-apply-lock-unreadable-named", "present but unreadable" in (err or "")
               and "no sanctioned path clears it" in (err or "") and "lock STAYS" in (err or "")
               and "nothing written" not in (err or "") and lock_path.is_file())
@@ -13548,7 +13625,7 @@ def _self_test_checks():
             real_acquire(journal_root, "opf-adopt-selftest-thread")
             raise OSError(24, "Too many open files")
         with landed(composing), mock.patch.object(_journal, "acquire_lock", peer_thread_first):
-            err = refusal(run_apply, root, plan_bytes_j, approval_bytes_j, sheet_j)
+            err = refusal(_run_apply_engine, root, plan_bytes_j, approval_bytes_j, sheet_j)
         check("driver-apply-lock-not-created-untouched", "left no journal lock" in (err or "")
               and lock_path.is_file())
         if os.path.lexists(lock_path):
@@ -13564,7 +13641,7 @@ def _self_test_checks():
             raise OSError("an injected lock release fault")
         with landed(composing), mock.patch.object(_journal, "run_transaction", unopened), \
                 mock.patch.object(_journal, "release_lock", release_failing):
-            err = refusal(run_apply, root, plan_bytes_j, approval_bytes_j, sheet_j)
+            err = refusal(_run_apply_engine, root, plan_bytes_j, approval_bytes_j, sheet_j)
         check("driver-apply-release-failure-named", "refused before it opened" in (err or "")
               and "lock STAYS" in (err or "") and "nothing written" not in (err or "") and lock_path.is_file())
         if os.path.lexists(lock_path):
@@ -13577,7 +13654,7 @@ def _self_test_checks():
             os.symlink("elsewhere", str(journal_root / "lock"))
         with landed(composing), mock.patch.object(_journal, "run_transaction", unopened), \
                 mock.patch.object(_journal, "release_lock", release_to_symlink):
-            err = refusal(run_apply, root, plan_bytes_j, approval_bytes_j, sheet_j)
+            err = refusal(_run_apply_engine, root, plan_bytes_j, approval_bytes_j, sheet_j)
         check("driver-apply-release-unreadable-named", "present but unreadable" in (err or "")
               and "unfinished write" not in (err or "") and "nothing written" not in (err or "")
               and "{}/lock (symlink)".format(JOURNAL_REL) in (err or ""))
@@ -13592,7 +13669,7 @@ def _self_test_checks():
             return real_fsync_dir(path)
         with landed(composing), mock.patch.object(_journal, "run_transaction", unopened), \
                 mock.patch.object(_journal, "_fsync_path_dir", second_sync_failing):
-            err = refusal(run_apply, root, plan_bytes_j, approval_bytes_j, sheet_j)
+            err = refusal(_run_apply_engine, root, plan_bytes_j, approval_bytes_j, sheet_j)
         check("driver-apply-release-unconfirmed-named", "refused before it opened" in (err or "")
               and "released, but the release may not be durable" in (err or "")
               and "nothing written" not in (err or "") and _snapshot(root) == prior)
@@ -13600,11 +13677,11 @@ def _self_test_checks():
         del seen[:]
         (root / "keep.md").write_bytes(b"kept, then edited\n")
         with landed(composing):
-            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            err = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-drift-after-approval-refused", "fresh plan" in (err or "") and not seen)
         (root / "keep.md").write_bytes(b"kept\n")
         with landed(composing):
-            txn, err = attempt(run_apply, root, plan_bytes, approval_bytes, sheet)
+            txn, err = attempt(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-commits-with-landed-ops", txn == frid and err is None)
         # every row in plan order, then the receipt stage, in the write-free preflight and again in the
         # transaction, each in the apply stage with the plan, approval and product root.
@@ -13631,12 +13708,12 @@ def _self_test_checks():
         applied = _snapshot(root)
         del seen[:]
         with landed(composing):
-            again = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+            again = refusal(_run_apply_engine, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-one-approval-one-apply", "already has its transaction" in (again or "")
               and not seen and _snapshot(root) == applied)
         # and approve refuses an applied run on the same rule, ahead of freshness.
         check("driver-approve-after-apply-refused", "already has its transaction" in
-              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or "")
+              (refusal(_capture_approval_engine, root, plan_bytes, sheet, "adopter", now) or "")
               and _snapshot(root) == applied)
 
     # 11b: the driver's typed contexts and its one preservation pass (B2, B3), over a planner-frozen fixture
@@ -13685,7 +13762,7 @@ def _self_test_checks():
         typed_doc = tomllib.loads(typed_plan.decode("utf-8")) if typed_plan else dict(
             run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
         trid = typed_doc["run_id"]
-        typed_approval = attempt(capture_approval, root, typed_plan, sheet, "adopter", now)[0] or b""
+        typed_approval = attempt(_capture_approval_engine, root, typed_plan, sheet, "adopter", now)[0] or b""
         typed_ops = [row["op"] for row in typed_doc["ops"]]
         # PRECONDITION: the fixture froze and was approved, carrying the rows the checks below drive.
         check("driver-typed-fixture-frozen-and-approved", bool(typed_plan) and bool(typed_approval)
@@ -13743,7 +13820,7 @@ def _self_test_checks():
         # reads observations this driver does not gather, so apply names that value and writes nothing (red
         # against a run_apply without its _unsupplied gate, which composes the row over an absent value).
         with typed_driver({"init-store": scaffold, "plant-governance": benign}):
-            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+            err = refusal(_run_apply_engine, root, typed_plan, typed_approval, sheet)
         check("driver-apply-unsupplied-observations-refused", "render-views" in (err or "")
               and "needs context observations" in (err or "") and "before anything is written" in (err or "")
               and not reached and _snapshot(root) == before, observed=err)
@@ -13752,7 +13829,7 @@ def _self_test_checks():
         # that value for the plant rows alone and writes nothing (red against a _DRIVER_UNSUPPLIED without
         # the plant-governance entry, where the real handler composes against an absent pack).
         with typed_driver({"init-store": scaffold, "render-views": benign}):
-            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+            err = refusal(_run_apply_engine, root, typed_plan, typed_approval, sheet)
         check("driver-apply-unsupplied-pack-refused",
               "('plant-governance') needs context pack" in (err or "")
               and "('render-views')" not in (err or "") and "('init-store')" not in (err or "")
@@ -13762,7 +13839,7 @@ def _self_test_checks():
         # written (red against a _DRIVER_UNSUPPLIED without the init-store entry, where the real handler
         # dispatches and refuses at its member-set precondition instead, the substrate run unnamed).
         with typed_driver({"render-views": benign, "plant-governance": benign}):
-            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+            err = refusal(_run_apply_engine, root, typed_plan, typed_approval, sheet)
         check("driver-apply-init-store-named-refused",
               "('init-store') needs its own journaled substrate run" in (err or "")
               and "before anything is written" in (err or "") and not reached and _snapshot(root) == before,
@@ -13771,7 +13848,7 @@ def _self_test_checks():
         # its source's copy refuses the apply, naming the source, with nothing written (red against a
         # run_apply without _require_archived_once, where the apply commits with legacy.md never archived).
         with typed_driver(stood_in, retire=skipping):
-            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+            err = refusal(_run_apply_engine, root, typed_plan, typed_approval, sheet)
         check("driver-apply-unarchived-source-refused", "other than exactly one archive copy" in (err or "")
               and "legacy.md (0 archive copies)" in (err or "") and ("retire-file", "OpContext") in reached
               and _snapshot(root) == before, observed=err)
@@ -13786,7 +13863,7 @@ def _self_test_checks():
         # and publishes the wrong archive bytes; the migrate source's pass copy stays right, so only the
         # retire source is named, and nothing is written.
         with typed_driver(stood_in, retire=wrong_payload):
-            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+            err = refusal(_run_apply_engine, root, typed_plan, typed_approval, sheet)
         check("driver-apply-wrong-retire-archive-payload-refused", "at the approved" in (err or "")
               and "legacy.md (an archive copy at another digest" in (err or "")
               and "old.md" not in (err or "") and ("retire-file", "OpContext") in reached
@@ -13801,14 +13878,14 @@ def _self_test_checks():
         # red against the path-cardinality guard, where the apply commits; the enable-hook preimage goes
         # through preserve_masked, so only the two plan sources are named, and nothing is written.
         with typed_driver(stood_in), mock.patch.object(ApplyOps, "preserve", preserve_wrong):
-            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+            err = refusal(_run_apply_engine, root, typed_plan, typed_approval, sheet)
         check("driver-apply-wrong-migrate-archive-payload-refused",
               "old.md (an archive copy at another digest" in (err or "")
               and "legacy.md (an archive copy at another digest" in (err or "")
               and _snapshot(root) == before, observed=err)
         del reached[:], composed_creates[:]
         with typed_driver(stood_in):
-            ttxn, terr = attempt(run_apply, root, typed_plan, typed_approval, sheet)
+            ttxn, terr = attempt(_run_apply_engine, root, typed_plan, typed_approval, sheet)
         after = _snapshot(root)
         # red against the plain context table for every handler, against typed contexts missing or mis-keying
         # any of the three handlers (that row takes the table and refuses), against a pass that also archives
@@ -13891,7 +13968,7 @@ def _self_test_checks():
         move_doc = tomllib.loads(move_plan.decode("utf-8")) if move_plan else dict(
             run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
         mrid = move_doc["run_id"]
-        move_approval = attempt(capture_approval, root, move_plan, sheet, "adopter", now)[0] or b""
+        move_approval = attempt(_capture_approval_engine, root, move_plan, sheet, "adopter", now)[0] or b""
         move_sources = dict((row["path"], row) for row in move_doc["sources"])
         # PRECONDITION: the fixture froze and was approved, carrying one occupying and one non-occupying
         # move source (a failed freeze turns this and every check below red: run_apply(b"") refuses).
@@ -13937,7 +14014,7 @@ def _self_test_checks():
         # .working/TODO.md never archived; only the occupying source is named (red also against a guard
         # that requires a copy for the non-occupying source, which it would name too), nothing written.
         with move_driver(move=move_skipping):
-            err = refusal(run_apply, root, move_plan, move_approval, sheet)
+            err = refusal(_run_apply_engine, root, move_plan, move_approval, sheet)
         check("driver-apply-move-skipped-archive-refused",
               "other than exactly one archive copy" in (err or "")
               and ".working/TODO.md (0 archive copies)" in (err or "")
@@ -13954,7 +14031,7 @@ def _self_test_checks():
         # red against a _require_archived_once that counts creates by path alone, where the apply commits
         # and publishes the wrong archive bytes; nothing is written.
         with move_driver(move=move_wrong):
-            err = refusal(run_apply, root, move_plan, move_approval, sheet)
+            err = refusal(_run_apply_engine, root, move_plan, move_approval, sheet)
         check("driver-apply-move-wrong-archive-payload-refused",
               ".working/TODO.md (an archive copy at another digest" in (err or "")
               and _snapshot(root) == before, observed=err)
@@ -13962,7 +14039,7 @@ def _self_test_checks():
         # non-occupying move sources too (it would refuse this planner-valid plan before anything runs).
         del taken[:]
         with move_driver():
-            mtxn, merr = attempt(run_apply, root, move_plan, move_approval, sheet)
+            mtxn, merr = attempt(_run_apply_engine, root, move_plan, move_approval, sheet)
         check("driver-apply-move-sources-commit", mtxn == mrid and merr is None, observed=merr)
         after = _snapshot(root)
         todo_copy = archive_rel(mrid, ".working/TODO.md")
@@ -14679,7 +14756,8 @@ def _self_test_checks():
         # the store resolves, so the plan takes no init-store row
         bound_sheet["ops"] = [row for row in bound_sheet["ops"] if row["op"] != "init-store"]
         bound_plan = _freeze(root, bound_sheet)[0] or b""
-        bound_approval = attempt(capture_approval, root, bound_plan, bound_sheet, "adopter", now)[0] or b""
+        bound_approval = attempt(_capture_approval_engine, root, bound_plan, bound_sheet, "adopter",
+                                 now)[0] or b""
         bound_before = _snapshot(root)
         bound_built = []
         real_driver_contexts = _driver_contexts
@@ -14692,7 +14770,7 @@ def _self_test_checks():
         with mock.patch.dict(globals(), _driver_contexts=recording_contexts), \
                 mock.patch.dict(OP_HANDLERS, stand_ins), \
                 mock.patch.dict(DRIVER_STAGES, {RECEIPT_STAGE: lambda context: schema._ok()}):
-            bound_err = refusal(run_apply, root, bound_plan, bound_approval, bound_sheet)
+            bound_err = refusal(_run_apply_engine, root, bound_plan, bound_approval, bound_sheet)
         check("driver-apply-registration-context-carries-bound-manifest-digest",
               bool(bound_plan) and bool(bound_approval) and bound_built == [plan_digest(files[man])]
               and "stopped once the driver's contexts are built" in (bound_err or "")
@@ -15035,17 +15113,28 @@ def _self_test_checks():
     in_root_row = dict(op="retire-file", path=in_root, preimage_digest=plan_digest(in_root_bytes))
     in_root_sources = [dict(path=in_root, disposition="retire", occupying=False,
                             digest=plan_digest(in_root_bytes), preservation=archive_rel(rid, in_root))]
+    # At homes 2 dispatch's validate_op refuses a store-control operand before any handler runs, so the
+    # three control-area vectors read that finding here; each handler's own rule is pinned below by
+    # composing the same row through its handler directly.
+    control_overlap = "adoption operand overlaps reserved store control area: {!r}".format
+    control_vectors = (
+        ("create-control-area", dict(rows=[forged_row], content={forged: fx_new_bytes}), "control area", forged),
+        ("move-into-own-archive", dict(rows=[move_row(archive_rel(rid, "legacy/MOVE.md"))],
+                                       sources=moved_to(archive_rel(rid, "legacy/MOVE.md"))), "beneath",
+         archive_rel(rid, "legacy/MOVE.md")),
+        ("retire-source-in-move-root", dict(rows=[in_root_row], sources=in_root_sources), "never removes",
+         in_root))
+    by_control = dict((label, (kwargs, control_overlap(operand))) for label, kwargs, _r, operand in control_vectors)
     for label, kwargs, reason in (
             ("create-occupied", dict(rows=[fx_create]), "occupied"),
             ("create-digest-mismatch", dict(rows=[fx_create], content={fx_new: b"unplanned\n"}),
              "content_digest"),
-            ("create-control-area", dict(rows=[forged_row], content={forged: fx_new_bytes}), "control area"),
+            ("create-control-area",) + by_control["create-control-area"],
             ("retire-unbound", dict(rows=fx_disposed[:1], sources=fx_sources[1:]), "plan source row"),
             ("retire-other-digest", dict(rows=fx_disposed[:1], sources=other_sources), "plan source row"),
             ("retire-ambiguous", dict(rows=fx_disposed[:1], sources=twice), "plan source row"),
             ("move-destination-occupied", dict(rows=fx_disposed[2:3]), "occupied"),
-            ("move-into-own-archive", dict(rows=[move_row(archive_rel(rid, "legacy/MOVE.md"))],
-                                           sources=moved_to(archive_rel(rid, "legacy/MOVE.md"))), "beneath"),
+            ("move-into-own-archive",) + by_control["move-into-own-archive"],
             # a protected move destination refuses at APPLY, through protected_destination itself (a
             # non-occupying move composes nothing there, so without this rule the base would commit)
             ("move-protected-aiqt", dict(rows=[move_row(".aiqt/x.md")], sources=moved_to(".aiqt/x.md")),
@@ -15078,7 +15167,7 @@ def _self_test_checks():
             ("move-store-tree-case-variant", dict(rows=[move_row(".Working/stuff.md")],
                                                   sources=moved_to(".Working/stuff.md")),
              "inside the store tree"),
-            ("retire-source-in-move-root", dict(rows=[in_root_row], sources=in_root_sources), "never removes"),
+            ("retire-source-in-move-root",) + by_control["retire-source-in-move-root"],
             ("move-preservation-mismatch", dict(rows=fx_disposed[2:3], sources=moved_to("adopter/elsewhere.md")),
              "records preservation")):
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -15095,6 +15184,28 @@ def _self_test_checks():
             before = tree_state(root)
             _txn, why = apply_stage(root, **kwargs)
             check("file-op-{}-refused-untouched-save-journal-dirs".format(label),
+                  why is not None and reason in why and untouched_save_journal_dirs(before, root)
+                  and lock_free(root))
+
+    def handler_stage(root, rows, sources=None, content=None):
+        """apply_stage with each row composed through its handler directly, past dispatch's validator."""
+        def compose(ops):
+            context = OpContext(ops, fx_sources if sources is None else sources,
+                                {fx_new: fx_new_bytes} if content is None else content)
+            for row in rows:
+                verdict = OP_HANDLERS[row["op"]](row, context)
+                if verdict.status != VALID:
+                    raise AdoptApplyError("; ".join(verdict.findings))
+        return attempt(run_adopt_transaction, root, rid, compose)
+    for label, kwargs, reason, _operand in control_vectors:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root = file_fixture(temp)
+            if label == "retire-source-in-move-root":
+                (root / in_root).parent.mkdir(parents=True)
+                (root / in_root).write_bytes(in_root_bytes)
+            before = tree_state(root)
+            _txn, why = handler_stage(root, **kwargs)
+            check("file-op-{}-handler-refused-untouched-save-journal-dirs".format(label),
                   why is not None and reason in why and untouched_save_journal_dirs(before, root)
                   and lock_free(root))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -15462,6 +15573,7 @@ def _self_test_checks():
     # --self-test-section kill-matrix).
     _kill_matrix_self_test(check)
 
+    _self_test_reconcile_shapes(check)
     _self_test_fence(check)
 
     if census:
@@ -15727,7 +15839,7 @@ def _kill_matrix_self_test(check):
                 pre = tree_state(root, journal=False)
                 died = crash_child(temp, stage_spec(root, phase), kill=point)
                 recovered = crash_child(temp, dict(action="reconcile", root=str(root)))
-                again, _why = attempt(reconcile, root)
+                again, _why = attempt(_reconcile_engine, root)
                 state, txn_now = tree_state(root, journal=False), txn_state(root, txn_of)
                 # Each conjunct is evaluated exactly where the short-circuit chain evaluates it (the journal
                 # read only after the three exit facts hold, the bundle verified at most once and only on
@@ -15754,7 +15866,7 @@ def _kill_matrix_self_test(check):
                 died = crash_child(temp, stage_spec(root, phase), kill="after-apply-{}".format(n - 2))
                 rdied = crash_child(temp, dict(action="reconcile", root=str(root)), kill=rpoint)
                 recovered = crash_child(temp, dict(action="reconcile", root=str(root)))
-                again, _why = attempt(reconcile, root)
+                again, _why = attempt(_reconcile_engine, root)
                 check("kill-rollback-{}-{}-lands-exact-prestate".format(stage, rpoint),
                       died == 137 and rdied == 137 and recovered == 0 and again == [] and journal_quiet(root)
                       and tree_state(root, journal=False) == pre and txn_state(root, txn_of) == "rolled-back")
@@ -15853,7 +15965,7 @@ def _reconcile_binding_self_test(check):
 
     def refusal_of(root):
         try:
-            return None, reconcile(root)
+            return None, _reconcile_engine(root)
         except ReconcileRefusal as exc:
             return exc.finding, str(exc)
         except AdoptApplyError as exc:
@@ -16346,23 +16458,126 @@ def _class_sweep_record(check, bound_expired, run=None):
             check(name, rows[index][1], observed=rows[index][2])
 
 
+def _self_test_reconcile_shapes(check):
+    """Three journal shapes the fenced `opf adopt reconcile` meets, each driven through the engine seam
+    (_reconcile_report_engine and _reconcile_engine) over a product-root fixture, so the engine vectors
+    pin every reconcile state the CLI fixtures name. A journal entry named lock.break that is a directory
+    refuses as unclassifiable at the strict listing, named, with nothing written (red against a listing
+    that takes it for a transaction directory). A store lease beside no journal, or beside a journal
+    holding no open transaction, reads as nothing to reconcile with nothing written and the lease
+    byte-identical (red against a lease observed before the journal is read). An open transaction named
+    for init-store whose live creations are not that operation's own publication refuses as an unproven
+    reversal, nothing written and the transaction still open (red without the reversal preverify)."""
+    import tempfile
+    from unittest import mock
+    rid = "adopt-20260101T000000Z-0123456789abcdef"
+    files = {".working/TODO.md": b"hand-kept todo\n", "legacy/RULES.md": b"old rules\n"}
+    body = dict(format=PLAN_V2_FORMAT, run_id=rid)
+    digest = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+    plan = emit_checked(dict(body, plan_digest=digest)).encode("utf-8")
+    lease_rel = "{}/{}/lease.toml".format(store.WORKING_DIRNAME, store.DEFAULT_MACHINE_SUBDIR)
+    engines = (_reconcile_report_engine, _reconcile_engine)
+
+    class _Interrupt(Exception):
+        pass
+
+    def compose(ops):
+        ops.create(plan_rel(rid), plan)
+        ops.archive_occupying(".working/TODO.md", "sha256:" + _sha256(files[".working/TODO.md"]))
+        ops.preserve("legacy/RULES.md", "sha256:" + _sha256(files["legacy/RULES.md"]))
+
+    def put(root, rel, data):
+        os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+        with open(os.path.join(root, rel), "wb") as fh:
+            fh.write(data)
+
+    def fixture(base, name, transaction):
+        # the product files, then (transaction "open") one interrupted mid-archive, or ("complete") one
+        # committed, or (None) no journal at all
+        root = os.path.join(base, name)
+        for rel, payload in files.items():
+            put(root, rel, payload)
+
+        def kill(point):
+            if (transaction == "open" and point.startswith("after-apply-")
+                    and os.path.exists(os.path.join(root, archive_rel(rid, ".working/TODO.md")))):
+                raise _Interrupt(point)
+        if transaction is not None:
+            with mock.patch.object(_journal, "_kill_point", kill):
+                try:
+                    run_adopt_transaction(root, rid, compose, plan_digest=digest)
+                except (_Interrupt, AdoptApplyError):
+                    pass
+        return root
+
+    def tree(root):
+        got = dict()
+        for dirpath, dirs, names in os.walk(root):
+            for name in dirs:
+                got[os.path.relpath(os.path.join(dirpath, name), root)] = None
+            for name in names:
+                with open(os.path.join(dirpath, name), "rb") as fh:
+                    got[os.path.relpath(os.path.join(dirpath, name), root)] = fh.read()
+        return got
+
+    def outcome(fn, root):
+        # (result, finding, message): the finding as the ReconcileRefusal names it, "unnamed" for any other
+        # refusal, (result, None, None) when fn did not refuse
+        try:
+            return fn(root), None, None
+        except ReconcileRefusal as exc:
+            return None, exc.finding, str(exc)
+        except AdoptApplyError as exc:
+            return None, "unnamed", str(exc)
+
+    def still_open(root):
+        try:
+            require_clean_journal(root)
+        except AdoptApplyError as exc:
+            return "must be reconciled" in str(exc)
+        return False
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-shapes-") as base:
+        root = fixture(base, "lockbreakdir", "open")
+        os.mkdir(os.path.join(root, JOURNAL_REL, "lock.break"))
+        was = tree(root)
+        rows = [outcome(fn, root) for fn in engines]
+        check("reconcile-lock-break-directory-refused-named",
+              all(got is None and finding == RECONCILE_UNCLASSIFIABLE
+                  and "'lock.break' is not a regular file" in (why or "") for got, finding, why in rows)
+              and tree(root) == was, observed=rows)
+
+        rows = []
+        for name, transaction in (("leasebare", None), ("leasedone", "complete")):
+            root = fixture(base, name, transaction)
+            put(root, lease_rel, b"held\n")
+            was = tree(root)
+            rows.append((name, [outcome(fn, root) for fn in engines], tree(root) == was,
+                         os.path.isdir(os.path.join(root, JOURNAL_REL)) == (transaction is not None)))
+        check("reconcile-store-lease-nothing-open-nothing-to-reconcile",
+              all(got == [(([], False, False), None, None), ([], None, None)] and kept and shaped
+                  for _name, got, kept, shaped in rows), observed=rows)
+
+        root = fixture(base, "unproven", "open")
+        os.rename(os.path.join(root, JOURNAL_REL, rid),
+                  os.path.join(root, JOURNAL_REL, rid + "." + INIT_STORE_PHASE))
+        was = tree(root)
+        rows = [outcome(fn, root) for fn in engines]
+        check("reconcile-initstore-reversal-unproven-refused-named",
+              all(got is None and finding == RECONCILE_REVERSAL_UNPROVEN for got, finding, _why in rows)
+              and tree(root) == was and still_open(root), observed=rows)
+
+
 def _self_test_fence(check):
-    """The base 2.0.0 adoption fence (adoption_journal_fenced), with SUPPORTED_HOMES raised to 2 inside each
-    vector and restored in a finally. Every engine step a fenced call must not reach is replaced by a
-    recorder that refuses under its own name, so a step reached is named, never run. apply and reconcile
-    refuse with ADOPTION_FENCE before any of them and leave no .aiqt entry; approve refuses with
-    JOURNAL_UNREAD before any of them; at the shipped constants each of those steps is still reached."""
+    """The base 2.0.0 adoption fence (adoption_journal_fenced). Every engine step a fenced call must not
+    reach is replaced by a recorder that refuses under its own name, so a step reached is named, never
+    run. apply and reconcile refuse with ADOPTION_FENCE before any of them and leave the root empty;
+    approve issues its approval through its journal-free body, reaching none of the journal reads. Each
+    of the three is the fence and then one call of its engine body, the body the engine vectors drive, so
+    the two differ only by the fence."""
     import tempfile
     from unittest import mock
     this = sys.modules[__name__]
-
-    def raised(thunk):
-        saved = store.SUPPORTED_HOMES
-        store.SUPPORTED_HOMES = 2
-        try:
-            return thunk()
-        finally:
-            store.SUPPORTED_HOMES = saved
 
     def refusal(thunk):
         try:
@@ -16388,40 +16603,90 @@ def _self_test_fence(check):
 
     apply_steps = ("frozen_plan", "require_clean_journal", "_require_unapplied", "_open_product_root")
     with tempfile.TemporaryDirectory(prefix="opf-adopt-fence-") as temp:
-        said, reached = raised(lambda: recorded(apply_steps, lambda: run_apply(temp, b"", b"", {})))
+        said, reached = recorded(apply_steps, lambda: run_apply(temp, b"", b"", {}))
         check("adopt-apply-fenced-homes2",
               said == ADOPTION_FENCE and reached == [] and os.listdir(temp) == [],
               observed="{!r} reached {}".format(said, reached))
-        said, reached = recorded(apply_steps, lambda: run_apply(temp, b"", b"", {}))
-        check("adopt-apply-unfenced-at-shipped-constants",
-              said == "reached frozen_plan" and reached == ["frozen_plan"],
-              observed="{!r} reached {}".format(said, reached))
 
         reconcile_steps = ("_open_product_root", "_reconcile_run", "_journal_root")
-        said, reached = raised(lambda: recorded(reconcile_steps, lambda: reconcile_report(temp)))
+        said, reached = recorded(reconcile_steps, lambda: reconcile_report(temp))
         check("adopt-reconcile-fenced-homes2",
               said == ADOPTION_FENCE and reached == [] and os.listdir(temp) == [],
               observed="{!r} reached {}".format(said, reached))
-        said, reached = recorded(reconcile_steps, lambda: reconcile_report(temp))
-        check("adopt-reconcile-unfenced-at-shipped-constants",
-              said == "reached _open_product_root" and reached == ["_open_product_root"],
-              observed="{!r} reached {}".format(said, reached))
 
-        def approve():
-            return capture_approval(temp, b"", {}, "fixture", None)
-        approve_steps = ("frozen_plan", "require_clean_journal", "_require_unapplied", "rederive_or_refuse")
-        said, reached = raised(lambda: recorded(approve_steps, approve))
+        # approve issues its approval through the journal-free body: with the plan re-proof and the shared
+        # tail stubbed, it reaches none of the journal reads, writes nothing and returns the shared tail's
+        # bytes for the re-proved plan, while its engine body under the same recorders reaches the
+        # reconcile-first gate first (red when approve refuses with JOURNAL_UNREAD, or calls the engine).
+        journal_reads = ("require_clean_journal", "_require_unapplied", "journal_state", "journal_clean_or_refuse")
+        stub_plan = dict(run_id="adopt-fence-fixture")
+        issued, tail = [], []
+
+        def stub_tail(*args):
+            tail.append(args)
+            return b"approval"
+        with mock.patch.object(this, "frozen_plan", lambda _plan_bytes: stub_plan), \
+                mock.patch.object(this, "_approval_over_live_tree", stub_tail):
+            said, reached = recorded(journal_reads,
+                                     lambda: issued.append(capture_approval(temp, b"plan", {}, "fixture", None)))
+            body_said, body_reached = recorded(
+                journal_reads, lambda: _capture_approval_engine(temp, b"plan", {}, "fixture", None))
         check("adopt-approve-no-journal-read-homes2",
-              said == JOURNAL_UNREAD and reached == [] and os.listdir(temp) == [],
-              observed="{!r} reached {}".format(said, reached))
-        with mock.patch.object(this, "frozen_plan", lambda _bytes: dict(run_id="fixture-run")):
-            said, reached = recorded(approve_steps[1:], approve)
-            check("adopt-approve-journal-read-at-shipped-constants",
-                  said == "reached require_clean_journal" and reached == ["require_clean_journal"],
-                  observed="{!r} reached {}".format(said, reached))
-        check("adopt-fence-inert-at-shipped-constants",
-              store.SUPPORTED_HOMES == 1 and not adoption_journal_fenced()
-              and raised(adoption_journal_fenced) is True)
+              said is None and reached == [] and issued == [b"approval"]
+              and tail == [(temp, stub_plan, b"plan", {}, "fixture", None)]
+              and body_said == "reached require_clean_journal" and body_reached == ["require_clean_journal"]
+              and os.listdir(temp) == [],
+              observed="{!r} reached {} issued {!r}; engine {!r} reached {}".format(
+                  said, reached, issued, body_said, body_reached))
+        check("adopt-fence-unconditional", adoption_journal_fenced() is True)
+        # status names the journal it does not read by its literal home (red when the line stops naming it).
+        check("adopt-status-names-unread-journal", JOURNAL_UNREAD.endswith(
+            ": this build does not read the adoption journal at .working/journals/adoption/journal"))
+
+        # The engine seam: each fenced entry is the fence, then one call of its engine body with its own
+        # parameters, and nothing else, so the two paths differ only by the fence (approve's fence returns
+        # its journal-free body instead of refusing). Under the same recorders the public apply and
+        # reconcile reach no step and leave the root empty while their engine bodies reach the first;
+        # unrecorded, the reconcile engine runs over that empty root (no journal: nothing recovered,
+        # nothing written) where the public reconcile still refuses.
+        import ast
+        tree = ast.parse(Path(os.path.abspath(__file__)).read_text(encoding="utf-8"))
+        defs = dict((node.name, node) for node in tree.body if isinstance(node, ast.FunctionDef))
+
+        def fence_then_engine(public, fenced, engine):
+            node = defs.get(public)
+            if node is None:
+                return False
+            body = node.body[1:] if ast.get_docstring(node) is not None else node.body
+            args = ", ".join(arg.arg for arg in node.args.args)
+            want = "if adoption_journal_fenced():\n    {}\nreturn {}({})\n".format(
+                fenced.format(args=args), engine, args)
+            return [ast.dump(s) for s in body] == [ast.dump(s) for s in ast.parse(want).body]
+
+        def entry(name, args):
+            return lambda: getattr(this, name)(*args)
+        seams = (("run_apply", "_run_apply_engine", apply_steps, (temp, b"", b"", {})),
+                 ("reconcile_report", "_reconcile_report_engine", reconcile_steps, (temp,)))
+        split = []
+        for public, engine, steps, args in seams:
+            said, reached = recorded(steps, entry(public, args))
+            body_said, body_reached = recorded(steps, entry(engine, args))
+            split.append((public, fence_then_engine(public, "raise AdoptApplyError(ADOPTION_FENCE)", engine),
+                          said == ADOPTION_FENCE and reached == [] and os.listdir(temp) == [],
+                          body_said == "reached " + steps[0] and body_reached == [steps[0]]))
+        approve_shape = fence_then_engine("capture_approval", "return _capture_approval_journal_free({args})",
+                                          "_capture_approval_engine")
+        fenced_reconcile = refusal(lambda: reconcile(temp))
+        try:
+            engine_ran = (_reconcile_report_engine(temp), _reconcile_engine(temp))
+        except (AdoptApplyError, OSError) as exc:
+            engine_ran = exc
+        check("adopt-fence-engine-seam",
+              all(shape and fenced and ran for _public, shape, fenced, ran in split) and approve_shape
+              and fenced_reconcile == ADOPTION_FENCE and engine_ran == (([], False, False), [])
+              and os.listdir(temp) == [],
+              observed="{} approve {} reconcile {!r} engine {!r}".format(
+                  split, approve_shape, fenced_reconcile, engine_ran))
 
 
 def _self_test_outcome(failures, failure_details, checked, bound_expired, skipped=()):
@@ -16458,8 +16723,11 @@ def _self_test_outcome(failures, failure_details, checked, bound_expired, skippe
 
 
 # The self-test sections `--self-test-section NAME` runs alone, each a suite of _self_test_checks that builds
-# its own fixtures and takes only the check recorder.
-_SELF_TEST_SECTIONS = {"kill-matrix": _kill_matrix_self_test, "fence": _self_test_fence}
+# its own fixtures and takes only the check recorder. Built by a self-test function rather than a module-level
+# dict, as opf.py's _self_tests is, so no production code spells a self-test function (check_opf_homes).
+def _self_test_sections():
+    """Return the self-test sections, {name: suite}, that `--self-test-section NAME` runs alone."""
+    return {"kill-matrix": _kill_matrix_self_test, "fence": _self_test_fence}
 
 
 def _self_test_section(name):
@@ -16475,7 +16743,7 @@ def _self_test_section(name):
             if observed is not None:
                 failure_details[check_name] = observed
 
-    _SELF_TEST_SECTIONS[name](check)
+    _self_test_sections()[name](check)
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST SECTION {}: FAIL ({} of {} checks failed)".format(
             name, len(failures), checked[0]))
@@ -17791,15 +18059,16 @@ def _close_class_sweep_checks():
 def _kill_injection_child(spec_path):
     """The self-test's kill-injection child, `--selftest-child SPEC` (the migrate.py crash-harness model,
     entered as `_opf_init_operation --selftest-child` is): in THIS fresh interpreter, run ONE adoption
-    transaction of the plan rows SPEC names, or reconcile(), against SPEC's fixture root. The transaction
-    carries SPEC's sealed fixture plan digest in its inventory's [adoption] identity, and a base
-    transaction stages that plan's bytes in the run's bundle first, as apply stages the approved plan
-    (spec 4.2). The parent sets _journal.KILL_ENV, so the journal os._exit()s (137) at that named point
-    exactly as a power loss would; otherwise 0 done, 2 refused."""
+    transaction of the plan rows SPEC names, or reconcile's engine body (_reconcile_engine, past the base
+    2.0.0 fence), against SPEC's fixture root. The transaction carries SPEC's sealed fixture plan digest
+    in its inventory's [adoption] identity, and a base transaction stages that plan's bytes in the run's
+    bundle first, as apply stages the approved plan (spec 4.2). The parent sets _journal.KILL_ENV, so the
+    journal os._exit()s (137) at that named point exactly as a power loss would; otherwise 0 done, 2
+    refused."""
     try:
         spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
         if spec["action"] == "reconcile":
-            reconcile(spec["root"])
+            _reconcile_engine(spec["root"])
         else:
             content = {path: bytes.fromhex(data) for path, data in spec["content"].items()}
             run_id, phase = spec["run_id"], spec["phase"]
@@ -17868,11 +18137,25 @@ def _init_store_self_test(check):
           and bound[manifest_rel] == "sha256:" + _sha256(_opf_init.build_manifest().encode("utf-8")))
     check("init-store-default-manifest-baseline-only", not any(default["modules"].values())
           and set(default["types"]) == set(store.BASELINE_TYPES))
+    # The sources are EXACTLY the roster the substrate's plan names for the bootstrap model (the
+    # imported leaves and .working/.gitignore at 2.0.0), so a scaffold built from the fixed
+    # pre-2.0.0 roster, which the plan's created set then outgrows, is red here.
+    roster = set(init_op.bootstrap_source_roster(_opf_init._manifest_model()))
+    targets = {v["target"] for v in default["views"].values()}
+
+    def complete_creation_set(sc):
+        return (init_op.PROVENANCE_RELPATH in sc and store.POINTER_REL in sc
+                and init_op.CHANGELOG_RELPATH in sc and targets <= set(sc)
+                and set(sc) - targets - {init_op.PROVENANCE_RELPATH, init_op.CHANGELOG_RELPATH}
+                == roster)
+
+    fixed_roster_only = {p: d for p, d in scaffold.items()
+                         if p not in roster - set(init_op.BOOTSTRAP_SOURCE_ROSTER)}
     check("init-store-scaffold-is-the-complete-creation-set",
-          init_op.PROVENANCE_RELPATH in scaffold and store.POINTER_REL in scaffold
-          and init_op.CHANGELOG_RELPATH in scaffold
-          and {v["target"] for v in default["views"].values()} <= set(scaffold)
-          and set(init_op.BOOTSTRAP_SOURCE_ROSTER) <= set(scaffold))
+          complete_creation_set(scaffold) and not complete_creation_set(fixed_roster_only)
+          and roster > set(init_op.BOOTSTRAP_SOURCE_ROSTER)
+          and scaffold.get(init_op.GITIGNORE_RELPATH)
+          == "sha256:" + _sha256(store.render_homes_gitignore().encode("utf-8")))
     check("init-store-external-destinations-derived",
           _init_store_external_destinations() == [init_op.CHANGELOG_RELPATH])
     check("init-store-row-validates", schema.validate_op(row).status == store.VALID)
@@ -18133,6 +18416,20 @@ def _init_store_git_checks(check, ctx, refused):
     from _opf_schema import high_water
     valid = store.VALID
     manifest_rel, scaffold = _init_store_scaffold(True, True)
+
+    def reconcile_after_kill(vector, root):
+        # reconcile() straight after a killed child: a refusal it raises (a reversed directory the
+        # scrub cannot remove, say) is this vector's own named failure carrying the refusal text,
+        # never a harness error that ends the run before every later check.
+        name = "init-store-{}-reconcile-after-kill-completes".format(vector)
+        try:
+            outcomes = _reconcile_engine(root)
+        except AdoptApplyError as exc:
+            check(name, False, str(exc))
+            return None
+        check(name, True)
+        return outcomes
+
     # Every adoption inventory names its run's sealed plan in its [adoption] identity (spec 4.2), so
     # these vectors run over a fixture plan sealed as the planner seals it, as the shell's own self-test
     # does: a base transaction stages it, and a hand-built base inventory lists it.
@@ -18815,7 +19112,10 @@ def _init_store_git_checks(check, ctx, refused):
         # pinned high-water (next WL 8, never a reused 1), its counters member digest-bound to the
         # seeded builder bytes; a snapshot missing a baseline namespace refuses inside the substrate
         # (UNKNOWN, never zero) and the scaffold is REVERSED, tree unchanged.
+        # The seed carries every imported:<NS> row too: the bootstrap model's imported series is
+        # active, so a re-adoption seed missing one is UNKNOWN ancestry and refuses like a baseline one.
         values = dict.fromkeys(sorted(set(store.BASELINE_TYPES.values())), 0)
+        values.update({init_op.IMPORTED_PREFIX + ns: 0 for ns in init_op._imported_seed_namespaces()})
         values.update(WL=7, BI=3)
         seeded = _opf_init.build_counters(seed=dict(values)).encode("utf-8")
         missing_ns = {k: v for k, v in values.items() if k != "HO"}
@@ -18871,7 +19171,7 @@ def _init_store_git_checks(check, ctx, refused):
         check("init-store-interrupted-run-refuses-into-reconcile",
               refused(dispatch(row, ctx(root, run_id=rid())), "never seized")
               and op_ids(root) == partial)
-        outcomes = reconcile(root)
+        outcomes = reconcile_after_kill("kill", root) or []
         gone = all(not os.path.lexists(os.path.join(root, m["path"])) for m in members)
         check("init-store-reconcile-reverses-from-journal-alone",
               "rolled-back" in [outcome for _t, outcome in outcomes] and gone
@@ -18957,7 +19257,7 @@ def _init_store_git_checks(check, ctx, refused):
         rc = _init_store_child(os.path.join(nest, "prod"), env, "source:2", row,
                                ctx(os.path.join(nest, "prod"), run_id=rid()))
         init_op.run_init_operation(os.path.join(nest, "prod"), recover=True)
-        nest_outcomes = reconcile(os.path.join(nest, "prod"))
+        nest_outcomes = _reconcile_engine(os.path.join(nest, "prod"))
         nest_twin = os.path.join(base, "nesttwin")
         shutil.copytree(nest, nest_twin, symlinks=True)
         twin_prod = os.path.join(nest_twin, "prod")
@@ -18994,7 +19294,7 @@ def _init_store_git_checks(check, ctx, refused):
 
         def reconcile_refusal(root):
             try:
-                reconcile(root)
+                _reconcile_engine(root)
             except ReconcileRefusal as exc:
                 return exc
             return None
@@ -19063,7 +19363,7 @@ def _init_store_git_checks(check, ctx, refused):
         found = outside_journal(open_twin)
         if len(opened) == 1:
             _st_settled_by_hand(open_twin, opened[0], open_twin + "-kept")
-        after = reconcile(open_twin)
+        after = _reconcile_engine(open_twin)
         # the expectation under the fail-closed rule: nothing deleted, so a person, not a fresh run, decides the rest
         check("init-store-copied-in-open-transaction-remedy-keeps-all",
               rc != 0 and len(opened) == 1 and len(records) == 1 and why is not None
@@ -19127,7 +19427,7 @@ def _init_store_git_checks(check, ctx, refused):
               and why.finding == RECONCILE_UNCLASSIFIABLE and outside_journal(sibling) == found
               and "The operator restores, deletes and moves nothing else" in str(why)
               and "a person decides from the kept transaction" in str(why) and not _st_directs_copy_back(str(why))
-              and substrate_records(sibling) == own_records and reconcile(sibling) == []
+              and substrate_records(sibling) == own_records and _reconcile_engine(sibling) == []
               and store.resolve_store(sibling).status == store.RESOLVED,
               observed=(str(why), sorted(set(outside_journal(sibling)) ^ set(found))))
         # The next step where the run was killed between a member's link and its staging unlink: the whole repository
@@ -19151,7 +19451,7 @@ def _init_store_git_checks(check, ctx, refused):
                              for n in files if init_op._STAGE_MARKER in n)
         if len(s_opened) == 1:
             _st_settled_by_hand(staged_twin, s_opened[0], staged_twin + "-kept")
-        s_after = reconcile(staged_twin)
+        s_after = _reconcile_engine(staged_twin)
         s_stuck = dispatch(row, ctx(staged_twin, run_id=rid(), recover=True))
         s_step, s_moved, s_half = staged_twin + "-next", {}, None
         if len(s_opened) == 1 and len(s_records) == 1:
@@ -19198,10 +19498,11 @@ def _init_store_git_checks(check, ctx, refused):
             if len(opened) == 1 and why is not None:
                 _st_settled_by_hand(holder, opened[0], holder + "-kept")
             settled[label] = (why is not None and why.finding == RECONCILE_UNCLASSIFIABLE and said == records[0]
-                              and leaves_record(why, linked_op, said) and reconcile(holder) == [], str(why))
+                              and leaves_record(why, linked_op, said) and _reconcile_engine(holder) == [],
+                              str(why))
         in_place = substrate_records(main) == records
         try:
-            outcomes = reconcile(worktree)
+            outcomes = _reconcile_engine(worktree)
         except ReconcileRefusal as exc:
             outcomes = [(exc.finding, str(exc))]
         res = dispatch(row, ctx(worktree, run_id=rid(), recover=True))
@@ -19245,7 +19546,7 @@ def _init_store_git_checks(check, ctx, refused):
         os.chmod(vwt, 0o755)
         rc = _init_store_child(vwt, env, "source:2", row, ctx(vwt, run_id=rid()))
         init_op.run_init_operation(vwt, recover=True)
-        v_outcomes = reconcile(vwt)
+        v_outcomes = _reconcile_engine(vwt)
         copy_in(os.path.join(vwt, store.JOURNALS_REL), os.path.join(nmain, store.JOURNALS_REL))
         killed = [n.split(".", 1)[0] for n in os.listdir(_journal_root(nmain)) if n.endswith("." + INIT_STORE_PHASE)]
         records = substrate_records(nmain)
@@ -19297,7 +19598,7 @@ def _init_store_git_checks(check, ctx, refused):
         os.chmod(owt, 0o755)
         rc = _init_store_child(owt, env, "source:2", row, ctx(owt, run_id=rid()))
         init_op.run_init_operation(owt, recover=True)
-        o_outcomes = reconcile(owt)
+        o_outcomes = _reconcile_engine(owt)
         copy_in(os.path.join(owt, store.JOURNALS_REL), os.path.join(omain, store.JOURNALS_REL))
         working_mode = "%o" % stat.S_IMODE(os.lstat(os.path.join(omain, store.WORKING_DIRNAME)).st_mode)
         killed = [n.split(".", 1)[0] for n in os.listdir(_journal_root(omain)) if n.endswith("." + INIT_STORE_PHASE)]
@@ -19365,7 +19666,7 @@ def _init_store_git_checks(check, ctx, refused):
         root = init_op._plain_repo(os.path.join(base, "killscrub"), env)
         rc = _init_store_child(root, env, "source:2", row, ctx(root, run_id=rid()))
         partial = op_ids(root)
-        outcomes = reconcile(root) if rc != 0 and len(partial) == 1 else []
+        outcomes = _reconcile_engine(root) if rc != 0 and len(partial) == 1 else []
         stale = [os.path.lexists(p) for p in (os.path.join(root, init_op.LEASE_RELPATH),
                                                os.path.join(_opf_oplock._st_ctl_dir(root), _opf_oplock.ACTIVE_NAME))]
         plant(root, os.path.join(store.WORKING_DIRNAME, "foreign-notes.md"), b"foreign notes\n")
@@ -19419,7 +19720,7 @@ def _init_store_git_checks(check, ctx, refused):
         root = init_op._plain_repo(os.path.join(base, "killscrubfail"), env)
         rc = _init_store_child(root, env, "source:2", row, ctx(root, run_id=rid()))
         left = op_ids(root)
-        outcomes = reconcile(root) if rc != 0 and len(left) == 1 else []
+        outcomes = _reconcile_engine(root) if rc != 0 and len(left) == 1 else []
         with mock.patch.object(_opf_oplock, "_recover_stale", removed_then_failed):
             res = dispatch(row, ctx(root, run_id=rid(), recover=True))
         said = " ".join(res.findings)
@@ -19518,7 +19819,7 @@ def _init_store_git_checks(check, ctx, refused):
                   and txn_state(root, run) == "open")
             rec_err = rec_finding = None
             try:
-                reconcile(root)
+                _reconcile_engine(root)
             except AdoptApplyError as exc:
                 rec_err, rec_finding = str(exc), getattr(exc, "finding", None)
             check("init-store-reconcile-preserves-foreign-{}".format(target),
@@ -19773,7 +20074,7 @@ def _init_store_git_checks(check, ctx, refused):
             else:
                 reversed_r1 = _init_store_child(root, env, kill, row,
                                                 ctx(root, run_id=r1, sources=[occ_row])) != 0
-                reconcile(root)
+                reconcile_after_kill(fixture, root)
                 need_recover = True
             burnt = refused(dispatch(row, ctx(root, run_id=r1, sources=[occ_row],
                                               recover=need_recover)), "was reversed")
@@ -20159,7 +20460,7 @@ def _init_store_git_checks(check, ctx, refused):
         before = snap(root)
         run = rid()
         rc = _init_store_child(root, env, "txnmkdir", row, ctx(root, run_id=run))
-        reconcile(root)
+        reconcile_after_kill("killmkdir", root)
         res = dispatch(row, ctx(root, run_id=run))
         check("init-store-crash-at-txn-mkdir-reruns-same-run", rc != 0 and res.status == valid
               and store.resolve_store(root).status == store.RESOLVED
@@ -20184,19 +20485,19 @@ def _init_store_git_checks(check, ctx, refused):
                                   "scrubdir:" + machine_base)):
             root = init_op._plain_repo(os.path.join(base, "kill{}".format(i)), env)
             before = snap(root)
+            label = kill.replace(":", "-").replace("/", "-").replace(".", "")
             rc = _init_store_child(root, env,
                                    "source:2" if kill.partition(":")[0] in two_stage else kill,
                                    row, ctx(root, run_id=rid()))
-            reconcile(root)
+            reconcile_after_kill("crash-{}".format(label), root)
             killed = rc != 0
             if kill.partition(":")[0] in two_stage:
                 killed = killed and _init_store_child(root, env, kill, row,
                                                       ctx(root, run_id=rid(),
                                                           recover=True)) != 0
-                reconcile(root)
+                reconcile_after_kill("crash-{}-second".format(label), root)
             res = dispatch(row, ctx(root, run_id=rid(), recover=True))
-            check("init-store-crash-{}-recovers-whole-tree".format(
-                      kill.replace(":", "-").replace("/", "-").replace(".", "")),
+            check("init-store-crash-{}-recovers-whole-tree".format(label),
                   killed and res.status == valid
                   and store.resolve_store(root).status == store.RESOLVED
                   and stage_leftovers(root) == [] and len(op_ids(root)) == 1
@@ -20317,7 +20618,7 @@ def _init_store_git_checks(check, ctx, refused):
         root = init_op._plain_repo(os.path.join(base, "scrubtrace"), env)
         rc1 = _init_store_child(root, env, "stage:" + init_op.CHANGELOG_RELPATH, row,
                                 ctx(root, run_id=rid()))
-        reconcile(root)
+        reconcile_after_kill("scrubtrace", root)
         root_id = path_ident(root)
         working_id = path_ident(os.path.join(root, store.WORKING_DIRNAME))
         machine_id = path_ident(os.path.join(root, machine_dir))
@@ -20338,8 +20639,13 @@ def _init_store_git_checks(check, ctx, refused):
             return holder
 
         _opf_oplock.acquire_init_operation = plant_lease_after_acquire
+        # a refusal the traced scrub raises (a reversed directory it cannot remove) is this
+        # vector's named failure carrying its text, never a harness error ending the run
+        scrub_err = None
         try:
             head = before_discard(traced_scrub(root))
+        except AdoptApplyError as exc:
+            head, scrub_err = None, str(exc)
         finally:
             _opf_oplock.acquire_init_operation = real_acquire
         seq = labeled(head) if head is not None else []
@@ -20349,7 +20655,7 @@ def _init_store_git_checks(check, ctx, refused):
               and paired(seq, "unlink", root_id)            # the staging leftover
               and paired(seq, "unlink", machine_id)         # an unlink in the lease's directory
               and paired(seq, "rmdir", working_id)          # the created machine directory
-              and ("rmdir", root_id) not in head)           # .working is retained, never rmdir'd
+              and ("rmdir", root_id) not in head, scrub_err)  # .working is retained, never rmdir'd
         # the scrub leaves `.working` holding exactly the retained journal, never a bare tree
         check("init-store-scrub-retains-working-journal-only",
               sorted(os.listdir(os.path.join(root, store.WORKING_DIRNAME)))
@@ -20360,17 +20666,21 @@ def _init_store_git_checks(check, ctx, refused):
 
         root = init_op._plain_repo(os.path.join(base, "scrubtrace2"), env)
         rc1 = _init_store_child(root, env, "source:2", row, ctx(root, run_id=rid()))
-        reconcile(root)
+        reconcile_after_kill("scrubtrace2", root)
         rc2 = _init_store_child(root, env, "scrubdir:" + machine_base, row,
                                 ctx(root, run_id=rid(), recover=True))
-        reconcile(root)
+        reconcile_after_kill("scrubtrace2-second", root)
         working_id = path_ident(os.path.join(root, store.WORKING_DIRNAME))
         gone = not os.path.lexists(os.path.join(root, machine_dir))
-        head = before_discard(traced_scrub(root))
+        scrub_err = None
+        try:
+            head = before_discard(traced_scrub(root))
+        except AdoptApplyError as exc:
+            head, scrub_err = None, str(exc)
         seq = labeled(head) if head is not None else []
         check("init-store-scrub-restart-absent-target-fsync-before-discard",
               rc1 != 0 and rc2 != 0 and gone and head is not None and every_paired(head)
-              and ("fsync", working_id) in seq)             # the removed machine directory's
+              and ("fsync", working_id) in seq, scrub_err)  # the removed machine directory's
         res = dispatch(row, ctx(root, run_id=rid(), recover=True))   # surviving parent
         check("init-store-scrub-restart-recovers", res.status == valid
               and store.resolve_store(root).status == store.RESOLVED
@@ -20534,7 +20844,7 @@ def _replace_vacated_self_test(check):
             finally:
                 _journal._close_fd_quietly(jr_fd)
         with mock.patch.object(store, "resolve_store", side_effect=AssertionError("reconcile resolved")):
-            outcomes = attempt(reconcile, root)[0] or []
+            outcomes = attempt(_reconcile_engine, root)[0] or []
         check("apply-replace-vacated-kill-reconciles",
               interrupted and left == "open" and (rid, "rolled-back") in outcomes and snapshot(root) == before
               and _st_lock_free(root), observed=why)
@@ -20567,10 +20877,25 @@ def _finish_ops_self_test(check):
                 if p.is_file() and not p.is_symlink()
                 and not str(p.relative_to(root)).startswith(JOURNAL_REL + "/")}
 
+    overlap = "adoption operand overlaps reserved store control area: {!r}".format
+
+    def execute(row, context):
+        """dispatch, save for the minted record-adoption row. Homes 2 grades that row INVALID at dispatch on
+        its one bundle-receipt operand (record-minted-row-homes2-operand-refused pins it), so a row whose
+        validate_op findings are exactly that one control-area finding reaches its handler directly: its
+        composition and every binding refusal are still judged by the handler itself, and any other
+        finding still refuses as dispatch refuses it."""
+        if isinstance(row, dict) and row.get("op") == "record-adoption":
+            graded = schema.validate_op(row)
+            if graded.status != valid and graded.findings != [overlap(receipt_rel(rid))]:
+                return graded
+            return OP_HANDLERS["record-adoption"](row, context)
+        return dispatch(row, context)
+
     def composer(rows, **context):
         def compose(ops):
             for row in rows:
-                verdict = dispatch(row, dict(context, ops=ops))
+                verdict = execute(row, dict(context, ops=ops))
                 if verdict.status != valid:
                     raise AdoptApplyError("; ".join(verdict.findings))
         return compose
@@ -20658,14 +20983,15 @@ def _finish_ops_self_test(check):
         against plan.toml, never the receipt; the doctor owns the approval binding)."""
         return (tree.get(plan_rel(rid)) == emit_checked(plan_doc).encode("utf-8")
                 and bound_digests(tree) == (plan_doc["plan_digest"],) * 4)
+    # every field of the minted row is well-formed: at homes 2 its one finding is the bundle-receipt operand
     check("finish-fixture-rows-validate", plan["run_id"] == rid and schema.validate_op(plant).status == valid
-          and schema.validate_op(record).status == valid)
+          and schema.validate_op(record).findings == [overlap(receipt_rel(rid))])
     check("finish-receipt-in-own-bundle", receipt_rel(rid) == evidence_home_rel(rid) + "/receipt.toml"
           and genesis_event_rel(rid) == evidence_home_rel(rid) + "/event-0001.toml")
     check("record-row-mint-is-the-executable-row",
           record == dict(op="record-adoption", receipt_path=receipt_rel(rid),
                          receipt_core_digest="sha256:" + _sha256(core))
-          and schema.validate_op(record).status == valid)
+          and schema.validate_op(record).findings == [overlap(receipt_rel(rid))])
     # M3: the genesis event's digest recomputes from its own canonical bytes without the event_digest key,
     # through the named helper AND an independent inline recomputation, so a minted digest that is not the
     # canonical-bytes digest is a red here and a refusal inside adoption_record itself.
@@ -20687,12 +21013,10 @@ def _finish_ops_self_test(check):
     check("record-minted-row-never-plannable",
           schema.validate_plan(base_plan).status == valid and minted_graded.status == invalid
           and any("control area" in f and receipt_rel(rid) in f for f in minted_graded.findings))
-    # and on homes 2 even validate_op refuses the minted row's receipt operand, so the homes-2 activation
-    # slice must route the receipt through the capability-bound journal API (or land its own explicit rule)
-    # before this build's SUPPORTED_HOMES rises -- the fact is pinned so it cannot drift silently.
-    check("record-minted-row-homes2-operand-refused",
-          schema.validate_op(record, homes=1).status == valid
-          and schema.validate_op(record, homes=2).status == invalid)
+    # and on homes 2, this build's only generation, even validate_op refuses the minted row's receipt
+    # operand, so homes-2 adoption must route the receipt through the capability-bound journal API (or land
+    # its own explicit rule) before the adoption fence lifts -- the fact is pinned so it cannot drift silently.
+    check("record-minted-row-homes2-operand-refused", schema.validate_op(record).status == invalid)
 
     # The two composing ops over a NOT-ADOPTED root: the verified member is planted create-only, and the
     # receipt core and its genesis event land in the run's own bundle, claimed by the derived inventory.
@@ -20744,7 +21068,7 @@ def _finish_ops_self_test(check):
         before, seen = snapshot(root), []
 
         def probe(ops):
-            verdict = dispatch(dict(record), dict(ctx, ops=ops))
+            verdict = execute(dict(record), dict(ctx, ops=ops))
             seen.append((verdict, list(ops.ops), dict(ops.staged)))
             raise AdoptApplyError("probe")
         try:
@@ -20877,7 +21201,7 @@ def _finish_ops_self_test(check):
     with mock.patch.object(schema, "validate_event_chain", return_value=schema._invalid(["stub"])):
         refuses_untouched("record-consults-the-chain-validator", [record], "genesis outcome event is refused")
     for name in ("plant-governance", "record-adoption"):
-        res = dispatch(dict(plant if name == "plant-governance" else record), dict(ctx))
+        res = execute(dict(plant if name == "plant-governance" else record), dict(ctx))
         check("{}-without-transaction-refused".format(name), refused(res, "no ApplyOps"))
 
     # render-views composes into the journaled shell: the approved bytes land through the same adoption
@@ -20899,10 +21223,9 @@ def _finish_ops_self_test(check):
         root = Path(parent).resolve() / name
         machine = root / store.WORKING_DIRNAME / store.DEFAULT_MACHINE_SUBDIR
         machine.mkdir(parents=True)
-        docs = dict([(store.MANIFEST_NAME, _opf_init.build_manifest()), ("counters.toml", _opf_init.build_counters()),
-                     ("version.toml", _opf_init.build_version()), ("worklog.toml", _opf_init.build_worklog())])
-        for type_name in _opf_init.INDEX_TYPES:
-            docs[type_name + _opf_check.INDEX_SUFFIX] = _opf_init.build_index(type_name)
+        # every bootstrap document init writes, the imported-series leaves and counter rows included: a
+        # 2.0.0 store without them does not validate, so the render engine would refuse it
+        docs = _opf_init.bootstrap_documents(_opf_init._manifest_model())
         for name_, text in docs.items():
             (machine / name_).write_text(text, encoding="utf-8")
         if changelog:
@@ -21150,7 +21473,7 @@ def main():
         if len(args) == 2:
             return self_test(section=args[1])
         print("usage: _opf_adopt_apply.py --self-test-section NAME (one of: {})".format(
-            ", ".join(sorted(_SELF_TEST_SECTIONS))), file=sys.stderr)
+            ", ".join(sorted(_self_test_sections()))), file=sys.stderr)
         return 2
     if "--self-test" in args or "--selftest" in args:
         return self_test()

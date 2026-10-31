@@ -64,7 +64,7 @@ reason = "test-code"
 path = "opf/tools/_opf_adopt_apply.py"
 function = "_self_test_checks"
 form = "call"
-count = 19
+count = 21
 class = "EXEMPT"
 reason = "test-code"
 
@@ -372,7 +372,7 @@ reason = "test-code"
 path = "opf/tools/_opf_adopt_plan.py"
 function = "self_test.PlanningTests.test_default_move_store_base_unobservable"
 form = "call"
-count = 2
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 
@@ -403,6 +403,14 @@ reason = "test-code"
 [[site]]
 path = "opf/tools/_opf_adopt_plan.py"
 function = "self_test.PlanningTests.test_hook_replacement_binds_observed_bytes"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_launcher_named_move_destination"
 form = "call"
 count = 1
 class = "EXEMPT"
@@ -623,6 +631,14 @@ reason = "already-validated"
 path = "opf/tools/_opf_init_operation.py"
 function = "_homes2_plan_tests"
 form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_homes2_tests"
+form = "call"
 count = 1
 class = "EXEMPT"
 reason = "test-code"
@@ -632,6 +648,14 @@ path = "opf/tools/_opf_init_operation.py"
 function = "_physical_tests"
 form = "call"
 count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_recorded_1_2_0_manifest"
+form = "call"
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 
@@ -736,7 +760,7 @@ reason = "test-code"
 path = "opf/tools/_opf_record.py"
 function = "_self_test_units"
 form = "call"
-count = 2
+count = 3
 class = "EXEMPT"
 reason = "test-code"
 
@@ -858,7 +882,7 @@ reason = "test-code"
 path = "opf/tools/check_opf_homes.py"
 function = "boundary_self_test.<lambda>"
 form = "call"
-count = 5
+count = 4
 class = "EXEMPT"
 reason = "test-code"
 
@@ -912,14 +936,6 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "_self_test_homes2_active"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/check_opf_record.py"
 function = "_t74_dead_pid"
 form = "call"
 count = 1
@@ -936,15 +952,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "flip_t74_schema.loose"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/check_opf_record.py"
-function = "flip_t74_verb.unbound"
+function = "flip_t74_prefix.prefix_judged"
 form = "call"
 count = 1
 class = "EXEMPT"

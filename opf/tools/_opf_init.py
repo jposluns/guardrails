@@ -71,16 +71,9 @@ def _choice(value, vocabulary):
     return value
 
 
-def _manifest_model(homes2=False):
-    """Construct a fresh clean-adopter model; never reuse the validator's test fixture.
-
-    `homes2` (an explicit caller input, never a default) declares the homes-2 pair, spec_version
-    2.0.0 with homes = 2 (spec 4.2), and is refused while this tooling keeps SUPPORTED_HOMES below
-    2, so no default call reaches it."""
-    if homes2 is not False and homes2 is not True:
-        raise InitError("homes2 must be a boolean")
-    if homes2 and _opf_store.SUPPORTED_HOMES < 2:
-        raise InitError("a homes-2 manifest needs tooling that supports homes generation 2")
+def _manifest_model():
+    """Construct a fresh clean-adopter model; never reuse the validator's test fixture. It declares
+    the base, spec_version 2.0.0 with homes = 2 (spec 4.2)."""
     views = {}
     for name in _INITIAL_VIEW_NAMES:
         if name not in NAMED_VIEWS:
@@ -94,13 +87,12 @@ def _manifest_model(homes2=False):
         }
     base = {
         "standard": _opf_store.STANDARD_TOKEN,
-        "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
+        "spec_version": _opf_store.SPEC_VERSION,
         "layout": _choice("inline", _opf_store.LAYOUTS),
         "posture": _choice("required", _opf_store.POSTURES),
         "import_status": _choice("none", _opf_store.IMPORT_STATES),
+        "homes": _opf_store.HOMES,
     }
-    if homes2:
-        base.update(spec_version=_opf_store.HOMES2_SPEC_VERSION, homes=2)
     return {
         "opf": base,
         "store": {"sync_target": ""},
@@ -160,10 +152,9 @@ def base_table_text(model):
     return text
 
 
-def build_manifest(homes2=False):
-    """Return the generic adopter's manifest; no profile, foreign paths, or root VERSION.
-    `homes2` selects the homes-2 declaration (_manifest_model)."""
-    return _emit_validated(_manifest_model(homes2=homes2), _opf_store.MANIFEST_NAME,
+def build_manifest():
+    """Return the generic adopter's manifest; no profile, foreign paths, or root VERSION."""
+    return _emit_validated(_manifest_model(), _opf_store.MANIFEST_NAME,
                            _opf_store.validate_manifest)
 
 
@@ -202,10 +193,11 @@ def build_counters(*, seed=None, manifest=None):
     also carries the quoted `"imported:<NS>"` row of each type that has an imported leaf (spec 4.2/8.2):
     at zero on the fresh path, and on the seed path copied from the seed, which MUST carry every one of
     them (spec 8.2: re-adoption never zero-seeds prior ancestry). Otherwise an imported key in a seed
-    is outside the roster and refuses, exactly as with `manifest` omitted."""
+    is outside the roster and refuses. `manifest` omitted means the bootstrap model (_manifest_model),
+    whose imported series is active at base 2.0.0, so the default ledger carries the imported rows."""
     baseline = frozenset(_opf_store.BASELINE_TYPES.values())
     importer = frozenset(_opf_store.IMPORTER_TYPES.values())
-    imported = imported_counter_namespaces(manifest)
+    imported = imported_counter_namespaces(_manifest_model() if manifest is None else manifest)
     imported_keys = frozenset(IMPORTED_PREFIX + ns for ns in imported or ())
     if seed is None:
         document = {"schema": SUPPORTED_SCHEMA, "counters": {ns: 0 for ns in baseline | imported_keys}}
@@ -387,9 +379,13 @@ def _self_test_body():
               manifest_text == _opf_emit.emit_checked(dict(reversed(list(model.items())))))
         check("manifest top tables", set(manifest) == _opf_store.TOP_LEVEL_TABLES - {"profiles"})
         check("opf defaults", manifest["opf"] == {
-            "standard": _opf_store.STANDARD_TOKEN, "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
-            "layout": "inline", "posture": "required", "import_status": "none",
+            "standard": _opf_store.STANDARD_TOKEN, "spec_version": _opf_store.SPEC_VERSION,
+            "layout": "inline", "posture": "required", "import_status": "none", "homes": 2,
         })
+        # The bootstrap model is the 2.0.0 / homes = 2 baseline (red when the old base dict returns).
+        check("init-default-is-baseline",
+              model["opf"].get("spec_version") == "2.0.0" and type(model["opf"].get("homes")) is int
+              and model["opf"]["homes"] == 2 and _opf_store.homes_generation(model) == 2)
         check("store default", manifest["store"] == {"sync_target": ""})
         check("modules disabled", set(manifest["modules"]) == set(_opf_store.KNOWN_MODULES)
               and all(value is False for value in manifest["modules"].values()))
@@ -445,6 +441,9 @@ def _self_test_body():
             schema_line + "\n[counters]\n"
             "AD = 0\nBI = 0\nBL = 0\nCN = 0\nDN = 0\nFN = 0\nHO = 0\nMD = 0\nPD = 0\n"
             "PP = 0\nRF = 0\nWL = 0\n"
+            '"imported:AD" = 0\n"imported:BI" = 0\n"imported:BL" = 0\n"imported:CN" = 0\n'
+            '"imported:DN" = 0\n"imported:FN" = 0\n"imported:HO" = 0\n"imported:MD" = 0\n'
+            '"imported:PD" = 0\n"imported:PP" = 0\n"imported:RF" = 0\n"imported:WL" = 0\n'
         )
         expected_version = "release = []\n" + schema_line + "summary = []\n"
         expected_worklog = "entry = []\n" + schema_line
@@ -460,11 +459,12 @@ def _self_test_body():
             check(name + " repeat bytes", text == builder())
             check(name + " keys", set(tomllib.loads(text)) == keys)
         namespaces = frozenset(_opf_store.BASELINE_TYPES.values())
+        imported_rows = {IMPORTED_PREFIX + ns: 0 for ns in namespaces}
         counters = tomllib.loads(documents[COUNTERS_NAME])
-        high, findings = validate_counters(counters, known_namespaces=namespaces)
-        check("counters validate and are complete", not findings and high == {
-            ns: 0 for ns in namespaces
-        })
+        high, findings = validate_counters(counters, known_namespaces=namespaces,
+                                           imported_namespaces=namespaces)
+        check("counters validate and are complete", not findings and high == dict(
+            {ns: 0 for ns in namespaces}, **imported_rows))
         # Spec 8.1: legacy_fragment is deprecated for new stores and MUST NOT be scaffolded, so a fresh
         # ledger carries no importer namespace (the revert-flip for a re-seeded LF, beside the pinned
         # "counters canonical bytes" check above).
@@ -477,33 +477,35 @@ def _self_test_body():
         # refuses rather than silently zeroing.
         baseline_ns = frozenset(_opf_store.BASELINE_TYPES.values())
         importer_ns = frozenset(_opf_store.IMPORTER_TYPES.values())
-        good_seed = {ns: 0 for ns in baseline_ns | importer_ns}
+        # The bootstrap model's imported series is active, so every seed carries the imported rows.
+        good_seed = dict({ns: 0 for ns in baseline_ns | importer_ns}, **imported_rows)
         good_seed.update({"WL": 7, "BI": 3, "LF": 5})
         seeded = seeded_or_none(good_seed)
         seeded = tomllib.loads(seeded) if seeded is not None else {"counters": {}}
         check("seeded counters follow ancestral high-water",
               seeded["counters"].get("WL") == 7 and seeded["counters"].get("BI") == 3)
         check("seed with LF is accepted and copied",
-              set(seeded["counters"]) == (baseline_ns | importer_ns)
+              set(seeded["counters"]) == (baseline_ns | importer_ns | set(imported_rows))
               and seeded["counters"]["LF"] == 5)
-        lf_free_seed = dict({ns: 0 for ns in baseline_ns}, WL=7)
+        lf_free_seed = dict({ns: 0 for ns in baseline_ns}, WL=7, **imported_rows)
         lf_free = seeded_or_none(lf_free_seed)
         lf_free = tomllib.loads(lf_free)["counters"] if lf_free is not None else {}
         check("seed without LF is accepted (LF is never required or invented)",
-              set(lf_free) == baseline_ns and lf_free["WL"] == 7)
+              set(lf_free) == baseline_ns | set(imported_rows) and lf_free["WL"] == 7)
         check("seed with a value past the 64-bit range refuses",
               rejects(lambda: build_counters(seed=dict(good_seed, WL=1 << 63))))
         ceiling = seeded_or_none(dict(good_seed, WL=(1 << 63) - 1))
         check("seed at the 64-bit ceiling is accepted",
               ceiling is not None and tomllib.loads(ceiling)["counters"]["WL"] == (1 << 63) - 1)
         check("seeded counters revalidate", not validate_counters(
-            seeded, known_namespaces=baseline_ns, optional_namespaces=importer_ns)[1])
-        missing = {ns: 0 for ns in (baseline_ns | importer_ns) if ns != "WL"}
+            seeded, known_namespaces=baseline_ns, optional_namespaces=importer_ns,
+            imported_namespaces=baseline_ns)[1])
+        missing = dict({ns: 0 for ns in (baseline_ns | importer_ns) if ns != "WL"}, **imported_rows)
         check("seed missing a baseline namespace refuses",
               rejects(lambda: build_counters(seed=missing)))
         check("LF-free seed missing a baseline namespace refuses",
               rejects(lambda: build_counters(
-                  seed={ns: 0 for ns in baseline_ns if ns != "HO"})))
+                  seed=dict({ns: 0 for ns in baseline_ns if ns != "HO"}, **imported_rows))))
         check("seed with a bool value refuses",
               rejects(lambda: build_counters(seed=dict(good_seed, WL=True))))
         check("seed with a negative value refuses",
@@ -513,7 +515,7 @@ def _self_test_body():
         check("non-mapping seed refuses",
               rejects(lambda: build_counters(seed=[1, 2, 3])))
         check("no-seed and empty-adoption bytes are the zero baseline",
-              build_counters() == seeded_or_none({ns: 0 for ns in baseline_ns}))
+              build_counters() == seeded_or_none(dict({ns: 0 for ns in baseline_ns}, **imported_rows)))
         check("version validates", valid(validate_version(tomllib.loads(documents[VERSION_NAME]))))
         check("worklog validates", valid(validate_worklog(tomllib.loads(documents[WORKLOG_NAME]))))
         check("index roster", INDEX_TYPES == tuple(sorted(set(_opf_store.BASELINE_TYPES) - {"worklog"})))
@@ -531,20 +533,7 @@ def _self_test_body():
             check("index refuses {!r}".format(bad_name),
                   rejects(lambda: build_index(bad_name)))
 
-        # The imported series (spec 4.2/8.2) is reached only through an explicit homes-2 manifest under
-        # raised gates; each vector patches the shipped constants and restores them in finally.
-        def gated(thunk, spec=_opf_store.IMPORTED_SPEC_VERSION):
-            saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
-            _opf_store.SUPPORTED_HOMES = 2
-            if spec is not None:
-                _opf_store.SUPPORTED_SPEC_VERSION = spec
-            try:
-                return thunk()
-            except InitError:
-                return None
-            finally:
-                _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = saved
-
+        # The imported series (spec 4.2/8.2) is active on the bootstrap model at base 2.0.0.
         def refusal(thunk):
             # The InitError message of a refusal, or None when the thunk did not refuse.
             try:
@@ -553,56 +542,40 @@ def _self_test_body():
                 return str(exc)
             return None
 
-        check("homes-2 manifest refuses at the shipped constants",
-              rejects(lambda: _manifest_model(homes2=True)) and rejects(lambda: build_manifest(True)))
-        # homes2 is an explicit boolean: a stand-in is refused by name at the shipped constants and
-        # with homes 2 supported, never read as the default or as a homes-2 request (red when the
-        # boolean check is dropped: 0 and None then build the default model).
-        for bad in (1, 0, "yes", None):
-            check("homes2 {!r} refuses as a non-boolean".format(bad), all(
-                "homes2 must be a boolean" in (message or "") for message in (
-                    refusal(lambda: _manifest_model(homes2=bad)),
-                    refusal(lambda: build_manifest(homes2=bad)),
-                    gated(lambda: refusal(lambda: _manifest_model(homes2=bad))),
-                    gated(lambda: refusal(lambda: build_manifest(homes2=bad))))))
-        homes2_model = gated(lambda: _manifest_model(homes2=True), spec=None) or {"opf": {}}
-        homes2_text = gated(lambda: build_manifest(homes2=True))
-        check("homes-2 manifest declares the reserved pair", homes2_model["opf"].get("homes") == 2
-              and homes2_model["opf"].get("spec_version") == _opf_store.HOMES2_SPEC_VERSION
-              and homes2_text is not None
-              and tomllib.loads(homes2_text)["opf"] == homes2_model["opf"])
-        imported_ns = sorted(gated(lambda: imported_counter_namespaces(homes2_model)) or ())
-        active_text = gated(lambda: build_counters(manifest=homes2_model))
-        active_counters = tomllib.loads(active_text) if active_text is not None else None
-        check("imported counter rows on an active manifest", active_counters is not None
-              and imported_ns == sorted(_opf_store.BASELINE_TYPES.values())
+        homes2_model = model
+        homes2_text = manifest_text
+        imported_ns = sorted(imported_counter_namespaces(homes2_model) or ())
+        active_text = build_counters(manifest=homes2_model)
+        active_counters = tomllib.loads(active_text)
+        check("imported counter rows on the bootstrap manifest",
+              imported_ns == sorted(_opf_store.BASELINE_TYPES.values())
               and active_counters["counters"] == dict({ns: 0 for ns in baseline_ns},
                                                        **{"imported:" + ns: 0 for ns in imported_ns})
               and not validate_counters(active_counters, known_namespaces=baseline_ns,
                                         imported_namespaces=imported_ns)[1])
-        check("no imported rows on a 2.0.0 homes-2 manifest at the shipped constants",
-              build_counters(manifest=homes2_model) == build_counters()
-              and imported_leaf_documents(homes2_model) == {})
-        check("no imported rows with homes 2 supported but not the series",
-              gated(lambda: build_counters(manifest=homes2_model), spec=None) == build_counters()
-              and gated(lambda: imported_leaf_documents(homes2_model), spec=None) == {})
+        check("the default ledger is the bootstrap manifest's ledger", build_counters() == active_text)
         active_seed = dict({ns: 0 for ns in baseline_ns}, **{"imported:" + ns: 0 for ns in imported_ns})
-        check("an active seed missing an imported row refuses", gated(lambda: build_counters(
-            seed={k: v for k, v in active_seed.items() if k != "imported:BI"},
-            manifest=homes2_model)) is None)
+        check("an active seed missing an imported row refuses", rejects(lambda: build_counters(
+            seed={k: v for k, v in active_seed.items() if k != "imported:BI"})))
         # The seed loop names the missing imported row before any ledger is built (red when it covers
         # the baseline only: the later ledger validation still refuses, under another message).
         check("an active seed missing an imported row refuses by name",
               "counters seed is missing a high-water for namespace 'imported:BI'" in (
-                  gated(lambda: refusal(lambda: build_counters(
-                      seed={k: v for k, v in active_seed.items() if k != "imported:BI"},
-                      manifest=homes2_model))) or ""))
-        copied = gated(lambda: build_counters(seed=dict(active_seed, **{"imported:BI": 4}),
-                                              manifest=homes2_model))
+                  refusal(lambda: build_counters(
+                      seed={k: v for k, v in active_seed.items() if k != "imported:BI"})) or ""))
+        copied = build_counters(seed=dict(active_seed, **{"imported:BI": 4}))
         check("an active seed copies its imported rows",
-              copied is not None and tomllib.loads(copied)["counters"]["imported:BI"] == 4)
+              tomllib.loads(copied)["counters"]["imported:BI"] == 4)
+        # A manifest whose imported series is inactive (no homes-2 declaration) carries no imported
+        # rows, and a seed carrying one refuses there.
+        inactive = deepcopy(homes2_model)
+        del inactive["opf"]["homes"]
+        check("no imported rows on an inactive manifest",
+              "imported:" not in build_counters(manifest=inactive)
+              and imported_leaf_documents(inactive) == {})
         check("an inactive seed carrying an imported row refuses",
-              rejects(lambda: build_counters(seed=dict(good_seed, **{"imported:BI": 0}))))
+              rejects(lambda: build_counters(seed=dict(good_seed, **{"imported:BI": 0}),
+                                             manifest=inactive)))
         expected_record_leaf = "record = []\n" + schema_line
         for leaf_type in sorted(_opf_store.BASELINE_TYPES):
             (leaf_name,) = _opf_store.imported_leaf_names((leaf_type,))
@@ -613,50 +586,41 @@ def _self_test_body():
         for bad_name in ("legacy_fragment", "version", "unknown", "", None):
             check("imported leaf refuses {!r}".format(bad_name),
                   rejects(lambda: build_imported_leaf(bad_name)))
-        check("imported leaves empty when inactive", imported_leaf_documents(homes2_model) == {}
-              and imported_leaf_documents(model) == {})
-        active_leaves = gated(lambda: imported_leaf_documents(homes2_model)) or {}
+        active_leaves = imported_leaf_documents(homes2_model)
         check("imported leaves cover every baseline type",
               sorted(active_leaves) == sorted(_opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES)))
         narrowed = deepcopy(homes2_model)
         del narrowed["types"]["finding"]
         check("imported leaves follow the authoritative roster",
-              "finding.imported.index.toml" in (gated(lambda: imported_leaf_documents(narrowed)) or {}))
+              "finding.imported.index.toml" in imported_leaf_documents(narrowed))
         # The leaves and the counter rows key on the one activation flag, so they cover the same types.
         check("imported leaves and counter rows agree",
               sorted(_opf_store.BASELINE_TYPES[t] for t in _opf_store.BASELINE_TYPES
                      if _opf_store.imported_leaf_names((t,)) & set(active_leaves)) == imported_ns)
-        # The shared bootstrap builder: on the default model, exactly the individual builders'
-        # documents in creation order (red on an added, dropped, reordered or changed document);
-        # on the active homes-2 model, the same documents with the imported counter rows plus every
-        # imported leaf after them (red when the leaves or the manifest-keyed counters are dropped);
-        # and a seed reaches the counters builder unchanged.
+        # The shared bootstrap builder: exactly the individual builders' documents in creation order,
+        # with the imported counter rows, then every imported leaf after them (red on an added,
+        # dropped, reordered or changed document, or when the leaves or the manifest-keyed counters
+        # are dropped); and a seed reaches the counters builder unchanged.
         individual = [(_opf_store.MANIFEST_NAME, manifest_text), (COUNTERS_NAME, build_counters()),
                       (VERSION_NAME, build_version()), (WORKLOG_NAME, build_worklog())]
         individual += [(t + INDEX_SUFFIX, build_index(t)) for t in INDEX_TYPES]
-        check("bootstrap documents on the default model are the individual builders' documents",
-              list(bootstrap_documents(model).items()) == individual)
-        active_docs = gated(lambda: bootstrap_documents(homes2_model)) or {}
-        check("bootstrap documents on an active homes-2 model add the imported leaves last",
+        active_docs = bootstrap_documents(homes2_model)
+        check("bootstrap documents are the individual builders' documents, imported leaves last",
               list(active_docs)[:len(individual)] == [name for name, _text in individual]
+              and list(active_docs.items())[:len(individual)] == individual
               and list(active_docs)[len(individual):] == list(active_leaves)
               and active_docs.get(COUNTERS_NAME) == active_text
               and active_docs.get(_opf_store.MANIFEST_NAME) == homes2_text)
         check("bootstrap documents pass a seed to the counters builder",
-              bootstrap_documents(model, seed=good_seed)[COUNTERS_NAME]
-              == build_counters(seed=good_seed))
-        # The fixture-facing [opf] spelling: the hand-written fixtures' exact lines on the default model
-        # (red on a reordered, requoted or dropped line), the homes-2 pair on the explicit model, and a
-        # refusal for a model with no base table or a value that does not read back.
-        check("base table text is the fixtures' default [opf] lines",
+              bootstrap_documents(model, seed=active_seed)[COUNTERS_NAME]
+              == build_counters(seed=active_seed))
+        # The fixture-facing [opf] spelling: the exact lines on the default model (red on a
+        # reordered, requoted or dropped line), and a refusal for a model with no base table or a
+        # value that does not read back.
+        check("base table text is the default [opf] lines",
               base_table_text(model) == '[opf]\nstandard = "opf"\nspec_version = "{}"\nlayout = "inline"\n'
-              'posture = "required"\nimport_status = "none"\n'.format(_opf_store.SUPPORTED_SPEC_VERSION))
-        homes2_base = gated(lambda: base_table_text(homes2_model), spec=None) or ""
-        check("base table text carries the homes-2 pair",
-              homes2_base.endswith('spec_version = "{}"\nlayout = "inline"\nposture = "required"\n'
-                                   'import_status = "none"\nhomes = 2\n'.format(
-                                       _opf_store.HOMES2_SPEC_VERSION))
-              and tomllib.loads(homes2_base) == {"opf": homes2_model["opf"]})
+              'posture = "required"\nimport_status = "none"\nhomes = 2\n'.format(_opf_store.SPEC_VERSION)
+              and tomllib.loads(base_table_text(model)) == {"opf": model["opf"]})
         check("base table text refuses a model with no base table or a value that does not read back",
               rejects(lambda: base_table_text({}))
               and rejects(lambda: base_table_text({"opf": {"standard": 'a"b'}})))
@@ -664,10 +628,11 @@ def _self_test_body():
         for name, text in documents.items():
             check(name + " byte-canon scan", not authority.scan_bytes(text.encode("utf-8")))
             check(name + " ASCII", text.isascii())
-        for namespace in sorted(namespaces):
+        for namespace in sorted(namespaces | set(imported_rows)):
             bad = deepcopy(counters)
             del bad["counters"][namespace]
-            _high, findings = validate_counters(bad, known_namespaces=namespaces)
+            _high, findings = validate_counters(bad, known_namespaces=namespaces,
+                                                imported_namespaces=namespaces)
             check("missing counter " + namespace, bool(findings))
         for label, table, key, value in (
                 ("non-bool module", "modules", "governance", "false"),

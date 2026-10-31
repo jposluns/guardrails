@@ -112,8 +112,8 @@ pull request (CLAUDE.md, Gates and CI).
 
    ```toml opf-declaration
    release = "1.0.5"
-   spec_version = "1.2.0"
-   homes = 1
+   spec_version = "2.0.0"
+   homes = 2
    worklog = 1
    ```
 2. Compute. From the repository root on the frozen tree, run

@@ -3,7 +3,7 @@
 
 Checks documented topology against the constructor authority. Text checks protect the base 2.0.0
 contract with homes 2, adoption and import included, not runtime conformance to it: the reference
-tooling does not yet implement 2.0.0. No store is mutated or required to install a block.
+tooling makes no claim of conformance to 2.0.0. No store is mutated or required to install a block.
 The registered pins tile each registered section completely (the self-test proves the
 concatenation equality per section), so deleting any sentence in a tiled section turns the gate
 red. Residual: the default gate's pins are substring checks over normalized text, so added
@@ -59,7 +59,8 @@ red; each sentence of the disclosure page's retired fresh-only item, the quickst
 conformance-class sentence, the record-indexes page's deleted importer-only legacy_fragment
 rows and counts, those three files' wording of the removed section 9.2 remedy adoption, and the
 disclosure and record-indexes pages' description of a store upgrade the reference tooling no longer
-defines, is searched over its whole file's normalized text and is red wherever it lands
+defines, and every surface's tooling-status sentences from before the tooling initialized and
+validated base 2.0.0 stores, is searched over its whole file's normalized text and is red wherever it lands
 (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
 and beyond those registered retired sentences no retired-text check reads them, so any other
 deleted sentence restored there stays green.
@@ -70,6 +71,16 @@ retired-text quotation entry (_Q) is not linted, since quoted text is not in for
 matches only a quotation block. Residual:
 the lint reads the registry marker, not the meaning, so a requirement wrongly marked descriptive
 stays green; review of registry changes catches that.
+
+The default entry also runs the retired gate name scan (retired_gate_name_findings): no .py module
+under opf/tools may spell a transitional alias of store.HOMES or store.SPEC_VERSION. Each file must
+have one reading: strict UTF-8 (a UTF-8 BOM allowed), no CR that is not followed by LF, and no coding
+cookie but utf-8 or utf-8-sig on lines 1 and 2, so the scan and the compiler both read it as UTF-8;
+any other file is a finding naming it, never a traceback. Each line is NFKC-normalized before it is
+matched, as Python normalizes identifiers, so a fullwidth or
+mathematical-alphanumeric spelling is caught. Residual: it is a line scan, so a name built at run time
+(getattr, setattr, or a globals() key assembled from split or formatted strings) is outside it, and so
+is every file that is not a .py file.
 
 The default entry also guards the informative sections: a heading whose title or body holds
 "(informative)" or the declaration ("This appendix is informative", or section or subsection,
@@ -257,6 +268,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import ast
 import html
 import re
 import tempfile
@@ -336,7 +348,7 @@ _CONTRACT = {
         _D('Base spec 2.0.0, with [opf].homes = 2, is the only base version this specification defines.'),
         _D('It includes adoption, the imported series and import (sections 8, 11 and 14).'),
         'A writer MUST NOT accept a format that its doctor does not grade deterministically.',
-        _D('The reference tooling does not yet implement base 2.0.0 (section 16.1).'),
+        _D('The reference tooling initializes and validates base 2.0.0 stores with homes = 2 (section 16.1).'),
         _D('<product repository root>/ .opf.toml # committed store pointer (section 4.3) CHANGELOG.md # curated public changelog (deliverable; section 6.3) VERSION # deterministic render from version.toml (deliverable) .working/ # the store; present here under the default in-repo configuration <store repository root>/ # the product repository itself, by default .working/ README.md # ownership and regeneration note (deliverable) WORKLOG.md # deterministic render of worklog.toml VERSION.md # optional human view of version.toml TODO.md BACKLOG.md PIPELINE.md DONE.md FINDINGS.md DECISIONS.md BLOCKS.md HANDOFF.md REFERENCES.md CONTRIBUTIONS.md DECISIONS.toml # machine projection (deterministic; section 10.5) <TYPE>-INDEX.md ...'),
         _D('# optional 1:1 index mirrors (section 10.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # imported records per enabled type (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.'),
         _D('The per-record layout (section 9) additionally places one file per record under .working/toml/<type>/, with each <type>.index.toml acting as the registry.'),
@@ -1006,8 +1018,8 @@ _CONTRACT = {
         _D('A project that keeps its own store by hand, with its own checks over that store alone (section 1), is not an implementation under this section.'),
         "The base defines one implementation model and no implementation conformance classes: a declared scope, exclusion, profile, or posture MUST NOT waive a base requirement, and current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind every implementation.",
         _D('An implementation supports base spec_version 2.0.0 and homes generation 2, the only ones this specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and initializes stores directly at them.'),
-        _D('The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, a pre-release format this specification does not define, and it makes no claim of conformance to this specification.'),
-        _D('The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to this specification, and its opf upgrade and opf record refuse such a store.'),
+        _D('The reference tooling initializes and validates base 2.0.0 stores with homes = 2, and it makes no claim of conformance to this specification.'),
+        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0, and it does not yet implement post-adoption import.'),
         _D('The reference tooling defines no store upgrade: its opf upgrade refuses every invocation with exit 2, reading and writing nothing.'),
         'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
@@ -1429,18 +1441,18 @@ _TOOLING_ONLY_RESERVATIONS = ("imports",)
 # They are not specification sentences, so the section 2 keyword lint does not read them. The
 # quickstart, the disclosure page, the adopt page, the adoption guide, the record-indexes page
 # and the core-files page state the one implementation model, the 2.0.0 file baseline, the
-# reference tooling's grading of a 2.0.0 manifest with homes = 2, that it defines no store
-# upgrade, what its scaffold still writes, and where its 1.2.0 behaviour diverges from the
-# specification. The self-test pins
+# reference tooling's initialization and validation of base 2.0.0 stores with homes = 2, which
+# adoption subcommands run there without reading the adoption journal and which refuse, that it
+# defines no store upgrade, and what its scaffold writes. The self-test pins
 # this registry's shape, so dropping an entry turns the self-test red.
 _SURFACE = {
     QUICKSTART: (
         'Date: 2026-10-24 (UTC).',
         'Create .working/toml/ by hand with manifest.toml declaring standard = "opf", spec_version = "2.0.0" and homes = 2 in its [opf] table, plus counters.toml (with the imported counter row of each enabled type beside its clean row), version.toml, worklog.toml, the eleven baseline .index.toml files (worklog is the exempt ledger listed above, not an index), the eleven .imported.index.toml leaves, and worklog.imported.toml, all empty to start; specification sections 4, 8 and 9 give the full file baseline.',
-        "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the specification's validation refuses (specification section 9.2).",
+        "The reference tooling's opf init scaffolds this store: base 2.0.0 with homes = 2.",
         'The specification defines one implementation model, with no conformance classes (OPF-SPEC section 16.1).',
-        'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling does not yet implement it.',
-        'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
+        'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling initializes and validates base 2.0.0 stores with homes = 2.',
+        'Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; opf adopt apply and reconcile refuse at base 2.0.0.',
         'This supersedes the earlier aiqt-opf token; the interim devprocess token and [devprocess] table are retired by the OPFiles rebrand.',
         "opf init also refuses when the git history of HEAD's first-parent line shows a prior store (specification section 8.2: counters never restart, so record ids are never reissued).",
         'opf adopt is the path for re-adopting any prior ancestry.',
@@ -1448,30 +1460,33 @@ _SURFACE = {
     ),
     DISCLOSURE: (
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
-        "That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.",
+        'at base 2.0.0 they and opf adopt status run without reading the adoption journal, and status says the journal is not read.',
+        'opf adopt apply and reconcile refuse with exit 2 at base 2.0.0, and complete refuses with exit 2,',
         'A rename would be a store-breaking change the specification gives no path: every base-schema version bump stays additive and keeps the exact token, so no bump the specification permits renames it (specification sections 4.5 and 9.2).',
         'Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.',
-        'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification.',
-        'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
+        'The reference tooling initializes and validates base 2.0.0 stores with homes = 2, and it makes no claim of conformance to the specification.',
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
     ADOPT_PAGE: (
-        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
-        "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        "The reference tooling's opf init scaffolds a 2.0.0 store with homes = 2.",
+        "The reference tooling's opf init scaffolds this store: base 2.0.0 with homes = 2.",
         'It declares standard = "opf" (the exact discovery token) in its [opf] table, along with the base spec_version you conform to ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status.',
         'It holds the clean row and the imported counter row (the quoted key "imported:&lt;NS&gt;", at zero to start) of every enabled type.',
         'The imported leaves: one &lt;type&gt;.imported.index.toml beside each of those eleven indexes, plus worklog.imported.toml for the worklog, each empty to start. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).',
-        'The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above.',
-        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
+        'The reference tooling initializes and validates spec 2.0.0 stores with homes = 2, the only base version the standard defines, as described above.',
+        'At base 2.0.0, opf adopt plan, approve and status run without reading the adoption journal, and status says the journal is not read.',
+        'opf adopt apply and reconcile refuse with exit 2 at base 2.0.0, and complete refuses with exit 2,',
         'spec_version = "2.0.0" # the base spec version this store conforms to homes = 2 # the homes generation; required, and 2 is the only value',
         'The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with opf render --write for a supported store or your own renderer, and then work records-first.',
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
+        'The reference CLI runs investigation and planning today, and prints the approval without recording it; recording the approval, apply and completion are not executable yet, so the assistant stops there and reports.',
     ),
     ADOPT_GUIDE: (
-        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        "The reference tooling's opf init scaffolds a 2.0.0 store with homes = 2.",
         'Create the machine store at .working/toml/: manifest.toml (the control document: an [opf] table declaring standard = "opf", the base spec_version ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status, plus a [types.] registration for every enabled type, the declared [views], and the other tables the standard defines; see section 9 of OPF-SPEC.md, linked from /standard), counters.toml (the per-namespace ID high-water marks), version.toml (the version and release ledger, numbers, dates, spans, and digests, never release prose), worklog.toml (the durable operational record: one entry per change, correctable before its span is released, frozen afterward, never deleted), and the eleven baseline typed indexes as .index.toml, empty to start, plus the imported leaves the standard requires in every store: one .imported.index.toml beside each of those indexes and worklog.imported.toml for the worklog, each empty to start, with the imported counter row of each enabled type (the quoted key "imported:", at zero) beside its clean row in counters.toml (OPF-SPEC.md sections 4.2 and 8.2).',
-        'It does not yet implement spec 2.0.0, the only base version the standard defines.',
-        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
+        'It initializes and validates spec 2.0.0 stores with homes = 2, the only base version the standard defines.',
+        'At base 2.0.0, opf adopt plan, approve and status run without reading the adoption journal, and status says the journal is not read.',
+        'What it does not run yet: opf adopt apply and reconcile refuse with exit 2 at base 2.0.0, and complete refuses with exit 2,',
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
@@ -1482,12 +1497,12 @@ _SURFACE = {
         'The standard reserves the LF namespace unassigned and defines no legacy_fragment type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.',
         "Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.",
         'Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates legacy_fragment records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.',
-        "A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
+        "A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and its manifest declares a spec_version below 2.0.0, which the reference tooling refuses as a store, as the standard's section 9.2 validation does.",
     ),
     CORE_FILES: (
         'The base [opf] table carries the exact discovery token standard = "opf", the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:',
         'standard = "opf" spec_version = "2.0.0" homes = 2 layout = "inline"',
-        'The reference tooling does not yet implement spec 2.0.0: its scaffold still writes spec_version = "1.2.0" with no homes key.',
+        'The reference tooling\'s scaffold writes spec_version = "2.0.0" with homes = 2.',
         '[opf] standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)',
     ),
 }
@@ -1497,13 +1512,22 @@ _SURFACE = {
 # unassigned LF namespace (spec 8.1), and the quickstart's, the disclosure page's and the
 # record-indexes page's wording of the removed section 9.2 remedy adoption, retired with it (spec
 # 9.2 defines no path for a manifest below 2.0.0), and the disclosure and record-indexes pages'
-# description of a store upgrade the reference tooling no longer defines. Each sentence present in
-# its file's normalized text is a finding.
+# description of a store upgrade the reference tooling no longer defines, and each surface's
+# tooling-status sentences from before the tooling initialized and validated base 2.0.0 stores (its
+# 1.2.0 scaffold and grading, the adoption subcommands that read or refused over the adoption
+# journal, and the adopt page's claim that approval did not run), and the claim on the quickstart, the
+# disclosure page, the adopt page and the adoption guide that apply and reconcile refuse until the
+# adoption journal moves, which already sits at its homes-2 home. Each sentence present in its file's
+# normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
         "the specification's section 9.2 remedy adoption starts a new store whose counters start at zero, so a number the old tree's records carried can appear again in the new store's own series",
         'under the specification, a tree whose manifest declares a spec_version below 2.0.0 is foreign content for adoption, so adoption over it is a first adoption (specification sections 9.2 and 14.1), never a re-adoption.',
+        "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the specification's validation refuses (specification section 9.2).",
+        'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling does not yet implement it.',
+        'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
+        'until the adoption journal moves',
     ),
     DISCLOSURE: (
         'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name an older store or one in which its admission check detects an item on the closed legacy-state list.',
@@ -1516,6 +1540,33 @@ _SURFACE_RETIRED = {
         'a 1.2.0 store is one the section 9.2 validation refusals refuse, so an adoption over it is a first adoption under section 14.1, never a re-adoption.',
         "An older store has no upgrade into 2.0.0; its remedy is a fresh 2.0.0 store whose adoption takes the old store's files as foreign content.",
         'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
+        "That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.",
+        'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification.',
+        'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
+        'opf adopt approve, apply, complete, and reconcile refuse with exit 2,',
+        'until the adoption journal moves',
+    ),
+    ADOPT_PAGE: (
+        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        'The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above.',
+        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
+        'It validates spec 1.2.0 stores in either layout,',
+        'opf adopt status reports adoption runs and the adoption journal and writes nothing.',
+        'opf adopt approve, apply, complete and reconcile refuse with exit 2, so no approval is recorded, nothing is applied, and nothing is retired.',
+        'The read-only plan and status subcommands run; approve, apply, complete, and reconcile refuse with exit 2 before reading anything.',
+        'reports any open transaction or held lock in the adoption journal.',
+        'The reference CLI runs investigation and planning today; approval, apply and completion are not executable yet, so the assistant stops there and reports.',
+        'until the adoption journal moves',
+    ),
+    ADOPT_GUIDE: (
+        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        'It does not yet implement spec 2.0.0, the only base version the standard defines.',
+        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
+        'It validates spec 1.2.0 stores in either layout,',
+        'opf adopt status, which reports adoption runs and the adoption journal and writes nothing.',
+        'What it does not run yet: opf adopt approve, apply, complete and reconcile refuse with exit 2,',
+        'until the adoption journal moves',
     ),
     RECORD_INDEXES: (
         'Importer-only (no module toggle)',
@@ -1524,6 +1575,10 @@ _SURFACE_RETIRED = {
         'one importer-only type, and two reserved names or namespaces',
         "a 1.2.0 store is one the standard's section 9.2 validation refuses, so an adoption over it is a first adoption under its section 14.1, never a re-adoption.",
         'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
+        "and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
+    ),
+    CORE_FILES: (
+        'The reference tooling does not yet implement spec 2.0.0: its scaffold still writes spec_version = "1.2.0" with no homes key.',
     ),
 }
 
@@ -1544,6 +1599,1122 @@ def surface_findings(texts=None):
             if fragment in body:
                 findings.append("surface {} restores retired text: {}".format(path.name, fragment))
     return findings
+
+
+# The transitional aliases of store.HOMES and store.SPEC_VERSION are retired: no module under opf/tools
+# may spell either name again, as a definition or as a read. Each name is built from two pieces, so
+# this module's own source never carries it and the scan covers this file like any other. Python
+# normalizes every identifier with NFKC, so a fullwidth or mathematical-alphanumeric spelling is the
+# same identifier: each line is NFKC-normalized before it is matched, in a file that has one reading
+# (_module_source: a cookie such as UTF-7 would hide a name from a UTF-8 read, so it is refused rather
+# than interpreted). What a line scan cannot see is outside this gate: a name built at run time
+# (getattr, setattr or a globals() key assembled from split or formatted strings) never appears whole
+# on any line, and only .py files are scanned.
+_RETIRED_GATE_NAMES = ("SUPPORTED_" + "HOMES", "SUPPORTED_" + "SPEC_VERSION")
+_TOOLS = Path(__file__).resolve().parent
+# A scanned module has one reading, so no decoder can read it differently from the compiler: strict UTF-8
+# after an optional UTF-8 BOM, no CR that is not followed by LF (the compiler ends a line there, a reader
+# that splits at LF alone does not, and the two then look for a coding cookie on different lines), and no
+# coding cookie but utf-8 or utf-8-sig on lines 1 and 2. A cookie is every `coding:` or `coding=` and the
+# name after it, in a comment or not (Python reads one only in a comment, an over-refusal). The name passes
+# only when, lower-cased with each underscore read as a hyphen, it is exactly utf-8 or utf-8-sig (`UTF_8`
+# passes). Python reads more names as UTF-8 (`utf8`, `u8`, `cp65001`, and any name that begins `utf-8-`, such
+# as Emacs's `utf-8-unix`); each is refused, an over-refusal. Anything else is refused as a finding naming the
+# file, as is a module the no-homes-1 scan cannot compile or whose syntax tree it cannot walk (too deep or too
+# large); none is a traceback.
+_BOM = b"\xef\xbb\xbf"
+_CODING = re.compile(r"coding[:=][ \t]*([-\w.]+)")
+_SOURCE_RULE = ("a scanned module must be strict UTF-8, a UTF-8 BOM allowed, with no CR not followed by LF and "
+                "no coding cookie but utf-8 or utf-8-sig on lines 1 and 2, and must compile to a syntax tree the "
+                "scan can walk")
+_COMPILED_RULE = ("no __pycache__ directory, bytecode file or extension module may sit under opf/tools; run Python "
+                  "with -B and remove it")
+# The suffixes import loads compiled code from on any platform: bytecode, and every extension module suffix
+# (`.cpython-314-x86_64-linux-gnu.so` and `.abi3.so` end in .so; Windows uses .pyd).
+_BYTECODE_SUFFIX, _EXTENSION_SUFFIXES = ".pyc", (".so", ".pyd")
+
+
+def _source_finding(rel, line, scan, reason):
+    return "{}:{}: {}, so the {} scan refuses this module ({})".format(rel, line, reason, scan, _SOURCE_RULE)
+
+
+def _module_source(path, rel, scan):
+    """(bytes, text, None) for a module with one reading (above), else (None, None, the finding)."""
+    raw = path.read_bytes()
+    body = raw[len(_BOM):] if raw.startswith(_BOM) else raw
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return None, None, _source_finding(rel, body.count(b"\n", 0, exc.start) + 1, scan,
+                                           "byte 0x{:02x} is not strict UTF-8".format(body[exc.start]))
+    lone = re.search("\r(?!\n)", text)
+    if lone:
+        return None, None, _source_finding(rel, text.count("\n", 0, lone.start()) + 1, scan,
+                                           "a CR that is not followed by LF ends a line")
+    for number, line in enumerate(text.split("\n", 2)[:2], 1):
+        for cookie in _CODING.finditer(line):
+            if cookie.group(1).lower().replace("_", "-") not in ("utf-8", "utf-8-sig"):
+                return None, None, _source_finding(rel, number, scan, "the coding cookie {!r} is not utf-8 or "
+                                                   "utf-8-sig".format(cookie.group(1)))
+    return raw, text, None
+
+
+def retired_gate_name_findings(tools=None):
+    tools = _TOOLS if tools is None else tools
+    findings = []
+    for path in sorted(tools.rglob("*.py")):
+        _raw, text, refused = _module_source(path, path.relative_to(tools).as_posix(), "retired gate name")
+        if refused is not None:
+            findings.append(refused)
+            continue
+        # Lines end at LF, as the compiler counts them once no CR stands alone.
+        for number, line in enumerate(text.split("\n"), 1):
+            line = unicodedata.normalize("NFKC", line)
+            for name in _RETIRED_GATE_NAMES:
+                if name in line:
+                    findings.append("{}:{}: retired gate name {}; read store.{} instead".format(
+                        path.relative_to(tools).as_posix(), number, name, name[len("SUPPORTED_"):]))
+    return findings
+
+
+# The homes-1 paths of the record seam and the adoption validators are deleted: homes 2 is the only
+# generation they accept, and every other value refuses. A homes read is a name or attribute ending in
+# `homes`, a subscript, `.get(...)` or getattr(...) keyed by a string ending in `homes`, or a
+# homes_generation(...) call; a called name (`_directory_homes(plan)`) is not one. The HOMES constant is
+# the bare name HOMES, or HOMES read off a name the module binds only by importing _opf_store and never
+# rebinds through a namespace: no attribute of that name is set or deleted on any object (the module object
+# included: `sys.modules[__name__].store = x`), and no string constant or keyword argument is exactly that name
+# (a namespace key or a writer's name: `globals()["store"] = x`, `globals().update(store=x)`,
+# `setattr(module, "store", x)`); a dict key or an attribute of another object that only shares the name is an
+# over-refusal. Outside
+# self-test code and the vendored tree, this AST scan of opf/tools fails on the rules below. Self-test code,
+# which still builds refused homes-1 inputs, is every check_*.py module and the body of each self-test
+# function: a module-level def whose name holds `self_test` or `self_tests` as whole words between
+# underscores (`self_test`, `_self_test_units`, `_cli_self_test`, `run_self_tests`; _SELF_TEST_NAME), the
+# convention every such function in the tree follows. A def's decorators, defaults, annotations and type
+# parameters run when its module is imported, so they are scanned; a nested def, a method, a lambda and a
+# name holding the words inside a longer one (`myself_test`) are not self-test code. A self-test function is
+# scanned like any other where production code spells its name, as a name, an attribute or an import alias,
+# in any module (names are matched across modules, so every self-test function of that name is scanned, and
+# what its body spells is then production code too). Production code is all the scan walks outside the bodies
+# of self-test functions, of the self-test entries, and of the helpers only self-test code names (a
+# module-level def without decorators that self-test code or another such helper spells, as a name, an
+# attribute or inside a string, and nothing else spells: opf.py's two watchdog fixtures, which the self-test
+# pins). The self-test entries are the body of each module's `if __name__ == "__main__":` block (not its else
+# or elif arms, which run on import and are production code) and the body of each module-level `main` def
+# without decorators (a decorated main is production code, as every decorated def other than a self-test
+# function is: its decorator may run it). A main is production code too where production code spells `main`
+# outside the body of a module-level def without decorators (a module-level call `main()`, a decorator, a
+# class), or where a self-test function production code reaches spells it; names are matched across modules
+# here too. The scan then fails on:
+#   1. any comparison or membership test with a homes read anywhere in an operand (`homes - 1 == 0`,
+#      `int(homes) == 1`, `m["opf"]["homes"] == 1`) other than ONE `==` between a bare homes read and
+#      the integer 2 or the HOMES constant (element by element in a tuple `==`), or the type guard
+#      `type(<homes read>) is int` (or `is not int`): `== 1`, `< 2`, `!= 2`, `>= 2`, `in (1,)`,
+#      `== True` and a chained comparison all fail; any call with a homes read anywhere in it whose
+#      callee is a name or attribute in _COMPARISON_CALLS, the comparison dunders and operator's
+#      comparison functions (`homes.__eq__(1)`, `operator.eq(homes, 1)`, and `homes.__eq__(2)` too); and
+#      a mapping pattern keyed by a string ending in `homes`, or a class pattern keyword ending in
+#      `homes`, that matches anything but 2 or HOMES there (`case {'homes': 1}:`, `case C(homes=h):`);
+#   2. a homes-1 fallthrough after a generation test, a test that is only `== 2` comparisons (no tuple
+#      `==`) and type guards joined by `and`, or its `not`: the path a failed test takes (an `if`'s
+#      `else`, its body under `not`, or the statements after an `if` whose body ends in return, raise,
+#      continue or break) must begin with a refusal: a `raise` that is not inside the body of a try
+#      statement in the same function (one of its handlers or its finally clause may swallow it), or
+#      another such test whose own failed path (its body under `not`, its else, or else the statements
+#      after it) begins with a refusal; the false arm of a conditional expression must be None; no `or`
+#      may follow it; and a `match` whose subject holds a homes read must have a bare homes read as its
+#      subject, or a tuple or list display with no starred element whose elements holding a homes read
+#      are bare reads, and holds only arms that match 2 (or HOMES) at those reads with no guard
+#      (`case 2:`, `case ('2.0.0', 2):`) and a final `case _:` whose body begins with such a `raise`;
+#   3. a literal other than the integer 2 passed for a homes parameter (a keyword ending in `homes`, a
+#      key ending in `homes` in a dict display unpacked by `**`, or the position of a parameter ending
+#      in `homes` of a function that opf/tools defines by a def statement under that name), or set as
+#      such a parameter's default, a lambda's included; and a number literal (bool, int, float or
+#      complex) other than the integer 2 bound to a homes read by an assignment, annotated assignment or
+#      `:=` (`homes = 1`, `self.homes = 1`, a class attribute `homes: int = 1`, `m["homes"] = 1`;
+#      element by element where a tuple or list target meets a display of the same length), or given as
+#      the value of a dict display key ending in `homes` (`{"opf": {"homes": 1}}`);
+#   4. a binding or deletion of the name HOMES other than _opf_store.py's module-level `HOMES = 2` and
+#      `from _opf_store import HOMES`, a type parameter of any kind included (`def f[HOMES]()`,
+#      `class C[*HOMES]`, `type A[**HOMES] = ...`: no scope may read a TypeVar as the constant 2, and a type
+#      parameter named like the store module's alias keeps `alias.HOMES` from reading as it); every star
+#      import, since `from m import *` binds names the module
+#      never spells, HOMES possibly among them (refused even where m is a scanned module, which this rule
+#      holds too, or the importer never reads HOMES: an over-refusal); an assignment or deletion of an
+#      attribute HOMES on any object (`x.HOMES = 1`, `del x.HOMES`); a call of an attribute writer
+#      (setattr, delattr, __setattr__ or __delattr__, called by a name or an attribute: `builtins.setattr`,
+#      `monkeypatch.setattr`, `object.__setattr__`) given the string literal "HOMES" as setattr's or
+#      delattr's second argument or as a dunder's first or second (`setattr(_opf_store, "HOMES", 1)`,
+#      `_opf_store.__setattr__("HOMES", 1)`); and every other use of an attribute writer but a plain call
+#      given a string literal name. A plain call names the writer as its callee, by a name or an attribute,
+#      and passes positional arguments alone, none starred, as many as the builtin takes (setattr 3, delattr
+#      2, __setattr__ 2 bound or 3 unbound, __delattr__ 1 bound or 2 unbound), a string literal at the
+#      attribute name's position (_ATTRIBUTE_WRITERS); one the "HOMES" check above leaves clean names an
+#      attribute other than HOMES. Every other use is refused as a binding of HOMES the scan cannot rule
+#      out, fail-closed: a call with a starred, keyword or `**` argument, another argument count, or a name
+#      that is no string literal (a variable, an f-string, a join), and every other spelling of the four
+#      names, whatever it does: a name or attribute that is not that callee (`put = setattr`,
+#      `functools.partial(setattr, m)`, `map(setattr, ...)`), an import alias, a parameter, a keyword, a
+#      definition, a global or nonlocal declaration, a capture, a class pattern keyword or a type parameter,
+#      and a string constant, an f-string's literal piece included, that is exactly one of the names
+#      (`getattr(builtins, "setattr")`, `builtins.__dict__["setattr"]`). The class closed is every route by
+#      which a writer the module spells reaches an attribute name the scan does not read as a literal. It
+#      also fails on every string constant, an f-string's literal piece included, and every keyword argument
+#      that is exactly HOMES (`getattr(_opf_store, "HOMES")`, `charged(_opf_store, "HOMES", w)`, `f"HOMES"`,
+#      `dict(HOMES=1)`), so no writer or helper the scan does not read as a writer (an excluded one, a list
+#      of pairs a writer later drains, a stub table) is handed the name as a literal; this refusal has no
+#      exclusion, and _opf_store.py is not spared, since its `HOMES = 2` spells no string (_opf_init_p0's
+#      refusal code is HOMES_DECLARATION, not the name). Any scanned module can reach the store module (by
+#      import, through sys.modules, or as an argument), so the rule holds in every one;
+#   5. a homes parameter or homes read in each adoption validator named in _HOMES1_FREE;
+#   6. any reference to the deleted record journal root: a string or bytes constant other than a
+#      docstring containing .aiqt/record/journal (unless a documented exclusion,
+#      _LEGACY_JOURNAL_EXCLUSIONS), the name JOURNAL_REL anywhere in _opf_record.py, or an attribute
+#      JOURNAL_REL read off the record module (`_opf_record.JOURNAL_REL`, `record.JOURNAL_REL`).
+# Rules 1 to 3 pass a site that is a documented exclusion (_HOMES_COMPARE_EXCLUSIONS, one reason each), rule
+# 4's attribute-writer refusal passes one in _ATTRIBUTE_WRITER_EXCLUSIONS (one reason each: why the use never
+# writes HOMES and never writes to the store module), and rule 6 one in _LEGACY_JOURNAL_EXCLUSIONS; rule 4's
+# binding and HOMES string refusals pass none. Every exclusion is keyed by (module, owner, exact text) and
+# admits exactly one site: one that matches two or more is red, naming each. The owner is the innermost def or
+# class enclosing the site under the qualified name Python gives it (__qualname__: `_StCloseFault.__enter__`,
+# `_watchdog_install_charges.<locals>.charged`), or <module>; a lambda belongs to its enclosing owner, and a
+# def's defaults and decorators to the def. The text is the site as ast.unparse writes it: a comparison (the
+# whole conditional expression where it is one's test), the `== 2` test before a fallthrough, a call, a
+# reference, `<parameter>=<default>`, or a string constant's site: the lone `==` or `in` comparison it is an
+# operand of (an element of a tuple, list or set display right of `in` included), else the call it is an
+# argument or keyword value of, else the constant, with an f-string's piece at its f-string's site. Each
+# module must have one reading (_module_source): strict UTF-8 after an optional BOM, no CR that is not
+# followed by LF, and no coding cookie but utf-8 or utf-8-sig on lines 1 and 2, so the compiler and every
+# scan here read the same UTF-8 text; any other module (`# -*- coding: utf-7 -*-`, a latin-1 byte, CR-only
+# line ends), one the AST scan cannot compile (a SyntaxError or UnicodeError, or a MemoryError or
+# RecursionError where the source nests too deeply to parse), and one whose syntax tree the scan cannot walk
+# (a RecursionError or MemoryError from a tree too deep or too large, `VALUE = 1 + 1 + ...` in thousands of
+# terms; what the walk found in that module before it stopped is dropped) is a finding naming it, never a
+# traceback. The AST scan parses the file's bytes, so the compiler applies the same reading. Python imports
+# that source only where nothing compiled stands in for it, so a __pycache__ directory, a bytecode file (.pyc)
+# and an extension module (.so, .pyd) anywhere under opf/tools, the vendored tree included, is a finding naming it
+# (_compiled_findings): Python may import one in place of the scanned source beside it, or with no source.
+# RESIDUAL, outside this gate: a generation held in or passed through a differently named variable
+# (`gen = homes`, `store_control_roots(gen)`), or computed rather than written as a literal; a literal
+# bound to a homes read that is not a number (`self.homes = None`), or bound by a loop target, an
+# augmented assignment, a tuple or list assignment whose value is not a display of the target's length
+# (`homes, *rest = 1, 2, 3`), or bound through a call in any shape rule 3 does not read (it reads a
+# keyword ending in `homes`, a `**` dict display and a known homes parameter's position): a key or field
+# name and its value given as separate arguments or inside another display (`m.setdefault("homes", 1)`,
+# `setattr(m, "homes", 1)`, `dict([("homes", 1)])`, `collections.namedtuple("M", "homes", defaults=(1,))`),
+# or a call's result bound to a homes read (`homes: int = dataclasses.field(default=1)`); a binding of
+# HOMES by any route other than those rule 4 reads (a name binding, an attribute target, an attribute
+# writer the module spells, the name spelled as a string or keyword): the name obtained at run time (built,
+# `"HOM" + "ES"`; read from data or from a namespace's keys; handed to a __getattr__ hook by a read such as
+# `proxy.HOMES`) and given to a namespace mapping (globals(), vars() or a module's __dict__) or to a writer,
+# a writer obtained at run time by any lookup the scan does not read (a computed name, an enumeration or
+# filter of a namespace: `getattr(builtins, "set" + "attr")`,
+# `[v for k, v in vars(builtins).items() if k.startswith("seta")][0]`), source text run by exec or eval, a
+# change to how the store module resolves an attribute (its __class__, a module __getattr__, its
+# sys.modules entry), and every write made by code the scan does not walk (self-test code, a check_*.py
+# module, the vendored tree, the standard library or another package: unittest.mock's patch.object, or its
+# patch given a dotted target string); a self-test function production code reaches with no spelling the
+# scan reads (its name held as data, a string given to getattr or a namespace key, or a helper reached that
+# way), or through a self-test entry, which also dispatches production verbs (a call in the `__main__` block's
+# body or in `main` outside its self-test branch, which review catches), or through a main production code
+# reaches only from the body of a module-level def without decorators (`def run(): return main()` with
+# `run()` called at import: such a body's spelling of `main` is not read as reach, since a body may bind a
+# local of that name, as opf/tools' git worktree fixtures do), or run at import by the decorator of a
+# self-test function (the scan reads the decorator expression, not what it does with the function); the
+# reason of each exclusion, a data-flow claim the scan enforces only through the HOMES string refusal and the
+# one-site key, so a name obtained at run time that reaches an excluded site (directly, or through a list of
+# pairs such as _WATCHDOG_ORIGINALS that an excluded writer drains) is not read; a test that is not a
+# comparison (`if homes:`, `not homes - 1`, a mapping or index keyed by the generation), or that is a call
+# whose callee is not named in
+# _COMPARISON_CALLS (`math.isclose(homes, 1)`, a comparison function held in a variable or a
+# functools.partial); a `== 2` test joined with any other condition, used as a while or assert
+# condition, or kept as a flag (`is2 = homes == 2`) and branched on later; an `if` with no `else` whose
+# body does not end in return, raise, continue or break (its failed path is the code after it, which the
+# passing path runs too); a raise that something other than a try body in its own function swallows (a
+# handler in a caller, a context manager such as contextlib.suppress, or a finally clause's return, break
+# or continue after an except or else clause raised); the cases after a mapping or class pattern that
+# matched a generation to 2 (they are not held to a final `case _:` that refuses), and a class pattern's
+# positional patterns (`case C(1):`); the reader of a conditional expression's None false arm; a
+# positional generation after a `*args`, or passed to a function that opf/tools does not define by a def
+# statement under the called name (a lambda or a function alias); a comparison, binding or path built at
+# run time through no attribute writer (rule 4 refuses those): string joins, getattr with a computed name,
+# a namespace-mapping key, exec or eval of source text, a name re-bound to the record module, the store
+# module's alias re-bound under a name built at run time (`globals()["sto" + "re"] = x`); the journal
+# path spelled in pieces; and docstrings and comments, which are prose.
+_HOMES1_FREE = {"_opf_adopt.py": ("validate_op", "validate_plan", "_validate_plan_sources",
+                                  "_control_operand_findings")}
+# The comparisons, fallthroughs, literal arguments and defaults outside the record seam and the adoption
+# validators that may stay, with the reason each is not a homes-1 arm those paths can reach. Keyed by
+# (module, owner, exact text) as the paragraph above defines them, each admitting exactly one site, so the
+# same text anywhere else, or twice there, still fails.
+_HOMES_COMPARE_EXCLUSIONS = {
+    ("_opf_store.py", "_validate_base", "homes != HOMES"):
+        "the manifest validator's refusal: any [opf].homes but the integer 2 is a fail-closed finding",
+    ("_opf_adopt_plan.py", "_inventory", "homes != store.HOMES"):
+        "the investigation planner's refusal: any generation but 2 refuses before anything is planned",
+    ("_opf_store.py", "store_control_roots", "homes not in (1, 2)"):
+        "an unknown generation raises. Outside self-test code, generation 1 is reached only through "
+        "_opf_check.classify_containment "
+        "when homes_generation reads 1 (the manifest does not declare exactly homes = 2 with spec_version "
+        "2.0.0), and it yields .working/imports alone. That classification feeds the doctor's containment "
+        "grading of whatever store it is pointed at, and the write guard (_opf_write_guard.plan_write_scope), "
+        "which refuses on its colliding list: fewer roots, fewer collisions. It stays because the doctor "
+        "grades legacy stores and the write guard plans from the doctor's classification, so the two agree. "
+        "No write plans against it: the guard's one production caller, opf record (_run_operation), passes "
+        "only a manifest _load_manifest admitted, VALID at spec_version 2.0.0, whose homes is the integer 2",
+    ("_opf_store.py", "store_control_roots", "homes == 2"):
+        "the same function's generation-1 roots (the conditional expression's false arm); the reason above",
+    ("_opf_check.py", "imported_series_active", "_opf_store.homes_generation(manifest_data) >= 2"):
+        "the one imported-series flag the doctor and the writers read; on an admitted (homes-2) store it is "
+        "exactly the `== 2` grade, and below 2 it only switches the series off, opening no homes-1 path",
+    ("_opf_check.py", "required_checks", "homes < 2"):
+        "the doctor roster a legacy store is graded against; doctor reads, it writes nothing",
+    ("_opf_check.py", "_staged_run_roots", "homes >= 2"):
+        "the doctor's partial-import substantiation roots: read-only grading, the typed homes added at 2",
+    ("_opf_check.py", "_check_evidence", "homes < 2"):
+        "C-EVIDENCE-ENUM is inactive below homes 2 (spec 4.2): read-only grading",
+    ("_opf_check.py", "classify_containment",
+     "(_opf_store.IMPORTED_REL, _opf_store.ARCHIVE_REL) if homes >= 2 else ()"):
+        "the classification's evidence roots, which outside self-test code only the doctor's containment "
+        "walks read (_check_containment, _check_canonical_store_files). The write guard "
+        "(_opf_write_guard.plan_write_scope) runs the same pure classification but reads only its "
+        "malformed and colliding lists, which this comparison does not feed, so it decides no write",
+    ("_opf_check.py", "classify_containment",
+     "(imports_root, _opf_store.STAGING_REL) if homes >= 2 else (imports_root,)"):
+        "the classification's staged roots: the same readers, and the same malformed and colliding lists, "
+        "which this comparison does not feed either; the reason above",
+    ("_opf_check.py", "_check_containment", "cls.homes >= 2"):
+        "the doctor's containment grading of a legacy store's ordinary paths: read-only",
+    ("_opf_check.py", "_validate_opened_store", "homes >= 2"):
+        "the doctor's homes-2-only C-EVIDENCE-ENUM check: read-only grading",
+    ("_opf_check.py", "_validate_opened_store", "_reserved_numbers(root_fd, rep) if homes >= 2 else ({}, True)"):
+        "the doctor's homes-2-only reservation read: read-only grading",
+    ("_opf_check.py", "_has_active_import_run", "homes=1"):
+        "the partial-import substantiation default; each of its callers outside check_*.py passes the "
+        "generation (_validate_archive its own, the doctor the manifest's homes_generation)",
+    ("_opf_check.py", "_validate_archive", "homes=1"):
+        "the archive walk's default; both its callers pass the generation (archived_records its own, the "
+        "doctor the manifest's homes_generation)",
+    ("_opf_check.py", "archived_records", "homes=1"):
+        "the archived-record reader's default; opf record passes homes=ctx.homes (2 on the manifest "
+        "_load_manifest admitted), and the one call outside check_*.py that omits it is "
+        "_opf_worklog_regressions' _entry_point_regressions fixture; the reader writes nothing",
+    ("_opf_oplock.py", "_t_e4_distinct_nested_stores", "len(homes) == len(rels) + 1"):
+        "an oplock self-test vector counting the distinct lock anchors it collects in a set named homes; "
+        "no homes generation is read",
+    ("_opf_declaration.py", "parse_declaration",
+     "declaration_bytes(table['release'], table['spec_version'], table['homes'], table['worklog']) != data"):
+        "the implementation declaration's canonical-form check: it compares the file's bytes with their own "
+        "canonical rendering, so it tests no generation; a homes value other than HOMES refuses after it, as "
+        "contradictory (_contradiction)",
+}
+# String constants naming the deleted record journal root that may stay, with the reason each is not a
+# path any code builds or opens. Keyed by (module, owner, exact text: the constant), each admitting exactly
+# one site.
+_LEGACY_JOURNAL_EXCLUSIONS = {
+    ("_opf_adopt_plan.py", "<module>",
+     "'Ancestry reads the pointers and the resolved manifest; git history and manifestless .working content, "
+     'a reserved name included, are not read as ancestry. Durable OPF history outside .working also reads as '
+     'first-adoption on its own, including: root import-promotion state (.aiqt/import, .aiqt/import/journal, '
+     ".aiqt/import-archive), the record journal (.aiqt/record/journal) and the .gitignore opf-managed block.'"):
+        "the adoption plan's residual disclosure (RESIDUALS): a leftover directory an earlier build wrote "
+        "is not read as ancestry; no path is built from the text",
+    ("_opf_adopt_plan.py", "_inventory",
+     "'live pointers and the resolved manifest; git history and manifestless .working content are not "
+     'ancestry. Durable OPF history outside .working also reads as first-adoption on its own, including: root '
+     'import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive), the record journal '
+     "(.aiqt/record/journal) and the .gitignore opf-managed block'"):
+        "the same disclosure in the plan's ancestry evidence text; no path is built from the text",
+}
+# The attribute-writer uses rule 4 refuses that may stay, with the reason each never writes HOMES and never
+# writes to the store module. Keyed by (module, owner, exact text: the call, the reference, or a string
+# constant's site), each admitting exactly one site, so the same text anywhere else, or twice there, still
+# fails. Each reason is a claim about where the names reaching the site come from; the scan holds only that
+# none is the literal HOMES (rule 4's string refusal), and the residual above names what it does not read.
+_ATTRIBUTE_WRITER_EXCLUSIONS = {
+    ("_journal.py", "_StCloseFault.__enter__", "setattr(module, name, watched)"):
+        "_StCloseFault's stand-ins: self._watched, built once in __init__, pairs only os and the fcntl module with "
+        "the call names _ST_WATCHED lists (stat, fstat, fstatvfs, lseek, get_inheritable, isatty; fcntl, flock, "
+        "lockf, ioctl), and _st_watch_drop_check only swaps in a subset of those names",
+    ("_journal.py", "_StCloseFault.__exit__", "setattr(module, name, real)"):
+        "the same pairs restored to the calls __init__ read from them; the reason above",
+    ("_opf_emit.py", "_FixtureProcess._collect_abandoned", "setattr(self, name, None)"):
+        "the fixture process clears its own descriptor slots: name runs over the literal (\"pidfd\", "
+        "\"subject_pidfd\") and the receiver is the _FixtureProcess itself",
+    ("_opf_emit.py", "_st_guardian_close_reuse.<locals>.drive.<locals>.call", "setattr(module, name, stub)"):
+        "_st_guardian_close_reuse's stubs: the pairs are the keys of its literal calls dict, os with setpgid, "
+        "fork, waitid and _exit, and signal with pthread_sigmask",
+    ("_opf_emit.py", "_st_guardian_close_reuse.<locals>.drive.<locals>.call", "setattr(module, name, real)"):
+        "the same pairs restored from saved[1], which getattr(*seam) filled from those keys; the reason above",
+    ("_opf_emit.py", "_install_fault_hooks", "setattr(_lowlevel, _entry, _replacement)"):
+        "the fault recorders' low-level start wrappers: the receiver is the _thread module and _entry runs over "
+        "the literal (\"start_new_thread\", \"start_new\", \"start_joinable_thread\")",
+    ("_opf_emit.py", "_install_fault_hooks", "setattr(_threads, _alias, _replacement)"):
+        "the same wrappers bound over threading's saved aliases: the receiver is the threading module, and an "
+        "_alias from dir(_threads) is written only where its value is one of those _thread start entries",
+    ("_opf_init.py", "_install_fault_hooks", "setattr(_lowlevel, _entry, _replacement)"):
+        "the same fault recorders' low-level start wrappers; the _opf_emit.py reason above",
+    ("_opf_init.py", "_install_fault_hooks", "setattr(_threads, _alias, _replacement)"):
+        "the same wrappers bound over threading's saved aliases; the _opf_emit.py reason above",
+    ("_opf_init_operation.py", "_child_main", "setattr(_opf_oplock, target, wrapped)"):
+        "the --selftest-child kill hook: target is the literal attach_init_lease or detach_init_lease, on the "
+        "_opf_oplock module",
+    ("_opf_init_operation.py", "_install_fault_hooks", "setattr(_lowlevel, _entry, _replacement)"):
+        "the same fault recorders' low-level start wrappers; the _opf_emit.py reason above",
+    ("_opf_init_operation.py", "_install_fault_hooks", "setattr(_threads, _alias, _replacement)"):
+        "the same wrappers bound over threading's saved aliases; the _opf_emit.py reason above",
+    ("_opf_oplock.py", "_t_fd_census_pairs", "setattr(target, attr, fake)"):
+        "an oplock self-test vector's fault injection: the pairs are its literal tuple, os with listdir and "
+        "fstat, and the fcntl module with fcntl",
+    ("_opf_schema.py", "_imported_spec_copy", "setattr(copy, slot, v[slot])"):
+        "the receiver is the fresh TypeSpec object.__new__(TypeSpec) made just above, and slot runs over "
+        "TypeSpec.__slots__ (name, namespace, initial, working, terminal, transitions, proposable, gated, "
+        "extra_keys, reduced, states)",
+    ("_opf_views.py", "_install_fault_hooks", "setattr(_lowlevel, _entry, _replacement)"):
+        "the same fault recorders' low-level start wrappers; the _opf_emit.py reason above",
+    ("_opf_views.py", "_install_fault_hooks", "setattr(_threads, _alias, _replacement)"):
+        "the same wrappers bound over threading's saved aliases; the _opf_emit.py reason above",
+    ("opf.py", "_watchdog_install_charges.<locals>.charged", "setattr(owner, name, wrapper)"):
+        "the watchdog's charge wrappers: charged is a closure of _watchdog_install_charges, which calls it only "
+        "with fixed owners and literal names (_opf_emit with run_bounded and _run_fixture_process, "
+        "threading.Thread.join, threading.Event.wait, threading.Condition.wait, queue.Queue.get, select.select, "
+        "time.sleep)",
+    ("opf.py", "_watchdog_leg_entry", "setattr(owner, name, real)"):
+        "the same pairs restored from _WATCHDOG_ORIGINALS, which only charged appends to; the reason above",
+    ("opf.py", "_watchdog_completion_case.<locals>.external_import_names", "node.func.id in ('setattr', 'delattr')"):
+        "an AST walker compares a call's callee name with the two strings; it never looks a callable up by them",
+}
+# Every exclusion table, in the order homes1_findings reports one that admits more than one site.
+_EXCLUSION_TABLES = (_HOMES_COMPARE_EXCLUSIONS, _LEGACY_JOURNAL_EXCLUSIONS, _ATTRIBUTE_WRITER_EXCLUSIONS)
+# A self-test function's name: `self_test` or `self_tests` as whole words between underscores.
+_SELF_TEST_NAME = re.compile(r"(?:^|_)self_tests?(?:_|$)")
+_LEGACY_RECORD_JOURNAL = ".aiqt/record/journal"
+# The parenthesized rule each kind of homes-1 finding names.
+_COMPARE_RULE = "only `== 2` may test a generation"
+_FALLTHROUGH_RULE = ("a failed `== 2` test may only raise outside a try body, or yield None in a conditional "
+                     "expression")
+_MATCH_RULE = "a match on a generation holds only `case 2:` arms and a final `case _:` that raises"
+_LITERAL_RULE = "a generation argument or default may only be the integer 2 or HOMES"
+_BINDING_RULE = "a number bound to a generation may only be the integer 2"
+# The callees a comparison spelled as a call names (rule 1): the comparison dunders, and operator's comparison
+# functions.
+_COMPARISON_CALLS = frozenset(("__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__contains__",
+                               "eq", "ne", "lt", "le", "gt", "ge", "is_", "is_not", "contains"))
+# The attribute writers rule 4 bounds, keyed by (callee name, positional argument count) of a plain call, each
+# with the position of the attribute name: setattr and delattr as the builtins take them, and a dunder bound
+# (`m.__setattr__(name, value)`) or unbound (`object.__setattr__(m, name, value)`).
+_ATTRIBUTE_WRITERS = {("setattr", 3): 1, ("delattr", 2): 1, ("__setattr__", 2): 0, ("__setattr__", 3): 1,
+                      ("__delattr__", 1): 0, ("__delattr__", 2): 1}
+_WRITER_NAMES = frozenset(name for name, _count in _ATTRIBUTE_WRITERS)
+_WRITER_RULE = ("setattr, delattr, __setattr__ and __delattr__ may only be called by name, with positional "
+                "arguments alone, none starred, and the attribute name a string literal")
+_HOMES_NAME_RULE = "no string constant, f-string piece or keyword argument may be exactly HOMES"
+
+
+def _names_legacy_journal(value):
+    return ((isinstance(value, str) and _LEGACY_RECORD_JOURNAL in value)
+            or (isinstance(value, bytes) and _LEGACY_RECORD_JOURNAL.encode("ascii") in value))
+
+
+def _homes_key(node):
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith("homes")
+
+
+def _homes_read(node):
+    """A homes read: a name or attribute ending in `homes`, a subscript, `.get(...)` or getattr(...) keyed
+    by a string ending in `homes`, or a homes_generation(...) call."""
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            return func.attr == "homes_generation" or (func.attr == "get" and bool(node.args)
+                                                       and _homes_key(node.args[0]))
+        return isinstance(func, ast.Name) and (func.id == "homes_generation" or (
+            func.id == "getattr" and len(node.args) > 1 and _homes_key(node.args[1])))
+    if isinstance(node, ast.Subscript):
+        return _homes_key(node.slice)
+    return ((isinstance(node, ast.Name) and node.id.endswith("homes"))
+            or (isinstance(node, ast.Attribute) and node.attr.endswith("homes")))
+
+
+def _homes_reads(node):
+    """Every homes read in `node`; the name a call is made through (`_directory_homes(plan)`) is not one."""
+    callees = {id(n.func) for n in ast.walk(node) if isinstance(n, ast.Call)}
+    return [n for n in ast.walk(node) if id(n) not in callees and _homes_read(n)]
+
+
+def _homes_constant(node, module):
+    """The HOMES constant: the bare name (rule 4 holds every binding of it), or HOMES read off a name the
+    module binds only by importing _opf_store."""
+    return ((isinstance(node, ast.Name) and node.id == "HOMES")
+            or (isinstance(node, ast.Attribute) and node.attr == "HOMES" and isinstance(node.value, ast.Name)
+                and node.value.id in module["store"]))
+
+
+def _two(node, module):
+    return ((isinstance(node, ast.Constant) and type(node.value) is int and node.value == 2)
+            or _homes_constant(node, module))
+
+
+def _pair_equals_two(left, right, module):
+    if (isinstance(left, (ast.Tuple, ast.List)) and isinstance(right, (ast.Tuple, ast.List))
+            and len(left.elts) == len(right.elts)):
+        return all(_pair_equals_two(a, b, module) for a, b in zip(left.elts, right.elts)
+                   if _homes_reads(a) or _homes_reads(b))
+    read, other = (left, right) if _homes_read(left) else (right, left)
+    return _homes_read(read) and not _homes_reads(other) and _two(other, module)
+
+
+def _equals_two(node, module):
+    """One `==` between a bare homes read and the integer 2 (type-exact) or the HOMES constant; a tuple or
+    list `==` pairs element by element, and only the pairs holding a homes read are judged."""
+    return (len(node.ops) == 1 and isinstance(node.ops[0], ast.Eq) and bool(_homes_reads(node))
+            and _pair_equals_two(node.left, node.comparators[0], module))
+
+
+def _type_guard(node):
+    """`type(<homes read>) is int` or `is not int`: a type check, not a generation test."""
+    left, right = node.left, node.comparators[0]
+    return (len(node.ops) == 1 and isinstance(node.ops[0], (ast.Is, ast.IsNot))
+            and isinstance(left, ast.Call) and isinstance(left.func, ast.Name) and left.func.id == "type"
+            and len(left.args) == 1 and not left.keywords and _homes_read(left.args[0])
+            and isinstance(right, ast.Name) and right.id == "int")
+
+
+def _generation_test(test, module):
+    """(only, negated): whether `test` is only a generation test (`== 2` comparisons, none of them a tuple
+    `==`, and type guards, joined by `and`, at least one of them `== 2`), and whether `not` negates it."""
+    negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+    test = test.operand if negated else test
+    parts = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
+    two = [p for p in parts if isinstance(p, ast.Compare) and _equals_two(p, module)
+           and not isinstance(p.left, (ast.Tuple, ast.List))]
+    return bool(two) and all(p in two or (isinstance(p, ast.Compare) and _type_guard(p)) for p in parts), negated
+
+
+def _raises(stmt, module):
+    """Whether `stmt` is a raise outside the body of every try statement in its function (module["caught"])."""
+    return isinstance(stmt, ast.Raise) and id(stmt) not in module["caught"]
+
+
+def _refuses(stmts, module):
+    """Whether the path a failed generation test takes begins with a refusal: an uncaught raise, or another
+    generation test whose own failed path (its body under `not`, its else, or else the statements after it)
+    begins with one."""
+    if not stmts:
+        return False
+    first = stmts[0]
+    if isinstance(first, ast.If):
+        only, negated = _generation_test(first.test, module)
+        return only and _refuses(first.body if negated else (first.orelse or stmts[1:]), module)
+    return _raises(first, module)
+
+
+def _caught_raises(tree):
+    """The raise statements inside the body of a try statement, which one of its handlers or its finally clause
+    may swallow; a function defined there is its own scope."""
+    caught = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            stack = list(node.body)
+            while stack:
+                inner = stack.pop()
+                if isinstance(inner, ast.Raise):
+                    caught.add(id(inner))
+                if not isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    stack.extend(ast.iter_child_nodes(inner))
+    return caught
+
+
+def _literal_generation(node):
+    """Whether `node` is a literal other than the integer 2, the only generation."""
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+    return not (type(value) is int and value == 2)
+
+
+def _number_generation(node):
+    """Whether `node` is a number literal (bool, int, float or complex) other than the integer 2."""
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+    return type(value) in (bool, int, float, complex) and not (type(value) is int and value == 2)
+
+
+def _binds_number(target, value):
+    """Whether assigning `value` to `target` binds a number literal other than 2 to a homes read; a tuple or
+    list target pairs with a display of the same length element by element."""
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return (isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts)
+                and any(_binds_number(t, v) for t, v in zip(target.elts, value.elts)))
+    return _homes_read(target) and _number_generation(value)
+
+
+def _called_name(func):
+    return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+
+
+def _writer_name(node):
+    """The attribute name argument of a plain attribute-writer call (_ATTRIBUTE_WRITERS: called by name, positional
+    arguments alone, none starred, as many as the builtin takes); None for any other call."""
+    at = _ATTRIBUTE_WRITERS.get((_called_name(node.func), len(node.args)))
+    if at is None or node.keywords or any(isinstance(arg, ast.Starred) for arg in node.args):
+        return None
+    return node.args[at]
+
+
+def _spelled_names(node):
+    """The identifiers `node` itself spells (a name or attribute in any context, an import alias, a parameter, a
+    keyword, a definition, a global or nonlocal declaration, a capture, a class pattern keyword, a type
+    parameter), or a string constant's whole value."""
+    if isinstance(node, ast.Name):
+        return (node.id,)
+    if isinstance(node, ast.Attribute):
+        return (node.attr,)
+    if isinstance(node, ast.Constant):
+        return (node.value,) if isinstance(node.value, str) else ()
+    if isinstance(node, ast.alias):
+        return (node.name, node.asname)
+    if isinstance(node, ast.arg):
+        return (node.arg,)
+    if isinstance(node, ast.keyword):
+        return (node.arg,)
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return tuple(node.names)
+    if isinstance(node, ast.MatchMapping):
+        return (node.rest,)
+    if isinstance(node, ast.MatchClass):
+        return tuple(node.kwd_attrs)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler, ast.MatchAs,
+                         ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+        return (node.name,)
+    return ()
+
+
+def _binds_homes(node, module):
+    """Whether `node` binds the name HOMES (a type parameter of any kind included), or assigns an attribute HOMES
+    (by a literal-name setattr too), other than by _opf_store.py's module-level `HOMES = 2` or
+    `from _opf_store import HOMES`."""
+    if isinstance(node, ast.Call):
+        name = _called_name(node.func)
+        named = (node.args[1:2] if name in ("setattr", "delattr")
+                 else node.args[:2] if name in ("__setattr__", "__delattr__") else [])
+        return any(isinstance(arg, ast.Constant) and arg.value == "HOMES" for arg in named)
+    if isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
+        name = node.id if isinstance(node, ast.Name) else node.attr
+        return name == "HOMES" and id(node) not in module["constant"]
+    if isinstance(node, ast.Import):
+        return any((a.asname or a.name.split(".")[0]) == "HOMES" for a in node.names)
+    if isinstance(node, ast.ImportFrom):
+        return any((a.asname or a.name) == "HOMES" and not (
+            node.module == "_opf_store" and node.level == 0 and a.name == "HOMES") for a in node.names)
+    if isinstance(node, ast.arg):
+        return node.arg == "HOMES"
+    if isinstance(node, ast.MatchMapping):
+        return node.rest == "HOMES"
+    return (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                              ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple))
+            and node.name == "HOMES")
+
+
+def _store_names(tree):
+    """The names a module binds only by importing _opf_store (`import _opf_store`, `... as store`); any other
+    binding of the name, a type parameter included, removes it, as does a write that may rebind it through a
+    namespace: an attribute of that name set or deleted on any object (`sys.modules[__name__].store = x`), or a
+    string constant or keyword argument that is exactly the name (`globals()["store"] = x`,
+    `globals().update(store=x)`, `setattr(module, "store", x)`)."""
+    imported, other = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                (imported if alias.name == "_opf_store" else other).add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            other.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            other.add(node.id)
+        elif isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
+            other.add(node.attr)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            other.add(node.value)
+        elif isinstance(node, ast.keyword) and node.arg is not None:
+            other.add(node.arg)
+        elif isinstance(node, ast.arg):
+            other.add(node.arg)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            other.add(node.rest)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                               ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)) and node.name:
+            other.add(node.name)
+    return imported - other
+
+
+def _homes_definition(rel, tree):
+    """The target of _opf_store.py's module-level `HOMES = 2`, the one definition rule 4 admits."""
+    if rel != "_opf_store.py":
+        return set()
+    return {id(s.targets[0]) for s in tree.body if isinstance(s, ast.Assign) and len(s.targets) == 1
+            and isinstance(s.targets[0], ast.Name) and s.targets[0].id == "HOMES"
+            and isinstance(s.value, ast.Constant) and type(s.value.value) is int and s.value.value == 2}
+
+
+def _homes_parameters(trees):
+    """Each function name the scanned modules define with a parameter ending in `homes`, and the positions
+    a call may pass that parameter at (a method's counted with and without self or cls)."""
+    params = {}
+    for tree in trees:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                positional = [a.arg for a in node.args.posonlyargs + node.args.args]
+                for at, name in enumerate(positional):
+                    if name.endswith("homes"):
+                        params.setdefault(node.name, set()).add(at)
+                        if positional[0] in ("self", "cls"):
+                            params[node.name].add(at - 1)
+    return params
+
+
+def _two_pattern(pattern, module):
+    return isinstance(pattern, ast.MatchValue) and _two(pattern.value, module)
+
+
+def _bare_subject(subject):
+    """Whether a match subject holding a homes read holds it bare: a homes read, or a tuple or list display with
+    no starred element whose elements holding a homes read are homes reads."""
+    if not isinstance(subject, (ast.Tuple, ast.List)):
+        return _homes_read(subject)
+    return not any(isinstance(elt, ast.Starred) for elt in subject.elts) and all(
+        _homes_read(elt) for elt in subject.elts if _homes_reads(elt))
+
+
+def _match_arm(pattern, subject, module):
+    """Whether a case pattern matches 2 (or HOMES) at each homes read of a bare subject (_bare_subject)."""
+    if not isinstance(subject, (ast.Tuple, ast.List)):
+        return _two_pattern(pattern, module)
+    return (isinstance(pattern, ast.MatchSequence) and len(pattern.patterns) == len(subject.elts)
+            and all(_two_pattern(p, module) for p, elt in zip(pattern.patterns, subject.elts) if _homes_reads(elt)))
+
+
+def _literal_defaults(args, owner, module, findings):
+    positional = args.posonlyargs + args.args
+    defaults = list(zip(positional[len(positional) - len(args.defaults):], args.defaults))
+    defaults += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+    for arg, default in defaults:
+        if arg.arg.endswith("homes") and _literal_generation(default):
+            _homes1_arm(module, owner, "{}={}".format(arg.arg, ast.unparse(default)), default.lineno, "default",
+                        _LITERAL_RULE, findings)
+
+
+def _homes1_arm(module, owner, text, line, what, rule, findings):
+    if not _excluded(module, _HOMES_COMPARE_EXCLUSIONS, owner, text, line):
+        findings.append("{}:{}: homes-1 {} `{}` in {} is reintroduced; homes 2 is the only generation and every "
+                        "other one refuses ({})".format(module["rel"], line, what, text, owner, rule))
+
+
+def _qualified(owner, local, name):
+    """The __qualname__ Python gives a def or class named `name` in `owner`: <module>, a class, or a function
+    when `local` (what it defines nests under `<locals>`)."""
+    return name if owner == "<module>" else "{}.{}{}".format(owner, "<locals>." if local else "", name)
+
+
+def _self_test_entry(stmt):
+    """Whether a module-level statement is the `if __name__ == "__main__":` block, whose body (not its else or elif
+    arms) is a self-test entry."""
+    test = stmt.test if isinstance(stmt, ast.If) else None
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)):
+        return False
+    sides = (test.left, test.comparators[0])
+    return (any(isinstance(side, ast.Name) and side.id == "__name__" for side in sides)
+            and any(isinstance(side, ast.Constant) and side.value == "__main__" for side in sides))
+
+
+def _spellings(node):
+    """The identifiers `node` spells as a name, an attribute, an import alias (each dotted part) or a global or
+    nonlocal declaration."""
+    if isinstance(node, ast.Name):
+        return (node.id,)
+    if isinstance(node, ast.Attribute):
+        return (node.attr,)
+    if isinstance(node, ast.alias):
+        return tuple(node.name.split(".")) + ((node.asname,) if node.asname else ())
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return tuple(node.names)
+    return ()
+
+
+def _self_test_functions(trees):
+    """(unread, helpers): the ids of the self-test function defs whose bodies the scan does not read, and the names
+    of the helpers only self-test code names (the paragraph above rule 1). A name is matched across modules, so one
+    production code spells in any module is production's in every one, and a self-test function production spells
+    is production code itself, so what its body spells is production's too; so is a main production spells outside
+    the body of a module-level def without decorators."""
+    regions, tests, defs = [], [], set()    # a region: (kind, def name, identifiers, its strings joined by NUL)
+
+    def region(kind, name, nodes):
+        names, strings = set(), []
+        for inner in (n for node in nodes for n in ast.walk(node)):
+            names.update(_spellings(inner))
+            if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                strings.append(inner.value)
+        regions.append((kind, name, names, "\0".join(strings)))
+
+    for _rel, tree in trees:
+        for stmt in tree.body:
+            # A def's body is its own region; its decorators, defaults, annotations and type parameters run at
+            # import. A decorated def other than a self-test function, main included, is production code: its
+            # decorator may run it. Only the body of the `__main__` block is an entry; its else and elif arms run
+            # on import.
+            kind, inner = "production", []
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                kind = ("test" if _SELF_TEST_NAME.search(stmt.name) else "production" if stmt.decorator_list
+                        else "entry" if stmt.name == "main" else "def")
+                inner = stmt.body if kind != "production" else []
+            elif _self_test_entry(stmt):
+                kind, inner = "entry", stmt.body
+            if kind == "test":
+                tests.append(stmt)
+            elif kind == "def":
+                defs.add(stmt.name)
+            if inner:
+                held = {id(s) for s in inner}
+                region(kind, getattr(stmt, "name", None), inner)
+                region("production", None, [child for child in ast.iter_child_nodes(stmt) if id(child) not in held])
+            else:
+                region("production", None, [stmt])
+
+    def holders(name, strings):
+        return [(kind, owner) for kind, owner, names, text in regions if name in names or (strings and name in text)]
+
+    production, memo, visiting = set(), {}, set()
+
+    def helper(name):
+        # Least fixed point: a helper is spelled at least once, as a name, an attribute or inside a string, and
+        # only by self-test code or other helpers; a cycle that reaches no self-test code is no helper.
+        if name not in memo:
+            if name in visiting or name not in defs:
+                return False
+            visiting.add(name)
+            found = holders(name, True)
+            memo[name] = bool(found) and all((kind == "test" and owner not in production)
+                                             or (kind == "def" and helper(owner)) for kind, owner in found)
+            visiting.discard(name)
+        return memo[name]
+
+    def reached(name, through_defs):
+        # Production code spells `name`: a production region, a self-test function or main production reaches,
+        # or (through_defs) the body of a module-level def that is no helper. A def body is not read as reaching
+        # main, since it may bind a local of that name.
+        return any(kind == "production" or (kind in ("test", "entry") and owner in production)
+                   or (through_defs and kind == "def" and not helper(owner)) for kind, owner in holders(name, False))
+
+    while True:
+        memo.clear()
+        added = {stmt.name for stmt in tests if stmt.name not in production and reached(stmt.name, True)}
+        if "main" not in production and reached("main", False):
+            added.add("main")
+        if not added:
+            break
+        production |= added
+    return ({id(stmt) for stmt in tests if stmt.name not in production},
+            {name for name, is_helper in memo.items() if is_helper})
+
+
+def _excluded(module, table, owner, text, line):
+    """Whether the site (module, owner, text) is one of `table`'s exclusions; each site one admits is recorded, so
+    one that admits more than one is red (_homes1_scan)."""
+    key = (module["rel"], owner, text)
+    if key not in table:
+        return False
+    module["hits"].setdefault(key, []).append(line)
+    return True
+
+
+def _constant_sites(tree):
+    """The site each string constant or keyword reports at, by id: the lone `==` or `in` comparison it is an
+    operand of (an element of a tuple, list or set display right of `in` included), else the call it is an
+    argument or keyword value of (a keyword: the call it is passed to); an f-string's literal piece reports at
+    its f-string's site. One absent here reports at itself."""
+    sites = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], (ast.Eq, ast.In)):
+            right = node.comparators[0]
+            held = right.elts if isinstance(node.ops[0], ast.In) and isinstance(right, (ast.Tuple, ast.List,
+                                                                                        ast.Set)) else []
+            for operand in [node.left, right] + held:
+                sites[id(operand)] = node
+        elif isinstance(node, ast.Call):
+            for operand in node.args + node.keywords + [keyword.value for keyword in node.keywords]:
+                sites[id(operand)] = node
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            for piece in node.values:
+                sites[id(piece)] = sites.get(id(node), node)
+    return sites
+
+
+def _docstring_ids(tree):
+    ids = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
+            first = node.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                ids.add(id(first.value))
+    return ids
+
+
+def _homes1_walk(node, owner, local, module, findings):
+    rel = module["rel"]
+    skipped = ()
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if id(node) in module["self_tests"]:
+            skipped = {id(stmt) for stmt in node.body}    # self-test code: the body alone; what runs at import is read
+        owner, local = _qualified(owner, local, node.name), True
+        args = node.args
+        if node.name in module["free"]:
+            named = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+            named += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+            reads = {n.lineno for n in _homes_reads(node)}
+            if any(name.endswith("homes") for name in named):
+                reads.add(node.lineno)
+            findings.extend("{}:{}: {} names a homes generation again; it grades every row at homes 2".format(
+                rel, line, node.name) for line in sorted(reads))
+        else:
+            _literal_defaults(args, owner, module, findings)
+    elif isinstance(node, ast.ClassDef):
+        owner, local = _qualified(owner, local, node.name), False
+    if isinstance(node, ast.Lambda):
+        _literal_defaults(node.args, owner, module, findings)
+    bound = _binds_homes(node, module)
+    if bound:
+        findings.append("{}:{}: the HOMES constant is bound again in {}; only _opf_store.py's module-level "
+                        "`HOMES = 2` defines it, and every `== HOMES` test reads it as 2".format(
+                            rel, node.lineno, owner))
+    # An attribute writer other than as the callee of a plain call given a string literal name may set HOMES
+    # under a name the scan cannot read: refused, fail-closed (rule 4), unless the call is red as a binding. A
+    # writer's name as a string reports at its site (_constant_sites), once however many the site holds.
+    unread, site = None, node
+    if isinstance(node, ast.Call) and _called_name(node.func) in _WRITER_NAMES:
+        module["writers"].add(id(node.func))
+        named = _writer_name(node)
+        if not bound and not (isinstance(named, ast.Constant) and isinstance(named.value, str)):
+            unread = ast.unparse(node)
+        if bound or unread is not None:
+            module["reported"].update(id(inner) for inner in ast.walk(node))    # one finding: the call
+    elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in _WRITER_NAMES:
+        site = module["sites"].get(id(node), node)
+        if ("writer", id(site)) not in module["seen"]:
+            module["seen"].add(("writer", id(site)))
+            unread = ast.unparse(site)
+    elif id(node) not in module["writers"]:
+        unread = next((ast.unparse(node) if isinstance(node, (ast.expr, ast.alias)) else name
+                       for name in _spelled_names(node) if name in _WRITER_NAMES), None)
+    if unread is not None and not _excluded(module, _ATTRIBUTE_WRITER_EXCLUSIONS, owner, unread, site.lineno):
+        findings.append("{}:{}: attribute writer `{}` in {} may bind HOMES under a name the scan cannot read; "
+                        "it is refused ({})".format(rel, site.lineno, unread, owner, _WRITER_RULE))
+    # The name HOMES as a string or a keyword (rule 4): whatever it is handed to, an excluded writer included,
+    # may bind HOMES by it. One finding per site, none inside a writer call already red, and no exclusion.
+    if ((isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == "HOMES")
+            or (isinstance(node, ast.keyword) and node.arg == "HOMES")) and id(node) not in module["reported"]:
+        site = module["sites"].get(id(node), node)
+        if ("homes", id(site)) not in module["seen"]:
+            module["seen"].add(("homes", id(site)))
+            findings.append("{}:{}: `{}` in {} spells the name HOMES as data, which a writer the scan does not read "
+                            "could bind; it is refused ({})".format(rel, site.lineno, ast.unparse(site), owner,
+                                                                    _HOMES_NAME_RULE))
+    if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+        findings.append("{}:{}: star import from {} in {} may bind HOMES unseen; import each name it uses by "
+                        "name".format(rel, node.lineno, "." * node.level + (node.module or ""), owner))
+    if isinstance(node, ast.Compare) and _homes_reads(node) and not (
+            _equals_two(node, module) or _type_guard(node)):
+        # A conditional expression's test is reported as the whole expression, what it chooses between.
+        site = module["tests"].get(id(node), node)
+        _homes1_arm(module, owner, ast.unparse(site), site.lineno, "arm", _COMPARE_RULE, findings)
+    # A number other than 2 bound to a homes read, or given as a homes key's value in a dict display (one a call
+    # unpacks with ** is judged as its arguments instead).
+    if (isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None and any(
+            _binds_number(target, node.value)
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]))) or (
+            isinstance(node, ast.Dict) and id(node) not in module["unpacked"] and any(
+                key is not None and _homes_key(key) and _number_generation(value)
+                for key, value in zip(node.keys, node.values))):
+        _homes1_arm(module, owner, ast.unparse(node), node.lineno, "binding", _BINDING_RULE, findings)
+    # A failed generation test: an if's else, or what follows an if whose body leaves, must refuse.
+    for field in ("body", "orelse", "finalbody"):
+        stmts = getattr(node, field, None)
+        for at, stmt in enumerate(stmts if isinstance(stmts, list) else ()):
+            only, negated = _generation_test(stmt.test, module) if isinstance(stmt, ast.If) else (False, False)
+            if not only:
+                continue
+            if negated or stmt.orelse:
+                failed = stmt.body if negated else stmt.orelse
+            elif isinstance(stmt.body[-1], (ast.Return, ast.Raise, ast.Continue, ast.Break)):
+                failed = stmts[at + 1:]
+            else:
+                continue    # no else, and a body that does not leave: the code after it is shared
+            if not _refuses(failed, module):
+                _homes1_arm(module, owner, ast.unparse(stmt.test.operand if negated else stmt.test),
+                            failed[0].lineno if failed else stmt.lineno, "arm after", _FALLTHROUGH_RULE, findings)
+    if isinstance(node, ast.IfExp):
+        module["tests"][id(node.test)] = node
+        only, negated = _generation_test(node.test, module)
+        failed = node.body if negated else node.orelse
+        if only and not (isinstance(failed, ast.Constant) and failed.value is None):
+            _homes1_arm(module, owner, ast.unparse(node.test.operand if negated else node.test), failed.lineno,
+                        "arm after", _FALLTHROUGH_RULE, findings)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        for value, alternative in zip(node.values, node.values[1:]):
+            only, negated = _generation_test(value, module)
+            if only and not negated:
+                _homes1_arm(module, owner, ast.unparse(value), alternative.lineno, "arm after", _FALLTHROUGH_RULE,
+                            findings)
+                break
+    if isinstance(node, ast.Match) and _homes_reads(node.subject):
+        # A subject that holds a generation other than bare has no arm: the match itself is red.
+        for at, case in enumerate(node.cases if _bare_subject(node.subject) else ()):
+            pattern = case.pattern
+            refusal = (at == len(node.cases) - 1 and isinstance(pattern, ast.MatchAs) and pattern.pattern is None
+                       and pattern.name is None and _raises(case.body[0], module))
+            if case.guard is not None or not (_match_arm(pattern, node.subject, module) or refusal):
+                _homes1_arm(module, owner, "case " + ast.unparse(pattern), pattern.lineno, "arm", _MATCH_RULE,
+                            findings)
+                break
+            if refusal:
+                break
+        else:
+            _homes1_arm(module, owner, "match " + ast.unparse(node.subject), node.lineno, "arm", _MATCH_RULE,
+                        findings)
+    # A mapping pattern's homes key, or a class pattern's homes keyword, is a generation test.
+    if isinstance(node, ast.MatchMapping):
+        tested = [pattern for key, pattern in zip(node.keys, node.patterns) if _homes_key(key)]
+    elif isinstance(node, ast.MatchClass):
+        tested = [pattern for attr, pattern in zip(node.kwd_attrs, node.kwd_patterns) if attr.endswith("homes")]
+    else:
+        tested = []
+    if not all(_two_pattern(pattern, module) for pattern in tested):
+        _homes1_arm(module, owner, "case " + ast.unparse(node), node.lineno, "arm", _COMPARE_RULE, findings)
+    if isinstance(node, ast.Call):
+        name = _called_name(node.func)
+        if name in _COMPARISON_CALLS and _homes_reads(node):
+            _homes1_arm(module, owner, ast.unparse(node), node.lineno, "arm", _COMPARE_RULE, findings)
+        passed = [kw.value for kw in node.keywords if kw.arg is not None and kw.arg.endswith("homes")]
+        for kw in node.keywords:
+            if kw.arg is None and isinstance(kw.value, ast.Dict):
+                module["unpacked"].add(id(kw.value))
+                passed += [value for key, value in zip(kw.value.keys, kw.value.values)
+                           if key is not None and _homes_key(key)]
+        for at, arg in enumerate(node.args):
+            if isinstance(arg, ast.Starred):
+                break
+            if at in module["params"].get(name, ()):
+                passed.append(arg)
+        if any(_literal_generation(arg) for arg in passed):
+            _homes1_arm(module, owner, ast.unparse(node), node.lineno, "argument", _LITERAL_RULE, findings)
+    if (isinstance(node, ast.Constant) and _names_legacy_journal(node.value) and id(node) not in module["docstrings"]
+            and not _excluded(module, _LEGACY_JOURNAL_EXCLUSIONS, owner, ast.unparse(node), node.lineno)):
+        findings.append("{}:{}: the deleted record journal root {} is named in {}; the record journal lives "
+                        "only in the typed capability home".format(rel, node.lineno, _LEGACY_RECORD_JOURNAL, owner))
+    legacy_name = ((rel == "_opf_record.py" and isinstance(node, ast.Name) and node.id == "JOURNAL_REL")
+                   or (isinstance(node, ast.Attribute) and node.attr == "JOURNAL_REL"
+                       and (rel == "_opf_record.py" or (isinstance(node.value, ast.Name)
+                                                        and node.value.id in ("_opf_record", "record")))))
+    if legacy_name:
+        findings.append("{}:{}: the deleted record journal constant JOURNAL_REL is referenced in {}; the record "
+                        "journal lives only in the typed capability home".format(rel, node.lineno, owner))
+    for child in ast.iter_child_nodes(node):
+        if id(child) not in skipped:
+            _homes1_walk(child, owner, local, module, findings)
+
+
+def _compile_failure(exc):
+    """The reason a module the AST scan cannot compile is refused: the compiler's message, or for a source nested too
+    deeply to parse (a MemoryError or RecursionError) a fixed reason, since that message varies with the stack."""
+    if isinstance(exc, (MemoryError, RecursionError)):
+        return "it does not compile: the source nests too deeply to parse ({})".format(type(exc).__name__)
+    return "it does not compile: {}".format(exc.msg if isinstance(exc, SyntaxError) else exc)
+
+
+def _compiled_findings(tools):
+    """A finding for each __pycache__ directory, bytecode file and extension module under tools, the vendored tree
+    included (one for a __pycache__ directory, whatever it holds): Python may import one in place of the source the
+    scan reads."""
+    findings = []
+    for path in sorted(tools.rglob("*")):
+        rel = path.relative_to(tools)
+        if path.name == "__pycache__":
+            what = "a __pycache__ directory"
+        elif "__pycache__" in rel.parts[:-1]:
+            continue
+        elif path.name.endswith(_BYTECODE_SUFFIX):
+            what = "a bytecode file"
+        elif path.name.endswith(_EXTENSION_SUFFIXES):
+            what = "an extension module"
+        else:
+            continue
+        findings.append("{}: {}, which Python may import in place of the scanned source, so the no-homes-1 scan "
+                        "refuses it ({})".format(rel.as_posix(), what, _COMPILED_RULE))
+    return findings
+
+
+def _scanned_trees(tools):
+    """(trees, findings): each scanned module's (path relative to tools, AST), outside check_*.py and the vendored
+    tree, and a finding for each module that has no one reading or does not compile (_module_source), then one for
+    each compiled entry under tools (_compiled_findings)."""
+    trees, findings = [], []
+    for path in sorted(tools.rglob("*.py")):
+        rel = path.relative_to(tools).as_posix()
+        if "_vendor" in path.relative_to(tools).parts or path.name.startswith("check_"):
+            continue
+        raw, _text, refused = _module_source(path, rel, "no-homes-1")
+        if refused is None:
+            try:
+                # The bytes, as import compiles them: the compiler applies the BOM itself.
+                trees.append((rel, ast.parse(raw, filename=rel)))
+                continue
+            except (SyntaxError, UnicodeError, MemoryError, RecursionError) as exc:
+                refused = _source_finding(rel, getattr(exc, "lineno", None) or 1, "no-homes-1", _compile_failure(exc))
+        findings.append(refused)
+    return trees, findings + _compiled_findings(tools)
+
+
+def _homes1_scan(tools=None):
+    """(findings, hits): the no-homes-1 findings, and the lines of the sites each exclusion admitted."""
+    tools = _TOOLS if tools is None else tools
+    trees, findings = _scanned_trees(tools)
+    params = _homes_parameters(tree for _rel, tree in trees)
+    self_tests, _helpers = _self_test_functions(trees)
+    hits = {}
+    for rel, tree in trees:
+        module = {"rel": rel, "free": _HOMES1_FREE.get(rel, ()), "docstrings": _docstring_ids(tree),
+                  "store": _store_names(tree), "constant": _homes_definition(rel, tree), "params": params,
+                  "caught": _caught_raises(tree), "sites": _constant_sites(tree), "unpacked": set(),
+                  "writers": set(), "reported": set(), "seen": set(), "tests": {}, "hits": {},
+                  "self_tests": self_tests}
+        found = len(findings)
+        try:
+            _homes1_walk(tree, "<module>", False, module, findings)
+        except (RecursionError, MemoryError) as exc:
+            # A tree too deep or too large to walk is a finding naming the module, never a traceback; what the walk
+            # found there before it stopped, and the exclusion sites it admitted, are dropped (they vary with the
+            # stack depth the walk starts at).
+            del findings[found:]
+            findings.append(_source_finding(rel, 1, "no-homes-1", "the scan cannot walk its syntax tree ({})".format(
+                type(exc).__name__)))
+            continue
+        hits.update(module["hits"])
+    for table in _EXCLUSION_TABLES:
+        for (rel, owner, text), lines in ((key, hits.get(key, ())) for key in table):
+            if len(lines) > 1:
+                findings.append("{}:{}: the exclusion for `{}` in {} matches {} sites (lines {}); an exclusion admits "
+                                "exactly one site, so each is refused".format(
+                                    rel, lines[0], text, owner, len(lines), ", ".join(map(str, lines))))
+    return findings, hits
+
+
+def homes1_findings(tools=None):
+    return _homes1_scan(tools)[0]
 
 
 def _section_spans(text):
@@ -2415,10 +3586,6 @@ def boundary_self_test():
     homes = tuple(".working/" + name for name in ("imports", "imported", "archive", "staging", "journals"))
     legacy_root = homes[0]
 
-    def active():
-        # Homes 2 is activated only inside the fixture; shipped tooling grades every store as legacy.
-        return patch.object(store, "SUPPORTED_HOMES", 2)
-
     # Discovery precedes the manifest: a candidate under journals/ still fails closed as ambiguous.
     with patch.object(store, "_immediate_subdirs", return_value=["journals", "toml"]), \
             patch.object(store, "_read_toml_contained", return_value={"opf": {"standard": store.STANDARD_TOKEN}}):
@@ -2427,41 +3594,34 @@ def boundary_self_test():
     cls = doctor.classify_containment(manifest, machine)
     check("classifier-legacy-roster", lambda: cls.homes == 1 and cls.control_roots == (legacy_root,)
           and cls.evidence_roots == ())
-    check("classifier-declaration-inert", lambda: doctor.classify_containment(manifest2, machine).homes == 1)
-    # Latent activation is gated: raising SUPPORTED_HOMES activates only a store declaring both homes 2
-    # and spec_version 2.0.0, never a current-version store or a non-integer declaration.
-    with active():
-        check("activation-homes2-declared", lambda: store.homes_generation(manifest2) == 2)
-        for label, opf in (("current-version", {"homes": 2, "spec_version": "1.1.0"}),
-                           ("no-version", {"homes": 2}), ("boolean", {"homes": True, "spec_version": "2.0.0"}),
-                           ("string", {"homes": "2", "spec_version": "2.0.0"})):
-            check("activation-gated-" + label, lambda o=opf: store.homes_generation({"opf": o}) == 1)
-    with active():
-        check("classifier-activated-legacy", lambda: doctor.classify_containment(manifest, machine).homes == 1)
-        cls2 = doctor.classify_containment(manifest2, machine)
-        check("classifier-roster", lambda: cls2.homes == 2 and cls2.control_roots == homes)
-        check("evidence-roots-disjoint", lambda: cls2.evidence_roots ==
-              (".working/imported", ".working/archive") and cls2.archive_root not in cls2.evidence_roots)
-        for home in homes:
-            for operand in (home, home + "/child", ".working", "./" + home + "/"):
-                altered = dict(manifest2, unmanaged={"paths": [operand]})
-                check("unmanaged-collision-" + operand,
-                      lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
-                      and not doctor.classify_containment(m, machine).valid_unmanaged)
-        # Homes 2 registers .working/.gitignore as a managed control file (spec 4.2) at that exact
-        # path only, so an [unmanaged] declaration of it collides like any managed path.
-        control = ".working/.gitignore"
-        check("classifier-gitignore-managed", lambda: cls2.managed_file(control))
-        check("classifier-gitignore-legacy-stray",
-              lambda: not doctor.classify_containment(manifest, machine).managed_file(control))
-        check("classifier-gitignore-deeper-stray", lambda: not cls2.managed_file(machine + "/.gitignore")
-              and not cls2.managed_file(".working/staging/.gitignore"))
-        altered = dict(manifest2, unmanaged={"paths": [control]})
-        check("unmanaged-collision-" + control,
-              lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
-              and not doctor.classify_containment(m, machine).valid_unmanaged)
-    check("classifier-gitignore-inert-declaration",
-          lambda: not doctor.classify_containment(manifest2, machine).managed_file(".working/.gitignore"))
+    # Homes 2 is graded only for a store declaring both homes 2 and spec_version 2.0.0, never an older
+    # version or a non-integer declaration.
+    check("activation-homes2-declared", lambda: store.homes_generation(manifest2) == 2)
+    for label, opf in (("current-version", {"homes": 2, "spec_version": "1.1.0"}),
+                       ("no-version", {"homes": 2}), ("boolean", {"homes": True, "spec_version": "2.0.0"}),
+                       ("string", {"homes": "2", "spec_version": "2.0.0"})):
+        check("activation-gated-" + label, lambda o=opf: store.homes_generation({"opf": o}) == 1)
+    check("classifier-activated-legacy", lambda: doctor.classify_containment(manifest, machine).homes == 1)
+    cls2 = doctor.classify_containment(manifest2, machine)
+    check("classifier-roster", lambda: cls2.homes == 2 and cls2.control_roots == homes)
+    check("evidence-roots-disjoint", lambda: cls2.evidence_roots ==
+          (".working/imported", ".working/archive") and cls2.archive_root not in cls2.evidence_roots)
+    for home in homes:
+        for operand in (home, home + "/child", ".working", "./" + home + "/"):
+            altered = dict(manifest2, unmanaged={"paths": [operand]})
+            check("unmanaged-collision-" + operand,
+                  lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
+                  and not doctor.classify_containment(m, machine).valid_unmanaged)
+    # Homes 2 registers .working/.gitignore as a managed control file (spec 4.2) at that exact
+    # path only, so an [unmanaged] declaration of it collides like any managed path.
+    control = ".working/.gitignore"
+    check("classifier-gitignore-managed", lambda: cls2.managed_file(control))
+    check("classifier-gitignore-deeper-stray", lambda: not cls2.managed_file(machine + "/.gitignore")
+          and not cls2.managed_file(".working/staging/.gitignore"))
+    altered = dict(manifest2, unmanaged={"paths": [control]})
+    check("unmanaged-collision-" + control,
+          lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
+          and not doctor.classify_containment(m, machine).valid_unmanaged)
     for home in homes[1:]:
         for operand in (home, home + "/child"):
             check("unmanaged-legacy-valid-" + operand, lambda o=operand: doctor.classify_containment(
@@ -2567,89 +3727,58 @@ def boundary_self_test():
     def graded(report, path):
         return any(repr(path) in message for message in report.findings)
 
-    # This tooling's adoption journal home. Containment decides a legacy store has started an adoption
-    # from ONE probe of it (an lstat in the shipped helper, answered here from the fixture), never by
-    # listing journals/ (the listing mock above refuses that).
-    adoption_journal = store.journal_root("adoption").rsplit("/", 1)[0]
-    probed = []
-
-    def journal_probe(_fd):
-        probed.append(adoption_journal)
-        return adoption_journal in directories
-
-    def drop(path, depth):
-        # Remove one fixture file and the `depth` directories beneath it that add() created for it.
-        del files[path]
-        directories.difference_update(path.rsplit("/", n)[0] for n in range(1, depth + 1))
-
     with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", read_toml), \
-            patch.object(doctor, "_read_bytes", read_bytes), \
-            patch.object(doctor, "_adoption_journal_present", journal_probe):
+            patch.object(doctor, "_read_bytes", read_bytes):
         stage = ".working/staging/import/" + run + "/plan.toml"
         add(stage)
         add(".working/journals/import/journal/inflight/frames.log", b"torn")
-        # A legacy store that has started no adoption keeps its legacy grading (spec 4.2): each homes-2
-        # name, journals/ included, is one unregistered path.
+        # A legacy store keeps its legacy grading: each homes-2 name is one unregistered path.
         check("legacy-staging-graded", lambda: graded(containment(), ".working/staging"))
         check("legacy-journals-graded", lambda: graded(containment(), ".working/journals"))
-        # Once this tooling's adoption journal home is a directory the store has started an adoption: its
-        # journals/ is left out unlisted, decided by the probe alone. The same name as a FILE is no
-        # journal home, so journals/ is graded again.
-        txn = adoption_journal + "/journal/" + adopt_run + "/frames.log"
-        add(txn, b"torn")
-        del probed[:]
-        check("legacy-adoption-journal-excluded", lambda: not graded(containment(), ".working/journals")
-              and not any("journals" in m for m in containment().cannot)
-              and probed != [] and ".working/journals" not in listed)
-        drop(txn, 3)
-        add(adoption_journal, b"not a journal home")
-        check("legacy-adoption-journal-file-graded", lambda: graded(containment(), ".working/journals"))
-        drop(adoption_journal, 0)
         check("legacy-staging-not-partial", lambda: not containment(True).triage
               and any("no active" in message for message in containment(True).findings))
-        with active():
-            check("staging-steady-finding", lambda: any(stage in s for s in containment(model=manifest2).findings))
-            check("staging-substantiated-triage", lambda: bool(containment(True, manifest2).triage)
-                  and not containment(True, manifest2).findings)
-            del files[stage]
-            check("empty-run-grades", lambda: any(run in s for s in containment(model=manifest2).findings))
-            check("empty-run-not-partial", lambda: bool(containment(True, manifest2).findings)
-                  and not containment(True, manifest2).triage)
-            add(stage)
-            add(".working/staging/unknown/run/file")
-            check("unknown-kind-always-finding", lambda: any("invalid staging kind" in s
-                                                           for s in containment(True, manifest2).findings))
-            # The journal-only record kind (spec 4.2): a record staging run is NOT admitted by the
-            # homes-2 walk, exactly as any unknown kind (option ii, adding record to STAGING_KINDS,
-            # turns this red).
-            add(".working/staging/record/run/file")
-            check("record-staging-kind-invalid", lambda: any("invalid staging kind 'record'" in s
-                                                            for s in containment(True, manifest2).findings))
-            reset()
-            directories.add(".working/journals")
-            del listed[:]
-            check("journals-pruned", lambda: not containment(model=manifest2).findings
-                  and not containment(model=manifest2).cannot)
-            check("journals-never-listed", lambda: ".working/journals" not in listed)
-            check("evidence-absent-clean", lambda: not evidence().findings and not evidence().cannot)
-            bundle = ".working/imported/import/" + run
-            adoption = ".working/imported/adoption/" + adopt_run
-            source = bundle + "/sources/notes.txt"
-            moved = ".working/archive/moved/old/notes.txt"
-            receipt = adoption + "/receipt.toml"
-            plan = adoption + "/plan.toml"
-            preimage = ".working/archive/adoption/" + adopt_run + "/AGENTS.md"
-            members = (source, moved, receipt, preimage)
-            for path in members:
-                add(path, b"retained")
-            add(plan, plan_bytes)
-            for inventory, built in ((bundle + "/inventory.toml", doc(row(source), row(moved))),
-                                     (adoption + "/inventory.toml",
-                                      adoc(row(receipt), row(preimage), row(plan, plan_bytes)))):
-                add(inventory, b"")
-                inventories[inventory] = built
-            check("evidence-members-match", lambda: not evidence().findings and not evidence().cannot)
-            check("evidence-not-containment-graded", lambda: not containment(model=manifest2).findings)
+        check("staging-steady-finding", lambda: any(stage in s for s in containment(model=manifest2).findings))
+        check("staging-substantiated-triage", lambda: bool(containment(True, manifest2).triage)
+              and not containment(True, manifest2).findings)
+        del files[stage]
+        check("empty-run-grades", lambda: any(run in s for s in containment(model=manifest2).findings))
+        check("empty-run-not-partial", lambda: bool(containment(True, manifest2).findings)
+              and not containment(True, manifest2).triage)
+        add(stage)
+        add(".working/staging/unknown/run/file")
+        check("unknown-kind-always-finding", lambda: any("invalid staging kind" in s
+                                                       for s in containment(True, manifest2).findings))
+        # The journal-only record kind (spec 4.2): a record staging run is NOT admitted by the
+        # homes-2 walk, exactly as any unknown kind (option ii, adding record to STAGING_KINDS,
+        # turns this red).
+        add(".working/staging/record/run/file")
+        check("record-staging-kind-invalid", lambda: any("invalid staging kind 'record'" in s
+                                                        for s in containment(True, manifest2).findings))
+        reset()
+        directories.add(".working/journals")
+        del listed[:]
+        check("journals-pruned", lambda: not containment(model=manifest2).findings
+              and not containment(model=manifest2).cannot)
+        check("journals-never-listed", lambda: ".working/journals" not in listed)
+        check("evidence-absent-clean", lambda: not evidence().findings and not evidence().cannot)
+        bundle = ".working/imported/import/" + run
+        adoption = ".working/imported/adoption/" + adopt_run
+        source = bundle + "/sources/notes.txt"
+        moved = ".working/archive/moved/old/notes.txt"
+        receipt = adoption + "/receipt.toml"
+        plan = adoption + "/plan.toml"
+        preimage = ".working/archive/adoption/" + adopt_run + "/AGENTS.md"
+        members = (source, moved, receipt, preimage)
+        for path in members:
+            add(path, b"retained")
+        add(plan, plan_bytes)
+        for inventory, built in ((bundle + "/inventory.toml", doc(row(source), row(moved))),
+                                 (adoption + "/inventory.toml",
+                                  adoc(row(receipt), row(preimage), row(plan, plan_bytes)))):
+            add(inventory, b"")
+            inventories[inventory] = built
+        check("evidence-members-match", lambda: not evidence().findings and not evidence().cannot)
+        check("evidence-not-containment-graded", lambda: not containment(model=manifest2).findings)
         # Nothing reads a homes-1 store's evidence homes; its containment walk grades them as before.
         def legacy_reads_nothing():
             count = len(listed)
@@ -2661,216 +3790,214 @@ def boundary_self_test():
         check("evidence-legacy-reads-nothing", legacy_reads_nothing)
         check("evidence-legacy-contained", lambda: graded(containment(), ".working/imported")
               and graded(containment(), ".working/archive"))
-        with active():
-            for path in members:
-                files[path + ".stray"] = b"rogue"
-                check("evidence-off-inventory-" + path, lambda p=path: graded(evidence(), p + ".stray"))
-                del files[path + ".stray"]
-                del files[path]
-                check("evidence-missing-" + path, lambda p=path: graded(evidence(), p))
-                files[path] = b"tampered"
-                check("evidence-digest-" + path, lambda: any("mismatch" in s for s in evidence().findings))
-                files[path] = b"retained"
-                unreadable.add(path)
-                check("evidence-unreadable-" + path, lambda: bool(evidence().cannot))
-                unreadable.clear()
-            for extra in (".working/archive/empty-stray", bundle + "/empty", ".working/imported/other",
-                          ".working/imported/import/not-a-run", ".working/archive/adoption/" + run):
-                directories.add(extra)
-                check("evidence-stray-directory-" + extra, lambda: bool(evidence().findings)
-                      and not evidence().cannot)
-                directories.remove(extra)
-            orphan = ".working/imported/import/" + run.replace("0123", "4567")
-            add(orphan + "/file")
-            check("evidence-bundle-without-inventory", lambda: any("has no inventory" in s
-                                                                 for s in evidence().findings))
-            del files[orphan + "/file"]
-            directories.discard(orphan)
-            # A bundle its parent listed but that is gone when it is listed itself is a race, not an
-            # empty bundle: its claims are unknown, so the walk cannot evaluate rather than pass.
-            raced = ".working/imported/import/" + run.replace("0123", "89ab")
-            directories.add(raced)
-            vanished.add(raced)
-            check("evidence-bundle-vanished-cannot", lambda: any(
-                "vanished" in s for s in evidence().cannot) and not evidence().findings)
-            vanished.clear()
-            directories.discard(raced)
-            probe = adoption + "/probe.toml"
-            add(probe, b"retained")
-            check("evidence-unclaimed-phase-member", lambda: graded(evidence(), probe))
-            add(adoption + "/inventory-evidence.toml", b"")
-            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
-            check("evidence-phase-inventory", lambda: not evidence().findings and not evidence().cannot)
-            # The [adoption] identity binds each inventory to its run and its phase (spec 4.2): a
-            # foreign run id, a phase other than the file name's, a later phase named base, a missing
-            # identity, and an identity on a non-adoption inventory are each cannot-evaluate.
-            good_phase = copy.deepcopy(inventories[adoption + "/inventory-evidence.toml"])
-            foreign = adoc(row(probe), phase="evidence")
-            foreign["adoption"] = dict(foreign["adoption"],
-                                           run_id=adopt_run.replace("0123", "4567"))
-            for label, broken in (("foreign-run", foreign),
-                                  ("foreign-phase", adoc(row(probe), phase="completion")),
-                                  ("base-phase-name", adoc(row(probe), phase="base")),
-                                  ("missing-identity", doc(row(probe))),
-                                  ("phase-foreign-plan-digest", adoc(row(probe), phase="evidence",
-                                                                     digest="sha256:" + "0" * 64))):
-                inventories[adoption + "/inventory-evidence.toml"] = broken
-                check("evidence-identity-" + label, lambda: bool(evidence().cannot)
-                      and not evidence().findings)
-            inventories[adoption + "/inventory-evidence.toml"] = good_phase
-            # The plan digest binds each adoption inventory to its bundle's own sealed plan.toml
-            # (spec 4.2): a well-formed foreign digest on the base inventory, a bundle with no plan, an
-            # edited plan whose digest no longer seals it, and a sealed plan of another run each cannot
-            # evaluate, even when every member's row matches its bytes.
-            first = adoption + "/inventory.toml"
-            good_first = copy.deepcopy(inventories[first])
-            inventories[first] = dict(good_first, adoption=dict(good_first["adoption"],
-                                                                plan_digest="sha256:" + "0" * 64))
-            check("evidence-identity-base-foreign-plan-digest", lambda: any(
-                "plan digest" in s for s in evidence().cannot) and not evidence().findings)
-            del files[plan]
-            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan))
-            check("evidence-identity-missing-plan", lambda: any(
-                "no plan.toml" in s for s in evidence().cannot) and not evidence().findings)
-            edited = plan_bytes.replace(b"opf.adoption.plan/v2", b"opf.adoption.plan/v9")
-            alien_bytes, alien_digest = sealed_plan(dict(format="opf.adoption.plan/v2",
-                                                         run_id=adopt_run.replace("0123", "4567")))
-            for label, raw, digest in (("plan-not-sealed", edited, plan_digest),
-                                       ("plan-of-another-run", alien_bytes, alien_digest)):
-                add(plan, raw)
-                inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
-                                          row(plan, raw), digest=digest)
-                inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
-                                                                           digest=digest)
-                check("evidence-identity-" + label, lambda: bool(evidence().cannot)
-                      and not evidence().findings)
-            # Each clause of the plan proof alone (spec 4.2), with every inventory naming the plan's
-            # RECOMPUTED seal, so only that clause refuses: an edited canonical plan whose plan_digest no
-            # longer re-seals it, a sealed plan that is not canonical (a trailing comment), and a plan.toml
-            # that is not a regular file (an unreadable plan proves nothing, never a crash).
-            edited_seal = sealed_plan(dict(format="opf.adoption.plan/v9", run_id=adopt_run))[1]
-            for label, raw, digest, needle in (
-                    ("plan-edited-recomputed-seal", edited, edited_seal, "seals its own bytes"),
-                    ("plan-not-canonical", plan_bytes + b"# trailing comment\n", plan_digest,
-                     "seals its own bytes"),
-                    ("plan-not-regular", plan_bytes, plan_digest, "is unreadable")):
-                add(plan, raw)
-                inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
-                                          row(plan, raw), digest=digest)
-                inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
-                                                                           digest=digest)
-                if label == "plan-not-regular":
-                    unreadable.add(plan)
-                check("evidence-identity-" + label, lambda n=needle: any(
-                    "plan.toml" in s and n in s for s in evidence().cannot) and not evidence().findings)
-                unreadable.clear()
-            add(plan, plan_bytes)
-            inventories[first] = good_first
-            inventories[adoption + "/inventory-evidence.toml"] = good_phase
-            check("evidence-identity-plan-restored", lambda: not evidence().findings
+        for path in members:
+            files[path + ".stray"] = b"rogue"
+            check("evidence-off-inventory-" + path, lambda p=path: graded(evidence(), p + ".stray"))
+            del files[path + ".stray"]
+            del files[path]
+            check("evidence-missing-" + path, lambda p=path: graded(evidence(), p))
+            files[path] = b"tampered"
+            check("evidence-digest-" + path, lambda: any("mismatch" in s for s in evidence().findings))
+            files[path] = b"retained"
+            unreadable.add(path)
+            check("evidence-unreadable-" + path, lambda: bool(evidence().cannot))
+            unreadable.clear()
+        for extra in (".working/archive/empty-stray", bundle + "/empty", ".working/imported/other",
+                      ".working/imported/import/not-a-run", ".working/archive/adoption/" + run):
+            directories.add(extra)
+            check("evidence-stray-directory-" + extra, lambda: bool(evidence().findings)
                   and not evidence().cannot)
-            # ONE read of plan.toml per bundle (spec 4.2): plan A is swapped for B (A plus a newline)
-            # between the seal proof's read and the membership check, under a base inventory whose plan
-            # row names B. The seal proof reads A; the row is checked against those same bytes, so the
-            # swap is the plan's digest mismatch, never a clean result built from two reads.
-            swapped = plan_bytes + b"\n"
-            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
-                                      row(plan, swapped))
-            plan_reads = []
-
-            def swapping_read(_fd, rel, rep):
-                answer = read_bytes(_fd, rel, rep)
-                if rel == plan:
-                    plan_reads.append(answer[0])
-                    files[plan] = swapped
-                return answer
-
-            def swap_between_reads():
-                del plan_reads[:]
-                add(plan, plan_bytes)
-                with patch.object(doctor, "_read_bytes", swapping_read):
-                    report = evidence()
-                return (not report.cannot and any("mismatch" in s and repr(plan) in s for s in report.findings)
-                        and plan_reads == [plan_bytes])
-
-            check("evidence-plan-swapped-between-reads", swap_between_reads)
-            add(plan, plan_bytes)
-            inventories[first] = good_first
-            check("evidence-identity-plan-restored-after-swap", lambda: not evidence().findings
-                  and not evidence().cannot)
-            crossed_kind = doc(row(source), row(moved))
-            crossed_kind["adoption"] = dict(good_phase["adoption"])
-            inventories[bundle + "/inventory.toml"] = crossed_kind
-            check("evidence-identity-foreign-kind", lambda: bool(evidence().cannot)
+            directories.remove(extra)
+        orphan = ".working/imported/import/" + run.replace("0123", "4567")
+        add(orphan + "/file")
+        check("evidence-bundle-without-inventory", lambda: any("has no inventory" in s
+                                                             for s in evidence().findings))
+        del files[orphan + "/file"]
+        directories.discard(orphan)
+        # A bundle its parent listed but that is gone when it is listed itself is a race, not an
+        # empty bundle: its claims are unknown, so the walk cannot evaluate rather than pass.
+        raced = ".working/imported/import/" + run.replace("0123", "89ab")
+        directories.add(raced)
+        vanished.add(raced)
+        check("evidence-bundle-vanished-cannot", lambda: any(
+            "vanished" in s for s in evidence().cannot) and not evidence().findings)
+        vanished.clear()
+        directories.discard(raced)
+        probe = adoption + "/probe.toml"
+        add(probe, b"retained")
+        check("evidence-unclaimed-phase-member", lambda: graded(evidence(), probe))
+        add(adoption + "/inventory-evidence.toml", b"")
+        inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
+        check("evidence-phase-inventory", lambda: not evidence().findings and not evidence().cannot)
+        # The [adoption] identity binds each inventory to its run and its phase (spec 4.2): a
+        # foreign run id, a phase other than the file name's, a later phase named base, a missing
+        # identity, and an identity on a non-adoption inventory are each cannot-evaluate.
+        good_phase = copy.deepcopy(inventories[adoption + "/inventory-evidence.toml"])
+        foreign = adoc(row(probe), phase="evidence")
+        foreign["adoption"] = dict(foreign["adoption"],
+                                       run_id=adopt_run.replace("0123", "4567"))
+        for label, broken in (("foreign-run", foreign),
+                              ("foreign-phase", adoc(row(probe), phase="completion")),
+                              ("base-phase-name", adoc(row(probe), phase="base")),
+                              ("missing-identity", doc(row(probe))),
+                              ("phase-foreign-plan-digest", adoc(row(probe), phase="evidence",
+                                                                 digest="sha256:" + "0" * 64))):
+            inventories[adoption + "/inventory-evidence.toml"] = broken
+            check("evidence-identity-" + label, lambda: bool(evidence().cannot)
                   and not evidence().findings)
-            inventories[bundle + "/inventory.toml"] = doc(row(source), row(moved))
-            check("evidence-identity-restored", lambda: not evidence().findings and not evidence().cannot)
-            # A phase inventory never substitutes for a missing inventory.toml: the founding claims are
-            # unknown, so the bundle cannot evaluate, even when the phase inventory lists every member.
-            first = adoption + "/inventory.toml"
-            founding = inventories.pop(first)
-            del files[first]
-            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), *founding["file"],
-                                                                       phase="evidence")
-            check("evidence-phase-without-first-cannot", lambda: any(
-                "no inventory.toml" in s for s in evidence().cannot) and not evidence().findings)
-            add(first, b"")
-            inventories[first] = founding
-            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
-            check("evidence-phase-restored", lambda: not evidence().findings and not evidence().cannot)
-            inventory = bundle + "/inventory.toml"
-            good = copy.deepcopy(inventories)
-            # A claim on another bundle's member or another run's preimage is refused on its own, so the
-            # rightful owner's inventory drops that row here rather than masking it as a duplicate claim.
-            # An import bundle claiming a preimage path under its OWN run id is refused by its kind alone.
-            sole = {"cross-bundle": adoc(row(preimage)), "foreign-preimage": adoc(row(receipt))}
-            own_preimage = ".working/archive/adoption/" + run + "/file"
-            # Every malformed or unreadable inventory is cannot-evaluate and grades nothing partially.
-            for label, broken in (
-                    ("format", dict(doc(), format="unsupported")),
-                    ("extra-key", dict(doc(row(source), row(moved)), note="x")),
-                    ("no-file-array", {"format": "opf.evidence.inventory/v1"}),
-                    ("row-not-table", doc("x")),
-                    ("row-extra-key", doc(dict(row(source), note="x"), row(moved))),
-                    ("foreign-kind", doc(dict(row(source), path=".working/imported/other/" + run + "/x"))),
-                    ("wrong-prefix", doc(dict(row(source), path=source[len(".working/"):]), row(moved))),
-                    ("cross-bundle", doc(row(source), row(moved), row(receipt))),
-                    ("foreign-preimage", doc(row(source), row(moved), row(preimage))),
-                    ("import-own-run-preimage", doc(row(source), row(moved), row(own_preimage))),
-                    ("lists-inventory", doc(row(source), row(moved), row(inventory))),
-                    ("boolean-size", doc(dict(row(source), size=True), row(moved))),
-                    ("negative-size", doc(dict(row(source), size=-1), row(moved))),
-                    ("uppercase-digest", doc(dict(row(source), sha256=row(source)["sha256"].upper()), row(moved))),
-                    ("duplicate", doc(row(source), row(source), row(moved)))):
-                inventories[inventory] = broken
-                inventories[adoption + "/inventory.toml"] = sole.get(label, good[adoption + "/inventory.toml"])
-                check("evidence-malformed-" + label, lambda: bool(evidence().cannot) and not evidence().findings)
-            inventories.update(copy.deepcopy(good))
-            inventories[adoption + "/inventory.toml"] = adoc(row(receipt), row(preimage), row(moved))
-            check("evidence-cross-duplicate-refused", lambda: bool(evidence().cannot))
-            inventories.update(copy.deepcopy(good))
-            # An unreadable or vanished inventory leaves its bundle's claims unknown: cannot-evaluate
-            # only, never a partial reconciliation grading the rest of the homes without those claims.
-            unreadable.add(inventory)
-            check("evidence-unreadable-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
+        inventories[adoption + "/inventory-evidence.toml"] = good_phase
+        # The plan digest binds each adoption inventory to its bundle's own sealed plan.toml
+        # (spec 4.2): a well-formed foreign digest on the base inventory, a bundle with no plan, an
+        # edited plan whose digest no longer seals it, and a sealed plan of another run each cannot
+        # evaluate, even when every member's row matches its bytes.
+        first = adoption + "/inventory.toml"
+        good_first = copy.deepcopy(inventories[first])
+        inventories[first] = dict(good_first, adoption=dict(good_first["adoption"],
+                                                            plan_digest="sha256:" + "0" * 64))
+        check("evidence-identity-base-foreign-plan-digest", lambda: any(
+            "plan digest" in s for s in evidence().cannot) and not evidence().findings)
+        del files[plan]
+        inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan))
+        check("evidence-identity-missing-plan", lambda: any(
+            "no plan.toml" in s for s in evidence().cannot) and not evidence().findings)
+        edited = plan_bytes.replace(b"opf.adoption.plan/v2", b"opf.adoption.plan/v9")
+        alien_bytes, alien_digest = sealed_plan(dict(format="opf.adoption.plan/v2",
+                                                     run_id=adopt_run.replace("0123", "4567")))
+        for label, raw, digest in (("plan-not-sealed", edited, plan_digest),
+                                   ("plan-of-another-run", alien_bytes, alien_digest)):
+            add(plan, raw)
+            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                      row(plan, raw), digest=digest)
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
+                                                                       digest=digest)
+            check("evidence-identity-" + label, lambda: bool(evidence().cannot)
+                  and not evidence().findings)
+        # Each clause of the plan proof alone (spec 4.2), with every inventory naming the plan's
+        # RECOMPUTED seal, so only that clause refuses: an edited canonical plan whose plan_digest no
+        # longer re-seals it, a sealed plan that is not canonical (a trailing comment), and a plan.toml
+        # that is not a regular file (an unreadable plan proves nothing, never a crash).
+        edited_seal = sealed_plan(dict(format="opf.adoption.plan/v9", run_id=adopt_run))[1]
+        for label, raw, digest, needle in (
+                ("plan-edited-recomputed-seal", edited, edited_seal, "seals its own bytes"),
+                ("plan-not-canonical", plan_bytes + b"# trailing comment\n", plan_digest,
+                 "seals its own bytes"),
+                ("plan-not-regular", plan_bytes, plan_digest, "is unreadable")):
+            add(plan, raw)
+            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                      row(plan, raw), digest=digest)
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
+                                                                       digest=digest)
+            if label == "plan-not-regular":
+                unreadable.add(plan)
+            check("evidence-identity-" + label, lambda n=needle: any(
+                "plan.toml" in s and n in s for s in evidence().cannot) and not evidence().findings)
             unreadable.clear()
-            del inventories[inventory]
-            check("evidence-vanished-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
-            inventories.update(copy.deepcopy(good))
-            unreadable.add(".working/imported")
-            check("evidence-unreadable-root", lambda: bool(evidence().cannot))
-            unreadable.clear()
+        add(plan, plan_bytes)
+        inventories[first] = good_first
+        inventories[adoption + "/inventory-evidence.toml"] = good_phase
+        check("evidence-identity-plan-restored", lambda: not evidence().findings
+              and not evidence().cannot)
+        # ONE read of plan.toml per bundle (spec 4.2): plan A is swapped for B (A plus a newline)
+        # between the seal proof's read and the membership check, under a base inventory whose plan
+        # row names B. The seal proof reads A; the row is checked against those same bytes, so the
+        # swap is the plan's digest mismatch, never a clean result built from two reads.
+        swapped = plan_bytes + b"\n"
+        inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                  row(plan, swapped))
+        plan_reads = []
+
+        def swapping_read(_fd, rel, rep):
+            answer = read_bytes(_fd, rel, rep)
+            if rel == plan:
+                plan_reads.append(answer[0])
+                files[plan] = swapped
+            return answer
+
+        def swap_between_reads():
+            del plan_reads[:]
+            add(plan, plan_bytes)
+            with patch.object(doctor, "_read_bytes", swapping_read):
+                report = evidence()
+            return (not report.cannot and any("mismatch" in s and repr(plan) in s for s in report.findings)
+                    and plan_reads == [plan_bytes])
+
+        check("evidence-plan-swapped-between-reads", swap_between_reads)
+        add(plan, plan_bytes)
+        inventories[first] = good_first
+        check("evidence-identity-plan-restored-after-swap", lambda: not evidence().findings
+              and not evidence().cannot)
+        crossed_kind = doc(row(source), row(moved))
+        crossed_kind["adoption"] = dict(good_phase["adoption"])
+        inventories[bundle + "/inventory.toml"] = crossed_kind
+        check("evidence-identity-foreign-kind", lambda: bool(evidence().cannot)
+              and not evidence().findings)
+        inventories[bundle + "/inventory.toml"] = doc(row(source), row(moved))
+        check("evidence-identity-restored", lambda: not evidence().findings and not evidence().cannot)
+        # A phase inventory never substitutes for a missing inventory.toml: the founding claims are
+        # unknown, so the bundle cannot evaluate, even when the phase inventory lists every member.
+        first = adoption + "/inventory.toml"
+        founding = inventories.pop(first)
+        del files[first]
+        inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), *founding["file"],
+                                                                   phase="evidence")
+        check("evidence-phase-without-first-cannot", lambda: any(
+            "no inventory.toml" in s for s in evidence().cannot) and not evidence().findings)
+        add(first, b"")
+        inventories[first] = founding
+        inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
+        check("evidence-phase-restored", lambda: not evidence().findings and not evidence().cannot)
+        inventory = bundle + "/inventory.toml"
+        good = copy.deepcopy(inventories)
+        # A claim on another bundle's member or another run's preimage is refused on its own, so the
+        # rightful owner's inventory drops that row here rather than masking it as a duplicate claim.
+        # An import bundle claiming a preimage path under its OWN run id is refused by its kind alone.
+        sole = {"cross-bundle": adoc(row(preimage)), "foreign-preimage": adoc(row(receipt))}
+        own_preimage = ".working/archive/adoption/" + run + "/file"
+        # Every malformed or unreadable inventory is cannot-evaluate and grades nothing partially.
+        for label, broken in (
+                ("format", dict(doc(), format="unsupported")),
+                ("extra-key", dict(doc(row(source), row(moved)), note="x")),
+                ("no-file-array", {"format": "opf.evidence.inventory/v1"}),
+                ("row-not-table", doc("x")),
+                ("row-extra-key", doc(dict(row(source), note="x"), row(moved))),
+                ("foreign-kind", doc(dict(row(source), path=".working/imported/other/" + run + "/x"))),
+                ("wrong-prefix", doc(dict(row(source), path=source[len(".working/"):]), row(moved))),
+                ("cross-bundle", doc(row(source), row(moved), row(receipt))),
+                ("foreign-preimage", doc(row(source), row(moved), row(preimage))),
+                ("import-own-run-preimage", doc(row(source), row(moved), row(own_preimage))),
+                ("lists-inventory", doc(row(source), row(moved), row(inventory))),
+                ("boolean-size", doc(dict(row(source), size=True), row(moved))),
+                ("negative-size", doc(dict(row(source), size=-1), row(moved))),
+                ("uppercase-digest", doc(dict(row(source), sha256=row(source)["sha256"].upper()), row(moved))),
+                ("duplicate", doc(row(source), row(source), row(moved)))):
+            inventories[inventory] = broken
+            inventories[adoption + "/inventory.toml"] = sole.get(label, good[adoption + "/inventory.toml"])
+            check("evidence-malformed-" + label, lambda: bool(evidence().cannot) and not evidence().findings)
+        inventories.update(copy.deepcopy(good))
+        inventories[adoption + "/inventory.toml"] = adoc(row(receipt), row(preimage), row(moved))
+        check("evidence-cross-duplicate-refused", lambda: bool(evidence().cannot))
+        inventories.update(copy.deepcopy(good))
+        # An unreadable or vanished inventory leaves its bundle's claims unknown: cannot-evaluate
+        # only, never a partial reconciliation grading the rest of the homes without those claims.
+        unreadable.add(inventory)
+        check("evidence-unreadable-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
+        unreadable.clear()
+        del inventories[inventory]
+        check("evidence-vanished-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
+        inventories.update(copy.deepcopy(good))
+        unreadable.add(".working/imported")
+        check("evidence-unreadable-root", lambda: bool(evidence().cannot))
+        unreadable.clear()
 
     import _opf_init as init
     full_manifest = init._manifest_model()
     full_manifest["views"] = {}
-    full_manifest2 = copy.deepcopy(full_manifest)
-    full_manifest2["opf"]["homes"] = 2
-    full_manifest2["opf"]["spec_version"] = "2.0.0"
     reset()
     add(".working/imported/import/" + run + "/sources/notes.txt")
-    # A journal on disk: legacy grades it as an ordinary path, homes 2 must skip it unread.
+    # Journals on disk, an import and an adoption transaction: legacy grades them as ordinary paths, homes 2
+    # must skip them unread.
     add(".working/journals/import/journal/" + run + "/frames.log", b"torn")
+    add(".working/journals/adoption/journal/" + adopt_run + "/frames.log", b"torn")
 
     def dispatch(model):
         def doctor_toml(_fd, rel, _rep):
@@ -2896,8 +4023,7 @@ def boundary_self_test():
         with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", doctor_toml), \
                 patch.object(store, "_read_toml_contained", side_effect=worklog_toml), \
                 patch.object(journal, "_lstat_contained", side_effect=worklog_stat), \
-                patch.object(doctor, "_read_bytes", read_bytes), \
-                patch.object(doctor, "_adoption_journal_present", journal_probe):
+                patch.object(doctor, "_read_bytes", read_bytes):
             report = doctor._Report()
             doctor._validate_opened_store(0, None, machine, None, {}, None, "default", True, report)
         return report.result(), list(listed)
@@ -2905,33 +4031,14 @@ def boundary_self_test():
     def contained(result, path):
         return any(repr(path) in message for message in result.by_check.get("C-CONTAINMENT", []))
 
-    # A legacy (homes 1) report keeps the legacy roster, order and count and the pinned legacy residual
-    # text, with the homes-2 names graded as ordinary paths and no evidence read.
-    legacy_report, legacy_listed = dispatch(full_manifest)
-    # The roster is pinned independently of the live REQUIRED_CHECKS constant: sha256 over the 28 legacy check
-    # ids in report order joined by a newline, UTF-8, so an added, removed or reordered check changes it.
-    legacy_roster_sha256 = "21302b2c175604ab67307443e85a85fac592eff17cc4c2bf334948801adbce5f"
-
-    def legacy_roster(rep):
-        return len(rep.checks) == 28 and hashlib.sha256("\n".join(rep.checks).encode("utf-8")).hexdigest() \
-            == legacy_roster_sha256
-    check("doctor-legacy-roster-exact", lambda: legacy_roster(legacy_report)
-          and tuple(legacy_report.checks) == doctor.REQUIRED_CHECKS and "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS)
-    # The pin is independent of the live _RESIDUALS constant: sha256 over the 12 legacy residuals joined by
-    # a newline, UTF-8. Any added, removed, reordered or reworded legacy residual changes it.
-    legacy_residuals_sha256 = "6901f8734d2293e714c521e9b74836a188627839d7d8a08a3888b4a9cc7a8a0b"
-    check("doctor-legacy-residuals-unchanged", lambda: len(legacy_report.residuals) == 12
-          and hashlib.sha256("\n".join(legacy_report.residuals).encode("utf-8")).hexdigest()
-          == legacy_residuals_sha256
-          and not any(r in legacy_report.residuals for r in doctor._HOMES2_RESIDUALS))
-    check("doctor-legacy-evidence-inert", lambda: not any(
-        path.startswith(".working/imported/") for path in legacy_listed))
-    check("doctor-legacy-contains-homes", lambda: contained(legacy_report, ".working/imported")
-          and contained(legacy_report, ".working/journals"))
-    with active():
-        report, homes2_listed = dispatch(full_manifest2)
-    check("doctor-homes2-roster", lambda: tuple(report.checks) == doctor.required_checks(2)
-          and len(report.checks) == 29)
+    # The init model is the base 2.0.0, homes 2 baseline, so its report carries the one doctor roster.
+    report, homes2_listed = dispatch(full_manifest)
+    # The roster is pinned independently of the live DOCTOR_ROSTER constant: sha256 over the 33 check ids
+    # in report order joined by a newline, UTF-8, so an added, removed or reordered check changes it.
+    roster_sha256 = "393844f1856c0071b3c73db83f999870f8f608c8163b7de1e7ef547f77919d79"
+    check("doctor-homes2-roster", lambda: tuple(report.checks) == doctor.DOCTOR_ROSTER
+          and len(report.checks) == 33
+          and hashlib.sha256("\n".join(report.checks).encode("utf-8")).hexdigest() == roster_sha256)
     check("doctor-dispatches-evidence", lambda: report.checks.get("C-EVIDENCE-ENUM") == "FINDING")
     check("doctor-homes2-residual", lambda: all(r in report.residuals for r in doctor._HOMES2_RESIDUALS))
     # The reservation read is disclosed as the exception spec 4.2 makes, not as awaiting a revision.
@@ -2945,86 +4052,15 @@ def boundary_self_test():
                       and p not in allocation_homes for p in homes2_listed))
     check("doctor-lists-allocation-homes", lambda: sorted(
         p for p in homes2_listed if p.startswith(".working/journals/")) == sorted(allocation_homes))
-    check("doctor-legacy-reads-no-reservations", lambda: not any(
-        p == ".working/journals" or p.startswith(".working/journals/") for p in legacy_listed))
-    # Activated tooling alone widens nothing: a legacy manifest keeps the legacy roster and residuals.
-    with active():
-        activated_legacy, _ = dispatch(full_manifest)
-    check("doctor-activated-legacy-roster", lambda: legacy_roster(activated_legacy)
-          and activated_legacy.residuals == legacy_report.residuals)
-    # A legacy store holding this tooling's adoption journal home has started an adoption: the doctor
-    # leaves its journals/ out, lists none of it, still grades the other homes-2 names and keeps the
-    # legacy roster and residuals.
-    txn = adoption_journal + "/journal/" + adopt_run + "/frames.log"
-    add(txn, b"torn")
-    adopting_report, adopting_listed = dispatch(full_manifest)
-    drop(txn, 3)
-    check("doctor-legacy-adoption-journal-excluded", lambda: not contained(adopting_report, ".working/journals")
-          and contained(adopting_report, ".working/imported")
-          and not any(p == ".working/journals" or p.startswith(".working/journals/") for p in adopting_listed)
-          and legacy_roster(adopting_report) and adopting_report.residuals == legacy_report.residuals)
-
-    # The shipped probe over a real tree: one no-follow lstat of the adoption journal home, never a listing,
-    # True only for a real directory there (a file, a symlink to a directory, a sibling kind and an absent
-    # journals/ each read False, so journals/ keeps its legacy grading).
-    def probe_tree(plant):
-        with tempfile.TemporaryDirectory(prefix="opf-homes-probe-") as tmp:
-            plant(Path(tmp))
-            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
-            seen = []
-            real_lstat = journal._lstat_contained
-            try:
-                with patch.object(journal, "_lstat_contained", lambda f, rel: seen.append(rel) or real_lstat(f, rel)), \
-                        patch.object(doctor, "_list_contained", side_effect=AssertionError("journals listed")):
-                    return doctor._adoption_journal_present(fd), seen
-            finally:
-                os.close(fd)
-
-    def home_dir(root):
-        (root / adoption_journal / "journal").mkdir(parents=True)
-
-    def home_file(root):
-        (root / adoption_journal).parent.mkdir(parents=True)
-        (root / adoption_journal).write_bytes(b"not a journal home\n")
-
-    def home_symlink(root):
-        (root / ".working/elsewhere").mkdir(parents=True)
-        (root / adoption_journal).parent.mkdir(parents=True)
-        os.symlink("../elsewhere", str(root / adoption_journal))
-
-    def sibling_kind(root):
-        (root / ".working/journals/import/journal").mkdir(parents=True)
-
-    for label, plant, want in (("directory", home_dir, True), ("file", home_file, False),
-                               ("symlink", home_symlink, False), ("sibling-kind", sibling_kind, False),
-                               ("absent", lambda root: (root / ".working").mkdir(), False)):
-        check("adoption-journal-probe-" + label, lambda p=plant, w=want: probe_tree(p) == (w, [adoption_journal]))
-
-    # A probe that cannot observe the home reads False even over a real home directory, so journals/ keeps
-    # its legacy grading: a fault grades, never exempts (red against a probe that reads its fault as present).
-    def probe_faulting(fault):
-        def faulty(_fd, rel):
-            raise fault
-        with tempfile.TemporaryDirectory(prefix="opf-homes-probe-") as tmp:
-            home_dir(Path(tmp))
-            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                with patch.object(journal, "_lstat_contained", faulty):
-                    return doctor._adoption_journal_present(fd)
-            finally:
-                os.close(fd)
-
-    for label, fault in (("oserror", PermissionError(13, "an injected EACCES")),
-                         ("journal-error", journal.JournalError("an injected containment refusal"))):
-        check("adoption-journal-probe-unobservable-grades-" + label, lambda f=fault: probe_faulting(f) is False)
-    # The render source gate follows the report's roster: a homes-2 evidence finding refuses it, and a
-    # legacy report is gated on exactly SOURCE_INTEGRITY_CHECKS.
-    flagged = dict.fromkeys(doctor.required_checks(2), "PASS")
+    # The render source gate is the one roster's source checks: a homes-2 evidence finding refuses it,
+    # and a report that ran only the pre-homes checks is still gated on the homes-2 and imported checks.
+    flagged = dict.fromkeys(doctor.DOCTOR_ROSTER, "PASS")
     flagged["C-EVIDENCE-ENUM"] = "FINDING"
     check("source-gate-homes2-evidence", lambda: not doctor.source_integrity_ok(
         doctor.StoreValidation(doctor.INVALID, checks=flagged)))
-    check("source-gate-legacy-roster", lambda: set(doctor.source_checks(doctor.StoreValidation(
-        doctor.VALID, checks=dict.fromkeys(doctor.REQUIRED_CHECKS, "PASS")))) == doctor.SOURCE_INTEGRITY_CHECKS)
+    check("source-gate-one-roster", lambda: set(doctor.source_checks(doctor.StoreValidation(
+        doctor.VALID, checks=dict.fromkeys(doctor.REQUIRED_CHECKS, "PASS"))))
+        == doctor.SOURCE_INTEGRITY_CHECKS | set(doctor.HOMES2_CHECKS) | set(doctor.IMPORTED_CHECKS))
 
     def roster(generation, ran):
         rep = doctor._Report()
@@ -3035,8 +4071,11 @@ def boundary_self_test():
 
     check("roster-homes2-skipped-evidence", lambda: roster(2, doctor.REQUIRED_CHECKS).checks.get(
         "C-EVIDENCE-ENUM") == "CANNOT-EVALUATE")
-    check("roster-legacy-evidence-unknown", lambda: any("C-EVIDENCE-ENUM" in m for m in roster(
-        1, doctor.required_checks(2)).unattributed))
+    # The generation argument is not read: a homes-1 call requires the same one roster, so C-EVIDENCE-ENUM
+    # is a known check there, never an unattributed id.
+    check("roster-generation-unread", lambda: roster(1, doctor.REQUIRED_CHECKS).checks.get(
+        "C-EVIDENCE-ENUM") == "CANNOT-EVALUATE" and not any(
+        "C-EVIDENCE-ENUM" in m for m in roster(1, doctor.DOCTOR_ROSTER).unattributed))
 
     # Homes 1 keeps the legacy operand handling: the legacy engine applies no journal-operand refusal,
     # so each legacy entry point reaches its first I/O whatever the operand.
@@ -3119,19 +4158,17 @@ def boundary_self_test():
     create = {"op": "create-file", "content_digest": "sha256:" + "0" * 64}
     for home in homes:
         check("adoption-target-" + home, lambda h=home: adopt.validate_op(
-            dict(create, path=h + "/file"), homes=2).status != store.VALID)
-        check("adoption-legacy-target-" + home, lambda h=home: adopt.validate_op(
-            dict(create, path=h + "/file")).status == store.VALID)
+            dict(create, path=h + "/file")).status != store.VALID)
     check("adoption-composed-member", lambda: adopt.validate_op(
         {"op": "render-views", "store_root": ".working", "members": [
-            {"path": "journals/file", "digest": "sha256:" + "0" * 64}]}, homes=2).status != store.VALID)
+            {"path": "journals/file", "digest": "sha256:" + "0" * 64}]}).status != store.VALID)
 
     check("adoption-root-pack-preserved", lambda: adopt.validate_op(
         {"op": "render-views", "store_root": ".", "members": [
-            {"path": "notes.txt", "digest": "sha256:" + "0" * 64}]}, homes=2).status == store.VALID)
+            {"path": "notes.txt", "digest": "sha256:" + "0" * 64}]}).status == store.VALID)
     check("adoption-root-pack-journal-refused", lambda: adopt.validate_op(
         {"op": "init-store", "store_root": ".", "members": [
-            {"path": ".working/journals/file", "digest": "sha256:" + "0" * 64}]}, homes=2).status != store.VALID)
+            {"path": ".working/journals/file", "digest": "sha256:" + "0" * 64}]}).status != store.VALID)
     def view_plan(model):
         view_manifest = dict(model, views=dict(VERSION=dict(kind="projection", sources=[],
                                                             target=".working/journals/file")))
@@ -3151,12 +4188,7 @@ def boundary_self_test():
                 patch.object(views, "_spec_destination", return_value=("store", ".working/journals/file")):
             return refusal(lambda: views.plan_views(-1, machine)) or ""
 
-    with active():
-        check("view-journal-destination-refused", lambda: "journal home" in view_plan(manifest2))
-        # Pair the legacy allowance with the same destination's homes-2 refusal:
-        # removing the destination guard must not make this allowance vacuously pass.
-        check("view-legacy-journal-destination-planned", lambda: view_plan(manifest) == ""
-              and "journal home" in view_plan(manifest2))
+    check("view-journal-destination-refused", lambda: "journal home" in view_plan(manifest2))
 
     import _opf_adopt_plan as planning
     import _opf_emit as emit
@@ -3168,8 +4200,7 @@ def boundary_self_test():
         model = manifest2 if generation == 2 else manifest
         model = dict(model, unmanaged={"paths": [path]}) if unmanaged else model
         resolved = SimpleNamespace(status=store.RESOLVED, machine_rel=machine)
-        with patch.object(store, "SUPPORTED_HOMES", generation), \
-                patch.object(store._journal, "require_containment"), \
+        with patch.object(store._journal, "require_containment"), \
                 patch.object(store, "_open_dir_nofollow", return_value=-1), \
                 patch.object(planning.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=1)), \
                 patch.object(planning.os, "close"), \
@@ -3187,14 +4218,16 @@ def boundary_self_test():
                 return "enumerated"
         return "completed"
 
-    # Homes 2 excludes and reserves every control root; a legacy store reserves only imports.
+    # Homes 2 excludes and reserves every control root. A manifest without the homes-2 declaration is refused
+    # at validation; with validation mocked VALID here the planner still refuses it before any enumeration,
+    # since the homes-1 planner branch is deleted (red when a homes-1 store is investigated again).
     for home in homes:
         check("investigation-control-" + home, lambda h=home: investigation(h, generation=2) == "refused")
         check("investigation-collision-" + home, lambda h=home: investigation(h, True, 2) == "refused")
-        check("investigation-legacy-source-" + home, lambda h=home: investigation(h) == "enumerated")
+        check("investigation-legacy-refused-" + home, lambda h=home: investigation(h) == "refused")
+        check("investigation-legacy-unmanaged-refused-" + home,
+              lambda h=home: investigation(h, True) == "refused")
     check("investigation-legacy-imports-collision", lambda: investigation(legacy_root, True) == "refused")
-    for home in homes[1:]:
-        check("investigation-legacy-unmanaged-" + home, lambda h=home: investigation(h, True) == "enumerated")
 
     def unresolved_manifest(name):
         directory = SimpleNamespace(st_mode=stat.S_IFDIR)
@@ -3230,12 +4263,11 @@ def boundary_self_test():
     control_op = dict(create, path=".working/journals/file")
     utc = datetime.datetime(2026, 9, 17, 12, tzinfo=datetime.timezone.utc)
 
-    def planned(generation, op, supported=None):
-        # `generation` selects the manifest; `supported` (default: the same) is the activated tooling.
+    def planned(generation, op):
+        # `generation` selects the manifest.
         model = manifest2 if generation == 2 else manifest
         resolved = SimpleNamespace(status=store.RESOLVED, machine_rel=machine, detail="", pointer_source="default")
-        with patch.object(store, "SUPPORTED_HOMES", generation if supported is None else supported), \
-                patch.object(store._journal, "require_containment"), \
+        with patch.object(store._journal, "require_containment"), \
                 patch.object(store, "_open_dir_nofollow", return_value=-1), \
                 patch.object(planning.os, "fstat", return_value=same), \
                 patch.object(planning.os, "close"), \
@@ -3251,18 +4283,27 @@ def boundary_self_test():
             bindings = adopt.canonical_plan_bindings()
             targets = ["notes.txt", adopt.PACK_MIRROR_ROOT]
             observed = planning.investigate(Path("/store"), sources=[], targets=targets)
+            if observed.observation is None:  # investigation refused the store: no plan is built
+                return observed, [sorted(c.kwargs) for c in frozen.call_args_list]
             result = planning.plan(
                 Path("/store"), sources=[], targets=targets, product="opf", decisions=[],
                 ops=[op] + adopt.enforcement_install_ops(bindings["enforcement"]),
                 expected_observation_digest=tomllib.loads(observed.observation.decode())["observation_digest"],
                 now=utc, run_nonce="0123456789abcdef", bindings=bindings)
-        return result, [c.kwargs.get("homes") for c in frozen.call_args_list]
+        # Each frozen-plan revalidation is recorded by its keyword arguments: none, since no caller can
+        # select a homes generation any more (red when a homes argument is passed again).
+        return result, [sorted(c.kwargs) for c in frozen.call_args_list]
+
+    def legacy_refused(op):
+        # A homes-1 manifest (validation mocked VALID) is refused by the planner before any plan is built.
+        result, revalidated = planned(1, op)
+        return (result.status == store.CANNOT_EVALUATE and result.observation is None and revalidated == []
+                and any("not a homes-2 store" in f for f in result.findings))
 
     homes2_plan, _ = planned(2, control_op)
-    legacy_plan, legacy_frozen = planned(1, control_op)
     ordinary_plan, ordinary_frozen = planned(2, dict(create, path="notes.txt"))
     # Each op loop refuses on its own (its exact findings), not only through the frozen-plan revalidation.
-    refused = tuple(adopt.validate_op(control_op, homes=2).findings)
+    refused = tuple(adopt.validate_op(control_op).findings)
     check("plan-homes2-control-op-refused", lambda: homes2_plan.status == store.INVALID and homes2_plan.plan is None
           and bool(refused) and homes2_plan.findings == refused)
     control_retire = dict(op="retire-file", path=".working/journals/file", preimage_digest="sha256:" + "0" * 64)
@@ -3271,40 +4312,34 @@ def boundary_self_test():
                               "adopt-20260917T120000Z-0123456789abcdef", control_retire["path"]))
     with patch.object(planning, "_decisions", return_value=([control_retire], [control_source], [])):
         retired, _ = planned(2, dict(create, path="notes.txt"))
-        legacy_retired, _ = planned(1, dict(create, path="notes.txt"))
-    # A move beneath the Move archive is the generation-dependent disposition: spec 14.2 permits that explicit
-    # destination, so the legacy generation plans it, while the homes-2 operand refusal reaches it.
+        legacy_retired = legacy_refused(dict(create, path="notes.txt"))
+    # A move strictly beneath the Move archive is the one control-area destination spec 14.2 admits; the Move
+    # root itself stays refused by the homes-2 operand check.
     control_move = dict(op="move-file", source="notes.md", destination=".working/archive/moved/notes.md",
                         source_digest="sha256:" + "0" * 64)
     move_source = dict(path="notes.md", digest=control_move["source_digest"], disposition="move", occupying=False,
                        preservation=control_move["destination"])
     with patch.object(planning, "_decisions", return_value=([control_move], [move_source], [])):
-        moved, _ = planned(2, dict(create, path="notes.txt"))
-        legacy_moved, legacy_moved_frozen = planned(1, dict(create, path="notes.txt"))
-        activated_plan, activated_frozen = planned(1, dict(create, path="notes.txt"), supported=2)
+        moved, moved_frozen = planned(2, dict(create, path="notes.txt"))
+        legacy_moved = legacy_refused(dict(create, path="notes.txt"))
+    root_move = dict(control_move, destination=".working/archive/moved")
+    with patch.object(planning, "_decisions",
+                      return_value=([root_move], [dict(move_source, preservation=root_move["destination"])], [])):
+        rooted, _ = planned(2, dict(create, path="notes.txt"))
     check("plan-homes2-control-disposition-refused", lambda: retired.status == store.INVALID
-          and retired.findings == tuple(adopt.validate_op(control_retire, homes=2).findings) != ())
-    check("plan-homes2-control-move-refused", lambda: moved.status == store.INVALID
-          and moved.findings == tuple(adopt.validate_op(control_move, homes=2).findings) != ())
-    # Adoption refuses the control area in the legacy generation too (spec 14.2 carries no homes qualifier):
-    # the legacy op check admits these rows, and the frozen plan's revalidation at the store's own
-    # generation refuses them.
-    check("plan-legacy-control-disposition-refused", lambda: legacy_retired.status == store.INVALID
-          and legacy_retired.plan is None and "plan sources[0] path '.working/journals/file' selects the reserved "
-          "store control area as adoption content (spec 14.2)" in legacy_retired.findings)
-    check("plan-legacy-control-op-refused", lambda: legacy_plan.status == store.INVALID and legacy_plan.plan is None
-          and legacy_frozen == [1]
-          and "plan writes '.working/journals/file' into the reserved store control area (spec 14.2)"
-          in legacy_plan.findings)
-    check("plan-legacy-control-move-planned", lambda: legacy_moved.status == store.VALID
-          and legacy_moved_frozen == [1])
-    check("plan-activated-legacy-generation", lambda: activated_plan.status == store.VALID
-          and activated_frozen == [1])
-    check("plan-homes2-frozen-plan-bound", lambda: ordinary_plan.status == store.VALID and ordinary_frozen == [2])
-    check("plan-validate-homes2-refused", lambda: adopt.validate_plan(
-        tomllib.loads(legacy_moved.plan.decode()), homes=2).status == store.INVALID)
-    check("plan-validate-legacy-unchanged", lambda: adopt.validate_plan(
-        tomllib.loads(legacy_moved.plan.decode())).status == store.VALID)
+          and retired.findings == tuple(adopt.validate_op(control_retire).findings) != ())
+    check("plan-homes2-control-move-planned", lambda: moved.status == store.VALID and moved_frozen == [[]]
+          and adopt.validate_op(control_move).status == store.VALID)
+    check("plan-homes2-move-root-refused", lambda: rooted.status == store.INVALID and rooted.plan is None
+          and rooted.findings == tuple(adopt.validate_op(root_move).findings) != ())
+    # A homes-1 manifest is refused by the planner itself, whatever the plan carries (the homes-1 planner
+    # branch and its legacy op grading are deleted), so the control area stays refused there too.
+    check("plan-legacy-control-disposition-refused", lambda: legacy_retired)
+    check("plan-legacy-control-op-refused", lambda: legacy_refused(control_op))
+    check("plan-legacy-control-move-refused", lambda: legacy_moved)
+    check("plan-homes2-frozen-plan-bound", lambda: ordinary_plan.status == store.VALID and ordinary_frozen == [[]])
+    check("plan-validate-homes2-move-admitted", lambda: adopt.validate_plan(
+        tomllib.loads(moved.plan.decode())).status == store.VALID)
 
     check("internal-api-capability-required", lambda: refuses(
         lambda: home_journal.run_transaction(object(), "import", run, [], lambda _name: b"")))
@@ -3636,9 +4671,9 @@ def boundary_self_test():
             mismatch() or "") and mkdirs.call_count == made and reserved.call_count == published)
 
     check("evidence-homes2-roster", lambda: "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS
-          and doctor.required_checks(2).index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
+          and doctor.DOCTOR_ROSTER.index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
           and "C-EVIDENCE-ENUM" in doctor.source_checks(
-              SimpleNamespace(checks=dict.fromkeys(doctor.required_checks(2)))))
+              SimpleNamespace(checks=dict.fromkeys(doctor.DOCTOR_ROSTER))))
 
     for failure in failures:
         print("FAIL: " + failure)
@@ -4380,7 +5415,7 @@ def _self_test():
     escaping read or parse error to exit 2 exactly as `main(["--self-test"])` does."""
     try:
         code = _self_test_vectors()
-    except (OSError, UnicodeError, ValueError, AttributeError) as exc:
+    except (OSError, UnicodeError, ValueError, AttributeError, SyntaxError) as exc:
         print("check_opf_homes: cannot evaluate: {}".format(exc), file=sys.stderr)
         return 2
     failures = _fault_channel_vectors()
@@ -5460,19 +6495,23 @@ def _self_test_vectors():
         check("gitignore-drift-{!r}".format(bad), lambda: not store.homes_gitignore_matches(bad))
     _gitignore_reconciliation_self_test(check)
 
-    # OPF-D2B PR3a (decision 5): the base spec_version bump 1.1.0 -> 1.2.0 is an intended change
-    # (init.toml provenance), no longer inert; this tooling defines no store upgrade.
-    check("inert-version", lambda: store.SUPPORTED_SPEC_VERSION == "1.2.0")
-    check("inert-homes", lambda: store.SUPPORTED_HOMES == 1
-          and store.homes_generation({"opf": {"homes": 2}}) == 1)
-    check("inert-init", lambda: init._manifest_model()["opf"]["spec_version"] == "1.2.0"
-          and "homes" not in init._manifest_model()["opf"])
+    # Base 2.0.0 with homes 2 is the only baseline (spec 4.2): the tooling accepts exactly that pair,
+    # init creates exactly that pair, and this tooling defines no store upgrade.
+    check("inert-version", lambda: store.SPEC_VERSION == "2.0.0")
+    check("inert-homes", lambda: store.HOMES == 2
+          and store.homes_generation({"opf": {"spec_version": "2.0.0", "homes": 2}}) == 2
+          and store.homes_generation({"opf": {"spec_version": "2.0.0", "homes": 1}}) == 1
+          and store.homes_generation({"opf": {"spec_version": "2.0.0"}}) == 1)
+    check("inert-init", lambda: init._manifest_model()["opf"]["spec_version"] == "2.0.0"
+          and type(init._manifest_model()["opf"].get("homes")) is int
+          and init._manifest_model()["opf"]["homes"] == 2)
     check("inert-import", lambda: doctor.IMPORTS_REL == ".working/imports"
           and doctor._is_import_run_id("imp" + suffix) and not doctor._is_import_run_id("adopt" + suffix))
     check("inert-root-exclusions", lambda: store.STORE_ROOT_CONTROL_DIRS == (".git", ".aiqt"))
     source = Path(store.__file__).read_text(encoding="utf-8")
     check("transitional-comment", lambda: "In homes 2, .aiqt is AIQT-only" in source
-          and "Until homes 2 is activated, legacy import state still" in source)
+          and "Homes 2 is the only homes generation (spec 4.2)" in source
+          and "Until homes 2 is activated" not in source)
     text = SPEC.read_text(encoding="utf-8")
     check("spec-contract", lambda: not contract_findings(text))
     # The journal-only record kind is spec-pinned through the kind loop: deleting `record` from the
@@ -5566,10 +6605,10 @@ def _self_test_vectors():
     # pinned, so dropping a file or any of its pins turns the self-test red.
     check("surface-registry", lambda: tuple(_SURFACE) == (
         QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (10, 7, 10, 6, 7, 4))
+          tuple(map(len, _SURFACE.values())) == (10, 7, 12, 7, 7, 4))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 10, 6) and
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (7, 15, 11, 7, 7, 1) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
@@ -5580,6 +6619,758 @@ def _self_test_vectors():
             check("surface-retired-flip-" + path.name + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized:
                   frag not in nb and f in surface_findings(m))
+    # Retired gate names: the live tools tree, this module included, spells neither. In a fixture
+    # tree, the store module with either alias assignment restored, or a nested module reading it,
+    # is refused at that line; a non-.py file naming both is out of scope. The vectors iterate their
+    # own list, so narrowing the registry turns them red rather than skipping them.
+    retired_currents = ("HOMES", "SPEC_VERSION")
+    check("retired-gate-names-registry", lambda: _RETIRED_GATE_NAMES == tuple(
+        "SUPPORTED_" + current for current in retired_currents))
+    check("no-retired-gate-names", lambda: retired_gate_name_findings() == [])
+    check("retired-gate-names-scan-self", lambda: Path(__file__).resolve() in set(_TOOLS.rglob("*.py")))
+    store_source = (_TOOLS / "_opf_store.py").read_text(encoding="utf-8").rstrip("\n") + "\n"
+    with tempfile.TemporaryDirectory(prefix="opf-homes-names-") as tmp:
+        tree = Path(tmp)
+        (tree / "nested").mkdir()
+        (tree / "notes.txt").write_text(" ".join(_RETIRED_GATE_NAMES) + "\n", encoding="utf-8")
+        (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
+        check("retired-gate-names-clean-tree", lambda: retired_gate_name_findings(tree) == [])
+        for current in retired_currents:
+            name = "SUPPORTED_" + current
+            (tree / "_opf_store.py").write_text(store_source + "{} = {}\n".format(name, current),
+                                                encoding="utf-8")
+            check("retired-gate-names-revert-" + name, lambda n=name, c=current:
+                  retired_gate_name_findings(tree) == ["_opf_store.py:{}: retired gate name {}; read store.{} "
+                                                       "instead".format(store_source.count("\n") + 1, n, c)])
+            (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
+            (tree / "nested" / "reader.py").write_text(
+                "import _opf_store as store\nvalue = store.{}\n".format(name), encoding="utf-8")
+            check("retired-gate-names-reader-" + name, lambda n=name, c=current:
+                  retired_gate_name_findings(tree) == ["nested/reader.py:2: retired gate name {}; read store.{} "
+                                                       "instead".format(n, c)])
+            (tree / "nested" / "reader.py").unlink()
+            # A file has one reading: in UTF-7, `+AFM-` is the S the raw bytes lack, so a UTF-7 cookie is refused
+            # as a finding naming the file rather than decoded (red where the scan decoded it, which found the name
+            # Python reads), and under a UTF-8 cookie the same bytes name nothing.
+            for cookie, expected in (("utf-7", [_source_finding("encoded.py", 1, "retired gate name",
+                                                                "the coding cookie 'utf-7' is not utf-8 or utf-8-sig")]),
+                                     ("utf-8", [])):
+                (tree / "encoded.py").write_text("# -*- coding: {} -*-\nvalue = store.+AFM-{}\n".format(
+                    cookie, name[1:]), encoding="utf-8")
+                check("retired-gate-names-cookie-" + cookie + "-" + name, lambda n=name, e=expected:
+                      n not in (tree / "encoded.py").read_text(encoding="utf-8")
+                      and retired_gate_name_findings(tree) == e)
+            (tree / "encoded.py").unlink()
+            # A fullwidth or math-bold spelling of the prefix is the same Python identifier (NFKC), so
+            # an alias assignment spelled either way is refused at its line like the plain one (red
+            # when the scan matches the raw line).
+            for form, first in (("fullwidth", 0xFF21), ("math-bold", 0x1D400)):
+                spelled = "".join(chr(first + ord(ch) - ord("A")) for ch in "SUPPORTED") + "_" + current
+                (tree / "_opf_store.py").write_text(store_source + "{} = {}\n".format(spelled, current),
+                                                    encoding="utf-8")
+                check("retired-gate-names-" + form + "-" + name, lambda n=name, c=current, s=spelled:
+                      s != n and unicodedata.normalize("NFKC", s) == n
+                      and retired_gate_name_findings(tree) == [
+                          "_opf_store.py:{}: retired gate name {}; read store.{} instead".format(
+                              store_source.count("\n") + 1, n, c)])
+                (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
+    # No homes-1 path: outside self-test code the live tools tree tests a homes generation only by `== 2`
+    # with no fallthrough, passes and defaults no literal generation but 2, binds no number but 2 to one,
+    # binds HOMES only where it is defined, holds no star import, uses an attribute writer only as a plain call
+    # given a string literal name (the comparison, writer and journal refusals each with its documented
+    # exclusions), and spells HOMES as no string or keyword, with no exclusion; the adoption validators
+    # name no generation, and nothing names the deleted record journal root. In a fixture tree holding the
+    # record and adoption modules, restoring one deleted line (the homes-1 arm of _record_journal_rel or of
+    # claim_ids, or the homes-1 default of validate_op) is red at that line, as is every non-equality form of
+    # an arm; the same comparison in self-test code, or in a check_*.py module, is not (refused homes-1 inputs
+    # are still built there).
+    check("homes1-free-registry", lambda: _HOMES1_FREE == {"_opf_adopt.py": (
+        "validate_op", "validate_plan", "_validate_plan_sources", "_control_operand_findings")})
+    live_findings, live_hits = _homes1_scan()
+    check("no-homes1-paths", lambda: live_findings == [])
+    # Every documented exclusion carries a reason and admitted exactly one site in the scan just run (a
+    # comparison, a test, a call, a parameter default, a string constant's site, or an attribute writer's name
+    # or attribute or import alias), so a stale one, or one matching a second site, is red; the scan reads every
+    # table.
+    check("homes1-exclusion-tables", lambda: len(_EXCLUSION_TABLES) == 3 and all(a is b for a, b in zip(
+        _EXCLUSION_TABLES, (_HOMES_COMPARE_EXCLUSIONS, _LEGACY_JOURNAL_EXCLUSIONS, _ATTRIBUTE_WRITER_EXCLUSIONS)))
+          and len(set().union(*_EXCLUSION_TABLES)) == sum(map(len, _EXCLUSION_TABLES)))
+    check("homes1-exclusions-reasoned", lambda: all(
+        isinstance(r, str) and r.strip() for table in _EXCLUSION_TABLES for r in table.values()))
+    check("homes1-exclusions-live", lambda: [
+        k for table in _EXCLUSION_TABLES for k in table if len(live_hits.get(k, ())) != 1] == [])
+    check("homes1-exclusions-outside-record-seam", lambda: not [
+        k for table in _EXCLUSION_TABLES for k in table if k[0] in ("_opf_record.py", "_opf_adopt.py")])
+    # The self-test convention the scan states holds for the tree: every def in a scanned module whose name holds
+    # `self_test` is a module-level def that _SELF_TEST_NAME matches (narrowing the old substring test left none of
+    # them scanned), and no production code spells one, so each body stays unread; a production caller added
+    # later turns this red even where the function it reaches scans clean. The helpers only self-test code names
+    # are opf.py's two watchdog fixtures, which only its watchdog self-tests reach.
+    trees, refused = _scanned_trees(_TOOLS)
+    self_tests, helpers = _self_test_functions(trees)
+    named = [(node, tree) for _rel, tree in trees for node in ast.walk(tree)
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and "self_test" in node.name]
+    check("homes1-self-test-convention", lambda: refused == [] and named and all(
+        any(node is stmt for stmt in tree.body) and _SELF_TEST_NAME.search(node.name) for node, tree in named))
+    check("homes1-self-test-unread", lambda: {id(node) for node, _tree in named} == self_tests)
+    check("homes1-self-test-helpers", lambda: helpers == {"_watchdog_timer_case", "_watchdog_launcher_case"})
+    # The premises the store_control_roots and classify_containment reasons rest on: outside self-test code
+    # opf record's _run_operation is the write guard's one caller, and the guard reads only the
+    # classification's malformed and colliding lists.
+    guard_callers, guard_reads = set(), set()
+    for rel, tree in trees:
+        stack = [(tree, "<module>", False, False)]
+        while stack:
+            node, owner, local, exempt = stack.pop()
+            body = ()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner, local = _qualified(owner, local, node.name), True
+                body = {id(stmt) for stmt in node.body} if id(node) in self_tests else ()
+            elif isinstance(node, ast.ClassDef):
+                owner, local = _qualified(owner, local, node.name), False
+            if (isinstance(node, ast.Call) and not exempt
+                    and getattr(node.func, "attr", getattr(node.func, "id", None)) == "plan_write_scope"):
+                guard_callers.add((rel, owner))
+            if (rel, owner) == ("_opf_write_guard.py", "plan_write_scope") and isinstance(node, ast.Attribute) \
+                    and isinstance(node.value, ast.Name) and node.value.id == "classification":
+                guard_reads.add(node.attr)
+            stack.extend((child, owner, local, exempt or id(child) in body) for child in ast.iter_child_nodes(node))
+    check("homes1-write-guard-callers", lambda: guard_callers == {("_opf_record.py", "_run_operation")})
+    check("homes1-write-guard-reads", lambda: guard_reads == {"malformed", "colliding"})
+    record_source = (_TOOLS / "_opf_record.py").read_text(encoding="utf-8")
+    adopt_source = (_TOOLS / "_opf_adopt.py").read_text(encoding="utf-8")
+    journal_home = '    if type(homes) is int and homes == 2:\n        return _opf_store.journal_root("record")\n'
+    claim_home = "    if type(homes) is int and homes == 2:\n        if reserved is None:\n"
+    validator = "def validate_op(row):\n"
+    restored = (
+        ("record-journal-arm", "_opf_record.py", record_source, journal_home,
+         "    if type(homes) is int and homes == 1:\n        return _opf_store.journal_root(\"record\")\n"
+         + journal_home, "homes-1 arm `homes == 1` in _record_journal_rel is reintroduced"),
+        ("claim-ids-arm", "_opf_record.py", record_source, claim_home,
+         "    if type(homes) is int and homes == 1:\n        base = {}\n    el" + claim_home[4:],
+         "homes-1 arm `homes == 1` in claim_ids is reintroduced"),
+        ("validate-op-default", "_opf_adopt.py", adopt_source, validator, "def validate_op(row, homes=1):\n",
+         "validate_op names a homes generation again"))
+    # Every non-equality shape of an arm in claim_ids is red, at its line; `== 2` in either order and
+    # `== HOMES` stay clean.
+    red_forms = ("homes < 2", "homes != 2", "homes in (1,)", "homes not in (2,)", "homes >= 2", "2 > homes",
+                 "homes == True", "homes == 1.0", "1 <= homes < 2", "homes is not 2",
+                 "_opf_store.homes_generation(m) != 2")
+    clean_forms = ("homes == 2", "2 == homes", "homes == _opf_store.HOMES")
+    with tempfile.TemporaryDirectory(prefix="opf-homes-one-") as tmp:
+        tree = Path(tmp)
+        (tree / "_opf_record.py").write_text(record_source, encoding="utf-8")
+        (tree / "_opf_adopt.py").write_text(adopt_source, encoding="utf-8")
+        check("homes1-clean-tree", lambda: homes1_findings(tree) == [])
+        for label, name, source, anchor, line, needle in restored:
+            at = source.find(anchor)
+            planted = source[:at] + line + source[at + len(anchor):] if source.count(anchor) == 1 else None
+            (tree / name).write_text(planted if planted is not None else source, encoding="utf-8")
+            check("homes1-restored-" + label, lambda p=planted, n=name, a=at, e=needle: p is not None and [
+                f.startswith("{}:{}: ".format(n, p.count("\n", 0, a) + 1)) and e in f
+                for f in homes1_findings(tree)] == [True])
+            (tree / name).write_text(source, encoding="utf-8")
+        at = record_source.find(claim_home)
+        for form in red_forms + clean_forms:
+            arm = "    if {}:\n        base = {{}}\n    el".format(form) + claim_home[4:]
+            planted = record_source[:at] + arm + record_source[at + len(claim_home):]
+            (tree / "_opf_record.py").write_text(planted, encoding="utf-8")
+            expect = (["_opf_record.py:{}: homes-1 arm `{}` in claim_ids".format(
+                planted.count("\n", 0, at) + 1, ast.unparse(ast.parse(form, mode="eval").body))]
+                if form in red_forms else [])
+            check("homes1-form-" + ("red-" if expect else "clean-") + form, lambda e=expect: [
+                f[:len(e[0])] if e else f for f in homes1_findings(tree)] == e)
+        (tree / "_opf_record.py").write_text(record_source, encoding="utf-8")
+        # An exclusion is bounded to its module, function and exact text: the same comparison elsewhere is red.
+        (tree / "_opf_check.py").write_text("def required_checks(homes):\n    return homes < 2\n\n\n"
+                                            "def _other(homes):\n    return homes < 2\n", encoding="utf-8")
+        check("homes1-exclusion-bounded", lambda: homes1_findings(tree) == [
+            "_opf_check.py:6: homes-1 arm `homes < 2` in _other is reintroduced; homes 2 is the only "
+            "generation and every other one refuses (only `== 2` may test a generation)"])
+        (tree / "_opf_check.py").unlink()
+        (tree / "planted.py").write_text("def self_test(ctx):\n    return ctx.homes == 1\n\n\n"
+                                         "def _refuse(ctx):\n    return ctx.homes == 1\n", encoding="utf-8")
+        check("homes1-self-test-exempt-production-red", lambda: homes1_findings(tree) == [
+            "planted.py:6: homes-1 arm `ctx.homes == 1` in _refuse is reintroduced; homes 2 is the only "
+            "generation and every other one refuses (only `== 2` may test a generation)"])
+        (tree / "planted.py").unlink()
+        (tree / "check_planted.py").write_text("def flip(ctx):\n    return ctx.homes == 1\n", encoding="utf-8")
+        check("homes1-check-module-exempt", lambda: homes1_findings(tree) == [])
+        (tree / "check_planted.py").unlink()
+        (tree / "_opf_adopt.py").write_text(adopt_source.replace(
+            "def _validate_plan_sources(rows, run_id, findings, root=\".\"):",
+            "def _validate_plan_sources(rows, run_id, findings, root=\".\", *, homes=2):"), encoding="utf-8")
+        check("homes1-validator-keyword-generation-red", lambda: len(homes1_findings(tree)) == 1
+              and "_validate_plan_sources names a homes generation again" in homes1_findings(tree)[0])
+        (tree / "_opf_adopt.py").write_text(adopt_source, encoding="utf-8")
+        # The deleted record journal root: the constant restored in the record module, a read of it off the
+        # record module elsewhere, and the path string in production code are each red; the path in a
+        # docstring or in self-test code is not.
+        anchor = "VERB = \"record\"\n"
+        (tree / "_opf_record.py").write_text(record_source.replace(
+            anchor, anchor + "JOURNAL_REL = _opf_store.journal_root(\"record\")\n", 1), encoding="utf-8")
+        line = record_source[:record_source.find(anchor)].count("\n") + 2
+        check("homes1-legacy-constant-restored-red", lambda: record_source.count(anchor) == 1
+              and homes1_findings(tree) == [
+                  "_opf_record.py:{}: the deleted record journal constant JOURNAL_REL is referenced in <module>; "
+                  "the record journal lives only in the typed capability home".format(line)])
+        (tree / "_opf_record.py").write_text(record_source, encoding="utf-8")
+        legacy = _LEGACY_RECORD_JOURNAL
+        (tree / "planted.py").write_text(
+            "import _opf_record\n\n\ndef _home():\n    \"\"\"Not {0}.\"\"\"\n    return _opf_record.JOURNAL_REL\n\n\n"
+            "def _path():\n    return \"{0}\"\n\n\ndef self_test():\n    return \"{0}\"\n".format(legacy),
+            encoding="utf-8")
+        check("homes1-legacy-references-red", lambda: homes1_findings(tree) == [
+            "planted.py:6: the deleted record journal constant JOURNAL_REL is referenced in _home; the record "
+            "journal lives only in the typed capability home",
+            "planted.py:10: the deleted record journal root {} is named in _path; the record journal lives only "
+            "in the typed capability home".format(legacy)])
+        (tree / "planted.py").unlink()
+        # The one literal generation argument the live tree held: restoring IMPORTS_REL's
+        # store_control_roots(1) is red at that line; the live store_control_roots(HOMES) is its clean flip.
+        check_text = (_TOOLS / "_opf_check.py").read_text(encoding="utf-8")
+        imports_live = "IMPORTS_REL = _opf_store.store_control_roots(_opf_store.HOMES)[0]\n"
+        (tree / "_opf_store.py").write_text((_TOOLS / "_opf_store.py").read_text(encoding="utf-8"), encoding="utf-8")
+        for planted, expect in (
+                (check_text.replace(imports_live, "IMPORTS_REL = _opf_store.store_control_roots(1)[0]\n", 1), [
+                    "_opf_check.py:{}: homes-1 argument `_opf_store.store_control_roots(1)` in <module> is "
+                    "reintroduced; homes 2 is the only generation and every other one refuses ({})".format(
+                        check_text[:check_text.find(imports_live)].count("\n") + 1, _LITERAL_RULE)]),
+                (check_text, [])):
+            (tree / "_opf_check.py").write_text(planted, encoding="utf-8")
+            check("homes1-imports-rel-" + ("red" if expect else "clean"), lambda e=expect: check_text.count(
+                imports_live) == 1 and [f for f in homes1_findings(tree) if f.startswith("_opf_check.py:")] == e)
+        (tree / "_opf_check.py").unlink()
+        (tree / "_opf_store.py").unlink()
+    # Each further form the scan closes, as a red module and its clean flip one edit away: the red module is
+    # red with exactly its findings (module, line, kind, text, function, rule; a list where two rules refuse
+    # it) and the clean one is not.
+    arm_after, arm, argument, default, binding = "arm after", "arm", "argument", "default", "binding"
+    raises = "        raise ValueError(homes)\n"
+    match_clean = ("def home(homes):\n    match homes:\n        case 2:\n            return 'typed'\n"
+                   "        case _:\n            raise ValueError(homes)\n")
+    roots = "def roots(homes):\n    return (homes,)\n\n\nIMPORTS = roots({})[0]\n"
+    rebound_in = "the HOMES constant is bound again in {}; only _opf_store.py's module-level `HOMES = 2` " \
+                 "defines it, and every `== HOMES` test reads it as 2"
+    rebound = rebound_in.format("<module>")
+    source_refused = "{}, so the no-homes-1 scan refuses this module (" + _SOURCE_RULE + ")"
+    # a module whose helper writes the store by the refusal code _compatibility hands it, the
+    # code spelled HOMES (the former exclusion's exact text), or HOMES_DECLARATION.
+    init_p0 = ("import _opf_store as store\n\nMANIFEST_PATH = '.aiqt/manifest.toml'\n\n\n"
+               "def _require(condition, code, location, detail):\n"
+               "    if location == 'manifest' and code in vars(store):\n        vars(store)[code] = 1\n\n\n"
+               "def _compatibility(manifest, provenance):\n    base = manifest.get('opf')\n"
+               "    _require('homes' in base, '{}', 'manifest', '{{}} declares no [opf].homes; this bootstrap "
+               "requires the integer {{}} (fail-closed)'.format(MANIFEST_PATH, store.HOMES))\n")
+    names_generation = "{} names a homes generation again; it grades every row at homes 2"
+    writer = "attribute writer `{}` in {} may bind HOMES under a name the scan cannot read; it is refused (" \
+             + _WRITER_RULE + ")"
+    homes_name = "`{}` in {} spells the name HOMES as data, which a writer the scan does not read could bind; " \
+                 "it is refused (" + _HOMES_NAME_RULE + ")"
+    two_sites = "the exclusion for `{}` in {} matches {} sites (lines {}); an exclusion admits exactly one site, " \
+                "so each is refused"
+    # The clean flip of every attribute-writer vector: each plain call shape on an unrelated object, given an
+    # unrelated literal name.
+    plain = ("class Box:\n    pass\n\n\nBOX = Box()\nsetattr(BOX, 'size', 1)\ndelattr(BOX, 'size')\n"
+             "BOX.__setattr__('size', 1)\nobject.__delattr__(BOX, 'size')\n")
+    importing = "import _opf_store\n\n"
+    test_writer = "def helper_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n\n\n"
+    test_main = "def main():\n    return helper_self_test()\n"
+    store_rebound = ("import sys\nimport _opf_store as store\n\n{}\n\n\ndef home(homes):\n    if homes == store.HOMES:\n"
+                     "        return 'typed'\n    raise ValueError(homes)\n")
+    gap_forms = (
+        # A fallthrough after `== 2`: what a failed test reaches must refuse.
+        ("fallthrough-after-return", "planted.py",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    return 'fallback'\n",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    raise ValueError(homes)\n",
+         (4, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("fallthrough-else", "planted.py",
+         "def home(homes):\n    if type(homes) is int and homes == 2:\n        root = 'typed'\n    else:\n"
+         "        root = 'fallback'\n    return root\n",
+         "def home(homes):\n    if type(homes) is int and homes == 2:\n        root = 'typed'\n    else:\n"
+         + raises + "    return root\n",
+         (5, arm_after, "type(homes) is int and homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("fallthrough-negated", "planted.py",
+         "def home(homes):\n    if not homes == 2:\n        return 'fallback'\n    return 'typed'\n",
+         "def home(homes):\n    if not homes == 2:\n" + raises + "    return 'typed'\n",
+         (3, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("fallthrough-conditional", "planted.py",
+         "def home(ctx):\n    return 'typed' if ctx.homes == 2 else 'fallback'\n",
+         "def home(ctx):\n    return 'typed' if ctx.homes == 2 else None\n",
+         (2, arm_after, "ctx.homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("fallthrough-or", "planted.py",
+         "def home(homes, other):\n    return homes == 2 or other\n",
+         "def home(homes, other):\n    return homes == 2 and other\n",
+         (2, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("match-case-1", "planted.py",
+         match_clean.replace("        case _:", "        case 1:\n            return 'legacy'\n        case _:"),
+         match_clean, (5, arm, "case 1", "home", _MATCH_RULE)),
+        ("match-no-refusal", "planted.py",
+         "def home(homes):\n    match homes:\n        case 2:\n            return 'typed'\n    return 'fallback'\n",
+         match_clean, (2, arm, "match homes", "home", _MATCH_RULE)),
+        # A refusal a handler or finally clause of the same function may swallow is none, and a chained test
+        # refuses only if its own failed path does.
+        ("caught-raise", "planted.py",
+         "def home(homes):\n    try:\n        if homes == 2:\n            return 'typed'\n"
+         "        raise ValueError(homes)\n    except ValueError:\n        return 'fallback'\n",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    raise ValueError(homes)\n",
+         (5, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("chained-shared", "planted.py",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    if homes == 2:\n        pass\n"
+         "    return 'fallback'\n",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    if homes == 2:\n        pass\n"
+         "    raise ValueError(homes)\n", (4, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("chained-else-nested", "planted.py",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    else:\n        if homes == 2:\n"
+         "            pass\n    return 'fallback'\n",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    else:\n        if homes == 2:\n"
+         "            pass\n        raise ValueError(homes)\n    return 'fallback'\n",
+         (5, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        # A match on a tuple holding a generation, and a mapping or class pattern keyed by one.
+        ("match-tuple", "planted.py",
+         "def home(spec, homes):\n    match (spec, homes):\n        case ('2.0.0', 1):\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(homes)\n",
+         "def home(spec, homes):\n    match (spec, homes):\n        case ('2.0.0', 2):\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(homes)\n",
+         (3, arm, "case ['2.0.0', 1]", "home", _MATCH_RULE)),
+        ("match-mapping", "planted.py",
+         "def home(m):\n    match m:\n        case {'homes': 1}:\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(m)\n",
+         "def home(m):\n    match m:\n        case {'homes': 2}:\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(m)\n",
+         (3, arm, "case {'homes': 1}", "home", _COMPARE_RULE)),
+        ("match-class", "planted.py",
+         "def home(m):\n    match m:\n        case Manifest(homes=1):\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(m)\n",
+         "def home(m):\n    match m:\n        case Manifest(homes=2):\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(m)\n",
+         (3, arm, "case Manifest(homes=1)", "home", _COMPARE_RULE)),
+        # A test spelled as a call.
+        ("call-dunder", "planted.py", "def home(homes):\n    return homes.__eq__(1)\n",
+         "def home(homes):\n    return homes == 2\n", (2, arm, "homes.__eq__(1)", "home", _COMPARE_RULE)),
+        ("call-operator", "planted.py", "import operator\n\n\ndef home(homes):\n    return operator.eq(homes, 1)\n",
+         "import operator\n\n\ndef home(homes):\n    return homes == 2\n",
+         (5, arm, "operator.eq(homes, 1)", "home", _COMPARE_RULE)),
+        # A generation read through an expression, a key or a longer name in a comparison.
+        ("arithmetic", "planted.py", "def home(homes):\n    return homes - 1 == 0\n",
+         "def home(homes):\n    return homes == 2\n", (2, arm, "homes - 1 == 0", "home", _COMPARE_RULE)),
+        ("conversion", "planted.py", "def home(homes):\n    return int(homes) == 1\n",
+         "def home(homes):\n    return homes == 2\n", (2, arm, "int(homes) == 1", "home", _COMPARE_RULE)),
+        ("conversion-two", "planted.py", "def home(homes):\n    return int(homes) == 2\n",
+         "def home(homes):\n    return homes == 2\n", (2, arm, "int(homes) == 2", "home", _COMPARE_RULE)),
+        ("get", "planted.py", "def home(base):\n    return base.get('homes') == 1\n",
+         "def home(base):\n    return base.get('homes') == 2\n",
+         (2, arm, "base.get('homes') == 1", "home", _COMPARE_RULE)),
+        ("subscript", "planted.py", "def home(m):\n    return m['opf']['homes'] == 1\n",
+         "def home(m):\n    return m['opf']['homes'] == 2\n",
+         (2, arm, "m['opf']['homes'] == 1", "home", _COMPARE_RULE)),
+        ("suffix-name", "planted.py", "def home(declared_homes):\n    return declared_homes == 1\n",
+         "def home(declared_homes):\n    return declared_homes == 2\n",
+         (2, arm, "declared_homes == 1", "home", _COMPARE_RULE)),
+        ("getattr", "planted.py", "def home(ctx):\n    return getattr(ctx, 'homes') == 1\n",
+         "def home(ctx):\n    return getattr(ctx, 'homes') == 2\n",
+         (2, arm, "getattr(ctx, 'homes') == 1", "home", _COMPARE_RULE)),
+        ("tuple", "planted.py", "def home(m):\n    return (m.get('spec_version'), m.get('homes')) == ('2.0.0', 1)\n",
+         "def home(m):\n    return (m.get('spec_version'), m.get('homes')) == ('2.0.0', 2)\n",
+         (2, arm, "(m.get('spec_version'), m.get('homes')) == ('2.0.0', 1)", "home", _COMPARE_RULE)),
+        ("type-guard", "planted.py", "def home(homes):\n    return type(homes) is bool\n",
+         "def home(homes):\n    return type(homes) is int\n", (2, arm, "type(homes) is bool", "home", _COMPARE_RULE)),
+        # Only the real HOMES constant reads as 2.
+        ("rebound-constant", "planted.py", "HOMES = 1\n\n\ndef home(homes):\n    return homes == HOMES\n",
+         "from _opf_store import HOMES\n\n\ndef home(homes):\n    return homes == HOMES\n", (1, rebound)),
+        ("foreign-constant", "planted.py",
+         "import _opf_store\n\n\ndef home(homes, cfg):\n    return homes == cfg.HOMES\n",
+         "import _opf_store\n\n\ndef home(homes, cfg):\n    return homes == _opf_store.HOMES\n",
+         (5, arm, "homes == cfg.HOMES", "home", _COMPARE_RULE)),
+        ("rebound-store-alias", "planted.py",
+         "import _opf_store as store\n\n\ndef home(homes, store):\n    return homes == store.HOMES\n",
+         "import _opf_store as store\n\n\ndef home(homes):\n    return homes == store.HOMES\n",
+         (5, arm, "homes == store.HOMES", "home", _COMPARE_RULE)),
+        ("attribute-assignment", "planted.py", "import _opf_store\n\n_opf_store.HOMES = 1\n",
+         "import _opf_store\n\nGENERATION = _opf_store.HOMES\n", (3, rebound)),
+        ("setattr-literal", "planted.py", "import _opf_store\n\nsetattr(_opf_store, 'HOMES', 1)\n",
+         "import _opf_store\n\nsetattr(_opf_store, 'HOMES_SEEN', 1)\n", (3, rebound)),
+        ("setattr-dunder", "planted.py", "import _opf_store as store\n\nstore.__setattr__('HOMES', 1)\n",
+         "import _opf_store as store\n\nstore.__setattr__('HOMES_SEEN', 1)\n", (3, rebound)),
+        ("setattr-unbound-dunder", "planted.py", "import _opf_store\n\nobject.__setattr__(_opf_store, 'HOMES', 1)\n",
+         "import _opf_store\n\nobject.__setattr__(_opf_store, 'HOMES_SEEN', 1)\n", (3, rebound)),
+        ("delattr-literal", "planted.py", "import _opf_store\n\ndelattr(_opf_store, 'HOMES')\n",
+         "import _opf_store\n\ndelattr(_opf_store, 'HOMES_SEEN')\n", (3, rebound)),
+        # Rule 4's bounded refusal: a writer used other than as a plain call given a literal name is red,
+        # whatever the spelling (the first ten forms, then other members of the class). The HOMES string
+        # each passes outside a red writer call is red too, at its own site.
+        ("writer-starred-name", "planted.py", importing + "setattr(_opf_store, *('HOMES', 1))\n", plain,
+         (3, writer.format("setattr(_opf_store, *('HOMES', 1))", "<module>"))),
+        ("writer-starred-all", "planted.py", importing + "setattr(*(_opf_store, 'HOMES', 1))\n", plain,
+         (3, writer.format("setattr(*(_opf_store, 'HOMES', 1))", "<module>"))),
+        ("writer-alias", "planted.py", importing + "put = setattr\nput(_opf_store, 'HOMES', 1)\n", plain,
+         [(3, writer.format("setattr", "<module>")),
+          (4, homes_name.format("put(_opf_store, 'HOMES', 1)", "<module>"))]),
+        ("writer-import-alias", "planted.py",
+         "from builtins import setattr as put\n" + importing + "put(_opf_store, 'HOMES', 1)\n", plain,
+         [(1, writer.format("setattr as put", "<module>")),
+          (4, homes_name.format("put(_opf_store, 'HOMES', 1)", "<module>"))]),
+        ("writer-partial", "planted.py",
+         "import functools\n" + importing + "functools.partial(setattr, _opf_store, 'HOMES')(1)\n", plain,
+         [(4, writer.format("setattr", "<module>")),
+          (4, homes_name.format("functools.partial(setattr, _opf_store, 'HOMES')", "<module>"))]),
+        ("writer-partial-name", "planted.py",
+         "import functools\n" + importing + "functools.partial(setattr, _opf_store)('HOMES', 1)\n", plain,
+         [(4, writer.format("setattr", "<module>")),
+          (4, homes_name.format("functools.partial(setattr, _opf_store)('HOMES', 1)", "<module>"))]),
+        ("writer-getattr", "planted.py",
+         "import builtins\n" + importing + "getattr(builtins, 'setattr')(_opf_store, 'HOMES', 1)\n", plain,
+         [(4, writer.format("getattr(builtins, 'setattr')", "<module>")),
+          (4, homes_name.format("getattr(builtins, 'setattr')(_opf_store, 'HOMES', 1)", "<module>"))]),
+        ("writer-namespace", "planted.py",
+         "import builtins\n" + importing + "builtins.__dict__['setattr'](_opf_store, 'HOMES', 1)\n", plain,
+         [(4, writer.format("'setattr'", "<module>")),
+          (4, homes_name.format("builtins.__dict__['setattr'](_opf_store, 'HOMES', 1)", "<module>"))]),
+        ("writer-map", "planted.py", importing + "list(map(setattr, [_opf_store], ['HOMES'], [1]))\n", plain,
+         [(3, writer.format("setattr", "<module>")), (3, homes_name.format("'HOMES'", "<module>"))]),
+        ("writer-getattr-dunder", "planted.py", importing + "getattr(object, '__setattr__')(_opf_store, 'HOMES', 1)\n",
+         plain, [(3, writer.format("getattr(object, '__setattr__')", "<module>")),
+                 (3, homes_name.format("getattr(object, '__setattr__')(_opf_store, 'HOMES', 1)", "<module>"))]),
+        ("writer-fstring", "planted.py", importing + "setattr(_opf_store, f'HOMES', 1)\n", plain,
+         (3, writer.format("setattr(_opf_store, f'HOMES', 1)", "<module>"))),
+        ("writer-variable-name", "planted.py", importing + "NAME = 'HOMES'\nsetattr(_opf_store, NAME, 1)\n",
+         plain, [(3, homes_name.format("'HOMES'", "<module>")),
+                 (4, writer.format("setattr(_opf_store, NAME, 1)", "<module>"))]),
+        ("writer-bound-dunder-variable", "planted.py",
+         importing + "NAME = 'HOMES'\n_opf_store.__setattr__(NAME, 1)\n", plain,
+         [(3, homes_name.format("'HOMES'", "<module>")),
+          (4, writer.format("_opf_store.__setattr__(NAME, 1)", "<module>"))]),
+        ("writer-keyword", "planted.py",
+         "import _opf_store\n\n\ndef patch(monkeypatch):\n    monkeypatch.setattr(_opf_store, name='HOMES', value=1)\n",
+         plain, (5, writer.format("monkeypatch.setattr(_opf_store, name='HOMES', value=1)", "patch"))),
+        ("writer-class-pattern", "planted.py",
+         importing + "match _opf_store:\n    case object(__setattr__=put):\n        put('HOMES', 1)\n", plain,
+         [(4, writer.format("__setattr__", "<module>")), (5, homes_name.format("put('HOMES', 1)", "<module>"))]),
+        # x1 to x4: an exclusion admits only its own site, by its fully qualified function (not
+        # a same-named one elsewhere) and the exact comparison a string constant is an operand of (not any use
+        # of the string in that function); a name handed to the real excluded writer is never the literal HOMES.
+        ("x1-excluded-string-other-use", "opf.py",
+         "import builtins\n\n\ndef _watchdog_completion_case():\n\n    def external_import_names(node):\n"
+         "        put = getattr(builtins, 'setattr')\n        return node.func.id in ('setattr', 'delattr')\n",
+         "import builtins\n\n\ndef _watchdog_completion_case():\n\n    def external_import_names(node):\n"
+         "        put = None\n        return node.func.id in ('setattr', 'delattr')\n",
+         (7, writer.format("getattr(builtins, 'setattr')",
+                           "_watchdog_completion_case.<locals>.external_import_names"))),
+        ("x2-excluded-writer-other-class", "_journal.py",
+         "class _StOtherFault:\n\n    def __enter__(self):\n        for module, name, watched in self._watched:\n"
+         "            setattr(module, name, watched)\n",
+         "class _StCloseFault:\n\n    def __enter__(self):\n        for module, name, watched in self._watched:\n"
+         "            setattr(module, name, watched)\n",
+         (5, writer.format("setattr(module, name, watched)", "_StOtherFault.__enter__"))),
+        ("x3-excluded-writer-other-call", "_opf_emit.py",
+         "def _st_guardian_other_reuse():\n\n    def drive():\n\n        def call(module, name, stub):\n"
+         "            setattr(module, name, stub)\n",
+         "def _st_guardian_close_reuse():\n\n    def drive():\n\n        def call(module, name, stub):\n"
+         "            setattr(module, name, stub)\n",
+         (6, writer.format("setattr(module, name, stub)", "_st_guardian_other_reuse.<locals>.drive.<locals>.call"))),
+        ("x4-excluded-writer-other-charged", "opf.py",
+         "def _watchdog_other_charges():\n\n    def charged(owner, name, wrapper):\n"
+         "        setattr(owner, name, wrapper)\n",
+         "def _watchdog_install_charges():\n\n    def charged(owner, name, wrapper):\n"
+         "        setattr(owner, name, wrapper)\n",
+         (4, writer.format("setattr(owner, name, wrapper)", "_watchdog_other_charges.<locals>.charged"))),
+        ("x4-excluded-writer-handed-homes", "opf.py",
+         "import _opf_store\nimport time\n\n\ndef _watchdog_install_charges():\n\n"
+         "    def charged(owner, name, wrapper):\n        setattr(owner, name, wrapper)\n"
+         "    charged(_opf_store, 'HOMES', None)\n",
+         "import _opf_store\nimport time\n\n\ndef _watchdog_install_charges():\n\n"
+         "    def charged(owner, name, wrapper):\n        setattr(owner, name, wrapper)\n"
+         "    charged(time, 'sleep', None)\n",
+         (9, homes_name.format("charged(_opf_store, 'HOMES', None)", "_watchdog_install_charges"))),
+        # The HOMES string or keyword at any site (rule 4): a pair list a writer later drains, an f-string's
+        # piece, a keyword, a comparison operand, a getattr name, and the store module itself.
+        ("homes-string-pairs", "opf.py", importing + "_WATCHDOG_ORIGINALS.append((_opf_store, 'HOMES', 1))\n",
+         importing + "_WATCHDOG_ORIGINALS.append((_opf_store, 'HOMES_SEEN', 1))\n",
+         (3, homes_name.format("'HOMES'", "<module>"))),
+        ("homes-string-fstring", "planted.py", "NAME = f'HOMES'\n", "NAME = f'HOMES_SEEN'\n",
+         (1, homes_name.format("f'HOMES'", "<module>"))),
+        ("homes-string-keyword", "planted.py", "PAIRS = dict(HOMES=1)\n", "PAIRS = dict(SIZE=1)\n",
+         (1, homes_name.format("dict(HOMES=1)", "<module>"))),
+        ("homes-string-comparison", "planted.py", "def pick(name):\n    return name == 'HOMES'\n",
+         "def pick(name):\n    return name == 'SIZE'\n", (2, homes_name.format("name == 'HOMES'", "pick"))),
+        ("homes-string-getattr", "planted.py", importing + "GENERATION = getattr(_opf_store, 'HOMES')\n",
+         importing + "GENERATION = _opf_store.HOMES\n",
+         (3, homes_name.format("getattr(_opf_store, 'HOMES')", "<module>"))),
+        ("homes-string-store-module", "_opf_store.py", "HOMES = 2\nNAMES = ('HOMES',)\n",
+         "HOMES = 2\nNAMES = ('SPEC_VERSION',)\n", (2, homes_name.format("'HOMES'", "<module>"))),
+        # An exclusion that matches two sites admits neither: a writer's, and a comparison's.
+        ("exclusion-two-sites-writer", "_opf_emit.py",
+         "def _st_guardian_close_reuse():\n\n    def drive():\n\n        def call(module, name, stub):\n"
+         "            setattr(module, name, stub)\n            setattr(module, name, stub)\n",
+         "def _st_guardian_close_reuse():\n\n    def drive():\n\n        def call(module, name, stub):\n"
+         "            setattr(module, name, stub)\n            return stub\n",
+         (6, two_sites.format("setattr(module, name, stub)", "_st_guardian_close_reuse.<locals>.drive.<locals>.call",
+                              2, "6, 7"))),
+        ("exclusion-two-sites-comparison", "_opf_check.py",
+         "def required_checks(homes):\n    if homes < 2:\n        return 1\n    return homes < 2\n",
+         "def required_checks(homes):\n    if homes < 2:\n        return 1\n    return 0\n",
+         (2, two_sites.format("homes < 2", "required_checks", 2, "2, 4"))),
+        # a module has one reading, so a UTF-7 cookie, which would hide a write from a UTF-8 read,
+        # is refused as a finding naming the module rather than decoded (the byte-level vectors below hold the
+        # rest of the reading rule against both scans).
+        ("e1-source-encoding", "planted.py",
+         "# -*- coding: utf-7 -*-\nimport _opf_store\n# +AAo-_opf_store.HOMES = 1\n",
+         "# -*- coding: utf-8 -*-\nimport _opf_store\n# +AAo-_opf_store.HOMES = 1\n",
+         (1, source_refused.format("the coding cookie 'utf-7' is not utf-8 or utf-8-sig"))),
+        # no HOMES string is excluded, so _opf_init_p0's old refusal code is red at its call
+        # (where the former exclusion admitted it, and the helper wrote the store by it); HOMES_DECLARATION is not.
+        ("p1-init-p0-homes-code", "_opf_init_p0.py", init_p0.format("HOMES"), init_p0.format("HOMES_DECLARATION"),
+         (13, homes_name.format("_require('homes' in base, 'HOMES', 'manifest', '{} declares no [opf].homes; this "
+                                "bootstrap requires the integer {} (fail-closed)'.format(MANIFEST_PATH, store.HOMES))",
+                                "_compatibility"))),
+        # a type parameter of any kind named HOMES binds it (a TypeVar is no 2, though
+        # `homes == HOMES` reads as `== 2`), in a def, a class or a type alias; and a type parameter that shadows
+        # the store module's name keeps `store.HOMES` from reading as the constant.
+        ("p2-type-parameter", "planted.py",
+         importing + "def carrier[HOMES]():\n    pass\n\n\nvars(_opf_store)[carrier.__type_params__[0].__name__] = 1\n",
+         importing + "def carrier[T]():\n    pass\n\n\nvars(_opf_store)[carrier.__type_params__[0].__name__] = 1\n",
+         (3, rebound_in.format("carrier"))),
+        ("p2b-type-parameter-scopes", "planted.py",
+         "from _opf_store import HOMES\n\n\ndef home[HOMES](homes):\n    if homes == HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n\n\nclass Box[HOMES]:\n    pass\n\n\ntype Alias[HOMES] = HOMES\n",
+         "from _opf_store import HOMES\n\n\ndef home[T](homes):\n    if homes == HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n\n\nclass Box[T]:\n    pass\n\n\ntype Alias[T] = T\n",
+         [(4, rebound_in.format("home")), (10, rebound_in.format("Box")), (14, rebound)]),
+        ("type-parameter-kinds", "planted.py", "def spread[*HOMES]():\n    pass\n\n\ndef call[**HOMES]():\n    pass\n",
+         "def spread[*Ts]():\n    pass\n\n\ndef call[**P]():\n    pass\n",
+         [(1, rebound_in.format("spread")), (5, rebound_in.format("call"))]),
+        ("type-parameter-store-alias", "planted.py",
+         "import _opf_store as store\n\n\ndef home[store](homes):\n    if homes == store.HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n",
+         "import _opf_store as store\n\n\ndef home[T](homes):\n    if homes == store.HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n", (5, arm, "homes == store.HOMES", "home", _COMPARE_RULE)),
+        # a self-test function production code spells (called at import here, or aliased) is
+        # scanned like production code; what runs at import (its defaults and decorators) is read; and self-test
+        # code is the body of a module-level def whose name holds self_test or self_tests as whole words, so a
+        # nested def or a longer word (myself_test) is scanned. Each clean flip is self-test code no production
+        # code spells: reached from the `__main__` block or main, or through a helper only self-test code names.
+        ("p3-self-test-called", "planted.py",
+         importing + "def helper_self_test(store=_opf_store):\n    setattr(store, 'HOMES', 1)\n\n\nhelper_self_test()\n",
+         importing + "def helper_self_test(store=_opf_store):\n    setattr(store, 'HOMES', 1)\n\n\n"
+         "if __name__ == '__main__':\n    helper_self_test()\n", (4, rebound_in.format("helper_self_test"))),
+        ("self-test-aliased", "planted.py",
+         importing + "def helper_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n\n\nRUN = helper_self_test\n",
+         importing + "def helper_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n\n\ndef main():\n"
+         "    return helper_self_test\n", (4, rebound_in.format("helper_self_test"))),
+        ("self-test-default", "planted.py",
+         importing + "def self_test(done=setattr(_opf_store, 'HOMES', 1)):\n    return done\n",
+         importing + "def self_test(done=None):\n    return done\n", (3, rebound_in.format("self_test"))),
+        ("self-test-decorator", "planted.py",
+         importing + "@(lambda test: setattr(_opf_store, 'HOMES', 1) or test)\ndef self_test():\n    return 0\n",
+         importing + "@(lambda test: test)\ndef self_test():\n    return 0\n", (3, rebound_in.format("self_test"))),
+        ("self-test-nested", "planted.py",
+         importing + "def run():\n\n    def self_test():\n        setattr(_opf_store, 'HOMES', 1)\n    return self_test()\n",
+         importing + "def run():\n    return 0\n\n\ndef self_test():\n    setattr(_opf_store, 'HOMES', 1)\n",
+         (6, rebound_in.format("run.<locals>.self_test"))),
+        ("self-test-longer-word", "planted.py", importing + "def myself_test():\n    setattr(_opf_store, 'HOMES', 1)\n",
+         importing + "def my_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n", (4, rebound_in.format("myself_test"))),
+        ("self-test-helper", "planted.py",
+         importing + "def _fixture():\n    return helper_self_test\n\n\ndef helper_self_test():\n"
+         "    setattr(_opf_store, 'HOMES', 1)\n    return _fixture\n\n\nFIXTURE = _fixture\n",
+         importing + "def _fixture():\n    return helper_self_test\n\n\ndef helper_self_test():\n"
+         "    setattr(_opf_store, 'HOMES', 1)\n    return _fixture\n", (8, rebound_in.format("helper_self_test"))),
+        # Only the body of the `__main__` block is an entry: its else and elif arms run on import. A decorated main
+        # is production code, and so is a main production code spells (called at import, or from a self-test
+        # function production reaches). Each clean flip moves the call into the block's body, or drops the
+        # decorator.
+        ("self-test-main-block-else", "planted.py",
+         importing + test_writer + "if __name__ == '__main__':\n    pass\nelse:\n    helper_self_test()\n",
+         importing + test_writer + "if __name__ == '__main__':\n    helper_self_test()\nelse:\n    pass\n",
+         (4, rebound_in.format("helper_self_test"))),
+        ("self-test-main-block-elif", "planted.py",
+         importing + test_writer + "if __name__ == '__main__':\n    pass\nelif True:\n    helper_self_test()\n",
+         importing + test_writer + "if __name__ == '__main__':\n    helper_self_test()\nelif True:\n    pass\n",
+         (4, rebound_in.format("helper_self_test"))),
+        ("self-test-main-decorated", "planted.py",
+         importing + test_writer + "@(lambda run: run() or run)\n" + test_main,
+         importing + test_writer + test_main, (4, rebound_in.format("helper_self_test"))),
+        ("self-test-main-called", "planted.py", importing + test_writer + test_main + "\n\nmain()\n",
+         importing + test_writer + test_main + "\n\nif __name__ == '__main__':\n    main()\n",
+         (4, rebound_in.format("helper_self_test"))),
+        ("self-test-main-from-self-test", "planted.py",
+         importing + test_writer + test_main + "\n\ndef run_self_test():\n    return main()\n\n\nrun_self_test()\n",
+         importing + test_writer + test_main + "\n\ndef run_self_test():\n    return main()\n\n\n"
+         "if __name__ == '__main__':\n    run_self_test()\n", (4, rebound_in.format("helper_self_test"))),
+        # The store module's alias rebound through a namespace (the module object's attribute, a namespace key, a
+        # keyword, a writer's name) no longer reads as the store, so `== store.HOMES` is no `== 2`; the flip
+        # writes another name.
+        ("store-alias-module-attribute", "planted.py", store_rebound.format("sys.modules[__name__].store = None"),
+         store_rebound.format("sys.modules[__name__].other = None"), (8, arm, "homes == store.HOMES", "home",
+                                                                     _COMPARE_RULE)),
+        ("store-alias-namespace-key", "planted.py", store_rebound.format("globals()['store'] = None"),
+         store_rebound.format("globals()['other'] = None"), (8, arm, "homes == store.HOMES", "home", _COMPARE_RULE)),
+        ("store-alias-namespace-keyword", "planted.py", store_rebound.format("globals().update(store=None)"),
+         store_rebound.format("globals().update(other=None)"), (8, arm, "homes == store.HOMES", "home",
+                                                                _COMPARE_RULE)),
+        ("store-alias-writer-name", "planted.py", store_rebound.format("setattr(sys.modules[__name__], 'store', None)"),
+         store_rebound.format("setattr(sys.modules[__name__], 'other', None)"),
+         (8, arm, "homes == store.HOMES", "home", _COMPARE_RULE)),
+        # A module Python imports whose syntax tree is too deep for the walk is a finding naming it, not a
+        # RecursionError; the same sum in fewer terms is walked.
+        ("deep-expression", "planted.py", "VALUE = " + " + ".join(["1"] * 3000) + "\n",
+         "VALUE = " + " + ".join(["1"] * 30) + "\n",
+         (1, source_refused.format("the scan cannot walk its syntax tree (RecursionError)"))),
+        # A star import binds names the module never spells, HOMES possibly among them.
+        ("star-import", "planted.py",
+         "from check_shim import *\n\n\ndef home(homes):\n    if homes == HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n",
+         "from _opf_store import HOMES\n\n\ndef home(homes):\n    if homes == HOMES:\n        return 'typed'\n"
+         "    raise ValueError(homes)\n",
+         (1, "star import from check_shim in <module> may bind HOMES unseen; import each name it uses by name")),
+        # An adoption validator reads no generation, through a key or an attribute either.
+        ("validator-get", "_opf_adopt.py", "def validate_op(row):\n    return row.get('homes', 1)\n",
+         "def validate_op(row):\n    return row.get('op', 1)\n", (2, names_generation.format("validate_op"))),
+        ("validator-attribute", "_opf_adopt.py", "def validate_plan(plan):\n    return plan.homes\n",
+         "def validate_plan(plan):\n    return plan.ops\n", (2, names_generation.format("validate_plan"))),
+        ("validator-subscript", "_opf_adopt.py", "def _validate_plan_sources(rows):\n    return rows[0]['homes']\n",
+         "def _validate_plan_sources(rows):\n    return rows[0]['op']\n",
+         (2, names_generation.format("_validate_plan_sources"))),
+        # A literal generation passed for a homes parameter or set as its default.
+        ("literal-argument", "planted.py", roots.format("1"), roots.format("2"),
+         (5, argument, "roots(1)", "<module>", _LITERAL_RULE)),
+        ("literal-keyword", "planted.py", roots.format("homes=1"), roots.format("homes=2"),
+         (5, argument, "roots(homes=1)", "<module>", _LITERAL_RULE)),
+        ("literal-default", "planted.py", "def roots(homes=1):\n    return (homes,)\n",
+         "def roots(homes=2):\n    return (homes,)\n", (1, default, "homes=1", "roots", _LITERAL_RULE)),
+        ("literal-unpacked", "planted.py", roots.format("**{'homes': 1}"), roots.format("**{'homes': 2}"),
+         (5, argument, "roots(**{'homes': 1})", "<module>", _LITERAL_RULE)),
+        ("literal-lambda-default", "planted.py", "ROOTS = lambda homes=1: (homes,)\n",
+         "ROOTS = lambda homes=2: (homes,)\n", (1, default, "homes=1", "<module>", _LITERAL_RULE)),
+        # A number other than 2 bound to a homes read, or written under a homes key.
+        ("binding-class-attribute", "planted.py", "class Store:\n    homes: int = 1\n",
+         "class Store:\n    homes: int = 2\n", (2, binding, "homes: int = 1", "Store", _BINDING_RULE)),
+        ("binding-instance", "planted.py", "class Store:\n\n    def __init__(self):\n        self.homes = 1\n",
+         "class Store:\n\n    def __init__(self):\n        self.homes = 2\n",
+         (4, binding, "self.homes = 1", "Store.__init__", _BINDING_RULE)),
+        ("binding-dict", "planted.py", "MANIFEST = {'opf': {'homes': 1}}\n", "MANIFEST = {'opf': {'homes': 2}}\n",
+         (1, binding, "{'homes': 1}", "<module>", _BINDING_RULE)),
+        # The deleted journal root as bytes.
+        ("bytes-journal", "planted.py", "def path():\n    return b'.aiqt/record/journal'\n",
+         "def path():\n    return b'.working/journals/record/journal'\n",
+         (2, "the deleted record journal root {} is named in path; the record journal lives only in the typed "
+             "capability home".format(_LEGACY_RECORD_JOURNAL))))
+    with tempfile.TemporaryDirectory(prefix="opf-homes-gap-") as tmp:
+        tree = Path(tmp)
+        for label, name, red, clean, finding in gap_forms:
+            expect = ["{}:{}: ".format(name, f[0]) + (f[1] if len(f) == 2 else (
+                "homes-1 {} `{}` in {} is reintroduced; homes 2 is the only generation and every other one "
+                "refuses ({})".format(*f[1:]))) for f in (finding if isinstance(finding, list) else [finding])]
+            for source, expected in ((red, expect), (clean, [])):
+                (tree / name).write_text(source, encoding="utf-8")
+                check("homes1-gap-" + ("red-" if expected else "clean-") + label,
+                      lambda e=expected: homes1_findings(tree) == e)
+            (tree / name).unlink()
+        # The walk's other way to stop, a MemoryError (raised here where the walk reaches the second def), is refused
+        # like the RecursionError above, naming the module, and what the walk found there before it stopped is
+        # dropped: the arm the same module's full walk reports is absent.
+        (tree / "planted.py").write_text("def home(ctx):\n    return ctx.homes == 1\n\n\ndef later():\n    pass\n",
+                                         encoding="utf-8")
+        walk = _homes1_walk
+
+        def stopping(node, *rest):
+            if isinstance(node, ast.Pass):
+                raise MemoryError
+            return walk(node, *rest)
+
+        def walk_stopped():
+            with patch.object(sys.modules[__name__], "_homes1_walk", stopping):
+                return homes1_findings(tree)
+        check("homes1-walk-memory-error-red", lambda: walk_stopped() == [
+            "planted.py:1: " + source_refused.format("the scan cannot walk its syntax tree (MemoryError)")])
+        check("homes1-walk-memory-error-unstopped", lambda: homes1_findings(tree) == [
+            "planted.py:2: homes-1 arm `ctx.homes == 1` in home is reintroduced; homes 2 is the only generation and "
+            "every other one refuses ({})".format(_COMPARE_RULE)])
+        (tree / "planted.py").unlink()
+    # a module with no one reading, or one the AST scan cannot compile, is refused by each
+    # scan as a finding naming it (red where the retired gate name scan decoded through tokenize.open, where the
+    # AST scan read the compiler's reading, and where either raised), and the flip one edit away is read as UTF-8:
+    # (label, red bytes, clean bytes, line, reason or None for the compiler's own message, whether the retired gate
+    # name scan refuses it too, and the clean module's retired gate name and no-homes-1 findings).
+    bom, retired_name = _BOM, "SUPPORTED_" + "HOMES"
+    retired_line4 = ["encoded.py:4: retired gate name {}; read store.HOMES instead".format(retired_name)]
+    readings = (
+        # CR-only line ends: the compiler found no cookie on lines 1 and 2, tokenize read one on "line" 3 (the
+        # whole file) and decoded cp037; with LF ends both read UTF-8, and the retired name on line 4 is read.
+        ("cr-only-cookie-line3-cp037",
+         "# a\rimport _opf_store\r# -*- coding: cp037 -*-\r{} = _opf_store.HOMES\r".format(retired_name).encode(),
+         "# a\nimport _opf_store\n# -*- coding: cp037 -*-\n{} = _opf_store.HOMES\n".format(retired_name).encode(),
+         1, "a CR that is not followed by LF ends a line", True, retired_line4, []),
+        ("lone-cr", b"import _opf_store\r_opf_store.HOMES = 1\r", b"import _opf_store\r\n_opf_store.HOMES = 1\r\n",
+         1, "a CR that is not followed by LF ends a line", True, [], ["encoded.py:2: " + rebound]),
+        ("latin-1-byte", b"# -*- coding: latin-1 -*-\nimport _opf_store\nNAME = '\xe9'\n",
+         b"# -*- coding: utf-8 -*-\nimport _opf_store\nNAME = '\xc3\xa9'\n",
+         3, "byte 0xe9 is not strict UTF-8", True, [], []),
+        ("latin-1-cookie", b"# -*- coding: latin-1 -*-\nimport _opf_store\n",
+         b"# -*- coding: utf-8 -*-\nimport _opf_store\n", 1, "the coding cookie 'latin-1' is not utf-8 or utf-8-sig",
+         True, [], []),
+        ("utf-7-cookie-line2", b"# a\n# -*- coding: utf-7 -*-\nimport _opf_store\n",
+         b"# a\n# -*- coding: utf-8-sig -*-\nimport _opf_store\n", 2,
+         "the coding cookie 'utf-7' is not utf-8 or utf-8-sig", True, [], []),
+        ("unknown-codec", b"# -*- coding: no-such-codec -*-\nimport _opf_store\n",
+         b"# -*- coding: UTF_8 -*-\nimport _opf_store\n", 1,
+         "the coding cookie 'no-such-codec' is not utf-8 or utf-8-sig", True, [], []),
+        ("bom-latin-1-cookie", bom + b"# coding: latin-1\nimport _opf_store\n", bom + b"# coding: utf-8\nimport _opf_store\n",
+         1, "the coding cookie 'latin-1' is not utf-8 or utf-8-sig", True, [], []),
+        ("syntax-error", b"def broken(:\n    pass\n", b"def fixed():\n    pass\n", 1, None, False, [], []),
+        ("null-byte", b"VALUE = 1\x00\n", b"VALUE = 1\n", 1, None, False, [], []),
+        # A source nested too deeply to parse: the parser stops with a MemoryError, not a SyntaxError.
+        ("parser-depth", b"VALUE = " + b"-" * 200000 + b"1\n", b"VALUE = -1\n", 1,
+         "it does not compile: the source nests too deeply to parse (MemoryError)", False, [], []))
+
+    def compiled(raw):
+        try:
+            ast.parse(raw)
+        except SyntaxError as exc:
+            return "it does not compile: " + exc.msg
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="opf-homes-reading-") as tmp:
+        tree = Path(tmp)
+        for label, red, clean, line, reason, both, clean_retired, clean_homes1 in readings:
+            reason = reason or compiled(red)
+            (tree / "encoded.py").write_bytes(red)
+            check("source-reading-red-" + label, lambda r=reason, n=line, b=both: r is not None
+                  and retired_gate_name_findings(tree) == ([_source_finding("encoded.py", n, "retired gate name", r)]
+                                                           if b else [])
+                  and homes1_findings(tree) == ["encoded.py:{}: ".format(n) + source_refused.format(r)])
+            (tree / "encoded.py").write_bytes(clean)
+            check("source-reading-clean-" + label, lambda e=clean_retired, h=clean_homes1:
+                  retired_gate_name_findings(tree) == e and homes1_findings(tree) == h)
+        (tree / "encoded.py").unlink()
+    # A compiled entry Python may import in place of the scanned source is refused by its name wherever it sits under
+    # the tree, beside a clean source or with none, a __pycache__ directory once whatever it holds; the flip renames it
+    # out of what import loads: (label, red entries, clean entries, the refused path, what it is). An entry ending in
+    # "/" is an empty directory; a file holds bytes the scan never reads, and planted.py a clean module.
+    compiled_entries = (
+        ("pycache-empty", ("__pycache__/",), ("pycache/",), "__pycache__", "a __pycache__ directory"),
+        ("pycache-beside-source", ("planted.py", "__pycache__/planted.cpython-314.pyc"),
+         ("planted.py", "pycache/planted.cpython-314.pyc.orig"), "__pycache__", "a __pycache__ directory"),
+        ("pycache-vendored", ("_vendor/__pycache__/",), ("_vendor/pycache/",), "_vendor/__pycache__",
+         "a __pycache__ directory"),
+        ("sourceless-bytecode", ("sourceless.pyc",), ("sourceless.pyc.orig",), "sourceless.pyc", "a bytecode file"),
+        ("extension-module", ("planted.py", "planted.cpython-314-x86_64-linux-gnu.so"),
+         ("planted.py", "planted.cpython-314-x86_64-linux-gnu.so.orig"), "planted.cpython-314-x86_64-linux-gnu.so",
+         "an extension module"),
+        ("extension-module-windows", ("planted.pyd",), ("planted.pyd.orig",), "planted.pyd", "an extension module"))
+    with tempfile.TemporaryDirectory(prefix="opf-homes-compiled-") as tmp:
+        for label, red, clean, refused, what in compiled_entries:
+            expect = ["{}: {}, which Python may import in place of the scanned source, so the no-homes-1 scan refuses "
+                      "it ({})".format(refused, what, _COMPILED_RULE)]
+            for entries, expected in ((red, expect), (clean, [])):
+                tree = Path(tmp) / (("red-" if expected else "clean-") + label)
+                for entry in entries:
+                    if entry.endswith("/"):
+                        (tree / entry).mkdir(parents=True)
+                        continue
+                    (tree / entry).parent.mkdir(parents=True, exist_ok=True)
+                    (tree / entry).write_bytes(b"VALUE = 1\n" if entry == "planted.py" else b"\x00compiled\x00")
+                check("homes1-compiled-" + ("red-" if expected else "clean-") + label,
+                      lambda t=tree, e=expected: homes1_findings(t) == e)
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)
@@ -5850,9 +7641,13 @@ def _self_test_vectors():
              ('and initializes stores directly at them.',
               'and may also upgrade older stores.'),
             )),
-            ("The reference tooling's opf doctor grades a manifest", (
-             ('so its VALID verdict on such a store says nothing about conformance to this specification,',
-              'so its VALID verdict on such a store shows conformance to this specification,'),
+            # The reference tooling's adoption status at base 2.0.0: red when the sentence says the
+            # journal is read or that apply and reconcile run.
+            ('Its opf adopt plan, approve and status', (
+             ('run at base 2.0.0 without reading the adoption journal,',
+              'run at base 2.0.0 and read the adoption journal,'),
+             ('refuse at base 2.0.0, and it does not yet implement',
+              'run at base 2.0.0, and it does not yet implement'),
             )),
     ))
     spec_vectors("17", (
@@ -6158,7 +7953,7 @@ def _self_test_vectors():
         return found[0] if len(found) == 1 else start
     archive = _pin("9.2", "The upgrade MUST NOT write the adoption archive ")
     retired_runs = (
-        ('4.2', ('Base spec 2.0.0, with', 'It includes adoption,', 'A writer MUST NOT accept', 'The reference tooling does not yet implement base 2.0.0'), (
+        ('4.2', ('Base spec 2.0.0, with', 'It includes adoption,', 'A writer MUST NOT accept', 'The reference tooling initializes and validates base 2.0.0'), (
             'Base spec 1.3.0 defines adoption and the separate imported series on homes 1.',
             'The 1.3.0 requirements in sections 4.2, 4.5, 6.1, 8, 9.1, 9.2, 11, 12, 14, and 16.1 are a target contract; they do not claim that the reference tooling has activated adoption, imported-series validation, or the import writer.',
             'Activation MUST include deterministic doctor coverage before a writer accepts the new format.',
@@ -6171,7 +7966,7 @@ def _self_test_vectors():
             'The section 9 manifest example describes the 1.3.0 target on legacy homes.',
             'The homes-2 requirements in sections 4.2, 12, 14.1, 14.2, and 15, and the section 9.2 refusal of a homes-1 store, describe the target contract, not an activated runtime guarantee.',
         )),
-        ('4.2', ('Base spec 2.0.0, with', 'It includes adoption,', 'A writer MUST NOT accept', 'The reference tooling does not yet implement base 2.0.0'), (
+        ('4.2', ('Base spec 2.0.0, with', 'It includes adoption,', 'A writer MUST NOT accept', 'The reference tooling initializes and validates base 2.0.0'), (
             'It still supports 1.2.0 and initializes legacy homes (generation 1, with no homes key); writers retain their legacy paths until homes 2 is activated, which requires the homes migration (opf upgrade) to be available.',
             'The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.',
         )),
@@ -6315,7 +8110,7 @@ def _self_test_vectors():
         ('15', ('OPF MUST NOT read OPF artefacts',), (
             'On a homes-2 store, OPF MUST NOT read OPF artefacts from former .aiqt/ locations or touch unrelated AIQT material, since homes 2 has no homes migration (section 4.2).',
         )),
-        ('16.1', ('The reference tooling does not yet implement base 2.0.0:',), (
+        ('16.1', ('The reference tooling initializes and validates base 2.0.0 stores',), (
             "The reference tooling targets the upgrade-capable class: its opf upgrade, in the repository's reference code, carries a store from base 1.0.0 or 1.1.0 to base 1.2.0, within its disclosed residuals, and its upgrade into base 1.3.0 remains a target contract (section 9.2).",
         )),
         ('17', ('- Adoption and import run with C-EVIDENCE-ENUM,', 'Version-control history over the tracked store'), (
@@ -6425,6 +8220,17 @@ def _self_test_vectors():
             "The upgrade MUST NOT write the adoption archive ",
             "Both upgrade kinds, on the schema-level path and the homes-generation relocation path, the "
             "homes-2 path included, alike, MUST NOT write the adoption archive ", 1),)),
+    )
+    # The base 2.0.0 flip: the tooling-status sentences that said the reference tooling still
+    # initialized and validated base 1.2.0 stores, restored in place of the sentences that replaced them.
+    retired_runs += (
+        ('4.2', ('The reference tooling initializes and validates base 2.0.0',), (
+            'The reference tooling does not yet implement base 2.0.0 (section 16.1).',
+        )),
+        ('16.1', ('The reference tooling initializes and validates base 2.0.0 stores', 'Its opf adopt plan, approve and status'), (
+            'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, a pre-release format this specification does not define, and it makes no claim of conformance to this specification.',
+            'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to this specification, and its opf upgrade and opf record refuse such a store.',
+        )),
     )
     # The maintainer ruling of 2026-10-23: one implementation model, no legacy state, no legacy_fragment
     # type and no imports reserved name. Each row restores the pre-ruling pins verbatim in place of the
@@ -7851,6 +9657,53 @@ def _self_test_vectors():
         baseline_rc = main([])
     check("main-default-entry-green-baseline", lambda r=baseline_rc, out=buf.getvalue():
           r == 0 and out == "")
+    # The default entry runs the retired gate name scan: a tools tree whose module reads a retired
+    # alias is red there with that line's finding.
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-names-") as tmp:
+        retired = "SUPPORTED_" + "HOMES"
+        (Path(tmp) / "reader.py").write_text("value = store.{}\n".format(retired), encoding="utf-8")
+        with patch.object(module, "_TOOLS", Path(tmp)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                planted_rc = main([])
+        check("main-default-entry-runs-retired-gate-names", lambda r=planted_rc, out=buf.getvalue():
+              r == 1 and out == "check_opf_homes: reader.py:1: retired gate name {}; read store.HOMES "
+              "instead\n".format(retired))
+    # The default entry runs the no-homes-1 scan: a tools tree whose module restores a homes-1 arm is red
+    # there with that line's finding.
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-one-") as tmp:
+        (Path(tmp) / "reader.py").write_text("def arm(ctx):\n    return ctx.homes == 1\n", encoding="utf-8")
+        with patch.object(module, "_TOOLS", Path(tmp)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                planted_rc = main([])
+        check("main-default-entry-runs-no-homes1", lambda r=planted_rc, out=buf.getvalue():
+              r == 1 and out == "check_opf_homes: reader.py:2: homes-1 arm `ctx.homes == 1` in arm is "
+              "reintroduced; homes 2 is the only generation and every other one refuses (only `== 2` may "
+              "test a generation)\n")
+    # The default entry reports a module with no one reading as a finding from each scan, never a traceback or a
+    # cannot-evaluate exit: CR-only line ends here (red where the scans read the compiler's reading or raised).
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-reading-") as tmp:
+        (Path(tmp) / "reader.py").write_bytes(b"import _opf_store\r_opf_store.HOMES = 1\r")
+        with patch.object(module, "_TOOLS", Path(tmp)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                planted_rc = main([])
+        check("main-default-entry-refuses-source", lambda r=planted_rc, out=buf.getvalue(): r == 1 and out == "".join(
+            "check_opf_homes: {}\n".format(_source_finding("reader.py", 1, scan, "a CR that is not followed by LF ends a "
+                                                           "line")) for scan in ("retired gate name", "no-homes-1")))
+    # Nor is a module whose syntax tree is too deep to walk a traceback there: it is the no-homes-1 scan's finding
+    # naming it (a named failure where the walk's RecursionError escapes main()).
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-deep-") as tmp:
+        (Path(tmp) / "reader.py").write_text("VALUE = " + " + ".join(["1"] * 3000) + "\n", encoding="utf-8")
+
+        def deep_entry(tools=Path(tmp)):
+            with patch.object(module, "_TOOLS", tools):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    return main([]), buf.getvalue()
+        check("main-default-entry-refuses-deep-tree", lambda: deep_entry() == (1, "check_opf_homes: {}\n".format(
+            _source_finding("reader.py", 1, "no-homes-1", "the scan cannot walk its syntax tree (RecursionError)"))))
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())
@@ -7916,11 +9769,12 @@ def main(argv=None):
             return 2
         spec_text = SPEC.read_text(encoding="utf-8")
         findings = (contract_findings(spec_text) + keyword_findings()
-                    + surface_findings() + informative_findings(spec_text))
+                    + surface_findings() + informative_findings(spec_text)
+                    + retired_gate_name_findings() + homes1_findings())
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0
-    except (OSError, UnicodeError, ValueError, AttributeError) as exc:
+    except (OSError, UnicodeError, ValueError, AttributeError, SyntaxError) as exc:
         print("check_opf_homes: cannot evaluate: {}".format(exc), file=sys.stderr)
         return 2
 

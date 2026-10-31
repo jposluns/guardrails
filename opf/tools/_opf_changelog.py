@@ -1159,7 +1159,7 @@ def self_test():
         # validates the manifest first and names the path itself, so it is bypassed here to
         # reach exactly this module's call.
         manifest_old = manifest.replace(
-            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"', 'spec_version = "1.1.0"')
+            'spec_version = "' + _opf_store.SPEC_VERSION + '"', 'spec_version = "1.1.0"')
         _orig_load_worklog_at = _opf_worklog.load_worklog_at
         _opf_worklog.load_worklog_at = (
             lambda fd, machine_rel, required=False: {"schema": 1, "entry": []})

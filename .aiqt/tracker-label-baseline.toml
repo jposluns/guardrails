@@ -116,7 +116,7 @@ review-round = 4
 
 [[path]]
 path = "opf/tools/_opf_adopt_state.py"
-review-round = 36
+review-round = 34
 reviewer-source = 2
 
 [[path]]
@@ -192,13 +192,13 @@ reviewer-source = 8
 
 [[path]]
 path = "opf/tools/check_opf_init.py"
-review-round = 305
+review-round = 303
 qa-round = 6
 reviewer-source = 46
 
 [[path]]
 path = "opf/tools/check_opf_record.py"
-review-round = 10
+review-round = 3
 qa-round = 9
 
 [[path]]

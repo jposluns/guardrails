@@ -129,9 +129,9 @@ unstaged tamper does not block a clean staged change); `git commit PATH` and `gi
 against the temporary index git names in GIT_INDEX_FILE; an unborn branch commits a clean store; and a
 dedicated sync target equal to the clone's remote stays VALID in the snapshot. Over a store made with opf
 init and committed, render --write output and an opf record write each commit through the hook, while a
-comment line appended to the manifest is refused by doctor's canonical-bytes finding and a new file under
-an applied adoption run's archive by its unregistered-path finding (the hook output must name each
-finding). Under a recording stub tool,
+comment line appended to the manifest is refused by doctor's canonical-bytes finding and an applied adoption
+run, whose adoption home base 2.0.0 does not grade yet, by C-CONTAINMENT CANNOT-EVALUATE (the hook output
+must name each). Under a recording stub tool,
 run by hand: exact order and arguments (doctor --require-store, then render --check, over one snapshot root
 under TMPDIR), each launched -I -B; the clone left unchanged over the read-only snapshot described above; a doctor
 finding stopping before render, a render error forwarded, an out-of-vocabulary status normalized to 2 and a
@@ -2068,8 +2068,9 @@ def _self_test_isolated():
             # The two direct writes completion check 5 probes (spec 14.1), over a store made the way an
             # adopter makes one: opf init and a commit, then, with the hook installed, render --write and a
             # sanctioned opf record, each committed through the hook. A comment line appended to the manifest
-            # (bytes every other check parses past) and a new file under an applied adoption run's archive
-            # are each refused by a named doctor finding over the snapshot, with HEAD unmoved.
+            # (bytes every other check parses past) is refused by a named doctor finding over the snapshot,
+            # with HEAD unmoved. The applied-run probe, a new file under an applied adoption run's archive,
+            # needs a committed applied run, which base 2.0.0 cannot grade yet (below).
             tool = Path(__file__).resolve().parent / "opf.py"
             manifest_rel = "{}/{}/manifest.toml".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
 
@@ -2078,12 +2079,18 @@ def _self_test_isolated():
                 # opf init takes the shared init operation mutex, whose rev-parse strips every GIT_* variable,
                 # the fixture env's system-config pins included. The launch therefore runs inside the OPF git
                 # lifecycle: _env() carries its PATH, whose git wrapper reasserts those pins in the child, so
-                # the verb does not read the host's system configuration.
+                # the verb does not read the host's system configuration. Plain init also inspects the
+                # .working/.gitignore installation (spec 4.2), whose config-discovery probe refuses a
+                # GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM override; the fixture HOME and GIT_CONFIG_NOSYSTEM
+                # already keep the host's global and system configuration out of the verb.
                 import _opf_oplock
 
                 def launch():
+                    env = _env()
+                    for override in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+                        env.pop(override)
                     return subprocess.run([sys.executable, "-I", "-B", str(tool)] + list(args)
-                                          + ["--root", str(root)], cwd=str(root), env=_env(),
+                                          + ["--root", str(root)], cwd=str(root), env=env,
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
 
                 try:
@@ -2102,7 +2109,8 @@ def _self_test_isolated():
                 # An applied adoption run as committed evidence: the real planner freezes the retirement of
                 # one file at the store location in a scratch tree, and the plan, its approval, the file's
                 # preimage under the run archive and the sealed inventory are written into root beside the
-                # frozen file (apply itself refuses while its receipt stage has not landed). Returns the run id;
+                # frozen file (apply itself refuses on base 2.0.0 with the adoption fence, and its engine body
+                # while its receipt stage has not landed). Returns the run id;
                 # a fixture that cannot be built is a harness error.
                 import copy
                 import datetime
@@ -2180,14 +2188,15 @@ def _self_test_isolated():
                    _refused_by(made, "FINDING: C-CONTAINMENT: machine-store file '" + manifest_rel
                                + "' is not in canonical emitted form"), (True, True, True))
             _git(made, home, "reset", "-q", "--hard")
-            run_id = _applied_run(made)
+            # Base 2.0.0 keeps an applied run's evidence in the adoption home .working/imported/adoption/,
+            # whose grading has not landed (spec 4.2): doctor over the snapshot is C-CONTAINMENT
+            # CANNOT-EVALUATE, so the run's commit is refused with HEAD unmoved, and the archive-stray
+            # probe, which needs that run committed, does not run here.
+            _applied_run(made)
             _git(made, home, "add", "-A")
-            expect("commit-applied-run-passes", _committed(made), (EXIT_OK, True))
-            stray = ".working/archive/adoption/" + run_id + "/opf-wiring-probe.md"
-            (made / stray).write_text("probe\n", encoding="utf-8")
-            _git(made, home, "add", stray)
-            expect("commit-adoption-archive-file-refused",
-                   _refused_by(made, "FINDING: C-CONTAINMENT: unregistered path '" + stray + "'"),
+            expect("commit-applied-run-cannot-evaluate",
+                   _refused_by(made, "CANNOT-EVALUATE: C-CONTAINMENT: the adoption home .working/imported/adoption/ "
+                               "exists, and adoption grading on base 2.0.0 is not yet implemented"),
                    (True, True, True))
             # The stub fails closed when the working tree being committed has no pack hook (a branch that
             # predates the pack, say): the commit is refused rather than passing silently.
@@ -2391,8 +2400,9 @@ def _self_test_isolated():
               "git commit over the staged snapshot refuses a staged tamper by "
               "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
               "passes an unborn branch and a remote sync target; over an opf init store passes render "
-              "--write and opf record output and refuses, by named finding, a manifest comment line and "
-              "a new file in an applied adoption run's archive; stubbed hook order, -I -B, read-only, "
+              "--write and opf record output, refuses a manifest comment line by named finding and "
+              "refuses an applied adoption run as C-CONTAINMENT CANNOT-EVALUATE (adoption grading on base "
+              "2.0.0 not yet implemented); stubbed hook order, -I -B, read-only, "
               "propagation, normalization, usage and snapshot cleanup; fail closed on an unreadable hooks "
               "directory, an environment-only hooksPath, git below 2.32, an unreadable environment, a "
               "missing dirname and a failed cleanup; the --no-verify history bypass CI misses is disclosed "
