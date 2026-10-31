@@ -197,8 +197,10 @@
       <h3>Template</h3>
       <p>Every record ID has the form <code>&lt;NS&gt;-&lt;n&gt;</code>: a two-letter namespace mapped
         one-to-one to its type and a positive integer. The counters hold each namespace's allocated
-        high-water mark. A fresh store starts the twelve baseline namespaces and the importer's LF
-        namespace at zero. The file contains a schema marker and namespace-to-integer pairs.
+        high-water mark. A fresh store starts the twelve baseline namespaces at zero, each with its
+        imported counter row (the quoted key <code>"imported:&lt;NS&gt;"</code>) at zero beside it,
+        and it has no <code>LF</code> namespace, which the standard reserves unassigned.
+        The file contains a schema marker and namespace-to-integer pairs.
         The scaffold's values, shown with display indentation:</p>
       <div class="codecard src">
         <div class="codecard-bar">.working/toml/counters.toml</div>
@@ -212,12 +214,23 @@
   <span class="tok-key">DN</span> = <span class="tok-num">0</span>
   <span class="tok-key">FN</span> = <span class="tok-num">0</span>
   <span class="tok-key">HO</span> = <span class="tok-num">0</span>
-  <span class="tok-key">LF</span> = <span class="tok-num">0</span>
   <span class="tok-key">MD</span> = <span class="tok-num">0</span>
   <span class="tok-key">PD</span> = <span class="tok-num">0</span>
   <span class="tok-key">PP</span> = <span class="tok-num">0</span>
   <span class="tok-key">RF</span> = <span class="tok-num">0</span>
-  <span class="tok-key">WL</span> = <span class="tok-num">0</span></div>
+  <span class="tok-key">WL</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:AD"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:BI"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:BL"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:CN"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:DN"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:FN"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:HO"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:MD"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:PD"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:PP"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:RF"</span> = <span class="tok-num">0</span>
+  <span class="tok-key">"imported:WL"</span> = <span class="tok-num">0</span></div>
       </div>
       <p>Allocation increments the counter under the store's lock as one atomic claim, so no gap between
         choosing an ID and reserving it can double-allocate. Counters are never reset and IDs are never
@@ -248,7 +261,7 @@
       <dl class="refstrip">
         <div>
           <dt>Tracks</dt>
-          <dd class="refchips"><code>&lt;NS&gt;-&lt;n&gt;</code> <span>12 baseline namespaces + LF</span> <span>monotonic high-water</span></dd>
+          <dd class="refchips"><code>&lt;NS&gt;-&lt;n&gt;</code> <span>12 baseline namespaces + their imported rows</span> <span>monotonic high-water</span></dd>
         </div>
         <div>
           <dt>Written by</dt>

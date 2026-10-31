@@ -51,16 +51,18 @@ under the default entry; the rest of 9.1, and additions to it, stay unprotected.
 untiled, and its sentences that state what section 16.1 makes of its probes are pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red; the
 rest of Appendix E, and additions to it, stay unprotected here. The quickstart's, the opfiles.ai
-disclosure page's, the adopt page's, the adoption guide's, the record-indexes page's and the
-core-files page's changed
+disclosure page's, the adopt page's, the adoption guide's, the record-indexes page's, the
+core-files page's, the roadmap's, the tooling page's, the home page's and the AIQT page's changed
 sentences are pinned the same way over tag-stripped text (_SURFACE), outside the keyword lint,
 and the self-test pins the registry's shape, so dropping a _SURFACE entry turns the self-test
-red; each sentence of the disclosure page's retired fresh-only item, the quickstart's retired
+red, and rewords each import-status pin's operative clause; each sentence of the disclosure
+page's retired fresh-only item, the quickstart's retired
 conformance-class sentence, the record-indexes page's deleted importer-only legacy_fragment
 rows and counts, those three files' wording of the removed section 9.2 remedy adoption, and the
 disclosure and record-indexes pages' description of a store upgrade the reference tooling no longer
 defines, and every surface's tooling-status sentences from before the tooling initialized and
-validated base 2.0.0 stores, is searched over its whole file's normalized text and is red wherever it lands
+validated base 2.0.0 stores or offered the read-only import verbs, and the core-files page's LF
+counter row, is searched over its whole file's normalized text and is red wherever it lands
 (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
 and beyond those registered retired sentences no retired-text check reads them, so any other
 deleted sentence restored there stays green.
@@ -285,6 +287,10 @@ ADOPT_PAGE = SPEC.parents[1] / "site" / "adopt.html"
 ADOPT_GUIDE = SPEC.parents[1] / "site" / "adopt.md"
 RECORD_INDEXES = SPEC.parents[1] / "site" / "record-indexes.html"
 CORE_FILES = SPEC.parents[1] / "site" / "core-files.html"
+ROADMAP = SPEC.parents[1] / "site" / "roadmap.html"
+TOOLING = SPEC.parents[1] / "site" / "tooling.html"
+INDEX_PAGE = SPEC.parents[1] / "site" / "index.html"
+AIQT_PAGE = SPEC.parents[1] / "site" / "aiqt.html"
 
 
 class _Descriptive(str):
@@ -1024,7 +1030,7 @@ _CONTRACT = {
         "The base defines one implementation model and no implementation conformance classes: a declared scope, exclusion, profile, or posture MUST NOT waive a base requirement, and current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind every implementation.",
         _D('An implementation supports base spec_version 2.0.0 and homes generation 2, the only ones this specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and initializes stores directly at them.'),
         _D('The reference tooling initializes and validates base 2.0.0 stores with homes = 2, and it makes no claim of conformance to this specification.'),
-        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0, and of post-adoption import it implements only the read-only opf import --prompt, --status and --verify that section 14.1 defines, not the batch writer or the completion writer.'),
+        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0, and of post-adoption import it implements only the read-only opf import --prompt, --status and --verify that section 14.1 defines, not the section 8.8 batch writer opf record import --batch or the completion writer.'),
         _D('The reference tooling defines no store upgrade: its opf upgrade refuses every invocation with exit 2, reading and writing nothing.'),
         'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
@@ -1448,8 +1454,13 @@ _TOOLING_ONLY_RESERVATIONS = ("imports",)
 # and the core-files page state the one implementation model, the 2.0.0 file baseline, the
 # reference tooling's initialization and validation of base 2.0.0 stores with homes = 2, which
 # adoption subcommands run there without reading the adoption journal and which refuse, that it
-# defines no store upgrade, and what its scaffold writes. The self-test pins
-# this registry's shape, so dropping an entry turns the self-test red.
+# defines no store upgrade, and what its scaffold writes. Those pages, the roadmap, the tooling
+# page, the home page and the AIQT page also state the import status: the former import modes are
+# gone and exit 2, the read-only opf import verbs (--prompt, --status, --verify) write nothing in
+# the store and create no records, their exits, the split-index timestamp touch of --verify's git
+# read, and that the batch writer opf record import --batch is not offered. The self-test pins
+# this registry's shape, so dropping an entry turns the self-test red, and rewords each import
+# status pin's operative clause, which turns it red.
 _SURFACE = {
     QUICKSTART: (
         'Date: 2026-10-24 (UTC).',
@@ -1464,7 +1475,7 @@ _SURFACE = {
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
     DISCLOSURE: (
-        "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
+        "The former opf import modes are gone, and a former flag exits 2 as an unknown argument; the read-only opf import verbs (--prompt, --status, --verify) create no records, the batch writer opf record import --batch is not offered, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
         'at base 2.0.0 they and opf adopt status run without reading the adoption journal, and status says the journal is not read.',
         'opf adopt apply and reconcile refuse with exit 2 at base 2.0.0, and complete refuses with exit 2,',
         'A rename would be a store-breaking change the specification gives no path: every base-schema version bump stays additive and keeps the exact token, so no bump the specification permits renames it (specification sections 4.5 and 9.2).',
@@ -1485,6 +1496,13 @@ _SURFACE = {
         'The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with opf render --write for a supported store or your own renderer, and then work records-first.',
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
         'The reference CLI runs investigation and planning today, and prints the approval without recording it; recording the approval, apply and completion are not executable yet, so the assistant stops there and reports.',
+        'Installing the enforcement pack through adoption is not available either, and post-adoption import offers only its read-only verbs: its batch writer is not offered.',
+        'The read-only import verbs exit 0, 1, or 2 the same way (--prompt only 0 or 2), and a retired import mode exits 2.',
+        "Its batch writer, opf record import --batch (spec section 8.8), is not offered yet, and neither is the completion writer that records a source's result.",
+        "One touch outside the store remains: --verify observes the working tree through git, and in a repository with a split index, git's read refreshes the timestamp of the shared index file in .git. No content changes.",
+        '--prompt exits 0 when it prints and 2 on every refusal or cannot-evaluate.',
+        '--status exits 0 on a clean report, 1 on a finding, and 2 when it cannot evaluate.',
+        '--verify exits 0 only when every source is complete, 1 on an incomplete source, and 2 on one it cannot evaluate, the worst source deciding.',
     ),
     ADOPT_GUIDE: (
         "The reference tooling's opf init scaffolds a 2.0.0 store with homes = 2.",
@@ -1492,23 +1510,41 @@ _SURFACE = {
         'It initializes and validates spec 2.0.0 stores with homes = 2, the only base version the standard defines.',
         'At base 2.0.0, opf adopt plan, approve and status run without reading the adoption journal, and status says the journal is not read.',
         'What it does not run yet: opf adopt apply and reconcile refuse with exit 2 at base 2.0.0, and complete refuses with exit 2,',
-        "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
+        'Installing the enforcement pack through adoption is not available either, and post-adoption import offers only the read-only opf import --prompt, --status and --verify verbs: its batch writer, opf record import --batch, is not offered.',
+        "The former opf import modes are gone, and a former flag exits 2 as an unknown argument; the read-only opf import verbs (--prompt, --status, --verify) create no records, the batch writer opf record import --batch is not offered, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
     RECORD_INDEXES: (
-        "Created by opf init (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by opf render (DONE.md and the mirror) and validated by opf doctor (schema, uniqueness, the one-to-one receipt link).",
+        "Created by opf init (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import through the batch writer opf record import --batch, which the reference CLI does not implement yet; its read-only opf import verbs create no records); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by opf render (DONE.md and the mirror) and validated by opf doctor (schema, uniqueness, the one-to-one receipt link).",
         'Reserved namespace No module toggle: the standard reserves LF unassigned, with no record type on it (spec section 8.1). The reference tooling still recognizes legacy_fragment (LF, quarantined &#8594; resolved | ignored) in stores that hold such records from its retired import path; nothing in the reference CLI creates it now.',
         '(none) LF reserved unassigned; the reference tooling still recognizes legacy_fragment (quarantined &#8594; resolved | ignored) in stores holding such records from its retired import path',
         'The standard reserves the LF namespace unassigned and defines no legacy_fragment type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.',
         "Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.",
-        'Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates legacy_fragment records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.',
+        'The former opf import modes are gone, and a former flag exits 2 as an unknown argument; the read-only opf import verbs create no records, nothing in the reference CLI creates legacy_fragment records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.',
         "A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and its manifest declares a spec_version below 2.0.0, which the reference tooling refuses as a store, as the standard's section 9.2 validation does.",
+        'Nothing creates legacy_fragment records now: the former opf import modes are gone, the read-only opf import verbs create no records, and the type remains only for existing stores.',
     ),
     CORE_FILES: (
         'The base [opf] table carries the exact discovery token standard = "opf", the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:',
         'standard = "opf" spec_version = "2.0.0" homes = 2 layout = "inline"',
         'The reference tooling\'s scaffold writes spec_version = "2.0.0" with homes = 2.',
         '[opf] standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)',
+        'A fresh store starts the twelve baseline namespaces at zero, each with its imported counter row (the quoted key "imported:&lt;NS&gt;") at zero beside it, and it has no LF namespace, which the standard reserves unassigned.',
+        'The read-only opf import verbs make no store change and take no lease or lock.',
+    ),
+    ROADMAP: (
+        'opf import offers only its read-only surface, --prompt, --status, and --verify, which changes nothing in the store; its batch writer is not offered yet.',
+    ),
+    TOOLING: (
+        'import offers only the read-only surface opf.import.surface/v1 (--prompt, --status, --verify), and its batch writer is not offered yet;',
+        "The read-only surface opf.import.surface/v1: --prompt verifies the shipped prompt pack against the plan's binding and prints the pack version and digest, each import member's path and sha256, and the approved migrate scope (not the pack documents themselves), --status reports per-source import state, and --verify evaluates source completion; each writes nothing (spec 14.1).",
+        'The batch writer opf record import --batch is not offered yet, and the former --scan, --plan, --review, and --apply modes are gone.',
+    ),
+    INDEX_PAGE: (
+        'import offers only its read-only verbs (--prompt, --status, --verify), and its batch writer is not offered yet: clean-start adoption is the intake, and post-adoption import uses the approved prompt pack.',
+    ),
+    AIQT_PAGE: (
+        'Clean-start adoption is the intake, and post-adoption import uses the approved prompt pack; the reference CLI offers only its read-only opf import verbs, not its batch writer.',
     ),
 }
 # Retired surface wording: the disclosure page's fresh-only item, the quickstart's
@@ -1522,8 +1558,10 @@ _SURFACE = {
 # 1.2.0 scaffold and grading, the adoption subcommands that read or refused over the adoption
 # journal, and the adopt page's claim that approval did not run), and the claim on the quickstart, the
 # disclosure page, the adopt page and the adoption guide that apply and reconcile refuse until the
-# adoption journal moves, which already sits at its homes-2 home. Each sentence present in its file's
-# normalized text is a finding.
+# adoption journal moves, which already sits at its homes-2 home, and the disclosure page's, the
+# adoption guide's and the record-indexes page's wording that ordinary import is retired, written
+# before the read-only opf import verbs landed, with the core-files page's LF counter row, which
+# the scaffold does not write. Each sentence present in its file's normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
@@ -1550,6 +1588,7 @@ _SURFACE_RETIRED = {
         'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
         'opf adopt approve, apply, complete, and reconcile refuse with exit 2,',
         'until the adoption journal moves',
+        'Ordinary import is retired and refuses with exit 2,',
     ),
     ADOPT_PAGE: (
         "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
@@ -1572,6 +1611,7 @@ _SURFACE_RETIRED = {
         'opf adopt status, which reports adoption runs and the adoption journal and writes nothing.',
         'What it does not run yet: opf adopt approve, apply, complete and reconcile refuse with exit 2,',
         'until the adoption journal moves',
+        'Ordinary import is retired and refuses with exit 2,',
     ),
     RECORD_INDEXES: (
         'Importer-only (no module toggle)',
@@ -1581,9 +1621,14 @@ _SURFACE_RETIRED = {
         "a 1.2.0 store is one the standard's section 9.2 validation refuses, so an adoption over it is a first adoption under its section 14.1, never a re-adoption.",
         'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
         "and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
+        'or post-adoption import, which the reference CLI does not implement yet);',
+        'Ordinary import is now retired and refuses with exit 2,',
+        'ordinary import is retired and refuses,',
     ),
     CORE_FILES: (
         'The reference tooling does not yet implement spec 2.0.0: its scaffold still writes spec_version = "1.2.0" with no homes key.',
+        "A fresh store starts the twelve baseline namespaces and the importer's LF namespace at zero.",
+        '12 baseline namespaces + LF',
     ),
 }
 
@@ -6563,11 +6608,112 @@ def _self_test_vectors():
     # Emptying or narrowing the surface registry would retire its pins silently: its shape is
     # pinned, so dropping a file or any of its pins turns the self-test red.
     check("surface-registry", lambda: tuple(_SURFACE) == (
-        QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (10, 7, 12, 7, 7, 4))
+        QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES, ROADMAP, TOOLING,
+        INDEX_PAGE, AIQT_PAGE) and
+          tuple(map(len, _SURFACE.values())) == (10, 7, 19, 8, 8, 6, 1, 3, 1, 1))
+    # Import-status rewords: each pin below is red where its operative clause is reworded back to a
+    # retired importer, an import verb that writes, an offered batch writer, or another exit.
+    def surface_vectors(path, cases):
+        normalized = _surface_text(surfaces[path])
+        for start, rewordings in cases:
+            pin = [f for f in _SURFACE[path] if f.startswith(start)]
+            sentence = pin[0] if len(pin) == 1 else start
+            finding = "surface {} missing contract: {}".format(path.name, sentence)
+            for old, new in rewordings:
+                mutated = dict(surfaces)
+                mutated[path] = normalized.replace(sentence, sentence.replace(old, new, 1), 1)
+                check("surface-reword-" + path.name + "-" + old,
+                      lambda f=finding, m=mutated, p=pin, s=sentence, o=old, nb=normalized:
+                      len(p) == 1 and nb.count(s) == 1 and s.count(o) == 1 and f in surface_findings(m))
+    surface_vectors(DISCLOSURE, (
+            ('The former opf import modes are gone,', (
+             ('The former opf import modes are gone,', 'Ordinary import is retired,'),
+             ('create no records,', 'create records,'),
+             ('is not offered,', 'is offered,'),
+            )),
+    ))
+    surface_vectors(ADOPT_PAGE, (
+            ('Installing the enforcement pack', (
+             ('its batch writer is not offered.', 'its batch writer is offered.'),
+            )),
+            ('The read-only import verbs exit', (
+             ('(--prompt only 0 or 2)', '(--prompt 0, 1 or 2)'),
+            )),
+            ('Its batch writer, opf record import --batch', (
+             ('is not offered yet,', 'is offered,'),
+            )),
+            ('One touch outside the store remains:', (
+             ("git's read refreshes the timestamp", "git's read rewrites the content"),
+            )),
+            ('--prompt exits 0', (
+             ('and 2 on every refusal', 'and 1 on every refusal'),
+            )),
+            ('--status exits 0', (
+             ('1 on a finding,', '2 on a finding,'),
+            )),
+            ('--verify exits 0', (
+             ('the worst source deciding.', 'the first source deciding.'),
+            )),
+    ))
+    surface_vectors(ADOPT_GUIDE, (
+            ('Installing the enforcement pack', (
+             ('is not offered.', 'is offered.'),
+            )),
+            ('The former opf import modes are gone,', (
+             ('The former opf import modes are gone,', 'Ordinary import is retired,'),
+             ('create no records,', 'create records,'),
+            )),
+    ))
+    surface_vectors(RECORD_INDEXES, (
+            ('Created by opf init (empty index),', (
+             ('which the reference CLI does not implement yet;', 'which the reference CLI implements;'),
+             ('verbs create no records)', 'verbs create records)'),
+            )),
+            ('The former opf import modes are gone,', (
+             ('The former opf import modes are gone,', 'Ordinary import is now retired,'),
+            )),
+            ('Nothing creates legacy_fragment records now:', (
+             ('the former opf import modes are gone,', 'ordinary import is retired,'),
+            )),
+    ))
+    surface_vectors(CORE_FILES, (
+            ('A fresh store starts', (
+             ('and it has no LF namespace,', "and the importer's LF namespace,"),
+            )),
+            ('The read-only opf import verbs', (
+             ('take no lease or lock.', 'take the lease.'),
+            )),
+    ))
+    surface_vectors(ROADMAP, (
+            ('opf import offers only', (
+             ('its batch writer is not offered yet.', 'its batch writer is offered.'),
+            )),
+    ))
+    surface_vectors(TOOLING, (
+            ('import offers only the read-only surface', (
+             ('its batch writer is not offered yet;', 'its batch writer is offered;'),
+            )),
+            ('The read-only surface opf.import.surface/v1:', (
+             ('(not the pack documents themselves)', '(and the pack documents themselves)'),
+             ('each writes nothing', 'each writes the store'),
+            )),
+            ('The batch writer opf record import --batch', (
+             ('is not offered yet,', 'is offered,'),
+            )),
+    ))
+    surface_vectors(INDEX_PAGE, (
+            ('import offers only its read-only verbs', (
+             ('its batch writer is not offered yet:', 'its batch writer is offered:'),
+            )),
+    ))
+    surface_vectors(AIQT_PAGE, (
+            ('Clean-start adoption is the intake,', (
+             ('not its batch writer.', 'and its batch writer.'),
+            )),
+    ))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (7, 15, 11, 7, 7, 1) and
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (7, 16, 11, 8, 10, 3) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
@@ -7601,8 +7747,9 @@ def _self_test_vectors():
               'and may also upgrade older stores.'),
             )),
             # The reference tooling's adoption status at base 2.0.0: red when the sentence says the
-            # journal is read, that apply and reconcile run, or that it implements more of
-            # post-adoption import than the read-only verbs.
+            # journal is read, that apply and reconcile run, that it implements more of
+            # post-adoption import than the read-only verbs, or that it no longer names the
+            # batch writer it does not offer by its section 8.8 command.
             ('Its opf adopt plan, approve and status', (
              ('run at base 2.0.0 without reading the adoption journal,',
               'run at base 2.0.0 and read the adoption journal,'),
@@ -7610,6 +7757,10 @@ def _self_test_vectors():
               'run at base 2.0.0, and of post-adoption import'),
              ('it implements only the read-only',
               'it implements the batch writer and the read-only'),
+             ('not the section 8.8 batch writer `opf record import --batch` or',
+              'not the batch writer or'),
+             ('defines, not the section 8.8 batch writer',
+              'defines, and the section 8.8 batch writer'),
             )),
     ))
     spec_vectors("17", (

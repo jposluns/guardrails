@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "37c7d05c390adfc52b4505e8aedba0cd15e7bb2709d22d1586741907a765d12c"
+tree-sha256 = "d7bd2ca7f1930cf9dea2db7f50de293d58684dc3048e584fec008dd7b62d1a45"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2631,8 +2631,8 @@ sha256 = "90d9c7299de98e2490ada6bce0e787940a3acd01ec70df26e2f0b499e76ad5a6"
 
 [[sources]]
 path = "opf/site/adopt.md"
-bytes = 9044
-sha256 = "970e63484d89388b72605921db97e4f3bbb2bd8a47f1986c0827a3fb8e606c09"
+bytes = 9232
+sha256 = "896f946e3716f0a2dea5e7603eb24cd514f2fda0b35a655ac23bdb2a43eef1e1"
 
 [[sources]]
 path = "opf/site/aiqt.html"
@@ -2641,13 +2641,13 @@ sha256 = "194043a54d4b986432ab8f04891b69f219df62d5e1a4020de60b98d3eeb59a52"
 
 [[sources]]
 path = "opf/site/core-files.html"
-bytes = 34052
-sha256 = "e6a8309cc9cffbcf46aee8365ab5c07da7ef2dcc36e1c85611d0768e318ae135"
+bytes = 35109
+sha256 = "e83afbf97b529f923600c078d27219063517b55ec8be661d71e7e6ffb5ce0f6f"
 
 [[sources]]
 path = "opf/site/disclosure.html"
-bytes = 12181
-sha256 = "412a8468083a6a1ddf15b09a7980fd7c6b7ed24c836c9048c9185c0b7be49355"
+bytes = 12459
+sha256 = "43e10f7533762c87ec99b028b0073eda40380d38d2563a29643ac3ae63b5e5d0"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -2666,8 +2666,8 @@ sha256 = "ddbed046a693236846667fd82e3cd02918036e8bd62b91173e084f5a7c064acf"
 
 [[sources]]
 path = "opf/site/record-indexes.html"
-bytes = 71544
-sha256 = "d1ea2f0a87b5d30c547a8866ae8fcdfbdbd9f35a65aef9a5698959efb9812206"
+bytes = 71853
+sha256 = "4fa303bd2862e0c983a400882ebec610cf36938fc4b7aeee87692840d522788e"
 
 [[sources]]
 path = "opf/site/roadmap.html"
@@ -2726,8 +2726,8 @@ sha256 = "ed742e323ecd0ce8167e0d18c694fe2351dd7b65fc10b68e7c13c2e6f66b6486"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 190473
-sha256 = "4b47bae44fe9e61cfb53c9173c6f36d70024c33923662398514dcfc885db77d7"
+bytes = 190513
+sha256 = "f42d1c9ec50eac13ba0a10485ed582752c9248193d4f0efb5f7184ece2e5c1ef"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -3091,8 +3091,8 @@ sha256 = "e7bb0f23a85e5966a3dca0da5cba18fbc075ec54f24b4ae302734cb00f9cf57c"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 843526
-sha256 = "1f6118e56a22b237081c319aae9c96a39f69b8a104d6dacb66d0fc3d58518a05"
+bytes = 853898
+sha256 = "39f2eff39b89cf87f37db6de566c3bfb35a828751ea998e7f43d23eba4a7f474"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"

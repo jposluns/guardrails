@@ -96,7 +96,10 @@
         such as a module-type index mirror, makes the whole drift check cannot-evaluate. The reference
         renderer does not render or drift-check per-record views. For a store with module-tier or
         importer records, or a per-record store that declares views, doctor's overall verdict is
-        cannot-evaluate (exit 2). Ordinary import is retired and refuses with exit 2, and nothing in the
+        cannot-evaluate (exit 2). The former <code>opf import</code> modes are gone, and a former flag
+        exits 2 as an unknown argument; the read-only <code>opf import</code> verbs
+        (<code>--prompt</code>, <code>--status</code>, <code>--verify</code>) create no records, the
+        batch writer <code>opf record import --batch</code> is not offered, and nothing in the
         reference CLI creates <code>legacy_fragment</code> records; the type remains only for stores that
         already hold such records from the reference CLI's retired import path. In such a store, as in a store with
         module-tier records, doctor reports cannot-evaluate and <code>opf render --write</code> refuses,
