@@ -2042,7 +2042,7 @@ def _inputs():
                          + 'python3 -I -B "$here/../../../../opf/tools/opf.py"\npython3 -I -B "$OPF_DIR/opf.py"\n',
         "shell-same-name": "#!/bin/sh\n" + here_line + "python3 -I -B tools/opf.py\n"
                            'opf_tool=${OPF_TOOL:-$here/../tools/opf.py}\n',
-        "shell-here-unbound": _swap(real[SHELL_REAL[0]], here_line, "here=$(pwd)\n"),
+        "shell-here-unbound": _swap(real[SHELL_REAL[0]], 'here=$(CDPATH= cd -- "$dir" && pwd)', "here=$(pwd)"),
         "shell-dir-unbound": _swap(real[SHELL_REAL[1]], 'dir=$(dirname -- "$0")', "dir=$(pwd)"),
         "hooks": real[HOOKS_JSON_REL],
         "hooks-unregistered": _swap(real[HOOKS_JSON_REL], '"absolute_paths"\n', '"no_such_mode"\n'),
