@@ -30,3 +30,7 @@ than an explicit background dispatch does: the foreground call returns while the
 so its result and its failure are lost unless they are collected. Such work is launched through a tracked
 background mechanism that keeps its completion observable; where its result and completion are genuinely
 not needed, detaching it is a deliberate, recorded choice, not a reflex.
+
+A disposition recorded as waiting on another unit of work names work that exists: its reference resolves to a
+live dispatch record or a delivered result before the disposition stands; one resolving to neither is raised
+as a finding, not rested on.

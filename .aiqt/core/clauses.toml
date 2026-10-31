@@ -5441,7 +5441,7 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 16
 end-line = 17
 canonical-text = "A unit of work whose result or completion the caller depends on is launched so its outcome stays observable,\nnever discarded at the moment it starts."
-source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
+source-digest = "e02c8321c10c3cb65bbeccef626cae69a29947fc312e34827cc0c851ff344b09"
 
 [[clause]]
 clause-id = "trkasy.2"
@@ -5450,7 +5450,7 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 20
 end-line = 21
 canonical-text = "Such work is launched through a mechanism that tracks it to completion and surfaces both its\nresult and its failures;"
-source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
+source-digest = "e02c8321c10c3cb65bbeccef626cae69a29947fc312e34827cc0c851ff344b09"
 
 [[clause]]
 clause-id = "trkasy.3"
@@ -5459,7 +5459,7 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 21
 end-line = 22
 canonical-text = "a launch that drops the completion signal is not a safe way to start work the caller\nrelies on."
-source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
+source-digest = "e02c8321c10c3cb65bbeccef626cae69a29947fc312e34827cc0c851ff344b09"
 
 [[clause]]
 clause-id = "trkasy.4"
@@ -5468,7 +5468,7 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 22
 end-line = 23
 canonical-text = "Where neither its result nor its completion is genuinely needed, running the task without tracking\nit is a deliberate, recorded choice, not the default."
-source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
+source-digest = "e02c8321c10c3cb65bbeccef626cae69a29947fc312e34827cc0c851ff344b09"
 
 [[clause]]
 clause-id = "setcmp.7"
@@ -5486,7 +5486,7 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 25
 end-line = 26
 canonical-text = "A tracked deliverable whose output is captured only through a truncating filter is not observable\ncompletion: the completion signal must carry the full result, never a truncated view of it."
-source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
+source-digest = "e02c8321c10c3cb65bbeccef626cae69a29947fc312e34827cc0c851ff344b09"
 
 [[clause]]
 clause-id = "trkasy.6"
@@ -5495,7 +5495,16 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 30
 end-line = 32
 canonical-text = "Such work is launched through a tracked\nbackground mechanism that keeps its completion observable; where its result and completion are genuinely\nnot needed, detaching it is a deliberate, recorded choice, not a reflex."
-source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
+source-digest = "e02c8321c10c3cb65bbeccef626cae69a29947fc312e34827cc0c851ff344b09"
+
+[[clause]]
+clause-id = "trkasy.7"
+corpus-id = "trkasy"
+source-path = ".aiqt/core/rules/integ-track-launched-work.md"
+start-line = 34
+end-line = 36
+canonical-text = "A disposition recorded as waiting on another unit of work names work that exists: its reference resolves to a\nlive dispatch record or a delivered result before the disposition stands; one resolving to neither is raised\nas a finding, not rested on."
+source-digest = "e02c8321c10c3cb65bbeccef626cae69a29947fc312e34827cc0c851ff344b09"
 
 [[clause]]
 clause-id = "mstreg.1"

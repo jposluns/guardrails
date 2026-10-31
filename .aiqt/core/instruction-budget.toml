@@ -87,6 +87,11 @@
 #                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
 #                        it. When a queued fold lands, record its measured cost here against the 559-unit
 #                        estimate.
+#                        Not raised on 2026-10-31 when track-launched-work gained its sentence that a
+#                        disposition recorded as waiting on another unit of work names work that exists
+#                        (trkasy.7): rule files 117926 -> 118175 (+249 units); managed block 360 and file
+#                        headers 16136 unchanged. Measured PACK 134422 -> 134671 stays within the ratchet:
+#                        the fold uses the maintainer-approved margin, with no ratchet change.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
