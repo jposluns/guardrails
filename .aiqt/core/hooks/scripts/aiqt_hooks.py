@@ -9203,22 +9203,34 @@ def _reset_commit_operand(args):
 
 def _reset_ancestry(repo, operand):
     """Ask git, read-only and offline, whether a reset target is an ancestor of HEAD in `repo`. Returns
-    ('ancestor'|'not-ancestor'|'not-a-commit'|'unknown', detail), read only from unmasked git exit statuses,
-    with the scrubbed environment of _branch_root_git. 'not-a-commit': the operand resolves to no commit
-    (git then reads a single operand as a path). 'unknown': no repository directory is known, git cannot be
+    ('ancestor'|'not-ancestor'|'not-a-commit'|'no-commit-object'|'unknown', detail), read only from unmasked
+    git exit statuses, with the scrubbed environment of _branch_root_git. The operand is resolved alone and
+    the object it names is then peeled to a commit: appending '^{commit}' to the operand itself would change
+    what some operands name (everything after ':/' is a commit-message pattern, so ':/<text>^{commit}'
+    searches for the suffix too). 'not-a-commit': the operand resolves to no object (git then reads a single
+    operand as a path). 'no-commit-object': the operand resolves to an object that peels to no commit (a tree
+    or a blob), which git does not read as a path. 'unknown': no repository directory is known, git cannot be
     launched or does not finish, HEAD resolves to no commit (an unborn branch or an unreadable repository),
     the ancestry walk exits with anything but 0 or 1, or a repository that is shallow (or whose shallowness
     cannot be read) answers 'not an ancestor' over history it may not hold."""
     if not isinstance(repo, str) or not repo:
         return ("unknown", "no repository directory could be resolved for it")
+    found = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", operand)
+    if found is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if found.returncode == 1 and not found.stdout.strip():
+        return ("not-a-commit", "{!r} resolves to no commit".format(operand))
+    if found.returncode != 0 or not found.stdout.strip():
+        return ("unknown", "git rev-parse exited {} resolving {!r}".format(found.returncode, operand))
+    found_sha = found.stdout.strip()
     target = _branch_root_git(
-        repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "{}^{{commit}}".format(operand))
+        repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "{}^{{commit}}".format(found_sha))
     if target is None:
         return ("unknown", "git rev-parse could not be launched or did not finish")
     if target.returncode == 1 and not target.stdout.strip():
-        return ("not-a-commit", "{!r} resolves to no commit".format(operand))
+        return ("no-commit-object", found_sha)
     if target.returncode != 0 or not target.stdout.strip():
-        return ("unknown", "git rev-parse exited {} resolving {!r}".format(target.returncode, operand))
+        return ("unknown", "git rev-parse exited {} peeling {} to a commit".format(target.returncode, found_sha))
     target_sha = target.stdout.strip()
     head = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}")
     if head is None or head.returncode != 0 or not head.stdout.strip():
@@ -9244,8 +9256,9 @@ def _reset_ancestry_refusal(args, repo, cannot):
     history and reverts every change made since (a fold onto a newer main reverts that main). A probe that
     cannot evaluate denies: `cannot` is a reason the repository the reset acts on cannot be established from
     the command (the probe is then not run), and an 'unknown' probe denies as well. A soft reset whose operand
-    is no commit denies; a mixed reset whose single operand is no commit is a path reset, and the caller's
-    decision stands. A target that equals HEAD or lies behind it is an ancestor and passes. The undo-amend
+    resolves to no object denies; a mixed reset whose single operand resolves to no object is a path reset,
+    and the caller's decision stands. An operand that resolves to an object that peels to no commit denies in
+    every mode. A target that equals HEAD or lies behind it is an ancestor and passes. The undo-amend
     form 'HEAD@{1}' names the pre-amend commit, which is not an ancestor of the amended one, so it denies.
     The caller returns _reset_ancestry_deny of a refusal."""
     found = _reset_commit_operand(args)
@@ -9259,6 +9272,8 @@ def _reset_ancestry_refusal(args, repo, cannot):
         what = "moves HEAD to {}, which is not an ancestor of HEAD".format(detail)
     elif verdict == "not-a-commit":
         what = "names {!r}, which resolves to no commit".format(operand)
+    elif verdict == "no-commit-object":
+        what = "names {!r}, which resolves to {}, an object that is no commit".format(operand, detail)
     else:
         what = "could not be checked against HEAD's ancestry ({})".format(detail)
     return (mode, operand, what)
