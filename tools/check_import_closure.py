@@ -4154,6 +4154,20 @@ _CANNOT_VECTORS = (
     _unread_vector("name rebound as a for target", "ROOT",
                    source=_T_NAMED % "for ROOT in ('elsewhere',):\n    pass\n"),
     _unread_vector("name deleted", "ROOT", source=_T_NAMED % "del ROOT\n"),
+    _unread_vector("name rebound by import", "ROOT", (("tools/ROOT.py", ""),), source=_T_NAMED % "import ROOT\n"),
+    _unread_vector("name rebound by a from-import", "ROOT", (_T_ELSEWHERE,),
+                   source=_T_NAMED % "from elsewhere import ROOT\n"),
+    _unread_vector("name rebound as a with target", "ROOT",
+                   source=_T_NAMED % "with open('elsewhere') as ROOT:\n    pass\n"),
+    _unread_vector("name rebound by a walrus in a statement", "ROOT", source=_T_NAMED % "(ROOT := 'elsewhere')\n"),
+    _unread_vector("name rebound by a walrus in an if test", "ROOT",
+                   source=_T_NAMED % "if (ROOT := 'elsewhere'):\n    pass\n"),
+    _unread_vector("name rebound by a destructuring assignment", "ROOT",
+                   source=_T_NAMED % "ROOT, OTHER = 'elsewhere', 'other'\n"),
+    _unread_vector("name rebound as an except target", "ROOT",
+                   source=_T_NAMED % "try:\n    pass\nexcept OSError as ROOT:\n    pass\n"),
+    _unread_vector("name rebound as a match capture", "ROOT",
+                   source=_T_NAMED % "match 'elsewhere':\n    case ROOT:\n        pass\n"),
     # One name past the bound, and two names bound to chains that start at each other.
     _unread_vector("pathlib chain through one name past the highest read", "str(LIB)",
                    source=_T_PATH + "BASE = Path(__file__).resolve().parents[1]\nROOT = BASE / 'lib'\n"
@@ -4182,6 +4196,15 @@ _CANNOT_VECTORS = (
                    source=_T_ONE_NAME % "def move():\n    global ROOT\n    ROOT = Path('elsewhere')\nmove()\n"),
     _unread_vector("single pathlib-chain name rebound in an if branch", "str(ROOT / 'lib' / '_vendor')",
                    source=_T_ONE_NAME % "if os.environ.get('ELSEWHERE'):\n    ROOT = Path('elsewhere')\n"),
+    # The same names rebound by an import of a module that resolves: the gate reads neither binding.
+    _unread_vector("outer pathlib-chain name rebound by import", "str(LIB / '_vendor')", (("tools/LIB.py", ""),),
+                   source=_T_OUTER_NAME % "import LIB\n"),
+    _unread_vector("outer pathlib-chain name rebound by a from-import", "str(LIB / '_vendor')", (_T_ELSEWHERE,),
+                   source=_T_OUTER_NAME % "from elsewhere import LIB\n"),
+    _unread_vector("single pathlib-chain name rebound by import", "str(ROOT / 'lib' / '_vendor')",
+                   (("tools/ROOT.py", ""),), source=_T_ONE_NAME % "import ROOT\n"),
+    _unread_vector("single pathlib-chain name rebound by a from-import", "str(ROOT / 'lib' / '_vendor')",
+                   (_T_ELSEWHERE,), source=_T_ONE_NAME % "from elsewhere import ROOT\n"),
     # A str-valued name over a chain that starts at a name: its chain is read with no name to follow.
     _unread_vector("str-valued name over a pathlib chain that starts at a name", "LIBS",
                    source=_T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n"
@@ -4580,6 +4603,19 @@ _STR_NAME_FIRST_BINDING = "    if isinstance(node, ast.Name) and named == MAX_NA
     "        start = None if first is None else _path_chain(first, rel, bindings, MAX_NAME_HOPS - 1)\n" \
     "    elif isinstance(node, ast.Name) and named:\n        value = _assigned(bindings, node.id)\n" \
     "        start = None if"
+# That lookup with a branch ahead of it that drops the import and from-import bindings of the name read directly
+# inside the inserted str() before testing that the name is bound once.
+_STR_NAME_NO_IMPORTS = "    if isinstance(node, ast.Name) and named == MAX_NAME_HOPS:\n" \
+    '        kept = [b for b in _bindings_of(bindings, node.id) or () if b[0] not in ("import", "from")]\n' \
+    '        value = kept[0][1] if len(kept) == 1 and kept[0][0] == "assign" else None\n' \
+    "        start = None if value is None else _path_chain(value, rel, bindings, named - 1)\n" \
+    "    elif isinstance(node, ast.Name) and named:\n        value = _assigned(bindings, node.id)\n" \
+    "        start = None if"
+# _file_bindings' walk, and that walk with the targets of one binding form first marked as plain, so it records no
+# binding for them.
+_BINDING_WALK = "    for node in ast.walk(tree):\n        names = ()\n"
+_IMPORT_BRANCH = "                elif isinstance(node, ast.Import):\n"
+_HANDLER_NAMES = "        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar,"
 
 # Each mutant removes one check (or one fail-closed path), or puts back a widening or defect this gate replaces,
 # from the gate half of this file's source, the part before the
@@ -4695,6 +4731,16 @@ MUTANTS = (
      "single pathlib-chain name rebound in a function through global"),
     ("single-chain-name-bound-once-branch", _STR_NAME_LOOKUP, _STR_NAME_FIRST_BINDING,
      "single pathlib-chain name rebound in an if branch"),
+    # The same name with its import and from-import bindings dropped before the bound-once test: its rebinding by
+    # an import is then not seen.
+    ("outer-chain-name-import-seen", _STR_NAME_LOOKUP, _STR_NAME_NO_IMPORTS,
+     "outer pathlib-chain name rebound by import"),
+    ("outer-chain-name-from-import-seen", _STR_NAME_LOOKUP, _STR_NAME_NO_IMPORTS,
+     "outer pathlib-chain name rebound by a from-import"),
+    ("single-chain-name-import-seen", _STR_NAME_LOOKUP, _STR_NAME_NO_IMPORTS,
+     "single pathlib-chain name rebound by import"),
+    ("single-chain-name-from-import-seen", _STR_NAME_LOOKUP, _STR_NAME_NO_IMPORTS,
+     "single pathlib-chain name rebound by a from-import"),
     ("str-name-chain-unnamed", "MAX_NAME_HOPS if named else 0", "MAX_NAME_HOPS",
      "str-valued name over a pathlib chain that starts at a name"),
     ("str-wrapper-required", "    return _os_path_join(node, rel, bindings)\n",
@@ -4706,6 +4752,27 @@ MUTANTS = (
      "name rebound by an augmented assignment"),
     ("binding-defs", "        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):\n",
      "        elif False:\n", "repo_root import shadowed by a def"),
+    # One binding form dropped from _file_bindings (an import or from-import of a name the insertion shapes never
+    # import, a with, walrus or destructuring target, an except target, a match capture): a name it rebinds is then
+    # read at its first binding.
+    ("binding-imports", _IMPORT_BRANCH, "                elif isinstance(node, ast.Import) and "
+     "alias.name not in INSERT_IMPORTS:\n                    pass\n" + _IMPORT_BRANCH, "name rebound by import"),
+    ("binding-from-imports", _IMPORT_BRANCH, "                elif isinstance(node, ast.ImportFrom) and "
+     "alias.name not in INSERT_IMPORTS:\n                    pass\n" + _IMPORT_BRANCH, "name rebound by a from-import"),
+    ("binding-with-targets", _BINDING_WALK, "    plain |= {id(item.optional_vars) for n in ast.walk(tree) if "
+     "isinstance(n, (ast.With, ast.AsyncWith)) for item in n.items}\n" + _BINDING_WALK,
+     "name rebound as a with target"),
+    ("binding-walrus-targets", _BINDING_WALK, "    plain |= {id(n.target) for n in ast.walk(tree) if "
+     "isinstance(n, ast.NamedExpr)}\n" + _BINDING_WALK, "name rebound by a walrus in a statement"),
+    ("binding-walrus-targets-if", _BINDING_WALK, "    plain |= {id(n.target) for n in ast.walk(tree) if "
+     "isinstance(n, ast.NamedExpr)}\n" + _BINDING_WALK, "name rebound by a walrus in an if test"),
+    ("binding-destructuring-targets", _BINDING_WALK, "    plain |= {id(e) for n in ast.walk(tree) if "
+     "isinstance(n, ast.Assign) for t in n.targets if isinstance(t, (ast.Tuple, ast.List)) for e in t.elts}\n" +
+     _BINDING_WALK, "name rebound by a destructuring assignment"),
+    ("binding-except-targets", _HANDLER_NAMES, "        elif isinstance(node, (ast.MatchAs, ast.MatchStar,",
+     "name rebound as an except target"),
+    ("binding-match-captures", _HANDLER_NAMES, "        elif isinstance(node, (ast.ExceptHandler, ast.MatchStar,",
+     "name rebound as a match capture"),
     ("import-identity", "found[0] == INSERT_IMPORTS[name]", "found[0][-1] == INSERT_IMPORTS[name][-1]",
      "repo_root imported from another module"),
     ("star-import-unread", 'return None if "*" in bindings else bindings.get(name, [])',
