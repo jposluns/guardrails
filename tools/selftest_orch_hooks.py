@@ -15159,118 +15159,294 @@ def _main_isolated(report_path=None):
             wi.payload("PreToolUse", extra={"tool_input": {"command": BASE}})),
             aiqt_hooks._deny_missing_tool_name("trkasy"))
 
-        # ---------- the deliverable-exec guard (wowo01): no in-place run of a deliverable ----------
-        # Registry-scoped through the deliverable_dirs key: the fixture declares a staging and a
-        # hand-back directory inside its own repo and plants inert files there (hashlib.py included,
-        # the sys.path[0] shadowing story the no- -I deny tells). Each deny case pairs with a flip
-        # that differs in one element and allows.
+        # ---------- the deliverable-exec guard (wowo01): allowlist-by-construction ----------
+        # The property holds by construction: a command in SCOPE of a declared directory is denied
+        # unless EVERY segment is a closed-allowlist read-only form. The fixture declares a staging and
+        # a hand-back directory that sit OUTSIDE the repository (the real layout a worker runs in), and
+        # arms the guard through the repository's git toplevel. A real-bash oracle, launched in its own
+        # session with a timeout, confirms each deny vector runs the deliverable and each allow form
+        # does not.
+        import signal as _nrd_signal
         nd = Fixture(tmp, "nrd")
-        nd_staging = nd.root / "staging"
-        nd_handback = nd.root / "handback"
-        nd_copy = nd.root / "copy"
-        for nd_dir in (nd_staging, nd_handback, nd_copy):
+        nd_staging = tmp / "nrd-stage"
+        nd_handback = tmp / "nrd-handback"
+        nd_outside = tmp / "nrd-outside"
+        nd_stage_x = tmp / "nrd-stage-x"  # shared-prefix sibling, not declared
+        for nd_dir in (nd_staging, nd_handback, nd_outside, nd_stage_x):
             nd_dir.mkdir()
-        for nd_file in (nd_staging / "x.py", nd_staging / "t.py", nd_staging / "hashlib.py",
-                        nd_handback / "x.py", nd_copy / "x.py", nd.root / "x.py"):
-            nd_file.write_text("print('inert')\n", encoding="utf-8")
-        for nd_file in (nd_staging / "x.sh", nd.root / "env.sh", nd.root / "run.sh"):
-            nd_file.write_text("true\n", encoding="utf-8")
+        _nrd_py_mark = 'import os\nopen(os.environ["NRD_MARK"], "w").close()\n'
+        _nrd_sh_mark = '#!/bin/sh\n: > "$NRD_MARK"\n'
+        for nd_file in (nd_staging / "x.py", nd_staging / "hashlib.py", nd_staging / "test_x.py",
+                        nd_handback / "x.py", nd_stage_x / "x.py"):
+            nd_file.write_text(_nrd_py_mark, encoding="utf-8")
+        for nd_file in (nd_staging / "x.sh", nd_staging / "runme"):
+            nd_file.write_text(_nrd_sh_mark, encoding="utf-8")
+            nd_file.chmod(0o755)
         (nd_staging / "a.json").write_text("{}", encoding="utf-8")
         (nd_handback / "d.diff").write_text("", encoding="utf-8")
-        # one symlink from outside the declared directories INTO one (the realpath leg catches it),
-        # and one whose target stays outside (the flip)
+        (nd_outside / "x2.py").write_text(_nrd_py_mark, encoding="utf-8")
+        (nd.root / "r.py").write_text("import sys\nprint(sys.argv)\n", encoding="utf-8")
+        (nd.root / "run.sh").write_text(_nrd_sh_mark, encoding="utf-8")
+        (nd.root / "run.sh").chmod(0o755)
+        # a symlink from outside the declared directories INTO one (realpath leg catches it), and one
+        # whose target stays outside (the flip)
         (nd.root / "link-in.py").symlink_to(nd_staging / "x.py")
-        (nd.root / "link-plain.py").symlink_to(nd_copy / "x.py")
+        (nd.root / "link-plain.py").symlink_to(nd_outside / "x2.py")
         nd_reg_path = nd.root / ".aiqt" / "orchestration.local.json"
         nd_reg = json.loads(nd_reg_path.read_text(encoding="utf-8"))
         nd_reg["deliverable_dirs"] = [str(nd_staging), str(nd_handback)]
         nd_reg_path.write_text(json.dumps(nd_reg), encoding="utf-8")
-        nrd = lambda cmd, cwd=None: aiqt_hooks.orch_deliverable_exec_guard(
-            nd.payload("PreToolUse", "Bash", {"command": cmd},
-                       extra={"cwd": cwd} if cwd else None))
-        st, hb = str(nd_staging), str(nd_handback)
-        # a Python script run in place denies; a copy outside, and the same path as a DATA argument
-        # to a reader script, allow
-        check("nrd/py-script-staging-denies", _verdict(nrd("python3 -I -B {}/x.py".format(st))), "deny")
-        check("nrd/py-script-scratch-allows",
-              _verdict(nrd("python3 -I -B {}".format(nd_copy / "x.py"))), "allow")
-        check("nrd/py-script-handback-denies", _verdict(nrd("python3 -I -B {}/x.py".format(hb))), "deny")
-        check("nrd/py-data-arg-allows", _verdict(nrd("python3 -I tools/r.py {}/x.py".format(st))), "allow")
-        # the realpath leg: a script reached through a symlink INTO a declared directory denies;
-        # a symlink to a non-declared target allows
-        check("nrd/py-symlink-into-staging-denies",
-              _verdict(nrd("python3 -I {}".format(nd.root / "link-in.py"))), "deny")
-        check("nrd/py-symlink-out-allows",
-              _verdict(nrd("python3 -I {}".format(nd.root / "link-plain.py"))), "allow")
-        # the effective working directory: a literal cd moves it, so a relative script resolves there
-        check("nrd/py-relative-after-cd-denies", _verdict(nrd("cd {}; python3 x.py".format(st))), "deny")
-        check("nrd/py-relative-repo-allows", _verdict(nrd("python3 x.py")), "allow")
-        # python -m: an importing or installing module on a declared path denies; a read-only
-        # printer (json.tool) allows
-        check("nrd/py-m-pytest-denies", _verdict(nrd("python3 -I -m pytest {}/t.py".format(st))), "deny")
-        check("nrd/py-m-jsontool-allows",
-              _verdict(nrd("python3 -I -m json.tool {}/a.json".format(st))), "allow")
-        # python -c over a declared path: only the read-only hashlib/pathlib/json reader allowance passes
-        check("nrd/py-c-exec-denies", _verdict(nrd(
-            "python3 -I -c \"exec(open('{}/x.py').read())\"".format(st))), "deny")
-        check("nrd/py-c-hashlib-allows", _verdict(nrd(
-            "python3 -I -c \"import hashlib;print(hashlib.sha256(open('{}/x.py','rb').read())"
-            ".hexdigest())\"".format(st))), "allow")
-        check("nrd/py-c-runpy-denies", _verdict(nrd(
-            "python3 -I -c \"import runpy;runpy.run_path('{}/x.py')\"".format(st))), "deny")
-        check("nrd/py-c-syspath-import-denies", _verdict(nrd(
-            "python3 -I -c \"import sys;sys.path.insert(0,'{}');import x\"".format(st))), "deny")
-        check("nrd/py-c-syntaxerror-denies", _verdict(nrd(
-            "python3 -I -c \"print('{}/x.py'\"".format(st))), "deny")
-        check("nrd/py-c-readtext-allows", _verdict(nrd(
-            "python3 -I -c \"from pathlib import Path;print(Path('{}/x.py').read_text())\"".format(st))),
-            "allow")
-        # sys.path[0] shadowing: python without -I or -P, the working directory a declared directory
-        check("nrd/py-c-cwd-noI-denies",
-              _verdict(nrd('python3 -c "import hashlib"', cwd=st)), "deny")
-        check("nrd/py-c-cwd-I-allows",
-              _verdict(nrd('python3 -I -c "import hashlib"', cwd=st)), "allow")
-        # a program fed from a declared file on stdin denies (redirect and pipe); a data pipe into a
-        # reader script is not judged
-        check("nrd/py-stdin-redirect-denies", _verdict(nrd("python3 - < {}/x.py".format(st))), "deny")
-        check("nrd/py-stdin-data-pipe-allows",
-              _verdict(nrd("cat {}/x.py | python3 -I tools/r.py".format(st))), "allow")
-        check("nrd/py-pipe-program-denies", _verdict(nrd("cat {}/x.py | python3".format(st))), "deny")
-        # the shell family: a script operand denies, bash -n reads syntax only, and -c text is
-        # classified recursively
-        check("nrd/sh-script-denies", _verdict(nrd("bash {}/x.sh".format(st))), "deny")
-        check("nrd/sh-n-allows", _verdict(nrd("bash -n {}/x.sh".format(st))), "allow")
-        check("nrd/sh-c-nested-denies", _verdict(nrd('bash -c "python3 {}/x.py"'.format(st))), "deny")
-        check("nrd/sh-c-cat-allows", _verdict(nrd('bash -c "cat {}/x.py"'.format(st))), "allow")
-        # source and the dot builtin import the file into the running shell
-        check("nrd/source-denies", _verdict(nrd("source {}/x.sh".format(st))), "deny")
-        check("nrd/dot-denies", _verdict(nrd(". {}/x.sh".format(st))), "deny")
-        check("nrd/source-repo-allows", _verdict(nrd("source {}".format(nd.root / "env.sh"))), "allow")
-        # direct execution of a declared path, the exec peel included
-        check("nrd/direct-exec-denies", _verdict(nrd("{}/x.sh".format(st))), "deny")
-        check("nrd/exec-peel-denies", _verdict(nrd("exec {}/x.sh".format(st))), "deny")
-        check("nrd/direct-exec-repo-allows", _verdict(nrd(str(nd.root / "run.sh"))), "allow")
-        # loader-environment injection: PATH-class assignments whose value names a declared directory
-        check("nrd/env-pythonpath-denies",
-              _verdict(nrd("PYTHONPATH={} python3 -m foo".format(st))), "deny")
-        check("nrd/env-wrapper-path-denies",
-              _verdict(nrd("env PATH={}:/usr/bin x".format(st))), "deny")
-        check("nrd/env-pythonpath-other-allows",
-              _verdict(nrd("PYTHONPATH={} python3 -m foo".format(nd_copy))), "allow")
-        # the opaque fallback: an unreadable or indirection form denies only with a declared directory
-        # AND an interpreter word in its raw text
-        check("nrd/heredoc-interp-denies", _verdict(nrd(
-            "python3 - <<EOF\nexec(open('{}/x.py').read())\nEOF\n".format(st))), "deny")
-        check("nrd/heredoc-cat-allows", _verdict(nrd(
-            "cat <<EOF\n{}/x.py\nEOF\n".format(st))), "allow")
-        check("nrd/eval-denies", _verdict(nrd('eval "python3 {}/x.py"'.format(st))), "deny")
-        check("nrd/xargs-sha-allows", _verdict(nrd("ls {} | xargs sha256sum".format(st))), "allow")
-        # the row's named allowances stay allowed: hashing and read-only apply checks
+        st, hb, outd = str(nd_staging), str(nd_handback), str(nd_outside)
+
+        def nrd(cmd, cwd=None, project=None):
+            # The guard roots INDEPENDENTLY of the payload cwd: with no project env it arms through the
+            # repository git toplevel; with a project env it arms through that path too, so a cwd inside
+            # a declared directory outside the repository cannot disarm it. The env is managed here and
+            # restored so one case never leaks into the next.
+            prev = os.environ.get("CLAUDE_PROJECT_DIR")
+            if project is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = project
+            try:
+                extra = {"cwd": cwd} if cwd else None
+                return aiqt_hooks.orch_deliverable_exec_guard(
+                    nd.payload("PreToolUse", "Bash", {"command": cmd}, extra=extra))
+            finally:
+                if prev is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = prev
+
+        _nrd_oracle_dir = tmp / "nrd-oracle"
+        _nrd_oracle_dir.mkdir()
+        _nrd_oracle_n = [0]
+
+        def nrd_ran(cmd, run_cwd):
+            """Run cmd under real bash in its own session with a timeout; True when the deliverable
+            wrote its marker (it ran), False when no marker appeared. The child is reaped as a process
+            group so nothing is left running."""
+            _nrd_oracle_n[0] += 1
+            mark = _nrd_oracle_dir / ("mark-%d" % _nrd_oracle_n[0])
+            env = dict(os.environ)
+            env["NRD_MARK"] = str(mark)
+            env.pop("CLAUDE_PROJECT_DIR", None)
+            try:
+                proc = subprocess.Popen(["bash", "-c", cmd], cwd=run_cwd, env=env,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:
+                return False
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), _nrd_signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            return mark.exists()
+
+        def nrd_got(cmd, run_cwd=outd, cwd=None, project=None):
+            # The pair a vector is judged on: (guard verdict, whether real bash ran the deliverable).
+            return (_verdict(nrd(cmd, cwd=cwd, project=project)), nrd_ran(cmd, run_cwd))
+
+        DENY_RAN = ("deny", True)        # a review-vector form: denied, and real bash runs the file
+        ALLOW_INERT = ("allow", False)   # an allowlisted form: allowed, and the file does not run
+
+        # --- the closed read-only allowlist: allowed, and the deliverable does not run ---
+        check("nrd/cat-allows", nrd_got("cat {}/x.py".format(st)), ALLOW_INERT)
+        check("nrd/wc-allows", nrd_got("wc -l {}/x.py".format(st)), ALLOW_INERT)
+        check("nrd/head-allows", nrd_got("head -n 2 {}/x.py".format(st)), ALLOW_INERT)
+        check("nrd/tail-allows", nrd_got("tail -n2 {}/x.py".format(st)), ALLOW_INERT)
+        check("nrd/ls-allows", nrd_got("ls -l {}".format(st)), ALLOW_INERT)
+        check("nrd/file-allows", nrd_got("file {}/x.py".format(st)), ALLOW_INERT)
+        check("nrd/grep-allows", nrd_got("grep -rn inert {}".format(st)), ALLOW_INERT)
+        check("nrd/diff-allows", nrd_got("diff -u {}/x.py {}/x.sh".format(st, st)), ALLOW_INERT)
+        check("nrd/hash-sha256-allows", nrd_got("sha256sum {}/x.py".format(st)), ALLOW_INERT)
+        check("nrd/hash-md5-allows", nrd_got("md5sum {}/x.py".format(st)), ALLOW_INERT)
         check("nrd/git-apply-check-allows",
-              _verdict(nrd("git apply --check {}/d.diff".format(hb))), "allow")
-        check("nrd/sha256sum-allows", _verdict(nrd("sha256sum {}/d.diff".format(hb))), "allow")
-        # scope: inert without the key, armed by the key alone, fail-open on a non-Bash tool, an empty
-        # command or no registry, fail-closed on an unreadable command or a missing tool_name
+              nrd_got("git apply --check {}/d.diff".format(hb)), ALLOW_INERT)
+        check("nrd/git-apply-allows", nrd_got("git apply {}/d.diff".format(hb)), ALLOW_INERT)
+        check("nrd/git-diff-noindex-allows",
+              nrd_got("git diff --no-index {}/x.py {}/x.sh".format(st, st)), ALLOW_INERT)
+        check("nrd/cp-source-allows", nrd_got("cp {}/x.py {}/copy.py".format(st, outd)), ALLOW_INERT)
+        check("nrd/bash-n-allows", nrd_got("bash -n {}/x.sh".format(st)), ALLOW_INERT)
+        check("nrd/py-reader-outside-allows",
+              nrd_got("python3 -I {}/r.py {}/x.py".format(nd.root, st), run_cwd=str(nd.root)),
+              ALLOW_INERT)
+        check("nrd/py-reader-relative-allows",
+              nrd_got("python3 -I r.py {}/x.py".format(st), run_cwd=str(nd.root)), ALLOW_INERT)
+        check("nrd/py-reader-stdin-data-allows",
+              nrd_got("cat {}/x.py | python3 -I r.py".format(st), run_cwd=str(nd.root)), ALLOW_INERT)
+        check("nrd/cd-out-then-read-allows",
+              nrd_got("cd {}; cat {}/x.py".format(outd, st)), ALLOW_INERT)
+        check("nrd/quoted-heredoc-cat-allows",
+              nrd_got("cat <<'EOF'\n{}/x.py\nEOF\n".format(st)), ALLOW_INERT)
+        # the shared-prefix sibling is NOT a declared directory, so the guard allows it (out of scope);
+        # it does run its own file, which is fine - that file is not a deliverable
+        check("nrd/shared-prefix-sibling-allows",
+              _verdict(nrd("python3 -I {}/x.py".format(nd_stage_x))), "allow")
+        # out of scope entirely (names no declared directory): untouched
+        check("nrd/out-of-scope-allows", _verdict(nrd("python3 x.py")), "allow")
+        check("nrd/symlink-out-allows",
+              _verdict(nrd("python3 -I {}".format(nd.root / "link-plain.py"))), "allow")
+
+        # --- accepted over-denies: the allowlist refuses forms that do not run the file ---
+        # Each is denied by construction (not an allowlisted form) though real bash runs nothing; the
+        # escape is a reader script outside the directories taking the path as data.
+        for cid, cmd in (
+                ("nrd/over-deny-c-hashlib",
+                 'python3 -I -c "import hashlib;print(hashlib.sha256(open(\'{}/x.py\',\'rb\')'
+                 '.read()).hexdigest())"'.format(st)),
+                ("nrd/over-deny-c-readtext",
+                 'python3 -I -c "from pathlib import Path;print(Path(\'{}/x.py\').read_text())"'
+                 .format(st)),
+                ("nrd/over-deny-m-jsontool", "python3 -I -m json.tool {}/a.json".format(st)),
+                ("nrd/over-deny-xargs-sha", "ls {} | xargs sha256sum".format(st)),
+                ("nrd/over-deny-sed", "sed -n 1p {}/x.py".format(st)),
+                ("nrd/over-deny-cp-into", "cp {}/x.py {}/copy.py".format(st, st)),
+                ("nrd/over-deny-cat-bad-option", "cat --unknown-option {}/x.py".format(st)),
+                ("nrd/over-deny-unquoted-heredoc", "cat <<EOF\n{}/x.py\nEOF\n".format(st))):
+            check(cid, _verdict(nrd(cmd)), "deny")
+
+        # --- the review's bypass forms: now denied, and real bash shows each runs the deliverable ---
+        check("nrd/py-script-denies", nrd_got("python3 -I -B {}/x.py".format(st)), DENY_RAN)
+        check("nrd/py-script-handback-denies", nrd_got("python3 -I -B {}/x.py".format(hb)), DENY_RAN)
+        check("nrd/sh-script-denies", nrd_got("bash {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/direct-exec-denies", nrd_got("{}/x.sh".format(st)), DENY_RAN)
+        check("nrd/exec-peel-denies", nrd_got("exec {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/source-denies", nrd_got("source {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/dot-denies", nrd_got(". {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/builtin-source-denies", nrd_got("builtin source {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/command-dot-denies", nrd_got("command . {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/compound-if-denies",
+              nrd_got("if python3 {}/x.py; then :; fi".format(st)), DENY_RAN)
+        check("nrd/compound-while-denies",
+              nrd_got("while {}/x.sh; do break; done".format(st)), DENY_RAN)
+        check("nrd/compound-for-denies",
+              nrd_got("for i in 1; do {}/x.sh; done".format(st)), DENY_RAN)
+        check("nrd/negation-denies", nrd_got("! {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/brace-group-denies", nrd_got("{{ {}/x.sh; }}".format(st)), DENY_RAN)
+        check("nrd/backtick-denies", nrd_got("echo `python3 {}/x.py`".format(st)), DENY_RAN)
+        check("nrd/dollar-subst-denies", nrd_got("echo $(python3 {}/x.py)".format(st)), DENY_RAN)
+        check("nrd/wrapper-command-denies", nrd_got("command python3 {}/x.py".format(st)), DENY_RAN)
+        check("nrd/wrapper-nohup-denies", nrd_got("nohup {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/exec-env-denies", nrd_got("exec env python3 {}/x.py".format(st)), DENY_RAN)
+        check("nrd/env-C-sh-denies", nrd_got("env -C {} ./x.sh".format(st)), DENY_RAN)
+        check("nrd/env-C-py-denies", nrd_got("env -C {} python3 -I x.py".format(st)), DENY_RAN)
+        check("nrd/env-u-path-denies",
+              nrd_got("env -u FOO PATH={}:/usr/bin runme".format(st)), DENY_RAN)
+        check("nrd/declare-path-denies",
+              nrd_got("declare -x PATH={}:/usr/bin; runme".format(st)), DENY_RAN)
+        check("nrd/hash-p-denies", nrd_got("hash -p {}/x.sh foo; foo".format(st)), DENY_RAN)
+        check("nrd/xargs-exec-denies", nrd_got("echo a | xargs {}/x.sh".format(st)), DENY_RAN)
+        check("nrd/find-exec-denies",
+              nrd_got("find {} -type f -name x.sh -exec {{}} \\;".format(st)), DENY_RAN)
+        check("nrd/pipe-two-stage-denies",
+              nrd_got("cat {}/x.py | cat | python3 -I".format(st)), DENY_RAN)
+        check("nrd/pipe-tr-bash-denies",
+              nrd_got("cat {}/x.sh | tr -d '\\r' | bash".format(st)), DENY_RAN)
+        check("nrd/pipe-program-denies", nrd_got("cat {}/x.py | python3".format(st)), DENY_RAN)
+        check("nrd/stdin-redirect-denies", nrd_got("python3 - < {}/x.py".format(st)), DENY_RAN)
+        check("nrd/stdin-redirect-I-denies", nrd_got("python3 -I - < {}/x.py".format(st)), DENY_RAN)
+        check("nrd/c-attr-chain-denies",
+              nrd_got("python3 -I -c \"import pathlib; sorted(['sh {}/x.sh'], "
+                      "key=pathlib.os.system)\"".format(st)), DENY_RAN)
+        check("nrd/m-unittest-discover-denies",
+              nrd_got("python3 -I -m unittest discover --start-directory={}".format(st)), DENY_RAN)
+        check("nrd/heredoc-interp-denies",
+              nrd_got("python3 - <<EOF\nexec(open('{}/x.py').read())\nEOF\n".format(st)), DENY_RAN)
+        check("nrd/awk-system-denies",
+              nrd_got("awk 'BEGIN{{system(\"sh {}/x.sh\")}}'".format(st)), DENY_RAN)
+        check("nrd/pythonpath-import-denies",
+              nrd_got("PYTHONPATH={} python3 -c 'import x'".format(st)), DENY_RAN)
+        check("nrd/path-prefix-denies", nrd_got("PATH={}:/usr/bin runme".format(st)), DENY_RAN)
+        check("nrd/env-path-denies", nrd_got("env PATH={}:/usr/bin runme".format(st)), DENY_RAN)
+        check("nrd/symlink-into-denies",
+              nrd_got("python3 -I {}".format(nd.root / "link-in.py"), run_cwd=str(nd.root)), DENY_RAN)
+        check("nrd/relative-after-cd-denies", nrd_got("cd {}; python3 x.py".format(st)), DENY_RAN)
+        # setsid, stdbuf and exec -a, where present on the host (verdict always asserted; the real-bash
+        # run only where the tool exists, so the suite is portable)
+        for cid, tool, cmd in (
+                ("nrd/wrapper-setsid-denies", "setsid", "setsid -w python3 {}/x.py".format(st)),
+                ("nrd/wrapper-stdbuf-denies", "stdbuf", "stdbuf -o0 python3 {}/x.py".format(st)),
+                ("nrd/exec-a-denies", "bash", "exec -a foo {}/x.sh".format(st))):
+            got, want = ((nrd_got(cmd), DENY_RAN) if shutil.which(tool)
+                         else (_verdict(nrd(cmd)), "deny"))
+            check(cid, got, want)
+        # "outside the families" words: not on the allowlist, so denied by construction (real bash only
+        # where the tool is present)
+        for cid, word, cmd in (
+                ("nrd/busybox-sh-denies", "busybox", "busybox sh {}/x.sh".format(st)),
+                ("nrd/uv-run-denies", "uv", "uv run {}/x.py".format(st)),
+                ("nrd/py-suffix-t-denies", "python3.14t", "python3.14t {}/x.py".format(st))):
+            got, want = ((nrd_got(cmd), DENY_RAN) if shutil.which(word)
+                         else (_verdict(nrd(cmd)), "deny"))
+            check(cid, got, want)
+        # the dynamic linker needs an ELF operand, so it does not run a shell script; the guard denies
+        # it regardless (an unlisted command word with a slash), a verdict-only vector
+        check("nrd/ld-so-denies",
+              _verdict(nrd("/lib64/ld-linux-x86-64.so.2 {}/x.sh".format(st))), "deny")
+
+        # --- the out-of-repository working-directory layout (the review's inert case) ---
+        # The staging directory sits outside the repository and the session cwd is inside it; the guard
+        # arms through the project-directory env anchor, so sitting in a declared directory cannot
+        # disarm it. Each run uses cwd=staging, project=repo.
+        check("nrd/outrepo-cwd-abs-script-denies",
+              nrd_got("python3 {}/x.py".format(st), run_cwd=st, cwd=st, project=str(nd.root)), DENY_RAN)
+        check("nrd/outrepo-cwd-direct-denies",
+              nrd_got("./x.sh", run_cwd=st, cwd=st, project=str(nd.root)), DENY_RAN)
+        check("nrd/outrepo-cwd-noI-shadow-denies",
+              nrd_got("python3 -c 'import hashlib'", run_cwd=st, cwd=st, project=str(nd.root)),
+              DENY_RAN)
+        check("nrd/outrepo-cwd-plain-allows",
+              _verdict(nrd("ls", cwd=st, project=str(nd.root))), "allow")
+        # arming by the env anchor alone (no git toplevel at the staging cwd) still denies
+        check("nrd/outrepo-arming-env-only-denies",
+              _verdict(nrd("python3 {}/x.py".format(st), cwd=st, project=str(nd.root))), "deny")
+
+        # --- the flip: restore per-form matching and show the review's forms allowed again ---
+        # A per-form stand-in that only denies a direct interpreter segment naming a declared script
+        # (what the retired design did) is installed over the scope scan; the review's compound,
+        # backtick and wrapper forms, which the real guard denies, pass under it. This shows the
+        # inversion is what closes them, not an added per-form rule.
+        def _nrd_flip_scan(command, cwd, dirs):
+            eff = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+            try:
+                segs = aiqt_hooks._lex_command(command)
+            except ValueError:
+                return None
+            for seg in segs:
+                if not seg.argv:
+                    continue
+                head = seg.argv[0].rsplit("/", 1)[-1]
+                if aiqt_hooks._NRD_PY_WORD_RE.match(head) or head in aiqt_hooks._NRD_SHELL_WORDS:
+                    for tok in seg.argv[1:]:
+                        if not tok.startswith("-") and aiqt_hooks._nrd_match(tok, eff, dirs) is True:
+                            return (tok, "per-form direct interpreter match")
+            return None
+
+        _nrd_real_scan = aiqt_hooks._nrd_scope_scan
+        aiqt_hooks._nrd_scope_scan = _nrd_flip_scan
+        try:
+            check("nrd/flip-compound-allows",
+                  _verdict(nrd("if python3 {}/x.py; then :; fi".format(st))), "allow")
+            check("nrd/flip-backtick-allows",
+                  _verdict(nrd("echo `python3 {}/x.py`".format(st))), "allow")
+            check("nrd/flip-wrapper-allows",
+                  _verdict(nrd("command python3 {}/x.py".format(st))), "allow")
+            # the real scan still denies the plain direct form under the flip (a control: the flip only
+            # loosens, it does not disarm)
+            check("nrd/flip-direct-still-denies",
+                  _verdict(nrd("python3 -I {}/x.py".format(st))), "deny")
+        finally:
+            aiqt_hooks._nrd_scope_scan = _nrd_real_scan
+
+        # --- scope and fail-closed postures (unchanged contracts) ---
         check("nrd/failopen-nonbash", _verdict(aiqt_hooks.orch_deliverable_exec_guard(
             nd.payload("PreToolUse", "Write", {"command": "python3 {}/x.py".format(st)}))), "allow")
         check("nrd/failclosed-missing-tool-name", aiqt_hooks.orch_deliverable_exec_guard(
@@ -15285,17 +15461,26 @@ def _main_isolated(report_path=None):
         ni_staging.mkdir()
         (ni_staging / "x.py").write_text("print('inert')\n", encoding="utf-8")
         ni_cmd = "python3 -I {}/x.py".format(ni_staging)
-        check("nrd/inert-no-key-allows", _verdict(aiqt_hooks.orch_deliverable_exec_guard(
-            ni.payload("PreToolUse", "Bash", {"command": ni_cmd}))), "allow")
+
+        def ni_guard(cmd):
+            prev = os.environ.get("CLAUDE_PROJECT_DIR")
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            try:
+                return aiqt_hooks.orch_deliverable_exec_guard(
+                    ni.payload("PreToolUse", "Bash", {"command": cmd}))
+            finally:
+                if prev is not None:
+                    os.environ["CLAUDE_PROJECT_DIR"] = prev
+
+        check("nrd/inert-no-key-allows", _verdict(ni_guard(ni_cmd)), "allow")
         ni_reg_path = ni.root / ".aiqt" / "orchestration.local.json"
         ni_reg = json.loads(ni_reg_path.read_text(encoding="utf-8"))
         ni_reg["deliverable_dirs"] = [str(ni_staging)]
         ni_reg_path.write_text(json.dumps(ni_reg), encoding="utf-8")
-        check("nrd/armed-same-denies", _verdict(aiqt_hooks.orch_deliverable_exec_guard(
-            ni.payload("PreToolUse", "Bash", {"command": ni_cmd}))), "deny")
+        check("nrd/armed-same-denies", _verdict(ni_guard(ni_cmd)), "deny")
         ni_reg_path.unlink()
-        check("nrd/failopen-no-registry", _verdict(aiqt_hooks.orch_deliverable_exec_guard(
-            ni.payload("PreToolUse", "Bash", {"command": ni_cmd}))), "allow")
+        # no key at the git toplevel AND no project anchor: inert
+        check("nrd/failopen-no-root", _verdict(ni_guard(ni_cmd)), "allow")
         check("nrd/failclosed-missing-tool-name-no-registry", aiqt_hooks.orch_deliverable_exec_guard(
             ni.payload("PreToolUse", extra={"tool_input": {"command": ni_cmd}})),
             aiqt_hooks._deny_missing_tool_name("wowo01"))
@@ -15304,22 +15489,30 @@ def _main_isolated(report_path=None):
         nb_reg_path = nb.root / ".aiqt" / "orchestration.local.json"
         nb_reg = json.loads(nb_reg_path.read_text(encoding="utf-8"))
         nbcmd = "python3 -I -B {}/x.py".format(nb.root / "staging")
+
+        def nb_guard(cmd):
+            prev = os.environ.get("CLAUDE_PROJECT_DIR")
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            try:
+                return aiqt_hooks.orch_deliverable_exec_guard(
+                    nb.payload("PreToolUse", "Bash", {"command": cmd}))
+            finally:
+                if prev is not None:
+                    os.environ["CLAUDE_PROJECT_DIR"] = prev
+
         for check_id, badkey in (("nrd/badkey-relative-interp-denies", ["relative/staging"]),
                                  ("nrd/badkey-root-denies", ["/"]),
                                  ("nrd/badkey-repo-ancestor-denies", [str(nb.root)])):
             nb_reg["deliverable_dirs"] = badkey
             nb_reg_path.write_text(json.dumps(nb_reg), encoding="utf-8")
-            check(check_id, _verdict(aiqt_hooks.orch_deliverable_exec_guard(
-                nb.payload("PreToolUse", "Bash", {"command": nbcmd}))), "deny")
-        check("nrd/badkey-plain-cmd-allows", _verdict(aiqt_hooks.orch_deliverable_exec_guard(
-            nb.payload("PreToolUse", "Bash", {"command": "ls -l"}))), "allow")
+            check(check_id, _verdict(nb_guard(nbcmd)), "deny")
+        check("nrd/badkey-plain-cmd-allows", _verdict(nb_guard("ls -l")), "allow")
         nb_reg_path.write_text("{", encoding="utf-8")
-        check("nrd/badreg-interp-denies", _verdict(aiqt_hooks.orch_deliverable_exec_guard(
-            nb.payload("PreToolUse", "Bash", {"command": nbcmd}))), "deny")
+        check("nrd/badreg-interp-denies", _verdict(nb_guard(nbcmd)), "deny")
         # the whole dispatcher, in a child process: a structured deny is exit 0 with the deny JSON on
         # stdout, an allow is exit 0 with no output (the platform contract main() implements)
         _nrd_env = {k: v for k, v in os.environ.items()
-                    if k != aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV}
+                    if k not in (aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV, "CLAUDE_PROJECT_DIR")}
         _nrd_sub = subprocess.run(
             [sys.executable, "-I", "-B", aiqt_hooks.__file__, "orch_deliverable_exec_guard"],
             input=json.dumps(nd.payload("PreToolUse", "Bash",
@@ -15337,6 +15530,8 @@ def _main_isolated(report_path=None):
             input=json.dumps(nd.payload("PreToolUse", "Bash", {"command": "git status"})),
             capture_output=True, text=True, timeout=60, env=_nrd_env)
         check("nrd/main-subprocess-allows", (_nrd_ok.returncode, _nrd_ok.stdout), (0, ""))
+
+
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time

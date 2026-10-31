@@ -483,26 +483,59 @@ items (cannot-evaluate), never blocked and never actionable.
 PreToolUse Bash): a non-empty list of ABSOLUTE directories the orchestrator receives worker
 deliverables in, the draft staging directories and the hand-back directory. Prefer the narrowest
 hand-back path the harness can name over a whole shared tree; an entry may not be the filesystem root
-or hold the session repository root. With the key declared, a Bash call that runs or imports a file IN
-PLACE from one of those directories is denied: a python/pypy script operand; an operand handed to
-`python -m` (the read-only printers json.tool and tokenize excepted); `-c` text naming a declared path
-outside a closed read-only hashlib/pathlib/json reader allow-list; python without `-I` or `-P` while
-the working directory is declared (a planted hashlib.py would shadow the standard library through
-sys.path[0]); a program fed from a declared file on stdin (a redirect or a pipe); a
-sh/bash/dash/zsh/ksh script operand or a `-c` body (classified recursively, two levels deep); `source`
-and the `.` builtin; direct execution of a declared path; a loader-environment assignment (PATH,
-PYTHONPATH, PYTHONSTARTUP, PYTHONHOME, PYTHONUSERBASE, BASH_ENV, ENV, LD_PRELOAD, LD_LIBRARY_PATH)
-whose value names a declared directory; and an opaque form (an unlexable construct, an unknown
-wrapper, or an indirection word such as eval or xargs) whose raw text names a declared directory
-beside an interpreter word. Each judged operand and each declared directory is compared both as
-written (normalized against the effective working directory, which follows literal cd/pushd operands)
-and through realpath, so a symlink into or out of a directory is caught either way. `bash -n` without
-`-c` (a syntax-only read), readers (cat, sed, wc, file, diff), hashing (sha256sum, a `python3 -I -c`
-hashlib reader), `git apply` and `git apply --check`, and repository tools that take a deliverable's
-path as a DATA argument stay allowed: reading and applying are governed elsewhere, and what this guard
-refuses is the in-place RUN of a worker deliverable (integ/workers-produce-inert-data: worker code
-runs only after a full reading and only in a disposable copy outside the declared directories and
-every live checkout).
+or hold the session repository root.
+
+The guard holds its property BY CONSTRUCTION rather than by listing the shell forms that run a file,
+which shell's open grammar never lets a list close. A Bash call is IN SCOPE of a declared directory
+when its raw text names one (a directory spelling at a path boundary, or any literal absolute path
+resolving under one), when a lexed operand or redirect target resolves into one (resolved against the
+effective working directory, which follows literal `cd`/`pushd`), or when the payload working
+directory itself resolves into one. Out of scope the call passes untouched. IN SCOPE the call is
+DENIED unless EVERY lexed segment is a closed-allowlist read-only form with its registered options:
+`cat`, `wc`, `head`, `tail`, `ls`, `file`, `grep`, `diff`, and the coreutils hash tools (`sha256sum`,
+`sha1sum`, `sha224sum`, `sha384sum`, `sha512sum`, `md5sum`, `b2sum`, `cksum`, `sum`); `cp` with the
+declared file only as a SOURCE (the last operand must resolve outside every declared directory, and
+`cp`'s link and target-directory spellings are off the grammar); `git apply` (with `--check`,
+`--stat`, `--numstat`, `--summary` and the quiet/verbose flags) and `git diff --no-index`; `bash -n`
+(and the other shells) with no `-c` (a syntax-only read); `python3 -I` with a reader SCRIPT that
+resolves outside every declared directory, taking the deliverable's path only as a DATA argument (no
+`-c`, no `-m`, no program on stdin); and `cd` to one literal absolute directory outside the declared
+directories (the session's exit from a declared cwd). The command word must be a BARE allowlisted name
+(a name with a slash, so a file named like a reader that sits inside a declared directory, never
+matches), and a segment carrying any assignment prefix, wrapper, builtin, reserved word, substitution,
+backtick, glob, brace, tilde, `xargs`, `find`, or any unlisted word is simply not on the allowlist and
+denies. A command the lexer cannot read (an unquoted heredoc, a here-string, a process substitution,
+an unbalanced quote) has no segments to match and denies whole while in scope. Each judged operand and
+each declared directory is compared both as written and through realpath, so a symlink into or out of
+a directory is caught either way; a write-shaped redirect must provably land outside every declared
+directory, while reads and quoted-heredoc bodies fed to an allowlisted reader pass.
+
+The guard finds its registry and `deliverable_dirs` INDEPENDENTLY of the payload working directory:
+it consults the project directory the hook environment names (`CLAUDE_PROJECT_DIR`, the path the
+installed hook commands are themselves launched through) unioned with the session cwd's git-resolved
+toplevel. So a working directory inside a declared directory, inside or outside a repository, cannot
+disarm the guard; sitting in a declared directory in that case refuses commands outside the
+allowlist above. Where neither anchor is present the hook is inert, as it is with no registry.
+
+Accepted costs (observed over-denies the allowlist causes). A reader the allowlist does not name
+denies on a declared path even where it only reads: `python3 -c` with a hashlib/pathlib/json snippet,
+`python -m json.tool` or `-m tokenize`, `sed`, `awk`, `xargs sha256sum`, a reader behind a wrapper
+(`timeout`, `command`, `env`), and a reader whose command word carries an option outside the tool's
+registered grammar. An unquoted heredoc or any other construct the lexer cannot read denies whole
+while in scope even where it would only print. `cp` into a declared directory denies even though `cp`
+runs nothing. The escape for each is the same: read the file with the Read tool, use an allowlisted
+reader, or run a reader script kept outside the declared directories that takes the path as a DATA
+argument under `python3 -I`.
+
+Residuals (not caught, by construction). A command that reaches a declared file WITHOUT naming it or
+its directory in the call text and from a working directory that is not itself declared: a path held
+in a shell variable assigned in an earlier call, a path built by concatenation or an expansion the
+lexer reads as opaque, or a symlink or hard link made ELSEWHERE that points into a declared directory
+while the command names only the alias outside it. Nothing in such a call's text or payload
+distinguishes it. Running an UNREAD copy outside the directories is also not caught: the rule's "full
+reading" half stays judgement-level, because no hook state could prove a full reading (Read limits and
+truncation stand in the way). A symlink swapped between the check and the run is not prevented; one
+already in place is caught in either direction by the lexical-plus-realpath union.
 
 The key is validated fail-closed with a limited blast radius: an entry that is not a non-empty
 absolute NUL-free string, normalizes to the filesystem root, or holds the session repository root
@@ -1738,4 +1771,4 @@ The escape sentinel opens the clean-ALLOW channel only as an operator-created ar
 
 The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops to guard-events, where a failed append is warned about in the hook's output, so a drop is never silent. A checkpoint or init marker that cannot be written is named in the hook's output (the deny reason and banner of a scheduling call, the block reason of a denied Stop or TeammateIdle, or the banner or note of an allow) whether or not its guard-events row is written; an unwritten checkpoint does not record that window's items, so one that then vanishes or is demoted before a later checkpoint write succeeds is not held as such unless an earlier checkpoint records it, and an unwritten init marker holds that window as cannot-evaluate. The checkpoint also records each open id's eligibility (granted-and-open vs proposed/ungranted), so a demotion of a previously-actionable id to proposed or ungranted with no closed receipt is held (cannot-evaluate) rather than silently routed to the harmless proposed bucket; that eligibility memory lives in the same actor-writable state dir, raising the bar without being categorical. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit. Each denial and each forced exit appends its own guard-events row, and each forced exit also a row in an append-only forced-exit log, whose rows the next resume normally raises once (at least once if recording that they were raised fails). Neither record is guaranteed: a failed append leaves no row, and the hook then adds a short recording-failure warning to its output (the block reason of a denied Stop or TeammateIdle, which has no banner; the deny reason and the banner of a denied scheduling call; the banner of a forced exit) while the decision stands, so the loss is reported, not silent. The guard-events row of an ALLOW released by the operator escape is the only record that the override was used, so a failed append there adds the same kind of warning (in the banner of a Stop or TeammateIdle, in the note of a scheduling call) while the ALLOW stands. The row of a clean ALLOW with no escape is the over-fire metric only and is best effort: a failed append there is not reported. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.
 
-The deliverable-exec guard is path-textual: it compares the literal operands and raw text of one Bash call (lexically against the effective working directory, and through realpath) with the declared `deliverable_dirs`. It does not catch a deliverable copied, moved or hard-linked outside the declared directories before running (running an unread COPY is the rule's judgement-level half: no hook state could prove a full reading), a path built at run time (a shell variable set in an earlier call, concatenation, an expansion), interpreters outside its judged families (node, perl, ruby, php, make, npm, a direct pip install: follow-up candidates), a repository tool that itself imports or executes a path it receives as a data argument, any non-Bash tool (the write-scope guard covers the structured write tools), or a symlink swapped between the check and the run. The registry that declares the directories is writable by the same uid through Bash, the existing registry-integrity residual, and the guard is entirely inert wherever the key is not declared.
+The deliverable-exec guard is path-textual and allowlist-by-construction: a Bash call in scope of a declared `deliverable_dirs` directory (its raw text names one, a lexed operand or redirect target resolves into one, or its working directory is inside one) is denied unless every lexed segment is a closed read-only allowlist form with registered options (the readers, the hash tools, `cp` with the declared file only as a source, `git apply`, `git diff --no-index`, `bash -n`, `python3 -I` with a reader script outside the directories taking the path as data, and `cd` out), so a compound command, backtick, substitution, wrapper, builtin, assignment prefix, `xargs`, `find`, or any unlisted word in scope denies, and a command the lexer cannot read denies whole while in scope. It arms independently of the payload working directory (the project directory the hook environment names, unioned with the session cwd's git toplevel), so a cwd inside a declared directory cannot disarm it. It does not catch a command that reaches a declared file WITHOUT naming it or its directory and from an undeclared working directory (a path in a shell variable set in an earlier call, concatenation, an opaque expansion, or an alias symlink or hard link made elsewhere), running an unread COPY outside the directories (the rule's judgement-level half: no hook state could prove a full reading), any non-Bash tool (the write-scope guard covers the structured write tools), or a symlink swapped between the check and the run. It accepts the over-denies this inversion causes (a reader outside the allowlist, a reader behind a wrapper or with an unregistered option, an unlexable construct, and `cp` into a declared directory, each denied in scope even where nothing runs; the escape is an allowlisted reader or a reader script outside the directories taking the path as data). The registry that declares the directories is writable by the same uid through Bash, the existing registry-integrity residual, and the guard is entirely inert wherever the key is not declared.

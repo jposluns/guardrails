@@ -23720,55 +23720,92 @@ def orch_untracked_wait_loop(data):
 # (integ/workers-produce-inert-data): worker code runs only after a full reading and only in a disposable
 # copy, so the guard refuses the in-place run whether or not the file was read; no read-tracking state
 # could prove a FULL reading (Read limits and truncation stand in the way), and the "full reading" half
-# stays judgement-level. Reading, hashing, `git apply` and repository tools taking the path as DATA stay
-# allowed by construction. The matching is path-textual (the manifest residue discloses the copy, alias
-# and runtime-built-path residuals); each judged operand and each declared directory is compared both as
-# written (lexically normalized against the effective working directory) and through os.path.realpath,
-# and the union deny-biases the result, so a symlink into or out of a directory is caught either way.
+# stays judgement-level. The property holds BY CONSTRUCTION, not by enumerating the forms that run a
+# file (shell's grammar is open; no such list closes): a command in SCOPE of a declared directory (its
+# raw text names one, a lexed token resolves into one, or its effective working directory is inside one)
+# is DENIED unless EVERY lexed segment matches a closed allowlist of read-only forms with registered
+# options (_NRD_READ_FORMS and the shaped forms in _nrd_segment_allowed); a compound command, backtick,
+# substitution, wrapper, builtin, assignment prefix, xargs, find or any other unlisted word in scope
+# denies, and a command the lexer cannot read denies whole while in scope. The registry is found
+# independently of the payload working directory (_nrd_roots: the project directory the hook's own
+# environment names, unioned with the session cwd's git toplevel), so sitting inside a declared
+# directory cannot disarm the guard. The matching is path-textual (the manifest residue discloses the
+# copy, alias and runtime-built-path residuals); each judged operand and each declared directory is
+# compared both as written (lexically normalized against the effective working directory) and through
+# os.path.realpath, and the union deny-biases the result, so a symlink into or out of a directory is
+# caught either way.
 _NRD_RULE = "wowo01"
 _NRD_KEY = "deliverable_dirs"
-# The interpreter families this guard judges. node, perl, ruby, php, make and the installers are a
-# disclosed residual (candidates for a follow-up control), never silently cleared as safe: they are
-# simply outside this guard's families, here and in the raw-text fallback below.
+# The hook environment's project-directory anchor: the installed hook commands are themselves launched
+# through this path ("$CLAUDE_PROJECT_DIR"/... in .claude/settings.json), so it is present wherever the
+# hooks are and does not follow a cd that moved the session shell.
+_NRD_PROJECT_ENV = "CLAUDE_PROJECT_DIR"
+# The python/pypy family words and the shell words, used by the allowlist's two shaped forms
+# (python3 -I with a reader script outside the declared directories; bash -n) and by the
+# malformed-configuration candidate shape below.
 _NRD_PY_WORD_RE = re.compile(r"(?:python(?:[0-9]+(?:\.[0-9]+)?)?|pypy[0-9.]*)\Z")
 _NRD_SHELL_WORDS = frozenset(("sh", "bash", "dash", "zsh", "ksh"))
-# CPython short options that consume a separated value token; -c and -m end option parsing and are read
-# apart in _nrd_py_parse.
-_NRD_PY_VALUE_OPTS = "WX"
-# `python -m MODULE` modules that only read and print their operands; every other module given a
-# declared-directory operand is refused (pytest imports it, runpy and unittest execute it, pip installs).
-_NRD_M_READONLY = frozenset(("json.tool", "tokenize"))
 # Environment names whose assignment makes a later interpreter or shell load code from the named
-# directory: the loader search paths, the startup files, and the dynamic linker's preload surface.
+# directory; used only by the malformed-configuration candidate shape (in scope, EVERY assignment
+# prefix denies: it is not an allowlisted form).
 _NRD_ENV_NAMES = frozenset(("PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PYTHONUSERBASE",
                             "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH"))
-# Command words that hand their operands to another program in ways a linear token scan cannot follow;
-# with a declared directory AND an interpreter word in the raw text such a segment is refused
-# (_nrd_opaque_hit), otherwise it is left to the sibling guards on the same event.
+# Indirection words of the malformed-configuration candidate shape (kept for that posture alone; in
+# scope the allowlist already denies them as unlisted words).
 _NRD_OPAQUE_WORDS = frozenset(("eval", "xargs", "nohup", "sudo", "su", "watch", "parallel"))
-# find's own exec spellings, the one indirection find adds over its operand list.
-_NRD_FIND_EXEC = frozenset(("-exec", "-execdir", "-ok", "-okdir"))
-# An interpreter-ish word anywhere in raw text, quotes and heredoc bodies included, for the opaque
-# fallback and the malformed-key scope: a python/pypy/shell word, source, eval, exec, or the dot builtin.
+# An interpreter-ish word anywhere in raw text, quotes and heredoc bodies included, for the
+# malformed-key scope: a python/pypy/shell word, source, eval, exec, or the dot builtin.
 _NRD_RAW_INTERP_RE = re.compile(
     r"(?:^|[\s;|&(){}`<>'\"=])(?:python[0-9.]*|pypy[0-9.]*|sh|bash|dash|zsh|ksh|source|eval|exec|\.)"
     r"(?=$|[\s;|&(){}`<>'\"])")
-# The read-only `python -c` reader allowance (the row's hash-and-print escape): module roots it may
-# import, names and attributes it may call, and names whose mere appearance refuses it. ast.parse reads
-# the text without running it, and anything outside the closed lists below refuses; a reader this
-# allowance cannot read (one importing re, say) runs from a script kept outside the directories instead.
-_NRD_C_IMPORTS = frozenset(("hashlib", "pathlib", "json", "sys"))
-_NRD_C_NAME_CALLS = frozenset(("open", "print", "len", "sorted", "str", "int", "range", "enumerate",
-                               "Path"))
-_NRD_C_ATTR_CALLS = frozenset(("read", "read_bytes", "read_text", "update", "hexdigest", "digest",
-                               "decode", "splitlines", "load", "loads"))
-_NRD_C_DENY_NAMES = frozenset(("exec", "eval", "compile", "__import__", "importlib", "runpy",
-                               "subprocess", "os", "pickle", "getattr", "setattr", "delattr", "globals",
-                               "locals", "vars", "breakpoint", "input"))
-_NRD_C_NODE_TYPES = (ast.Module, ast.Expr, ast.Assign, ast.Import, ast.ImportFrom, ast.alias, ast.Call,
-                     ast.Attribute, ast.Name, ast.Constant, ast.Tuple, ast.List, ast.Subscript, ast.Slice,
-                     ast.keyword, ast.Load, ast.Store, ast.For, ast.comprehension, ast.ListComp,
-                     ast.GeneratorExp, ast.JoinedStr, ast.FormattedValue, ast.BinOp, ast.Add, ast.Mod)
+# The coreutils hash tools, one allowlist row shared below.
+_NRD_HASH_WORDS = frozenset(("sha256sum", "sha1sum", "sha224sum", "sha384sum", "sha512sum", "md5sum",
+                             "b2sum", "cksum", "sum"))
+# The closed read-only allowlist's plain readers, each with its registered option grammar:
+# (clusterable single-letter flags, single-letter options taking a value (attached or the next token),
+# exact long options, long options taking an =value). An option outside its tool's registered grammar
+# is NOT read as harmless: the segment simply fails the allowlist and the command denies while in
+# scope. None of these tools, within these options, writes a file or hands an operand to another
+# program; cp, git, the shells, the python family and cd take shaped rules in _nrd_segment_allowed
+# instead (operand positions matter there).
+_NRD_READ_FORMS = {
+    "cat": ("AbeEnstTuv", "", ("--show-all", "--number", "--number-nonblank", "--squeeze-blank",
+                               "--show-ends", "--show-tabs", "--show-nonprinting"), ()),
+    "wc": ("clmwL", "", ("--bytes", "--chars", "--lines", "--words", "--max-line-length"), ()),
+    "head": ("qvz", "nc", ("--quiet", "--verbose", "--zero-terminated"), ("--lines", "--bytes")),
+    "tail": ("qvz", "nc", ("--quiet", "--verbose", "--zero-terminated"), ("--lines", "--bytes")),
+    "ls": ("1AadFgGhilnopRrSstuUX", "", ("--all", "--almost-all", "--recursive", "--human-readable",
+                                         "--inode", "--size", "--directory", "--reverse"), ()),
+    "file": ("bhikLNz", "", ("--brief", "--mime", "--mime-type", "--mime-encoding", "--dereference"),
+             ()),
+    "diff": ("abBcdiNpqrstuwy", "U", ("--brief", "--recursive", "--report-identical-files",
+                                      "--ignore-all-space", "--ignore-space-change", "--text",
+                                      "--new-file", "--unified"), ("--unified",)),
+    "grep": ("abcEFGHhiIlLnoPqRrsvwxZ", "ABCefm",
+             ("--extended-regexp", "--fixed-strings", "--ignore-case", "--line-number", "--count",
+              "--files-with-matches", "--files-without-match", "--only-matching", "--recursive",
+              "--with-filename", "--no-filename", "--invert-match", "--word-regexp", "--quiet",
+              "--no-messages", "--binary-files=text", "--binary-files=without-match"),
+             ("--include", "--exclude", "--exclude-dir", "--max-count", "--regexp", "--file",
+              "--after-context", "--before-context", "--context")),
+}
+_NRD_READ_FORMS.update({w: ("bctwz", "", ("--binary", "--check", "--tag", "--text", "--quiet",
+                                          "--status", "--strict", "--warn", "--ignore-missing",
+                                          "--zero"), ())
+                        for w in _NRD_HASH_WORDS})
+# cp's registered options (shaped rule: the LAST operand must provably resolve outside every declared
+# directory, so the declared file is only ever a SOURCE). -l, -s, -t/--target-directory and every
+# other spelling are deliberately outside the grammar: a link made by cp would alias a deliverable
+# past later textual matching, and a -t form moves the destination out of the last-operand position.
+_NRD_CP_FORM = ("ainpRrv", "", ("--archive", "--no-clobber", "--recursive", "--verbose"), ())
+# git's two allowlisted shapes: `git apply` (the sanctioned apply step, check and stat readings
+# included) and `git diff --no-index`. Any other git word, global option or subcommand in scope
+# denies (git -C, -c, --exec-path and friends re-point what runs).
+_NRD_GIT_APPLY_OPTS = frozenset(("--check", "--stat", "--numstat", "--summary", "--verbose", "-v",
+                                 "--quiet", "-q"))
+_NRD_GIT_DIFF_OPTS = frozenset(("--no-index", "--stat", "--numstat", "--shortstat", "--summary",
+                                "--name-only", "--name-status", "--patch", "-p", "-u", "--quiet",
+                                "--exit-code", "--no-color"))
 
 
 def _nrd_forms(path, eff_cwd):
@@ -23829,348 +23866,252 @@ def _nrd_match(path, eff_cwd, dirs):
 
 
 def _nrd_raw_names(text, dirs):
-    """True when the raw text names a declared directory: a directory's normalized or resolved spelling
-    as a substring (quoted operands with spaces included), or any literal absolute path in the text
-    (_RWH_RAW_ABS_PATH_RE, a leading slash run collapsed) resolving under one."""
+    """True when the raw text names a declared directory: a directory's normalized or resolved
+    spelling at a path boundary (followed by '/', by any character that does not continue a file
+    name, or by the end of the text, so quoted operands with spaces are included while a
+    shared-prefix SIBLING such as <dir>-x or <dir>x never matches), or any literal absolute path in
+    the text (_RWH_RAW_ABS_PATH_RE, a leading slash run collapsed) resolving under one."""
     for d in dirs:
-        if d in text:
-            return True
+        start = 0
+        while True:
+            idx = text.find(d, start)
+            if idx < 0:
+                break
+            nxt = text[idx + len(d):idx + len(d) + 1]
+            if not nxt or nxt == "/" or not (nxt.isalnum() or nxt in "._+-~%@"):
+                return True
+            start = idx + 1
     for m in _RWH_RAW_ABS_PATH_RE.finditer(text):
         if _nrd_match("/" + m.group(0).lstrip("/"), None, dirs) is True:
             return True
     return False
 
 
-def _nrd_env_hit(argv, eff_cwd, dirs):
-    """The first loader-environment assignment whose value names a declared directory: a leading
-    VAR=value prefix word, env's assignment arguments, or export's operands; None otherwise. A
-    colon-joined value is judged one component at a time, so PATH=<dir>:/usr/bin is caught."""
-    tokens = []
+def _nrd_roots(data):
+    """The ordered root candidates this guard consults for its registry, independent of any cd that
+    moved the session shell: the project directory the hook's own environment names (_NRD_PROJECT_ENV;
+    the installed hook commands are launched through that very path, so it is present wherever the
+    hooks are) first, then the session cwd's git-resolved toplevel (_orch_root, the sibling
+    orchestration guards' root). A payload working directory inside a declared directory, inside or
+    outside a repository, therefore cannot disarm the guard while the hook environment still names the
+    project; a bare handler call with neither anchor set finds no root and stays inert (disclosed)."""
+    roots = []
+    env_root = os.environ.get(_NRD_PROJECT_ENV)
+    if isinstance(env_root, str) and env_root and "\x00" not in env_root and os.path.isabs(env_root):
+        roots.append(os.path.normpath(env_root))
+    git_root = _orch_root(data)
+    if isinstance(git_root, str) and git_root:
+        git_root = os.path.normpath(git_root)
+        if git_root not in roots:
+            roots.append(git_root)
+    return roots
+
+
+def _nrd_options_ok(tokens, spec):
+    """Validate EVERY option-shaped token of one allowlisted plain reader against its registered
+    grammar (spec: clusterable flags, value-taking letters, exact long options, =value long options):
+    (True, operands) when every such token fits, (False, None) otherwise. Tokens after a literal '--'
+    are operands; a lone '-' is an operand (stdin). Option-shaped tokens are judged WHEREVER they
+    stand (GNU tools permute options past operands), so an unregistered option can never ride in an
+    operand position."""
+    operands = []
     i = 0
-    n = len(argv)
-    while i < n and _ENV_ASSIGN_RE.match(argv[i]):
-        tokens.append(argv[i])
-        i += 1
-    word = argv[i].rsplit("/", 1)[-1] if i < n else ""
-    if word in ("env", "export"):
-        for tok in argv[i + 1:]:
-            if _ENV_ASSIGN_RE.match(tok):
-                tokens.append(tok)
-            elif word == "env" and tok.startswith("-"):
-                continue
-            else:
-                break
-    for tok in tokens:
-        name, _sep, value = tok.partition("=")
-        if name.endswith("+"):
-            name = name[:-1]
-        if name not in _NRD_ENV_NAMES:
+    n = len(tokens)
+    seen_ddash = False
+    while i < n:
+        tok = tokens[i]
+        if seen_ddash or tok == "-" or not tok.startswith("-"):
+            operands.append(tok)
+            i += 1
             continue
-        for part in value.split(":"):
-            if part and _nrd_match(part, eff_cwd, dirs) is True:
-                return tok
-    return None
+        if tok == "--":
+            seen_ddash = True
+            i += 1
+            continue
+        if tok.startswith("--"):
+            name, sep, _value = tok.partition("=")
+            if (sep and name in spec[3]) or (not sep and tok in spec[2]):
+                i += 1
+                continue
+            return (False, None)
+        j = 1
+        need_value = False
+        while j < len(tok):
+            ch = tok[j]
+            if ch in spec[0]:
+                j += 1
+                continue
+            if ch in spec[1]:
+                need_value = not tok[j + 1:]
+                j = len(tok)
+                continue
+            return (False, None)
+        i += 1
+        if need_value:
+            if i >= n:
+                return (False, None)
+            i += 1
+    return (True, operands)
 
 
-def _nrd_py_parse(args):
-    """The CPython invocation shape of the tokens after a python-family word: (kind, value, rest,
-    isolated), kind one of 'script' (value the script operand), 'c' (value the -c text), 'm' (value the
-    module), 'stdin' (an explicit '-' program) or 'none' (no program operand: stdin or the REPL), rest
-    the operands after the program, and isolated True when -I or -P appears (either suppresses the
-    sys.path[0] entry). Attached option values (-ccmd, -mmod, -Wall) are read from their own token."""
+def _nrd_py_reader_ok(args, eff_cwd, dirs):
+    """True when the tokens after a python-family word are the allowlisted reader shape: -I present
+    (only -B and -E may stand beside it), then a script operand that PROVABLY resolves outside every
+    declared directory (an unresolvable or declared script fails), then operands taken only as data.
+    No -c, -m, '-' or bare interpreter passes: a program on stdin or in argument text is not a reader
+    script kept outside the directories."""
     isolated = False
     i = 0
     n = len(args)
     while i < n:
         tok = args[i]
-        if tok == "-":
-            return ("stdin", None, args[i + 1:], isolated)
-        if tok == "--check-hash-based-pycs":
-            i += 2
-            continue
-        if tok.startswith("--"):
+        if tok.startswith("-") and len(tok) > 1 and all(ch in "IBE" for ch in tok[1:]):
+            isolated = isolated or "I" in tok
             i += 1
             continue
-        if tok.startswith("-") and len(tok) > 1:
-            j = 1
-            skip_value = False
-            while j < len(tok):
-                ch = tok[j]
-                if ch in "IP":
-                    isolated = True
-                elif ch in "cm":
-                    attached = tok[j + 1:]
-                    value = attached or (args[i + 1] if i + 1 < n else None)
-                    rest = args[i + (1 if attached else 2):]
-                    return ("c" if ch == "c" else "m", value, rest, isolated)
-                elif ch in _NRD_PY_VALUE_OPTS:
-                    skip_value = not tok[j + 1:]
-                    break
-                j += 1
-            i += 2 if skip_value else 1
-            continue
-        return ("script", tok, args[i + 1:], isolated)
-    return ("none", None, [], isolated)
-
-
-def _nrd_open_readonly(call):
-    """True when an ast open(...) call provably reads only: at most path and mode positionally, only
-    mode/encoding/errors/newline/buffering keywords, and any given mode a string constant carrying none
-    of w, a, x or +."""
-    if len(call.args) > 2:
-        return False
-    mode = call.args[1] if len(call.args) > 1 else None
-    for kw in call.keywords:
-        if kw.arg == "mode":
-            mode = kw.value
-        elif kw.arg not in ("encoding", "errors", "newline", "buffering"):
-            return False
-    if mode is None:
-        return True
-    return (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
-            and not set(mode.value) & set("wax+"))
-
-
-def _nrd_c_reader_ok(text):
-    """True when -c TEXT is a reader the hash-and-print allowance accepts: it parses (ast.parse never
-    runs it), every node type is on the closed list, imports stay within hashlib/pathlib/json/sys (and
-    never touch sys.path or sys.modules, where an import could be redirected), every call is an
-    allow-listed name or attribute (hashlib.* and json.* attributes pass whole), no dunder attribute
-    appears, and every open() is read-only. Anything else, a SyntaxError included, refuses."""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
-        return False
-    for node in ast.walk(tree):
-        if not isinstance(node, _NRD_C_NODE_TYPES):
-            return False
-        if isinstance(node, ast.ImportFrom):
-            if node.level or not isinstance(node.module, str) \
-                    or node.module.partition(".")[0] not in _NRD_C_IMPORTS:
-                return False
-        elif isinstance(node, ast.Import):
-            if any(alias.name.partition(".")[0] not in _NRD_C_IMPORTS for alias in node.names):
-                return False
-        elif isinstance(node, ast.Name):
-            if node.id in _NRD_C_DENY_NAMES:
-                return False
-        elif isinstance(node, ast.Attribute):
-            if node.attr.startswith("__"):
-                return False
-            if isinstance(node.value, ast.Name) and node.value.id == "sys" \
-                    and node.attr in ("path", "modules"):
-                return False
-        elif isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name):
-                if func.id not in _NRD_C_NAME_CALLS:
-                    return False
-                if func.id == "open" and not _nrd_open_readonly(node):
-                    return False
-            elif isinstance(func, ast.Attribute):
-                if func.attr not in _NRD_C_ATTR_CALLS and not (
-                        isinstance(func.value, ast.Name) and func.value.id in ("hashlib", "json")):
-                    return False
-            else:
-                return False
-    return True
-
-
-def _nrd_c_names_match(text, eff_cwd, dirs):
-    """True when -c TEXT names a declared-directory path: the raw-text test first (a literal absolute
-    path or a directory spelling, cheap), then each string constant the parse shows resolved against the
-    effective working directory, so a relative constant reaching a declared directory counts too. A text
-    that does not parse is judged by the raw-text test alone (where that names a directory the caller's
-    reader test then refuses on the SyntaxError)."""
-    if _nrd_raw_names(text, dirs):
-        return True
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
-        return False
-    return any(isinstance(node, ast.Constant) and isinstance(node.value, str)
-               and _nrd_match(node.value, eff_cwd, dirs) is True for node in ast.walk(tree))
-
-
-def _nrd_stdin_hit(seg, prev, eff_cwd, dirs):
-    """The stdin source of a program-on-stdin segment when it is a declared-directory file: a stdin
-    redirect whose target matches, or a pipe from the stage before whose argv names one; None otherwise.
-    A data pipe into a reader script never reaches this (the callers judge only segments with no script
-    operand)."""
-    for r in seg.redirects:
-        if r.op in ("<", "<>") and r.src_fd == 0:
-            hit = _nrd_match(r.target, eff_cwd, dirs)
-            if hit is True or (hit is None and _nrd_raw_names(seg.raw, dirs)):
-                return r.target
-    if prev is not None and prev.sep_after in ("|", "|&"):
-        for tok in prev.argv:
-            if _nrd_match(tok, eff_cwd, dirs) is True:
-                return tok
-    return None
-
-
-def _nrd_python_hit(args, seg, prev, eff_cwd, dirs):
-    """Judge one python-family segment (args: the tokens after the interpreter word): (subject, why) to
-    refuse, None to pass. A script operand in a declared directory refuses; -m hands its operands to the
-    module, so a declared-directory operand refuses unless the module is a read-only printer; -c text
-    naming a declared path passes only the read-only reader allowance; without -I or -P a non-script run
-    whose working directory is declared refuses whatever the text (a planted hashlib.py shadows the
-    standard library through sys.path[0]); and a program taken from declared stdin refuses."""
-    kind, value, rest, isolated = _nrd_py_parse(args)
-    if kind == "script":
-        hit = _nrd_match(value, eff_cwd, dirs)
-        if hit is True or (hit is None and _nrd_raw_names(seg.raw, dirs)):
-            return (value, "runs a Python script in place from a declared deliverable directory")
-    elif kind == "m" and isinstance(value, str) and value not in _NRD_M_READONLY:
-        for op in rest:
-            hit = _nrd_match(op, eff_cwd, dirs)
-            if hit is True or (hit is None and _nrd_raw_names(seg.raw, dirs)):
-                return (op, "hands a declared-directory path to python -m " + value)
-    elif kind == "c" and isinstance(value, str):
-        if _nrd_c_names_match(value, eff_cwd, dirs) and not _nrd_c_reader_ok(value):
-            return ("the -c text", "runs -c code over a declared deliverable directory that is not a "
-                                   "read-only hashlib/pathlib/json reader")
-    if kind in ("c", "m", "stdin", "none") and not isolated and eff_cwd is not None \
-            and _nrd_match(eff_cwd, None, dirs) is True:
-        return (eff_cwd, "runs python without -I or -P while the working directory is a declared "
-                         "deliverable directory, where a planted module (a hashlib.py, say) shadows "
-                         "the standard library through sys.path[0]; add -I")
-    if kind in ("stdin", "none"):
-        src = _nrd_stdin_hit(seg, prev, eff_cwd, dirs)
-        if src is not None:
-            return (src, "feeds a declared-directory file to python as its program on stdin")
-    return None
-
-
-def _nrd_shell_hit(args, seg, prev, eff_cwd, dirs, depth):
-    """Judge one shell-family segment: (subject, why) to refuse, None to pass. A -c body is classified
-    recursively through the same rules at depth 2 at most (deeper nesting refuses only where the body
-    names a declared directory); -n without -c is a syntax-only read and passes (the row's named
-    allowance); a script operand in a declared directory refuses; a program taken from declared stdin
-    (no operand, '-', or -s) refuses."""
-    ctext = None
-    syntax_only = False
-    script = None
-    i = 0
-    n = len(args)
-    while i < n:
-        tok = args[i]
-        if tok == "--":
-            script = args[i + 1] if i + 1 < n else None
-            break
-        if tok == "-":
-            break
-        if tok.startswith("--"):
-            i += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            body = tok[1:]
-            if "c" in body:
-                ctext = args[i + 1] if i + 1 < n else None
-                break
-            if "n" in body:
-                syntax_only = True
-            if body in ("o", "O"):
-                i += 2
-                continue
-            i += 1
-            continue
-        script = tok
         break
-    if ctext is not None:
-        if depth >= 2:
-            if _nrd_raw_names(ctext, dirs):
-                return ("the nested -c text", "nests shell -c over a declared deliverable directory "
-                                              "deeper than this guard reads")
-            return None
-        return _nrd_scan(ctext, eff_cwd, dirs, depth + 1)
-    if syntax_only:
+    if not isolated or i >= n:
+        return False
+    script = args[i]
+    if not script or script.startswith("-"):
+        return False
+    return _nrd_match(script, eff_cwd, dirs) is False
+
+
+def _nrd_git_allowed(args):
+    """True for the two allowlisted git shapes: `git apply` with registered options only (the
+    sanctioned apply step; --check and the stat readings included) and `git diff --no-index` with
+    registered options only. A global option before the subcommand, any other subcommand, and any
+    unregistered option fail; a lone '-' operand (a patch on stdin) is data."""
+    if not args:
+        return False
+    sub = args[0]
+    if sub == "apply":
+        return all(tok in _NRD_GIT_APPLY_OPTS
+                   for tok in args[1:] if tok.startswith("-") and tok != "-")
+    if sub == "diff":
+        rest = args[1:]
+        return "--no-index" in rest and all(tok in _NRD_GIT_DIFF_OPTS
+                                            for tok in rest if tok.startswith("-") and tok != "-")
+    return False
+
+
+def _nrd_segment_allowed(seg, eff_cwd, dirs):
+    """Judge one lexed segment against the closed read-only allowlist: (True, next effective working
+    directory) when it matches a listed form, (False, eff_cwd) otherwise. BY CONSTRUCTION, not by
+    exclusion: a segment carrying any unquoted expansion, substitution, glob, brace or tilde fails
+    (opaque to this reading); a write-shaped redirect must PROVABLY land outside every declared
+    directory (reads, quoted heredocs and fd duplications pass: feeding a declared file TO a listed
+    reader is the point); the command word must be a BARE listed name (no slash, so a file named like
+    a reader inside a declared directory can never match; no assignment prefix, wrapper, builtin or
+    reserved word, which are simply not listed); and the per-tool shape must hold. The one segment
+    that moves the effective working directory is the listed cd: exactly one literal absolute operand
+    resolving outside every declared directory (the session's exit from a declared cwd; entering one
+    with cd is not listed)."""
+    if seg.opaque_shell or any(seg.argv_opaque):
+        return (False, eff_cwd)
+    for r in seg.redirects:
+        if r.target_class == "opaque":
+            return (False, eff_cwd)
+        if r.op == "<" or r.op.startswith("<<"):
+            continue
+        if r.target_class == "descriptor":
+            continue
+        if _nrd_match(r.target, eff_cwd, dirs) is not False:
+            return (False, eff_cwd)
+    argv = seg.argv
+    if not argv:
+        return (not seg.redirects, eff_cwd)
+    head = argv[0]
+    if "/" in head or not head or _ENV_ASSIGN_RE.match(head):
+        return (False, eff_cwd)
+    if head == "cd":
+        if len(argv) == 2 and "\x00" not in argv[1] and os.path.isabs(argv[1]) \
+                and _nrd_match(argv[1], None, dirs) is False:
+            return (True, os.path.normpath(argv[1]))
+        return (False, eff_cwd)
+    if head in _NRD_READ_FORMS:
+        ok, _operands = _nrd_options_ok(argv[1:], _NRD_READ_FORMS[head])
+        return (ok, eff_cwd)
+    if head == "cp":
+        ok, operands = _nrd_options_ok(argv[1:], _NRD_CP_FORM)
+        if ok and len(operands) >= 2 and _nrd_match(operands[-1], eff_cwd, dirs) is False:
+            return (True, eff_cwd)
+        return (False, eff_cwd)
+    if head == "git":
+        return (_nrd_git_allowed(argv[1:]), eff_cwd)
+    if head in _NRD_SHELL_WORDS:
+        rest = argv[1:]
+        if rest and rest[0] == "-n" \
+                and all(tok == "--" or not tok.startswith("-") for tok in rest[1:]):
+            return (True, eff_cwd)
+        return (False, eff_cwd)
+    if _NRD_PY_WORD_RE.match(head):
+        return (_nrd_py_reader_ok(argv[1:], eff_cwd, dirs), eff_cwd)
+    return (False, eff_cwd)
+
+
+def _nrd_next_cwd(seg, eff_cwd):
+    """The effective working directory after one segment, for the SCOPE walk only: a literal cd or
+    pushd destination moves it (absolute, or resolved against the current one), a non-literal one
+    makes it unknown (None), and every other segment leaves it unchanged. The allowlist pass tracks
+    its own cwd through the one listed cd shape; this looser reading only widens what the scope walk
+    can resolve, never what it allows."""
+    argv = seg.argv
+    if not argv:
+        return eff_cwd
+    if argv[0].rsplit("/", 1)[-1] not in ("cd", "pushd"):
+        return eff_cwd
+    dest = _rwh_cd_dest(argv)
+    if dest is None:
         return None
-    if script is not None and script != "-":
-        hit = _nrd_match(script, eff_cwd, dirs)
-        if hit is True or (hit is None and _nrd_raw_names(seg.raw, dirs)):
-            return (script, "runs a shell script in place from a declared deliverable directory")
-        return None
-    src = _nrd_stdin_hit(seg, prev, eff_cwd, dirs)
-    if src is not None:
-        return (src, "feeds a declared-directory file to a shell as its program on stdin")
-    return None
+    if os.path.isabs(dest):
+        return os.path.normpath(dest)
+    return os.path.normpath(os.path.join(eff_cwd, dest)) if eff_cwd is not None else None
 
 
-def _nrd_opaque_hit(text, dirs, what):
-    """The opaque fallback: a command or segment this guard cannot read (an unlexable construct, an
-    unknown wrapper, or an indirection word such as eval or xargs) refuses only when its raw text BOTH
-    names a declared directory AND holds an interpreter-ish word; everything else is left to the sibling
-    guards on the same event, so plain heredoc readers and xargs sha256sum fan-outs stay allowed."""
-    if _nrd_raw_names(text, dirs) and _NRD_RAW_INTERP_RE.search(text):
-        return (what, "cannot be read by this guard while it names a declared deliverable directory "
-                      "alongside an interpreter word")
-    return None
-
-
-def _nrd_segment_hit(seg, prev, eff_cwd, dirs, depth):
-    """Judge one lexed segment: ((subject, why) or None, next effective working directory). The order
-    matters: a loader-environment assignment refuses before any command-word reading; an unpeelable
-    wrapper takes the opaque fallback; exec is peeled (it replaces the shell with the command it names);
-    a literal cd or pushd only moves the effective working directory, a non-literal one (and a passing
-    source, which can do anything to shell state) makes it unknown, after which a relative operand in a
-    judged position falls back to the raw-text test."""
-    env_tok = _nrd_env_hit(seg.argv, eff_cwd, dirs)
-    if env_tok is not None:
-        return ((env_tok, "points a loader environment variable at a declared deliverable directory"),
-                eff_cwd)
-    eff = _gate_peel(seg.argv)
-    if eff is None:
-        return (_nrd_opaque_hit(seg.raw, dirs, "this command segment"), eff_cwd)
-    if eff and eff[0].rsplit("/", 1)[-1] == "exec":
-        eff = eff[1:]
-    if not eff:
-        return (None, eff_cwd)
-    head = eff[0]
-    word = head.rsplit("/", 1)[-1]
-    if word in ("cd", "pushd"):
-        dest = _rwh_cd_dest(eff)
-        if dest is None:
-            return (None, None)
-        if os.path.isabs(dest):
-            return (None, os.path.normpath(dest))
-        return (None, os.path.normpath(os.path.join(eff_cwd, dest)) if eff_cwd is not None else None)
-    if head == "." or word == "source":
-        operand = next((tok for tok in eff[1:] if not tok.startswith("-")), None)
-        if operand is not None:
-            hit = _nrd_match(operand, eff_cwd, dirs)
-            if hit is True or (hit is None and _nrd_raw_names(seg.raw, dirs)):
-                return ((operand, "sources a declared-directory file into the running shell"), eff_cwd)
-        return (None, None)
-    if _NRD_PY_WORD_RE.match(word):
-        return (_nrd_python_hit(eff[1:], seg, prev, eff_cwd, dirs), eff_cwd)
-    if word in _NRD_SHELL_WORDS:
-        return (_nrd_shell_hit(eff[1:], seg, prev, eff_cwd, dirs, depth), eff_cwd)
-    if "/" in head:
-        hit = _nrd_match(head, eff_cwd, dirs)
-        if hit is True or (hit is None and _nrd_raw_names(seg.raw, dirs)):
-            return ((head, "executes a declared-directory file directly"), eff_cwd)
-        return (None, eff_cwd)
-    if word in _NRD_OPAQUE_WORDS or (word == "find" and any(t in _NRD_FIND_EXEC for t in eff[1:])):
-        return (_nrd_opaque_hit(seg.raw, dirs, "this command segment"), eff_cwd)
-    return (None, eff_cwd)
-
-
-def _nrd_scan(command, eff_cwd, dirs, depth):
-    """Judge one command string against the declared directories: (subject, why) to refuse, None to
-    pass. The effective working directory starts at the payload cwd and follows literal cd/pushd
-    operands; an unlexable command takes the opaque fallback over its whole raw text."""
+def _nrd_scope_scan(command, cwd, dirs):
+    """The allowlist-by-construction judgement of one Bash command against the declared directories:
+    (subject, why) to refuse, None to pass. SCOPE first: the command is in scope when its raw text
+    names a declared directory (_nrd_raw_names: a directory spelling, or any literal absolute path
+    resolving under one), when any lexed argv token or redirect target resolves into one (relative
+    tokens resolved against the effective working directory, which follows literal cd/pushd), or when
+    the payload working directory itself resolves into one. Out of scope the command passes untouched.
+    IN SCOPE the command passes only when EVERY lexed segment matches the closed read-only allowlist
+    (_nrd_segment_allowed); a command the lexer cannot read (an unquoted heredoc, a here-string, a
+    process substitution, an unbalanced quote) has no segments to match and refuses whole. The
+    residual is a command that reaches a declared file WITHOUT naming it or its directory and from an
+    undeclared working directory (a variable assigned in an earlier call, an alias file made
+    elsewhere): nothing in such a call's text or payload distinguishes it (disclosed in the manifest
+    residue and ORCHESTRATION.md)."""
+    eff_cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd else None
+    scope = (eff_cwd is not None and _nrd_match(eff_cwd, None, dirs) is True) \
+        or _nrd_raw_names(command, dirs)
     try:
         segments = _lex_command(command)
     except ValueError:
-        return _nrd_opaque_hit(command, dirs, "this command")
-    prev = None
+        segments = None
+    if segments is not None and not scope:
+        walk_cwd = eff_cwd
+        for seg in segments:
+            if any(_nrd_match(tok, walk_cwd, dirs) is True for tok in seg.argv) \
+                    or any(_nrd_match(r.target, walk_cwd, dirs) is True for r in seg.redirects):
+                scope = True
+                break
+            walk_cwd = _nrd_next_cwd(seg, walk_cwd)
+    if not scope:
+        return None
+    if segments is None:
+        return ("this command", "cannot be read by this guard's lexer, so no segment of it can be "
+                                "matched against the closed read-only allowlist")
     for seg in segments:
-        if seg.argv:
-            hit, eff_cwd = _nrd_segment_hit(seg, prev, eff_cwd, dirs, depth)
-            if hit is not None:
-                return hit
-        prev = seg
+        if not seg.argv and not seg.redirects:
+            continue
+        ok, eff_cwd = _nrd_segment_allowed(seg, eff_cwd, dirs)
+        if not ok:
+            return (seg.argv[0] if seg.argv else "a redirect with no command",
+                    "is not a closed-allowlist read-only form (or carries an option, operand shape, "
+                    "expansion or redirect outside the registered grammar)")
     return None
 
 
@@ -24214,22 +24155,27 @@ def _nrd_candidate(command):
 
 
 def _nrd_deny_text(subject, why):
-    """The deny reason and banner for one refused in-place run (strings only; the handler holds the
-    constructor return sites). The reason names the judged subject, the rule and the three exits the
-    rule leaves open."""
+    """The deny reason and banner for one refused in-scope command (strings only; the handler holds
+    the constructor return sites). The reason names the judged subject, the rule, the closed allowlist
+    and the exits the rule leaves open."""
     reason = (
-        "AIQT rule wowo01 (workers produce inert data): {} {}. A worker-delivered file under a declared "
+        "AIQT rule wowo01 (workers produce inert data): {} {}. This command is in scope of a declared "
         "deliverable directory (the registry's deliverable_dirs: the draft staging and hand-back "
-        "directories) is data until it is applied: running or importing it IN PLACE is an apply step, "
-        "not an inspection, whether or not it was read. Take ONE of these exits: (1) read the file "
-        "fully with the Read tool first; (2) to run it, copy it into a disposable copy outside every "
-        "live checkout and every declared directory and run the copy there; (3) to hash or print it, "
-        "use sha256sum, cat, git apply --check, python3 -I -c with a read-only hashlib/pathlib/json "
-        "reader, or a reader script kept outside the declared directories that takes the deliverable's "
-        "path as a DATA argument.".format(subject, why))
-    banner = ("AIQT guardrail: denied running a worker deliverable in place ({}; rule wowo01). Read it "
-              "fully, then run a disposable copy outside the declared deliverable directories."
-              .format(subject))
+        "directories): its text names one, an operand resolves into one, or its working directory is "
+        "inside one. A worker-delivered file there is data until it is applied, so in that scope ONLY "
+        "a closed allowlist of read-only forms runs, each with its registered options: cat, wc, head, "
+        "tail, ls, file, grep, diff, the coreutils hash tools, cp with the declared file only as a "
+        "source, git apply (--check/--stat/--numstat/--summary) and git diff --no-index, bash -n, "
+        "python3 -I with a reader script outside the declared directories taking the path only as "
+        "data, and cd to one literal absolute directory outside them. Take ONE of these exits: (1) "
+        "read the file fully with the Read tool first; (2) to run it, cp it into a disposable copy "
+        "outside every live checkout and every declared directory and run the copy there; (3) to hash "
+        "or print it, use the allowlisted readers above, or a reader script kept outside the declared "
+        "directories that takes the deliverable's path as a DATA argument under python3 -I.".format(
+            subject, why))
+    banner = ("AIQT guardrail: denied a non-allowlisted command over a worker deliverable ({}; rule "
+              "wowo01). Read it fully, then run a disposable copy outside the declared deliverable "
+              "directories.".format(subject))
     return reason, banner
 
 
@@ -24249,55 +24195,69 @@ def _nrd_malformed_text(detail):
 
 
 def orch_deliverable_exec_guard(data):
-    """wowo01, PreToolUse Bash: DENY running or importing a worker-delivered file IN PLACE from a
-    registry-declared deliverable directory (the deliverable_dirs key: the draft staging directories and
-    the hand-back directory, each an absolute path). Rooted like orch_untracked_wait_loop (_orch_root,
-    the session cwd's git-resolved toplevel only, no ancestor walk, never AIQT_ORCH_REQUIRE_REGISTRY)
-    and NOT lease-gated: a bounded worker running a deliverable in place is equally wrong. A payload
-    with NO tool_name is malformed, not another tool, and DENIES in every session (the shared
-    missing-tool_name contract). Fail-open (silent allow) on a present non-Bash tool, no git toplevel,
-    an absent registry, a valid registry without the key, and an empty command (it runs nothing). A BAD
-    registry or a malformed key cannot say which directories are protected, so it denies ONLY
-    interpreter-shaped candidates (_nrd_candidate), check-fails-closed-on-unreadable with a limited
-    blast radius; with a usable key a MISSING or NON-STRING command in scope denies
-    (check-fails-closed-on-unreadable), never a clean pass. The judged surface is pinned by the nrd/
-    cases of tools/selftest_orch_hooks.py: python scripts, -m operands, -c text outside the read-only
-    reader allowance, the no- -I sys.path[0] shadow, programs on stdin, shell scripts and -c bodies
-    (recursively, depth 2 at most), source and the dot builtin, direct execution, loader-environment
-    assignments, and the opaque fallback for forms the lexer or wrapper peel cannot read. Everything
-    else (cat, sed, sha256sum, wc, git apply, repository tools taking the path as data) passes
-    untouched."""
+    """wowo01, PreToolUse Bash: DENY any command in SCOPE of a registry-declared deliverable directory
+    (the deliverable_dirs key: the draft staging directories and the hand-back directory, each an
+    absolute path) unless EVERY segment matches a closed allowlist of read-only forms
+    (_nrd_scope_scan): the property holds by construction rather than by listing the forms that run a
+    file, which shell's open grammar never closes. Rooted INDEPENDENTLY of the payload working
+    directory (_nrd_roots: the project directory the hook environment names, unioned with the session
+    cwd's git toplevel; never AIQT_ORCH_REQUIRE_REGISTRY) and NOT lease-gated: a bounded worker running
+    a deliverable in place is equally wrong, and a session sitting INSIDE a declared directory, inside
+    or outside a repository, stays guarded. A payload with NO tool_name is malformed, not another tool,
+    and DENIES in every session (the shared missing-tool_name contract). Fail-open (silent allow) on a
+    present non-Bash tool, no root candidate at all, an absent registry at every consulted root, a
+    valid registry without the key, and an empty command (it runs nothing). A BAD registry or a
+    malformed key cannot say which directories are protected, so it denies ONLY interpreter-shaped
+    candidates (_nrd_candidate), check-fails-closed-on-unreadable with a limited blast radius (the
+    posture is unchanged from the per-form release); where another consulted root supplies usable
+    directories both postures apply, deny-biased. With a usable key a MISSING or NON-STRING command in
+    scope denies (check-fails-closed-on-unreadable), never a clean pass. The judged surface is pinned
+    by the nrd/ cases of tools/selftest_orch_hooks.py, deny cases paired with real-bash evidence that
+    the refused form runs the file and allow cases with evidence that it does not."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name(_NRD_RULE)
     if tool_name != "Bash":
         return _allow()                     # a present non-Bash tool is out of scope
-    root = _orch_root(data)
-    if root is None:
-        return _allow()
-    status, reg = _orch_registry(root)
-    if status == "absent":
-        return _allow()                     # no registry at the git toplevel: inert
+    roots = _nrd_roots(data)
+    if not roots:
+        return _allow()                     # no project anchor and no git toplevel: nothing to consult
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     command = tool_input.get("command")
-    if status == "bad":
-        # A present-but-unreadable registry cannot say whether deliverable_dirs is declared, so the
-        # malformed posture applies: only interpreter-shaped candidates deny.
+    dirs = []
+    malformed = None
+    armed = False
+    for root in roots:
+        status, reg = _orch_registry(root)
+        if status == "absent":
+            continue                        # no registry at this root: the next may still arm
+        if status == "bad":
+            # A present-but-unreadable registry cannot say whether deliverable_dirs is declared, so
+            # the malformed posture applies for this root: interpreter-shaped candidates deny.
+            if malformed is None:
+                malformed = "the orchestration registry is unreadable: {}".format(reg)
+            continue
+        if _NRD_KEY not in reg:
+            continue                        # the key alone arms this guard at a root
+        root_dirs = _nrd_dirs(reg.get(_NRD_KEY), root)
+        if isinstance(root_dirs, str):
+            if malformed is None:
+                malformed = root_dirs
+            continue
+        armed = True
+        for d in root_dirs:
+            if d not in dirs:
+                dirs.append(d)
+    if not armed:
+        if malformed is None:
+            return _allow()                 # no key at any consulted root: inert, as before
         if not _nrd_candidate(command):
             return _allow()
-        reason, banner = _nrd_malformed_text("the orchestration registry is unreadable: {}".format(reg))
-        return _deny(reason, banner)
-    if _NRD_KEY not in reg:
-        return _allow()                     # the key alone arms this guard; without it the hook is inert
-    dirs = _nrd_dirs(reg.get(_NRD_KEY), root)
-    if isinstance(dirs, str):
-        if not _nrd_candidate(command):
-            return _allow()
-        reason, banner = _nrd_malformed_text(dirs)
+        reason, banner = _nrd_malformed_text(malformed)
         return _deny(reason, banner)
     if not isinstance(command, str):
-        # In key scope a missing, non-object or non-string command is a cannot-evaluate input: the scan
-        # cannot run over what was not read, so it denies (check-fails-closed-on-unreadable).
+        # In key scope a missing, non-object or non-string command is a cannot-evaluate input: the
+        # scan cannot run over what was not read, so it denies (check-fails-closed-on-unreadable).
         return _deny(
             "AIQT rule wowo01 (deliverable-exec guard): the Bash payload carried no readable command "
             "string, so this guard could not check it against the declared deliverable directories; "
@@ -24305,12 +24265,15 @@ def orch_deliverable_exec_guard(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule wowo01, fail-closed).")
     if not command:
         return _allow()                     # an empty command runs nothing: nothing to judge
-    cwd = data.get("cwd")
-    hit = _nrd_scan(command, cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None, dirs, 0)
-    if hit is None:
-        return _allow()
-    reason, banner = _nrd_deny_text(hit[0], hit[1])
-    return _deny(reason, banner)
+    hit = _nrd_scope_scan(command, data.get("cwd"), tuple(dirs))
+    if hit is not None:
+        reason, banner = _nrd_deny_text(hit[0], hit[1])
+        return _deny(reason, banner)
+    if malformed is not None and _nrd_candidate(command):
+        # Another consulted root's configuration is unusable: its candidate posture still applies.
+        reason, banner = _nrd_malformed_text(malformed)
+        return _deny(reason, banner)
+    return _allow()
 
 
 def orch_dispatch_ledger(data):
