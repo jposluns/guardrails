@@ -13493,6 +13493,74 @@ def _main_isolated(report_path=None):
               [_verdict(bg(v, rib=False)) for v in (
                   "grep x <<'EOF'\nsleep 30 &\nEOF", "sort <<'EOF'\nsleep 30 &\nEOF")],
               ["deny"] * 2)
+        # git reads the body as DATA only under a fixed built-in subcommand directly after `git`, with no
+        # global option before it: hash-object with --stdin hashes the bytes, commit reading its message from
+        # standard input (-F - or --file=-, with only --allow-empty or --no-edit besides) reads them as the
+        # message, and apply reads them as a patch. A built-in name cannot be shadowed by a git alias, so these
+        # cannot be redirected to a shell. Each row denies if the subcommand rule rejects the form.
+        check("trunc/fg-quoted-heredoc-git-data-subcommand-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "git hash-object --stdin <<'EOF'\nFix A & B\nEOF",
+                  "git commit -F - <<'EOF'\nFix A & B\nEOF",
+                  "git commit --file=- <<'EOF'\nFix A & B\nEOF",
+                  "git commit --allow-empty --no-edit -F - <<'EOF'\nFix A & B\nEOF",
+                  "git apply <<'EOF'\nFix A & B\nEOF")],
+              ["allow"] * 5)
+        # Every other git form reads the body as code: a configured or -c alias runs it (`!sh`), `git run` is
+        # an alias not a built-in, a global option before the subcommand (-c, --exec-path and the rest) can
+        # define an alias or set core.editor to a shell, commit with an editor-opening option (-e, --edit, a
+        # bundled -eF-) runs the message file through core.editor, hash-object without --stdin and bare commit
+        # take no stdin body. Each row allows if `git` is lifted without proving the subcommand reads data.
+        check("trunc/fg-quoted-heredoc-git-executes-body-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "git -c alias.x=!sh x <<'EOF'\nsleep 30 &\nEOF",
+                  "git -c alias.x='!sh' x <<'EOF'\nsleep 30 &\nEOF",
+                  "git -c alias.x='!bash -s' x <<'EOF'\nsleep 30 &\nEOF",
+                  "git run <<'EOF'\nsleep 30 &\nEOF",
+                  "git -c core.editor=sh commit --allow-empty -e -F - <<'EOF'\nsleep 30 &\nEOF",
+                  "git commit -e -F - <<'EOF'\nsleep 30 &\nEOF",
+                  "git commit --edit -F - <<'EOF'\nsleep 30 &\nEOF",
+                  "git commit -eF- <<'EOF'\nsleep 30 &\nEOF",
+                  "git hash-object <<'EOF'\nsleep 30 &\nEOF",
+                  "git commit <<'EOF'\nsleep 30 &\nEOF",
+                  "git --exec-path=/x apply <<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 11)
+        # An environment-assignment prefix (GIT_CONFIG_COUNT and GIT_CONFIG_VALUE_0, which can carry a `!sh`
+        # alias, or GIT_EDITOR, which names the editor an -e commit opens) is the command's first word, so the
+        # command word is not a bare `git` and the body reads as code. Each row allows if the prefix is
+        # stripped and the trailing git is lifted.
+        check("trunc/fg-quoted-heredoc-git-env-config-prefix-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0=!sh git x <<'EOF'\n"
+                  "sleep 30 &\nEOF",
+                  "GIT_EDITOR=sh git commit --allow-empty -e -F - <<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 2)
+        # The command word can be redefined EARLIER in the same command, so a body is lifted only when its
+        # opener is the command's first line: a function, alias (with expand_aliases), hash -p, or a PATH
+        # assignment on an earlier line can point cat or git at a shell. Each row allows if a body opened on a
+        # later line is lifted on the command word as written.
+        check("trunc/fg-quoted-heredoc-command-word-redefined-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "function cat { sh; }\ncat <<'EOF'\nsleep 30 &\nEOF",
+                  "function git { sh; }\ngit <<'EOF'\nsleep 30 &\nEOF",
+                  "hash -p /bin/sh cat\ncat <<'EOF'\nsleep 30 &\nEOF",
+                  "shopt -s expand_aliases\nalias cat=sh\ncat <<'EOF'\nsleep 30 &\nEOF",
+                  "PATH=/tmp/x\ncat <<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 5)
+        # Keeping the single-segment, first-line consumer rule denies several forms that run nothing (the named
+        # cost): a body piped to a filter, a here-document after an && chain, a here-document followed by ';'
+        # and another command, an absolute or command-prefixed cat, and a body fed to a non-shell interpreter.
+        # Each row allows if the owning segment is lifted though it is chained, prefixed or piped onward.
+        check("trunc/fg-quoted-heredoc-chained-or-prefixed-consumer-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF' | grep A\nsleep 30 &\nEOF",
+                  "git add -A && git commit -F - <<'EOF'\nsleep 30 &\nEOF",
+                  "mkdir -p d && cat > d/f <<'EOF'\nsleep 30 &\nEOF",
+                  "cat > f <<'EOF'; chmod 644 f\nsleep 30 &\nEOF",
+                  "/usr/bin/cat <<'EOF'\nsleep 30 &\nEOF",
+                  "command cat <<'EOF'\nsleep 30 &\nEOF",
+                  "python3 - <<'EOF'\nprint(6 & 3)\nEOF")],
+              ["deny"] * 7)
         # Where the lexer refuses the command (an unquoted here-document, an open quote, a process
         # substitution, a here-string) the scan alone decides: its detach and open quote deny, and a
         # command it reads with no bare `&` allows.
