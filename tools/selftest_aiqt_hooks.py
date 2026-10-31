@@ -2401,8 +2401,126 @@ def _test_coauthor_guards(failures, tmp):
         failures.append("(cab-g7) the shipped commit-msg hook spells the trailer token; build it at run time")
     if not os.access(script, os.X_OK):
         failures.append("(cab-g8) the shipped commit-msg hook is not executable")
+    _test_coauthor_ascii(failures, base)
     _test_coauthor_children(failures, base, script)
     _test_coauthor_oracle(failures, base, script)
+
+
+def _test_coauthor_ascii(failures, base):
+    """(cab-ascii-*) The Bash layer reads digits, name characters and blanks in ASCII only, as bash and git
+    read them. Each row holds a non-ASCII case (U+0663 or U+FF11 where a pattern reads digits, U+00E9 where
+    it reads name characters, U+00A0 where it reads blanks) and an ASCII control. Both must hold on the
+    shipped patterns; the row is then run again with the one pattern it rests on compiled back to Unicode
+    (re.ASCII dropped, the explicit blank class read as \\s again), where the non-ASCII case must fail and
+    the ASCII control must still hold, so each row pins its pattern and the ASCII verdicts are unchanged.
+    In-process: the flip replaces the module attribute and restores it. Decisions only; nothing is run."""
+    root = base / "ascii"
+    root.mkdir(parents=True, exist_ok=True)
+    tok12 = _CAB_UC[:12]
+    long_tail = " #" + "a" * (aiqt_hooks._CAB_MAX_COMMAND + 10)
+    clean_mbox = "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\nfix\n"
+    (root / "٣-x.patch").write_text(clean_mbox, encoding="utf-8")
+    for name in ("１", "1"):
+        (root / name).write_text("fix\n", encoding="utf-8")
+    replay = root / "replay"
+    replay.mkdir(exist_ok=True)
+    _git(replay, "init", "-q", "-b", "main")
+    (replay / "a.txt").write_text("a\n", encoding="utf-8")
+    _git(replay, "add", "a.txt")
+    _git(replay, "commit", "-q", "-m", "init", env_identity=True)
+    _git(replay, "checkout", "-q", "-b", "nb dirty")
+    (replay / "d.txt").write_text("d\n", encoding="utf-8")
+    _git(replay, "add", "d.txt")
+    _git(replay, "commit", "-q", "-m", "add d\n\n" + _CAB_UC + ": Claude <c@x>", env_identity=True)
+    _git(replay, "branch", "-q", "plain-dirty")
+    _git(replay, "checkout", "-q", "main")
+
+    def decided(command, want, cwd=root):
+        return lambda: _decision(aiqt_hooks.coauthor_bash, command, cwd=str(cwd)) == want
+
+    def tokens(pattern_name, text, want):
+        return lambda: [m.group() for m in getattr(aiqt_hooks, pattern_name).finditer(text)] == want
+
+    def unicode(pattern):
+        return re.compile(pattern.pattern.replace(aiqt_hooks._CAB_BLANKS, r"\s"), pattern.flags & ~re.ASCII)
+
+    def mime(text):
+        return bool(aiqt_hooks._CAB_MIME_RE.search(text))
+
+    def json_start(text):
+        return bool(aiqt_hooks._CAB_JSON_START_RE.match(text))
+
+    rows = (
+        ("cab-ascii-seq", "_CAB_SEQ_RE", "a sequence expression whose step or ends are U+0663 or U+FF11 digits is "
+         "no sequence (bash leaves it, so no token forms); the ASCII step expands and denies",
+         lambda: (decided("echo " + tok12 + "B{y..y..٣}: Bob", "allow")()
+                  and aiqt_hooks._cab_brace_sequence("１..３") is None),
+         decided("echo " + tok12 + "B{y..y..3}: Bob", "deny")),
+        ("cab-ascii-patch", "_CAB_PATCH_NAME_RE", "a file named with a U+0663 digit is no git format-patch output, "
+         "so it is read (clean, allows); 0001-x.patch is written by the format-patch stage and denies",
+         decided("git format-patch -1 HEAD && git am ٣-x.patch", "allow"),
+         decided("git format-patch -1 HEAD && git am 0001-x.patch", "deny")),
+        ("cab-ascii-trailer", "_CAB_TRAILER_OPT_RE", "U+00E9 after --trailer does not continue the option name, so "
+         "it is read as --trailer beside the token's words and denies; an ASCII letter continues it and allows",
+         decided("git commit -m x --traileré " + _CAB_UC, "deny"),
+         decided("git commit -m x --trailerx " + _CAB_UC, "allow")),
+        ("cab-ascii-hint", "_CAB_SINK_HINT_RE", "past the read bound, U+00E9 before cp leaves cp a word, so the "
+         "command is refused; a quoted c''t holds no such word and allows",
+         decided("écp x" + long_tail, "deny"), decided("c''t x" + long_tail, "allow")),
+        ("cab-ascii-fd-target", "_CAB_DIGITS_RE", ">&U+FF11 names a file another stage writes, so git commit -F of "
+         "it denies; >&1 is a descriptor and the same read of file 1 allows",
+         decided("echo hi >&１ && git commit -F １", "deny"),
+         decided("echo hi >&1 && git commit -F 1", "allow")),
+        ("cab-ascii-fd-source", "_CAB_DIGITS_RE", "a U+0663 word before <<< is no descriptor, so the here-string "
+         "feeds git commit -F - (allows); 3<<< feeds descriptor 3, not standard input, and denies",
+         decided("git commit -F - ٣<<< fix", "allow"), decided("git commit -F - 3<<< fix", "deny")),
+        ("cab-ascii-replay-word", "_CAB_BLANK_RE", "a revision whose name holds U+00A0 is one word git replays, so "
+         "its token message denies; the ASCII-named branch denies too",
+         decided("git cherry-pick nb dirty", "deny", replay),
+         decided("git cherry-pick plain-dirty", "deny", replay)),
+        ("cab-ascii-replay-stdin", "_CAB_BLANK_RE", "git cherry-pick --stdin reads a here-string line holding "
+         "U+00A0 as one revision, so its token message denies; the ASCII-named branch denies too",
+         decided("git cherry-pick --stdin <<< nb dirty", "deny", replay),
+         decided("git cherry-pick --stdin <<< plain-dirty", "deny", replay)),
+        ("cab-ascii-crude", "_CAB_CRUDE_RE", "the fallback reading keeps U+00A0 inside a word; \\x1c, an ASCII "
+         "character \\s matches, still splits as before",
+         tokens("_CAB_CRUDE_RE", "a b", ["a b"]), tokens("_CAB_CRUDE_RE", "a b\tc\x1cd", ["a", "b", "c", "d"])),
+        ("cab-ascii-chunk", "_CAB_CHUNK_RE", "a brace word joined by U+00A0 is one word past the chunk bound, "
+         "uncertain, and denies; an ASCII space splits it and the short brace expands and allows",
+         decided("echo " + "a" * (aiqt_hooks._CAB_BRACE_CHUNK + 10) + " {b,c}", "deny"),
+         decided("echo " + "a" * (aiqt_hooks._CAB_BRACE_CHUNK + 10) + " {b,c}", "allow")),
+        ("cab-ascii-mime", "_CAB_MIME_RE", "U+00A0 after the header colon is not read as a blank, and it is read "
+         "inside an encoded word's charset; \\x1c and a space after the colon still read as before",
+         lambda: not mime("Content-Transfer-Encoding: base64") and mime("=?utf 8?b?x?="),
+         lambda: mime("Content-Transfer-Encoding:\x1cbase64") and mime("Content-Transfer-Encoding: base64")),
+        ("cab-ascii-json", "_CAB_JSON_START_RE", "U+00A0 before a brace is not read as a JSON start (json.loads "
+         "refuses it either way); \\x1c and an ASCII blank still are",
+         lambda: not json_start(" {}"), lambda: json_start("\x1c{}") and json_start(" \t{}")),
+    )
+    for label, name, what, non_ascii, control in rows:
+        if not (non_ascii() and control()):
+            failures.append("({}) {}: not so on the shipped patterns".format(label, what))
+        saved = getattr(aiqt_hooks, name)
+        setattr(aiqt_hooks, name, unicode(saved))
+        try:
+            flipped = (non_ascii(), control())
+        finally:
+            setattr(aiqt_hooks, name, saved)
+        if flipped != (False, True):
+            failures.append("({}-flip) with {} read as Unicode the non-ASCII case must fail and the ASCII control "
+                            "hold, got {}".format(label, name, flipped))
+
+    # A header blank git's own decoding still reads: U+00A0 after the colon is not read by _CAB_MIME_RE, and the
+    # mailbox is still refused because git mailinfo decodes the base64 body and the token is there.
+    body = base64.encodebytes(("\n" + _CAB_UC + ": Claude <c@x>\n---\n").encode("utf-8")).decode("ascii")
+    nbsp_mbox = root / "nbsp.mbox"
+    nbsp_mbox.write_text("From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\nMIME-Version: 1.0\nContent-Type: "
+                         "text/plain; charset=UTF-8\nContent-Transfer-Encoding: base64\n\n" + body,
+                         encoding="utf-8")
+    got = _decision(aiqt_hooks.coauthor_bash, "git am " + str(nbsp_mbox), cwd=str(root))
+    if got != "deny":
+        failures.append("(cab-ascii-mime-decoded) a base64 token body under a U+00A0 header blank: expected deny "
+                        "(git mailinfo decodes it), got {}".format(got))
 
 
 def _test_coauthor_children(failures, base, script):

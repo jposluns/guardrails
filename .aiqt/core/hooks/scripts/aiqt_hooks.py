@@ -5755,8 +5755,9 @@ _CAB_BASH_RE = re.compile(r"(?i)co[- ]authored[- ]by[ \t]*+[:=]")
 _CAB_WORDS_RE = re.compile(r"(?i)co[- ]authored[- ]by")
 # A --trailer option in any abbreviation (--tr to --trailer), or the interpret-trailers command. Beside one,
 # the token's words alone count: git writes a bare --trailer name as '<name>: ', and a trailer.separators
-# setting makes git read another separator and write a colon (--trailer '<name>#value' under ':#').
-_CAB_TRAILER_OPT_RE = re.compile(r"(?i)--tr(?:a(?:i(?:l(?:e(?:r)?)?)?)?)?(?![\w-])|interpret-trailers")
+# setting makes git read another separator and write a colon (--trailer '<name>#value' under ':#'). git
+# reads an option name in ASCII bytes, so only an ASCII name character continues it (re.ASCII).
+_CAB_TRAILER_OPT_RE = re.compile(r"(?i)--tr(?:a(?:i(?:l(?:e(?:r)?)?)?)?)?(?![\w-])|interpret-trailers", re.ASCII)
 # One word that is such a --trailer option, alone or with its '=' value (_cab_trailer_stage).
 _CAB_TRAILER_WORD_RE = re.compile(r"--tr(?:a(?:i(?:l(?:e(?:r)?)?)?)?)?(?:=|$)")
 # The Bash layer's de-quoted reading: every quote character, backslash, '$' and backquote removed.
@@ -5767,7 +5768,13 @@ _CAB_MAX_BYTES = 67_108_864
 # references are not extracted; it is refused when it holds a word that could redirect, write or commit.
 _CAB_MAX_COMMAND = 131_072
 _CAB_FILE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
-_CAB_JSON_START_RE = re.compile(r"\s*+[\[{]")
+# The whitespace the layer's patterns and word splits read, as a character class body: the ASCII characters
+# an unflagged \s matches (space, \t, \n, \v, \f, \r and \x1c to \x1f), so a reading of ASCII text is
+# unchanged, and nothing beyond ASCII. bash splits words and git reads names in bytes, so a non-ASCII space
+# (U+00A0, U+3000) stays inside a word as it does there.
+_CAB_BLANKS = r" \t\n\v\f\r\x1c-\x1f"
+_CAB_BLANK_RE = re.compile("[" + _CAB_BLANKS + "]+")
+_CAB_JSON_START_RE = re.compile("[" + _CAB_BLANKS + r"]*+[\[{]")
 # A JSON string escape of one character, decoded wherever it stands in the escape reading of a text
 # (_cab_text_count), so a JSON Lines record, a JSON document inside other text, or a string literal that
 # spells the token with \u escapes is counted as a reader decodes it.
@@ -6087,12 +6094,13 @@ _CAB_AM_SHORT_VALUE = "Cp"
 # encoding, or an RFC 2047 encoded word), and the first line of an StGit series, which names further patch
 # files git am reads. Each mailbox file is also decoded by git itself (_CabReader.decode): split by git
 # mailsplit into its messages, each run through git mailinfo, at most _CAB_MAX_MAILS messages per command.
-_CAB_MIME_RE = re.compile(r"(?im)^content-transfer-encoding:\s*+(?:base64|quoted-printable)|=\?[^?\s]++\?[bq]\?")
+_CAB_MIME_RE = re.compile(r"(?im)^content-transfer-encoding:[" + _CAB_BLANKS + r"]*+(?:base64|quoted-printable)"
+                          r"|=\?[^?" + _CAB_BLANKS + r"]++\?[bq]\?")
 _CAB_STGIT_SERIES = "# This series applies on GIT commit"
 _CAB_MAX_MAILS = 256
 # The names git format-patch gives the patch files it writes: NNNN-<subject><suffix>, or a bare number under
-# --numbered-files.
-_CAB_PATCH_NAME_RE = re.compile(r"\d++(?:-.*+)?+", re.S)
+# --numbered-files. It numbers them in ASCII digits (re.ASCII).
+_CAB_PATCH_NAME_RE = re.compile(r"\d++(?:-.*+)?+", re.S | re.ASCII)
 _CAB_WRITE_WORDS = frozenset(("cp", "mv", "ln", "link", "install", "tee", "rsync", "dd", "patch"))
 _CAB_PUNCT = "();<>|&\n"
 # The fallback reading, read beside the shlex one: the de-quoted text split at blanks, the shell operators,
@@ -6100,7 +6108,10 @@ _CAB_PUNCT = "();<>|&\n"
 # the words of a command substitution are still read; parentheses end no unit here. Each '$(' and backquote
 # is marked first (_CAB_HEAD, a private-use character), so the word after it is read as the word a command
 # starts with (_cab_command_word); a NAME=value word before a command word is an assignment (_CAB_ASSIGN_RE).
-_CAB_CRUDE_RE = re.compile(r"\n|[;&|]+|[<>]+[&|]?|[^\s;&|<>(){}]+")
+_CAB_CRUDE_RE = re.compile(r"\n|[;&|]+|[<>]+[&|]?|[^" + _CAB_BLANKS + r";&|<>(){}]+")
+# A file descriptor number before or after a redirect operator: bash reads one only in ASCII digits, so a
+# word of other digits (U+0663, U+FF11) is a word or a file name there.
+_CAB_DIGITS_RE = re.compile(r"\d+", re.ASCII)
 _CAB_LOCALE_QUOTE_RE = re.compile(r"\$(?=\")")
 _CAB_SUBST_OPEN_RE = re.compile(r"\$\(|`")
 _CAB_HEAD = ""
@@ -6113,14 +6124,18 @@ _CAB_MAX_REPLAY = 1000
 _CAB_MAX_REPLAY_CALLS = 8
 _CAB_GIT_TIMEOUT = 3.0
 # A command past _CAB_MAX_COMMAND is refused when any of its readings (raw, de-quoted, ANSI-C decoded, brace
-# expanded) holds one of these (its references cannot be read), so a quoted command word (c''p) counts.
-_CAB_SINK_HINT_RE = re.compile(r"[<>]|\b(?:git|gh|tee|cp|mv|ln|link|install|rsync|dd|patch|sed|perl)\b")
+# expanded) holds one of these (its references cannot be read), so a quoted command word (c''p) counts. A
+# word boundary is read in ASCII (re.ASCII), so a non-ASCII letter or digit beside one of them still leaves
+# it a word.
+_CAB_SINK_HINT_RE = re.compile(r"[<>]|\b(?:git|gh|tee|cp|mv|ln|link|install|rsync|dd|patch|sed|perl)\b", re.ASCII)
 # Brace expansion (_cab_brace_texts): the raw words that may hold one, the private-use characters a quoted
 # or escaped brace, comma or dot is masked to while a word is expanded, and the bounds on the expansion.
-_CAB_CHUNK_RE = re.compile(r"[^\s;&|<>()]+")
+# A sequence expression (_CAB_SEQ_RE) has its ends and step read in ASCII digits only (re.ASCII), as bash
+# reads them: {1..3} spelled in other digits is left as it is.
+_CAB_CHUNK_RE = re.compile(r"[^" + _CAB_BLANKS + r";&|<>()]+")
 _CAB_MASKS = {"{": "", "}": "", ",": "", ".": ""}
 _CAB_UNMASK = str.maketrans({mask: char for char, mask in _CAB_MASKS.items()})
-_CAB_SEQ_RE = re.compile(r"(-?\d+)\.\.(-?\d+)(?:\.\.-?\d+)?|([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?")
+_CAB_SEQ_RE = re.compile(r"(-?\d+)\.\.(-?\d+)(?:\.\.-?\d+)?|([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?", re.ASCII)
 _CAB_BRACE_CHUNK = 1024
 _CAB_BRACE_LIMIT = 4096
 
@@ -6441,7 +6456,8 @@ def _cab_parse(tokens, dirs, joined=None, mark=None):
                     grouped = True
                 else:
                     fd = None
-                    if k == 0 and last == i - 1 and prev.isdigit() and stage.words and stage.words[-1] == prev:
+                    if (k == 0 and last == i - 1 and _CAB_DIGITS_RE.fullmatch(prev) and stage.words
+                            and stage.words[-1] == prev):
                         fd = prev
                         if joined is not None:
                             if i - 1 not in joined:
@@ -6455,7 +6471,7 @@ def _cab_parse(tokens, dirs, joined=None, mark=None):
         if pending is not None:
             (kind, fd), pending = pending, None
             stdin = fd in (None, "0")
-            target_fd = tok.isdigit() or tok == "-"
+            target_fd = bool(_CAB_DIGITS_RE.fullmatch(tok)) or tok == "-"
             if kind == "out" or kind == "dupout" and not target_fd:
                 stage.targets.append(tok)
             elif kind == "in" or kind == "dupin" and not target_fd:
@@ -6840,7 +6856,7 @@ def _cab_replay_names(stage, args, extra=()):
     """(revs, walk) a replaying git stage names (_cab_replay_revs), each rev a word git log can take as one."""
     revs, walk = _cab_replay_revs(stage.verb, args, extra)
     return [rev for rev in revs if rev and len(rev) <= 1024 and not rev.startswith("-")
-            and not any(ch.isspace() for ch in rev)], walk
+            and not _CAB_BLANK_RE.search(rev)], walk
 
 
 def _cab_replay_hit(stage, revs, walk):
@@ -7233,7 +7249,7 @@ def _cab_reference_problem(joined, cwd):
                         continue
                     extra = []
                     if stage.text and _cab_stdin_revs(stage):
-                        extra = [word for text in stage.texts for word in text.split()]
+                        extra = [word for text in stage.texts for word in _CAB_BLANK_RE.split(text) if word]
                         if stage.doc is not None:  # every word after the here-document opens: its body and more
                             extra += [tok for tok in tokens[stage.doc + 1:] if tok and tok != _CAB_HEAD
                                       and not all(ch in _CAB_PUNCT for ch in tok)]
