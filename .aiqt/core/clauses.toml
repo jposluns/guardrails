@@ -563,7 +563,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 13
 end-line = 14
 canonical-text = "Do not assert what a system shows, renders, prints, outputs, or does in its live state unless you observed\nthat behaviour directly."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.2"
@@ -572,7 +572,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 17
 end-line = 19
 canonical-text = "A claim that a system is launch-ready,\nlive, or working is such a behavioural claim: it rests on having exercised the relevant runtime path and\nobserved the expected result, not on a static check that the configuration or registration looks correct."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.3"
@@ -581,7 +581,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.4"
@@ -590,7 +590,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.5"
@@ -599,7 +599,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.6"
@@ -608,7 +608,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.7"
@@ -617,7 +617,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.8"
@@ -626,7 +626,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.9"
@@ -635,7 +635,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.10"
@@ -644,7 +644,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 29
 end-line = 32
 canonical-text = "You read the\nresource's own state, the host's available capacity, and your own footprint directly before asserting\nsuch a failure or reporting it onward; absent that reading the condition resolves to a local error to\ninvestigate while work continues, never a stop or a resource-wide alarm."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "obsbeh.11"
@@ -652,8 +652,8 @@ corpus-id = "obsbeh"
 source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 34
 end-line = 38
-canonical-text = "An external-interface observation establishes behaviour only for the effective principal whose authority\nits request used, named in each citing brief or record by identity, non-secret credential reference\n(anonymous access or an unavailable one recorded as such) and effective scope; a control using another\nprincipal remains unverified until its relevant runtime path is observed to produce the expected result\nunder it."
-source-digest = "4f98ca5f1df92f4ae19ee012ae89344ef20a3c7a5c64252552a9dfccfb6d741d"
+canonical-text = "An external-interface observation establishes behaviour only for the effective principal whose authority\nits request used, named in each citing brief or record by identity, non-secret credential reference\n(anonymous access recorded as such, or one the observer could not obtain, recorded with the reason) and\neffective scope; a control using another principal remains unverified until its relevant runtime path is\nobserved to produce the expected result under that principal."
+source-digest = "1530fe21c9bd99c38decbc2088fe63e8838284012c8249ab78657b89a5d06443"
 
 [[clause]]
 clause-id = "rdbchr.1"
@@ -4595,7 +4595,7 @@ source-path = ".aiqt/core/rules/trust-records-first.md"
 start-line = 17
 end-line = 17
 canonical-text = "Every ruling and decision is recorded to the durable store the session it is made."
-source-digest = "a5a68d6891653b6b75b50b192ec6c97e917c2592ac4bc9c6895cba2d1ff23581"
+source-digest = "40910957f240ab4aded629f11bbf8bbc7b8e4b5b03589b5ec947de8e8ec5d515"
 
 [[clause]]
 clause-id = "recfst.2"
@@ -4604,25 +4604,25 @@ source-path = ".aiqt/core/rules/trust-records-first.md"
 start-line = 17
 end-line = 18
 canonical-text = "The record, not the\nconversation, is the source of truth: a decision that is not recorded did not happen."
-source-digest = "a5a68d6891653b6b75b50b192ec6c97e917c2592ac4bc9c6895cba2d1ff23581"
+source-digest = "40910957f240ab4aded629f11bbf8bbc7b8e4b5b03589b5ec947de8e8ec5d515"
 
 [[clause]]
 clause-id = "recfst.3"
 corpus-id = "recfst"
 source-path = ".aiqt/core/rules/trust-records-first.md"
 start-line = 20
-end-line = 24
-canonical-text = "A brief or record stating review or fix rounds used or allowed cites durable round records for usage and\nthe recorded governing rule or authorized decision for the limit; where recorded rulings conflict the\nlater one governs, as the decision-classification rule (deccls) sets out, and a missing basis,\nconflicting round records, or rulings of unclear order are reported as unresolved rather than\nsubstituted from memory."
-source-digest = "a5a68d6891653b6b75b50b192ec6c97e917c2592ac4bc9c6895cba2d1ff23581"
+end-line = 26
+canonical-text = "A brief or record stating review or fix rounds used or allowed cites durable round records for usage and\nthe recorded governing rule or authorized decision for the limit; where conflicting maintainer rulings\nare each recorded in an artefact the maintainer controls and the assistant cannot write, the later\nrecorded one governs, as the decision-classification rule (deccls) sets out, and a missing basis, rulings\nof unclear order and every other conflict in the basis, such as between round records or between a\ngoverning rule and an authorized decision or another rule, are reported as unresolved rather than\nsubstituted from memory."
+source-digest = "40910957f240ab4aded629f11bbf8bbc7b8e4b5b03589b5ec947de8e8ec5d515"
 
 [[clause]]
 clause-id = "recfst.4"
 corpus-id = "recfst"
 source-path = ".aiqt/core/rules/trust-records-first.md"
-start-line = 26
-end-line = 27
+start-line = 28
+end-line = 29
 canonical-text = "Pending records stay durable without obstructing synchronization of the checkout tracking the protected\nline; versioned records enter through reviewed integration."
-source-digest = "a5a68d6891653b6b75b50b192ec6c97e917c2592ac4bc9c6895cba2d1ff23581"
+source-digest = "40910957f240ab4aded629f11bbf8bbc7b8e4b5b03589b5ec947de8e8ec5d515"
 
 [[clause]]
 clause-id = "trstre.1"

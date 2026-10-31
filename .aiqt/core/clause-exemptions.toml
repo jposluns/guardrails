@@ -114,12 +114,12 @@ reason = "Rationale for estsep.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "obsbeh"
-text = "Reading a configuration, a setting, or source tells you what a system is configured\nto do, not what it actually produces: precedence, environment, inputs, and runtime state sit between the\nconfiguration and the result."
+text = "Reading a configuration, a setting, or source tells you what a system is configured\nto do, not what it produces: precedence, environment, inputs, and runtime state sit between configuration\nand result."
 reason = "Rationale for obsbeh.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "obsbeh"
-text = "This differs from reading a file for its static contents, where the reading is\nitself the observation; here the observation is the rendered output."
+text = "Reading a file for its static contents is itself the observation; here the observation is the\nrendered output."
 reason = "Scope note separating a static read from the behavioural claim obsbeh.1 governs; no obligation of its own."
 
 [[exempt]]
