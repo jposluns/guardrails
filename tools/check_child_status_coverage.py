@@ -100,10 +100,10 @@ with exit 2). This gate holds where it runs:
      is read from the repository root (R12). A word that does not resolve, or resolves to
      a path that is not self-guarded (a same-named file elsewhere included), is a finding. A directory the
      launcher walk cannot list is cannot-evaluate, and a declared launcher that is absent is a finding.
-  5. completeness: every entry point, enumerated from (a) every .py with a module-level __main__ guard
-     (tools/check_python_floor.py's own walk and EXCLUDED_TREES), (b) both runners' rosters, (c) every workflow's
-     python3 launch targets, (d) every registry runner (tools/selftest_checks.toml, through the execution gate's
-     schema validator) and (e) the hook registrations, is classified SELF (it carries the pinned guard),
+  5. completeness: every entry point, enumerated from (a) every tracked .py with a module-level __main__ guard
+     (tools/check_python_floor.py's tracked-file listing, git ls-files, outside its EXCLUDED_TREES), (b) both
+     runners' rosters, (c) every workflow's python3 launch targets, (d) every registry runner
+     (tools/selftest_checks.toml, through the execution gate's schema validator) and (e) the hook registrations, is classified SELF (it carries the pinned guard),
      NOT-APPLICABLE (a static scan of it and its local import closure finds no spawn or wait API), LAUNCHER (it
      reads a child's status and every declared launch is through a guarded launcher) or RESIDUAL (it reads one
      and has no declared launcher). A LAUNCHER or RESIDUAL entry's direct launch is unguarded, so each must be
@@ -212,7 +212,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
 import check_ci_parity  # noqa: E402  (the validated roster reader and loader)
 import check_entry_guard  # noqa: E402  (the non-blocking regular-file reader and the registry runners)
-import check_python_floor  # noqa: E402  (the shipped-entrypoint walk)
+import check_python_floor  # noqa: E402  (the shipped-entrypoint listing)
 import check_selftest_execution  # noqa: E402  (the registry schema)
 
 ROOT = Path(__file__).resolve().parents[1]
