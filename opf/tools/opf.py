@@ -38,11 +38,13 @@ READ-ONLY surface `opf.import.surface/v1` (spec 14.1): `opf import --prompt` pri
 pack's version, digest and import members and the approved migrate-source scope once the plan's
 prompt-pack binding matches the verified pack; `opf import --status` reports `[opf].import_status` and
 each migrate-disposed source's referencing import runs and records; and `opf import --verify` grades each
-such source through the import-completion evaluator (_opf_import_complete), recording nothing. Each verb
-writes nothing and exits 2 on every refusal or cannot-evaluate, a NOT-ADOPTED or runless root included (a
-requested operation); the former --scan/--plan/--review/--apply modes are gone, so a former flag meets the
-same usage error as any unknown token, and the batch writer `opf record import --batch` (spec 8.8) is not
-offered in this build.
+such source through the import-completion evaluator (_opf_import_complete). `--verify` is read-only and
+records nothing: no source result, retirement or import_status is recorded until the per-source result
+writer lands. Each verb writes nothing and exits 2 on every refusal or cannot-evaluate, a NOT-ADOPTED or
+runless root included (a requested operation). Each former mode prints a pointer to the command that
+replaced it and exits 2 (IMPORT_FORMER_MODES): --scan and --plan point to `opf adopt plan`, --review to
+`opf adopt approve` and --apply to `opf import --prompt`; any other unknown token gets the usage error.
+The batch writer `opf record import --batch` (spec 8.8) is not offered in this build.
 
 `init` HAS landed: `opf init [--root DIR] [--recover]` creates validated store sources, a pointer, and a
 starter `CHANGELOG.md` under the shared init operation mutex and the spec 5.7 lease, without rendering or
@@ -19036,7 +19038,8 @@ def _cmd_upgrade(rest):
 
 
 # Spec 14.1: the read-only post-adoption import surface. The former --scan, --plan, --review and --apply
-# modes and their engine are gone; a former flag meets the same usage error as any other unknown token.
+# modes and their engine are gone; each former mode prints its IMPORT_FORMER_MODES pointer and exits 2,
+# and any other unknown token gets IMPORT_USAGE.
 IMPORT_SURFACE = "opf.import.surface/v1"
 # The verbs of that surface, in the order the spec 14.1 sentence names them. _import_surface_findings
 # holds the spec's sentence and the dispatch table to exactly this tuple.
@@ -19045,7 +19048,25 @@ IMPORT_VERBS = ("--prompt", "--status", "--verify")
 # spec and absent from the tool; the change that lands one delists it here (_import_surface_findings).
 IMPORT_NOT_OFFERED = ("opf record import --batch",)
 IMPORT_USAGE = ("usage: opf import (--prompt | --status | --verify) [--root DIR] [--run RUN_ID] -- the "
-                "read-only import surface {}; nothing was read or written".format(IMPORT_SURFACE))
+                "read-only import surface {}; --verify records nothing until the per-source result writer "
+                "lands; nothing was read or written".format(IMPORT_SURFACE))
+# Each former mode's pointer to the command that replaced it, printed alone on stderr at exit 2 before
+# any read. Only these four tokens are former modes; their companions (--set, --actor and the rest) and
+# every other unknown token keep IMPORT_USAGE.
+IMPORT_FORMER_MODES = {
+    "--scan": ("opf import: the former --scan mode was replaced by `opf adopt plan --inputs FILE`, whose "
+               "investigation inventories the old files into one adoption plan (spec 14.1); nothing was "
+               "read or written"),
+    "--plan": ("opf import: the former --plan mode was replaced by `opf adopt plan --inputs FILE`, which "
+               "freezes one adoption plan binding every source's disposition (spec 14.1); nothing was read "
+               "or written"),
+    "--review": ("opf import: the former --review mode was replaced by `opf adopt approve --inputs FILE "
+                 "--plan FILE --actor NAME`, the one approval of the whole plan, with no per-fragment "
+                 "review (spec 14.1); nothing was read or written"),
+    "--apply": ("opf import: the former --apply mode was replaced by `opf import --prompt`, which prints "
+                "the approved prompt pack that post-adoption import follows (spec 14.1); its batch writer "
+                "`opf record import --batch` is not offered in this build; nothing was read or written"),
+}
 
 
 def _import_adoption_runs(root_abs):
@@ -19292,10 +19313,12 @@ def _cmd_import(rest):
     READ-ONLY post-adoption import surface, IMPORT_SURFACE. Exactly one verb; `--root` defaults to the
     cwd product repository root; `--run` names the adoption run and may be omitted when exactly one
     admitted run exists. The parser is the house fail-closed idiom (no verb, two verbs, an empty,
-    option-looking or duplicate value, a --run outside the adoption run-id grammar, or any other token,
-    the former --scan/--plan/--review/--apply modes included, -> exit 2 with IMPORT_USAGE, before any
-    read). Each verb's contract is its own docstring (_import_prompt, _import_status, _import_verify);
-    all three write nothing, and a NOT-ADOPTED or runless root is a located cannot-evaluate (exit 2),
+    option-looking or duplicate value, a --run outside the adoption run-id grammar, or any other token
+    -> exit 2 with IMPORT_USAGE, before any read). A former mode token (IMPORT_FORMER_MODES: --scan,
+    --plan, --review, --apply) instead prints only its pointer to the command that replaced it and exits
+    2, also before any read; tokens are taken in order, so the first refused token decides the message.
+    `--verify` records nothing until the per-source result writer lands. Each verb's contract is its
+    own docstring (_import_prompt, _import_status, _import_verify); all three write nothing, and a NOT-ADOPTED or runless root is a located cannot-evaluate (exit 2),
     import being a REQUESTED operation. Every residual escape fails closed to exit 2, the class-width
     backstop record and doctor carry. The spec's 14.1 sentence naming these verbs and this surface is
     held to this dispatch by _import_surface_findings (the opf-import-surface self-test)."""
@@ -19343,6 +19366,9 @@ def _cmd_import(rest):
                     run_id = val
                 i += 2
                 continue
+            if tok in IMPORT_FORMER_MODES:
+                print(IMPORT_FORMER_MODES[tok], file=sys.stderr)
+                return EXIT_MALFORMED
             print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
             print(IMPORT_USAGE, file=sys.stderr)
             return EXIT_MALFORMED
@@ -20175,7 +20201,7 @@ def _cli_self_test():
         _ADOPT_RID = "adopt-20260101T000000Z-0123456789abcdef"   # run-id shaped; names no adoption run
         expect(["import"], EXIT_MALFORMED)                       # bare: exactly one verb required
         expect(["import", "--help"], EXIT_MALFORMED)             # an unknown token
-        expect(["import", "--scan", "--set", "s.toml"], EXIT_MALFORMED)   # a former mode is unrecognized
+        expect(["import", "--scan", "--set", "s.toml"], EXIT_MALFORMED)   # a former mode prints its pointer
         expect(["import", "--prompt", "--verify"], EXIT_MALFORMED)        # two verbs
         expect(["import", "--status", "--run", _ADOPT_RID, "--run", _ADOPT_RID], EXIT_MALFORMED)
         expect(["import", "--bogus"], EXIT_MALFORMED)            # an unknown flag
@@ -20357,11 +20383,17 @@ def _cli_self_test():
             codes, located messages AND snapshot equality (the read-only contract). Returns None on
             success or EXIT_MALFORMED on a harness (fixture I/O) error.
 
-            Grammar vectors need no store on disk: a bare `import`, two verbs, each former mode flag
-            (--scan, --plan, --review, --apply and their companions, unrecognized tokens like any
-            other), --root and --run value grammar, an unknown or joined flag, a positional token, an
-            empty token and `--` each exit 2 with nothing on stdout and the usage line on stderr naming
-            the surface and all three verbs, refused by the parser before any read. A NOT-ADOPTED root
+            Grammar vectors need no store on disk: a bare `import`, two verbs, each former companion
+            flag (--set, --actor and the rest, unrecognized tokens like any other), --root and --run
+            value grammar, an unknown or joined flag, a positional token, an empty token and `--` each
+            exit 2 with nothing on stdout and the usage line on stderr naming the surface and all three
+            verbs, refused by the parser before any read. Each former mode (--scan, --plan, --review,
+            --apply), alone, with a trailing value or after a verb, exits 2 with nothing on stdout and
+            exactly its IMPORT_FORMER_MODES pointer on stderr, which names that mode and the command
+            that replaced it; the unknown token --sca (a prefix the retired parser once expanded) exits
+            2 with exactly the unrecognized-argument line and the usage line. Flips: emptying
+            IMPORT_FORMER_MODES reverts every former mode to the usage error and turns each mode's rows
+            red; listing --sca as a former mode gives it a pointer and turns its row red. A NOT-ADOPTED root
             (an empty directory) refuses at exit 2 for every verb, naming the missing adoption run:
             import is a REQUESTED operation, never the NOT-APPLICABLE exit 0 of doctor and render
             (reverting the import dispatch to the fail-closed KNOWN_VERBS branch leaves these at 2 but
@@ -20412,9 +20444,8 @@ def _cli_self_test():
 
             # Grammar rows: each refused by the parser (exit 2, no stdout, the usage line naming the
             # surface and the three verbs) before any store resolution or read.
-            former = ["--scan", "--plan", "--review", "--apply", "--set", "--actor", "--decisions",
-                      "--interactive", "--show-review", "--dispositions", "--ingest-options",
-                      "--include", "--diff-review"]
+            former = ["--set", "--actor", "--decisions", "--interactive", "--show-review", "--dispositions",
+                      "--ingest-options", "--include", "--diff-review"]
             grammar = ([[], ["--help"], ["-h"], ["--prompt", "--status"], ["--status", "--status"],
                         ["--status", "--root"], ["--status", "--root", ""], ["--status", "--root", "-x"],
                         ["--status", "--root", ".", "--root", "."], ["--status", "--run"],
@@ -20432,6 +20463,50 @@ def _cli_self_test():
                     failures.append("import {!r}: rc={!r} stdout={!r} stderr={!r} (expected a parser "
                                     "refusal: exit 2, no stdout, the usage line naming the surface and "
                                     "the three verbs)".format(argv, rc, out, err))
+
+            # Former-mode rows: each former mode prints exactly its pointer, naming the command that
+            # replaced it, and an unknown token keeps the usage error. The expected pointers are taken
+            # before any flip, so a flip that empties the table cannot also empty the expectation.
+            replaced = {"--scan": "`opf adopt plan --inputs FILE`", "--plan": "`opf adopt plan --inputs FILE`",
+                        "--review": "`opf adopt approve --inputs FILE --plan FILE --actor NAME`",
+                        "--apply": "`opf import --prompt`"}
+            pointers = dict(IMPORT_FORMER_MODES)
+            if set(pointers) != set(replaced):
+                failures.append("IMPORT_FORMER_MODES lists {!r} (expected exactly {!r})".format(
+                    sorted(pointers), sorted(replaced)))
+            unknown = "--sca"
+            usage_err = "opf import: unrecognized argument {!r}\n{}\n".format(unknown, IMPORT_USAGE)
+
+            def former_misses():
+                misses = []
+                for mode, command in sorted(replaced.items()):
+                    pointer = pointers.get(mode, "")
+                    for argv in ([mode], [mode, "x"], ["--status", mode]):
+                        rc, out, err = run_cli(argv)
+                        if (rc != EXIT_MALFORMED or out != "" or err != pointer + "\n"
+                                or "the former {} mode".format(mode) not in pointer or command not in pointer):
+                            misses.append((mode, "import {!r}: rc={!r} stdout={!r} stderr={!r} (expected exit "
+                                           "2, no stdout and exactly the pointer to {})".format(
+                                               argv, rc, out, err, command)))
+                rc, out, err = run_cli([unknown])
+                if rc != EXIT_MALFORMED or out != "" or err != usage_err:
+                    misses.append((unknown, "import {!r}: rc={!r} stdout={!r} stderr={!r} (expected exit 2, "
+                                            "no stdout and exactly the usage error)".format([unknown], rc, out,
+                                                                                         err)))
+                return misses
+
+            failures.extend(text for _key, text in former_misses())
+            with mock.patch.dict(IMPORT_FORMER_MODES, clear=True):
+                red = {key for key, _text in former_misses()}
+            for mode in sorted(set(replaced) - red):
+                failures.append("flip: with IMPORT_FORMER_MODES emptied, import {} still passed its "
+                                "pointer row (expected red on the generic usage error)".format(mode))
+            listed = {unknown: "opf import: the former {} mode".format(unknown)}
+            with mock.patch.dict(IMPORT_FORMER_MODES, listed):
+                red = {key for key, _text in former_misses()}
+            if unknown not in red:
+                failures.append("flip: with {} listed as a former mode, its usage-error row still "
+                                "passed (expected red)".format(unknown))
 
             try:
                 ibase = tempfile.mkdtemp(prefix="opf-cli-import-")
@@ -21833,9 +21908,12 @@ def _cli_self_test():
               "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
               "the read-only import verbs (spec 14.1, the surface opf.import.surface/v1): the parser "
               "fails closed at exit 2 with the usage line naming the surface and the three verbs on a "
-              "bare import, two verbs, every former mode flag (now an unrecognized token like any "
+              "bare import, two verbs, every former companion flag (an unrecognized token like any "
               "other), --root and --run value grammar, an unknown flag, a positional token and --, "
-              "before any read; a NOT-ADOPTED or runless root refuses at exit 2 for every verb (a "
+              "before any read; each former mode (--scan, --plan, --review, --apply) exits 2 with "
+              "exactly its pointer to the command that replaced it, and the unknown token --sca with "
+              "exactly the usage error (an emptied pointer table, or --sca listed as a former mode, "
+              "turns those rows red); a NOT-ADOPTED or runless root refuses at exit 2 for every verb (a "
               "requested operation, never doctor's NOT-APPLICABLE 0); over evaluator-built adopted "
               "fixtures --status reports the import run, its record ids and import_status (0), a "
               "drifted frozen migrate source (1, its own FINDING line) and a --run naming no admitted "

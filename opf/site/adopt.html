@@ -301,8 +301,10 @@
       <code>--verify</code>. Its batch writer, <code>opf record import --batch</code> (spec section
       8.8), is not offered yet, and neither is the completion writer that records a source's result.
       The former <code>--scan</code>, <code>--plan</code>, <code>--review</code>, and
-      <code>--apply</code> modes are gone: a former flag gets the same usage error, exit 2, as any
-      unknown argument.</p>
+      <code>--apply</code> modes are gone: each exits 2 with a pointer to the command that replaced
+      it (<code>--scan</code> and <code>--plan</code> to <code>opf adopt plan</code>,
+      <code>--review</code> to <code>opf adopt approve</code>, <code>--apply</code> to
+      <code>opf import --prompt</code>), and any other unknown argument gets the usage error, exit 2.</p>
     <p><b style="color:var(--ink)">Purpose.</b> In the standard, <code>opf import</code> is only the
       post-adoption import activity. Clean-start adoption is the intake for an existing project: it
       preserves and retires the old operational files, establishes the new store and enforcement, and
