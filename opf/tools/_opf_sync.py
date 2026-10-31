@@ -84,13 +84,19 @@ re-allowed, and core.sshCommand pinned to the adopter's own global-or-system val
 where none is set), so a repository-local core.sshCommand never executes while a global one is
 honoured as the adopter's own setting. Two enumerations then gate every fetch and push, both
 fail-closed. First, the repository scopes (--local and --worktree) are listed by name, and a
-credential helper, core.askpass, core.gitProxy, a push.gpgSign / gpg.program /
-gpg.<format>.program / gpg.ssh.defaultKeyCommand push-signing key, a remote.<name>.receivepack /
+credential helper, core.askpass, core.gitProxy, core.alternateRefsCommand, gc.recentObjectsHook,
+a push.gpgSign /
+gpg.program / gpg.<format>.program / gpg.ssh.defaultKeyCommand push-signing key, a remote.<name>.receivepack /
 uploadpack / vcs program name, a per-protocol protocol.<name>.allow (protocol.allow included), an
 http.sslVerify / sslCAInfo / sslCAPath server-trust override, an http.cookieFile / saveCookies
 cookie path, a fetch.bundleURI bundle source, a url.*.insteadOf / pushInsteadOf rewrite, and
 include.path / includeIf.*.path are each REFUSED, in the plain and the subsection form alike
 (http.cookieFile and http.<url>.cookieFile): a repository-planted helper is a program launch, a
+repository core.alternateRefsCommand names a program the fetch itself runs with each alternate
+recorded under .git/objects/info/alternates (a store made with clone --reference or --shared
+carries that file legitimately) while it advertises the alternates' tips, a repository
+gc.recentObjectsHook names a program the auto-maintenance a fetch can spawn in the store
+repository would run, a
 repository push.gpgSign makes the push sign its certificate where the target advertises signing,
 running the signing program the configuration names, and a repository gpg.program, any
 gpg.<format>.program or gpg.ssh.defaultKeyCommand makes that a repository-chosen program, a
@@ -105,11 +111,15 @@ bundle source makes a fetch also download a bundle from a location the repositor
 write its objects and refs/bundles/* refs under .git (a fetch source the destination agreement
 never verified), and a repository-local include is read by the transport but not expanded by a
 scoped listing, so its keys could not be verified by name. The same enumeration refuses a
-repository-scope clean, smudge or process filter driver and a repository-scope external diff,
-textconv or merge driver: git runs the program such a key names while it materializes or compares
-working-tree content, so the --pull fast-forward's checkout (the first local step that writes the
-worktree, with .gitattributes assigning the driver to a changed path) would otherwise run a
-repository-chosen program before the post-pull doctor grades the result. Every local step reads
+repository-scope clean, smudge or process filter driver: git runs the program such a key names
+while it materializes working-tree content, so the --pull fast-forward's checkout (the first local
+step that writes the worktree, with .gitattributes assigning the driver to a changed path) would
+otherwise run a repository-chosen program before the post-pull doctor grades the result. It also
+refuses a repository-scope external diff, textconv or merge driver: git runs the program such a
+key names while it compares or merges working-tree content, and no step of the reference pull
+path is shown to reach those drivers, so they are refused as fail-closed defence in depth, at the
+cost that an adopter with a repository-scope textconv (or external diff or merge driver) must
+move it to global configuration before sync will run. Every local step reads
 global and system config as the null device (the scrubbed observation boundary), so the repository's
 own scope is the only one from which such a program is reachable, and it is refused before any fetch
 or checkout rather than forced off on each later local worktree step one by one.
@@ -202,7 +212,11 @@ _HELPER_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9+.]*::")
 # Repository-SCOPE config keys the transport refuses by name, over both the --local and --worktree
 # listings (section/key folded, the subsection kept): a URL rewrite silently redirects the verified
 # destination; a repository-planted credential helper, askpass or git proxy is a program launch on
-# fetch or push; a repository-scope push.gpgSign turns on push-certificate signing where the target
+# fetch or push, a repository-scope core.alternateRefsCommand names a program the fetch itself
+# runs with each alternate recorded under .git/objects/info/alternates while it advertises the
+# alternates' tips, and a repository-scope gc.recentObjectsHook names a program the
+# auto-maintenance a fetch can spawn in the store repository would run;
+# a repository-scope push.gpgSign turns on push-certificate signing where the target
 # advertises it, which runs the configured signing program during the push, and a repository-scope
 # gpg.program, gpg.<format>.program or gpg.ssh.defaultKeyCommand makes that a repository-chosen
 # program; a repository-scope remote.<name>.receivepack, uploadpack or vcs names the pack program or
@@ -224,7 +238,8 @@ _HELPER_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9+.]*::")
 # _refuse_local_redirect_config reads these lists and nothing else, so the stated and the enforced
 # lists are one.
 _LOCAL_REDIRECT_KEYS = (b"url.insteadof", b"url.pushinsteadof")
-_LOCAL_EXEC_KEYS = (b"credential.helper", b"core.askpass", b"core.gitproxy")
+_LOCAL_EXEC_KEYS = (b"credential.helper", b"core.askpass", b"core.gitproxy",
+                    b"core.alternaterefscommand", b"gc.recentobjectshook")
 _LOCAL_SIGN_KEYS = (b"push.gpgsign", b"gpg.program", b"gpg.defaultkeycommand")
 _LOCAL_REMOTE_PROGRAM_KEYS = (b"remote.receivepack", b"remote.uploadpack", b"remote.vcs")
 _LOCAL_PROTOCOL_KEYS = (b"protocol.allow",)
@@ -236,8 +251,12 @@ _LOCAL_INCLUDE_KEYS = (b"include.path", b"includeif.path")
 # content (not on the fetch/push transport, which moves objects and never touches the worktree): a
 # filter.<name>.clean, smudge or process driver runs on the --pull fast-forward's checkout (the first
 # local step that writes the worktree, with .gitattributes assigning the driver to a changed path),
-# and before the post-pull doctor sees the result; a diff.<name>.command / textconv or merge.<name>
-# .driver names the external diff, textconv or merge program git would run the same way. Every local
+# and before the post-pull doctor sees the result. A diff.<name>.command / textconv or merge.<name>
+# .driver names a program git runs while it compares or merges working-tree content; no step of the
+# reference pull path is shown to reach those drivers (the fast-forward checks out, it never
+# content-diffs or merges), so they stay refused as fail-closed defence in depth, at the cost that
+# an adopter with a repository-scope textconv (or external diff or merge driver) must move it to
+# global configuration before sync will run. Every local
 # step reads global and system config as the null device (the scrubbed observation env), so the
 # repository's OWN scope is the only one from which such a program is reachable on those steps: the key
 # is refused before any fetch or checkout, rather than the fast-forward and every later local worktree
@@ -615,7 +634,10 @@ def _refuse_local_redirect_config(git, store_root):
     """Refuse, by name, a repository-scope config key that would redirect, exec, weaken the trust
     decision or reach a repository-chosen path on the transport call: url.*.insteadOf /
     pushInsteadOf (a silent rewrite of the verified URL), a credential helper, core.askpass,
-    core.gitProxy, a push.gpgSign / gpg.program / gpg.<format>.program / gpg.ssh.defaultKeyCommand
+    core.gitProxy, core.alternateRefsCommand (a program the fetch itself runs with each alternate
+    recorded under .git/objects/info/alternates while it advertises the alternates' tips),
+    gc.recentObjectsHook (a program the auto-maintenance a fetch can spawn would run),
+    a push.gpgSign / gpg.program / gpg.<format>.program / gpg.ssh.defaultKeyCommand
     push-signing key (push.gpgSign makes the push sign its certificate where the target advertises
     signing, running the configured signing program, and the gpg keys make that program a
     repository-chosen one), a remote.<name>.receivepack / uploadpack / vcs program name (git runs
@@ -628,12 +650,15 @@ def _refuse_local_redirect_config(git, store_root):
     downloads a bundle from the location the repository names, writing its objects and
     refs/bundles/* refs under .git), include.path / includeIf.*.path (the transport
     reads the included file, but a scoped listing does not expand it, so the included keys could not
-    be verified by name), a filter.<name>.clean / smudge / process driver and a diff.<name>.command /
-    textconv or merge.<name>.driver driver (git runs the program such a key names while it
-    materializes or compares working-tree content: the --pull fast-forward's checkout runs the smudge
-    before the post-pull doctor sees the result, and the local steps read global and system config as
-    the null device, so the repository's own scope is the only one that could reach such a program,
-    refused here before any fetch or checkout). The names are matched from the _LOCAL_* lists alone
+    be verified by name), a filter.<name>.clean / smudge / process driver (git runs the program such
+    a key names while it materializes working-tree content: the --pull fast-forward's checkout runs
+    the smudge before the post-pull doctor sees the result, and the local steps read global and
+    system config as the null device, so the repository's own scope is the only one that could reach
+    such a program, refused here before any fetch or checkout), and a diff.<name>.command / textconv
+    or merge.<name>.driver driver (git runs the program such a key names while it compares or merges
+    working-tree content; no step of the reference pull path is shown to reach those drivers, so
+    they stay refused as fail-closed defence in depth, at the cost that an adopter with a
+    repository-scope textconv must move it to global configuration). The names are matched from the _LOCAL_* lists alone
     (_local_key_listed).
     Both repository scopes are enumerated, --local and --worktree (without the worktreeConfig
     extension the latter reads the same .git/config), through the scrubbed read-only boundary
@@ -644,8 +669,12 @@ def _refuse_local_redirect_config(git, store_root):
          ", a URL rewrite that would silently redirect the verified destination (spec 5.6); remove "
          "it from the repository config and re-run (fail-closed)"),
         (_LOCAL_EXEC_KEYS,
-         ", a repository-planted program launch on fetch or push; credentials belong in the "
-         "adopter's own global configuration (spec 5.6); remove it and re-run (fail-closed)"),
+         ", a repository-planted program launch on fetch or push (a credential helper, askpass or "
+         "git proxy runs when the transport needs it, core.alternateRefsCommand runs inside "
+         "the fetch itself whenever the store has objects/info/alternates, and "
+         "gc.recentObjectsHook runs inside the auto-maintenance a fetch can spawn); such programs "
+         "belong in the adopter's own global configuration (spec 5.6); remove it and re-run "
+         "(fail-closed)"),
         (_LOCAL_SIGN_KEYS,
          ", a repository-scope push-signing key: push.gpgSign makes the push sign its certificate "
          "where the target advertises signing, running the configured signing program, and "
@@ -687,9 +716,11 @@ def _refuse_local_redirect_config(git, store_root):
          "global configuration (spec 5.6); remove it and re-run (fail-closed)"),
         (_LOCAL_CONTENT_DRIVER_KEYS,
          ", a repository-scope external diff, textconv or merge driver: git runs the program it "
-         "names while it materializes or compares working-tree content, the same working-tree "
-         "program-launch class as a filter driver; such drivers belong to the adopter's own global "
-         "configuration (spec 5.6); remove it and re-run (fail-closed)"))
+         "names while it compares or merges working-tree content, and no step of the reference "
+         "pull path is shown to reach it, so it is refused as fail-closed defence in depth; the "
+         "cost is that an adopter with a repository-scope textconv (or external diff or merge "
+         "driver) must move it to the adopter's own global configuration (spec 5.6); remove it "
+         "and re-run (fail-closed)"))
     for scope in ("--local", "--worktree"):
         listing = _opf_observe._run_git(git, store_root,
                                         ["config", scope, "-z", "--name-only", "--list"])
@@ -1107,7 +1138,9 @@ def self_test():
     destination agreement, the held-lease refusal (never seized), the hostile-repository-config
     neutralization, the effective URL-rewrite refusal over every config scope, the repository-scope
     include/helper/signing/remote-program/protocol/trust/cookie/bundle refusals (every listed key
-    in its plain and its subsection form), the repository-scope working-tree driver refusals
+    in its plain and its subsection form), the core.alternateRefsCommand refusal over a store with
+    alternates (the fetch shown running the program once the refusal is dropped), the
+    repository-scope working-tree driver refusals
     (filter clean/smudge/process and the diff/textconv/merge drivers, with the fast-forward checkout
     shown running the smudge program once the refusal is dropped), the pre-git target validation, and
     the fetch/detached/unborn refusals. The
@@ -1802,6 +1835,42 @@ def _self_test_units(check):
             _git(rp_root, "config", "--local", "--unset", "remote.origin.vcs")
             check("emptying the remote-program list lets the repository remote program through "
                   "(shown red)", rc == EXIT_OK)
+            # a repository-scope core.alternateRefsCommand refuses before any fetch: with
+            # .git/objects/info/alternates present (a store made with clone --reference or
+            # --shared carries that file legitimately), the fetch itself runs the configured
+            # program with each alternate's path while it advertises the alternates' tips, so the
+            # key is a program launch inside the hardened transport, in the read-only report and
+            # on --pull alike; the program's marker never appears and nothing moves
+            ar_root, ar_bare = _paired("altrefs")
+            _writer_commit(ar_bare, "altrefs")
+            ar_marker = os.path.join(base, "altrefs-marker")
+            ar_prog = Path(base) / "altrefs-prog"
+            ar_prog.write_text("#!/bin/sh\n: > {}\nexit 0\n".format(ar_marker), encoding="utf-8")
+            os.chmod(str(ar_prog), 0o755)
+            ar_alt = os.path.join(base, "altrefs-alt.git")
+            _git(base, "init", "--bare", ar_alt)
+            ar_alt_file = Path(ar_root) / ".git" / "objects" / "info" / "alternates"
+            ar_alt_file.parent.mkdir(parents=True, exist_ok=True)
+            ar_alt_file.write_text(os.path.join(ar_alt, "objects") + "\n", encoding="utf-8")
+            _git(ar_root, "config", "--local", "core.alternateRefsCommand", str(ar_prog))
+            ar_head = _head(ar_root)
+            for argv in ([], ["--pull"]):
+                rc, out = run(argv + ["--root", ar_root])
+                check("a repository-scope core.alternateRefsCommand with alternates present "
+                      "refuses before any fetch ({})".format(" ".join(argv) or "bare"),
+                      rc == EXIT_MALFORMED and "program launch" in out
+                      and not os.path.exists(ar_marker) and _head(ar_root) == ar_head
+                      and not _status(ar_root))
+            # the named flip: with the exec list emptied, the fetch itself runs the
+            # repository-chosen program (the marker appears) while the report stays read-only,
+            # so the refusal reads the list, not a copy of it, and the fetch is the transport
+            # step this refusal protects
+            with patch.object(module, "_LOCAL_EXEC_KEYS", ()):
+                rc, out = run(["--root", ar_root])
+            check("emptying the exec list lets the fetch run the alternate-refs program "
+                  "(shown red)",
+                  rc == EXIT_MALFORMED and "BEHIND" in out and os.path.exists(ar_marker)
+                  and _head(ar_root) == ar_head)
             # -- a repository-scope working-tree driver program is refused before any fetch or
             # checkout: a filter.<name>.clean / smudge / process driver runs on the --pull
             # fast-forward's CHECKOUT (the first local step that writes the worktree), and a
