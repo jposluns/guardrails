@@ -2724,7 +2724,10 @@ def _journal_listing(root_fd, keep=None, raised=None):
     the walk cannot open or list is keyed `<dir>/` to ("unlisted", reason), a key no entry name can take
     (a name is never empty), so a listing never stands for what it did not see. A JOURNAL_REL ancestor's
     next component is stated by name even when the ancestor's own entries could not be listed; when the
-    ancestor could not be opened, that component is keyed unlisted itself. When `keep` is a list, the
+    ancestor could not be opened, that component is keyed unlisted itself. One the ancestor's listing
+    stated but that is gone when stated by name (removed between the two stats) is keyed unlisted too,
+    never left at the identity the ancestor's listing stated with nothing beneath it listed; one absent
+    from the ancestor's listing as well is observed absent. When `keep` is a list, the
     descriptors this listing opened for the JOURNAL_REL components are handed to it as (rel, fd) pairs and
     stay open: while they are HELD no filesystem can hand a removed component's freed inode number to a
     recreation, so a later listing compared against this one can never read a recreated component as
@@ -2804,7 +2807,12 @@ def _journal_listing(root_fd, keep=None, raised=None):
             rel = "/".join(parts[:i + 1])
             try:
                 st = os.stat(comp, dir_fd=cur, follow_symlinks=False)
-            except FileNotFoundError:
+            except FileNotFoundError as exc:
+                if rel in found:
+                    # the ancestor's listing stated it, so it vanished between the two stats: what is
+                    # beneath it was never listed, and that listing's entry must not stand for it
+                    found[rel] = ("unlisted", "it was gone when this listing stated it by name after its "
+                                  "parent's listing stated it ({})".format(exc))
                 break
             except OSError as exc:
                 found[rel] = ("unlisted", str(exc))
@@ -10973,6 +10981,45 @@ def _self_test_checks():
               unopenable.get(JOURNAL_REL, ("",))[0] == "unlisted" and len(said) == 1
               and "{} could not be listed ({} could not be opened".format(JOURNAL_REL, adopt) in said[0],
               observed=said)
+    # 6a12d': a journal path component its ancestor's listing stated, removed before the walk states it by
+    # name, is keyed unlisted and the journal is said not fully observed, at each component below the root
+    # (red against a FileNotFoundError that breaks the walk leaving the ancestor's stale entry, which names
+    # the removed entries gone as if observed); one absent from both stats is observed absent, no key.
+    parts = JOURNAL_REL.split("/")
+    vanished = []
+    for i in range(1, len(parts)):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            jdir = Path(temp) / JOURNAL_REL
+            os.makedirs(jdir)
+            (jdir / "x").write_bytes(b"")
+            real_stat = os.stat
+            stated = []
+
+            def removed_between(path, *args, **kwargs):
+                if path == parts[i]:
+                    stated.append(path)
+                    if len(stated) == 2:
+                        os.unlink(jdir / "x")
+                        for k in range(len(parts), i, -1):
+                            os.rmdir(Path(temp).joinpath(*parts[:k]))
+                return real_stat(path, *args, **kwargs)
+            race_fd = store._open_dir_nofollow(Path(temp).resolve())
+            try:
+                first = _journal_listing(race_fd)
+                with mock.patch.object(os, "stat", removed_between):
+                    raced = _journal_listing(race_fd)
+                absent = _journal_listing(race_fd)
+            finally:
+                os.close(race_fd)
+            said, _ours = _observed(first, raced, [], rid)
+            rel = "/".join(parts[:i + 1])
+            vanished.append((rel, len(stated), raced.get(rel), absent.get(rel), said))
+    check("listing-component-removed-between-stats-unlisted",
+          len(vanished) == len(parts) - 1 and all(
+              n == 2 and (got or ("",))[0] == "unlisted" and gone is None and bool(said)
+              and said[0].startswith("the adoption journal could not be fully observed")
+              and "{} could not be listed (it was gone".format(rel) in said[0]
+              for rel, n, got, gone, said in vanished), observed=vanished)
     # 6a12e: what the opening listing could not see hides nothing it did see, and an entry present now is
     # named only where that listing looked. It could not list `adopt` but stated the journal: the journal's
     # removed x is named gone (red against an opening `<dir>/` key hiding an observed disappearance) and its
