@@ -19,9 +19,12 @@
 #   tools/check_toolchain_pins.py; placed anywhere else it reads .aiqt/toolchain-pins.toml under another
 #   directory and, without --require-config, can report NOT APPLICABLE.
 # - If you also run tools/check_python_floor.py over your workflows, it requires every python-version: pin
-#   there to equal the floor's MAJOR.MINOR ('3.14') and reports a patch pin such as '3.14.4' as a finding
-#   (its patch exception covers only the pack repository's own host-patch jobs), while a python-interpreter
-#   declaration needs the full patch: no python-version: line satisfies both. To run both, keep the
+#   there to equal the floor's MAJOR.MINOR ('3.14') and reports a patch pin such as '3.14.4' as a finding.
+#   Its one patch exception is matched by workflow path, job name and host pin file, not by repository: a
+#   patch pin passes only in .github/workflows/quality.yml, inside a job that gate's HOST_JOBS names
+#   (opf-host-patch and the git-fixture-env-*-host-patch jobs), and only when it equals the
+#   python-host-patch that .aiqt/python-host.toml names. A python-interpreter declaration needs the full
+#   patch: no python-version: line satisfies both. To run both, keep the
 #   python-version: pins at '3.14', declare the python-interpreter toolchain with no
 #   [[toolchain.declaration]] (the runtime leg alone holds the interpreter running the gate to the patch),
 #   and update its version when the interpreter '3.14' installs moves to another patch; until then the
@@ -61,8 +64,11 @@
 #   indirect-count          required with indirect: the exact number of mentioned lines that are one of
 #                           the indirect lines.
 #
-# [[wiring]]                optional: a line the gate requires in a file, so its own CI step cannot be
-#                           removed silently:
+# [[wiring]]                optional: a line the gate requires in a file. It checks only that the named
+#                           line, stripped, appears there exactly count times (a finding otherwise). It
+#                           does not establish that the line is an executable, required or correctly
+#                           ordered CI step: the text still counts inside a run: | script, under an if:
+#                           that skips its job or step, or after the suites.
 #   path                    repo-relative, as for a declaration.
 #   line                    the exact line once stripped of surrounding whitespace (a list marker,
 #                           "- ", is part of it, so write the step's run: on a line of its own).
@@ -120,11 +126,12 @@ count = 1
 
 # ======== Minimal single-pin configuration: one Python patch in one CI file ========
 # The whole live configuration for a project whose only pin is one Python patch, stated on one line of one
-# workflow, with the gate's own step wired in. Copy the lines between the begin and end markers to
-# .aiqt/toolchain-pins.toml and remove the leading "# " from each. The workflow after it is the CI file the
-# configuration reads; the gate's step runs after the step that installs the pinned interpreter, so the
-# runtime leg observes it, and before the suites. If you also run tools/check_python_floor.py, see "Before
-# you adopt it" above: this patch pin is a finding there.
+# workflow, with a [[wiring]] entry that requires the gate's own run: line there once. Copy the lines
+# between the begin and end markers to .aiqt/toolchain-pins.toml and remove the leading "# " from each. The
+# workflow after it is the CI file the configuration reads; in it the gate's step runs after the step that
+# installs the pinned interpreter, so the runtime leg observes it, and before the suites. The gate does not
+# check that order, or that the step runs: keeping it so is the workflow's job. If you also run
+# tools/check_python_floor.py, see "Before you adopt it" above: this patch pin is a finding there.
 # -------- begin minimal .aiqt/toolchain-pins.toml
 # format-version = 1
 #

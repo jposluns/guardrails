@@ -11,6 +11,9 @@ adopter who has opted in cannot lose the gate by deleting the file.
 
   check_toolchain_pins.py [--require-config] [--declarations-only] [--only ID[,ID...]] [--lane ID]
   check_toolchain_pins.py --self-test
+  check_toolchain_pins.py [--self-test] --execution-report ABS_PATH
+                          the self-test, also writing the executed check ids, finalized at interpreter exit
+                          (tools/_selftest_exit_report.py), for tools/check_selftest_execution.py
 
 Prerequisites:
   Python 3.14 or newer runs the gate. Below 3.14 its prelude writes a refusal and exits 2 before it reads
@@ -26,7 +29,10 @@ Prerequisites:
   APPLICABLE.
   With tools/check_python_floor.py: that gate, where an adopter runs it over its own workflows, requires
   every python-version: pin there to equal the floor's MAJOR.MINOR ('3.14') and reports a patch pin
-  ('3.14.4') as a finding; its patch exception covers only this repository's own host-patch jobs. The
+  ('3.14.4') as a finding. Its one patch exception is matched by workflow path, job name and host pin
+  file, not by repository: a patch pin passes there only in .github/workflows/quality.yml, inside a job
+  that gate's HOST_JOBS names (opf-host-patch and the git-fixture-env-*-host-patch jobs), and only when it
+  equals the python-host-patch that .aiqt/python-host.toml names. The
   python-interpreter adapter takes only MAJOR.MINOR.PATCH, and a declaration's captured version must equal
   it, so no python-version: line satisfies both gates. An adopter running both declares the
   python-interpreter toolchain with no [[toolchain.declaration]], so the runtime leg alone holds the
@@ -45,7 +51,9 @@ Legs, each over the selected toolchains (every [[toolchain]], or only those --on
                 or gained a pin), and each captured version must equal the version of the declaration's lane
                 (a finding naming file and line otherwise).
   wiring        each [[wiring]] line must occur, stripped, exactly count times in its file (a finding
-                otherwise). The same line screen applies.
+                otherwise). The same line screen applies. That is all it establishes: the named text is
+                present that many times, not that it is an executable, required or correctly ordered CI
+                step (NOT CHECKED below).
   runtime       skipped with --declarations-only, and the report says so. For each selected toolchain the
                 adapter reads the version and compares it, as a string, with the baseline version, or with
                 the version of the lane --lane names (a lane every selected toolchain must declare;
@@ -56,8 +64,11 @@ Legs, each over the selected toolchains (every [[toolchain]], or only those --on
                 to another process group or session is not killed); its output is then collected for at
                 most COLLECT_SECONDS (1) more, after which the pipes are closed, so a surviving descendant
                 that holds them cannot keep the gate waiting, and the timeout is cannot-evaluate either
-                way. The command must exit 0, and its standard output, decoded as UTF-8 and stripped, must
-                match pattern whole. A command that is not on PATH is a finding.
+                way. The report says which it was: a command that did not finish, or one that exited
+                within its timeout while a descendant still held its output open. A failed kill is named
+                in the report, and a command still not reaped once the collection ends is named and left
+                running, never waited on. The command must exit 0, and its standard output, decoded as
+                UTF-8 and stripped, must match pattern whole. A command that is not on PATH is a finding.
 
 The report names, for each toolchain, its lane, the lane's role, the expected and the observed version and
 the executable, and which legs ran.
@@ -90,10 +101,11 @@ continue-on-error:) is not seen, nor a version built at run time or set through 
 adopter's mention bounds what is read; a YAML block scalar's text is read as lines like any other, so a pin
 or wiring line moved into a run: | script, where it is shell text and no longer a setting or a step,
 still counts and passes; a descendant of a timed-out command that left its process group is not killed
-and may outlive the gate; a lane's role is a label only; without --require-config, deleting
-the configuration brings NOT APPLICABLE back; an adopter regex that backtracks badly runs as written; and
-whether the declared version is what a developer's host runs rests on a human updating the configuration
-when the host changes.
+and may outlive the gate, and so may a timed-out command the kill could not stop (one running under
+another user id, or in an uninterruptible wait), which is reported and left unreaped; a lane's role is a
+label only; without --require-config, deleting the configuration brings NOT APPLICABLE back; an adopter
+regex that backtracks badly runs as written; and whether the declared version is what a developer's host
+runs rests on a human updating the configuration when the host changes.
 """
 import sys
 
@@ -110,6 +122,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import contextlib
+import errno
 import importlib.util
 import io
 import os
@@ -125,10 +138,12 @@ import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
+SUITE_ID = "toolchain-pins-selftest"
 CONFIG_REL = ".aiqt/toolchain-pins.toml"
 EXAMPLE_REL = ".aiqt/toolchain-pins.toml.example"
 USAGE = ("usage: check_toolchain_pins.py [--require-config] [--declarations-only] [--only ID[,ID...]] "
-         "[--lane ID] | --self-test")
+         "[--lane ID] | --self-test | [--self-test] --execution-report ABS_PATH")
 ID_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 # The python-interpreter version grammar: MAJOR.MINOR.PATCH, each component at most four digits, the
 # grammar tools/check_python_host_pin.py reads its own pin with.
@@ -414,22 +429,40 @@ def _row(toolchain, lane, role, expected, observed, executable):
         toolchain, lane, role, expected, observed, executable)
 
 
-def _stop_group(proc):
-    """Kill the process group of the new session the command runs in (start_new_session makes the command
-    that group's leader), then collect its output for at most COLLECT_SECONDS. A descendant that moved to
-    another process group or session survives the kill and can hold the pipes open, so the pipes are then
-    closed rather than waited on. True when the collection ended at its bound."""
+def _seconds(count):
+    """count seconds in words: "1 second", "2 seconds"."""
+    return "{} second{}".format(count, "" if count == 1 else "s")
+
+
+def _stop_group(proc, binary, timeout):
+    """The cannot-evaluate reason for a command whose output was still open at its timeout. The process group
+    of the new session the command runs in (start_new_session makes the command that group's leader) is
+    killed, then its output is collected for at most COLLECT_SECONDS. A descendant that moved to another
+    process group or session survives the kill and can hold the pipes open, so the caller then closes them
+    rather than waiting on them. The command itself is not waited on past that bound either: a failed kill
+    is named, and a command still not reaped then is named and left running."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except OSError:
-        pass
+        kill = ""
+    except OSError as exc:
+        kill = "; killing its process group failed ({}: {})".format(type(exc).__name__, exc)
     try:
         proc.communicate(timeout=COLLECT_SECONDS)
+        held = ""
     except subprocess.TimeoutExpired:
-        proc.stdout.close()
-        proc.stderr.close()
-        return True
-    return False
+        held = ("; its output was still held open {} after its process group was killed (a descendant outside "
+                "that group), so the pipes were closed".format(_seconds(COLLECT_SECONDS)))
+    returncode = proc.poll()
+    if returncode is None:
+        # Not held: with the command still running, the pipes may be its own.
+        return "{} did not finish within {}{}; it was still running {} later, so it is left running and not " \
+               "waited on".format(binary, _seconds(timeout), kill, _seconds(COLLECT_SECONDS))
+    if returncode == -signal.SIGKILL and not kill:
+        return "{} did not finish within {}{}".format(binary, _seconds(timeout), held)
+    # The command ended before the kill reached it: the output still open at the timeout was a descendant's.
+    return "{} {} within {}, but its output was still open when the timeout ended (a descendant held it){}{}".format(
+        binary, "was killed by signal {}".format(-returncode) if returncode < 0 else "exited {}".format(returncode),
+        _seconds(timeout), kill, held)
 
 
 def _command_version(toolchain, expected, path):
@@ -440,19 +473,22 @@ def _command_version(toolchain, expected, path):
         return None, None, None
     binary = os.path.abspath(binary)
     try:
-        with subprocess.Popen([binary] + toolchain["argv"][1:], stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, PATH=path),
-                              start_new_session=True) as proc:
-            try:
-                output, _errors = proc.communicate(timeout=toolchain["timeout"])
-            except subprocess.TimeoutExpired:
-                held = _stop_group(proc)
-                raise CannotEvaluate("{} did not finish within {} seconds{}".format(
-                    binary, toolchain["timeout"], "; its output was still held open {} seconds after its process "
-                    "group was killed (a descendant outside that group), so the pipes were closed".format(
-                        COLLECT_SECONDS) if held else ""))
+        proc = subprocess.Popen([binary] + toolchain["argv"][1:], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, PATH=path),
+                                start_new_session=True)
     except OSError as exc:
         raise CannotEvaluate("{} could not be run ({})".format(binary, exc))
+    # No with block: its exit waits on the command with no bound, and a command the kill could not stop must
+    # not keep the gate waiting (_stop_group).
+    try:
+        output, _errors = proc.communicate(timeout=toolchain["timeout"])
+    except subprocess.TimeoutExpired:
+        raise CannotEvaluate(_stop_group(proc, binary, toolchain["timeout"]))
+    except OSError as exc:
+        raise CannotEvaluate("{} could not be read ({})".format(binary, exc))
+    finally:
+        proc.stdout.close()
+        proc.stderr.close()
     if proc.returncode != 0:
         raise CannotEvaluate("{} {}".format(binary, "was killed by signal {}".format(-proc.returncode)
                                             if proc.returncode < 0 else "exited {}".format(proc.returncode)))
@@ -554,9 +590,22 @@ def parse_args(args):
 
 
 def main(argv=None, root=None):
-    args = sys.argv[1:] if argv is None else argv
-    if args == ["--self-test"]:
-        return self_test()
+    if argv is None:
+        # The process entry: the command line, ended through the execution-report finalizer when the
+        # self-test armed it.
+        _code = main(sys.argv[1:], root)
+        _finalizer = sys.modules.get("_selftest_exit_report")
+        (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
+    args = argv
+    if args and args[0] in ("--self-test", "--execution-report"):
+        rest = args[1:] if args[0] == "--self-test" else list(args)
+        if not rest:
+            return self_test()
+        if len(rest) == 2 and rest[0] == "--execution-report" and os.path.isabs(rest[1]):
+            return self_test(rest[1])
+        print("CANNOT EVALUATE: the self-test takes only --execution-report and an absolute path; {}".format(
+            USAGE), file=sys.stderr)
+        return 2
     options, why = parse_args(args)
     if options is None:
         print("CANNOT EVALUATE: {}; {}".format(why, USAGE), file=sys.stderr)
@@ -578,6 +627,7 @@ def main(argv=None, root=None):
 SELF_TEST_MARKER = "\n# " + "-" * 94 + " self-test\n"
 FAILURES = []
 EXECUTED = []
+_EXECUTED_SET = set()
 HOST = (3, 14, 4, "final")
 EXE = "/usr/local/bin/python3"
 PIN = "(?P<version>[0-9]+\\\\.[0-9]+\\\\.[0-9]+)"
@@ -615,9 +665,10 @@ HELD_HELPER = ("import pathlib, subprocess, sys\n"
 
 
 def check(name, got, want):
-    if name in EXECUTED:
+    if name in _EXECUTED_SET:
         print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
         sys.exit(2)
+    _EXECUTED_SET.add(name)
     EXECUTED.append(name)
     if got != want:
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
@@ -722,6 +773,20 @@ def _injected(module, root, kind):
         module.tomllib = real
 
 
+class _RefusingKill:
+    """A stand-in for a gate module's os whose killpg is refused, as it is for a process running under another
+    user id; every other name is the real module's."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def killpg(self, _pid, _signal):
+        raise PermissionError(errno.EPERM, "injected: not permitted")
+
+
 def _cases(base):
     this = sys.modules[__name__]
 
@@ -763,30 +828,32 @@ def _cases(base):
     # Schema: each breach is cannot-evaluate; flipped without the key-set check, an unknown key passes.
     controls = _tree(base, "controls")
     check("schema/control-passes", _code(this, controls), 0)
+    # Every check id is a literal (here a literal loop row), so tools/check_selftest_execution.py can resolve
+    # each call site to its registered id before it launches the suite.
     for name, config in (
-            ("unknown-key", CONFIG.replace('adapter = "python-interpreter"\n',
-                                           'adapter = "python-interpreter"\nnote = "x"\n')),
-            ("format-version-true", CONFIG.replace("format-version = 1", "format-version = true")),
-            ("format-version-float", CONFIG.replace("format-version = 1", "format-version = 1.0")),
-            ("duplicate-id", CONFIG + PY.split("[[toolchain.declaration]]")[0]),
-            ("unknown-adapter", CONFIG.replace('"python-interpreter"', '"node"')),
-            ("pattern-without-version-group", CONFIG.replace("(?P<version>", "(", 1)),
-            ("pattern-does-not-compile", CONFIG.replace("(?P<version>", "((?P<version>", 1)),
-            ("unknown-lane", CONFIG.replace('lane = "canary"', 'lane = "nightly"')),
-            ("unknown-role", CONFIG.replace('"exploratory"', '"advisory"')),
-            ("version-outside-grammar", CONFIG.replace('version = "3.14.4"', 'version = "3.14"')),
-            ("count-zero", CONFIG.replace("count = 2", "count = 0")),
-            ("climbing-path", CONFIG.replace('"ci/canary.yml"', '"ci/../ci/canary.yml"')),
-            ("no-toolchain", "format-version = 1\n"),
-            ("timeout-zero", _command_config(timeout=0)),
-            ("timeout-too-long", _command_config(timeout=TIMEOUT_MAX + 1)),
-            ("timeout-not-integer", _command_config(timeout='"10"')),
-            ("argv-path", _command_config(argv='["/usr/bin/tool"]'))):
-        check("schema/" + name, _code(this, _tree(base, "schema-" + name, config=config)), 2)
+            ("schema/unknown-key", CONFIG.replace('adapter = "python-interpreter"\n',
+                                                  'adapter = "python-interpreter"\nnote = "x"\n')),
+            ("schema/format-version-true", CONFIG.replace("format-version = 1", "format-version = true")),
+            ("schema/format-version-float", CONFIG.replace("format-version = 1", "format-version = 1.0")),
+            ("schema/duplicate-id", CONFIG + PY.split("[[toolchain.declaration]]")[0]),
+            ("schema/unknown-adapter", CONFIG.replace('"python-interpreter"', '"node"')),
+            ("schema/pattern-without-version-group", CONFIG.replace("(?P<version>", "(", 1)),
+            ("schema/pattern-does-not-compile", CONFIG.replace("(?P<version>", "((?P<version>", 1)),
+            ("schema/unknown-lane", CONFIG.replace('lane = "canary"', 'lane = "nightly"')),
+            ("schema/unknown-role", CONFIG.replace('"exploratory"', '"advisory"')),
+            ("schema/version-outside-grammar", CONFIG.replace('version = "3.14.4"', 'version = "3.14"')),
+            ("schema/count-zero", CONFIG.replace("count = 2", "count = 0")),
+            ("schema/climbing-path", CONFIG.replace('"ci/canary.yml"', '"ci/../ci/canary.yml"')),
+            ("schema/no-toolchain", "format-version = 1\n"),
+            ("schema/timeout-zero", _command_config(timeout=0)),
+            ("schema/timeout-too-long", _command_config(timeout=TIMEOUT_MAX + 1)),
+            ("schema/timeout-not-integer", _command_config(timeout='"10"')),
+            ("schema/argv-path", _command_config(argv='["/usr/bin/tool"]'))):
+        check(name, _code(this, _tree(base, name.replace("/", "-"), config=config)), 2)
     # Each end of the timeout range is accepted (the command is then simply absent from the empty PATH, a
     # finding); one past each end is refused above.
-    for name, seconds in (("timeout-at-low-end", 1), ("timeout-at-high-end", TIMEOUT_MAX)):
-        check("schema/" + name, _code(this, _tree(base, "schema-" + name, config=_command_config(timeout=seconds))), 1)
+    for name, seconds in (("schema/timeout-at-low-end", 1), ("schema/timeout-at-high-end", TIMEOUT_MAX)):
+        check(name, _code(this, _tree(base, name.replace("/", "-"), config=_command_config(timeout=seconds))), 1)
     unknown = _tree(base, "flip-unknown-key", config=CONFIG.replace(
         'adapter = "python-interpreter"\n', 'adapter = "python-interpreter"\nnote = "x"\n'))
     check("schema/flip-key-set-check-removed", _code(_mutant(base, "keyset", (
@@ -796,11 +863,15 @@ def _cases(base):
     # The parse mapping: each class injected at the parse is cannot-evaluate, and escapes a copy whose
     # handler no longer maps it.
     anchor = "except (ValueError, RecursionError, MemoryError) as exc:"
-    for kind, kept in ((RecursionError, "ValueError, MemoryError"), (MemoryError, "ValueError, RecursionError"),
-                       (ValueError, "RecursionError, MemoryError")):
-        name = kind.__name__.lower()
-        check("parse/injected-" + name, _injected(this, controls, kind), 2)
-        check("parse/flip-without-" + name, _injected(_mutant(base, "without_" + name, (
+    for name, flip, kind, kept in (
+            ("parse/injected-recursionerror", "parse/flip-without-recursionerror", RecursionError,
+             "ValueError, MemoryError"),
+            ("parse/injected-memoryerror", "parse/flip-without-memoryerror", MemoryError,
+             "ValueError, RecursionError"),
+            ("parse/injected-valueerror", "parse/flip-without-valueerror", ValueError,
+             "RecursionError, MemoryError")):
+        check(name, _injected(this, controls, kind), 2)
+        check(flip, _injected(_mutant(base, "without_" + kind.__name__.lower(), (
             (anchor, "except (" + kept + ") as exc:"),)), controls, kind), "raised " + kind.__name__)
     check("parse/syntax-error", _code(this, _tree(base, "syntax", config=CONFIG + "[[toolchain\n")), 2)
 
@@ -829,20 +900,30 @@ def _cases(base):
     check("command/empty-path", _code(this, command, path=""), 1)
     words = _stub(base, "words", "printf 'x 1.2.3 y'\n")
     fails = _stub(base, "fails", "printf '1.2.3'\nexit 3\n")
-    for name, path in (("extra-words", words), ("two-lines", _stub(base, "two", "printf '1.2.3\\n1.2.3\\n'\n")),
-                       ("non-zero-exit", fails), ("killed-by-signal", _stub(base, "signal", "kill -KILL $$\n")),
-                       ("not-utf-8", _stub(base, "bytes", "printf '\\377'\n"))):
-        check("command/" + name, _code(this, command, path=path), 2)
+    for name, path in (("command/extra-words", words),
+                       ("command/two-lines", _stub(base, "two", "printf '1.2.3\\n1.2.3\\n'\n")),
+                       ("command/non-zero-exit", fails),
+                       ("command/killed-by-signal", _stub(base, "signal", "kill -KILL $$\n")),
+                       ("command/not-utf-8", _stub(base, "bytes", "printf '\\377'\n"))):
+        check(name, _code(this, command, path=path), 2)
     loop = _stub(base, "loop", "while :; do :; done\n")
     check("command/timeout", _code(this, timed, path=loop), 2)
+
+    # A one-second timeout reads "1 second"; flipped to the plural alone, it reads "1 seconds".
+    def timeout_words(module):
+        text = "\n".join(module.evaluate(timed, HOST, loop, EXE)[1])
+        return "did not finish within 1 second" in text and "1 seconds" not in text
+    check("command/timeout-says-1-second", timeout_words(this), True)
+    check("command/flip-seconds-always-plural", timeout_words(_mutant(base, "plural", (
+        ('"" if count == 1 else "s"', '"s"'),))), False)
     check("command/flip-fullmatch-to-search", _code(_mutant(base, "search", (
         ('toolchain["pattern"].fullmatch(', 'toolchain["pattern"].search('),)), command, path=words), 0)
     check("command/flip-return-code-ignored", _code(_mutant(base, "rc_ignored", (
         ("    if proc.returncode != 0:\n", "    if False:\n"),)), command, path=fails), 0)
     check("command/flip-timeout-passes", _code(_mutant(base, "timeout_passes", (
-        ('                raise CannotEvaluate("{} did not finish within {} seconds{}".format(\n',
-         '                return expected, binary, ""\n'
-         '                raise CannotEvaluate("{} did not finish within {} seconds{}".format(\n'),)), timed, path=loop), 0)
+        ('        raise CannotEvaluate(_stop_group(proc, binary, toolchain["timeout"]))\n',
+         '        _stop_group(proc, binary, toolchain["timeout"])\n'
+         '        return expected, binary, ""\n'),)), timed, path=loop), 0)
 
     # A descendant in a process group of its own survives the kill and holds stdout open: the gate still
     # returns within the timeout, the collection bound and HELD_MARGIN seconds, as cannot-evaluate naming
@@ -850,10 +931,12 @@ def _cases(base):
     held_tree = _tree(base, "command-held", config=_command_config(timeout=HELD_TIMEOUT), files={})
     _write(base, "held_helper.py", HELD_HELPER)
 
-    def held(module, label):
+    def held(module, label, then="while :; do :; done\n"):
+        """(exit code, whether the descendant started, whether the gate returned within its bound, the
+        report) of a stub that starts the descendant and then runs then."""
         started, stop = base / ("held-" + label + ".started"), base / ("held-" + label + ".stop")
-        path = _stub(base, "held-" + label, '"{}" -I "{}" "{}" "{}"\nwhile :; do :; done\n'.format(
-            sys.executable, base / "held_helper.py", started, stop))
+        path = _stub(base, "held-" + label, '"{}" -I "{}" "{}" "{}"\n{}'.format(
+            sys.executable, base / "held_helper.py", started, stop, then))
         begun = time.monotonic()
         try:
             code, lines = module.evaluate(held_tree, HOST, path, EXE)
@@ -861,10 +944,55 @@ def _cases(base):
             elapsed = time.monotonic() - begun
             _write(base, "held-" + label + ".stop", "")
         return (code, started.exists(), elapsed <= HELD_TIMEOUT + COLLECT_SECONDS + HELD_MARGIN,
-                any("still held open" in line for line in lines))
-    check("command/escaped-descendant-bounded", held(this, "bounded"), (2, True, True, True))
+                "\n".join(lines))
+    code, started, bounded, text = held(this, "bounded")
+    check("command/escaped-descendant-bounded", (code, started, bounded, "still held open" in text),
+          (2, True, True, True))
     check("command/flip-collection-unbounded", held(_mutant(base, "unbounded", (
         ("proc.communicate(timeout=COLLECT_SECONDS)", "proc.communicate()"),)), "unbounded")[:3], (2, True, False))
+
+    # A command that prints its version and exits 0 within its timeout while the descendant still holds its
+    # output is cannot-evaluate too, and the report says it exited, not that it did not finish. Flipped to
+    # read every timeout as unfinished, it does not.
+    def exited(module, label):
+        code, started, bounded, text = held(module, label, then="printf '1.2.3\\n'\n")
+        return (code, started, bounded, "exited 0 within {}".format(_seconds(HELD_TIMEOUT)) in text,
+                "did not finish" in text)
+    check("command/exited-while-held-says-exited", exited(this, "exited"), (2, True, True, True, False))
+    check("command/flip-exited-read-as-unfinished", exited(_mutant(base, "exited_unfinished", (
+        ("    if returncode == -signal.SIGKILL and not kill:\n", "    if True:\n"),)), "exited-flip")[3:],
+        (False, True))
+
+    # A kill that fails (os.killpg refused, as for a command running under another user id) is named, and
+    # the command it did not stop is left running, not waited on, so the gate still returns within its
+    # bound. Flipped to drop the failure from the report, or to wait on the command, each reads otherwise.
+    # The command is a child that ends when its stop file appears, or after HELD_LIFETIME seconds.
+    _write(base, "held_child.py", HELD_CHILD)
+
+    def unkilled(module, label):
+        """(exit code, whether the report names the failed kill, whether it says the command was left running,
+        whether the gate returned within its bound) under an os.killpg that refuses."""
+        stop = base / ("unkilled-" + label + ".stop")
+        path = _stub(base, "unkilled-" + label, 'exec "{}" -I "{}" "{}"\n'.format(
+            sys.executable, base / "held_child.py", stop))
+        real = module.os
+        module.os = _RefusingKill(real)
+        begun = time.monotonic()
+        try:
+            code, lines = module.evaluate(timed, HOST, path, EXE)
+        finally:
+            elapsed = time.monotonic() - begun
+            module.os = real
+            _write(base, stop.name, "")
+        text = "\n".join(lines)
+        return (code, "killing its process group failed (PermissionError" in text, "left running" in text,
+                elapsed <= 1 + COLLECT_SECONDS + HELD_MARGIN)
+    check("command/kill-failure-named-and-bounded", unkilled(this, "named"), (2, True, True, True))
+    check("command/flip-kill-failure-unnamed", unkilled(_mutant(base, "kill_unnamed", (
+        ('        kill = "; killing its process group failed ({}: {})".format(type(exc).__name__, exc)\n',
+         '        kill = ""\n'),)), "unnamed")[1], False)
+    check("command/flip-exit-wait-unbounded", unkilled(_mutant(base, "exit_wait", (
+        ("    returncode = proc.poll()\n", "    returncode = proc.wait()\n"),)), "waited")[3], False)
 
     # argv is passed with no shell: a shell metacharacter in an argument stays literal. Flipped to a shell
     # over the joined command, the marker appears (a redirection, which needs no command on the stub PATH).
@@ -907,30 +1035,34 @@ def _cases(base):
     # lines, or without the expression screen, each reads otherwise.
     loose = CONFIG.replace("pattern = \"python-version: '" + PIN + "'\"\ncount = 2",
                            "pattern = \"python-version: (?P<version>.+)\"\ncount = 2")
-    outside = (("key-other-case", CONFIG, MAIN_YML.replace("python-version: '3.14.4'", "Python-Version: '3.14.4'", 1)),
-               ("trailing-comment", CONFIG, MAIN_YML.replace("'3.14.4'", "'3.14.4'  # pin", 1)),
-               ("unlisted-expression", loose, MAIN_YML.replace("${{ matrix.python }}", "${{ matrix.other }}")))
     skip = _mutant(base, "skip_outside", (
         ("                if match is None:\n                    raise CannotEvaluate(",
          "                if match is None:\n                    continue\n"
          "                    raise CannotEvaluate("),))
     unscreened = _mutant(base, "no_expression_screen", (("                if EXPRESSION in text:\n",
                                                          "                if False:\n"),))
-    for name, config, text in outside:
-        root = _tree(base, "outside-" + name, config=config, files=dict(FILES, **{"ci/main.yml": text}))
-        check("mentions/" + name, _code(this, root), 2)
-        flip = unscreened if name == "unlisted-expression" else skip
-        check("mentions/flip-" + name, _code(flip, root) != 2, True)
+    for name, flip_name, flip, config, text in (
+            ("mentions/key-other-case", "mentions/flip-key-other-case", skip, CONFIG,
+             MAIN_YML.replace("python-version: '3.14.4'", "Python-Version: '3.14.4'", 1)),
+            ("mentions/trailing-comment", "mentions/flip-trailing-comment", skip, CONFIG,
+             MAIN_YML.replace("'3.14.4'", "'3.14.4'  # pin", 1)),
+            ("mentions/unlisted-expression", "mentions/flip-unlisted-expression", unscreened, loose,
+             MAIN_YML.replace("${{ matrix.python }}", "${{ matrix.other }}"))):
+        root = _tree(base, name.replace("mentions/", "outside-"), config=config,
+                     files=dict(FILES, **{"ci/main.yml": text}))
+        check(name, _code(this, root), 2)
+        check(flip_name, _code(flip, root) != 2, True)
 
     # A line-break character in a line that does not mention the pin is cannot-evaluate; flipped without
     # the screen, it passes.
     unbroken = _mutant(base, "no_line_screen", (("        if any(mark in line for mark in LINE_BREAKS):\n",
                                                  "        if False:\n"),))
-    for name, mark in (("internal-cr", "\r"), ("line-separator", "\u2028")):
-        root = _tree(base, "break-" + name, files=dict(FILES, **{"ci/main.yml": MAIN_YML.replace(
+    for name, flip_name, mark in (("lines/internal-cr", "lines/flip-internal-cr", "\r"),
+                                  ("lines/line-separator", "lines/flip-line-separator", "\u2028")):
+        root = _tree(base, name.replace("lines/", "break-"), files=dict(FILES, **{"ci/main.yml": MAIN_YML.replace(
             "jobs:\n", "jobs:" + mark + "x: y\n")}))
-        check("lines/" + name, _code(this, root), 2)
-        check("lines/flip-" + name, _code(unbroken, root), 0)
+        check(name, _code(this, root), 2)
+        check(flip_name, _code(unbroken, root), 0)
     check("lines/crlf-file", _code(this, _tree(base, "crlf", files={
         rel: text.replace("\n", "\r\n") for rel, text in FILES.items()})), 0)
 
@@ -996,24 +1128,25 @@ def _cases(base):
                                                  "executable " + executable)) for line in lines)
     tool = os.path.join(pinned, "tool")
     other_tool = os.path.join(base, "bin-other", "tool")
-    reports = (("pass", controls, HOST, "", EXE), ("fail", controls, (3, 14, 5, "final"), "", EXE),
-               ("command-pass", command, HOST, pinned, tool),
-               ("command-fail", command, HOST, os.path.dirname(other_tool), other_tool))
     no_executable = _mutant(base, "no_executable", (("        toolchain, lane, role, expected, observed, executable)",
                                                      '        toolchain, lane, role, expected, observed, "")'),))
-    for name, root, version, path, executable in reports:
-        check("report/" + name, names_all(this, root, version, path, executable), True)
-        check("report/flip-" + name, names_all(no_executable, root, version, path, executable), False)
+    for name, flip_name, root, version, path, executable in (
+            ("report/pass", "report/flip-pass", controls, HOST, "", EXE),
+            ("report/fail", "report/flip-fail", controls, (3, 14, 5, "final"), "", EXE),
+            ("report/command-pass", "report/flip-command-pass", command, HOST, pinned, tool),
+            ("report/command-fail", "report/flip-command-fail", command, HOST, os.path.dirname(other_tool),
+             other_tool)):
+        check(name, names_all(this, root, version, path, executable), True)
+        check(flip_name, names_all(no_executable, root, version, path, executable), False)
 
     # The shipped example validates under the schema, and a tree holding only the example is NOT APPLICABLE.
     # Flipped so the example is the live path, it is not; and an unknown key in the example is refused.
     example = (Path(__file__).resolve().parents[1] / EXAMPLE_REL).read_bytes().decode("utf-8")
     try:
-        loaded = load_config(example)
-        check("example/validates", sorted(toolchain["id"] for toolchain in loaded["toolchains"]),
-              ["gitleaks", "python"])
+        validated = sorted(toolchain["id"] for toolchain in load_config(example)["toolchains"])
     except CannotEvaluate as exc:
-        check("example/validates", str(exc), "no refusal")
+        validated = "refused: {}".format(exc)
+    check("example/validates", validated, ["gitleaks", "python"])
     only_example = _tree(base, "only-example", config=None, files={EXAMPLE_REL: example})
     check("example/not-applicable", _code(this, only_example), 0)
     check("example/flip-example-is-live", _code(_mutant(base, "example_live", (
@@ -1031,15 +1164,16 @@ def _cases(base):
     # another patch is a finding.
     minimal, minimal_ci = (_section(example, rel) for rel in (CONFIG_REL, ".github/workflows/ci.yml"))
     try:
-        loaded = load_config(minimal or "")
-        check("example/minimal-validates", [(toolchain["id"], [d["count"] for d in toolchain["declarations"]])
-                                            for toolchain in loaded["toolchains"]], [("python", [1])])
+        validated = [(toolchain["id"], [d["count"] for d in toolchain["declarations"]])
+                     for toolchain in load_config(minimal or "")["toolchains"]]
     except CannotEvaluate as exc:
-        check("example/minimal-validates", str(exc), "no refusal")
-    for name, text, want in (("minimal-passes", minimal_ci or "", 0),
-                             ("minimal-other-patch-finds", (minimal_ci or "").replace("'3.14.4'", "'3.14.5'"), 1)):
-        check("example/" + name, _code(this, _tree(base, "example-" + name, config=minimal or "",
-                                                   files={".github/workflows/ci.yml": text})), want)
+        validated = "refused: {}".format(exc)
+    check("example/minimal-validates", validated, [("python", [1])])
+    for name, text, want in (("example/minimal-passes", minimal_ci or "", 0),
+                             ("example/minimal-other-patch-finds",
+                              (minimal_ci or "").replace("'3.14.4'", "'3.14.5'"), 1)):
+        check(name, _code(this, _tree(base, name.replace("/", "-"), config=minimal or "",
+                                      files={".github/workflows/ci.yml": text})), want)
 
     # An unknown argument is cannot-evaluate; flipped to fall through to a default scan, it is NOT APPLICABLE.
     check("arguments/unknown", _main(this, ["--bogus"], empty)[0], 2)
@@ -1050,19 +1184,54 @@ def _cases(base):
         ["--bogus"], empty)[0], 0)
 
 
-def self_test():
+def _expected_check_ids():
+    """The expected-check-ids of this suite's row in CHECKS_MANIFEST, or None after printing why not."""
+    try:
+        manifest = tomllib.loads(CHECKS_MANIFEST.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc), file=sys.stderr)
+        return None
+    for row in manifest.get("suite", []):
+        if isinstance(row, dict) and row.get("id") == SUITE_ID:
+            ids = row.get("expected-check-ids")
+            if isinstance(ids, list) and ids and all(isinstance(item, str) and item for item in ids) \
+                    and len(set(ids)) == len(ids):
+                return set(ids)
+            break
+    print("SELF-TEST HARNESS ERROR: missing or malformed suite {!r} in {}".format(SUITE_ID, CHECKS_MANIFEST),
+          file=sys.stderr)
+    return None
+
+
+def self_test(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band. Imported only here: the flipped copies
+        # of this gate load from a temporary directory that does not carry it.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _selftest_exit_report
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     try:
         with tempfile.TemporaryDirectory(prefix="toolchain-pins-selftest-") as raw:
             _cases(Path(raw))
     except (CannotEvaluate, OSError) as exc:
         print("SELF-TEST HARNESS ERROR: {}".format(exc), file=sys.stderr)
         return 2
+    # The in-run self-guard: the executed set must equal this suite's registered set, on a direct run too.
+    expected = _expected_check_ids()
+    if expected is None:
+        return 2
+    for check_id in sorted(expected - _EXECUTED_SET):
+        FAILURES.append("execution-set/missing: {}".format(check_id))
+    for check_id in sorted(_EXECUTED_SET - expected):
+        FAILURES.append("execution-set/extra: {}".format(check_id))
     if FAILURES:
         print("SELF-TEST FAIL:")
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: {} checks executed (each case red under its flip)".format(len(EXECUTED)))
+    print("SELF-TEST PASS: {} unique checks executed (each case red under its flip); execution set reconciled "
+          "against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
 
