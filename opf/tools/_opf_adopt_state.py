@@ -569,6 +569,7 @@ def self_test():
     """Fail-closed vectors over throwaway temporary product trees: the adoption bundles carry plans the real
     planner froze and approvals the real capture produced, and every verdict is read from the C-CONTAINMENT
     report the doctor itself builds. Every write lands under its own TemporaryDirectory."""
+    _child_status_refusal_exit("_opf_adopt_state.py")
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
@@ -681,9 +682,9 @@ def _self_test_checks():
         rows = [dict(op="init-store", store_root=".", members=[dict(
                     path=mrel + "/manifest.toml", digest=digest(manifest_text.encode("utf-8")))]),
                 dict(op="render-views", store_root=".",
-                     members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views]),
-                schema.enforcement_install_op(bindings["enforcement"])]
-        # The opf/ mirror the pack row plants lies outside every walked root, so its absence is a declared
+                     members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views])]
+        rows += schema.enforcement_install_ops(bindings["enforcement"])
+        # The opf/ mirror the plant rows fill lies outside every walked root, so its absence is a declared
         # target beside each explicit move destination.
         sheet = dict(sources=sorted(srcs), targets=[schema.PACK_MIRROR_ROOT] + sorted(dests.values()),
                      product="opf",
@@ -1713,6 +1714,34 @@ def _self_test_checks():
             os.close(cross_fd)
         check("crossing-final-read-reported", crossed is not None and "exceeds" in crossed
               and crossing[0] == -2)
+        # The read ceiling at both ends: the budget refuses only when a read drives it NEGATIVE (never at
+        # zero), so a ceiling of one byte over the call's exact consumption and of exactly it both admit,
+        # and one byte under is cannot-evaluate. The exact consumption is metered on the same tree first
+        # (one budget serves the whole call), so each bound is derived, never guessed.
+        root = tree()
+        spent = [0]
+        real_budgeted = reader._read_budgeted
+
+        def metering(root_fd, rel, budget):
+            held = budget[0]
+            try:
+                return real_budgeted(root_fd, rel, budget)
+            finally:
+                spent[0] += held - budget[0]
+
+        with mock.patch.object(reader, "_read_budgeted", metering):
+            rep = contain(root)
+        exact = spent[0]
+        check("read-ceiling-metered-clean", rep.cannot == [] and exact > 0 and bounded(rep) != [])
+        for label, ceiling, admits in (("one-over", exact + 1, True), ("exact", exact, True),
+                                       ("one-under", exact - 1, False)):
+            with mock.patch.object(reader, "READ_CEILING", ceiling):
+                rep = contain(root)
+            if admits:
+                ok = rep.cannot == [] and bounded(rep) != []
+            else:
+                ok = any("read ceiling" in m for m in rep.cannot)
+            check("read-ceiling-" + label + ("-admits" if admits else "-cannot"), ok)
 
         # S18 (QA rounds 1 and 4): the move row, frozen by the real planner: bounded, drifted and
         # vanished grade exactly as retire does. Before the recorded retirement the plan's Move
@@ -1743,14 +1772,14 @@ def _self_test_checks():
         # original store, retirement included.
         root = tree()
         original = contain(root)
-        shutil.rmtree(root / ".aiqt")
+        shutil.rmtree(root / store.JOURNALS_REL)
         cloned = contain(root)
         check("clone-without-journal-grades-identically", original.findings == [] and original.cannot == []
               and (cloned.findings, cloned.cannot, cloned.triage, cloned.migration_incomplete)
               == (original.findings, original.cannot, original.triage, original.migration_incomplete))
         root = tree()
         retire(root, rid)
-        shutil.rmtree(root / ".aiqt")
+        shutil.rmtree(root / store.JOURNALS_REL)
         rep = contain(root)
         check("clone-retirement-recorded-from-evidence", rep.cannot == [] and bounded(rep) == [mig])
 
@@ -1826,7 +1855,7 @@ def _self_test_checks():
         # requires the journal, pinned through validate_store itself, not only contain().
         clone_result = None
         if ok and result is not None:
-            shutil.rmtree(e2e / apply.JOURNAL_REL.split("/")[0])
+            shutil.rmtree(e2e / store.JOURNALS_REL)
             if git_commit_all(e2e):
                 res = store.resolve_store(e2e)
                 if res.status == store.RESOLVED:
@@ -1853,7 +1882,65 @@ def main():
     return 2
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. Its self-test launches git and reads
+# each exit status, so under an ignored SIGCHLD it would read a failing child as a pass. The guard runs
+# as the first statement of self_test(), before any launch, and at the entry line before main(); the
+# entry line comes after the --self-test statement that opf.py requires first in the __main__ block.
+# The import _opf_check and opf.py make of this module runs nothing; opf.py's opf-adopt-state leg calls
+# self_test() in process, so the guard runs there too, after opf.py's own guard at its entry line.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("_opf_adopt_state.py") or main())

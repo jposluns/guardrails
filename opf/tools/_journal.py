@@ -167,9 +167,9 @@ def _close_fd_quietly(fd):
     it in the loop, nor propagate a raw OSError out of a `finally` in place of the JournalError the engine
     maps every other failure to. Used by the contained-walk cleanup loops (_open_parent, _open_dir_contained,
     ensure_journal_dirs), each of which closes SEVERAL opened fds in a `finally`: a raw `os.close` there,
-    when one close raised, abandoned the rest (codex round-8, the sibling of _opf_check._close_fd_quietly).
+    when one close raised, abandoned the rest (the sibling of _opf_check._close_fd_quietly).
 
-    Single close (P1, #378): the descriptor is closed with exactly ONE os.close. If it raises, the number
+    Single close (#378): the descriptor is closed with exactly ONE os.close. If it raises, the number
     counts as released and is never touched again: no fstat, no second close. close(2) on Linux "always
     releases the file descriptor early in the close operation, freeing it for reuse", and retrying "is the
     wrong thing to do, since this may cause a reused file descriptor from another thread to be closed"
@@ -186,7 +186,7 @@ def _close_fd_quietly(fd):
 
 def _close_fd_propagating(fd):
     """Close a descriptor on a FAIL-CLOSED path where the close error must PROPAGATE to the caller (unlike
-    _close_fd_quietly's teardown swallow). Single close (P1, #378): exactly ONE os.close; if it raises, the
+    _close_fd_quietly's teardown swallow). Single close (#378): exactly ONE os.close; if it raises, the
     number counts as released (close(2) on Linux releases it early, even when the close then reports EINTR
     or EIO, and a retry can close another thread's reused descriptor: man 2 close), so it is never probed
     or closed again, and the ORIGINAL close error propagates unchanged, preserving every existing
@@ -303,7 +303,7 @@ def _close_fd_yielding(fd):
     """Close a descriptor from an `except` handler or a `finally` block without letting a close error
     REPLACE the exception already in flight there (#378): the close error _close_fd_propagating raises would
     otherwise mask the body's error whenever the body raised. When an exception is unwinding through, or
-    being handled in, the CALLING frame, the same single close still runs (P1: one os.close, the number
+    being handled in, the CALLING frame, the same single close still runs (one os.close, the number
     released either way and never touched again) but its close error is dropped, so the ORIGINAL exception
     keeps propagating; when none is (the normal path through a `finally`), this is exactly
     _close_fd_propagating and a close error still fails closed. "In flight in the calling frame" means the
@@ -480,7 +480,7 @@ def _read_contained(root_fd, relpath, require_single_link=False, cap=None):
     an out-of-tree victim passes O_NOFOLLOW and S_ISREG, and its resolved posture would then track the
     victim's inode, so it is refused here class-consistent with the journal's own frames.log nlink==1
     identity guard (SECI-symlink-resolution). The default is OFF, so a generic product read keeps an
-    intentional hardlink (F-R17-A1)."""
+    intentional hardlink."""
     try:
         pfd, name = _open_parent(root_fd, relpath)
     except OSError as exc:                                 # includes FileNotFoundError
@@ -502,8 +502,8 @@ def _read_contained(root_fd, relpath, require_single_link=False, cap=None):
         if require_single_link and st.st_nlink != 1:
             # A HARDLINK to an out-of-tree victim passes O_NOFOLLOW and S_ISREG; a link count above 1 means
             # a second name references this inode. Refuse a multiply-linked CONTROL file on the OPENED fd
-            # BEFORE reading a byte, so its posture cannot track a victim inode (codex round-6 sibling;
-            # F-R17-A1).
+            # BEFORE reading a byte, so its posture cannot track a victim inode (the per-open half of
+            # the hardlink defence).
             raise JournalError("contained control file {!r} has {} hard links; refusing to read a "
                                "multiply-linked control file (a hardlink to an out-of-tree victim, never "
                                "our singly-linked control file)".format(relpath, st.st_nlink))
@@ -511,8 +511,8 @@ def _read_contained(root_fd, relpath, require_single_link=False, cap=None):
             return _read_fd(fd, cap=cap, stop_at_cap=True), st
         return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
-        # Each close in its own try/finally (round-5 defect 3): a FILE close that reports an error must
-        # not skip the parent close and leak pfd. Each close is a single os.close (P1: a raising close has
+        # Each close in its own try/finally: a FILE close that reports an error must
+        # not skip the parent close and leak pfd. Each close is a single os.close (a raising close has
         # released its number, close(2), and it is never touched again), so both descriptors are released
         # either way, and the file-close error keeps propagating fail-closed to the caller.
         try:
@@ -644,10 +644,10 @@ def open_journal_root_from_path(root, journal_rel):
     try:
         jr_fd = _open_dir_contained(root_fd, journal_rel)
     finally:
-        # ROUND-6 defect sibling (_opf_store._open_working_dir_fd): the new jr fd is HELD in a local
+        # As in _opf_store._open_working_dir_fd: the new jr fd is HELD in a local
         # across the root close, so a root close that reports an error cannot abandon the return and
         # leak the just-opened journal-root fd. It is released quietly, the root close is a single
-        # os.close (P1: a raising close has released its number, close(2), and it is never touched
+        # os.close (a raising close has released its number, close(2), and it is never touched
         # again), and the close error keeps propagating fail-closed.
         try:
             _close_fd_yielding(root_fd)
@@ -683,7 +683,7 @@ def _create_frames_excl(jr_fd, txn_dir):
     """Create the txn's frames.log EXACTLY ONCE, EXCLUSIVELY, inside the freshly-made txn dir (contained
     beneath the trusted journal-root fd). O_CREAT|O_EXCL refuses ANY pre-existing entry at that name (a
     planted hardlink to a victim, or a plain regular file), so the log is provably freshly created by us
-    before the first publish ever appends (codex round-6; the FIRST-creation half of the hardlink defence,
+    before the first publish ever appends (the FIRST-creation half of the hardlink defence,
     complementing the per-open st_nlink==1 identity check on every reopen/append/read/truncate). The empty
     file is fsync'd and its dir entry made durable through the same contained fd."""
     try:
@@ -744,8 +744,8 @@ def publish(jr_fd, txn_dir, ftype, obj):
             # O_NOFOLLOW refuses a SYMLINK but a HARDLINK is a regular file that passes S_ISREG, so a
             # frames.log hardlinked to an out-of-tree victim would be appended-to on the victim's inode. A
             # frames.log we created is unlinked (exactly one link); a link count above 1 means a second name
-            # references this inode (a planted hardlink to a victim), so refuse it (codex round-6;
-            # SECI-symlink-resolution: confirm the opened object's identity, a hardlink is not a swap-in-name
+            # references this inode (a planted hardlink to a victim), so refuse it
+            # (SECI-symlink-resolution: confirm the opened object's identity, a hardlink is not a swap-in-name
             # a symlink defence catches).
             if _st.st_nlink != 1:
                 raise JournalError("journal frames.log has {} hard links; refusing to append (a hardlink "
@@ -754,7 +754,7 @@ def publish(jr_fd, txn_dir, ftype, obj):
             # _MAX_JOURNAL_READ_BYTES, so a publish that would carry the log past that cap produces a journal
             # recovery refuses as oversize. Refuse the append here, fail-closed, so no publish path (INTENT,
             # the terminal frames from run_transaction, or the terminal frames from recover()) can ever write
-            # an unreadable journal (F-R17-A2). run_transaction's pre-mutation budget check reserves the whole
+            # an unreadable journal. run_transaction's pre-mutation budget check reserves the whole
             # INTENT+rollback envelope so a legitimate transaction never trips this.
             if _st.st_size + len(frame) > _MAX_JOURNAL_READ_BYTES:
                 raise JournalError("journal frames.log would reach {} bytes after a {}-byte {} frame, over "
@@ -785,7 +785,7 @@ def read_frames(jr_fd, txn_dir, txn_fd=None):
     (Path(txn_dir).name) is opened by a dir-fd-relative O_DIRECTORY|O_NOFOLLOW open beneath the trusted
     journal-root fd (jr_fd), and frames.log dir-fd-relative to THAT, so no re-resolved absolute path is
     walked and an ANCESTOR symlink on the txn path fails closed (SECI-symlink-resolution). An absent txn
-    dir (or absent frames.log) reads as no frames. txn_fd (round 4): a txn-dir descriptor the caller HELD
+    dir (or absent frames.log) reads as no frames. txn_fd: a txn-dir descriptor the caller HELD
     from its enumeration (_journal_txn_dirs hold=True); when given, frames.log is read through a dup of
     THAT directory identity, never a by-name reopen beneath jr_fd, so a transaction directory swapped
     onto its name after the enumeration can neither hide the enumerated transaction's frames nor
@@ -819,7 +819,7 @@ def read_frames(jr_fd, txn_dir, txn_fd=None):
                 raise JournalError("journal frames.log is not a regular file (no-follow)")
             # A HARDLINK to an out-of-tree victim passes O_NOFOLLOW and S_ISREG; a link count above 1 means
             # another name references this inode, so refuse it rather than read a victim's bytes into the
-            # frame parse (codex round-6; SECI-symlink-resolution identity confirmation).
+            # frame parse (SECI-symlink-resolution identity confirmation).
             if _st.st_nlink != 1:
                 raise JournalError("journal frames.log has {} hard links; refusing to read (a hardlink to "
                                    "an out-of-tree victim, never our unlinked log)".format(_st.st_nlink))
@@ -891,7 +891,7 @@ def _truncate_log(jr_fd, txn_dir, good_len):
             if not stat.S_ISREG(_st.st_mode):
                 raise JournalError("journal frames.log is not a regular file (no-follow truncate)")
             # A HARDLINK to an out-of-tree victim passes O_NOFOLLOW and S_ISREG; refusing a link count above
-            # 1 stops the ftruncate from truncating a victim's inode (codex round-6; recovery is the
+            # 1 stops the ftruncate from truncating a victim's inode (recovery is the
             # destructive path this most needs, SECI-symlink-resolution identity confirmation).
             if _st.st_nlink != 1:
                 raise JournalError("journal frames.log has {} hard links; refusing to truncate (a hardlink "
@@ -1041,7 +1041,7 @@ def read_lock_owner_at(jr_fd):
         # created is singly-linked (O_CREAT|O_EXCL, exactly one name); a link count above 1 means a second
         # name references this inode (a planted hardlink), so refuse it fail-closed, class-consistent with
         # the other journal opens' st_nlink==1 identity guards (frames.log reopen/append/read/truncate,
-        # the product-file prestate checks, and the lock.break arbitration inode). Round-12 F4: this closes
+        # the product-file prestate checks, and the lock.break arbitration inode). This closes
         # read_lock_owner, the last unguarded acceptor of a hardlinked inode in the journal.
         if _st.st_nlink != 1:
             raise JournalError("journal lock has {} hard links; refusing to read (a hardlink to an "
@@ -1173,7 +1173,7 @@ def release_lock(journal_root):
 
 def _listdir_fresh(held_fd, label):
     """The entry names of the directory held open at `held_fd`, read through a FRESH descriptor opened
-    as "." beneath it for this listing alone (F-JOURNAL-HELD-FD-LISTING). os.listdir(fd) and
+    as "." beneath it for this listing alone. os.listdir(fd) and
     os.scandir(fd) read through a dup that SHARES the given descriptor's open file description -- its
     directory read offset and, on btrfs, a readdir upper bound the kernel snapshots when the directory
     is opened -- so a listing through a descriptor held from an earlier open or listing can miss every
@@ -1184,7 +1184,7 @@ def _listdir_fresh(held_fd, label):
     description whose view includes every entry up to THIS open. The fresh descriptor is closed on
     every path, exactly once. An OSError opening or listing is wrapped in a contextual JournalError
     (fail-closed). The enumeration itself stays os.scandir, so an injected scandir fault still
-    exercises the fail-closed wrap (F-R18-OSESC). Behaviour change, in the fail-closed direction: the
+    exercises the fail-closed wrap. Behaviour change, in the fail-closed direction: the
     "." open checks the directory's permissions again at listing time, where a listing through the
     held descriptor relied on the check made at its open, so a directory made unreadable after the held
     open (mode 000, say) now raises JournalError here (doctor reports MALFORMED, pin blocks, store
@@ -1215,19 +1215,19 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
     arbitration files and any stray non-directory entry. A symlinked entry is REFUSED (JournalError), not
     followed or silently skipped, class-consistent with doctor.assert_open_journal and migrate._txn_dirs so
     a symlinked/dangling txn entry cannot slip through the stale-lock reconcile as 'all terminal'
-    (SECI-symlink-resolution; F-R17-C1 sibling). strict=True (a read-only state report) also REFUSES any
+    (SECI-symlink-resolution). strict=True (a read-only state report) also REFUSES any
     wrong-type entry instead of skipping it: only a directory, or a REGULAR, SINGLY-LINKED `lock` /
     `lock.break` (the only non-directory names this engine creates in a journal root, each created with
     exactly one link), is accepted -- a multiply-linked `lock` or `lock.break` is a second name for a
     foreign inode (a planted hardlink), refused fail-closed class-consistent with the journal's other
-    nlink==1 identity guards (round 4). hold=True: each transaction directory is ALSO opened
+    nlink==1 identity guards. hold=True: each transaction directory is ALSO opened
     O_DIRECTORY|O_NOFOLLOW beneath jr_fd AT enumeration and (path, fd) pairs are returned in place of
     bare paths, so the caller classifies and reads frames through the SAME held directory identity this
-    listing produced (round 4: a transaction directory swapped onto its name after the enumeration is
+    listing produced (a transaction directory swapped onto its name after the enumeration is
     never reopened by name); the caller closes every returned fd (on this function's own error paths
     they are closed here).
 
-    F-R18-JTOCTOU: enumerate and classify FD-RELATIVE to the TRUSTED, already-open journal-root descriptor
+    Enumerate and classify FD-RELATIVE to the TRUSTED, already-open journal-root descriptor
     (a fresh "." listing descriptor opened beneath jr_fd, os.lstat(name, dir_fd=jr_fd)), never by
     re-resolving the journal PATH. A path-based
     Path(journal_root).iterdir() FOLLOWS the journal path at enumeration time, so a swapped journal ANCESTOR
@@ -1235,7 +1235,7 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
     txn is missed and the caller reads the journal as 'all terminal'). Binding the enumeration to jr_fd keeps
     it on the same directory identity every other journal op is bound to; `journal_root` is used only to build
     the returned entry paths whose basenames the contained per-txn opens resolve beneath jr_fd.
-    F-JOURNAL-HELD-FD-LISTING: the enumeration reads through a FRESH descriptor opened as "." beneath
+    The enumeration reads through a FRESH descriptor opened as "." beneath
     jr_fd for each listing (_listdir_fresh), NEVER through the held jr_fd itself: a listing read through
     a descriptor held from an earlier open or listing can miss a transaction directory created after
     that open (on btrfs the kernel snapshots a readdir upper bound when the directory is opened). A
@@ -1245,7 +1245,7 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
     read the journal as 'all terminal' and break the lock with the transaction still open.
     The "." open resolves relative to jr_fd inside the kernel, so the enumeration keeps jr_fd's
     directory identity with no path re-resolution.
-    F-R18-OSESC: a listing or entry-stat OSError (e.g. EIO) is wrapped in a contextual JournalError
+    A listing or entry-stat OSError (e.g. EIO) is wrapped in a contextual JournalError
     (fail-closed), never left to escape as a raw OSError (CLI exit 1 + traceback); the CLI maps it to exit 2,
     _all_terminal to False, and _latest_txn to its documented failure."""
     out = []
@@ -1272,7 +1272,7 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
                 continue
             if stat.S_ISDIR(est.st_mode):
                 if hold:
-                    # Round 7 MINOR: build the returned entry path BEFORE the open, so a path
+                    # Build the returned entry path BEFORE the open, so a path
                     # construction that raises (a malformed journal_root) can never strand a
                     # just-opened txn descriptor outside `out`, where the except-cleanup below
                     # cannot close it.
@@ -1297,7 +1297,7 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
     return out
 
 
-def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
+def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=None):
     """E4 (spec 1262): a confirmed-dead stale lock is broken ONLY after (a) its recorded owner is confirmed
     dead AND (b) the journal is reconciled to a consistent (terminal) state. Under a kernel advisory lock on
     a STABLE, never-replaced arbitration file (<journal>/lock.break) that serializes recoverers (C1), RE-READ
@@ -1309,6 +1309,12 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
     concurrent recoverer already re-acquired (now live) is left untouched and reported 'possibly-live'.
     Returns 'acquired' or 'possibly-live'; JournalError on a lost O_EXCL acquire, an unreadable current lock,
     or a journal that does not reconcile to terminal (fail-closed: the stale lock is NOT broken).
+
+    `claim`, when given, is called with no arguments under the arbitration lock once the current owner is
+    confirmed dead and BEFORE the first recover(), so a caller takes its own further exclusion (the adoption
+    reconcile's store leases) with the journal's exclusion already held and before any recovery write; an
+    exception it raises propagates as itself, nothing recovered and the stale lock kept. It is not called
+    when the lock is already gone (a concurrent recoverer broke it), since this call then recovers nothing.
 
     PORTABILITY: fcntl is POSIX-only. On a platform without it (e.g. Windows) this FAILS CLOSED, refusing
     to break the stale lock rather than falling back to the unguarded race, consistent with the engine's
@@ -1335,8 +1341,8 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
         # recovery; a legitimate, singly-created lock.break has exactly one link. Refuse it, class-consistent
         # with the journal nlink==1 identity guards on every other inode open (frames.log
         # reopen/append/read/truncate, the product-file prestate checks, and read_lock_owner's own `lock`
-        # open), so no unguarded acceptor of a hardlinked inode remains in the journal (round-10 F3, extended
-        # by round-12 F4 which closed read_lock_owner; fails closed, never breaks a hardlinked lock).
+        # open), so no unguarded acceptor of a hardlinked inode remains in the journal (read_lock_owner
+        # included; fails closed, never breaks a hardlinked lock).
         if _ast.st_nlink != 1:
             raise JournalError("arbitration file {} has {} hard links (expected exactly 1); a multiply-linked "
                                "arbitration inode lets a foreign flock holder block stale-lock recovery, so we "
@@ -1351,6 +1357,8 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
                 return "possibly-live"                       # a concurrent recoverer re-acquired: never break
             # (b) reconcile every transaction to terminal BEFORE breaking the stale lock (spec 1262), the
             # stale lease RETAINED throughout so a crash mid-reconcile leaves the stale lock in place.
+            if claim is not None:
+                claim()                                      # the caller's exclusion, before any recovery write
             for txn_dir in _journal_txn_dirs(jr_fd, journal_root):
                 recover(jr_fd, txn_dir, root_fd)
             for txn_dir in _journal_txn_dirs(jr_fd, journal_root):
@@ -1441,7 +1449,7 @@ def capture_preimages(parent_fd, txn_dir, root_fd, ops):
                                            .format(op["path"], kind))
                     data, _fst = _read_contained(root_fd, op["path"])
                     if kind == "write" and _fst.st_nlink != 1:
-                        # DEFENCE IN DEPTH (codex round-8): a `write` op mutates the product file in place at
+                        # DEFENCE IN DEPTH: a `write` op mutates the product file in place at
                         # apply/restore, so a multiply-linked target would corrupt an out-of-tree victim through
                         # the shared inode. The authoritative refusal is on the OPENED fd at apply
                         # (_verify_fd_prestate) and at restore, but reject a hard-linked write target HERE too
@@ -1506,7 +1514,7 @@ def _verify_fd_prestate(fd, prestate, where):
         # victim, or a second in-tree name): the ftruncate+rewrite below would mutate that other name
         # THROUGH the shared inode. Refuse fail-closed on the OPENED fd (the race-safe measurement, not a
         # pre-open lstat) BEFORE any truncation, exactly as the frames.log nlink==1 identity check does for
-        # the journal log (the PRODUCT-FILE sibling of that defence; SECI-symlink-resolution / codex round-8).
+        # the journal log (the PRODUCT-FILE sibling of that defence; SECI-symlink-resolution).
         raise JournalError("{}: product file has {} hard links (>1); refusing to truncate/write a multiply-"
                            "linked file (a second name would mutate an out-of-tree victim through the shared "
                            "inode)".format(where, st.st_nlink))
@@ -1855,12 +1863,12 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                         try:
                             fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
                         except PermissionError:
-                            # RESTARTABLE RESTORATION (codex U1 round-2): a live file whose mode
+                            # RESTARTABLE RESTORATION: a live file whose mode
                             # denies owner write (a 0400 or 0000 prestate, or the debris of an
                             # interrupted earlier restore) cannot be reopened O_RDWR, which would
                             # wedge recovery forever on EACCES with the preimage still retained.
                             # Grant a TEMPORARY owner-rw bit by name (no-follow, beneath the same
-                            # parent fd) and reopen. HARD-LINK GATE (codex U1 round-3): the grant
+                            # parent fd) and reopen. HARD-LINK GATE: the grant
                             # is applied ONLY to an inode whose lstat link count is exactly 1,
                             # checked BEFORE any chmod, so an inode carrying a second name
                             # (possibly outside the product root) is never widened, not even
@@ -1897,7 +1905,7 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                                                    "root, would be widened through the shared "
                                                    "inode); no chmod was "
                                                    "applied".format(path, st.st_nlink))
-                            # REVERT PROTECTION BEFORE THE GRANT (codex U1 round-4): granted is
+                            # REVERT PROTECTION BEFORE THE GRANT: granted is
                             # set BEFORE the grant chmod, and the BaseException handler below
                             # spans the chmod, the reopen and the whole restore body at source
                             # level, so an exception or an interruption the handler observes
@@ -1905,7 +1913,7 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                             # returning and the next statement -- reaches the revert. If the
                             # interruption instead beats the chmod, the revert is an idempotent
                             # chmod back to the mode the file already holds.
-                            # INTERPRETER-INSTRUCTION RESIDUAL (codex U1 round-5): the handler's
+                            # INTERPRETER-INSTRUCTION RESIDUAL: the handler's
                             # span is a source-level guarantee. The compiled body can hold
                             # individual instructions that no exception-table entry covers
                             # (OBSERVED on CPython 3.14.4: a NOT_TAKEN instruction of the
@@ -1971,7 +1979,7 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                             # ftruncate+rewrite below would mutate that out-of-tree victim through the
                             # shared inode. Refuse on the OPENED fd BEFORE truncating, the same
                             # product-file nlink==1 defence _verify_fd_prestate applies on the apply path
-                            # (SECI-symlink-resolution / codex round-8).
+                            # (SECI-symlink-resolution).
                             raise JournalError("cannot restore {!r}: product file has {} hard links (>1); "
                                                "refusing to truncate/write a multiply-linked file (a second "
                                                "name would mutate an out-of-tree victim through the shared "
@@ -1998,8 +2006,8 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                             # handler never sees.
                             _revert_grant(fd if identity_verified else None)
                         raise
-                    # POST-CHECKPOINT EXITS NEVER REVERT (claude U1 round-4; split by the fchmod
-                    # boundary in round-5): the checkpoint above has verified the restored live
+                    # POST-CHECKPOINT EXITS NEVER REVERT (split by the fchmod
+                    # boundary): the checkpoint above has verified the restored live
                     # bytes, so the only missing step is the exact prestate mode, and no exit
                     # past this point reverts to the pre-grant mode. WHICH state a failed exit
                     # leaves depends on whether the prestate-mode fchmod below took effect.
@@ -2061,7 +2069,7 @@ def _recreate_file(pfd, name, data, mode):
     # checkpoint passes. A checkpoint failure (a faulty restore write, or the verification read itself
     # failing) therefore leaves an owner-writable file a LATER reconcile can reopen and finish restoring
     # once the fault is gone: a read-only prestate mode (0400, 0000) never wedges recovery behind an
-    # EACCES reopen (restartable restoration; codex U1 round-2).
+    # EACCES reopen (restartable restoration).
     fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=pfd)
     try:
         os.fchmod(fd, 0o600)                 # pin the temporary grant exactly (umask independence)
@@ -2122,7 +2130,7 @@ def classify_state(jr_fd, txn_dir, txn_fd=None):
     treated as never written (read_frames), consistent with recover(). The txn dir is reached contained
     beneath the trusted journal-root fd (jr_fd), or, when txn_fd is given (a txn-dir descriptor the
     caller HELD from its enumeration), read through that SAME held directory identity, so a read-only
-    reporter classifies exactly the directory it listed (round 4; see read_frames)."""
+    reporter classifies exactly the directory it listed (see read_frames)."""
     frames, _torn, _ = read_frames(jr_fd, txn_dir, txn_fd=txn_fd)
     _validate_terminal_agreement(frames)
     types = [t for t, _ in frames]
@@ -2180,7 +2188,7 @@ def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_re
     # terminal log this transaction can produce is INTENT + ROLLBACK-IN-PROGRESS + ROLLBACK-COMPLETE (the
     # rollback path, larger than INTENT + COMPLETE), so reserve room for all three HERE. Over budget => raise
     # BEFORE any mutation, so a crash can never leave an applied tree beside a journal recovery would refuse
-    # as oversize (F-R17-A2). The frames are serialized exactly as publish() does.
+    # as oversize. The frames are serialized exactly as publish() does.
     def _budget_frame(ftype, obj):
         payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
         return _frame(ftype, payload)
@@ -2203,10 +2211,10 @@ def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_re
         raise JournalError("cannot create contained journal txn dir {!r} ({})".format(txn_id, exc))
     os.fsync(jr_fd)
     # Create frames.log EXCLUSIVELY in the fresh txn dir before any publish appends to it, so a pre-planted
-    # entry (a hardlink to a victim or a plain regular file) is refused at creation (codex round-6).
+    # entry (a hardlink to a victim or a plain regular file) is refused at creation.
     _create_frames_excl(jr_fd, txn_dir)
     capture_preimages(jr_fd, txn_dir, root_fd, ops)
-    # F-R18-A2BUD: capture_preimages MUTATES each op in place, adding its prestate metadata, so the INTENT
+    # capture_preimages MUTATES each op in place, adding its prestate metadata, so the INTENT
     # actually published now carries MORE bytes than the pre-mutation budget above reserved. Re-check the
     # FINALIZED serialized envelope (the post-capture INTENT plus the two rollback terminal frames, the
     # largest terminal log) against the reader cap HERE, BEFORE INTENT is published and BEFORE apply_ops
@@ -2223,7 +2231,7 @@ def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_re
     if _final_budget > _MAX_JOURNAL_READ_BYTES:
         raise JournalError("finalized transaction journal frames would total {} bytes (post-capture "
                            "INTENT+ROLLBACK), over the {}-byte journal-read cap; refusing BEFORE any product "
-                           "mutation so a crash leaves a recoverable journal (fail-closed; F-R18-A2BUD)".format(
+                           "mutation so a crash leaves a recoverable journal (fail-closed)".format(
                                _final_budget, _MAX_JOURNAL_READ_BYTES))
     publish(jr_fd, txn_dir, F_INTENT, {"txn": txn_id, "header": header, "ops": ops})
     try:
@@ -2596,7 +2604,7 @@ def _st_close_run(call, masking, expect, watch=True):
     # A deliberately leaked number is reported and left open: the harness records no opens, so it cannot
     # prove the number is still the tested call's own. Another thread may have reused it (a released
     # number included) through os.open, builtin open() or any other route, so closing it could close
-    # someone else's descriptor (#378 P1).
+    # someone else's descriptor (#378, single close).
     leaked = sorted(fd for fd, ident in after.items() if before.get(fd) != ident)
     if leaked:
         problems.append("LEAK: descriptor(s) {} survived the failing close".format(leaked))
@@ -2620,7 +2628,7 @@ def _st_close_check(ns, vectors):
     assertion alone. `ns` is the namespace whose close helpers the sites resolve at call time. A vector is
     (label, masking, flips, call, expect). The flips: A, _close_fd_yielding replaced by
     _close_fd_propagating, so every site is back to propagating (red: MASKED); B, the helper always quiet
-    (red: SILENT); C, the caller-frame check removed (red: SILENT); R (RECLOSE), the pre-P1 bodies of
+    (red: SILENT); C, the caller-frame check removed (red: SILENT); R (RECLOSE), the pre-single-close bodies of
     _close_fd_propagating and _close_fd_quietly put back, which fstat the number after a failed close and
     close it again when it looks open (red: REUSE alone, so this leg runs with the PROBE watch off); P, an
     fstat probe after the failed close with no second close (red: PROBE); F, the same probe made with
@@ -2847,7 +2855,7 @@ def _st_watch_drop_check():
     return failures, runs
 
 
-# F-JOURNAL-HELD-FD-LISTING: the deterministic stale-listing seam. A listing read through a held directory
+# The deterministic stale-listing seam. A listing read through a held directory
 # descriptor can miss every entry created since that descriptor was opened, but only on some filesystems
 # (btrfs does; tmpfs does not), so a vector that relies on the native behaviour discriminates only where its
 # fixture happens to sit. Under this seam the stale view is served on ANY filesystem, so each fresh-descriptor
@@ -2880,7 +2888,7 @@ class _StStaleScandir:
 
 
 class _StStaleListing:
-    """A deterministic model of a STALE directory listing (F-JOURNAL-HELD-FD-LISTING), so a vector proves
+    """A deterministic model of a STALE directory listing, so a vector proves
     that a listing reads through a FRESH descriptor whatever filesystem its fixture is on.
 
     hold(fd) records a held directory descriptor and the entry names its directory had at that moment (a
@@ -3192,7 +3200,7 @@ def _st_fd_table_fails_closed():
 
 def _st_n2d():
     """N2d: the helper's one os.close raises EIO while a stderr write would raise OSError too (a broken
-    stderr): the helper must RETURN, having made exactly one close (P1, #378: no probe, no second close).
+    stderr): the helper must RETURN, having made exactly one close (#378: no probe, no second close).
     The close is a stub, so no open number is touched. Returns (returned, single_close)."""
     import errno
     saved_close, saved_stderr = os.close, sys.stderr
@@ -3356,7 +3364,7 @@ def _st_descriptor_helper_checks():
                  an exact fit returns its bytes, one byte over and a non-empty file under a zero cap refuse,
                  and an empty file under a zero cap returns empty with no read (_st_stop_at_cap).
       N2a        _close_fd_quietly swallows a close-time EBADF rather than propagating it.
-      N2d        _close_fd_quietly never raises and closes exactly once (P1, #378): its one close fails while
+      N2d        _close_fd_quietly never raises and closes exactly once (#378): its one close fails while
                  stderr itself is broken, and the helper still returns without a second close.
       FD-table   _st_fd_table, the close vectors' leak table, fails closed: an fstat error other than EBADF
                  raises naming the descriptor, never reads as closed.
@@ -3420,7 +3428,7 @@ def self_test():
         failures, runs = _st_close_check(globals(), vectors)
         drop_failures, drop_runs = _st_watch_drop_check()
         failures, runs = failures + drop_failures, runs + drop_runs
-        seam_failures, seam_checks = _st_stale_listing_check(base)   # F-JOURNAL-HELD-FD-LISTING
+        seam_failures, seam_checks = _st_stale_listing_check(base)
     except _StCensusError as exc:
         print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
         return 2

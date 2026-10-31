@@ -454,9 +454,12 @@ def _verify_with_loader(toml_path):
     import shutil
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-cwe-loadcheck-"))
     try:
-        shutil.copy(toml_path, tmp / "cwe.toml")
+        # The loader reads a directory strictly beneath its root, so the copy sits one level down.
+        std = tmp / "standards"
+        std.mkdir()
+        shutil.copy(toml_path, std / "cwe.toml")
         try:
-            manifests = load_manifests(tmp)
+            manifests = load_manifests(std, root=tmp)
         except ManifestError as exc:
             raise ImportError_("load_manifests rejected the rendered manifest: {}".format(exc))
         man = manifests.get("map-cwe")

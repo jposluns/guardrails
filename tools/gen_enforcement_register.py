@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Guardrail Enforcement Register (GER-1): ENFORCEMENT.md and site/enforcement.html.
+"""Generate the Guardrail Enforcement Register: ENFORCEMENT.md and site/enforcement.html.
 
 The register is the human-reviewable enforcement surface built ON the machine-readable enforceability
 ledger (.aiqt/enforceability.json, authored by tools/gen_enforceability.py). For every one of the pack's
@@ -84,8 +84,8 @@ import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
+from _standards import dir_or_absent, dir_present, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402  canonical AIQT-priority rule order (as gen_mappings uses)
 import gen_enforceability  # noqa: E402  reuse build_ledger so the register can never accept a stale ledger
@@ -137,7 +137,7 @@ EN, EM = "–", "—"
 RESIDUAL_HEADING = "Technical limits (from the enforcement ledger)"
 
 # The class-letter legend, single-sourced here so a class letter is never the only boundary signal on the
-# page (codex's requirement). The legend renders only for the class letters actually present among the
+# page. The legend renders only for the class letters actually present among the
 # enforced mechanisms. The text is the enforceability grading rubric (gen_enforceability) in plain terms.
 CLASS_LEGEND = (
     ("a", "deterministic gate: a machine predicate over committed artefacts, total for what it examines"),
@@ -506,7 +506,8 @@ def _enforced_cell_md(mechanisms, controls):
 # overclaim gate consumes) iterate the SAME field set and cannot fork on which fields ship: a field added
 # to the page is added here once and flows to both render and the source-side overclaim scan. The "entry"
 # field is the mechanism's entry point, which for a hook is "<event> on <matcher>", so the hook matcher is
-# a verbatim page-bound string carried through this field BY CONSTRUCTION (the round-10 escape channel).
+# a verbatim page-bound string carried through this field BY CONSTRUCTION (render_md writes it raw), so it
+# must be covered by the overclaim scan like any other shipped field (it once shipped unscanned).
 _MECH_FIELDS = (
     ("Platform", "platform"),
     ("Default", "default"),
@@ -617,7 +618,7 @@ def render_html(rows, roadmap, controls, enforced_union):
         # The technical-limits residual is rendered VERBATIM from the ledger inside a labelled blockquote:
         # the residue is element text (HTML-escaped by _t), so a residue token shaped like a tag renders
         # as visible text, not markup. The data-mech attribute names the control this quotation declares.
-        # The block carries no marketing exemption (round 7 removed the carve-out): the residue is kept
+        # The block carries no marketing exemption: the residue is kept
         # marketing-clean at its manifest source, so the overclaim gate scans this page plainly like any
         # other. The generation-time verbatim check below asserts this exact block ships byte-for-byte.
         # A multi-line residue keeps its newlines here verbatim; the .ledger-residual style is white-space:
@@ -635,8 +636,8 @@ def render_html(rows, roadmap, controls, enforced_union):
 
 
 # --- generation-time verbatim check -------------------------------------------------------------------
-# Round 7 (GER-1) replaced the earlier "re-parse the emitted HTML and compare rendered visible text"
-# fidelity assertion (which was static-DOM fidelity, not rendered-visible fidelity, and codex showed a
+# This replaced an earlier "re-parse the emitted HTML and compare rendered visible text"
+# fidelity assertion (which was static-DOM fidelity, not rendered-visible fidelity, and a
 # CSS-generated ::after content could diverge from it) with a plain BYTE check over the generated source:
 # each mechanism's residue is emitted by escaping the residue string into a fixed block shape, so asserting
 # that exact block appears byte-for-byte in the composed HTML (and the residue verbatim in the mechanism's
@@ -649,7 +650,7 @@ def _md_mechanism_fence(md_text, ref):
     """The residue text inside `ref`'s OWN Markdown fence: locate the mechanism's '### `ref`' heading, then
     the first fenced code block after it (a run of >=3 backticks alone on a line, closed by an identical
     run), and return the fenced content. This binds the residue to the mechanism's own fence, so a residue
-    that appears ANYWHERE ELSE in the file cannot satisfy fidelity (F-330 fix 3). Returns None if the
+    that appears ANYWHERE ELSE in the file cannot satisfy fidelity. Returns None if the
     mechanism's heading or its fence is not found before the next mechanism heading."""
     heading = "### `{}`".format(ref)
     lines = md_text.split("\n")
@@ -768,7 +769,14 @@ def build_views(root):
     ValueError/OSError/gen_site.SchemaError on any malformed, unreadable, stale, or contradictory input
     (including a bad site shell or a display-fidelity failure); the caller maps those to exit 2."""
     rules_dir = root / RULES_DIR_REL
-    if not dir_present(rules_dir):
+    # dir_or_absent (not is_dir): a corpus that is there but cannot be read as a directory (a
+    # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
+    # root) is never read; a symlink to a directory inside the root is read.
+    # dir_present, bound beneath root, then judges every component above it the same way.
+    _present, problem = dir_or_absent(rules_dir, root)
+    if problem is not None:
+        raise ValueError("cannot build the register: {} {} (cannot evaluate)".format(rules_dir, problem))
+    if not dir_present(rules_dir, root=root):
         raise ValueError("cannot build the register: no {} to load".format(rules_dir))
     ledger = load_ledger(root)
     by_cid, controls, linkage = ledger_index(ledger)
@@ -805,7 +813,7 @@ def page_content_strings(root):
     recomputed IN MEMORY from the corpus, the manifests, and the roadmap (guard-input-soundness), as
     (channel, key, raw) tuples. This is the AUTHORITATIVE, single-sourced set the render functions draw
     from (via the shared _MECH_FIELDS) and the overclaim gate's source-side scan consumes, so the checked
-    set cannot fork from what the page renders (FIX 1, GER-1 round 11: the round-8/round-10 class where a
+    set cannot fork from what the page renders (the class where a
     hand-maintained channel list in check_overclaim drifted from the generator, letting the rule TITLE and
     the hook MATCHER ship unscanned). One channel per verbatim interpolation the page emits:
       - "title"       each rule's display title (the corpus '# ' heading render_* puts in the Rule cell)
@@ -858,11 +866,11 @@ def run(root, check):
     try:
         # reconcile fail-closes with SystemExit(2) on an unreadable or invalid-UTF-8 existing target or a
         # write error; map that to a returned exit 2 so the code is uniform with the input-error path above.
-        if reconcile(root / MD_REL, md_text, check):
+        if reconcile(root / MD_REL, md_text, check, root):
             print("drift: {} is out of date; run tools/gen_enforcement_register.py".format(MD_REL),
                   file=sys.stderr)
             drift = True
-        if reconcile(root / HTML_REL, html_page, check):
+        if reconcile(root / HTML_REL, html_page, check, root):
             print("drift: {} is out of date; run tools/gen_enforcement_register.py".format(HTML_REL),
                   file=sys.stderr)
             drift = True
@@ -1096,6 +1104,7 @@ def _build(base):
 
 def self_test_main():
     import io
+    import os
     import shutil
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
@@ -1252,7 +1261,7 @@ def self_test_main():
             failures.append("fidelity test setup: expected the alpha residue tail to append")
         try:
             _assert_display_fidelity(appended, md_text, controls, enforced_union)
-            failures.append("display fidelity: appended content in a block must fail exact-equality (fix 3)")
+            failures.append("display fidelity: appended content in a block must fail exact-equality")
         except ValueError:
             pass
         # (a4) FENCE-SCOPING: a residue removed from its OWN Markdown fence but present elsewhere in the
@@ -1260,7 +1269,7 @@ def self_test_main():
         md_moved = md_text.replace(_ALPHA_RESIDUE, "gone", 1) + "\n\nprose: " + _ALPHA_RESIDUE + "\n"
         try:
             _assert_display_fidelity(html_page, md_moved, controls, enforced_union)
-            failures.append("display fidelity: a residue outside its own fence must fail (fix 3)")
+            failures.append("display fidelity: a residue outside its own fence must fail")
         except ValueError:
             pass
 
@@ -1285,7 +1294,7 @@ def self_test_main():
         ])
         if _md_mechanism_fence(fenced_md, "gate:beta") != "Beta real residue.":
             failures.append("fence-unaware heading: the heading lookup must skip fenced blocks so a prior "
-                            "residue containing a heading-like line does not misdirect extraction (fix 3)")
+                            "residue containing a heading-like line does not misdirect extraction")
 
         # (a5) F2: a rule linked only through class c gates reads as such on both views, and the summary
         # counts it under the same label. Flip the alpha gate to class c and rebuild the ledger to match;
@@ -1543,6 +1552,33 @@ def self_test_main():
                           "<code>hook:hook-one</code></a>, class b; " + pv_link + "</td>"):
                 if token not in page:
                     failures.append("preview tree: {!r} missing from the generated page".format(token))
+
+        # A .aiqt/core/rules that is a symlink to the corpus moved elsewhere inside the root is read (exit 0,
+        # the views written); one to the corpus moved outside the root (so following it would render cleanly)
+        # fails closed (exit 2) with no view written, refused by this generator's own corpus probe (its
+        # message), never followed out of the repository.
+        for where, want in (("in-root", 0), ("outside", 2)):
+            t = _build(tmp / ("corpus-" + where))
+            corpus = t / RULES_DIR_REL
+            target = t / "shared" / "rules" if where == "in-root" else tmp / "outside-corpus"
+            target.parent.mkdir(exist_ok=True)
+            shutil.move(str(corpus), str(target))
+            corpus.symlink_to(target if where == "outside" else os.path.relpath(target, corpus.parent))
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(buf):
+                try:
+                    got = run(t, False)
+                except (SystemExit, Exception) as exc:  # noqa: BLE001  an escape is a failure, not a crash
+                    got = "raised {}".format(type(exc).__name__)
+            named = "cannot build the register: {} {}".format(corpus, LINK_OUTSIDE_ROOT) in buf.getvalue()
+            if (got, (t / MD_REL).is_file(), named) != (want, want == 0, want == 2):
+                failures.append("a corpus that is a symlink {} expected exit {} with the views {}{}, got {}\n{}".format(
+                    where, want, "written" if want == 0 else "not written",
+                    "" if want == 0 else " and the register's own refusal", got, buf.getvalue()))
+
+        # site/ above the HTML view symlinked outside the root fails closed (exit 2) in --check and write mode with
+        # the page there untouched; symlinked inside the root, it is read and the page rewritten there.
+        failures.extend(linked_dir_failures(tmp, "site", _build, run, "site", HTML_REL))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1571,7 +1607,8 @@ def self_test_main():
           "neither view calls a linked control enforcement, and the page "
           "lead scopes its linkage claim to the declared inputs; and a rule linked only to a preview-channel "
           "hook reads Preview only (not Hook-linked) while a rule linked to a plugin hook and a preview hook "
-          "reads Hook-linked with the preview mechanism marked, in both views")
+          "reads Hook-linked with the preview mechanism marked, in both views; a corpus symlinked inside the "
+          "root is read, and one symlinked outside the root fails closed (exit 2) with no view written")
     return 0
 
 

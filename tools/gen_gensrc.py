@@ -61,7 +61,7 @@ import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 
 # The registry this tool renders, repo-root-relative. It is listed in its own output (below), so the
 # inventory is complete: the registry names itself alongside every other generated artefact.
@@ -174,7 +174,7 @@ def _read_declaration(path, where):
     harmless and fails in the safe direction (do not reuse the name). (b) Truly-DYNAMIC binding
     (globals()["GENSRC_OUTPUTS"] = ..., exec, setattr on the module) is beyond static analysis and out of
     scope; discovery never executes a generator, so such a binding cannot affect the static registry
-    anyway. Per the GD-34 lesson, static enumeration of a dynamic surface is unbounded; this guard covers
+    anyway. Static enumeration of a dynamic surface is unbounded; this guard covers
     the realistic and statically-detectable forms and discloses the rest. (c) A PEP-695 type
     parameter (def f[GENSRC_OUTPUTS](), class C[GENSRC_OUTPUTS], type X[GENSRC_OUTPUTS] = ...)
     binds only in the type-parameter scope, is not inspected, and cannot affect the module-level
@@ -464,7 +464,7 @@ def run(root, check):
     except (ValueError, OSError) as exc:
         print("error: cannot build {} ({}); fail-closed".format(REGISTRY_REL, exc), file=sys.stderr)
         return 2
-    drifted = reconcile(root / REGISTRY_REL, text, check)  # shared reconcile fail-closes (exit 2) on an
+    drifted = reconcile(root / REGISTRY_REL, text, check, root)  # shared reconcile fail-closes (exit 2) on an
                                                             # OSError or an invalid-UTF-8 target
     if drifted:
         print("drift: {} is out of date; run tools/gen_gensrc.py".format(REGISTRY_REL), file=sys.stderr)
@@ -906,7 +906,7 @@ def self_test_main():
 
         # (i) The single-binding invariant, one case per Python binding mechanism: each rebind of
         #     GENSRC_OUTPUTS beside a valid decoy literal fails closed (exit 2). Closes the whole rebind
-        #     class the round-3 node-type enumeration missed (walrus/tuple-unpack/for/with/except/
+        #     class an earlier node-type enumeration missed (walrus/tuple-unpack/for/with/except/
         #     import-as/def/class).
         for idx, (label, snippet) in enumerate(_REBINDS.items()):
             rbdir = tmp / "rebind{}".format(idx)
@@ -1058,6 +1058,11 @@ def self_test_main():
             if rc != 2 or _DEEP_CAUSE not in err:
                 failures.append("parser overflow: {} expected exit 2 naming {!r}, got {}".format(
                     label, _DEEP_CAUSE, rc))
+
+        # .aiqt/ above the registry symlinked outside the root fails closed (exit 2) in --check and write mode
+        # with the registry there untouched; symlinked inside the root, it is read and the registry rewritten.
+        failures.extend(linked_dir_failures(tmp, "aiqt", lambda base: _build_from(
+            base, "gen_selftestgood.py", _FAKE_GOOD), run, ".aiqt", REGISTRY_REL))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit

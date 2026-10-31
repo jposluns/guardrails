@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Claude Code enforcement-plugin surface from the hooks manifest (GD-24).
+"""Generate the Claude Code enforcement-plugin surface from the hooks manifest.
 
 The pack's mechanical-enforcement controls are declared in .aiqt/core/hooks/manifest.toml (one
 [[hook]] per control) with the handler implementations beside it under .aiqt/core/hooks/scripts/.
@@ -81,7 +81,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _standards import dir_chain_or_absent, dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The nested plugin surface, as repo-root-relative forward-slash paths. hooks/ under the plugin root is
@@ -556,7 +556,14 @@ def build_desired(root, src_dir):
         raise ValueError("{} exists but holds no manifest.toml".format(src_dir))
     plugin, hooks = load_manifest(manifest_path)
     rules_dir = root / ".aiqt" / "core" / "rules"
-    if not dir_present(rules_dir):
+    # dir_or_absent (not is_dir): a corpus that is there but cannot be read as a directory (a
+    # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
+    # root) is never read; a symlink to a directory inside the root is read.
+    # dir_present, bound beneath root, then judges every component above it the same way.
+    _present, problem = dir_or_absent(rules_dir, root)
+    if problem is not None:
+        raise ValueError("cannot validate manifest rules ids: {} {} (cannot evaluate)".format(rules_dir, problem))
+    if not dir_present(rules_dir, root=root):
         raise ValueError("cannot validate manifest rules ids: no {} to load".format(rules_dir))
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in load_corpus(rules_dir)}
     script_text = script_src.read_text(encoding="utf-8")  # FileNotFoundError -> OSError, fail-closed
@@ -581,9 +588,18 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
     src_dir = root / ".aiqt" / "core" / "hooks"
     desired = {}
     try:
-        # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as
-        # exit 2, not read as an absent manifest (which would prune the whole surface as orphans).
-        if dir_present(src_dir):
+        # dir_or_absent (not is_dir) inside the try: an unreadable .aiqt/ parent, or a source path that
+        # is there but cannot be read as a directory, must fail closed as exit 2, not read as an absent
+        # manifest (which would prune the whole surface as orphans). A symlink to a directory inside the
+        # root is read.
+        # Then dir_present, bound beneath root, judges every component above it the same way, so
+        # a .aiqt that is dangling, not a directory or a symlink resolving outside the root fails
+        # closed too, never read as an absent manifest.
+        _present, problem = dir_or_absent(src_dir, root)
+        if problem is not None:
+            print("error: {} {} (cannot evaluate)".format(src_dir, problem))
+            return 2
+        if dir_present(src_dir, root=root):
             desired = build_desired(root, src_dir)
             if project_ids and authoring_tree(root):
                 _plugin, hooks = load_manifest(src_dir / "manifest.toml")
@@ -600,6 +616,25 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
     def _raise(exc):
         raise exc
     try:
+        # dir_chain_or_absent (not is_dir, dir_present or dir_or_absent), before the first read, write or delete:
+        # the plugin root, its reserved hooks/ subtree and the directory holding each target (hooks/scripts/,
+        # .claude-plugin/ whether or not plugin.json is desired, and .claude/ for the project settings) are judged
+        # at every component under the root, so one at any depth that is there but cannot be read as a directory
+        # (a regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
+        # root) is exit 2 with nothing written or deleted, never followed out of the repository, and an unreadable
+        # parent raises (exit 2 below), never skipping the orphan scan. A symlink to a directory inside the root is
+        # read. A directory absent here can only be created below, holding desired files alone. The orphan scan
+        # deletes only in the directories os.walk enters below the probed hooks/, and os.walk does not follow a
+        # symlink there.
+        hooks_dir = root.joinpath(*HOOKS_SUBTREE_PARTS)
+        plugin_json = root / PLUGIN_JSON_REL
+        probed = {}
+        for path in (root.joinpath(*PLUGIN_ROOT_PARTS), hooks_dir, plugin_json.parent,
+                     *sorted({(root / rel).parent for rel in desired})):
+            probed[path], problem = dir_chain_or_absent(path, root)
+            if problem is not None:
+                print("error: {} {} (cannot evaluate)".format(path, problem))
+                return 2
         for rel, content in sorted(desired.items()):
             target = root / rel
             current = target.read_text(encoding="utf-8") if _exists(target) else None
@@ -610,8 +645,7 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
                     target.write_text(content, encoding="utf-8")
         # Orphan scan, scoped to the RESERVED plugin hooks/ subtree (100% generated) plus the one
         # managed .claude-plugin/plugin.json; nothing else is ever walked, written, or deleted.
-        hooks_dir = root.joinpath(*HOOKS_SUBTREE_PARTS)
-        if dir_present(hooks_dir):
+        if probed[hooks_dir]:
             for dirpath, _dirs, filenames in os.walk(hooks_dir, onerror=_raise):
                 for fn in sorted(filenames):
                     f = Path(dirpath) / fn
@@ -622,7 +656,6 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
                         drift.append("orphan " + rel)
                         if not check:
                             f.unlink()
-        plugin_json = root / PLUGIN_JSON_REL
         if PLUGIN_JSON_REL not in desired and _exists(plugin_json):
             drift.append("orphan " + PLUGIN_JSON_REL)
             if not check:
@@ -655,6 +688,15 @@ def main():
 #   3. an unknown corpus-id in the manifest fails closed (exit 2),
 #   4. an empty residue fails closed (exit 2),
 #   5. an unreadable .aiqt/core/hooks/ fails closed (exit 2), never an all-absent clean,
+#  5b. a .aiqt/core/hooks that is not a directory fails closed (exit 2), the generated surface kept,
+#  5c. a .aiqt/core/hooks symlinked to a directory inside the root is read; one that is dangling, to a
+#      regular file, or to a directory outside the root fails closed (exit 2), the generated surface kept,
+#  5d. a .aiqt/core/rules symlinked to a directory inside the root is read; one symlinked to the corpus
+#      outside the root fails closed (exit 2), the generated surface kept,
+#  5e. the plugin root or its hooks/ symlinked outside the root fails closed (exit 2) in write mode with
+#      nothing written or deleted there; symlinked inside the root, it is read and reconciled,
+#  5f. so does plugin/ above the plugin root, hooks/scripts/, .claude-plugin/ (its plugin.json an orphan) and,
+#      in the authoring tree, .claude/; each symlinked inside the root is read and reconciled,
 #   6. a bad/unknown event fails closed (exit 2),
 #   7. an uncompilable matcher regex fails closed (exit 2),
 #   8. a named handler not defined in the source script fails closed (exit 2),
@@ -1493,6 +1535,149 @@ def self_test_main(_nested=False):
             if run_quiet(unread, check=True) != 2:
                 failures.append("unreadable .aiqt/core/hooks/ expected exit 2 (fail-closed)")
         os.chmod(hooks_src, 0o755)  # restore so cleanup can remove it
+
+        # 5b. A .aiqt/core/hooks that is there but is not a directory fails closed (exit 2) in write mode
+        #     with the generated surface kept, never read as an absent manifest that prunes it as orphans.
+        nondir = tmp / "nondir"
+        nondir.mkdir()
+        _build_tree(nondir)
+        run_quiet(nondir, check=False)
+        nondir_src = nondir / ".aiqt" / "core" / "hooks"
+        shutil.rmtree(nondir_src)
+        nondir_src.write_text("not a directory\n", encoding="utf-8")
+        if run_quiet(nondir, check=False) != 2 or not (nondir / HOOKS_JSON_REL).is_file():
+            failures.append("a .aiqt/core/hooks that is a regular file expected exit 2 with the generated "
+                            "surface kept")
+
+        # 5c. A .aiqt/core/hooks that is a symlink: to the source moved elsewhere inside the root, it is read
+        #     (--check exit 0, the surface in sync); dangling, to a regular file inside the root, or to the
+        #     source moved outside the root (so following it would regenerate cleanly), it is exit 2 in write
+        #     mode with the generated surface kept, never read as absent and never followed.
+        for shape, check, want in (("in-root", True, 0), ("dangling", False, 2), ("to-file", False, 2),
+                                   ("outside", False, 2)):
+            linked = tmp / ("linked-" + shape)
+            linked.mkdir()
+            _build_tree(linked)
+            run_quiet(linked, check=False)
+            linked_src = linked / ".aiqt" / "core" / "hooks"
+            target = {"in-root": linked / "shared" / "hooks", "dangling": linked / "absent",
+                      "to-file": linked / "file.txt", "outside": tmp / "outside-hooks"}[shape]
+            if shape in ("in-root", "outside"):
+                target.parent.mkdir(exist_ok=True)
+                shutil.move(str(linked_src), str(target))
+            else:
+                shutil.rmtree(linked_src)
+            if shape == "to-file":
+                target.write_text("not a directory\n", encoding="utf-8")
+            try:
+                linked_src.symlink_to(target if shape == "outside" else os.path.relpath(target, linked_src.parent))
+            except OSError as exc:
+                failures.append("NOT RUN: a .aiqt/core/hooks that is a symlink {}: the fixture could not be "
+                                "planted ({}); coverage that did not run fails the self-test".format(shape, exc))
+                continue
+            got = run_quiet(linked, check=check)
+            if got != want or not (linked / HOOKS_JSON_REL).is_file():
+                failures.append("a .aiqt/core/hooks that is a symlink {} expected exit {} with the generated "
+                                "surface kept, got {}".format(shape, want, got))
+
+        # 5d. A .aiqt/core/rules that is a symlink to the corpus moved elsewhere inside the root is read (--check
+        #     exit 0); one to the corpus moved outside the root (so following it would validate cleanly) is exit
+        #     2 in write mode with the generated surface kept, never followed out of the repository.
+        for where, check, want in (("in-root", True, 0), ("outside", False, 2)):
+            linked = tmp / ("corpus-" + where)
+            linked.mkdir()
+            _build_tree(linked)
+            run_quiet(linked, check=False)
+            corpus = linked / ".aiqt" / "core" / "rules"
+            target = linked / "shared" / "rules" if where == "in-root" else tmp / "outside-corpus"
+            target.parent.mkdir(exist_ok=True)
+            shutil.move(str(corpus), str(target))
+            try:
+                corpus.symlink_to(target if where == "outside" else os.path.relpath(target, corpus.parent))
+            except OSError as exc:
+                failures.append("NOT RUN: a .aiqt/core/rules that is a symlink {}: the fixture could not be "
+                                "planted ({}); coverage that did not run fails the self-test".format(where, exc))
+                continue
+            got = run_quiet(linked, check=check)
+            if got != want or not (linked / HOOKS_JSON_REL).is_file():
+                failures.append("a .aiqt/core/rules that is a symlink {} expected exit {} with the generated "
+                                "surface kept, got {}".format(where, want, got))
+
+        # 5e. The plugin root or its reserved hooks/ subtree that is a symlink to a directory holding a planted
+        #     orphan and lacking the generated files, in write mode: outside the root, it is exit 2 with the
+        #     orphan kept and nothing written there, never followed to prune or write out of the repository;
+        #     inside the root, it is read (exit 0, the orphan pruned and hooks.json written there).
+        for parts in (PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS):
+            for where, want in (("outside", 2), ("in-root", 0)):
+                out = tmp / ("surface-" + parts[-1] + "-" + where)
+                out.mkdir()
+                _build_tree(out)
+                link = out.joinpath(*parts)
+                link.parent.mkdir(parents=True)
+                held = tmp / ("held-" + out.name) if where == "outside" else out / "shared" / "held"
+                fam = held / "hooks" if parts == PLUGIN_ROOT_PARTS else held
+                fam.mkdir(parents=True)
+                (fam / "zz-planted-orphan.txt").write_text("planted\n", encoding="utf-8")
+                try:
+                    link.symlink_to(held if where == "outside" else os.path.relpath(held, link.parent))
+                except OSError as exc:
+                    failures.append("NOT RUN: a {} that is a symlink {}: the fixture could not be planted ({}); "
+                                    "coverage that did not run fails the self-test".format("/".join(parts), where,
+                                                                                         exc))
+                    continue
+                got = run_quiet(out, check=False)
+                kept = (fam / "zz-planted-orphan.txt").exists()
+                wrote = (fam / "hooks.json").exists()
+                if (got, kept, wrote) != (want, want == 2, want == 0):
+                    failures.append("a {} that is a symlink {} expected exit {} with the orphan {} there, got exit "
+                                    "{}, orphan kept {}, hooks.json written {}".format(
+                                        "/".join(parts), where, want, "kept and nothing written" if want == 2
+                                        else "pruned", got, kept, wrote))
+
+        # 5f. A directory at another depth above a generated file that is a symlink to a directory, in write mode:
+        #     plugin/ above the plugin root (holding a planted orphan under hooks/ and no hooks.json), hooks/scripts/
+        #     (no script), .claude-plugin/ with the hooks source removed (holding the plugin.json that is then an
+        #     orphan), and .claude/ in the authoring tree (no settings.json). Outside the root, it is exit 2 with
+        #     nothing written or deleted there, never followed out of the repository; inside the root, it is read
+        #     (exit 0, the file written there, or the orphan pruned).
+        for name, parts, sub, fname in (("plugin", ("plugin",), ("aiqt-guardrails-hooks", "hooks"), "hooks.json"),
+                                        ("scripts", HOOKS_SUBTREE_PARTS + ("scripts",), (), SCRIPT_NAME),
+                                        ("claude-plugin", PLUGIN_ROOT_PARTS + (".claude-plugin",), (), "plugin.json"),
+                                        ("claude", (".claude",), (), "settings.json")):
+            for where, want in (("outside", 2), ("in-root", 0)):
+                deep = tmp / ("deep-" + name + "-" + where)
+                deep.mkdir()
+                (_build_project_tree if name == "claude" else _build_tree)(deep)
+                runner = run_project if name == "claude" else run_quiet
+                runner(deep, check=False)
+                link = deep.joinpath(*parts)
+                held = tmp / ("held-" + deep.name) if where == "outside" else deep / "shared" / "held"
+                held.parent.mkdir(exist_ok=True)
+                shutil.move(str(link), str(held))
+                file = held.joinpath(*sub) / fname
+                if name == "claude-plugin":
+                    shutil.rmtree(deep / ".aiqt" / "core" / "hooks")
+                else:
+                    file.unlink()
+                orphan = held.joinpath(*sub) / "zz-planted-orphan.txt"
+                if name == "plugin":
+                    orphan.write_text("planted\n", encoding="utf-8")
+                try:
+                    link.symlink_to(held if where == "outside" else os.path.relpath(held, link.parent))
+                except OSError as exc:
+                    failures.append("NOT RUN: a {} that is a symlink {}: the fixture could not be planted ({}); "
+                                    "coverage that did not run fails the self-test".format("/".join(parts), where,
+                                                                                         exc))
+                    continue
+                got = runner(deep, check=False)
+                there = file.exists()
+                kept = orphan.exists()
+                want_there = (want == 2) if name == "claude-plugin" else (want == 0)
+                if got != want or there != want_there or (name == "plugin" and kept != (want == 2)):
+                    failures.append("a {} that is a symlink {} expected exit {} with nothing written or deleted there "
+                                    "if refused, got exit {}, {} there {}, planted orphan kept {}".format(
+                                        "/".join(parts), where, want, got, fname, there,
+                                        kept if name == "plugin" else "(none planted)"))
 
         # 6. A bad/unknown hook event fails closed (the event whitelist).
         badevent = tmp / "badevent"
@@ -3787,7 +3972,11 @@ def self_test_main(_nested=False):
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
           "launcher runs isolated (args[0] == '-I'); hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
-          "an unreadable source tree, a bad/unknown event, an uncompilable matcher, a handler not in "
+          "an unreadable source tree, a source path that is not a directory (a symlink to a directory inside "
+          "the root is read), a rule corpus symlinked outside the root, a plugin root, plugin hooks/, "
+          "plugin/ above it, hooks/scripts/, .claude-plugin/ or authoring .claude/ symlinked outside the root "
+          "(nothing written or deleted there; one inside the root is read), a "
+          "bad/unknown event, an uncompilable matcher, a handler not in "
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "

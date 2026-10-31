@@ -47,8 +47,8 @@ The maintainer's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), 
   5. Plan and provenance. The provenance source_digest is sha256 over the canonical JSON of the
      sorted (path, content-digest) roster EXCLUDING init.toml; init.toml is TOML through
      _opf_emit.emit_checked; the plan_digest is sha256 over the canonical JSON of the plan WITHOUT
-     its plan_digest member. The base spec_version bump, init.toml's C-CONTAINMENT membership, and the
-     `opf upgrade` route live in _opf_store, _opf_check, and opf.py. A completed adoption is
+     its plan_digest member. The base spec_version bump and init.toml's C-CONTAINMENT membership live
+     in _opf_store and _opf_check; this tooling defines no store upgrade. A completed adoption is
      re-validated for HEALTH (it may carry legitimate later edits); a partial operation is held to
      BYTE-EXACT dedupe against its immutable plan.
   6. Newest ancestral counters. The reader consumes ONE pinned evidence commit, which must lie on
@@ -90,9 +90,15 @@ ALREADY-INITIALIZED are library milestones and never map to coupled-init exit 0;
 for a fully evaluated, NON-mutating assessment that reports findings; every REFUSED, FAILED, or
 CANNOT-EVALUATE result maps to exit 2.
 
-DISCLOSED RESIDUALS: the git ignore-eligibility preflight D2a runs is not repeated here (it is a
-staging precondition, PR5); the adoption observer that distinguishes a first adoption from a
-committed deletion is PR4, so this layer refuses an existing store it did not itself record; a
+DISCLOSED RESIDUALS: the git ignore-eligibility preflight is the one shared check plain `opf init` runs
+(_opf_write_guard.init_ignore_refusal), applied here by _refuse_ignored_destinations under the held
+mutex on both the fresh path (before the plan is persisted) and the resume path (once the recorded plan
+validates), so its own disclosed residual holds here too (an ignore input git cannot read is read as
+no rule, as git add reads it, and is not refused); the adoption observer that distinguishes a first
+adoption from a committed deletion is not part of this layer, so this layer refuses an existing store it did
+not itself record, and refuses a first adoption whenever plain `opf init`'s history scan (HEAD's
+first-parent line, the root's current path, the committed pointer or a store manifest) shows a prior
+store, but seeds a re-adoption only from an evidence commit its caller supplies; a
 same-uid writer racing the held mutex can still change a destination between the final check and a
 later reader (the lock is advisory; OS isolation is SYSTEM-HARDENING's); a byte-identical file a
 foreign writer plants after the intent is recorded is accepted as a dedupe (its content is exactly
@@ -190,6 +196,49 @@ BOOTSTRAP_SOURCE_ROSTER = tuple(sorted(
     + tuple("{}/{}.index.toml".format(_MACHINE_HOME, t) for t in _INDEX_TYPES)))
 COUNTERS_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_check.COUNTERS_NAME)
 _MANIFEST_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_store.MANIFEST_NAME)
+# The homes-2 managed-block carrier (spec 4.2), a bootstrap source only of a generation-2 plan.
+GITIGNORE_RELPATH = "{}/.gitignore".format(_opf_store.WORKING_DIRNAME)
+
+
+def bootstrap_source_roster(manifest_model):
+    """The bootstrap SOURCE roster (store-relative, sorted, init.toml excluded) a plan built from
+    `manifest_model` creates: BOOTSTRAP_SOURCE_ROSTER, plus one empty imported leaf per enabled type
+    while the model's imported series is active, plus .working/.gitignore when the model grades at
+    homes generation 2 (spec 4.2). The default model adds nothing, so its roster is the constant."""
+    extra = {"{}/{}".format(_MACHINE_HOME, name)
+             for name in _opf_init.imported_leaf_documents(manifest_model)}
+    if _opf_store.homes_generation(manifest_model) == 2:
+        extra.add(GITIGNORE_RELPATH)
+    return tuple(sorted(set(BOOTSTRAP_SOURCE_ROSTER) | extra))
+
+
+def _bootstrap_manifest(homes2):
+    """The plan's manifest text: the default builder call, or the explicit homes-2 declaration."""
+    return _opf_init.build_manifest(homes2=True) if homes2 else _opf_init.build_manifest()
+
+
+def plan_generation(sources):
+    """The homes generation a plan's S list was built for: 2 only while this tooling supports homes
+    2 and the manifest entry's payload is byte for byte the homes-2 bootstrap manifest, else 1. Byte
+    equality with the builder parses nothing; a missing or malformed entry reads as generation 1,
+    whose roster and payload checks then refuse it exactly as before."""
+    if _opf_store.SUPPORTED_HOMES < 2 or type(sources) is not list:
+        return 1
+    entry = next((s for s in sources if type(s) is dict and s.get("path") == _MANIFEST_RELPATH), None)
+    if entry is None or type(entry.get("payload")) is not str:
+        return 1
+    try:
+        data = base64.b64decode(entry["payload"].encode("ascii"), validate=True)
+        homes2 = _bootstrap_manifest(True).encode("utf-8")
+    except (binascii.Error, UnicodeEncodeError, ValueError, _opf_init.InitError):
+        return 1
+    return 2 if data == homes2 else 1
+
+
+def _plan_manifest_model(plan):
+    """The manifest model of a plan's own generation, for its roster and counters namespaces."""
+    return _opf_init._manifest_model(homes2=plan_generation(plan["sets"]["S"]) == 2)
+
 
 _OP_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 _SHA1_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -290,9 +339,13 @@ class InitResult:
     REFUSED, FAILED, CANNOT-EVALUATE. `created` and `deduplicated` name the planned paths this
     attempt created or found byte-identical to the plan on resume; `conflicts` the preserved
     destinations that refused; `primary_failure` the first failure (code, detail) or None;
-    `finalization_failures` every later release, outcome, or close failure, kept separately."""
+    `finalization_failures` every later release, outcome, or close failure, kept separately;
+    `staging_removed` and `recovered` what the mutex acquisition removed (its staging leftovers,
+    then the stale records its explicit recovery cleared, in delete order), as the holder, or the
+    refusal of an acquisition that failed after a removal, reports them."""
     __slots__ = ("status", "operation_id", "plan_digest", "milestone", "created", "deduplicated",
-                 "conflicts", "notes", "primary_failure", "finalization_failures", "phases")
+                 "conflicts", "notes", "primary_failure", "finalization_failures", "phases",
+                 "staging_removed", "recovered")
 
     def __init__(self):
         self.status = CANNOT_EVALUATE
@@ -306,6 +359,8 @@ class InitResult:
         self.primary_failure = None
         self.finalization_failures = []
         self.phases = ()
+        self.staging_removed = ()
+        self.recovered = ()
 
 
 # --- the source-digest basis (init.toml excluded) -------------------------------------------------
@@ -791,8 +846,12 @@ def observe_inventory(root_fd):
     the opened product root, walked no-follow and bounded by the D2b contract limits: each directory
     with its mode, each regular file with its mode, size, and content digest. A symbolic link, a
     special file, a hard-linked file, an unreadable entry, or an exceeded bound refuses (never an
-    entry that silently disappears from the inventory). An absent `.working` is the empty
-    inventory."""
+    entry that silently disappears from the inventory). The whole `.working/journals/` subtree is
+    OPF control area, never adopter content (spec 14.2: the reserved child carries no homes
+    qualifier; the adoption journal of a coupled init lives and mutates there), so a plain-directory
+    `journals` entry is carved out of the inventory wholesale, neither listed nor descended into,
+    while a symlinked or non-directory `journals` entry still refuses fail-closed. An absent
+    `.working` is the empty inventory."""
     entries = []
     budget = [0]
 
@@ -818,6 +877,13 @@ def observe_inventory(root_fd):
                 st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
             except OSError as exc:
                 raise InitOperationError("cannot stat {} ({})".format(path, exc), CANNOT_EVALUATE)
+            if path == _opf_store.JOURNALS_REL:
+                # The reserved journals control area (spec 14.2), carved out wholesale: only a plain
+                # directory is carved out; anything else at the reserved name refuses fail-closed.
+                if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                    raise InitOperationError("{} is the reserved journals control area and is not a "
+                                             "plain directory; the inventory refuses it".format(path))
+                continue
             if stat.S_ISDIR(st.st_mode):
                 add({"path": path, "kind": "directory", "mode": stat.S_IMODE(st.st_mode) & 0o777})
                 if depth + 1 >= _opf_init_contract.MAX_PATH_DEPTH:
@@ -1014,20 +1080,29 @@ def staging_name(relpath, operation_id):
 
 
 def _effect_order(paths):
-    """The canonical creation order: the machine-store sources (sorted, init.toml last among them,
-    so the provenance names a complete source set on disk before itself), then CHANGELOG.md, then
-    the store pointer LAST (the pointer promises a store, so it appears only once the store exists)."""
+    """The canonical creation order: .working/.gitignore FIRST when a generation-2 plan creates it
+    (its ignore rules stand before any store file exists), then the machine-store sources (sorted,
+    init.toml last among them, so the provenance names a complete source set on disk before itself),
+    then CHANGELOG.md, then the store pointer LAST (the pointer promises a store, so it appears only
+    once the store exists). A path it cannot place raises, never silently dropped; every caller
+    refuses a path outside its roster before ordering."""
+    head = [p for p in (GITIGNORE_RELPATH,) if p in paths]
     store = sorted(p for p in paths if p.startswith(_MACHINE_HOME + "/") and p != PROVENANCE_RELPATH)
     tail = [p for p in (PROVENANCE_RELPATH, CHANGELOG_RELPATH, _opf_store.POINTER_REL) if p in paths]
-    return store + tail
+    unplaced = sorted(set(paths) - set(head + store + tail))
+    if unplaced:
+        raise InitOperationError("the canonical creation order cannot place {}".format(unplaced))
+    return head + store + tail
 
 
 def build_source_payloads(*, operation_id, binding, head, first_adoption, inventory_digest_value,
-                          create_changelog, seed=None):
+                          create_changelog, seed=None, homes2=False):
     """The exact bytes of every planned source {store-relative path: bytes}, init.toml included:
     the D1 builders' documents (counters seeded from a validated ancestral seed when one is given),
     the `dir:.` store pointer, CHANGELOG.md when the plan creates it, and the provenance computed
-    over all of them EXCLUDING itself."""
+    over all of them EXCLUDING itself. `homes2` (explicit, never a default) builds the homes-2
+    manifest; its plan also creates .working/.gitignore with the rendered managed block and, while
+    the imported series is active, the empty imported leaves and their zero counter rows (spec 4.2)."""
     counters_seed = None
     if seed is not None:
         reason = seed_permanence_refusal(seed)
@@ -1035,17 +1110,13 @@ def build_source_payloads(*, operation_id, binding, head, first_adoption, invent
             raise InitOperationError(reason)
         counters_seed = dict(seed.counters)
     try:
-        documents = {
-            "manifest.toml": _opf_init.build_manifest(),
-            "counters.toml": _opf_init.build_counters(seed=counters_seed),
-            "version.toml": _opf_init.build_version(),
-            "worklog.toml": _opf_init.build_worklog(),
-        }
-        for tname in _opf_init.INDEX_TYPES:
-            documents[tname + _opf_check.INDEX_SUFFIX] = _opf_init.build_index(tname)
+        model = _opf_init._manifest_model(homes2=homes2)
+        documents = _opf_init.bootstrap_documents(model, seed=counters_seed)
     except _opf_init.InitError as exc:
         raise InitOperationError("a bootstrap builder refused: {}".format(exc))
     payloads = {"{}/{}".format(_MACHINE_HOME, n): t.encode("utf-8") for n, t in documents.items()}
+    if _opf_store.homes_generation(model) == 2:
+        payloads[GITIGNORE_RELPATH] = _opf_store.render_homes_gitignore().encode("utf-8")
     payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
         {"store": {"target": "dir:."}}).encode("utf-8")
     if create_changelog:
@@ -1133,7 +1204,7 @@ def compute_plan_digest(plan):
 
 def build_init_plan(*, operation_id, binding, head, inventory_digest_value, application_time,
                     existing_changelog=None, seed=None, admitted=(), working_mode=None,
-                    coupled=False):
+                    coupled=False, homes2=False):
     """Produce the immutable opf.init.plan/v1 envelope (a pure producer): returns (plan model, exact
     canonical bytes). `existing_changelog` is None when CHANGELOG.md is absent (the plan creates it)
     or its observed {path, mode, size, digest} entry, preserved in E. `seed` is a validated
@@ -1144,12 +1215,14 @@ def build_init_plan(*, operation_id, binding, head, inventory_digest_value, appl
     operation preserves it rather than planning its own); `coupled` records that the operation id
     was caller-minted and bound into a coupled adoption's own durable intent, so the plan carries
     the coupled recovery policy and is NEVER resumed (its adoption transaction reverses a partial
-    operation instead; spec 14.2). The result is re-validated by validate_init_plan."""
+    operation instead; spec 14.2). `homes2` builds the generation-2 plan (build_source_payloads);
+    the default builds generation 1 exactly as before. The result is re-validated by
+    validate_init_plan."""
     first_adoption = seed is None
     payloads = build_source_payloads(
         operation_id=operation_id, binding=binding, head=head, first_adoption=first_adoption,
         inventory_digest_value=inventory_digest_value,
-        create_changelog=existing_changelog is None, seed=seed)
+        create_changelog=existing_changelog is None, seed=seed, homes2=homes2)
     sources = []
     for path in _effect_order(payloads):
         data = payloads[path]
@@ -1295,7 +1368,8 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
     sources = sets["S"]
     if type(sources) is not list:
         _plan_bad("S must be a list")
-    roster = set(BOOTSTRAP_SOURCE_ROSTER) | {PROVENANCE_RELPATH}
+    # The roster of the plan's own generation (plan_generation: byte equality with a builder).
+    roster = set(bootstrap_source_roster(_plan_manifest_model(plan))) | {PROVENANCE_RELPATH}
     if CHANGELOG_RELPATH not in e_paths:
         roster.add(CHANGELOG_RELPATH)
     paths = [s.get("path") if type(s) is dict else None for s in sources]
@@ -1369,9 +1443,17 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
 
 def _validate_plan_payloads(plan, payloads, counters_basis):
     """Each payload equals what the D1 builders produce (the counters from its recorded basis), and
-    the provenance validates against the plan's own basis and the recomputed source digest."""
+    the provenance validates against the plan's own basis and the recomputed source digest. A
+    generation-2 plan is held to its own builders' bytes: the homes-2 manifest, the rendered
+    .working/.gitignore block, each empty imported leaf, and counters carrying its imported rows."""
+    homes2 = plan_generation(plan["sets"]["S"]) == 2
+    try:
+        model = _opf_init._manifest_model(homes2=homes2)
+        leaves = _opf_init.imported_leaf_documents(model)
+    except _opf_init.InitError as exc:
+        _plan_bad("the plan's generation has no bootstrap builder ({})".format(exc))
     fixed = {
-        "{}/manifest.toml".format(_MACHINE_HOME): _opf_init.build_manifest(),
+        "{}/manifest.toml".format(_MACHINE_HOME): _bootstrap_manifest(homes2),
         "{}/version.toml".format(_MACHINE_HOME): _opf_init.build_version(),
         "{}/worklog.toml".format(_MACHINE_HOME): _opf_init.build_worklog(),
         _opf_store.POINTER_REL: _opf_emit.emit_checked({"store": {"target": "dir:."}}),
@@ -1379,6 +1461,10 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
     for tname in _opf_init.INDEX_TYPES:
         fixed["{}/{}{}".format(_MACHINE_HOME, tname, _opf_check.INDEX_SUFFIX)] = \
             _opf_init.build_index(tname)
+    for name, text in leaves.items():
+        fixed["{}/{}".format(_MACHINE_HOME, name)] = text
+    if _opf_store.homes_generation(model) == 2:
+        fixed[GITIGNORE_RELPATH] = _opf_store.render_homes_gitignore()
     if CHANGELOG_RELPATH in payloads:
         fixed[CHANGELOG_RELPATH] = _CHANGELOG_PAYLOAD.decode("ascii")
     for path, text in fixed.items():
@@ -1396,7 +1482,7 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
     if kind == "zero":
         if counters_basis != {"kind": "zero"} or not plan["first_adoption"]:
             _plan_bad("a zero counters basis belongs to a first adoption only")
-        expected = _opf_init.build_counters()
+        expected = _opf_init.build_counters(manifest=model)
     elif kind == "ancestral":
         if set(counters_basis) != {"kind", "module_counters", "commit", "blob", "path",
                                    "content_digest"} or plan["first_adoption"]:
@@ -1412,7 +1498,7 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
                 and all(v == 0 for v in counters_basis["module_counters"].values())):
             _plan_bad("the ancestral counters evidence is malformed")
         try:
-            expected = _opf_init.build_counters(seed=counters.get("counters"))
+            expected = _opf_init.build_counters(seed=counters.get("counters"), manifest=model)
         except _opf_init.InitError as exc:
             _plan_bad("the counters payload is not a complete seeded ledger ({})".format(exc))
     else:
@@ -2033,8 +2119,9 @@ def _final_check(root, root_fd, plan, lease_held, views=None, git=None):
             manifest.findings))
     baseline, importer, _module = _roster_namespaces()
     counters = tomllib.loads(on_disk[COUNTERS_RELPATH].decode("utf-8"))
-    _hw, findings = validate_counters(counters, known_namespaces=baseline,
-                                      optional_namespaces=importer)
+    _hw, findings = validate_counters(
+        counters, known_namespaces=baseline, optional_namespaces=importer,
+        imported_namespaces=_opf_init.imported_counter_namespaces(_plan_manifest_model(plan)))
     if findings:
         raise InitOperationError("the published counters are not valid ({})".format(findings))
     if views is None:
@@ -2097,8 +2184,9 @@ def _health_check(root, root_fd, plan, binding):
         # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key;
         # MemoryError: a many-part key under a memory limit.
         raise InitOperationError("the completed adoption's counters are not TOML")
-    _hw, findings = validate_counters(counters, known_namespaces=baseline,
-                                      optional_namespaces=importer)
+    _hw, findings = validate_counters(
+        counters, known_namespaces=baseline, optional_namespaces=importer,
+        imported_namespaces=_opf_init.imported_counter_namespaces(_plan_manifest_model(plan)))
     if findings:
         raise InitOperationError("the completed adoption's counters are invalid ({})".format(
             findings))
@@ -2125,6 +2213,9 @@ def _health_check(root, root_fd, plan, binding):
         raise InitOperationError("the completed adoption's current sources are unhealthy "
                                  "(checks {}; details {}; unattributed {}; triage {})".format(
                                      bad, details, health.unattributed, health.triage))
+    # A generation-2 adoption's managed block is current health too: a removed or drifted block
+    # refuses here rather than reporting ALREADY-INITIALIZED (containment never reads the file).
+    _verify_homes_gitignore(root, plan)
 
 
 # --- the operation: select, plan or resume, journal, attach, verify, finalize (plan steps 1-10) ----
@@ -2376,7 +2467,7 @@ def _planned_view_targets():
 
 
 def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=None,
-                admitted_dirs=()):
+                admitted_dirs=(), homes2=False):
     """Preflight a FRESH adoption under the mutex and produce its immutable plan: no pointer, no
     resolvable or partial store, every destination and staging name absent, no destination already
     tracked, and CHANGELOG.md either absent (created) or a plain file (preserved in E). Without
@@ -2385,8 +2476,11 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
     digest each re-verified here, under the mutex) plus their implied ancestor directories, recorded
     in the plan's E set so every later check and resume re-verifies them. With `ancestral` (a pinned
     evidence commit, PR4's selection) the counters are seeded from the validated snapshot and the
-    plan records it. `operation_id` is a caller-minted id (the coupled adoption binds it into its
-    own durable intent BEFORE this operation runs); None mints a fresh one."""
+    plan records it; without it, a first adoption whose HEAD's first-parent history already shows
+    a store refuses (_refuse_prior_store). `operation_id` is a caller-minted id (the coupled
+    adoption binds it into its own durable intent BEFORE this operation runs); None mints a fresh
+    one. `homes2` plans generation 2 (build_init_plan), whose .working/.gitignore installation the
+    read-only inspection must admit before the plan is persisted (_inspect_homes_gitignore)."""
     import uuid
     root, root_fd = run.root, run.root_fd
     for pointer in (_opf_store.POINTER_REL, _opf_store.LOCAL_POINTER_REL):
@@ -2446,7 +2540,11 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
                 raise InitOperationError("admitted .working file {} does not match its plan-bound "
                                          "mode, size and digest; foreign content is never adopted "
                                          "by init".format(path))
-        planned = set(BOOTSTRAP_SOURCE_ROSTER) | {PROVENANCE_RELPATH, CHANGELOG_RELPATH}
+        try:
+            roster = bootstrap_source_roster(_opf_init._manifest_model(homes2=homes2))
+        except _opf_init.InitError as exc:
+            raise InitOperationError("a bootstrap builder refused: {}".format(exc))
+        planned = set(roster) | {PROVENANCE_RELPATH, CHANGELOG_RELPATH}
         planned |= _planned_view_targets()
         clash = sorted(set(want_files) & planned)
         if clash:
@@ -2502,7 +2600,7 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
                                 inventory_digest_value=inventory_digest(model),
                                 application_time=_utc_now(), existing_changelog=changelog,
                                 seed=seed, admitted=admitted, working_mode=working_mode,
-                                coupled=operation_id is not None)
+                                coupled=operation_id is not None, homes2=homes2)
     if admitted:
         # Admitted frozen sources may legitimately be git-tracked, so the tracked-destination
         # pathspec never sweeps the whole .working: the planned destinations are enumerated exactly
@@ -2526,7 +2624,73 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
                                  "present only in the worktree or index is never re-initialized "
                                  "over".format(tracked))
     _refuse_ignored_destinations(git, binding, plan)
+    if plan_generation(plan["sets"]["S"]) == 2:
+        _inspect_homes_gitignore(root, plan)
+    if ancestral is None and head["kind"] == "commit":
+        _refuse_prior_store(git, binding, head)
     return plan, raw
+
+
+def _refuse_prior_store(git, binding, head):
+    """Refuse a FIRST adoption over a store in git history (spec 8.2: only a genuinely first
+    adoption may start its counters at zero; re-adoption seeds them from a pinned ancestral
+    snapshot). The detector is _opf_init_observe.prior_store_holder, which applies plain `opf
+    init`'s markers, first-parent walk and fail-closed boundaries to the HEAD observed under the
+    mutex (an unborn HEAD has no history and is never scanned). It runs last in _fresh_plan, the
+    position plain init's scan takes after its index and ignore checks, before the plan is
+    persisted, so a refusal records no operation and writes nothing. A found holder is REFUSED,
+    naming the commit; a scan that cannot evaluate (a shallow repository, a grafts entry, an
+    unreadable answer) is CANNOT-EVALUATE, never a pass. A re-adoption (an ancestral commit
+    supplied) and a resume are not scanned: the seed is pinned, and a resume's plan pins its
+    HEAD."""
+    try:
+        holder = _opf_init_observe.prior_store_holder(
+            git, binding["repository_root"]["path"], pinned_head=head["oid"],
+            prefix=binding["product_prefix"], object_format=binding["object_format"])
+    except _opf_init_observe.ObservationError as exc:
+        code = CANNOT_EVALUATE if exc.code == _opf_init_observe.CANNOT_EVALUATE else REFUSED
+        raise InitOperationError("cannot evaluate prior-store ancestry ({}: {}); a first "
+                                 "adoption never starts its counters at zero over history it "
+                                 "cannot read".format(exc.input_name, exc.detail), code) from exc
+    if holder is not None:
+        raise InitOperationError("a prior store exists on HEAD's first-parent line at commit {}; "
+                                 "spec 8.2 forbids zero-seeding prior ancestry, so this is a "
+                                 "re-adoption: re-adopt with its ancestral evidence "
+                                 "commit".format(holder), REFUSED)
+
+
+def _inspect_homes_gitignore(root, plan):
+    """Generation 2, fresh path only: the read-only .working/.gitignore installation inspection
+    (spec 4.2: effective ignore rules and the index are inspected first), under the held mutex
+    before the plan is persisted, so a refusal records no operation and writes nothing. Init is
+    create-only: the inspector must plan exactly the plan's payload from an absent file. Any hold
+    is REFUSED, naming each; a state the inspection cannot evaluate is CANNOT-EVALUATE."""
+    try:
+        planned, holds, prestate = _opf_write_guard.inspect_homes_gitignore(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise InitOperationError(str(exc), CANNOT_EVALUATE)
+    if holds:
+        raise InitOperationError("the {} installation is held: {}".format(
+            GITIGNORE_RELPATH, "; ".join(holds)))
+    if prestate is not None or planned != plan_payloads(plan)[GITIGNORE_RELPATH]:
+        raise InitOperationError("the {} inspection did not plan the bootstrap block for an absent "
+                                 "file; init is create-only".format(GITIGNORE_RELPATH))
+
+
+def _verify_homes_gitignore(root, plan):
+    """Generation 2, every attempt once the sources are verified and the completed rerun's health
+    check (_health_check): the post-write effectiveness re-check of the installed managed block
+    (spec 4.2). A finding is REFUSED, naming each; a state the check cannot evaluate is
+    CANNOT-EVALUATE. A generation-1 plan has no such file."""
+    if plan_generation(plan["sets"]["S"]) != 2:
+        return
+    try:
+        findings = _opf_write_guard.verify_homes_gitignore_effective(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise InitOperationError(str(exc), CANNOT_EVALUATE)
+    if findings:
+        raise InitOperationError("the installed {} is not effective: {}".format(
+            GITIGNORE_RELPATH, "; ".join(findings)))
 
 
 def _refuse_ignored_destinations(git, binding, plan):
@@ -2668,8 +2832,24 @@ def _resume_binding_or_refuse(plan, op_id, ancestral, admitted, operation_id, ad
                                  "content is admitted")
 
 
+def _generation_or_refuse(plan, homes2):
+    """A resume or a completed rerun keeps its recorded plan's homes generation (plan_generation):
+    `homes2` must name exactly that generation, else the call refuses before any group runs or any
+    health is checked, so neither a homes-2 request against a generation-1 operation nor a default
+    request against a generation-2 one reports a generation it did not carry out. The completed
+    path's plan is not yet re-validated here, so a malformed S reads as generation 1 (its health
+    check then refuses it exactly as before)."""
+    sets = plan.get("sets") if type(plan) is dict else None
+    recorded = plan_generation(sets.get("S") if type(sets) is dict else None)
+    requested = 2 if homes2 else 1
+    if recorded != requested:
+        raise InitOperationError("the recorded operation is at homes generation {} and this call "
+                                 "requests generation {}; a resume or rerun never changes its "
+                                 "plan's generation".format(recorded, requested))
+
+
 def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=None,
-                       operation_id=None, admitted_dirs=None):
+                       operation_id=None, admitted_dirs=None, homes2=False):
     """Run (or resume) the PR3a/PR3b init operation on the EXPLICIT absolute product root and return
     an InitResult; never raises for an expected outcome. Takes the shared mutex before any write
     (pre-store holder), re-observes the binding and HEAD under it (a pre-lock observation never
@@ -2693,9 +2873,21 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
     resumed (its adoption transaction reverses a partial one); `admitted` and `admitted_dirs`
     are REFUSED without it (they are the coupled seam's bindings, never a plain init's). A plain RESUME must carry the SAME
     ancestral, admitted and operation_id bindings its recorded plan carries, else it refuses
-    (_resume_binding_or_refuse)."""
+    (_resume_binding_or_refuse). `homes2` (explicit, never a default) plans a FRESH operation at
+    homes generation 2 (_fresh_plan) and is REFUSED up front, before the mutex and any branch, while
+    this tooling does not support homes 2; a resume or a completed rerun must name its recorded
+    plan's own generation, else it refuses (_generation_or_refuse); and every attempt of a
+    generation-2 plan, the completed rerun's health check included, re-checks the installed managed
+    block (_verify_homes_gitignore)."""
     result = InitResult()
     try:
+        if homes2 is not False and homes2 is not True:
+            raise InitOperationError("homes2 must be a boolean")
+        if homes2 and _opf_store.SUPPORTED_HOMES < 2:
+            # Before the mutex and before any branch: a fresh, resumed or completed operation alike
+            # never reports success for a homes-2 request this tooling cannot carry out.
+            raise InitOperationError("homes2 needs tooling that supports homes generation 2; "
+                                     "nothing is planned, resumed or checked")
         root = _abs_root(product_root)
         admitted = tuple(admitted) if admitted else ()
         reason = _bad_admitted(admitted)
@@ -2731,7 +2923,11 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
         try:
             run.holder = _opf_oplock.acquire_init_operation(root, OPERATION, recover=recover)
         except _opf_oplock.OpLockError as exc:
+            result.staging_removed = getattr(exc, "staging_removed", ())
+            result.recovered = getattr(exc, "recovered", ())
             raise InitOperationError("cannot take the operation mutex ({})".format(exc))
+        result.staging_removed = getattr(run.holder, "staging_removed", ())
+        result.recovered = getattr(run.holder, "recovered", ())
         binding, head = observe_binding(root, git)
         if (binding, head) != (pre_binding, pre_head):
             raise InitOperationError("the binding or HEAD changed while the mutex was taken; "
@@ -2747,6 +2943,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
             raise InitOperationError("the product root changed identity after it was observed")
         kind, rep = _select(run, binding)
         if kind == "completed":
+            _generation_or_refuse(rep.plan, homes2)
             _health_check(root, run.root_fd, rep.plan, binding)
             result.status = ALREADY_INITIALIZED
             result.operation_id = rep.op_id
@@ -2755,7 +2952,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
             return result
         if kind == "fresh":
             plan, raw = _fresh_plan(run, binding, head, ancestral, git, admitted, operation_id,
-                                    admitted_dirs)
+                                    admitted_dirs, homes2)
             try:
                 run.sub = _opf_init_substrate.begin_operation(run.holder, raw)
             except _opf_init_substrate.InitSubstrateError as exc:
@@ -2773,6 +2970,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
                                           expected_head=head)
             _resume_binding_or_refuse(run.plan, rep.op_id, ancestral, admitted, operation_id,
                                       admitted_dirs)
+            _generation_or_refuse(run.plan, homes2)
             _refuse_ignored_destinations(git, binding, run.plan)
             run.phases = _phase_names(run.sub)
             if not run.phases:
@@ -2801,6 +2999,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
         if "sources-ready" not in run.phases:
             _final_check(root, run.root_fd, run.plan, lease_held=True)
             run.record("sources-ready")
+        _verify_homes_gitignore(root, run.plan)
         views = plan_init_views(root, run.root_fd, run.plan, git)
         apply_init_views(run, views)
         try:
@@ -2898,6 +3097,19 @@ def _mk_plan(**over):
                 application_time="2026-01-02T03:04:05Z")
     args.update(over)
     return build_init_plan(**args)
+
+
+def _st_gates(thunk, spec=_opf_store.IMPORTED_SPEC_VERSION):
+    """Run `thunk` with homes 2 supported (and, unless `spec` is None, the imported series too),
+    restoring the shipped constants in finally: generation 2 is reached only inside a vector."""
+    saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+    _opf_store.SUPPORTED_HOMES = 2
+    if spec is not None:
+        _opf_store.SUPPORTED_SPEC_VERSION = spec
+    try:
+        return thunk()
+    finally:
+        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = saved
 
 
 def _st_git_env(base):
@@ -3153,7 +3365,78 @@ def _read_plan(root):
         return ops, fh.read()
 
 
+def _homes2_plan_tests(plan, ok, refuses):
+    """The pure generation-2 plan vectors (spec 4.2): built only through the explicit homes2
+    input under raised gates (_st_gates), with its roster, creation order, payloads and counters
+    namespaces, and the refusals that hold each generation to its own exact roster. `plan` is
+    the self-test's default generation-1 plan."""
+    def resealed(source, change):
+        doc = json.loads(json.dumps(source))
+        change(doc)
+        doc["plan_digest"] = compute_plan_digest(doc)
+        return _opf_init_contract.canonical_json_bytes(doc)
+
+    gen2_leaves = sorted("{}/{}".format(_MACHINE_HOME, n)
+                         for n in _opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES))
+    ok("H2-gen1-roster-unchanged",
+       bootstrap_source_roster(_opf_init._manifest_model()) == BOOTSTRAP_SOURCE_ROSTER
+       and plan_generation(plan["sets"]["S"]) == 1
+       and _st_gates(lambda: plan_generation(plan["sets"]["S"])) == 1)
+    refuses("H2-homes2-refused-at-shipped-constants", lambda: _mk_plan(homes2=True),
+            needle="homes generation 2")
+    plan2, raw2 = _st_gates(lambda: _mk_plan(homes2=True))
+    paths2 = [s["path"] for s in plan2["sets"]["S"]]
+    payloads2 = plan_payloads(plan2)
+    ok("H2-plan-carries-gitignore", paths2[0] == GITIGNORE_RELPATH
+       and payloads2[GITIGNORE_RELPATH] == _opf_store.render_homes_gitignore().encode("utf-8")
+       and _st_gates(lambda: plan_generation(plan2["sets"]["S"])) == 2
+       and _st_gates(lambda: validate_init_plan(raw2, expected_binding=_mk_binding(),
+                                                expected_head=_mk_head()))["plan_digest"]
+       == plan2["plan_digest"], str(paths2[:2]))
+    ok("H2-plan-carries-imported-leaves", set(gen2_leaves) <= set(paths2)
+       and all(payloads2[p] in (b"record = []\nschema = 1\n", b"entry = []\nschema = 1\n")
+               for p in gen2_leaves)
+       and paths2[-3:] == [PROVENANCE_RELPATH, CHANGELOG_RELPATH, _opf_store.POINTER_REL]
+       and set(tomllib.loads(payloads2[COUNTERS_RELPATH].decode("utf-8"))["counters"])
+       == set(_opf_store.BASELINE_TYPES.values())
+       | {"imported:" + ns for ns in _opf_store.BASELINE_TYPES.values()})
+    plan2h, _raw2h = _st_gates(lambda: _mk_plan(homes2=True), spec=None)
+    paths2h = [s["path"] for s in plan2h["sets"]["S"]]
+    ok("H2-homes-only-no-leaves", paths2h[0] == GITIGNORE_RELPATH
+       and not set(gen2_leaves) & set(paths2h)
+       and plan_payloads(plan2h)[COUNTERS_RELPATH] == plan_payloads(plan)[COUNTERS_RELPATH])
+    refuses("H2-plan-missing-gitignore-refused", lambda: _st_gates(lambda: validate_init_plan(
+        resealed(plan2, lambda d: d["sets"]["S"].pop(0)))),
+        needle="S is not exactly the bootstrap source roster")
+    gitignore_entry = dict(plan2["sets"]["S"][0], staging=staging_name(GITIGNORE_RELPATH,
+                                                                       plan["operation_id"]))
+    # Homes-only gates keep the shipped spec_version pin, so the roster is the refusal under test.
+    refuses("H2-gen1-plan-with-gitignore-refused", lambda: _st_gates(lambda: validate_init_plan(
+        resealed(plan, lambda d: d["sets"]["S"].insert(0, gitignore_entry))), spec=None),
+        needle="S is not exactly the bootstrap source roster")
+    refuses("H2-gen2-plan-refused-at-shipped-constants", lambda: validate_init_plan(_raw2h),
+            needle="S is not exactly the bootstrap source roster")
+    refuses("H2-effect-order-refuses-unplaced", lambda: _effect_order({".working/other"}),
+            needle="cannot place")
+    ok("H2-checks-accept-imported-counters",
+       _st_gates(lambda: _opf_init.imported_counter_namespaces(_plan_manifest_model(plan2)))
+       == frozenset(_opf_store.BASELINE_TYPES.values())
+       and _st_gates(lambda: _opf_init.imported_counter_namespaces(_plan_manifest_model(plan)))
+       is None)
+
+
 def _run_self_test():
+    code = _run_self_test_lifecycle()
+    failures = _fault_channel_vectors()
+    for failure in failures:
+        print("_opf_init_operation self-test: FAIL: {}".format(failure), file=sys.stderr)
+    return code or (1 if failures else 0)
+
+
+# The suite's status is returned straight from the lifecycle helper: the git-fixture-env lifecycle
+# roster derives this wrapper's edge to _run_self_test_isolated from that return, so a status kept
+# for later reads as no wrapper.
+def _run_self_test_lifecycle():
     return _opf_oplock._st_with_git_lifecycle(_run_self_test_isolated)
 
 
@@ -3356,6 +3639,12 @@ def _run_self_test_isolated():
                                          expected_head=_mk_head())["plan_digest"]
        == plan["plan_digest"])
 
+    # --- pure: the generation-2 plan (spec 4.2), reached only through the explicit homes2 input ----
+    try:
+        _homes2_plan_tests(plan, ok, refuses)
+    except Exception:
+        ok("H2-plan-harness", False, traceback.format_exc())
+
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-op-selftest-"))
     env = _st_git_env(base)
     saved = {}
@@ -3375,6 +3664,10 @@ def _run_self_test_isolated():
         tests_run.append("seam")
         _ignore_tests(base, env, ok)
         tests_run.append("ignore")
+        _ancestry_tests(base, env, ok)
+        tests_run.append("ancestry")
+        _homes2_tests(base, env, ok)
+        tests_run.append("homes2")
         import check_opf_init_qa
         ok("PR3a-QA-regressions", check_opf_init_qa.self_test() == 0)
     except Exception:
@@ -3391,13 +3684,198 @@ def _run_self_test_isolated():
     for lbl, why in failed:
         sys.stderr.write("SELF-TEST FAIL {}: {}\n".format(lbl, why))
     print("filesystem under test: {} (TMPDIR={})".format(base, os.environ.get("TMPDIR", "")))
-    if failed or tests_run != ["b6", "physical", "views", "seam", "ignore"]:
+    if failed or tests_run != ["b6", "physical", "views", "seam", "ignore", "ancestry", "homes2"]:
         sys.stderr.write("_opf_init_operation SELF-TEST: FAIL ({} of {})\n".format(
             len(failed), len(checks)))
         return 1
     print("_opf_init_operation SELF-TEST: PASS ({} checks)".format(len(checks)))
     return 0
 
+
+
+def _homes2_tests(base, env, ok):
+    """Generation-2 init over real git stores (spec 4.2), reached only through the explicit homes2
+    input with both gates raised inside each vector: the plan creates .working/.gitignore first, the
+    empty imported leaves and their zero counter rows; the read-only inspection gates the fresh path
+    before the plan is persisted (a hold or a plan that is not a create REFUSED and a cannot-evaluate
+    state CANNOT-EVALUATE, nothing written, no operation recorded); the post-write check runs on
+    every attempt and on the completed rerun's health check; a homes2 request at the shipped
+    constants, or a non-boolean homes2, is refused before the mutex on the fresh, resume and
+    completed paths, and a resume or rerun naming the other generation than its recorded plan's is
+    refused; and a default run never inspects, even with both gates raised. The inspection refuses
+    the self-test's ambient GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM overrides, so those two are unset
+    around the group."""
+    from unittest import mock
+    d = os.path.join(base, "homes2")
+    leaves = sorted(_opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES))
+
+    def sub_ops(root):
+        ops = _ops_dir(root)
+        return sorted(os.listdir(ops)) if os.path.isdir(ops) else []
+
+    def counting(real):
+        calls = []
+
+        def wrapped(*a, **k):
+            calls.append(a)
+            return real(*a, **k)
+        return wrapped, calls
+
+    def detail(res):
+        return (res.primary_failure or {}).get("detail", "")
+
+    def unsupported(root, **kw):
+        # A homes2 request at the shipped constants: REFUSED before the mutex is taken, with the
+        # worktree and the recorded operations unchanged. Returns (verdict, detail) for ok().
+        before, ops = _tree_snapshot(root), sub_ops(root)
+        acquire, acquired = counting(_opf_oplock.acquire_init_operation)
+        with mock.patch.object(_opf_oplock, "acquire_init_operation", acquire):
+            res = run_init_operation(root, homes2=True, **kw)
+        return (res.status == REFUSED and "homes2 needs tooling" in detail(res) and not acquired
+                and _tree_snapshot(root) == before and sub_ops(root) == ops,
+                "{} {} {}".format(res.status, res.primary_failure, len(acquired)))
+
+    def no_lease(snapshot):
+        # the lock's explicit recovery legitimately settles the killed holder's stale lease
+        return {rel: v for rel, v in snapshot.items() if rel != LEASE_RELPATH.replace("/", os.sep)}
+
+    def mismatched(root, homes2, spec=_opf_store.IMPORTED_SPEC_VERSION, **kw):
+        # A resume or completed rerun naming the other generation than its recorded plan's, with
+        # homes 2 supported: REFUSED with the worktree and the recorded operations unchanged.
+        before, ops = no_lease(_tree_snapshot(root)), sub_ops(root)
+        res = _st_gates(lambda: run_init_operation(root, homes2=homes2, **kw), spec=spec)
+        return (res.status == REFUSED and "never changes its plan's generation" in detail(res)
+                and no_lease(_tree_snapshot(root)) == before and sub_ops(root) == ops,
+                "{} {}".format(res.status, res.primary_failure))
+
+    saved = {k: os.environ.pop(k, None) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+    try:
+        # The fresh path at the shipped constants: a homes2 request, and a homes2 that is not a
+        # boolean (red when that check is dropped: 0 and None then run a default init), each refuse
+        # before the mutex with nothing written.
+        root = _plain_repo(os.path.join(d, "unsupported"), env)
+        ok("H2-fresh-unsupported-refused-up-front", *unsupported(root))
+        before = _tree_snapshot(root)
+        acquire, acquired = counting(_opf_oplock.acquire_init_operation)
+        outcomes = []
+        with mock.patch.object(_opf_oplock, "acquire_init_operation", acquire):
+            for bad in (1, 0, "yes", None):
+                res = run_init_operation(root, homes2=bad)
+                outcomes.append((bad, res.status, detail(res)))
+        ok("H2-run-homes2-non-boolean-refused", all(
+            status == REFUSED and "homes2 must be a boolean" in text
+            for _bad, status, text in outcomes)
+           and not acquired and _tree_snapshot(root) == before and sub_ops(root) == [],
+           str(outcomes))
+
+        root = _plain_repo(os.path.join(d, "fresh"), env)
+        inspect, inspected = counting(_opf_write_guard.inspect_homes_gitignore)
+        verify, verified = counting(_opf_write_guard.verify_homes_gitignore_effective)
+        with mock.patch.object(_opf_write_guard, "inspect_homes_gitignore", inspect), \
+                mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", verify):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        snap = _tree_snapshot(root)
+        counters = snap.get(os.path.join(".working", "toml", "counters.toml"), (None, 0, b""))[2]
+        ok("H2-run-views-ready", res.status == VIEWS_READY and len(inspected) == 1
+           and len(verified) == 1
+           and snap.get(os.path.join(".working", ".gitignore"), (None,))[2:]
+           == (_opf_store.render_homes_gitignore().encode("utf-8"),)
+           and all(os.path.join(".working", "toml", n) in snap for n in leaves)
+           and b'"imported:BI" = 0' in counters, "{} {} {}".format(
+               res.status, res.primary_failure, (len(inspected), len(verified))))
+        verify, verified = counting(_opf_write_guard.verify_homes_gitignore_effective)
+        with mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", verify):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-rerun-already-initialized", res.status == ALREADY_INITIALIZED and len(verified) == 1,
+           "{} {} {}".format(res.status, res.primary_failure, len(verified)))
+        # The completed path keeps the recorded generation: a default rerun of this generation-2
+        # adoption refuses, and a homes2 rerun at the shipped constants refuses before the mutex.
+        ok("H2-completed-gen2-default-rerun-refused", *mismatched(root, False))
+        ok("H2-completed-unsupported-refused-up-front", *unsupported(root))
+        # A completed adoption whose managed block was removed is unhealthy: the rerun's health
+        # check runs the post-write check and refuses, never ALREADY-INITIALIZED, writing nothing.
+        _write(os.path.join(root, ".working", ".gitignore"), b"# adopter only\n")
+        before = _tree_snapshot(root)
+        res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-completed-block-removed-refused", res.status == REFUSED
+           and "not effective" in detail(res) and "homes-gitignore-block-missing" in detail(res)
+           and _tree_snapshot(root) == before, "{} {}".format(res.status, res.primary_failure))
+
+        # Init is create-only: an inspection that planned from a present file, or planned other
+        # bytes than the plan's payload, refuses like a hold (red when that arm is dropped).
+        rendered = _opf_store.render_homes_gitignore().encode("utf-8")
+        for label, effect, code, needle in (
+                ("hold", lambda *a, **k: (rendered, ["tracked-control-path: held"], None),
+                 REFUSED, "is held"),
+                ("cannot-evaluate", mock.Mock(side_effect=_opf_write_guard.WriteGuardError(
+                    "cannot run git")), CANNOT_EVALUATE, "cannot run git"),
+                ("present-file", lambda *a, **k: (rendered, [], b"# adopter\n"), REFUSED,
+                 "init is create-only"),
+                ("other-bytes", lambda *a, **k: (rendered + b"# extra\n", [], None), REFUSED,
+                 "init is create-only")):
+            root = _plain_repo(os.path.join(d, "inspect-" + label), env)
+            before = _tree_snapshot(root)
+            with mock.patch.object(_opf_write_guard, "inspect_homes_gitignore", effect):
+                res = _st_gates(lambda: run_init_operation(root, homes2=True))
+            ok("H2-inspector-{}-refuses".format(label), res.status == code
+               and needle in detail(res)
+               and _tree_snapshot(root) == before and sub_ops(root) == [],
+               "{} {}".format(res.status, res.primary_failure))
+
+        # The post-write check runs on the fresh attempt and again on its resume (the source-state
+        # milestone already recorded): a finding refuses with the plan kept, and the resume, naming
+        # its recorded generation-2 plan's generation, re-checks and completes. Before it, a default
+        # resume refuses (the other generation) and a homes2 resume at the shipped constants
+        # refuses before the mutex, each leaving the partial as it was.
+        root = _plain_repo(os.path.join(d, "verify"), env)
+        with mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective",
+                               lambda *a, **k: ["homes-gitignore-ineffective: forced"]):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-verifier-finding-refuses", res.status == REFUSED
+           and "not effective" in detail(res)
+           and len(sub_ops(root)) == 1, "{} {}".format(res.status, res.primary_failure))
+        ok("H2-resume-gen2-default-refused", *mismatched(root, False))
+        ok("H2-resume-unsupported-refused-up-front", *unsupported(root))
+        verify, verified = counting(_opf_write_guard.verify_homes_gitignore_effective)
+        with mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", verify):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-verifier-runs-on-resume", res.status == VIEWS_READY and len(verified) == 1
+           and len(sub_ops(root)) == 1, "{} {} {}".format(res.status, res.primary_failure,
+                                                           len(verified)))
+
+        # A generation-1 partial (killed after its second source) and then its completed adoption:
+        # a homes2 resume or rerun refuses at the shipped constants (before the mutex) and with
+        # homes 2 supported (the recorded generation is 1; the homes-only gate keeps the shipped
+        # spec_version pin, so the generation is the refusal under test), while the default resume
+        # completes it.
+        root = _plain_repo(os.path.join(d, "gen1"), env)
+        _child(root, env, kill="source:2")
+        partial = sub_ops(root)
+        good, why = unsupported(root, recover=True)
+        ok("H2-resume-gen1-unsupported-refused-up-front", len(partial) == 1 and good, why)
+        ok("H2-resume-gen1-homes2-refused", *mismatched(root, True, spec=None, recover=True))
+        res = run_init_operation(root, recover=True)
+        ok("H2-resume-gen1-default-completes", res.status == VIEWS_READY
+           and sub_ops(root) == partial, "{} {}".format(res.status, res.primary_failure))
+        ok("H2-completed-gen1-unsupported-refused-up-front", *unsupported(root))
+        ok("H2-completed-gen1-homes2-refused", *mismatched(root, True, spec=None))
+
+        # A default run plans generation 1 even with both gates raised: no inspection, no
+        # post-write check, no .working/.gitignore and no imported leaf.
+        root = _plain_repo(os.path.join(d, "default"), env)
+        refuse = mock.Mock(side_effect=_opf_write_guard.WriteGuardError("must not be called"))
+        with mock.patch.object(_opf_write_guard, "inspect_homes_gitignore", refuse), \
+                mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", refuse):
+            res = _st_gates(lambda: run_init_operation(root))
+        snap = _tree_snapshot(root)
+        ok("H2-gen1-never-inspects", res.status == VIEWS_READY and refuse.call_count == 0
+           and os.path.join(".working", ".gitignore") not in snap
+           and not any(os.path.join(".working", "toml", n) in snap for n in leaves),
+           "{} {}".format(res.status, res.primary_failure))
+    finally:
+        for k, val in saved.items():
+            if val is not None:
+                os.environ[k] = val
 
 
 def _seam_tests(base, env, ok):
@@ -3437,6 +3915,55 @@ def _seam_tests(base, env, ok):
        and "caller-minted operation_id" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
 
+    # The journals carve-out (spec 14.2): the reserved `.working/journals/` subtree is OPF control
+    # area, carved out of the observed inventory wholesale (the coupled adoption's journal lives and
+    # mutates there); a symlinked or non-directory `journals` entry refuses fail-closed; and plain
+    # init keeps refusing a `.working` holding only the journal, exactly as any other existing one.
+    root = _plain_repo(os.path.join(d, "journals"), env)
+    _write(os.path.join(root, ".working", "journals", "adoption", "journal", "frames.log"), b"")
+    _write(os.path.join(root, ".working", "kept.md"), b"kept\n")
+    jfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        model, present = observe_inventory(jfd)
+    finally:
+        os.close(jfd)
+    ok("SEAM-journals-carved-out", present
+       and [e["path"] for e in model["entries"]] == [".working/kept.md"], str(model["entries"]))
+    root = _plain_repo(os.path.join(d, "journalsonly"), env)
+    _write(os.path.join(root, ".working", "journals", "adoption", "journal", "frames.log"), b"")
+    before = _tree_snapshot(root)
+    res = run_init_operation(root)
+    ok("SEAM-plain-journal-only-working-refused", res.status == REFUSED
+       and "already exists" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+    root = _plain_repo(os.path.join(d, "journalslink"), env)
+    os.makedirs(os.path.join(root, ".working", "elsewhere"))
+    os.symlink("elsewhere", os.path.join(root, ".working", "journals"))
+    linked = None
+    jlfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            observe_inventory(jlfd)
+        except InitOperationError as exc:
+            linked = str(exc)
+    finally:
+        os.close(jlfd)
+    root = _plain_repo(os.path.join(d, "journalsfile"), env)
+    _write(os.path.join(root, ".working", "journals"), b"not a directory\n")
+    plainfile = None
+    jffd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            observe_inventory(jffd)
+        except InitOperationError as exc:
+            plainfile = str(exc)
+    finally:
+        os.close(jffd)
+    ok("SEAM-journals-symlink-or-file-refused",
+       linked is not None and "reserved journals control area" in linked
+       and plainfile is not None and "reserved journals control area" in plainfile,
+       "{!r} {!r}".format(linked, plainfile))
+
     def admit_fixture(name, payload=b"frozen source\n"):
         root = _plain_repo(os.path.join(d, name), env)
         rel = os.path.join(".working", "notes", "frozen.md")
@@ -3454,6 +3981,14 @@ def _seam_tests(base, env, ok):
     ok("SEAM-admitted-accepted", res.status == VIEWS_READY and live == payload
        and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
        and len(sub_ops(root)) == 1, str(res.primary_failure))
+
+    # The admitted inventory still holds exactly beside a live journal subtree: the carve-out keeps
+    # the coupled run's own journal out of the exactness comparison and the final check alike.
+    root, adm, payload = admit_fixture("admitjournal")
+    _write(os.path.join(root, ".working", "journals", "adoption", "journal", "frames.log"), b"")
+    res = run_init_operation(root, admitted=adm, operation_id=oid(21))
+    ok("SEAM-admitted-beside-journal-accepted", res.status == VIEWS_READY
+       and _opf_store.resolve_store(root).status == _opf_store.RESOLVED, str(res.primary_failure))
 
     # One byte of drift in the admitted file refuses with nothing written.
     root, adm, payload = admit_fixture("drift")
@@ -3837,6 +4372,186 @@ def _ignore_tests(base, env, ok):
     res = run_init_operation(root, recover=True)
     ok("IGNORE-resume-finishes-once-unignored", res.status == VIEWS_READY
        and _opf_store.resolve_store(root).status == _opf_store.RESOLVED, str(res.primary_failure))
+
+
+def _ancestry_tests(base, env, ok):
+    """OPF spec 8.2 over real git stores: a FIRST adoption (no ancestral commit), plain or coupled,
+    whose HEAD's first-parent history already shows a store refuses with nothing written and no
+    operation recorded, naming the newest holding commit (a nested product prefix, and a merge
+    that drops the mainline store, included); a shallow or grafted history refuses
+    CANNOT-EVALUATE; a history that never held a store, and a store that lived only on a merged
+    side branch, proceed, each having consulted the detector (_opf_init_observe.prior_store_holder)
+    for the pinned HEAD; and a re-adoption over the same history is not scanned and seeds from its
+    evidence commit. Without the _fresh_plan call every refusal here fails (the store is published)
+    and each proceeding run consults nothing. A first adoption over an unborn HEAD reaches
+    VIEWS-READY unscanned (scanning it would raise, having no commit to pin), and a git read that
+    exits non-zero (rev-list over a pinned head the repository does not hold) is CANNOT-EVALUATE,
+    never None."""
+    from unittest import mock
+    d = os.path.join(base, "ancestry")
+    real = _opf_init_observe.prior_store_holder
+    calls = []
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        calls.append((k["pinned_head"], out))
+        return out
+
+    def run(root, **kw):
+        del calls[:]
+        with mock.patch.object(_opf_init_observe, "prior_store_holder", spy):
+            return run_init_operation(root, **kw)
+
+    def sub_ops(root):
+        ops = _ops_dir(root)
+        return sorted(os.listdir(ops)) if os.path.isdir(ops) else []
+
+    def deleted_store(name, prefix=""):
+        # A store committed under prefix (pointer, manifest, counters with BI = 7), then removed
+        # by git rm in a later commit; a kept file holds the product root open. Returns
+        # (repository, evidence commit, product root).
+        repo = _plain_repo(os.path.join(d, name), env)
+        root = os.path.join(repo, prefix) if prefix else repo
+        values = {ns: 0 for ns in _opf_store.BASELINE_TYPES.values()}
+        values["BI"] = 7
+        _write(os.path.join(root, "kept.txt"), b"kept\n")
+        _write(os.path.join(root, _opf_store.POINTER_REL), b'[store]\ntarget = "dir:."\n')
+        _write(os.path.join(root, _MACHINE_HOME, _opf_store.MANIFEST_NAME), b"x = 1\n")
+        _write(os.path.join(root, COUNTERS_RELPATH), _counters_toml(values))
+        _git(["add", "-A"], repo, env)
+        _git(["commit", "-q", "-m", "store"], repo, env)
+        evidence = _head(repo, env)
+        _git(["rm", "-q", "-r", "--", os.path.join(prefix, _opf_store.WORKING_DIRNAME),
+              os.path.join(prefix, _opf_store.POINTER_REL)], repo, env)
+        _git(["commit", "-q", "-m", "drop store"], repo, env)
+        return repo, evidence, root
+
+    def refused(label, res, code, needles, after, before, ops):
+        detail = (res.primary_failure or {}).get("detail", "")
+        ok(label, res.status == code and all(n in detail for n in needles) and after == before
+           and ops == [], "{} {}".format(res.status, res.primary_failure))
+
+    for name, kw in (("plain", {}),
+                     ("coupled", {"operation_id": "0000a001-c0de-4ead-8ead-00000000a001"})):
+        repo, evidence, root = deleted_store(name)
+        before = _tree_snapshot(root)
+        res = run(root, **kw)
+        refused("ANC-{}-first-adoption-over-history-refused".format(name), res, REFUSED,
+                ("prior store", evidence), _tree_snapshot(root), before, sub_ops(root))
+
+    repo, evidence, root = deleted_store("nested", prefix="prod")
+    before = _tree_snapshot(repo)
+    res = run(root)
+    refused("ANC-nested-prefix-first-adoption-refused", res, REFUSED, ("prior store", evidence),
+            _tree_snapshot(repo), before, sub_ops(root))
+
+    # The first-parent line is load-bearing: a merge whose tree IS its storeless side parent's
+    # drops the mainline store. On HEAD's first-parent line that merge deletes the store, so its
+    # first parent is the holder; a walk without --first-parent simplifies the merge to its
+    # TREESAME side parent, never visits the store, and would proceed.
+    root = _plain_repo(os.path.join(d, "treesame"), env)
+    fork = _head(root, env)
+    _write(os.path.join(root, _opf_store.POINTER_REL), b'[store]\ntarget = "dir:."\n')
+    _write(os.path.join(root, _MACHINE_HOME, _opf_store.MANIFEST_NAME), b"x = 1\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "store on main"], root, env)
+    store = _head(root, env)
+    _git(["checkout", "-q", "-b", "side", fork], root, env)
+    _write(os.path.join(root, "side.txt"), b"side\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "side work"], root, env)
+    side = _head(root, env)
+    merge = _git(["commit-tree", side + "^{tree}", "-p", store, "-p", side,
+                  "-m", "merge drops store"], root, env).stdout.decode("ascii").strip()
+    _git(["checkout", "-q", "main"], root, env)
+    _git(["reset", "-q", "--hard", merge], root, env)
+    before = _tree_snapshot(root)
+    res = run(root)
+    refused("ANC-treesame-merge-dropping-mainline-store-refused", res, REFUSED,
+            ("prior store", store), _tree_snapshot(root), before, sub_ops(root))
+
+    # A re-adoption over the same history is never scanned: its counters copy the pinned seed.
+    repo, evidence, root = deleted_store("readopt")
+    res = run(root, ancestral=evidence)
+    body = _read_or_none(os.path.join(root, COUNTERS_RELPATH)) or b""
+    ok("ANC-readoption-not-scanned-seeds-from-evidence", res.status == VIEWS_READY
+       and calls == [] and re.search(rb"(?m)^BI = 7$", body) is not None,
+       "{} {} {} {!r}".format(res.status, res.primary_failure, calls, body))
+
+    # Fail closed: a shallow clone hides the store behind its boundary, and a grafts entry cuts the
+    # parent link that reaches it; removing the grafts entry finds the store again.
+    repo, evidence, root = deleted_store("shallow-source")
+    shallow = os.path.join(d, "shallow")
+    _git(["clone", "-q", "--depth", "1", "file://" + repo, shallow], d, env)
+    before = _tree_snapshot(shallow)
+    res = run(shallow)
+    refused("ANC-shallow-cannot-evaluate", res, CANNOT_EVALUATE, ("SHALLOW",),
+            _tree_snapshot(shallow), before, sub_ops(shallow))
+    repo, evidence, root = deleted_store("grafts")
+    grafts = os.path.join(repo, ".git", "info", "grafts")
+    _write(grafts, (_head(repo, env) + "\n").encode("ascii"))
+    before = _tree_snapshot(root)
+    res = run(root)
+    refused("ANC-grafts-cannot-evaluate", res, CANNOT_EVALUATE, ("grafts",),
+            _tree_snapshot(root), before, sub_ops(root))
+    os.unlink(grafts)
+    res = run(root)
+    refused("ANC-grafts-removed-refused-again", res, REFUSED, ("prior store", evidence),
+            _tree_snapshot(root), before, sub_ops(root))
+
+    # No over-refusal: a history that never held a store, and a store created and deleted on a
+    # side branch that WAS merged (it never reached a first-parent tree), proceed; each consulted
+    # the detector once, for the pinned HEAD, which found nothing.
+    root = _plain_repo(os.path.join(d, "never"), env)
+    _write(os.path.join(root, "later.txt"), b"later\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "later"], root, env)
+    head = _head(root, env)
+    res = run(root)
+    ok("ANC-never-held-proceeds-after-scan", res.status == VIEWS_READY
+       and calls == [(head, None)], "{} {} {}".format(res.status, res.primary_failure, calls))
+    root = _plain_repo(os.path.join(d, "side"), env)
+    _git(["checkout", "-q", "-b", "feature"], root, env)
+    _write(os.path.join(root, _opf_store.POINTER_REL), b'[store]\ntarget = "dir:."\n')
+    _write(os.path.join(root, _MACHINE_HOME, _opf_store.MANIFEST_NAME), b"x = 1\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "store on side"], root, env)
+    _git(["rm", "-q", "-r", "--", _opf_store.WORKING_DIRNAME, _opf_store.POINTER_REL], root, env)
+    _git(["commit", "-q", "-m", "drop store on side"], root, env)
+    _git(["checkout", "-q", "main"], root, env)
+    _git(["merge", "-q", "--no-ff", "-m", "merge feature", "feature"], root, env)
+    head = _head(root, env)
+    merged = _git(["merge-base", "--is-ancestor", "feature", head], root, env, allow_fail=True)
+    res = run(root)
+    ok("ANC-side-branch-only-store-proceeds-after-scan", merged.returncode == 0
+       and res.status == VIEWS_READY and calls == [(head, None)],
+       "{} {} {} {}".format(merged.returncode, res.status, res.primary_failure, calls))
+
+    # An unborn HEAD (a fresh git init, no commit) has no history: the first adoption reaches
+    # its normal outcome without consulting the detector, whose pinned head would not exist.
+    root = os.path.join(d, "unborn")
+    os.makedirs(root)
+    _git(["init", "-q", "-b", "main", "."], root, env)
+    try:
+        res = run(root)
+        outcome = (res.status, res.primary_failure)
+    except Exception as exc:
+        outcome = ("raised", "{}: {}".format(type(exc).__name__, exc))
+    ok("ANC-unborn-head-proceeds-without-scan", outcome[0] == VIEWS_READY and calls == [],
+       "{} {}".format(outcome, calls))
+
+    # A git read that exits non-zero is CANNOT-EVALUATE, never "no prior store": rev-list over
+    # a well-formed pinned head the repository does not hold fails, and its empty output must
+    # not read as an empty walk.
+    root = _plain_repo(os.path.join(d, "unresolvable"), env)
+    try:
+        out = _opf_init_observe.prior_store_holder(
+            _opf_observe._git_path(), root, pinned_head="f" * 40, prefix="",
+            object_format="sha1")
+    except _opf_init_observe.ObservationError as exc:
+        out = (exc.code, exc.detail)
+    ok("ANC-unresolvable-pinned-head-cannot-evaluate", type(out) is tuple
+       and out[0] == _opf_init_observe.CANNOT_EVALUATE and out[1].startswith("rc "), repr(out))
 
 
 def _b6_tests(base, env, ok, refuses):
@@ -4797,12 +5512,651 @@ def _view_tests(base, env, ok, signal):
        and "views-ready" not in res.phases and _view_state(root, views)[2] == views,
        "{} {} {}".format(res.status, res.primary_failure, res.phases))
 
+# --- background fault channels of code loaded in process (atexit, worker thread, destructor) ----------
+# Fail-closed settlement for the background fault channels of the code this gate loads and runs in
+# process. _fail_closed_main installs the recorders BEFORE the gate's work (so before any in-process
+# load) and settles them AFTER it: a fault the interpreter reports only to stderr (a destructor, weakref
+# or similar callback through sys.unraisablehook; an unhandled exception ending a worker thread through
+# threading.excepthook) is recorded and forces exit 2 over a passing verdict, never a silent pass. Before
+# a passing verdict the settle waits (_SETTLE_SECONDS in all) for every other thread still running,
+# threading's census and the runtime's live count of low-level _thread workers together, so a worker's
+# later fault is recorded instead of killed silently by the exit, and a thread or low-level worker still
+# running at the bound fails the verdict closed (exit 2). On Linux the settle also waits on the OS's own
+# thread list for this process (_os_threads_pending), which still shows a worker while the runtime clears
+# its thread state (its thread-local and context values' destructors run there, after the runtime's live
+# count and threading's census already dropped it), a faulthandler watchdog and a thread a C extension
+# starts. The verdict then ends the process with os._exit, so an
+# atexit callback registered by loaded code can never run after it (that channel is unreachable, not
+# merely disclosed). Only a SystemExit with code None or 0 ending a worker thread is the interpreter's
+# normal SUCCESSFUL thread exit (default-hook parity) and is not recorded; any other code is an
+# unsuccessful exit a worker reported, so it is recorded.
+# A low-level _thread worker's SystemExit never reaches any hook (the interpreter drops it), so the
+# start entries and threading's saved module aliases of them are wrapped from before the gate's work and
+# a non-zero code ending such a worker is recorded as a fault there. The subinterpreter modules are made
+# unimportable before the gate's work, because a thread inside a subinterpreter reports its faults to
+# that interpreter's own hooks, never these recorders. Stated residuals, not closed: where the platform
+# has no per-process thread list (outside Linux) a thread outside the Python runtime stays invisible to
+# the census and the live count; and a process the loaded code starts is not followed, so one still
+# running after this gate ends is outside its verdict.
+# Each recorder chains to the hook it wrapped, so the usual traceback still reaches stderr after the
+# marker line. After the exit flushes the settle stops the collector, blocks every signal, runs any
+# handler already tripped, and re-reads the record and every liveness term, so a fault recorded or a
+# worker a signal handler started while a flush was blocked on a full pipe still fails the verdict, and
+# no loaded code can run between that last read and the exit.
+# Paths that end outside _gate_exit (a propagating KeyboardInterrupt, an escaping exception) already end
+# non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
+# no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
+# the exit itself is the reporting-machinery channel disclosed once in the _opf_views class disclosure
+# (deliberately hostile loaded code is accepted there and not closed).
+_LOADED_FAULTS = []
+# A started low-level worker's liveness flag, set synchronously at the start call: the runtime
+# live count misses the brief window before a just-started worker's OS thread registers, so the
+# settle also waits while any flag is set, never breaking on that transient zero.
+_LOADED_WORKERS = []
+_FAULT_MARKER = "LOADED-CODE-FAULT"
+
+
+def _install_fault_hooks():
+    # A local alias: opf.py's close-lifecycle census reads an attribute store through the bare module name
+    # as shadowing that module.
+    import threading as _threads
+
+    # The modules that create a subinterpreter are made unimportable (an import is an ImportError the
+    # gate's work fails on): a thread inside one reports its faults to that interpreter's own hooks.
+    for _name in ("_interpreters", "concurrent.interpreters", "_testinternalcapi", "_testcapi"):
+        sys.modules[_name] = None
+
+    previous_unraisable = sys.unraisablehook
+    previous_thread = _threads.excepthook
+
+    def _record(channel, chained, args):
+        _LOADED_FAULTS.append(channel)
+        try:
+            sys._loaded_code_fault = True
+            sys.stderr.write("{}: a {} fault was recorded; a passing verdict will fail closed\n".format(
+                _FAULT_MARKER, channel))
+        finally:
+            chained(args)
+
+    def _record_unraisable(args):
+        _record("destructor-or-callback", previous_unraisable, args)
+
+    def _benign_thread_exit(args):
+        # Only a worker thread ending by SystemExit(None) or SystemExit(0) is the interpreter's normal
+        # SUCCESSFUL thread exit (default-hook parity). Any other SystemExit code is an unsuccessful exit
+        # a worker reported, recorded like any other fault (never a silent pass); the code is read
+        # through exact built-in types alone and never formatted.
+        if args.exc_type is None or not issubclass(args.exc_type, SystemExit):
+            return False
+        code = getattr(args.exc_value, "code", None) if args.exc_value is not None else None
+        return code is None or (type(code) is int and code == 0)
+
+    def _record_thread(args):
+        if _benign_thread_exit(args):
+            previous_thread(args)
+        else:
+            _record("worker-thread", previous_thread, args)
+
+    sys.unraisablehook = _record_unraisable
+    _threads.excepthook = _record_thread
+
+    import _thread as _lowlevel
+
+    def _record_lowlevel_fault():
+        _LOADED_FAULTS.append("lowlevel-worker")
+        try:
+            sys._loaded_code_fault = True
+            sys.stderr.write("{}: a lowlevel-worker fault was recorded; a passing verdict will fail "
+                             "closed\n".format(_FAULT_MARKER))
+        except Exception:
+            pass
+
+    import types as _types
+    _bootstrap = _threads.Thread._bootstrap
+
+    def _genuine_bootstrap(target):
+        # A thread start is threading's own only when its target is exactly a bound method whose function
+        # is threading.Thread._bootstrap and whose instance is a threading.Thread (read through the exact
+        # method type, never an attribute the target supplies). Such a worker's fault already reaches
+        # threading.excepthook, so it is passed through untouched; wrapping it would also replace the
+        # target an audit-based observer reads, making threading's own start look like a raw one.
+        return (type(target) is _types.MethodType and target.__func__ is _bootstrap
+                and isinstance(target.__self__, _threads.Thread))
+
+    def _wrap_lowlevel(original):
+        # A raw low-level worker's SystemExit reaches no hook (the interpreter drops it), so the start
+        # entry wraps the worker's function and records a non-zero code as a fault (None or 0 is the
+        # successful low-level exit, default-interpreter parity; the code is read through exact built-in
+        # types alone and never formatted), and tracks the worker's liveness flag. A genuine threading
+        # start is passed through untouched.
+        def _start(function, *args, **kwargs):
+            if _genuine_bootstrap(function):
+                return original(function, *args, **kwargs)
+            state = [True]
+            def _run(*wargs, **wkwargs):
+                try:
+                    return function(*wargs, **wkwargs)
+                except SystemExit as exc:
+                    code = getattr(exc, "code", None)
+                    if not (code is None or (type(code) is int and code == 0)):
+                        _record_lowlevel_fault()
+                    raise
+                finally:
+                    state[0] = False
+            result = original(_run, *args, **kwargs)
+            _LOADED_WORKERS.append(state)
+            return result
+        return _start
+
+    _wrapped = []
+    for _entry in ("start_new_thread", "start_new", "start_joinable_thread"):
+        if hasattr(_lowlevel, _entry):
+            _original = getattr(_lowlevel, _entry)
+            _replacement = _wrap_lowlevel(_original)
+            setattr(_lowlevel, _entry, _replacement)
+            _wrapped.append((_original, _replacement))
+    for _alias in dir(_threads):
+        _value = getattr(_threads, _alias)
+        for _original, _replacement in _wrapped:
+            if _value is _original:
+                setattr(_threads, _alias, _replacement)
+
+
+# The OS's own list of this process's threads (Linux): it still shows a worker while the runtime clears
+# its thread state, a faulthandler watchdog and a thread a C extension starts. None where the platform has
+# no such list; the runtime's own counts then carry the settle alone (a stated residual).
+_TASK_DIR = "/proc/self/task" if sys.platform.startswith("linux") else None
+
+
+def _os_threads_pending():
+    """True while the OS lists a thread of this process besides the calling one, and when that list
+    exists but cannot be read (fail-closed); False where the platform has no such list."""
+    import os
+    if _TASK_DIR is None:
+        return False
+    try:
+        return len(os.listdir(_TASK_DIR)) != 1
+    except OSError:
+        return True
+
+
+def _drain_pending_signals():
+    """A Python-level call: the interpreter runs any signal handler already tripped on entry here."""
+    return None
+
+
+_SETTLE_SECONDS = 60.0
+
+
+def _gate_exit(code):
+    """Settle and END the process: before a passing verdict, wait (up to _SETTLE_SECONDS in all) for every
+    other thread still running, so a fault it raises later is recorded, never killed silently by the exit,
+    and fail closed (exit 2) if one still runs at the bound (the census covers threading's threads and,
+    through the runtime's live count, workers started through the low-level _thread entry points, so a
+    low-level worker still running at the bound also fails closed, and on Linux the OS's own thread list
+    covers a worker still clearing its thread state, a watchdog and a C extension's thread; elsewhere a
+    thread outside the Python runtime is invisible: a stated residual); force a recorded background fault
+    to exit 2 over a passing verdict, flush both streams, then stop the collector, block every signal, run
+    any handler already tripped and re-read the record and every liveness term AFTER the flushes (a fault
+    recorded or a worker started while a flush was blocked, on a full pipe say, must still fail the
+    verdict; its late marker is written straight to fd 2, past the buffers), then os._exit, so no atexit
+    callback registered by loaded code
+    runs after the verdict (the gate's own cleanup runs inside its work; this gate registers no atexit work
+    of its own)."""
+    import os
+    import threading as _threads
+    import time
+    import _thread as _lowlevel
+    if type(code) is bool:
+        code = 1 if code else 0
+    elif code is None:
+        code = 0
+    elif type(code) is not int:
+        # The code object is never formatted: a loaded object's __str__ must not run here.
+        sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
+        code = 1
+    low = code & 0xFF
+    if code != 0 and low == 0:
+        # os._exit truncates its status to the low 8 bits, so this non-zero code would end the
+        # process with exit status 0, a silent pass; fail closed instead.
+        sys.stderr.write("{}: a SystemExit code outside the exit-status range at the gate entry; exit 2\n".format(
+            _FAULT_MARKER))
+        code = 2
+    else:
+        # os._exit refuses a code outside the C int range (OverflowError) instead of exiting, and
+        # that escape would let atexit callbacks registered by loaded code run after the verdict:
+        # take the low byte, the status any in-range code would report, so the exit below always runs.
+        code = low
+    if code == 0:
+        current = _threads.current_thread()
+        deadline = time.monotonic() + _SETTLE_SECONDS
+        while True:
+            running = [worker for worker in _threads.enumerate()
+                       if worker is not current and worker.is_alive()]
+            pending = (_lowlevel._count() or any(_state[0] for _state in _LOADED_WORKERS)
+                       or _os_threads_pending())
+            remaining = deadline - time.monotonic()
+            if (not running and not pending) or remaining <= 0:
+                break
+            if running:
+                running[0].join(min(remaining, 0.5))
+            else:
+                time.sleep(min(remaining, 0.05))
+        if running or pending:
+            sys.stderr.write("{}: a worker thread or low-level worker was still running at the verdict; "
+                             "fail-closed\n".format(_FAULT_MARKER))
+            code = 2
+    if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
+        sys.stderr.write("{}: {} background fault(s) from loaded code over a passing verdict; "
+                         "fail-closed\n".format(_FAULT_MARKER, len(_LOADED_FAULTS) or 1))
+        code = 2
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        if code == 0:
+            code = 2
+    if code == 0:
+        # The verdict stands only once no loaded code can run before the exit: the collector is stopped,
+        # every signal is blocked (no other thread is left to take one), a handler already tripped runs
+        # now, and the record and every liveness term are read afresh, so a fault or a worker a handler
+        # started while a flush was blocked fails the verdict.
+        import gc as _gc
+        import signal as _signals
+        try:
+            _gc.disable()
+            _signals.pthread_sigmask(_signals.SIG_BLOCK, _signals.valid_signals())
+            _drain_pending_signals()
+        except BaseException:  # noqa: BLE001  a handler's own escape fails the verdict, never the exit
+            code = 2
+        if (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False) or _lowlevel._count()
+                or any(_state[0] for _state in _LOADED_WORKERS) or _os_threads_pending()):
+            code = 2
+        if code != 0:
+            try:
+                os.write(2, ("{}: a background fault or a worker was recorded during the exit flush; "
+                             "fail-closed\n".format(_FAULT_MARKER)).encode("utf-8"))
+            except OSError:
+                pass
+    os._exit(code)
+
+
+def _fail_closed_main(run):
+    """The canonical process entry: install the fault recorders, run the gate's own work, settle, end."""
+    _install_fault_hooks()
+    try:
+        code = run()
+    except SystemExit as exc:
+        code = exc.code
+    _gate_exit(code)
+
+
+# The background fault channels, each driven through the gate's REAL _fail_closed_main in a child that
+# loads one fixture the way this gate loads code in process: a clean load passes; an atexit callback
+# registered by loaded code never runs (unreachable behind os._exit); a worker-thread fault and a
+# destructor fault are recorded and force exit 2.
+_FAULT_CHANNEL_PROBE = """import importlib.util, sys
+tool, fixture = sys.argv[1:3]
+sys.path.insert(0, tool.rsplit("/", 1)[0])
+spec = importlib.util.spec_from_file_location("_fault_channel_probe_target", tool)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+gate._SETTLE_SECONDS = 2.0
+def load():
+    case = importlib.util.spec_from_file_location("_fault_channel_fixture", fixture)
+    module = importlib.util.module_from_spec(case)
+    case.loader.exec_module(module)
+    return 0
+gate._fail_closed_main(load)
+"""
+
+# (label, fixture source, expected exit, marker required, text that must NOT appear on stderr)
+_FAULT_CHANNEL_CASES = (
+    ("clean", "x = 1\n", 0, False, None),
+    ("atexit", "import atexit, sys\n"
+     "def callback():\n"
+     "    sys.stderr.write('FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "    raise RuntimeError('fault-fixture-atexit')\n"
+     "atexit.register(callback)\n", 0, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("joined-thread", "import threading\n"
+     "def fault():\n"
+     "    raise RuntimeError('fault-fixture-thread')\n"
+     "worker = threading.Thread(target=fault)\n"
+     "worker.start()\n"
+     "worker.join()\n", 2, True, None),
+    ("destructor", "import gc\n"
+     "class Fault:\n"
+     "    def __del__(self):\n"
+     "        raise RuntimeError('fault-fixture-destructor')\n"
+     "Fault()\n"
+     "gc.collect()\n", 2, True, None),
+    ("thread-systemexit", "import threading\n"
+     "def fault():\n"
+     "    raise SystemExit(7)\n"
+     "worker = threading.Thread(target=fault)\n"
+     "worker.start()\n"
+     "worker.join()\n", 2, True, None),
+    ("thread-systemexit-zero", "import sys\nimport threading\n"
+     "def done():\n"
+     "    sys.exit(0)\n"
+     "worker = threading.Thread(target=done)\n"
+     "worker.start()\n"
+     "worker.join()\n", 0, False, None),
+    ("finishing-thread", "import threading, time\n"
+     "threading.Thread(target=time.sleep, args=(0.3,)).start()\n", 0, False, None),
+    ("unjoined-thread", "import threading, time\n"
+     "def fault():\n"
+     "    time.sleep(0.5)\n"
+     "    raise RuntimeError('fault-fixture-unjoined-thread')\n"
+     "threading.Thread(target=fault).start()\n", 2, True, None),
+    ("unfinished-thread", "import threading\n"
+     "threading.Thread(target=threading.Event().wait, daemon=True).start()\n", 2, True, None),
+    # Low-level _thread workers: the interpreter drops a SystemExit ending one without calling any hook,
+    # so the wrapped start entry records a non-zero code as a fault (None or 0 stays the successful
+    # low-level exit), and the settle waits on the runtime's live count, so one still running at the
+    # bound fails the verdict closed while one that finishes is waited out.
+    ("lowlevel-systemexit", "import _thread, threading\n"
+     "done = threading.Event()\n"
+     "def worker():\n"
+     "    try:\n"
+     "        raise SystemExit(7)\n"
+     "    finally:\n"
+     "        done.set()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "done.wait()\n", 2, True, None),
+    ("lowlevel-systemexit-zero", "import _thread, threading\n"
+     "done = threading.Event()\n"
+     "def worker():\n"
+     "    try:\n"
+     "        raise SystemExit(0)\n"
+     "    finally:\n"
+     "        done.set()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "done.wait()\n", 0, False, None),
+    ("lowlevel-finishing", "import _thread, time\n"
+     "_thread.start_new_thread(time.sleep, (0.3,))\n", 0, False, None),
+    ("lowlevel-unfinished", "import _thread, threading\n"
+     "_thread.start_new_thread(threading.Event().wait, ())\n", 2, True, None),
+    # A handled failed low-level start leaves no pending worker: red when the start flag is recorded
+    # before the start call (the flag then stays set and the settle fails closed at the bound).
+    ("lowlevel-failed-start", "import _thread\n"
+     "try:\n"
+     "    _thread.start_new_thread(print)\n"
+     "except TypeError:\n"
+     "    pass\n", 0, False, None),
+    # Thread-state teardown: a worker's thread-local and context-variable values are destroyed while the
+    # runtime clears its thread state, after its live count and threading's census already dropped it;
+    # the OS thread list still shows the worker, so the settle waits and records the fault (red without
+    # that term: each ends 0).
+    ("lowlevel-local-destructor", "import _thread, threading, time\n"
+     "entered = threading.Event()\n"
+     "store = threading.local()\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-local-destructor')\n"
+     "def worker():\n"
+     "    store.value = Held()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 2, True, None),
+    ("thread-local-destructor", "import threading, time\n"
+     "entered = threading.Event()\n"
+     "store = threading.local()\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-thread-local-destructor')\n"
+     "def worker():\n"
+     "    store.value = Held()\n"
+     "threading.Thread(target=worker).start()\n"
+     "entered.wait()\n", 2, True, None),
+    ("contextvar-destructor", "import _thread, contextvars, threading, time\n"
+     "entered = threading.Event()\n"
+     "held = contextvars.ContextVar('held')\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-contextvar-destructor')\n"
+     "def worker():\n"
+     "    held.set(Held())\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 2, True, None),
+    # The runtime's live count, the term that carries the settle where the platform has no thread list:
+    # the fixture switches the OS list off in the probe's gate, and a low-level worker whose return value's
+    # destructor still runs after its callback returned must still be waited out and recorded (red
+    # without the live count: it ends 0).
+    ("runtime-count-return-destructor", "import _thread, sys, threading, time\n"
+     "sys.modules['__main__'].gate._TASK_DIR = None\n"
+     "entered = threading.Event()\n"
+     "class Result:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-return-destructor')\n"
+     "def worker():\n"
+     "    return Result()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 2, True, None),
+    # The settle's own reads of those two terms: a teardown destructor or a return value's destructor
+    # that finishes without a fault is waited out and passes (red without the settle-position read: the
+    # re-read after the flushes then still sees the worker and fails the clean run closed).
+    ("lowlevel-local-finishing", "import _thread, threading, time\n"
+     "entered = threading.Event()\n"
+     "store = threading.local()\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.3)\n"
+     "def worker():\n"
+     "    store.value = Held()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 0, False, None),
+    ("runtime-count-return-finishing", "import _thread, sys, threading, time\n"
+     "sys.modules['__main__'].gate._TASK_DIR = None\n"
+     "entered = threading.Event()\n"
+     "class Result:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.3)\n"
+     "def worker():\n"
+     "    return Result()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 0, False, None),
+    # Capability removal: every subinterpreter module is unimportable (red when any one is left
+    # importable: the fixture then ends 3).
+    ("subinterpreter-modules", "import importlib\n"
+     "for name in ('_interpreters', 'concurrent.interpreters', '_testinternalcapi', '_testcapi'):\n"
+     "    try:\n"
+     "        importlib.import_module(name)\n"
+     "    except ImportError:\n"
+     "        continue\n"
+     "    raise SystemExit(3)\n", 0, False, None),
+    # An armed faulthandler watchdog is a C-level thread only the OS thread list shows; still armed at
+    # the bound it fails the verdict closed (red without that term: it ends 0).
+    ("watchdog-armed", "import faulthandler\n"
+     "faulthandler.dump_traceback_later(600)\n", 2, True, None),
+    # Exit-status range: os._exit truncates its status to the low 8 bits, so a non-zero SystemExit
+    # code that is a multiple of 256 would end the child with status 0, a silent pass; the gate maps
+    # it to 2. The neighbouring codes pass through (257 reaches the parent as its low byte, 1).
+    ("exit-status-255", "raise SystemExit(255)\n", 255, False, None),
+    ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
+    ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
+    ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
+    # Codes around the ends of the C int range: os._exit raises OverflowError on a code outside that
+    # range instead of exiting, which would let the loaded code's atexit callbacks run after the
+    # verdict; the gate takes the low byte first, so the exit always runs. The wide codes (beyond
+    # each end, with non-zero low bytes) reach the parent as their low bytes only through that
+    # ordering. The boundary codes (2**31, just past the positive end, and -(2**31), exactly the
+    # negative end) have a zero low byte and fail closed as exit 2; the multiple-of-256 rule alone
+    # already gives both that outcome, so those two cases are preservation controls over the range
+    # ends, not evidence that the ordering is required. The code at the positive end itself,
+    # 2**31 - 1, has low byte 255 and is inside os._exit's accepted range.
+    ("exit-status-wide-positive", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(2**31 + 1)\n", 1, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-wide-negative", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(-(2**31) - 1)\n", 255, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-boundary-positive", "raise SystemExit(2**31)\n", 2, True, None),
+    ("exit-status-boundary-negative", "raise SystemExit(-(2**31))\n", 2, True, None),
+)
+
+
+# The flush-window channel: _gate_exit's fault decision must hold across the exit flushes. The fixture
+# fills the child's stdout pipe to its exact capacity (F_GETPIPE_SZ) and leaves one byte in the stream's
+# buffer, then arms a timer (SIGALRM unblocked: a caller's blocked mask is inherited) whose signal handler
+# drops an object with a faulting destructor, so the fault is recorded while the exit flush is blocked on
+# the full pipe (after the settle's thread wait, which a worker-thread fault would not outlast); the
+# parent drains stdout only after stderr shows the fault marker. Exit 2 with the marker is required. Red
+# when the fault decision runs only before the flushes: the child then ends 0 with the marker on stderr.
+_FLUSH_WINDOW_FIXTURE = """import fcntl, os, signal, sys
+os.write(1, b"x" * fcntl.fcntl(1, fcntl.F_GETPIPE_SZ))
+sys.stdout.write("y")
+class Fault:
+    def __del__(self):
+        raise RuntimeError("fault-fixture-flush-window")
+def fault(signum, frame):
+    Fault()
+signal.signal(signal.SIGALRM, fault)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGALRM])
+signal.setitimer(signal.ITIMER_REAL, 1.0)
+"""
+
+# The same window with a start instead of a fault: the handler starts a low-level worker that never ends
+# while the exit flush is blocked, then reports on fd 2, and the parent drains stdout only after that
+# line. Exit 2 with the marker is required. Red when only the record is read after the flushes: the
+# child then ends 0 with the worker still running.
+_FLUSH_WINDOW_START_FIXTURE = """import _thread, fcntl, os, signal, sys, threading
+os.write(1, b"x" * fcntl.fcntl(1, fcntl.F_GETPIPE_SZ))
+sys.stdout.write("y")
+def start(signum, frame):
+    _thread.start_new_thread(threading.Event().wait, ())
+    os.write(2, b"FAULT-FIXTURE-FLUSH-START\\n")
+signal.signal(signal.SIGALRM, start)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGALRM])
+signal.setitimer(signal.ITIMER_REAL, 1.0)
+"""
+
+
+def _flush_window_failures():
+    """One failure string per flush-window requirement a child missed (see _FLUSH_WINDOW_FIXTURE and
+    _FLUSH_WINDOW_START_FIXTURE)."""
+    import subprocess
+    import tempfile
+    import threading
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-init-operation-flush-window-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
+        for label, fixture, ready in (
+                ("flush-window", _FLUSH_WINDOW_FIXTURE, _FAULT_MARKER + ":"),
+                ("flush-window-start", _FLUSH_WINDOW_START_FIXTURE, "FAULT-FIXTURE-FLUSH-START")):
+            case = Path(tmp) / (label + ".py")
+            case.write_text(fixture, encoding="utf-8")
+            try:
+                child = subprocess.Popen([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
+                continue
+            with child:
+                killer = threading.Timer(120, child.kill)
+                killer.start()
+                try:
+                    header = b""
+                    while ready.encode("ascii") not in header:
+                        line = child.stderr.readline()
+                        if not line:
+                            break
+                        header += line
+                    child.stdout.read()
+                    trailer = child.stderr.read()
+                    code = child.wait()
+                finally:
+                    killer.cancel()
+            stderr_text = (header + trailer).decode("utf-8", "replace")
+            if code != 2:
+                failures.append("fault-channel/{}: expected exit 2, got {}".format(label, code))
+            elif (_FAULT_MARKER + ":") not in stderr_text:
+                failures.append("fault-channel/{}: fault marker absent".format(label))
+    return failures
+
+
+# The entry wiring, checked statically on this file's own source: the final __main__ block must be
+# exactly _ENTRY_WIRING by AST (spacing and comments aside), so a rewiring that keeps _fail_closed_main
+# defined but routes an entry branch around it (a plain sys.exit around the work, say) is red even though
+# the channel probes above drive _fail_closed_main directly.
+_ENTRY_WIRING = '''if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ("--self-test", "--selftest"):
+        _fail_closed_main(_run_self_test)
+    if len(sys.argv) in (7, 8) and sys.argv[1] == "--selftest-child":
+        _fail_closed_main(lambda: _child_main(sys.argv[2:]))
+    sys.stderr.write("usage: python3 -I -B _opf_init_operation.py --self-test "
+                     "(a library module; no live mode)\\n")
+    sys.exit(2)
+'''
+
+
+def _entry_wiring_failures():
+    """One failure string per entry-wiring requirement this file's own source misses (see _ENTRY_WIRING)."""
+    import ast
+    failures = []
+    try:
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError) as exc:
+        return ["fault-channel/entry-wiring: this file could not be parsed ({})".format(type(exc).__name__)]
+    last = tree.body[-1] if tree.body else None
+    expected = ast.parse(_ENTRY_WIRING).body[0]
+    if last is None or ast.dump(last) != ast.dump(expected):
+        failures.append("fault-channel/entry-wiring: the final __main__ block is not the expected "
+                        "fail-closed form")
+    return failures
+
+def _fault_channel_vectors():
+    """One failure string per fault-channel case whose child did not end as required: the expected exit
+    code, the fault marker exactly when a fault must be recorded, and for the atexit case no trace of the
+    callback (it must never run). Red without the entry wrapper (the probe then ends 1, AttributeError on
+    _fail_closed_main, where clean and atexit expect 0) and red with the wrapper reverted to a plain exit
+    (the thread and destructor children then end 0 with the default hooks' output alone, where exit 2 with
+    the marker is required, and the atexit child then runs the callback)."""
+    import subprocess
+    import tempfile
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-init-operation-fault-channel-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
+        for index, (label, body, expected, marked, absent) in enumerate(_FAULT_CHANNEL_CASES):
+            case = Path(tmp) / "fault_channel_{}.py".format(index)
+            case.write_text(body, encoding="utf-8")
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                       capture_output=True, text=True, timeout=120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
+                continue
+            if child.returncode != expected:
+                failures.append("fault-channel/{}: expected exit {}, got {}".format(
+                    label, expected, child.returncode))
+            elif marked != ((_FAULT_MARKER + ":") in child.stderr):
+                failures.append("fault-channel/{}: fault marker {}".format(
+                    label, "absent" if marked else "present"))
+            elif absent is not None and absent in child.stderr:
+                failures.append("fault-channel/{}: the atexit callback ran".format(label))
+    failures.extend(_flush_window_failures())
+    failures.extend(_entry_wiring_failures())
+    return failures
+
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("--self-test", "--selftest"):
-        sys.exit(_run_self_test())
+        _fail_closed_main(_run_self_test)
     if len(sys.argv) in (7, 8) and sys.argv[1] == "--selftest-child":
-        sys.exit(_child_main(sys.argv[2:]))
+        _fail_closed_main(lambda: _child_main(sys.argv[2:]))
     sys.stderr.write("usage: python3 -I -B _opf_init_operation.py --self-test "
                      "(a library module; no live mode)\n")
     sys.exit(2)

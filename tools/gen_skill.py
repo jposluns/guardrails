@@ -96,7 +96,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The canonical apex ordering. It MUST appear verbatim in the apex rule body (prjint1), so the skill's
@@ -125,7 +125,7 @@ ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.6.zip")  # the versi
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
-# gate read from). The public attribution line (GD-56) is built from the [plugin] author-name here plus
+# gate read from). The public attribution line is built from the [plugin] author-name here plus
 # the pack's public source URL, so the maintainer's name is never a literal in any scanned source file;
 # it enters the two download artefacts only, where the portability gate carries its narrow exemption.
 IDENTITY_MANIFEST_PARTS = (".aiqt", "core", "hooks", "manifest.toml")
@@ -166,7 +166,7 @@ _EVIDENCE_VERSION_END = re.compile(r"(?:\Z|[ \t\n]|\.(?:\Z|[ \t\n]|<))")
 RENDERER_DECL = {"renderer-id": "skill", "semantics-revision": 2}
 # GENSRC_OUTPUTS is STATICALLY parsed by gen_gensrc.py and must be a LITERAL (a tuple of dict literals),
 # so each source list is inlined rather than shared through a name. The hooks manifest is a content-bearing
-# source: the public attribution line (GD-56) is rendered from its [plugin] author-name, so a change to that
+# source: the public attribution line is rendered from its [plugin] author-name, so a change to that
 # name changes these outputs and must re-trigger regeneration. LICENSE is likewise a content-bearing source
 # of the two download zips: render_zip packs it as a member, so a LICENSE edit changes those archives.
 GENSRC_OUTPUTS = (
@@ -451,7 +451,7 @@ def render_skill(data):
         "# Rules\n\n" + data["body_rules"],
         _conduct_block(data),
         _security_block(data),
-        # Public attribution footer (GD-56): attributes both the project and the maintainer under the
+        # Public attribution footer: attributes both the project and the maintainer under the
         # pack's Apache License 2.0. The portability gate carries a narrow, reviewed exemption for exactly this line.
         "---\n\n" + data["attribution"],
     ]
@@ -512,11 +512,14 @@ def _is_regular(path):
     return stat.S_ISREG(st.st_mode)
 
 
-def versioned_zips(downloads_dir):
-    """The sorted version-numbered skill zip basenames directly under downloads_dir that are REGULAR files by
-    lstat (top level only; the reserved aiqt/ subtree is not a download location). An absent dir has none; an
-    unreadable one raises OSError, which run_gen surfaces as exit 2."""
-    if not dir_present(downloads_dir):
+def versioned_zips(root):
+    """The sorted version-numbered skill zip basenames directly under root's site/downloads that are REGULAR
+    files by lstat (top level only; the reserved aiqt/ subtree is not a download location). An absent dir has
+    none; an unreadable one, or a symlink at site or downloads that is dangling or whose target is not a
+    directory or resolves outside root, raises OSError, which run_gen surfaces as exit 2 (a symlink to a
+    directory inside root is read)."""
+    downloads_dir = root.joinpath(*ZIP_PARTS[:-1])
+    if not dir_present(downloads_dir, root=root):
         return []
     return sorted(fn for fn in os.listdir(downloads_dir)
                   if is_versioned_zip(fn) and _is_regular(os.path.join(downloads_dir, fn)))
@@ -862,8 +865,8 @@ def plugin_identity(root, root_fd=None):
         # build_outputs surfaces as exit 2 and passes unchanged. tomllib raises RecursionError (a RuntimeError)
         # on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more than 1000 dotted
         # parts, and MemoryError on a many-part key under a memory limit; map each into that family
-        # (F-TOML-BARE-VALUEERROR-CLASS). A MemoryError is named as the resource failure it is, never as
-        # nesting.
+        # (RecursionError and MemoryError are not ValueErrors). A MemoryError is named as the resource failure it
+        # is, never as nesting.
         if isinstance(exc, ValueError):
             raise
         if isinstance(exc, MemoryError):
@@ -882,7 +885,7 @@ def plugin_identity(root, root_fd=None):
 
 
 def attribution_string(name):
-    """The public attribution line (GD-56), built from the operator name plus the pack's public source URL,
+    """The public attribution line, built from the operator name plus the pack's public source URL,
     so the maintainer's name is never a literal in a scanned source file. The exact string must match the
     portability gate's exempt line."""
     return "AIQT Guardrails by {}, {}, Apache License 2.0".format(name, ATTRIBUTION_SOURCE_URL)
@@ -942,7 +945,8 @@ def build_outputs(root, root_fd=None):
 def run_gen(root, check):
     """Reconcile every output under root. Exit 0 in sync, 1 on drift (check mode), 2 on a malformed
     source, an unknown corpus-id, or a read/write failure. Mirrors gen_cursor.main()'s fail-closed shape:
-    dir_present (not is_dir) so an unreadable .aiqt/ parent fails closed, and a walk whose errors raise so an
+    dir_or_absent (not is_dir) so an unreadable .aiqt/ parent, or a corpus path that cannot be read as a
+    directory, fails closed, and a walk whose errors raise so an
     unreadable output dir fails closed instead of concealing an orphan. The repository root is opened ONCE
     (_open_root), before any input is read, and that one descriptor anchors every input read, scan, output
     read and write of the run. Every refusal of static tree state happens BEFORE the first write: the input
@@ -966,7 +970,13 @@ def run_gen(root, check):
         # output as an orphan for removal, never concealed and never deleted. A PRESENT corpus with a
         # missing/unreadable skill source is malformed (the
         # OSError from parse_source propagates here as exit 2), which is the correct fail-closed outcome.
-        if dir_present(corpus_dir):
+        # A corpus path that is there but cannot be read as a directory is a refusal (exit 2), never that
+        # transition; a symlink to a directory inside the root is read.
+        # dir_present, bound beneath root, then judges every component above it the same way.
+        _present, problem = dir_or_absent(corpus_dir, root)
+        if problem is not None:
+            raise NotADirectoryError("{} {} (cannot evaluate)".format(corpus_dir, problem))
+        if dir_present(corpus_dir, root=root):
             reserved_map, standalone, binary = build_outputs(root, root_fd)
         else:
             reserved_map, standalone, binary = {}, [], []
@@ -1113,7 +1123,7 @@ def main():
 #   3. a hand-edited (drifted) SKILL.md makes --check report drift (exit 1),
 #   4. an orphan file in the reserved output subtree is detected (exit 1),
 #   5. an invalid-UTF-8 reserved target fails closed (exit 2), not a raw UnicodeDecodeError traceback:
-#      guards the widened (OSError, UnicodeError) reconcile arm (F-154),
+#      guards the widened (OSError, UnicodeError) reconcile arm, so an unreadable target fails closed,
 #   6. a stale versioned zip or ANY undeclared top-level entry (the allow-list) is never deleted: a normal
 #      run fails closed (exit 2, writing nothing) and --check exits 1, each naming the entry for git rm,
 #   7. the scan refuses by lstat a symlink, directory or dangling link at a skill zip name (including the
@@ -1297,7 +1307,7 @@ def self_test_main():
         return 2
     try:
         # 1. Well-formed source renders and round-trips clean.
-        # 0. F-TOML-BARE-VALUEERROR-CLASS: a parser overflow in the identity manifest makes tomllib raise
+        # 0. A parser overflow in the identity manifest makes tomllib raise
         #    RecursionError (a RuntimeError, not a ValueError); plugin_identity must map it into the ValueError
         #    family run_gen surfaces as exit 2, carrying the overflow.
         #    The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
@@ -1328,7 +1338,7 @@ def self_test_main():
         finally:
             tomllib.loads, tomllib.load = real_loads, real_load
 
-        # F-TOML-BARE-VALUEERROR-CLASS, memory leg: an injected MemoryError at the parse maps into the same
+        # Memory leg: an injected MemoryError at the parse maps into the same
         # ValueError family but is named as a memory failure, never as nesting.
         def oom_loads(text, **kwargs):
             if "injected-overflow" in text:
@@ -1506,7 +1516,7 @@ def self_test_main():
         _write_fixture(latest, good_src)
         capture(latest, False)
         ldl = latest.joinpath(*ZIP_PARTS[:-1])
-        found = versioned_zips(ldl)
+        found = versioned_zips(latest)
         if found != [ZIP_VERSIONED_PARTS[-1]]:
             failures.append("a clean tree must hold exactly the current versioned zip, got {}".format(found))
         alias_bytes = latest.joinpath(*ZIP_PARTS).read_bytes()
@@ -1549,7 +1559,7 @@ def self_test_main():
             failures.append("a missing current versioned zip expected latest-only drift (exit 1, found 0), "
                             "got {}\n{}".format(code, out))
         code, out = capture(latest, False)
-        if code != 0 or versioned_zips(ldl) != [ZIP_VERSIONED_PARTS[-1]]:
+        if code != 0 or versioned_zips(latest) != [ZIP_VERSIONED_PARTS[-1]]:
             failures.append("regen expected to restore exactly the current versioned zip, got {}\n{}".format(
                 code, out))
         code, out = capture(latest, True)
@@ -1789,7 +1799,7 @@ def self_test_main():
             os.rename(str(moved), str(rdl))
 
         # 13. A hard link at a declared output is refused and named in both modes (exit 2), never read and
-        #     accepted, whether its content matches (round-4 QA: --check passed it) or has drifted (a normal
+        #     accepted, whether its content matches (--check must not pass it) or has drifted (a normal
         #     run regenerated it silently); both names keep their bytes. Red if the link-count refusal is
         #     dropped. The writer itself still never writes THROUGH a hard link: it renames a fresh inode over
         #     the directory entry, so the outside name keeps its bytes (and the output drops to one link). Red
@@ -1846,7 +1856,7 @@ def self_test_main():
                 code, out))
         ver = zip_versioned_version()
         cur_line = "The chat skill now served from the install page is {} under the Apache License 2.0.\n"
-        # The canonical-form rule (round-4 QA, both reviews): the raw page must mention 'served from the'
+        # The canonical-form rule: the raw page must mention 'served from the'
         # exactly once, in the one plain canonical sentence. Each of these is drift (exit 1) naming the page:
         # a second mention, styled, linked or commented; a current sentence with markup or an entity between
         # the phrase and the version, or capitalized, wrapped or commented; and a version followed by anything
@@ -2057,7 +2067,7 @@ def self_test_main():
         # 20. The repository root is opened ONCE per run and EVERY walk starts from that descriptor: the
         #     fixture's root path is swapped for a symlink to an outside look-alike tree right after the run
         #     opens it. The look-alike differs from the real tree once per walk, so a walk that reopens the
-        #     root by path goes red whichever walk it is (round-4 and round-5 QA): its instructions file is
+        #     root by path goes red whichever walk it is: its instructions file is
         #     current while the real one is drifted (an output READER that reopens sees no drift and the real
         #     file stays drifted); each input this generator reads differs (its LICENSE, its skill-source.md body
         #     and its hooks-manifest author name, so an input read that reopens renders outside content into
@@ -2143,7 +2153,7 @@ def self_test_main():
                             "the evidence read or another walk reopens the root by path), got {}\n{}".format(
                                 code, out))
 
-        # 21. Inputs are read through the descriptor reader too (round-4 QA, both reviews): a symlink at
+        # 21. Inputs are read through the descriptor reader too: a symlink at
         #     LICENSE, skill-source.md or the hooks manifest, pointing at an outside file, is refused in both
         #     modes (exit 2, named), never read through or packed into the zip. Red if any of the three is
         #     read by plain path.
@@ -2188,7 +2198,7 @@ def self_test_main():
             outside_hl.unlink()
         # A FIFO at LICENSE is refused at once in both modes, never blocking the run; and a FIFO at one output
         # plus a drifted other output makes a normal run exit 2 having written nothing (the pre-write pass;
-        # round-4 QA codex 4). Each bounded by a 10 s alarm; red if an input is read by plain path (it blocks)
+        # so a partial write never lands). Each bounded by a 10 s alarm; red if an input is read by plain path (it blocks)
         # or an output is written before every output's type is checked.
         if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
             class _Blocked21(Exception):
@@ -2236,6 +2246,45 @@ def self_test_main():
                                         code, pw_instr.read_text(encoding="utf-8") == "local edit\n", out))
             finally:
                 signal.signal(signal.SIGALRM, prev21)
+
+        # 22. A corpus path that is there but is not a directory is refused in both modes (exit 2), never read
+        #     as the absent-corpus transition, which on a tree with no outputs yet is a clean exit 0.
+        nondir = tmp / "nondir-corpus"
+        nondir.joinpath(*CORPUS_PARTS[:-1]).mkdir(parents=True)
+        nondir.joinpath(*CORPUS_PARTS).write_text("not a directory\n", encoding="utf-8")
+        for chk in (True, False):
+            code, out = capture(nondir, chk)
+            if code != 2 or "is not a directory" not in out:
+                failures.append("a corpus path that is a regular file expected exit 2 naming it (check={}), got "
+                                "{}\n{}".format(chk, code, out))
+
+        # 23. A corpus path that is a symlink, on a generated tree: to the corpus moved elsewhere inside the root,
+        #     it is read (--check exit 0, in sync); dangling, to a regular file inside the root, or to the corpus
+        #     moved outside the root (so following it would be in sync), it is refused in both modes (exit 2),
+        #     named, never read as the absent-corpus transition and never followed.
+        for shape, want, reason in (("in-root", 0, None), ("dangling", 2, "whose target does not exist"),
+                                    ("to-file", 2, "whose target is not a directory"),
+                                    ("outside", 2, "whose target resolves outside the repository")):
+            linked = tmp / ("linked-corpus-" + shape)
+            linked.mkdir()
+            _write_fixture(linked, good_src)
+            capture(linked, False)
+            corpus = linked.joinpath(*CORPUS_PARTS)
+            target = {"in-root": linked / "shared" / "rules", "dangling": linked / "absent",
+                      "to-file": linked / "file.txt", "outside": tmp / "outside-corpus"}[shape]
+            if shape in ("in-root", "outside"):
+                target.parent.mkdir(exist_ok=True)
+                shutil.move(str(corpus), str(target))
+            else:
+                shutil.rmtree(corpus)
+            if shape == "to-file":
+                target.write_text("not a directory\n", encoding="utf-8")
+            corpus.symlink_to(target if shape == "outside" else os.path.relpath(target, corpus.parent))
+            for chk in ((True,) if want == 0 else (True, False)):
+                code, out = capture(linked, chk)
+                if code != want or (reason is not None and "is a symbolic link " + reason not in out):
+                    failures.append("a corpus path that is a symlink {} expected exit {} (check={}), got {}\n{}".format(
+                        shape, want, chk, code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2264,7 +2313,9 @@ def self_test_main():
           "version (a second plain-whitespace mention, a stale, capitalized, wrapped or commented sentence, a "
           "longer version or suffix straight after the version, and a missing page are --check drift; "
           "deliberate markup around or inside the phrase or after a '.' is out of scope); a hard-linked input "
-          "is refused as an input (break the link, never git rm); a facet-misplaced rule fails closed (exit 2).")
+          "is refused as an input (break the link, never git rm); a facet-misplaced rule and a corpus path that "
+          "is not a directory or a symlink to a directory inside the root fail closed (exit 2), and a corpus "
+          "symlinked to a directory inside the root is read.")
     return 0
 
 

@@ -11,7 +11,11 @@ plus labels as plain Python literals into a sentinelled GENERATED REGION in aiqt
 compiles them at module load. The region is drift-gated, so the source of truth stays single.
 
   gen_secret_patterns.py           rewrite the generated regions (aiqt_hooks.py, _opf_adopt_complete.py)
-  gen_secret_patterns.py --check   fail (exit 1) on drift; exit 2 on an unreadable source or target
+  gen_secret_patterns.py --check   fail (exit 1) on drift; exit 2 on an unreadable source or target, or a
+                                   directory above a target that cannot be read as one inside the repository
+  gen_secret_patterns.py --self-test  assert a directory above either target symlinked outside the root fails
+                                      closed (exit 2) with the target there untouched, and one symlinked
+                                      inside the root is read and rewritten
 
 Order matters in the pipeline: run this BEFORE tools/gen_hooks.py, so the region is up to date in the
 source aiqt_hooks.py before gen_hooks.py copies that file byte-identical into the plugin surface.
@@ -47,7 +51,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hashlib  # noqa: E402
 
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, target_dir_present  # noqa: E402
 
 # The source of truth and the render target, repo-root-relative.
 SOURCE_REL = "tools/check_secrets.py"
@@ -83,7 +87,7 @@ GENSRC_OUTPUTS = (
 def _load_check_secrets(root):
     """Import tools/check_secrets.py and return a dict of the single-sourced pattern material: the
     (raw_pattern_string, label) list for PREFIXES, the raw .pattern strings of ASSIGN, PLACEHOLDER, and
-    (GD-121) ENTROPY_ASSIGN, the entropy length bounds and threshold, and the credential/metadata
+    ENTROPY_ASSIGN, the entropy length bounds and threshold, and the credential/metadata
     component sets rendered as SORTED TUPLES for determinism. An import failure (an unreadable or broken
     source) raises, and run() maps it to exit 2, so the generator never renders a region from a source it
     could not read."""
@@ -172,6 +176,11 @@ def run(root, check):
     source or unreadable/unwritable target, mirroring gen_hooks.py's posture; nothing is written unless
     both regions render."""
     plans = []
+    # The directory probe reconcile runs (target_dir_present), for each target before any is read: a directory
+    # above one that is there but cannot be read as a directory inside the repository (a symlink resolving
+    # outside it, say) exits 2, never read through, reported clean or written.
+    for rel in (TARGET_REL, CI_FLOOR_TARGET_REL):
+        target_dir_present(root / rel, root)
     try:
         patterns = _load_check_secrets(root)
         for rel, region, begin, end in ((TARGET_REL, render_region(patterns), BEGIN, END),
@@ -199,7 +208,52 @@ def run(root, check):
     return 0
 
 
+def _build_fixture(base):
+    """A synthetic tree holding the two CI floor files and each target with its sentinel pair around a stale
+    body, so run() renders both regions into it. The patterns come from the check_secrets module run() imports."""
+    for _name, rel in CI_FLOOR_SOURCES:
+        (base / rel).parent.mkdir(parents=True, exist_ok=True)
+        (base / rel).write_text("# self-test CI floor file {}\n".format(rel), encoding="utf-8")
+    for rel, begin, end in ((TARGET_REL, BEGIN, END), (CI_FLOOR_TARGET_REL, CI_FLOOR_BEGIN, CI_FLOOR_END)):
+        (base / rel).parent.mkdir(parents=True, exist_ok=True)
+        (base / rel).write_text("# head\n{}\nstale\n{}\n# tail\n".format(begin, end), encoding="utf-8")
+
+
+def self_test_main():
+    """A directory above each target (.aiqt/ above aiqt_hooks.py, opf/tools/ above _opf_adopt_complete.py)
+    symlinked outside the root: --check and a regeneration over a stale region exit 2 with the target there
+    untouched; symlinked inside the root, it is read and the region rewritten there."""
+    import shutil
+    import tempfile
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-secret-patterns-selftest-"))
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    failures = []
+    try:
+        for label, link_rel, rel, begin, end in (("aiqt", ".aiqt", TARGET_REL, BEGIN, END),
+                                                 ("opf-tools", "opf/tools", CI_FLOOR_TARGET_REL, CI_FLOOR_BEGIN,
+                                                  CI_FLOOR_END)):
+            def drift(path, stale="# head\n{}\nstale\n{}\n# tail\n".format(begin, end)):
+                path.write_text(stale, encoding="utf-8")
+            failures.extend(linked_dir_failures(tmp, label, _build_fixture, run, link_rel, rel, drift=drift))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if failures:
+        print("SELF-TEST FAIL:")
+        for failure in failures:
+            print("  - " + failure)
+        return 1
+    print("SELF-TEST PASS: .aiqt/ above aiqt_hooks.py and opf/tools/ above _opf_adopt_complete.py each symlinked "
+          "outside the root fail closed (exit 2) in --check and write mode with the target there untouched, and "
+          "each symlinked inside the root is read and the region rewritten.")
+    return 0
+
+
 def main():
+    if "--self-test" in sys.argv[1:]:
+        return self_test_main()
     return run(repo_root(), "--check" in sys.argv[1:])
 
 

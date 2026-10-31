@@ -397,9 +397,13 @@ ALLOWLIST = (
      " external input"),
     ("opf/tools/check_opf_init_p0.py", "red_on_revert", "code", 1,
      _MUTANT + " (each guard revert, matched exactly once)"),
-    ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", "code", 2,
-     _MUTANT + " (the _read_regular close revert); exec_module loads the repository's own"
-     " _journal.py beside this file as the close harness"),
+    ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", "code", 1,
+     _MUTANT + " (the _read_regular close revert)"),
+    ("opf/tools/check_opf_prompt_pack.py", "_load_sibling", "code", 1,
+     "self-test loader: exec_module of a file by explicit path, never registered in sys.modules;"
+     " its callers pass the repository's own _journal.py beside this file (the close harness) or,"
+     " in the loaded-exit probe child, a scratch file holding one _LOADED_EXIT_CASES literal; no"
+     " external input"),
     ("opf/tools/check_opf_record.py", "flip_t70", "code", 1,
      _MUTANT + " (the _opf_oplock _acquire_body T70 flip)"),
     ("opf/tools/check_opf_record.py", "<module>", "deserialize", 1,
@@ -429,16 +433,31 @@ ALLOWLIST = (
     ("opf/tools/opf.py", "_cli_self_test._import_leg", "shell", 2,
      "self-test deny table: (module, name) seams patched to refuse process and file effects"
      " (subprocess.Popen and os names from a fixed literal tuple); replaced, never called"),
-    ("opf/tools/check_opf_upgrade.py", "_suite_isolated", "code", 2,
-     "self-test flip: exec_module builds a module from the repository's own _opf_upgrade"
-     " source with one literal replacement, and types.FunctionType rebinds its code; no"
-     " external input"),
     ("tools/check_instruction_budget.py", "_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own production source with"
      " one reviewed literal substitution; no external input"),
+    ("tools/check_instruction_budget.py", "_GuardedMutant.__getattr__", "code", 1,
+     "type test: isinstance(value, types.FunctionType) only decides whether an attribute of the"
+     " loaded mutant is wrapped in the process-ending guard; types.FunctionType is never called"),
     ("tools/check_entry_guard.py", "_load_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
      " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
+    ("tools/check_internal_names.py", "_load_ratchet_mutant", "code", 1,
+     "self-test mutant loader: exec_module of a scratch copy of this gate's own source (read from"
+     " __file__ by its one caller, with one ratchet-comparison branch disabled by a reviewed literal"
+     " substitution), written under the self-test's temporary directory; no external input"),
+    ("tools/check_child_status_coverage.py", "_canonical_module", "code", 1,
+     "authority loader: exec_module of the repository's own opf/tools/_child_status.py under ROOT,"
+     " the equivalent of an import; no external input"),
+    ("tools/check_child_status_coverage.py", "_load_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
+     " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
+    ("tools/check_rule_placement.py", "_load_probe_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of the repository's own _standards.py with one"
+     " reviewed literal substitution from the self-test's fixed mutant table; no external input"),
+    ("tools/check_rule_placement.py", "_load_placement_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
+     " with one reviewed literal substitution (the listing identity check dropped); no external input"),
     ("tools/check_python_floor.py", "_rule_reverts", "code", 1,
      "self-test mutant: exec_module of a copy of this gate's own source with one rule removed"
      " from RULES; no external input"),
@@ -465,17 +484,21 @@ ALLOWLIST = (
     ("opf/tools/_opf_adopt_observe.py", "self_test.deny_effects", "shell", 1,
      "self-test deny patch: mock.patch.object(os, name) over a fixed literal tuple of spawn and"
      " exec names, each replaced with a refusal; never called"),
-    ("tools/selftest_aiqt_hooks.py", "_main_isolated", "shell", 1,
-     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run)"),
+    ("tools/selftest_aiqt_hooks.py", "_main_isolated", "shell", 2,
+     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run, once by"
+     " the rec-nolazyfetch env capture and once by the blank-probe status-answer injection, each"
+     " restored in a finally)"),
     ("tools/selftest_orch_hooks.py", "_main_isolated._recheck_under", "shell", 1,
      "self-test fault injector: picks the hook module's own os (or os.path) to patch one"
      " function its caller names from a fixed fault table; never runs a shell"),
+    ("tools/selftest_orch_hooks.py", "_rwh_cases", "shell", 2,
+     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run, saved"
+     " once for the probe-error stubs and once around the locale-pin recorder; the identity-probe"
+     " stubs raise for the one probe argv they intercept and delegate every other call unchanged,"
+     " and the locale recorder answers the probe reply shape without running anything)"),
     ("tools/selftest_orch_hooks.py", "_main_isolated", "shell", 1,
      "self-test fault injector: setattr on the hook module's own os with a function name from"
      " its fixed fault table; never runs a shell"),
-    ("opf/tools/check_opf_init_contract.py", "_checks", "code", 1,
-     "check harness: runpy.run_path loads the repository's own"
-     " opf/tools/_opf_init_contract.py, the equivalent of an import; no external input"),
     ("opf/tools/_opf_adopt_observe.py", "self_test", "tls", 1,
      "self-test fixture server: a PROTOCOL_TLS_SERVER context for a local listener serving a"
      " freshly generated certificate; server-side, so it verifies no peer; no client context"),
@@ -516,6 +539,21 @@ ALLOWLIST = (
     ("tools/gen_hooks.py", "self_test_main._secondary_fault_case", "shell", 9,
      _SAVED + " (the saved real Popen.communicate, kill and wait the staged-cleanup vectors"
      " wrap and restore)"),
+    ("tools/check_opf_standalone_closure.py", "_bounds_self_test", "shell", 1,
+     "self-test launch refusal: keeps the real subprocess.Popen only to restore it in a finally"
+     " after patching in a stand-in that records the argv and raises OSError, so nothing is"
+     " launched; no call in this file turns shell on"),
+    ("tools/check_opf_standalone_closure.py", "_after_launch_fault_self_test", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the after-launch fault double, whose __init__"
+     " forwards _run_one's own sys.executable -I -B argv list; restored in a finally)"),
+    ("tools/check_opf_standalone_closure.py", "_harness_routing_self_test", "shell", 2,
+     "self-test launch refusal: the (subprocess, \"Popen\", real Popen) restore triple, set back"
+     " in a finally after each routing case patches in a stand-in that records the leg's script"
+     " and raises, so nothing is launched; no call in this file turns shell on"),
+    ("tools/check_opf_standalone_closure.py", "_ci_job_sweep_self_test", "shell", 1,
+     "self-test launch refusal: keeps the real subprocess.Popen only to restore it in a finally"
+     " after patching in a raiser for the whole check, so no per-job sweep vector can launch a"
+     " process; no call in this file turns shell on"),
     ("opf/tools/_opf_adopt_observe.py", "_runner_red_checks", "shell", 2, _SAVED),
     ("opf/tools/_opf_pack_manifest.py", "_runner_red_checks", "shell", 3, _SAVED),
     ("opf/tools/check_opf_doctor.py", "_self_test_isolated._doctor_suite", "shell", 3, _SAVED),
@@ -545,6 +583,23 @@ ALLOWLIST = (
      _MUTANT + " (each route mutant, written to the self-test's temporary directory first)"),
     ("opf/tools/check_opf_init.py", "_suite_isolated.load_plain", "code", 1,
      _MUTANT + " (each boot mutant, written to the self-test's temporary directory first)"),
+    ("tools/_load_bound.py", "_acquiring_popen", "shell", 1,
+     "ownership spawn: subclasses the current subprocess.Popen so run() holds the handle before the"
+     " fork; the subclass forwards run()'s own argv list and keywords, and no call in this file"
+     " turns shell on"),
+    ("tools/_load_bound.py", "_acquiring_popen.Acquiring._execute_child", "code", 1,
+     "pid capture: types.FunctionType rebuilds the standard library's own Popen._execute_child code"
+     " object with its globals copied and only _fork_exec wrapped to record the pid; no external"
+     " code"),
+    ("tools/_load_bound.py", "vector_failures", "shell", 14,
+     _SAVED + " (the real Popen each vector's fault or recording double subclasses, set back in a"
+     " finally; the fork-window vector also reads its _execute_child through that saved class)"),
+    ("tools/_load_bound.py", "vector_failures.bounded", "shell", 1,
+     _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
+    ("tools/_load_bound.py", "vector_failures.mid_read_fault", "shell", 1,
+     _SAVED + " (the real Popen the mid-read fault double subclasses, restored in a finally)"),
+    ("tools/_load_bound.py", "vector_failures.drained_stop", "shell", 1,
+     _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
 )
 
 
@@ -2151,7 +2206,7 @@ TREE_VECTORS = (
     # allowance leaves both reported plus the count drift.
     ("two sites on one line", {"tools/a.py": _TWO_ON_ONE_LINE},
      (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-column", 0),
-    # Round 6: two chained calls start at one position, so the end position keeps them apart.
+    # Two chained calls start at one position, so the end position keeps them apart.
     ("two chained sites on one line", {"tools/a.py": _TWO_CHAINED},
      (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-end", 0),
     ("allowlist entry without reason", {"tools/a.py": _SITE}, (_ENTRY[:4] + (" ",),),

@@ -347,7 +347,7 @@ def _manifest_suites(manifest_path):
         return None
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         _cannot("expectation manifest {} is not valid TOML: {}".format(manifest_path, exc))
         return None
@@ -854,7 +854,7 @@ def run_suite(root, suite_id):
         # the [<runner>, <row args>..., --execution-report, <path>] argv it expects (_bootstrap_main
         # documents the shim's own argv contract; the row's args, validated by _row_args_problem,
         # follow the report path here and are absent for a row with no args key). A raw launch of
-        # the runner would leave its import-time and pre-arm code outside the hooks, the round-2
+        # the runner would leave its import-time and pre-arm code outside the hooks, a
         # pre-arm thread gap.
         bootstrap = ("import sys; sys.path.insert(0, sys.argv[1]); "
                      "import _selftest_exit_report; _selftest_exit_report._bootstrap_main()")
@@ -887,7 +887,7 @@ def run_suite(root, suite_id):
         # variable, so no descendant interpreter ever sees one; the runner's grandchild launch
         # sites carry -I -B as well, defence in depth for a direct developer run. This hardens the
         # GATE-launched child only; the runner's own direct-invocation hermeticity is tracked
-        # separately (F-249).
+        # separately.
         child_env = dict(os.environ)
         for key in list(child_env):
             if key.startswith("GIT_") or key.startswith("PYTHON"):
@@ -1230,7 +1230,7 @@ def self_test():
 
         # 7b: an integer literal past CPython's 4300-digit int-string limit makes tomllib raise a BARE
         #     ValueError (not TOMLDecodeError); the manifest is still refused 2 BEFORE any launch
-        #     (F-TOML-BARE-VALUEERROR-CLASS). The digit limit is pinned to the default 4300
+        #     (a bare parser ValueError). The digit limit is pinned to the default 4300
         #     (test-hermeticity) and restored in finally.
         #     A parser overflow (RecursionError, not a ValueError) is refused the same way, with the
         #     overflow in the refusal.
@@ -1308,6 +1308,18 @@ def self_test():
         expect("st/child-fail-stated",
                "execution set complete; child reported assertion failures" in out, True)
 
+        # 12b: a member diagnostic on STDOUT is forwarded, and the exit 1 of the child stays a FAIL
+        # (exit 1): failure evidence a suite prints to stdout is never downgraded to the CANNOT
+        # EVALUATE that any stderr byte becomes (the suites declare 0 stderr bytes).
+        diag = ("print(" + repr("CONFIG-INJECTION demo member "
+                                "(exited 3 before its bound fired): evidence") + ")\n")
+        code, out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 1, before_exit=diag)))
+        expect("st/child-fail-stdout-diagnostic-1", code, 1)
+        expect("st/child-fail-stdout-forwarded",
+               "CONFIG-INJECTION demo member (exited 3 before its bound fired): evidence" in out,
+               True)
+        expect("st/child-fail-stdout-no-cannot", "CANNOT EVALUATE" in err, False)
+
         # 13: child rc 0 with an incomplete report: missing ids -> 1 naming them; truncated JSON -> 2
         code, out, _err = run(build(_manifest_text(), _report_body(["a/one"], 0)))
         expect("st/rc0-missing-1", code, 1)
@@ -1343,7 +1355,7 @@ def self_test():
         code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0)))
         expect("st/near-miss-twin-passes", code, 0)
 
-        # 17 (FIX 1): the static source-to-manifest reconcile refuses, BEFORE any launch, a source
+        # 17: the static source-to-manifest reconcile refuses, BEFORE any launch, a source
         # check absent from the manifest (even an unreachable one), a registered id with no source
         # site, a dead duplicate-id alias, and an unresolvable dynamic id; the loop-literal pattern
         # resolves, and a clean source==manifest twin still passes
@@ -1383,7 +1395,7 @@ def self_test():
         code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0)))
         expect("st/static-clean-twin-passes", code, 0)
 
-        # 18 (FIX 3): an exported copy of this gate run from outside a git checkout refuses to guess
+        # 18: an exported copy of this gate run from outside a git checkout refuses to guess
         # its target instead of validating whatever tree the cwd happens to sit in
         exported = base / "exported"
         exported.mkdir()
@@ -1397,7 +1409,7 @@ def self_test():
                "cannot confirm the gate's own repo root"
                in proc.stderr.decode("utf-8", errors="replace"), True)
 
-        # 19 (FIX 4): unavailable temp storage for the private report directory is cannot-evaluate,
+        # 19: unavailable temp storage for the private report directory is cannot-evaluate,
         # never a finding, and the child is never launched; the pinned tempdir is restored after
         root = build(_manifest_text(), _report_body(GOOD_IDS, 0))
         real_tempdir = tempfile.tempdir
@@ -1409,7 +1421,7 @@ def self_test():
         expect("st/mkdtemp-oserror-2", code, 2)
         expect("st/mkdtemp-oserror-no-launch", launched(root), False)
 
-        # 20 (round 3, FIX A): a reference to the bare name check outside a direct call (an alias
+        # 20: a reference to the bare name check outside a direct call (an alias
         # that could carry a call site beyond the static scan) is refused fail-closed, no launch
         root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
                      source_block=dead_checks(GOOD_IDS)
@@ -1419,7 +1431,7 @@ def self_test():
         expect("st/static-alias-ref-named", "referenced outside a direct call" in err, True)
         expect("st/static-alias-ref-no-launch", launched(root), False)
 
-        # 21 (round 3, FIX B): a check() id Name bound inside a comprehension is refused fail-closed
+        # 21: a check() id Name bound inside a comprehension is refused fail-closed
         # (the lexical for-stack does not model comprehension scope, so an enclosing for could
         # mis-attribute it); a literal-id check() inside a comprehension still resolves
         root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
@@ -1437,7 +1449,7 @@ def self_test():
         code, _out, _err = run(root)
         expect("st/static-comp-literal-passes", code, 0)
 
-        # 22 (round 3, FIX C; round 4, FIX 3; round 5, FIX 1; round 6, FIX 1): the child is
+        # 22: the child is
         # launched under a git-neutral, interpreter-neutral environment: every ambient GIT_* and
         # PYTHON* variable is dropped, the config surfaces pin
         # to os.devnull, core.excludesFile and core.attributesFile are overridden to os.devnull by
@@ -1508,7 +1520,7 @@ def self_test():
             expect("st/home-fresh-empty-dir",
                    (home_env["home_is_dir"], home_env["home_entries"]), (True, []))
 
-        # 23 (round 4, FIX 1): a statically EMPTY literal loop is refused fail-closed, no launch: an
+        # 23: a statically EMPTY literal loop is refused fail-closed, no launch: an
         # empty iterable resolves its check() site to zero ids, so without the refusal the site
         # would be silently invisible (the exact "loop that no longer iterates" failure)
         root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
@@ -1661,7 +1673,7 @@ def self_test():
             "    threading.Thread(target=time.sleep, args=(0.1,)).start()\n"
             "threading.Thread(target=_parent).start()\n_selftest_exit_report.exit_with(0)\n")))
         expect("st/finalizer-thread-during-join-twin-passes", (code, err), (0, ""))
-        # 25c (round 3): the observation hooks the gate's bootstrap installs BEFORE any suite code
+        # 25c: the observation hooks the gate's bootstrap installs BEFORE any suite code
         # close the remaining thread-class routes through the one mechanism: a raw thread started
         # before arm is recorded at its start, whenever that is; a failing threading.Thread joined
         # before arm is recorded by the already-installed excepthook wrapper; a fresh import of
@@ -1704,7 +1716,7 @@ def self_test():
             code, _out, err = run(build(_manifest_text(), body))
             expect("st/finalizer-{}-2".format(label), code, 2)
             expect("st/finalizer-{}-named".format(label), named in err, True)
-        # 25c1 (round 10): importing _interpreters is no fault (CPython 3.14's concurrent.futures, and
+        # 25c1: importing _interpreters is no fault (CPython 3.14's concurrent.futures, and
         # so asyncio, imports it at module level); the bootstrap imports it first and replaces its
         # interpreter-creating and code-running functions with refusals, so a clean
         # concurrent.futures pool and a clean asyncio.run pass, while creating an interpreter, through
@@ -1737,7 +1749,7 @@ def self_test():
             code, _out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0,
                                                                       before_exit=body)))
             expect("st/finalizer-{}-twin-passes".format(label), (code, err), (0, ""))
-        # 25c3 (round 10): a trace, profile or sys.monitoring callback runs in a thread's frames after
+        # 25c3: a trace, profile or sys.monitoring callback runs in a thread's frames after
         # run(), and a SystemExit(1) it raises there (in Thread._delete, or at the return of
         # _bootstrap_inner) escapes to _thread, which drops it silently, so threading.excepthook
         # never sees it; each passed the gate before installing such a callback was itself refused
@@ -1769,7 +1781,7 @@ def self_test():
                                                                       before_exit=vector)))
             expect("st/finalizer-thread-end-{}-2".format(label), code, 2)
             expect("st/finalizer-thread-end-{}-named".format(label), installed in err, True)
-        # 25c2 (round 9): the interpreter-creating machinery is identified by its extension FILE, not
+        # 25c2: the interpreter-creating machinery is identified by its extension FILE, not
         # by the name it is loaded under: the _interpreters extension loaded as qa._interpreters
         # (a qualified alias through spec_from_file_location) creates a subinterpreter whose fault no
         # hook here can see, and so does a byte copy of the file loaded from another path; both are
@@ -1831,7 +1843,7 @@ def self_test():
                "observation hooks were not installed"
                in direct.stderr.decode("utf-8", errors="replace"), True)
         expect("st/arm-without-bootstrap-no-report", direct_report.exists(), False)
-        # 25d (round 4): no hook trusts code the suite controls before its fault is recorded. A thread
+        # 25d: no hook trusts code the suite controls before its fault is recorded. A thread
         # exception whose __repr__ raises SystemExit(0), and a SystemExit subclass with a nonzero code
         # whose code property raises SystemExit(0), are still recorded (the end is classified by real
         # type and SystemExit's own code slot, and the fixed fault precedes any description); a raw
@@ -1888,7 +1900,7 @@ def self_test():
             "        raise RuntimeError('ST_MAIN_LOST')\n"
             "atexit.register(_late)\n"))))
         expect("st/main-module-at-exit-passes", (code, err), (0, ""))
-        # 25e (round 5): every hook and the finalizer keep, through interpreter teardown, what they
+        # 25e: every hook and the finalizer keep, through interpreter teardown, what they
         # read: teardown clears module globals while the audit hook is still installed, so a hook
         # that read a global then faulted and refused a clean run. A retained clean destructor that
         # opens a file, and one that calls a captured sys.audit, run at teardown and pass; their
@@ -1918,7 +1930,7 @@ def self_test():
                 ("interpreters-refusal", probe._refuse_interp_entry("create")),
                 ("harness-error", probe._harness_error), ("finalize", probe._finalize)):
             expect("st/teardown-bound-{}".format(label), _global_name_reads(function), [])
-        # 25f (round 7): the static witness names an import at call time (IMPORT_NAME, and
+        # 25f: the static witness names an import at call time (IMPORT_NAME, and
         # IMPORT_FROM for a from-import), which fails at teardown once sys.meta_path is cleared
 
         def _imports_name(event, args):
@@ -1932,10 +1944,10 @@ def self_test():
                [("_imports_name", "IMPORT_NAME", "json")])
         expect("st/teardown-bound-import-from-named", _global_name_reads(_imports_from),
                [("_imports_from", "IMPORT_FROM", "path"), ("_imports_from", "IMPORT_NAME", "os")])
-        # 25g (round 7), a RESIDUAL WITNESS, not a guarantee: a faulting destructor that CPython runs
+        # 25g, a RESIDUAL WITNESS, not a guarantee: a faulting destructor that CPython runs
         # at late teardown, after it has dropped sys.stderr, raises with an empty error stream, so
         # the gate PASSES the run while the marker shows the destructor ran; the three named
-        # examples of the disclosed class (the codec search registry, an audit hook (round 8), a
+        # examples of the disclosed class (the codec search registry, an audit hook, a
         # cycle anchored on a sys attribute) are pinned, so if the interpreter ever reports such a
         # fault this leg fails and the disclosure must change; the class is not enumerated further
         for label, placement in (("codec-registry", RESIDUAL_CODEC_REGISTRY),
@@ -1948,7 +1960,7 @@ def self_test():
             ran = marker.read_text(encoding="utf-8") if marker.exists() else None
             expect("st/residual-witness-late-teardown-{}-passes".format(label), (code, err, ran),
                    (0, "", "ran"))
-        # 25h (round 7): a faulting cycle anchored on a module global or a class attribute is freed
+        # 25h: a faulting cycle anchored on a module global or a class attribute is freed
         # while sys.stderr exists, because the finalizer drops the exit exception (whose traceback
         # held the runner's globals) after writing the report; each is refused, its destructor ran
         for label, placement in (("module-global", TEARDOWN_CYCLE_GLOBAL),
@@ -2167,7 +2179,7 @@ def self_test():
                    True)
             expect("st/suite-id-{}-no-launch".format(label), (launched(root), allocated),
                    (False, []))
-        # the round-2 reviewer's reproduction: a sibling row whose id carries a space, with the
+        # The reproduction: a sibling row whose id carries a space, with the
         # space-joined launch line in BOTH rosters, is refused by the schema naming that id (the
         # CLI accepts exactly ["--suite", <id>], so that line could never launch the row), and
         # nothing is resolved, allocated or launched
@@ -2309,11 +2321,11 @@ def self_test():
                 expect("st/singleton-{}-argv-unchanged".format(label), seen[0][3],
                        ["<root>/tools/fake_runner.py", "--execution-report"])
 
-        # Round 3 (FIX E note): leg 19 witnesses run_suite's mkdtemp guard; self_test's own base
+        # Leg 19 witnesses run_suite's mkdtemp guard; self_test's own base
         # tempdir guard above cannot be witnessed from inside this self-test without circularity,
         # and the runner's FAILURES-before-report-write-OSError ordering has no cheap hermetic
         # witness from here, so both remain manual-flip verifications, disclosed rather than forced
-        # into a fragile test. Round 6: run_suite's git_home os.mkdir guard is the same kind, a
+        # into a fragile test. run_suite's git_home os.mkdir guard is the same kind, a
         # manual-flip verification, unwitnessed here and essentially unreachable (a fresh mkdir
         # inside the just-created private tempdir).
     finally:
@@ -2403,5 +2415,62 @@ def main(argv=None):
     return 2
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. Inline, not imported, because this file's
+# own self-test copies it alone into an exported directory. This file launches every registered suite and
+# reads each child's exit status, so under an ignored SIGCHLD it would read a failing suite as a pass; it
+# refuses at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("check_selftest_execution.py") or main())
