@@ -496,6 +496,30 @@ count = 1
 class = "EXEMPT"
 reason = "test-code"
 
+[[site]]
+path = "opf/tools/_opf_adopt_verdict.py"
+function = "_full_fixture"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_verdict.py"
+function = "_reinventory"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_verdict.py"
+function = "_break_chain"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 # the round-trip reparse of the bytes emit_checked itself just emitted; the cancellation and
 # decode-error clauses are hostile-tomllib seams the scan cannot read, and the ordered BaseException
 # backstop converts everything else to EmitError

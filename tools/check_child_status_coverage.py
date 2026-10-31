@@ -11,7 +11,7 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
+     opf/tools/_opf_adopt_verdict.py, tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
      tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
      (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
      and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
@@ -29,7 +29,7 @@ with exit 2). This gate holds where it runs:
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
      ends the process by raising SystemExit itself, never through sys.exit), and for every other,
      sys.exit(_child_status_refusal_exit("<basename>") or main()), except that of each SELF_TEST_COPIES entry
-     (the three opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
+     (the four opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
      (SELF_TEST_ENTRY, held to opf.py's own _ENTRY_STATEMENT) then that second form, with self_test bound once
      at module scope (the same count), by one undecorated top-level def whose first statement after the
      docstring is the guard call _child_status_refusal_exit("<basename>"); opf.py's _main_exit, which receives
@@ -224,6 +224,7 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_adopt_complete.py", "_opf_adopt_complete.py"),
               ("opf/tools/_opf_adopt_state.py", "_opf_adopt_state.py"),
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
+              ("opf/tools/_opf_adopt_verdict.py", "_opf_adopt_verdict.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
@@ -266,7 +267,7 @@ MAIN_EXIT_CALL = "status = main()"
 # exactly that statement then the CLI entry line, and the guard call SELF_TEST_GUARD is the first statement of
 # self_test() after its docstring, so the --self-test path refuses too.
 SELF_TEST_COPIES = ("opf/tools/_opf_adopt_complete.py", "opf/tools/_opf_adopt_state.py",
-                    "opf/tools/_opf_import_complete.py")
+                    "opf/tools/_opf_import_complete.py", "opf/tools/_opf_adopt_verdict.py")
 SELF_TEST_ENTRY = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
 SELF_TEST_GUARD = '_child_status_refusal_exit("{}")'
 # The file whose _ENTRY_STATEMENT SELF_TEST_ENTRY copies: it must bind that name once, at the top level, to a string
@@ -2787,6 +2788,8 @@ def _behaviour(probe, base):
             ("behaviour/adopt-state-self-test-refuses", "opf/tools/_opf_adopt_state.py", ("--self-test",)),
             ("behaviour/import-complete-refuses", "opf/tools/_opf_import_complete.py", ()),
             ("behaviour/import-complete-self-test-refuses", "opf/tools/_opf_import_complete.py", ("--self-test",)),
+            ("behaviour/adopt-verdict-refuses", "opf/tools/_opf_adopt_verdict.py", ()),
+            ("behaviour/adopt-verdict-self-test-refuses", "opf/tools/_opf_adopt_verdict.py", ("--self-test",)),
             ("behaviour/gitleaks-pin-refuses", "tools/check_gitleaks_pin.py", ()),
             ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ()),
             ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ())):
@@ -3169,6 +3172,8 @@ def self_test(lane, report_path=None):
                                 ("behaviour/adopt-state-refuses", 0), ("behaviour/adopt-state-self-test-refuses", 0),
                                 ("behaviour/import-complete-refuses", 0),
                                 ("behaviour/import-complete-self-test-refuses", 0),
+                                ("behaviour/adopt-verdict-refuses", 0),
+                                ("behaviour/adopt-verdict-self-test-refuses", 0),
                                 ("behaviour/gitleaks-pin-refuses", 0), ("behaviour/must-deliver-refuses", 0),
                                 ("behaviour/verifier-delivery-refuses", 0),
                                 ("control/opf-cli-default-runs", 0),

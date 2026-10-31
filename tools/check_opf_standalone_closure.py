@@ -161,6 +161,7 @@ _SUBSET = [
     ("opf-adopt-complete-selftest", "_opf_adopt_complete.py", ["--self-test"]),
     ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]),
     ("opf-import-complete-selftest", "_opf_import_complete.py", ["--self-test"]),
+    ("opf-adopt-verdict-selftest", "_opf_adopt_verdict.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
     ("opf-adopt-discover-selftest", "_opf_adopt_discover.py", ["--self-test"]),
@@ -253,13 +254,13 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
-# limit): on this tree the whole roster's worst case is 93855 s at 3 (no one job fits it: the premise
-# of the split), the per-job worst cases are 21193 s (A), 21420 s (B), 15810 s (C), 19930 s (D) and
-# 19302 s (E) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the config-lane floors,
+# limit): on this tree the whole roster's worst case is 96395 s at 3 (no one job fits it: the premise
+# of the split), the per-job worst cases are 21193 s (A), 21420 s (B), 18350 s (C), 19930 s (D) and
+# 19302 s (E) at 3, and the same at 4 but for C, 20750 s (at 3 and at 4 the config-lane floors,
 # _LEG_BOUND_FLOOR_S, hold every floored leg's bound above its headroom term, opf-homes-selftest's
 # 1260 s above its 273 s and 364 s included; only opf-adopt-state-selftest and
 # opf-adopt-complete-selftest, both in C, are bounded by the headroom term), and the largest
-# multiplier that fits every job is 5.412 (at 5.413, job C's worst case is 21601.2 s, over its
+# multiplier that fits every job is 4.354 (at 4.355, job C's worst case is 21602.0 s, over its
 # limit).
 # The multiplier does NOT cover the one loaded run measured against it, and cannot. One --self-test
 # run on 2026-10-15, at the revision carrying this table, at load5 about 50 (between 42 and 61 while it
@@ -272,7 +273,7 @@ _SUBSET = [
 # REPORTED by its account and not reproduced here. Covering it on the headroom term alone needs a
 # multiplier above 299.3 / 69 = 4.33768... (so 4.338 to three places, since 4.337 x 69 = 299.253
 # falls short of 299.3); the multiplier is one constant for every leg. At 4.338 every job now fits
-# (job C's worst case is then 19021.2 s, the only one that moves, since only opf-adopt-state-selftest's
+# (job C's worst case is then 21561.2 s, the only one that moves, since only opf-adopt-state-selftest's
 # and opf-adopt-complete-selftest's headroom terms, 2602.8 s each, then exceed their other terms), but
 # this change, which holds the lane-member legs to their config-lane deadlines, leaves the
 # multiplier at 3: raising it is a separate sizing decision. So a run under such load CAN exit 2 on a
@@ -320,6 +321,10 @@ _LEG_CEILING_S = {
     # opf-import-complete-selftest: the slowest run times 20 / 3 for load, 2.4 * 20 / 3 = 16.0, rounded up to
     # a multiple of 5, 20 s.
     "opf-import-complete-selftest": 20,  # INFERRED (main's row, measured 2026-10-14: 2.3 to 2.4 s, three runs)
+    # opf-adopt-verdict-selftest: three runs measured 2026-10-31 in the repository, not against an opf/ copy,
+    # took 5.0 to 5.1 s at load5 about 47; the slowest run times 20 / 3 for load, 5.1 * 20 / 3 = 34.0, rounded
+    # up to a multiple of 5, 35 s.
+    "opf-adopt-verdict-selftest": 35,  # INFERRED (measured 2026-10-31: 5.0 to 5.1 s, three runs)
     "opf-pack-manifest-selftest": 17,  # INFERRED here (measured at 7bf8107f: 16.8 s at load5 21.7)
     "opf-adopt-observe-selftest": 284,  # INFERRED here (measured at 7bf8107f: 283.7 s at load5 21.9)
     "opf-adopt-discover-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.5 s at load5 23.9)
@@ -340,7 +345,7 @@ _LEG_CEILING_S = {
 # added or renamed together with its ceiling row, which leaves the two tables agreeing, is still drift.
 # A deliberate roster change records the new figures here in the same change (the drift line prints
 # them); this pin does not judge whether that change is right.
-_ROSTER_PIN = (28, "f0d1f4582b166a630e35f0f4540244968743eca4e9fbc9e9758a0d74da623eed")
+_ROSTER_PIN = (29, "f192e5d633dd09c92ee3c0baced895114c83b16dfaf3d0299a0929c30dcf4a85")
 _LOAD_HEADROOM = 3
 _LAUNCH_MARGIN_S = 60
 # The post-kill cleanup deadline (_kill_and_reap): ONE absolute deadline that the output drain and the
@@ -439,6 +444,7 @@ _LEG_BOUND_FLOOR_S = {
     "opf-adopt-hook-selftest": 1260,
     "opf-import-batch-selftest": 1260,
     "opf-import-complete-selftest": 1260,
+    "opf-adopt-verdict-selftest": 1260,
     "opf-pack-manifest-selftest": 1260,
     "opf-adopt-observe-selftest": 1860,
     "opf-adopt-discover-selftest": 1260,
@@ -480,11 +486,14 @@ _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 # (_job_worst_case_s over every leg) does not fit one job's time limit with the bound rule above
 # unchanged, and, once every lane-member leg reaches its config-lane deadline plus the launch margin
 # (see _LEG_BOUND_FLOOR_S), it does not fit four. ARITHMETIC on this tree: the legs' two sweeps,
-# their cleanup deadlines and the flip come to 92905 s, and each job adds the 350 s vector allowance
+# their cleanup deadlines and the flip come to 95445 s, and each job adds the 350 s vector allowance
 # and the 600 s setup to them, so four jobs hold at most 4 x (21600 - 950) = 82600 s of that work,
-# 10305 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 21193 s (A,
-# the flip's job), 21420 s (B), 15810 s (C), 19930 s (D) and 19302 s (E), each within its 21600 s
-# limit. opf-import-complete-selftest, a leg main added, sits in D beside opf-import-batch-selftest:
+# 12845 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 21193 s (A,
+# the flip's job), 21420 s (B), 18350 s (C), 19930 s (D) and 19302 s (E), each within its 21600 s
+# limit. opf-adopt-verdict-selftest sits in C beside opf-adopt-complete-selftest: its 1260 s
+# config-lane floor adds 2540 s to a job's worst case, which only C can hold (A, B, D and E would
+# reach 23733 s, 23960 s, 22470 s and 21842 s), and in C it lowers the largest headroom multiplier
+# that fits every job from 5.412 to 4.354 (see _LEG_CEILING_S). opf-import-complete-selftest, a leg main added, sits in D beside opf-import-batch-selftest:
 # its 1260 s config-lane floor adds 2540 s to a job's worst case (two sweeps and two cleanup
 # deadlines), which A and E cannot hold (nor could B while it held the store-upgrade gate's leg), and D,
 # unlike C, is not moved by the headroom multiplier
@@ -536,6 +545,7 @@ _CI_JOB_LEGS = {
         "opf-adopt-state-selftest",
         "opf-adopt-hook-selftest",
         "opf-adopt-complete-selftest",
+        "opf-adopt-verdict-selftest",
     }),
     "opf-closure-d": frozenset({
         "opf-import-batch-selftest",

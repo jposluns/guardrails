@@ -562,6 +562,7 @@ opf/tools/_opf_adopt_hook.py text eol=lf
 opf/tools/_opf_adopt_observe.py text eol=lf
 opf/tools/_opf_adopt_plan.py text eol=lf
 opf/tools/_opf_adopt_state.py text eol=lf
+opf/tools/_opf_adopt_verdict.py text eol=lf
 opf/tools/_opf_changelog.py text eol=lf
 opf/tools/_opf_check.py text eol=lf
 opf/tools/_opf_declaration.py text eol=lf

@@ -1145,8 +1145,8 @@ CONFIG_MEMBER_BOUNDS = {
     # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case, READ FROM
     # SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
     # member's legs' bounds, one 10 s cleanup deadline per leg, the flip and its cleanup where it
-    # runs, and the 350 s vector allowance), 13322 s (opf-closure-a), 10585 s (b), 7780 s (c),
-    # 9840 s (d) and 9526 s (e), and below each CI job's worst case (21193 s, 21420 s, 15810 s,
+    # runs, and the 350 s vector allowance), 13322 s (opf-closure-a), 10585 s (b), 9050 s (c),
+    # 9840 s (d) and 9526 s (e), and below each CI job's worst case (21193 s, 21420 s, 18350 s,
     # 19930 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
     # as the default's comment above sanctions: this lane owns no member's
     # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
@@ -1159,7 +1159,7 @@ CONFIG_MEMBER_BOUNDS = {
     # whose command is a member here, at or above this table's deadline for that command plus the
     # member's 60 s launch margin, so that the closure never kills such a leg before this lane would.
     # The opf-closure-c entry was 1800 s while that member swept opf-homes-selftest alone, sized above
-    # its then worst case, 1620 s; it now sweeps five legs, so it takes the 3600 s of the others.
+    # its then worst case, 1620 s; it now sweeps six legs, so it takes the 3600 s of the others.
     # MEASURED (2026-10-23, at the tree of that one-leg member, plain, on a 24-CPU host, load5 5.4 at
     # the start and 5.9 at the end): one complete standalone run of it took 110.3 s wall and passed,
     # its homes leg 53.4 s. No config-lane time of any of the five members is known.
@@ -4123,6 +4123,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
                                        "(_opf_adopt_apply._selftest_git_commit and the S16 add, "
                                        "write-tree, commit-tree, update-ref helper), never a hook."),
     "opf/tools/_opf_adopt_complete.py": "Completion-check vectors over temporary post-apply filesystem fixtures.",
+    "opf/tools/_opf_adopt_verdict.py": "Verdict-composition vectors over temporary post-apply filesystem fixtures.",
     "opf/tools/_opf_import_batch.py": "Pure batch parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/_opf_import_complete.py": "Import-completion vectors over temporary post-import filesystem fixtures.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",

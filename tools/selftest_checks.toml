@@ -2968,6 +2968,8 @@ expected-check-ids = [
   "behaviour/adopt-state-self-test-refuses",
   "behaviour/import-complete-refuses",
   "behaviour/import-complete-self-test-refuses",
+  "behaviour/adopt-verdict-refuses",
+  "behaviour/adopt-verdict-self-test-refuses",
   "behaviour/gitleaks-pin-refuses",
   "behaviour/must-deliver-refuses",
   "behaviour/verifier-delivery-refuses",

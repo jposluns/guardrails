@@ -384,6 +384,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_import_complete.py --self-test
 
+      - name: OPF adoption verdict scorer self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_verdict.py --self-test
+
       - name: OPF source-only init gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init.py --self-test
