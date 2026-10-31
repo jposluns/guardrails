@@ -11052,6 +11052,28 @@ def self_test():
                                                 pd(2, status="withdrawn", supersedes="PD-1")])
         f["counters.toml"] = counters(PD=2)
         check("pd-wholly-undecided-chain-valid", run(f).status == VALID)
+        # Two decided decisions joined only through an open decision's `supersedes` links are ONE chain
+        # (spec 8.8), graded here, where the views refuse it as a cannot-evaluate; with the open decision
+        # linking nothing they are two chains, each with its one resolution. Red when the chains are built
+        # from decided decisions' links only (the first then passes as two one-member chains).
+        f = clean_machine()
+        _ol_open = pd(3, status="open")
+        _ol_open["links"] = [{"rel": "supersedes", "id": "PD-1"}, {"rel": "supersedes", "id": "PD-2"}]
+        f["pending_decision.index.toml"] = idx([pd(1), pd(2), _ol_open])
+        f["counters.toml"] = counters(PD=3)
+        _ol_r = run(f)
+        check("pd-open-link-joins-two-decided-one-chain-finding",
+              _ol_r is not None and _ol_r.status == INVALID
+              and {c for c, v in _ol_r.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and _ol_r.by_check.get("C-DECISION-CHAINS")
+              == ["C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution has 0 "
+                  "current effective resolutions; exactly one exists per chain (spec 8.5)"])
+        f = clean_machine()
+        f["pending_decision.index.toml"] = idx([pd(1), pd(2), pd(3, status="open")])
+        f["counters.toml"] = counters(PD=3)
+        _ol_c = run(f)
+        check("pd-open-decision-linking-nothing-two-chains-valid",
+              _ol_c is not None and _ol_c.status == VALID and _ol_c.checks.get("C-DECISION-CHAINS") == "PASS")
 
         # --- id space / counters ----------------------------------------------------------------------
         f = clean_machine()
