@@ -283,7 +283,7 @@ def load_config(path):
         raise GateError("cannot read the configuration {} ({})".format(CONFIG_REL, exc))
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("configuration {} does not parse ({})".format(CONFIG_REL, exc))
     extra = set(data) - {"format-version", "binding"}
@@ -751,7 +751,7 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
 
             # (e2) an integer literal past CPython's 4300-digit int-string limit makes tomllib raise a BARE
             #      ValueError (not TOMLDecodeError); it must still fail closed exit 2, never escape as a
-            #      traceback (F-TOML-BARE-VALUEERROR-CLASS). The digit limit is pinned to the default 4300
+            #      traceback. The digit limit is pinned to the default 4300
             #      (test-hermeticity) and restored in finally.
             #      A parser overflow (tomllib raises RecursionError, not a ValueError) must fail closed the same
             #      way, and the refusal must carry the injected overflow (the parse handler mapped it).
