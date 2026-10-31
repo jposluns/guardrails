@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T115)
+  check_opf_record.py --self-test                    the fixture suite (T1-T117)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -673,6 +673,16 @@ Each case runs on its own copy of that template; the root is removed in a finall
       one holding it at active, refuses exit 2 at the committed-row check read again under the held lease,
       every byte untouched, no reservation and no transaction (flip: the held re-check dropped, so the
       repair publishes over a prior commit that does not hold the item and records exit 0)
+  T116 HEAD moved after that held read and before the final doctor, to a commit not holding the item at all
+      and to the one holding it at active: the receipt is already published, and each run refuses exit 2
+      after publication, nothing offered as recorded, with the scoped recovery text and its moved-HEAD
+      caution (flip: the committed-row check read again after the final doctor dropped, so over the commit
+      not holding the item the repair records exit 0)
+  T117 receipt-repair refuses before anything is written a store its final doctor would certainly fail: a
+      done record of lookalike actor kind naming another item, which leaves the receipt join not evaluated
+      (flip: the provenance check dropped), and a backlog index the repair only reads carrying a comment,
+      the canonical-bytes finding (flip: that index's canonical check dropped); under either flip the
+      receipt publishes and the final doctor fails after publication
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -10318,7 +10328,7 @@ def flip_t109():
     return patch.object(guard._opf_observe, "_filter_neutralizing_config", lambda *args, **kwargs: [])
 
 
-# --- T110-T114: receipt-repair, the reviewed repair of a ratified item with no receipt (spec 8.8) -----------
+# --- T110-T117: receipt-repair, the reviewed repair of a ratified item with no receipt (spec 8.8) -----------
 
 REPAIR_REASON = "ratified in review without its receipt"
 REPAIR = ["receipt-repair", "BI-1", "--reason", REPAIR_REASON] + MAINTAINER
@@ -10841,6 +10851,94 @@ def flip_t115():
     return patch.object(record, "_require_committed_held", lambda ctx, req: None)
 
 
+def t116_repair_head_moved_published(fx):
+    """HEAD moved after the committed-row check read under the held lease and before the final doctor
+    (git reset --soft, as another shell would run it, made right after that held read), to the first
+    commit, which does not hold BI-1 at all, and to the commit holding BI-1 at active: the receipt is
+    already published, and each run refuses exit 2 after publication, never exit 0, nothing offered as
+    recorded, with the scoped recovery text and its moved-HEAD caution, the lease released (flip: the
+    post-publication re-check dropped, so over the commit not holding the item the final doctor passes
+    and the repair records exit 0)."""
+    env = fx.env
+    base = _repair_store(fx, "t116-base")
+    with _self_test_homes2_active(base):
+        for label, target, needle in (
+                ("absent", None, "after the final doctor, the prior commit (HEAD) was read again and the "
+                                 "receipt is not offered as recorded: receipt-repair refused (uncommitted-item): "
+                                 "BI-1"),
+                ("active", "HEAD~1", "the uncommitted change is left for review")):
+            root = fx.case("t116-head-moved-" + label, base)
+            if target is None:
+                (target,) = env.git(root, "rev-list", "--max-parents=0", "HEAD").split()
+            target = env.git(root, "rev-parse", "--verify", target).strip()
+            held = record._require_committed_held
+
+            def moved_after(ctx, req, root=root, target=target, held=held):
+                held(ctx, req)
+                env.git(root, "reset", "-q", "--soft", target)
+            pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
+            with patch.object(record, "_require_committed_held", moved_after), ticking():
+                result = record_cli(env, root, REPAIR)
+            assert env.git(root, "rev-parse", "HEAD").strip() == target, ("T116 HEAD was moved", label)
+            refused(result, needle)
+            assert "restore --staged --worktree" in result[2] and "if HEAD has moved since" in result[2], (
+                "T116 the scoped recovery text with its moved-HEAD caution", label, result[2][-1600:])
+            assert read(root, DN_INDEX) != pre[DN_INDEX], ("T116 the publication is left for review", label)
+            assert not (Path(root) / LEASE).exists(), ("T116 the lease is released on the failure path", label)
+
+
+def flip_t116():
+    return patch.object(record, "_require_committed_published", lambda ctx, req: None)
+
+
+def t117_repair_unreadable_provenance(fx):
+    """A committed DN-1 whose actor kind is the lookalike 'Maintainer', naming another item receipt_of,
+    leaves the doctor's receipt join CANNOT-EVALUATE at rest whichever item it names: the repair of BI-1
+    refuses before anything is written, naming the record (flip: the provenance check dropped, so the
+    receipt publishes and the final doctor fails after publication)."""
+    env = fx.env
+    base = _repair_store(fx, "t117-provenance")
+    lookalike = {"id": "DN-1", "type": "done", "status": "recorded", "title": "other",
+                 "created_at": "2026-09-01T00:30:00Z", "updated_at": "2026-09-01T00:30:00Z",
+                 "actor": {"kind": "Maintainer"}, "links": [{"rel": "receipt_of", "id": "BI-2"}]}
+    dones = model(base, DN_INDEX)
+    dones["record"] = dones.get("record", []) + [lookalike]
+    write_commit(env, base, DN_INDEX, emit.emit_checked(dones).encode("utf-8"), "a receipt of lookalike provenance")
+    counters = model(base, COUNTERS)
+    counters["counters"]["DN"] += 1
+    write_commit(env, base, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["doctor", "--root", str(base)])
+    assert rc != 0 and "whether each is importer-authored (spec 8.6) is not known" in out + err, (
+        "T117 the lookalike provenance leaves the receipt join not evaluated at rest", rc, out[-1600:], err[-800:])
+    with _self_test_homes2_active(base):
+        refused_untouched(env, fx.case("t117-provenance-repair", base), REPAIR,
+                          "the done record 'DN-1' ({}) has an actor kind that cannot be read".format(DN_INDEX))
+
+
+def flip_t117_provenance():
+    return patch.object(record, "_require_known_provenance", lambda ctx, records, rid: None)
+
+
+def t117_repair_noncanonical_backlog(fx):
+    """A committed backlog index carrying a comment, which the repair only reads and the doctor's
+    canonical-bytes leg reports at rest, refuses the repair before anything is written, naming the index
+    (flip: the canonical check of the read-only index dropped, so the receipt publishes and the final
+    doctor fails after publication)."""
+    env = fx.env
+    base = _repair_store(fx, "t117-noncanonical")
+    write_commit(env, base, BI_INDEX, read(base, BI_INDEX) + b"# a hand note\n", "a commented backlog index")
+    rc, out, err = cli(env, ["doctor", "--root", str(base)])
+    assert rc != 0 and BI_INDEX in out + err and "C-CONTAINMENT" in out + err, (
+        "T117 the commented index is the canonical-bytes finding at rest", rc, out[-1600:], err[-800:])
+    with _self_test_homes2_active(base):
+        refused_untouched(env, fx.case("t117-noncanonical-repair", base), REPAIR,
+                          "{} is not in canonical new-document form".format(BI_INDEX))
+
+
+def flip_t117_canonical():
+    return patch.object(record, "_require_canonical_backlog", lambda ctx: None)
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -11044,6 +11142,9 @@ TESTS = (
     ("T113-receipt-repair-backlog-changed", t113_repair_backlog_changed, flip_t113_backlog),
     ("T114-receipt-repair-uncommitted-edit", t114_repair_uncommitted_edit, flip_t114),
     ("T115-receipt-repair-head-moved", t115_repair_head_moved, flip_t115),
+    ("T116-receipt-repair-head-moved-after-held-read", t116_repair_head_moved_published, flip_t116),
+    ("T117-receipt-repair-unreadable-provenance", t117_repair_unreadable_provenance, flip_t117_provenance),
+    ("T117-receipt-repair-noncanonical-backlog", t117_repair_noncanonical_backlog, flip_t117_canonical),
 )
 
 
