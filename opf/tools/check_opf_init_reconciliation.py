@@ -8,7 +8,7 @@ once, and an entry whose Disposition is "transferred" names a Successor. It chec
 reads a cited symbol, so a green run says nothing about whether any obligation is implemented.
 
 Exit 0 clean; exit 1 on a concrete finding; exit 2 (cannot evaluate) when the manifest or the crosswalk is
-missing or unreadable, or the residue no longer has the shape this gate reads. The --self-test is source-free
+missing, unreadable or unparseable, or the residue no longer has the shape this gate reads. The --self-test is source-free
 (in-memory fixtures only), so it also runs in a standalone opf/ copy with no manifest beside it; each fixture
 must be red with every check active and green with only its own check removed.
 Run: python3 -I -B opf/tools/check_opf_init_reconciliation.py [--self-test].
@@ -27,9 +27,12 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import contextlib
+import io
 import re
 import tomllib
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = Path(".aiqt") / "core" / "gates" / "manifest.toml"
@@ -75,13 +78,20 @@ def _norm(name):
     return name
 
 
+def _parse_manifest(manifest_text):
+    try:
+        return tomllib.loads(manifest_text)
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError: deep
+        # nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part key under a memory
+        # limit. Each is an unparseable manifest, so the gate cannot evaluate.
+        raise CannotEvaluate("gates manifest does not parse: {}".format(exc)) from None
+
+
 def residue_obligations(manifest_text):
     """The obligation names the opf-init-p0 residue lists, normalized and in order."""
-    try:
-        doc = tomllib.loads(manifest_text)
-    except tomllib.TOMLDecodeError as exc:
-        raise CannotEvaluate("gates manifest does not parse: {}".format(exc))
-    gates = [g for g in doc.get("gate", []) if isinstance(g, dict) and g.get("id") == RESIDUE_GATE]
+    doc = _parse_manifest(manifest_text)
+    gates =[g for g in doc.get("gate", []) if isinstance(g, dict) and g.get("id") == RESIDUE_GATE]
     if len(gates) != 1 or not isinstance(gates[0].get("residue"), str):
         raise CannotEvaluate("gates manifest has no single {} gate with a residue".format(RESIDUE_GATE))
     residue = gates[0]["residue"]
@@ -251,6 +261,30 @@ _MANIFEST_FIXTURE = (
     'classifier, coordination, Keep-apply, verb wiring, git staging, publication, finalization, the CLI verbs, and '
     'Migrate/Move; the contract fixtures drive no live adopter product repository."\n')
 
+# Two unparseable manifests: one tomllib refuses with RecursionError, one with TOMLDecodeError.
+_DEEP_MANIFEST = "deep = " + "[" * 5000 + "]" * 5000 + "\n"
+_INVALID_MANIFEST = "[[gate]\n"
+
+
+def _unhandled_parse(manifest_text):
+    """The manifest parse with its handler removed: the flip each unparseable-manifest vector turns red under."""
+    return tomllib.loads(manifest_text)
+
+
+def _gate_cannot_evaluate(manifest_text):
+    """True when run_gate over this manifest text and a clean crosswalk exits 2 with the named parse message;
+    an exception that escapes run_gate is False."""
+    texts = {MANIFEST: manifest_text, CROSSWALK: _good()}
+    err = io.StringIO()
+    try:
+        with mock.patch.object(sys.modules[__name__], "_read", texts.__getitem__), \
+                contextlib.redirect_stderr(err):
+            code = run_gate()
+    except Exception:
+        return False
+    return code == 2 and err.getvalue().startswith(
+        "CANNOT EVALUATE check_opf_init_reconciliation: gates manifest does not parse: ")
+
 
 def self_test():
     failures = []
@@ -274,6 +308,10 @@ def self_test():
             expect(False, label)
     dropped = _MANIFEST_FIXTURE.replace("git staging, ", "")
     expect(residue_obligations(dropped) != list(OBLIGATIONS), "residue/drop-detected")
+    for bad, label in ((_DEEP_MANIFEST, "deeply-nested"), (_INVALID_MANIFEST, "invalid")):
+        expect(_gate_cannot_evaluate(bad), "unparseable-manifest/{}".format(label))
+        with mock.patch.object(sys.modules[__name__], "_parse_manifest", _unhandled_parse):
+            expect(not _gate_cannot_evaluate(bad), "unparseable-manifest/{}-red-without-handler".format(label))
 
     expect(findings(_good()) == [], "clean/no-findings")
     expect(findings(_good(override={"verb wiring": _entry("verb wiring", "transferred", "a named successor")})) == [],

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "35c86ea9ed5bb35772b0795f39511d48617b9f2590c7232583058d179de509b7"
+tree-sha256 = "e869033494a1dc01fc8cf96c99a6c8c18feb6c9da21f1e80ae8017f7131c04a1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2721,8 +2721,8 @@ sha256 = "dc856ac19c1f38e695163c165622c168dcf36bb6286ff17c80b12f730124a2d5"
 
 [[sources]]
 path = "opf/spec/OPF-INIT-RECONCILIATION.md"
-bytes = 13407
-sha256 = "540c1f210ac54e5d52c797ae4f6f2342ce8f0750f9bd0b3e463c0e6733d016af"
+bytes = 17360
+sha256 = "11ca101ffa4bad6730c560aea5a2ed314a35d10d7ee125f1a118b5a350068fda"
 
 [[sources]]
 path = "opf/spec/OPF-QUICKSTART.md"
@@ -3131,8 +3131,8 @@ sha256 = "abb63c72d7f706ebf20ebaa8cd497c81279a28a3a6e8b232d2f2bc9acff96536"
 
 [[sources]]
 path = "opf/tools/check_opf_init_reconciliation.py"
-bytes = 13395
-sha256 = "baefc2e82bc58d555158881a39158ade7c8a4fa1eaf46d744d04e3e6afc154bf"
+bytes = 15259
+sha256 = "d8d6857a18e675b5eab94be798722af55ae2a112e8fe36ba85fa6a2a72bae7fa"
 
 [[sources]]
 path = "opf/tools/check_opf_prompt_pack.py"
@@ -3961,8 +3961,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 28568
-sha256 = "66b12879804332b0deab4812abe036e48ee0263607fdd2e3bb2b7397079299e6"
+bytes = 28783
+sha256 = "e1cffa84b7882f05cbb132b8c66992b633c0697a482617190bd135ed676a3deb"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

@@ -902,6 +902,15 @@ count = 1
 class = "EXEMPT"
 reason = "test-code"
 
+# the self-test flip that removes the manifest parse handler
+[[site]]
+path = "opf/tools/check_opf_init_reconciliation.py"
+function = "_unhandled_parse"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 [[site]]
 path = "opf/tools/check_opf_prompt_pack.py"
 function = "_example_vectors.rewrite"

@@ -5,7 +5,8 @@ This document accounts for each later OPF-INIT obligation that the `opf-init-p0`
 classifier, coordination, Keep-apply, verb wiring, git staging, publication, finalization, the CLI
 verbs, and Migrate/Move. It is a reconciliation record, not an implementation claim. A symbol cited
 below implements at most the part its entry names; presence in source does not establish runtime
-correctness, and no entry is closed.
+correctness. No entry is closed by evidence of implementation; an entry marked `transferred` is
+closed only in the sense the closing rule below allows, by an accepted successor.
 
 `opf/tools/check_opf_init_reconciliation.py` checks the structure of this file only: every residue
 obligation has exactly one entry, the Migrate/Move entry keeps its three split children, and an
@@ -17,9 +18,24 @@ validates stores at base `1.2.0` (`_opf_store.SUPPORTED_SPEC_VERSION`, with
 `_opf_store.SUPPORTED_HOMES = 1`), while the specification defines only base 2.0.0 with homes
 generation 2. Unless an entry says otherwise, the code it cites covers the 1.2.0, homes 1 store.
 
-Ownership note: which tracker records own the split work is a pending maintainer decision, so every
-owner below is a proposal. Where a further maintainer decision bears on an entry, its ownership is
-marked open and the decision is named.
+Ownership note: the maintainer answered the crosswalk's ownership questions on 2026-10-31. The
+answers, in plain words:
+
+1. Each of the old coupled-init later-slice duties moves to the adoption-orchestration work
+   (backlog id `OPF-ADOPT-ORCH`); a duty with no equivalent acceptance check there stays open.
+2. Adoption's present-tree classification and init's history and counter policy stay two distinct
+   classifiers.
+3. Automatic exact-source git staging stays a product promise until a contract change withdraws it.
+4. One adoption approval replaces the older Keep acceptance and worklog contract; the replacement
+   documents which attribution and preservation requirements survive.
+5. An entry closes only when every obligation in it has evidence or an accepted successor.
+
+Acceptance reading: the `OPF-ADOPT-ORCH` backlog row in `TODO.md` lists no acceptance checks of its
+own, so this record reads that work's acceptance as the adoption contract it implements:
+`OPF-SPEC.md` section 14 (the end state of apply) and the clean-start completion-check roster in
+section 14.1. That reading is this record's inference, not part of the answers; an entry below is
+marked `transferred` only where that contract carries a check equivalent to the entry's remaining
+work, and is otherwise left open with the reason.
 
 Field vocabulary: `Disposition` is one of `open`, `retained`, `transferred` or `superseded`; an
 entry marked `transferred` names its successor in `Successor`.
@@ -39,10 +55,13 @@ entry marked `transferred` names its successor in `Successor`.
   --self-test`; `opf/tools/_opf_oplock.py --self-test`.
 - Not done: binding for an adoption whose store resolves outside the product root;
   `_opf_adopt_apply._store_posture_or_refuse` refuses that case.
-- Proposed owner: adoption coordination and driver inputs successor.
-- Ownership: open (tracker assignment pending).
-- Disposition: open
-- Successor: none
+- Owner: adoption-orchestration work (`OPF-ADOPT-ORCH`).
+- Ownership: settled by the answer that moves each old later-slice duty to the
+  adoption-orchestration work. The equivalent acceptance check is the section 14.1 plan binding of
+  product and store identities and the observed revision, with completion checks 1 (authority and
+  freshness) and 4 (the store resolves to the planned identity).
+- Disposition: transferred
+- Successor: OPF-ADOPT-ORCH
 
 ## Obligation: adoption classifier
 
@@ -58,8 +77,11 @@ entry marked `transferred` names its successor in `Successor`.
   `opf/tools/check_opf_init.py --self-test` (prior-store detector over shared ancestry fixtures).
 - Not done: the full classifier that authorizes initialization; a decision on which contract is
   authoritative for a manifestless tree with OPF ancestry.
-- Proposed owner: classifier decision and implementation successor.
-- Ownership: open (maintainer decision pending: which classifier contract is authoritative).
+- Owner: none yet.
+- Ownership: open. The answers settle that adoption's present-tree classification and init's
+  history and counter policy stay two distinct classifiers, so neither contract replaces the other.
+  The transfer answer keeps a duty open when the adoption work has no equivalent acceptance check,
+  and neither section 14 nor the section 14.1 completion roster checks either classification.
 - Disposition: open
 - Successor: none
 
@@ -76,8 +98,10 @@ entry marked `transferred` names its successor in `Successor`.
   `opf/tools/_opf_adopt_apply.py --self-test`.
 - Not done: adoption coordination over a resolved store (lease join and recovery of a dead apply's
   lease).
-- Proposed owner: adoption coordination and driver inputs successor.
-- Ownership: open (tracker assignment pending).
+- Owner: none yet.
+- Ownership: open. The answer moves this duty to the adoption-orchestration work only with an
+  equivalent acceptance check there, and the section 14.1 completion roster has none for a lease
+  join over a resolved store or the recovery of a dead apply's lease.
 - Disposition: open
 - Successor: none
 
@@ -95,9 +119,11 @@ entry marked `transferred` names its successor in `Successor`.
 - Not done: Keep through a usable end-to-end adoption path (the apply shell still refuses a
   resolved store); reconciliation of the older Keep acceptance and worklog contract with the
   one-plan approval.
-- Proposed owner: Keep and publication integration successor.
-- Ownership: open (maintainer decision pending: whether the one-plan approval replaces the older
-  Keep acceptance and worklog contract).
+- Owner: adoption-orchestration work (`OPF-ADOPT-ORCH`).
+- Ownership: open. The answers settle that one adoption approval replaces the older Keep
+  acceptance and worklog contract, and that the replacement documents which attribution and
+  preservation requirements survive; that record of surviving requirements does not exist yet, and
+  no section 14.1 completion check verifies a Keep path's preserved bytes, so the entry stays open.
 - Disposition: open
 - Successor: none
 
@@ -112,10 +138,12 @@ entry marked `transferred` names its successor in `Successor`.
 - Tests: `opf/tools/opf.py --self-test` (not mapped to specific cases here).
 - Not done: a working `complete`; a successful `apply` (see finalization); whether this obligation
   overlaps the CLI verbs entry is undecided, so the two stay separate.
-- Proposed owner: completion and retirement successor.
-- Ownership: open (tracker assignment pending).
-- Disposition: open
-- Successor: none
+- Owner: adoption-orchestration work (`OPF-ADOPT-ORCH`).
+- Ownership: settled by the answer that moves each old later-slice duty to the
+  adoption-orchestration work. The equivalent acceptance check is the section 14.1 completion
+  roster that a working `complete` runs, with retirement recorded only on a green check.
+- Disposition: transferred
+- Successor: OPF-ADOPT-ORCH
 
 ## Obligation: git staging
 
@@ -127,9 +155,10 @@ entry marked `transferred` names its successor in `Successor`.
 - Tests: `opf/tools/check_opf_init_p0.py --self-test --red-on-revert` checks the F19 boundary
   contract (staging set fixed empty) in memory, not staging.
 - Not done: all of it.
-- Proposed owner: coupled-init staging and CLI activation successor, if retained.
-- Ownership: open (maintainer decision pending: whether exact-source git staging remains a product
-  promise).
+- Owner: none yet.
+- Ownership: open. The answers keep automatic exact-source git staging as a product promise until a
+  contract change withdraws it, so it is not superseded; the transfer answer keeps it open because
+  neither section 14 nor the section 14.1 completion roster checks what enters the git index.
 - Disposition: open
 - Successor: none
 
@@ -147,10 +176,14 @@ entry marked `transferred` names its successor in `Successor`.
   --self-test`.
 - Not done: publication through the complete adoption driver (the inputs `_DRIVER_UNSUPPLIED`
   names).
-- Proposed owner: Keep and publication integration successor.
-- Ownership: open (tracker assignment pending).
-- Disposition: open
-- Successor: none
+- Owner: adoption-orchestration work (`OPF-ADOPT-ORCH`).
+- Ownership: settled by the answer that moves each old later-slice duty to the
+  adoption-orchestration work. The equivalent acceptance checks are section 14's requirement that
+  apply end with rendered views and an adoption receipt plus its outcome-event chain, and
+  completion checks 4 (declared views rendered, no unaccounted drift) and 5 (the enforcement pack
+  installed and probed).
+- Disposition: transferred
+- Successor: OPF-ADOPT-ORCH
 
 ## Obligation: finalization
 
@@ -165,10 +198,13 @@ entry marked `transferred` names its successor in `Successor`.
 - Tests: `opf/tools/_opf_init_operation.py --self-test`; `opf/tools/_opf_adopt_apply.py
   --self-test`; `opf/tools/_opf_adopt_complete.py --self-test`.
 - Not done: the adoption receipt stage, completion and retirement.
-- Proposed owner: completion and retirement successor.
-- Ownership: open (tracker assignment pending).
-- Disposition: open
-- Successor: none
+- Owner: adoption-orchestration work (`OPF-ADOPT-ORCH`).
+- Ownership: settled by the answer that moves each old later-slice duty to the
+  adoption-orchestration work. The equivalent acceptance checks are section 14's rule that a
+  `views-ready` milestone alone is not adoption success and section 14.1's rule that retirement is
+  recorded only on a green completion check.
+- Disposition: transferred
+- Successor: OPF-ADOPT-ORCH
 
 ## Obligation: CLI verbs
 
@@ -179,9 +215,10 @@ entry marked `transferred` names its successor in `Successor`.
 - Generation: 1.2.0, homes 1.
 - Tests: `opf/tools/check_opf_init.py --self-test`.
 - Not done: wiring the CLI to `run_init_operation` and any coupled-init success report.
-- Proposed owner: coupled-init staging and CLI activation successor, if retained.
-- Ownership: open (maintainer decision pending: whether the adoption re-scope supersedes or
-  transfers the standalone coupled-init activation).
+- Owner: none yet.
+- Ownership: open. The answer moves this duty to the adoption-orchestration work only with an
+  equivalent acceptance check there, and section 14 has no check for the standalone `opf init` CLI
+  wiring or its coupled-init success report.
 - Disposition: open
 - Successor: none
 
@@ -193,8 +230,10 @@ entry marked `transferred` names its successor in `Successor`.
 - Generation: see the split children.
 - Tests: see the split children.
 - Not done: see the split children.
-- Proposed owner: see the split children.
-- Ownership: open (tracker assignment pending).
+- Owner: see the split children.
+- Ownership: open. By the answer that an entry closes only when every obligation has evidence or an
+  accepted successor, this entry stays open while the import disposition and whole-store relocation
+  children are open.
 - Disposition: open
 - Successor: none
 
@@ -209,8 +248,11 @@ entry marked `transferred` names its successor in `Successor`.
 - Tests: `opf/tools/_opf_import_complete.py --self-test`; `opf/tools/_opf_import_batch.py
   --self-test` (coverage of this requirement not established).
 - Not done: source-accounted import completion through adoption.
-- Proposed owner: import disposition, Move retirement and whole-store relocation successor.
-- Ownership: open (tracker assignment pending).
+- Owner: none yet.
+- Ownership: open. Section 14.1 places the import completion check in post-adoption import, which
+  the backlog tracks as separate work (`OPF-IMPORT-COMPLETION`); the adoption-orchestration work has
+  no equivalent acceptance check beyond the completion check 3 preservation of a migrate-disposed
+  source, so the transfer answer keeps this duty open.
 - Disposition: open
 - Successor: none
 
@@ -227,10 +269,12 @@ entry marked `transferred` names its successor in `Successor`.
   `test_default_move_collision` (which gate runs them is not reconciled here);
   `opf/tools/_opf_adopt_apply.py --self-test`.
 - Not done: Move retirement after a green completion through the real driver.
-- Proposed owner: import disposition, Move retirement and whole-store relocation successor.
-- Ownership: open (tracker assignment pending).
-- Disposition: open
-- Successor: none
+- Owner: adoption-orchestration work (`OPF-ADOPT-ORCH`).
+- Ownership: settled by the answer that moves each old later-slice duty to the
+  adoption-orchestration work. The equivalent acceptance checks are completion check 6 (retirement
+  readiness) and section 14.1's rule that retirement waits on a green completion check.
+- Disposition: transferred
+- Successor: OPF-ADOPT-ORCH
 
 ### Split: whole-store relocation
 
@@ -241,7 +285,10 @@ entry marked `transferred` names its successor in `Successor`.
 - Generation: not applicable (no implementation).
 - Tests: none.
 - Not done: all of it.
-- Proposed owner: import disposition, Move retirement and whole-store relocation successor.
-- Ownership: open (tracker assignment pending).
+- Owner: none yet.
+- Ownership: open. Whole-store relocation is `opf migrate --store` (section 5.4), not an adoption
+  step; section 14.1 only rebinds an approved plan's paths after a relocation, so the
+  adoption-orchestration work has no equivalent acceptance check and the transfer answer keeps this
+  duty open.
 - Disposition: open
 - Successor: none
