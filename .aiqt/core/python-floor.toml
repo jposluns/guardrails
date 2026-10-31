@@ -113,6 +113,7 @@ guarded-surfaces = [
     "tools/check_dangerous_api.py",
     "tools/check_derived_command_parameters.py",
     "tools/check_entry_guard.py",
+    "tools/check_fixture_pins.py",
     "tools/check_footer.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",

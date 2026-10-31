@@ -996,6 +996,9 @@ jobs:
       - name: Verifier delivery self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
+      - name: Fixture-pin self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite fixture-pins-selftest
 
       # The child-status probe's own vectors and the coverage gate that holds every probe placement, every
       # inline copy of the guard and every entry point's classification (execution-reconciled self-tests).

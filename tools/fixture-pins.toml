@@ -1,0 +1,10 @@
+# Declared fixture-pin tables, read by tools/check_fixture_pins.py: each [[table]] row names a source file
+# (repo-relative .py) and the module-level dict literal in it that maps a fixture path to its sha256.
+#
+# HAND-AUTHORED. There is deliberately no generate, update or accept command: a table discovered from the
+# tree would vanish from the gate's view when it is renamed or deleted, which is the failure a declaration
+# exists to catch. Add, rename or remove a row by hand in the same change as the table itself.
+#
+# No table is declared yet, so the gate exits 2 (a manifest with no tables is cannot-evaluate) and is not
+# wired as a live gate; only its self-test runs.
+format-version = 1

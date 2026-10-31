@@ -247,6 +247,7 @@ run_gate "hook-latency-selftest" python3 -I -B tools/check_selftest_execution.py
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
 run_gate "verifier-delivery-selftest" python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
+run_gate "fixture-pins-selftest" python3 -I -B tools/check_selftest_execution.py --suite fixture-pins-selftest
 run_gate "opf-declaration-selftest" python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
 run_gate "opf-declaration" python3 -I -B tools/check_opf_declaration.py
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test

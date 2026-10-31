@@ -4421,3 +4421,68 @@ expected-check-ids = [
   "tracker/unfamiliar-suffix-decode-decides",
   "tracker/frozen-allowlist-byte-bound",
 ]
+
+[[suite]]
+# The fixture-pin gate's vectors, each in a throwaway repository: a vector, its flip (one gate line edited, the
+# vector's result shown to change) and its control (the intact gate rerun on the same repository).
+id = "fixture-pins-selftest"
+runner = "tools/check_fixture_pins.py"
+expected-check-ids = [
+  # ---------- pin findings, exit 1 ----------
+  "vector/clean",
+  "flip/clean-always-fails",
+  "control/clean",
+  "vector/missing",
+  "flip/missing-skipped",
+  "control/missing",
+  "vector/untracked",
+  "flip/untracked-as-tracked",
+  "control/untracked",
+  "vector/head-blob-mismatch",
+  "flip/head-blob-skipped",
+  "control/head-blob-mismatch",
+  "vector/worktree-mismatch",
+  "flip/worktree-hash-skipped",
+  "control/worktree-mismatch",
+  "vector/symlink-final",
+  "flip/symlink-lstat-dropped",
+  "control/symlink-final",
+  "vector/symlink-ancestor",
+  "flip/symlink-realpath-dropped",
+  "control/symlink-ancestor",
+  "vector/staged-not-committed",
+  "flip/empty-ls-tree-passes",
+  "control/staged-not-committed",
+  # ---------- cannot evaluate, exit 2 ----------
+  "vector/table-missing",
+  "flip/absent-table-skipped",
+  "control/table-missing",
+  "vector/table-empty",
+  "flip/empty-table-passes",
+  "control/table-empty",
+  "vector/computed-path",
+  "flip/non-literal-skipped",
+  "control/computed-path",
+  "vector/duplicate-key",
+  "flip/duplicate-key-dropped",
+  "control/duplicate-key",
+  "vector/manifest-empty",
+  "flip/zero-tables-pass",
+  "control/manifest-empty",
+  "vector/git-unavailable",
+  "flip/git-launch-error-swallowed",
+  "control/git-unavailable",
+  "vector/outside-repository",
+  "flip/git-exit-ignored",
+  "control/outside-repository",
+  # ---------- single-outcome vectors ----------
+  "vector/conflicting-pins",
+  "vector/malformed-digest",
+  "vector/dotdot-path",
+  "vector/precedence-two-over-one",
+  "vector/manifest-absent",
+  "vector/manifest-unknown-key",
+  "vector/table-bound-twice",
+  "vector/fifo-not-regular",
+  "vector/no-git-on-path",
+]
