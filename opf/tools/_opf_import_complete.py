@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""OPF import completion: the read-only per-source evaluator (OPF-SPEC 1.3.0 section 14.1).
+"""OPF import completion: the read-only per-source evaluator (OPF-SPEC 2.0.0 section 14.1, "One approval
+and completion").
 
 Spec sections implemented: 14.1's per-source import completion ("For each migrate-disposed source, import
 completion MUST verify the preserved original's digest (the archived copy under section 14.2 for a source
@@ -31,7 +32,7 @@ adoption run `run_id`, in four legs, each reporting under one SourceResult:
     inventory; and a non-occupying source's frozen live file still holds its plan digest (an occupying
     source left the live tree at apply);
   imports: the imported records referencing the source are those, in the imported managed leaves
-    (<type>.imported.index.toml per type except legacy_fragment, and worklog.imported.toml, inline in the
+    (<type>.imported.index.toml per type other than worklog, and worklog.imported.toml, inline in the
     machine store), whose import.source is exactly the source's preserved original
     .working/imported/import/<import-run>/originals/<source-path> of their own import.run. Every import run
     holding such a record re-reads its bundle inventory (the doctor's own row validator, kind import) and
@@ -130,7 +131,8 @@ from _opf_emit import emit_checked   # noqa: E402
 
 VALID, INVALID, CANNOT_EVALUATE = store.VALID, store.INVALID, store.CANNOT_EVALUATE
 # The imported managed leaves (spec 4.2, 8.3), inline in the machine store in either layout: one index per
-# enabled type except the importer-only legacy_fragment, and the imported worklog on its own number line.
+# enabled type other than worklog (spec 4.2: the same enabled-type roster as the clean series), and the
+# imported worklog on its own number line.
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
 IMPORTED_TYPES = tuple(sorted(

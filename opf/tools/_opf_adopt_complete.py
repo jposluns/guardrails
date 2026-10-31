@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """OPF adoption completion evaluator: the read-only deterministic checks 1 to 4 and 6 (slice 1) and the
-wiring probe frame of check 5 (slice 2) (OPF-SPEC 1.3.0).
+wiring probe frame of check 5 (slice 2) (OPF-SPEC 2.0.0).
 
 Spec sections implemented: 14.1 (the clean-start completion-check roster: checks 1 authority and freshness,
 2 discovery accounting, 3 preservation and restore, 4 operational readiness and 6 retirement readiness; a

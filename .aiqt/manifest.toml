@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0da71ca55f02c949167bd4cffbdadb72a17c33495541a8ae0fd6a529c294a1e4"
+tree-sha256 = "0c47b8983d17bdf02567a8247272a8e33150061391d95a0dfbe579655e913727"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2767,12 +2767,12 @@ sha256 = "2efb26e11dcc25049792ce7f0a2adaf4dccef94caa888390b69875f32983068a"
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
 bytes = 1386246
-sha256 = "3d70e8f5a117d4a75b3bf3080dccc03bab881d8e441bb1f9e119ac8650414f62"
+sha256 = "29bb9f101677dbaa4eaeee718686385de98d802c7acaebdd9c296aebe86f1db0"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
 bytes = 174891
-sha256 = "40087af3f3fe64b79a45eebd97ad93377a39726ca60b1095f8b25be026bd2d80"
+sha256 = "a5bb0417961b37a17d8daaf3cf861c77c303c849f5a6982e2be5c9f0d7e8c111"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_discover.py"
@@ -2827,12 +2827,12 @@ sha256 = "225d9d5f7c15f5794a3772cd1333665829c1d34849a9708d994915fdeadc4349"
 [[sources]]
 path = "opf/tools/_opf_import_batch.py"
 bytes = 110700
-sha256 = "a7c9bbe6a6145fc5de1a77bed4954b4e758b57702b430ef70b414d65dc2ec945"
+sha256 = "c9dbb8b6e9f47e99328513d6dfc4188e1a20328092b6c3f1d68170cbbd2968a4"
 
 [[sources]]
 path = "opf/tools/_opf_import_complete.py"
-bytes = 101771
-sha256 = "218e5d5961332696bfc333a37a44e9c8e7a3734da94d7a0e3de0f8802c5fc9dd"
+bytes = 101839
+sha256 = "dd793d13cdd93f22be92bc955f54852c081bd583112dc8c13038ce4aaa58c990"
 
 [[sources]]
 path = "opf/tools/_opf_init.py"
@@ -3087,7 +3087,7 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
 bytes = 368620
-sha256 = "4ec0521ece0ad24bc12402d969a93b8c71ff71c3b5a6ff64672c1407803cbde0"
+sha256 = "f71032b2e8db7e7ef961a7a3ad3f8e4d8c8fefe4e80548cb84804c7d9d441864"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
@@ -3142,7 +3142,7 @@ sha256 = "5f13d71937d37efa09894c7176e98c1a94dbb2271143f155a56e051562b121bc"
 [[sources]]
 path = "opf/tools/opf.py"
 bytes = 1371933
-sha256 = "e982dfa6854697802a4fa40ce702f28a31e5d03a3935eb1a01a0e6d533d5e05f"
+sha256 = "00c9f4be73208ec00713d82ce19f4cd00a0a24f364cd7cd2d76201bf39ac951b"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
