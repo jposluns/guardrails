@@ -35,6 +35,14 @@ is caught by byte reconciliation. This keeps the generator fail-safe with no fil
 Exit convention (matches the repo's gates): 0 clean; 1 drift; 2 malformed or unreadable input, an
 unclassified/stray/overlapping selector outcome, an exclusion swallowing a gensrc or portability
 surface, a tracked concern-2 path, an unusable git repository, or any other cannot-evaluate.
+
+Residual (ownership): the two tracked-file reads (git_tracked, check_output_modes) pin the caller's git
+configuration away (_pinned_git_env), so system and global safe.directory entries no longer apply to them,
+and none is added (no -c safe.directory is passed, which would let the tool trust any directory by itself).
+A checkout owned by another user is therefore cannot-evaluate (exit 2, git's dubious-ownership refusal)
+whatever the system or global configuration trusts, and git's suggested git config --global --add
+safe.directory cannot help. The remedy is to run as the checkout's owner, or on a clone the caller owns; the
+cannot-evaluate message names it when git reports dubious ownership.
 """
 import sys
 
@@ -278,7 +286,8 @@ def _pinned_git_env(environ=None):
     caller-configuration pins modelled on the fixture pins of tools/_git_fixture_env.py: GIT_CONFIG_NOSYSTEM=1,
     and GIT_CONFIG_GLOBAL, HOME and XDG_CONFIG_HOME at os.devnull (the fixture points HOME and XDG_CONFIG_HOME at
     a scratch directory instead; a read needs none). git then reads no system, home or XDG configuration, so a
-    malformed file there cannot fail the read (exit 128) and a hostile one cannot steer it."""
+    malformed file there cannot fail the read (exit 128) and a hostile one cannot steer it. The same pins drop
+    the system and global safe.directory entries (see the module's ownership residual)."""
     env = {k: v for k, v in (os.environ if environ is None else environ).items() if not k.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -286,6 +295,23 @@ def _pinned_git_env(environ=None):
     env["HOME"] = os.devnull
     env["XDG_CONFIG_HOME"] = os.devnull
     return env
+
+
+# git's ownership refusal: its first line in English, and the command of its hint, which a translation keeps
+OWNERSHIP_REFUSAL_MARKS = ("detected dubious ownership in repository at ", "--add safe.directory ")
+OWNERSHIP_REMEDY = ("git refused the checkout for dubious ownership: it is owned by another user, and this read "
+                    "honours no system or global safe.directory entry, so git's suggested git config --global "
+                    "--add safe.directory cannot help; run as the checkout's owner, or on a clone you own")
+
+
+def _git_read_failure(label, proc):
+    """The GateError message for a tracked-file read whose git exited nonzero: the exit and git's stderr, and,
+    when git refused the repository for its ownership (OWNERSHIP_REFUSAL_MARKS), OWNERSHIP_REMEDY."""
+    stderr = proc.stderr.decode("utf-8", "replace").strip()
+    message = "{} failed (exit {}): {}".format(label, proc.returncode, stderr)
+    if any(mark in stderr for mark in OWNERSHIP_REFUSAL_MARKS):
+        message += "; " + OWNERSHIP_REMEDY
+    return message
 
 
 def git_tracked(root, environ=None):
@@ -299,9 +325,11 @@ def git_tracked(root, environ=None):
     never a transport), atop the GIT_* environment scrub. The caller's git configuration is pinned away
     after the scrub (_pinned_git_env: no system, home or XDG configuration file is read), so a malformed
     file there no longer makes this read exit 128. `environ` replaces os.environ as the base the scrub and
-    pins apply to (the self-test passes its own). Side effect: a safe.directory entry in the caller's global
-    configuration no longer applies, so a checkout owned by another user is cannot-evaluate (git refuses it
-    as dubious ownership, GateError, exit 2: fail closed); no -c safe.directory is passed, by design."""
+    pins apply to (the self-test passes its own). Side effect: system and global safe.directory entries no
+    longer apply, so a checkout owned by another user is cannot-evaluate (git refuses it as dubious ownership,
+    GateError, exit 2: fail closed), and git's suggested git config --global --add safe.directory cannot
+    help; the message then names the remedy (_git_read_failure): run as the checkout's owner, or on a clone
+    the caller owns. No -c safe.directory is passed, by design."""
     env = _pinned_git_env(environ)
     try:
         proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
@@ -311,8 +339,7 @@ def git_tracked(root, environ=None):
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("cannot run git ls-files ({}); fail-closed".format(exc))
     if proc.returncode != 0:
-        raise GateError("git ls-files failed (exit {}): {}".format(
-            proc.returncode, proc.stderr.decode("utf-8", "replace").strip()))
+        raise GateError(_git_read_failure("git ls-files", proc))
     if not proc.stdout:
         raise GateError("git ls-files returned no entries; an empty tree is never assumed")
     paths, seen_fold, seen_nfc = set(), {}, {}
@@ -351,7 +378,9 @@ def check_output_modes(root, environ=None):
     and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read.
     Pinned exactly as git_tracked (the sibling index read): core.fsmonitor=false,
     protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub, the caller's git configuration pinned
-    away after it (_pinned_git_env, with the same safe.directory side effect), and `environ` injectable."""
+    away after it (_pinned_git_env, with the same side effect: system and global safe.directory entries no
+    longer apply, so a checkout owned by another user is cannot-evaluate, the message naming the remedy), and
+    `environ` injectable."""
     env = _pinned_git_env(environ)
     try:
         proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
@@ -361,8 +390,7 @@ def check_output_modes(root, environ=None):
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("cannot run git ls-files for output modes ({}); fail-closed".format(exc))
     if proc.returncode != 0:
-        raise GateError("git ls-files (output modes) failed (exit {}): {}".format(
-            proc.returncode, proc.stderr.decode("utf-8", "replace").strip()))
+        raise GateError(_git_read_failure("git ls-files (output modes)", proc))
     for record in proc.stdout.split(b"\x00"):
         if not record:
             continue
@@ -901,7 +929,13 @@ def main():
 #   a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
 #       and a class outside the vocabulary each fail closed;
 #   (n) the tracked-file reads succeed under a malformed home and XDG git configuration, which fails an unpinned
-#       read, and fail there when the pins are dropped (mutant).
+#       read, and fail there when the pins are dropped (mutant);
+#   (o) the production calls (os.environ as the base) succeed under a malformed home and XDG configuration in
+#       os.environ, and check_output_modes with its body reverted to the unpinned scrub fails there (flip);
+#   (p) a malformed system configuration, set by the caller's GIT_CONFIG_SYSTEM or found by git itself (a PATH
+#       shim), is not read, and is read once GIT_CONFIG_NOSYSTEM is dropped (flip);
+#   (q) a checkout git treats as another user's is refused although system and global configuration trust it,
+#       the refusal (GateError, --check exit 2) names the remedy, and without the refusal marks it does not (flip).
 
 _OWN_BASE = '''format-version = 1
 
@@ -1149,14 +1183,256 @@ def _config_pin_vector(root, scratch):
     return failures
 
 
+def _patched_environ(**values):
+    """Set os.environ[name] = value for each item; return the saved values (None: the name was absent) for
+    _restore_environ."""
+    saved = {name: os.environ.get(name) for name in values}
+    os.environ.update(values)
+    return saved
+
+
+def _restore_environ(saved):
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def _shim_git(directory, real_git, lines):
+    """Write `directory`/git, a POSIX shell script that runs `lines` and then the real git (by its absolute path,
+    so the self-test's own lifecycle wrapper, which reasserts the system pins, is not in the way) with its
+    arguments, and return `directory`. A vector puts it first on PATH in the environment a read receives:
+    subprocess resolves "git" through that environment's PATH."""
+    import shlex
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "git"
+    script.write_text("#!/bin/sh\n" + "".join(line + "\n" for line in lines)
+                      + "{} \"$@\"\n".format(shlex.quote(str(real_git))), encoding="utf-8")
+    script.chmod(0o700)
+    return directory
+
+
+def _scrub_only_ls_files(root, environ):
+    """`git ls-files` under `environ` with the GIT_* scrub alone (the reads' environment without the pins)."""
+    unpinned = {k: v for k, v in environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                           "ls-files", "-z", "--cached", "--stage"],
+                          capture_output=True, timeout=60, env=unpinned)
+
+
+def _default_env_vector(root, scratch):
+    """The production calls (no `environ`, so os.environ is the base the scrub and pins apply to) succeed while
+    os.environ's HOME and XDG_CONFIG_HOME are directories whose config files (.gitconfig, git/config) open with
+    the malformed line '[invalid'; _config_pin_vector's controls show that configuration fails an unpinned read.
+    os.environ is restored on every path. Returns a list of failure strings."""
+    failures = []
+    home, xdg = scratch / "home", scratch / "xdg"
+    (xdg / "git").mkdir(parents=True, exist_ok=True)
+    home.mkdir(exist_ok=True)
+    (home / ".gitconfig").write_text("[invalid\n", encoding="utf-8")
+    (xdg / "git" / "config").write_text("[invalid\n", encoding="utf-8")
+    saved = _patched_environ(HOME=str(home), XDG_CONFIG_HOME=str(xdg))
+    try:
+        for label, read in (("git_tracked", git_tracked), ("check_output_modes", check_output_modes)):
+            try:
+                read(root)
+            except GateError as exc:
+                failures.append("default environment: {} with a malformed home and XDG configuration in os.environ "
+                                "expected to succeed, got GateError ({})".format(label, exc))
+    finally:
+        _restore_environ(saved)
+    return failures
+
+
+def _default_env_flip(root, scratch):
+    """Flip: check_output_modes with its body reverted to the GIT_* scrub of os.environ alone (its body before the
+    pins, which takes no `environ`) must fail _default_env_vector on that read, so the vector bites when
+    check_output_modes stops using the pinned environment. The patched global is restored on every path. Returns
+    a list of failure strings."""
+    global check_output_modes
+    saved = check_output_modes
+
+    def reverted(root):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env["GIT_NO_LAZY_FETCH"] = "1"
+        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "ls-files", "-z", "--cached", "--stage", "--", *GENERATED_OUTPUTS_REL],
+                              capture_output=True, timeout=60, env=env)
+        if proc.returncode != 0:
+            raise GateError(_git_read_failure("git ls-files (output modes)", proc))
+    check_output_modes = reverted
+    try:
+        flipped = _default_env_vector(root, scratch)
+    finally:
+        check_output_modes = saved
+    if not any("check_output_modes" in failure for failure in flipped):
+        return ["default environment: check_output_modes with its body reverted to the unpinned scrub expected to "
+                "fail the vector (the vector does not bite), got {!r}".format(flipped)]
+    return []
+
+
+def _system_pin_vector(root, scratch, real_git):
+    """The system-scope pin. A git shim first on PATH stands in for an installed system configuration the code
+    cannot avoid: when its caller leaves GIT_CONFIG_SYSTEM unset (as the GIT_* scrub does) it points it at a file
+    opening with '[invalid', then runs the real git. The caller's environment also sets GIT_CONFIG_SYSTEM to a
+    second malformed file. _pinned_git_env drops the caller's GIT_CONFIG_SYSTEM, and git_tracked returns the
+    clean set and check_output_modes passes: GIT_CONFIG_NOSYSTEM=1 keeps git from reading either file. Controls,
+    through the shim: an ls-files with the GIT_* scrub alone, and one that keeps the caller's GIT_CONFIG_SYSTEM,
+    each exit nonzero, so the vector is not vacuous. Flip: _pinned_git_env without GIT_CONFIG_NOSYSTEM makes
+    git_tracked raise GateError. The patched global is restored on every path. Returns a list of failure
+    strings."""
+    global _pinned_git_env
+    if real_git is None:
+        return ["system pin: no real git executable was located before the fixture lifecycle; not run"]
+    import shlex
+    failures = []
+    scratch.mkdir(parents=True, exist_ok=True)
+    installed, caller = scratch / "installed-gitconfig", scratch / "caller-gitconfig"
+    installed.write_text("[invalid\n", encoding="utf-8")
+    caller.write_text("[invalid\n", encoding="utf-8")
+    shim = _shim_git(scratch / "bin", real_git, (
+        'if [ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then GIT_CONFIG_SYSTEM={}; export GIT_CONFIG_SYSTEM; fi'.format(
+            shlex.quote(str(installed))),))
+    environ = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    environ.update(GIT_CONFIG_SYSTEM=str(caller), PATH=str(shim) + os.pathsep + os.environ.get("PATH", os.defpath))
+    controls = (("the GIT_* scrub alone", _scrub_only_ls_files(root, environ)),
+                ("the caller's GIT_CONFIG_SYSTEM kept",
+                 subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                                 "ls-files", "-z", "--cached", "--stage"],
+                                capture_output=True, timeout=60, env=environ)))
+    for label, control in controls:
+        if control.returncode == 0:
+            failures.append("system pin: an ls-files with {} under a malformed system configuration expected a "
+                            "nonzero exit (the vector would be vacuous), got 0".format(label))
+    if _pinned_git_env(environ).get("GIT_CONFIG_SYSTEM") == str(caller):
+        failures.append("system pin: the caller's GIT_CONFIG_SYSTEM survived _pinned_git_env")
+    try:
+        want = git_tracked(root)
+        got = git_tracked(root, environ)
+        check_output_modes(root, environ)
+    except GateError as exc:
+        failures.append("system pin: the tracked-file reads under a malformed system configuration expected to "
+                        "succeed, got GateError ({})".format(exc))
+    else:
+        if got != want:
+            failures.append("system pin: the tracked set read under a malformed system configuration differs "
+                            "from the clean read")
+    saved = _pinned_git_env
+
+    def without_nosystem(environ=None):
+        env = saved(environ)
+        env.pop("GIT_CONFIG_NOSYSTEM", None)
+        return env
+    _pinned_git_env = without_nosystem
+    try:
+        git_tracked(root, environ)
+    except GateError:
+        pass
+    else:
+        failures.append("system pin: _pinned_git_env without GIT_CONFIG_NOSYSTEM expected GateError from "
+                        "git_tracked under a malformed system configuration (the vector does not bite)")
+    finally:
+        _pinned_git_env = saved
+    return failures
+
+
+def _names_ownership_remedy(text):
+    return all(words in text for words in ("dubious ownership", "owned by another user",
+                                           "run as the checkout's owner", "on a clone you own"))
+
+
+def _ownership_vector(root, scratch, real_git, run_check):
+    """The safe.directory side effect and its message. A git shim first on PATH sets git's
+    GIT_TEST_ASSUME_DIFFERENT_OWNER=1 (git then treats the repository as owned by another user) and, when its
+    caller leaves GIT_CONFIG_SYSTEM unset, points it at a system file that trusts every directory
+    ('[safe] directory = *'); the caller's HOME carries the same trust in .gitconfig. Controls, through the shim
+    with the GIT_* scrub alone: the system trust alone and the global trust alone each admit the checkout
+    (exit 0), so both scopes would apply to an unpinned read. Under the pins, git_tracked and check_output_modes
+    each raise GateError naming dubious ownership and the remedy, and run_check (the --check run) with the shim
+    first on os.environ's PATH exits 2 with that message on stderr. A refusal translated down to git's hint
+    command still names the remedy and a malformed-config failure does not. Flip: with OWNERSHIP_REFUSAL_MARKS
+    emptied the message no longer names it. os.environ and the patched global are restored on every path.
+    run_check(root) returns (exit, stderr). Returns a list of failure strings."""
+    global OWNERSHIP_REFUSAL_MARKS
+    if real_git is None:
+        return ["ownership: no real git executable was located before the fixture lifecycle; not run"]
+    import shlex
+    failures = []
+    home, clean = scratch / "home", scratch / "clean"
+    home.mkdir(parents=True, exist_ok=True)
+    clean.mkdir(exist_ok=True)
+    trust = "[safe]\n\tdirectory = *\n"
+    (home / ".gitconfig").write_text(trust, encoding="utf-8")
+    (scratch / "system-gitconfig").write_text(trust, encoding="utf-8")
+    shim = _shim_git(scratch / "bin", real_git, (
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER=1; export GIT_TEST_ASSUME_DIFFERENT_OWNER",
+        'if [ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then GIT_CONFIG_SYSTEM={}; export GIT_CONFIG_SYSTEM; fi'.format(
+            shlex.quote(str(scratch / "system-gitconfig")))))
+    path = str(shim) + os.pathsep + os.environ.get("PATH", os.defpath)
+    environ = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    environ.update(HOME=str(home), XDG_CONFIG_HOME=str(clean), PATH=path)
+    for label, control_env in (("the system trust alone", dict(environ, HOME=str(clean))),
+                               ("the global trust alone", dict(environ, GIT_CONFIG_SYSTEM=os.devnull))):
+        control = _scrub_only_ls_files(root, control_env)
+        if control.returncode != 0:
+            failures.append("ownership: an unpinned ls-files with {} expected exit 0 (the vector would be "
+                            "vacuous), got {}: {}".format(label, control.returncode,
+                                                         control.stderr.decode("utf-8", "replace").strip()))
+
+    def refusals():
+        out = []
+        for read in (git_tracked, check_output_modes):
+            try:
+                read(root, environ)
+            except GateError as exc:
+                out.append(str(exc))
+            else:
+                out.append(None)
+        return out
+    for message in refusals():
+        if message is None or not _names_ownership_remedy(message):
+            failures.append("ownership: a read of a checkout git treats as another user's expected GateError naming "
+                            "dubious ownership and the remedy, got {!r}".format(message))
+    saved_path = _patched_environ(PATH=path)
+    try:
+        code, stderr = run_check(root)
+    finally:
+        _restore_environ(saved_path)
+    if code != 2 or not _names_ownership_remedy(stderr):
+        failures.append("ownership: --check on a checkout git treats as another user's expected exit 2 naming the "
+                        "remedy, got {!r}: {!r}".format(code, stderr))
+    translated = subprocess.CompletedProcess(
+        ["git"], 128, b"", b"fatal: <translated>\n\n\tgit config --global --add safe.directory /r\n")
+    malformed = subprocess.CompletedProcess(["git"], 128, b"", b"fatal: bad config line 1 in file /h/.gitconfig\n")
+    if not _names_ownership_remedy(_git_read_failure("git ls-files", translated)):
+        failures.append("ownership: a refusal translated down to git's hint command expected to name the remedy")
+    if "safe.directory entry" in _git_read_failure("git ls-files", malformed):
+        failures.append("ownership: a malformed-config failure expected no ownership remedy")
+    saved = OWNERSHIP_REFUSAL_MARKS
+    OWNERSHIP_REFUSAL_MARKS = ()
+    try:
+        flipped = refusals()
+    finally:
+        OWNERSHIP_REFUSAL_MARKS = saved
+    if any(message is None or _names_ownership_remedy(message) for message in flipped):
+        failures.append("ownership: with OWNERSHIP_REFUSAL_MARKS emptied expected GateError without the remedy "
+                        "(the vector does not bite), got {!r}".format(flipped))
+    return failures
+
+
 def self_test_main():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import shutil
     from _git_fixture_env import fixture_git_lifecycle
+    # The real git, located before the lifecycle puts its system-pinning wrapper first on PATH: the system-pin
+    # and ownership vectors run it through their own shims.
+    real_git = shutil.which("git")
     with fixture_git_lifecycle():
-        return _self_test_main_isolated()
+        return _self_test_main_isolated(real_git)
 
 
-def _self_test_main_isolated():
+def _self_test_main_isolated(real_git=None):
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     import io
@@ -1676,6 +1952,23 @@ def _self_test_main_isolated():
 
         # (n) the tracked-file reads pin the caller's system, home and XDG git configuration away.
         failures.extend(_config_pin_vector(good, tmp / "config-pins"))
+        # (o) the production calls, with os.environ as the base, also run pinned; a check_output_modes whose body
+        # is reverted to the unpinned scrub fails there.
+        failures.extend(_default_env_vector(good, tmp / "default-env"))
+        failures.extend(_default_env_flip(good, tmp / "default-env-flip"))
+        # (p) a system configuration, the caller's GIT_CONFIG_SYSTEM or one git finds by itself, is not read.
+        failures.extend(_system_pin_vector(good, tmp / "system-pin", real_git))
+
+        # (q) system and global safe.directory no longer apply; the refusal names the remedy.
+        def run_check_stderr(root):
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                try:
+                    rc = run(root, True)
+                except SystemExit as exc:
+                    rc = "raised SystemExit({!r})".format(exc.code)
+            return rc, err.getvalue()
+        failures.extend(_ownership_vector(good, tmp / "ownership", real_git, run_check_stderr))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1708,7 +2001,10 @@ def _self_test_main_isolated():
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
           "class outside the vocabulary each fail the frozen floor closed; and the tracked-file reads "
           "succeed under a malformed home and XDG git configuration that fails an unpinned read, and fail "
-          "there once the pins are dropped")
+          "there once the pins are dropped, also through os.environ (a check_output_modes reverted to the "
+          "unpinned scrub fails there); a malformed system configuration is not read and is read once "
+          "GIT_CONFIG_NOSYSTEM is dropped; and a checkout git treats as another user's is refused although "
+          "system and global configuration trust it, with the remedy named and exit 2 from --check")
     return 0
 
 
