@@ -187,7 +187,9 @@ not hold; a completed transaction's journal directory
 is retained under the generation's record journal home as local recovery evidence; the lease is not made observable at a sync target
 (`opf sync` ships the surfaced reconciliation step, but the lease stays local to this host until the
 planned target lock ref lands, so the spec 17 propagation window stands and the divergence check
-`opf sync` surfaces is the overlapping control); a signal
+`opf sync` surfaces is the overlapping control), and until the spec 5.7 pre-operation fetch-and-compare
+lands, a store whose manifest records a dedicated sync target refuses before any operand is read, after
+step 1's recovery (_opf_sync.require_reconciled); a signal
 delivered at any point may leave a lease, an operation capability record or a journal lock in place,
 which the next run's recovery handles (an asynchronous interrupt makes any narrower promise
 unkeepable, so release is described in this module for ordinary exceptions and clean exits only); an
@@ -345,6 +347,7 @@ import _opf_oplock       # noqa: E402
 import _opf_release      # noqa: E402
 import _opf_schema       # noqa: E402
 import _opf_store        # noqa: E402
+import _opf_sync         # noqa: E402
 import _opf_views        # noqa: E402
 import _opf_write_guard  # noqa: E402
 
@@ -3268,6 +3271,14 @@ def _run_operation(req):
         # before any operand path is built from the request. No probe-versus-validation comparison
         # follows: the probe yields homes 2 or refuses, and _load_manifest yields homes 2 or refuses.
         _load_manifest(ctx)
+        # 2a. the spec 5.7 pre-operation reconciliation: AFTER step 1's recovery (spec 8.8 reconciles an
+        # interrupted transaction first, and that recovery clears a confirmed-dead holder's lease, which
+        # sync's own acquisition refuses) and before any operand path is built; interim body: a
+        # dedicated-target store refuses (_opf_sync.require_reconciled).
+        try:
+            _opf_sync.require_reconciled(res, VERB, manifest=ctx.manifest)
+        except _opf_sync.SyncError as exc:
+            raise RecordError(str(exc))
         _check_request(req, ctx)
         ctx.counters = _read_operand(root_fd, ctx.rel(_opf_check.COUNTERS_NAME))
         ctx.version = _read_operand(root_fd, ctx.rel(_opf_check.VERSION_NAME)).model

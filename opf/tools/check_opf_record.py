@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T116)
+  check_opf_record.py --self-test                    the fixture suite (T1-T121)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -635,6 +635,19 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T116 _publish_homes2 with no capability takes and releases its own; a refused publication whose
       release raises KeyboardInterrupt still refuses with its own refusal, the release attempted once
       and surfaced (flip: the self-acquired release catching OpLockError only)
+  T117 every record subcommand refuses on a store whose manifest records a dedicated sync target (the
+       interim spec 5.7 pre-operation reconciliation): exit 2, every byte untouched, nothing fetched, no
+       lease (flip: the check dropped for record, so the create publishes)
+  T118 that check runs after step 1's journal recovery: an interrupted create is reconciled first and no
+       transaction stays open, then the next run meets the interim refusal (flip: the check moved before
+       the recovery)
+  T119 `opf render --write` refuses on a doctor-VALID dedicated-target store with a drifted view, the
+       drift left in place, while the in-repo control is repaired (flip: the check dropped for render, so
+       the view is rewritten)
+  T120 a record run checks exactly once, under its own verb; its post-publication render goes through
+       the engine, which carries no check (flip: the engine checks too, so the count is two)
+  T121 `opf init` on a dedicated-target store refuses on its existing pointer and never reaches the
+       check, every byte untouched (a pin of existing behaviour; no flip)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -10020,6 +10033,180 @@ def flip_t115():
     return patch.object(record, "_require_committed_held", lambda ctx, req: None)
 
 
+# --- T117-T121: the interim pre-operation reconciliation of the writing verbs (spec 5.7) ----------------
+
+DEDICATED = "does not write to a dedicated-target store"
+
+
+def _dedicate(fx, root, url=None):
+    """Give the store at `root` a dedicated sync target in place, recorded in the manifest (committed) and
+    added as the store's one remote. By default the target is a bare repository beside the store, recorded
+    as git:<absolute path> and pushed (the form `opf sync` accepts; doctor's C-SYNC-AGREE cannot
+    canonicalize a filesystem path, so such a store is doctor CANNOT-EVALUATE). With `url` the target is
+    that never-contacted https URL instead, which doctor canonicalizes, so the store stays doctor-VALID and
+    a write gated on source integrity can land once the reconciliation is dropped."""
+    env = fx.env
+    if url is None:
+        bare = fx.base / (Path(root).name + "-target.git")
+        env.git(fx.base, "init", "-q", "--bare", str(bare))
+        remote = str(bare)
+    else:
+        remote = url
+    manifest = model(root, MANIFEST)
+    manifest["store"]["sync_target"] = "git:" + remote
+    write_commit(env, root, MANIFEST, emit.emit_checked(manifest).encode("utf-8"), "a dedicated sync target")
+    env.git(root, "remote", "add", "origin", remote)
+    if url is None:
+        env.git(root, "push", "-q", "origin", "HEAD")
+    else:
+        doctor_valid(env, root)
+    return root
+
+
+def _dedicated(fx, name, source=None, url=None):
+    """A fresh copy of the template (or of `source`) with a dedicated sync target (_dedicate)."""
+    return _dedicate(fx, fx.case(name, source), url)
+
+
+HTTPS_TARGET = "https://example.invalid/opf/store.git"
+
+
+def _no_transport_trace(root, label):
+    assert not (Path(root) / ".git" / "FETCH_HEAD").exists(), (label, "nothing is fetched")
+    assert not (Path(root) / LEASE).exists(), (label, "no lease is taken or left")
+
+
+def _skip_reconcile(verb):
+    """The pre-operation reconciliation dropped for `verb` only (the helper is one module attribute both
+    callers read, so the other caller keeps its check)."""
+    original = record._opf_sync.require_reconciled
+
+    def skipping(res, called_verb, manifest=None):
+        if called_verb == verb:
+            return None
+        return original(res, called_verb, manifest=manifest)
+    return patch.object(record._opf_sync, "require_reconciled", skipping)
+
+
+def t117_record_dedicated_refused(fx):
+    """Every record subcommand refuses on a store whose manifest records a dedicated sync target: exit 2
+    naming the interim refusal, every byte untouched, nothing fetched and no lease (flip: the check
+    dropped for record, so the create publishes)."""
+    env = fx.env
+    base = fx.case("t117-base")
+    with ticking():
+        step(fx, base, CREATE, "BI-1")
+    root = _dedicated(fx, "t117-dedicated", base)
+    for args in (CREATE, ["transition", "BI-1", "active"] + ASSISTANT, ["done-with-receipt", "BI-1"] + MAINTAINER,
+                 REPAIR, APPEND):
+        with ticking():
+            refused_untouched(env, root, args, "`opf record` " + DEDICATED)
+        _no_transport_trace(root, ("T117", args[0]))
+
+
+def flip_t117():
+    return _skip_reconcile(record.VERB)
+
+
+def t118_reconcile_after_recovery(fx):
+    """The check runs AFTER step 1's journal recovery: an interrupted create on a store that then records
+    a dedicated target is reconciled first (the run refuses naming the reconciliation and no transaction
+    stays open), and only the next run meets the interim refusal (flip: the check moved before the
+    recovery, so the first run refuses with the interim text and the transaction stays open)."""
+    env = fx.env
+    root = _dedicate(fx, _interrupted(fx, "t118-interrupted"))
+    assert any(s == "open" for s in journal_states(root).values()), "T118 the fixture holds an open transaction"
+    refused(record_cli(env, root, CREATE), "was reconciled")
+    assert not any(s == "open" for s in journal_states(root).values()), "T118 recovery ran before the check"
+    refused_untouched(env, root, CREATE, "`opf record` " + DEDICATED)
+    _no_transport_trace(root, "T118")
+
+
+def flip_t118():
+    original = record._reconcile_journal
+
+    def checked_first(ctx):
+        try:
+            record._opf_sync.require_reconciled(ctx.res, record.VERB)
+        except record._opf_sync.SyncError as exc:
+            raise record.RecordError(str(exc))
+        return original(ctx)
+    return patch.object(record, "_reconcile_journal", checked_first)
+
+
+def t119_render_dedicated_refused(fx):
+    """`opf render --write` refuses on a doctor-VALID dedicated-target store (an https target, never
+    contacted) whose owned view drifted: exit 2 naming the interim refusal, the drift left in place, nothing
+    fetched and no lease; the same drift on an in-repo store is repaired (flip: the check dropped for
+    render, so the view is rewritten)."""
+    env = fx.env
+    for label, make in (("in-repo", fx.case), ("dedicated", lambda name: _dedicated(fx, name, url=HTTPS_TARGET))):
+        root = make("t119-" + label)
+        clean = read(root, DECISIONS_VIEW)
+        write_commit(env, root, DECISIONS_VIEW, clean + b"stale\n", "a drifted view")
+        before = snapshot(root)
+        rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+        if label == "in-repo":
+            assert rc == 0 and read(root, DECISIONS_VIEW) == clean, ("T119 the in-repo control repairs the view",
+                                                                     rc, err[-800:])
+            continue
+        assert snapshot(root) == before, ("T119 bytes untouched on refusal", rc, err[-800:])
+        assert rc == 2 and "`opf render --write` " + DEDICATED in err, ("T119 the interim refusal", rc, err[-800:])
+        _no_transport_trace(root, "T119")
+
+
+def flip_t119():
+    return _skip_reconcile("render --write")
+
+
+def t120_one_reconcile_per_record(fx):
+    """A record run checks once, under its own verb: its post-publication render goes through the engine,
+    which carries no check of its own (flip: the engine checks too, so the count is two)."""
+    env = fx.env
+    root = fx.case("t120-nested")
+    calls = []
+    original = record._opf_sync.require_reconciled
+
+    def counting(res, verb, manifest=None):
+        calls.append(verb)
+        return original(res, verb, manifest=manifest)
+    with patch.object(record._opf_sync, "require_reconciled", counting):
+        recorded(record_cli(env, root, CREATE))
+    assert calls == [record.VERB], ("T120 one check per record run, under record's verb", calls)
+
+
+def flip_t120():
+    original = record._opf_views.render
+
+    def checking(argv, **kwargs):
+        res = record._opf_store.resolve_store(Path(os.path.abspath(argv[argv.index("--root") + 1])))
+        record._opf_sync.require_reconciled(res, "render --write")
+        return original(argv, **kwargs)
+    return patch.object(record._opf_views, "render", checking)
+
+
+def t121_init_never_checks(fx):
+    """`opf init` on a dedicated-target store refuses on its existing pointer before any lock, never reaching
+    the reconciliation: a pin of existing behaviour (init creates only an empty-target in-repo store, so the
+    dedicated-target check can never apply to it), with no new code to flip."""
+    env = fx.env
+    root = _dedicated(fx, "t121-init")
+    calls = []
+    original = record._opf_sync.require_reconciled
+
+    def counting(res, verb, manifest=None):
+        calls.append(verb)
+        return original(res, verb, manifest=manifest)
+    before = snapshot(root)
+    with patch.object(record._opf_sync, "require_reconciled", counting):
+        rc, out, err = cli(env, ["init", "--root", str(root)])
+    assert snapshot(root) == before, ("T121 bytes untouched", rc, err[-800:])
+    # init escapes its refusal text, so the pointer refusal reads with its spaces as \x20.
+    assert rc == 2 and "existing\\x20pointer" in err and "preflight refused" in err, (
+        "T121 init's own refusal", rc, err[-800:])
+    assert calls == [], ("T121 init never reaches the reconciliation", calls)
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -10214,6 +10401,11 @@ TESTS = (
     ("T114-receipt-repair-uncommitted-edit", t114_repair_uncommitted_edit, flip_t114),
     ("T115-receipt-repair-head-moved", t115_repair_head_moved, flip_t115),
     ("T116-own-capability-release-interrupt", t116_own_capability_release_interrupt, flip_t116),
+    ("T117-record-dedicated-target-refused", t117_record_dedicated_refused, flip_t117),
+    ("T118-reconcile-after-journal-recovery", t118_reconcile_after_recovery, flip_t118),
+    ("T119-render-write-dedicated-target-refused", t119_render_dedicated_refused, flip_t119),
+    ("T120-one-reconcile-per-record-run", t120_one_reconcile_per_record, flip_t120),
+    ("T121-init-never-reaches-reconcile", t121_init_never_checks, None),   # a pin: no new code to flip
 )
 
 
