@@ -149,19 +149,26 @@ Rules:
      answer, the path and its brief line): a clean verdict over a required input the verifier did not read
      counts as not-passed. An answer NAMES a declared input when it holds the path as a substring (a
      prefix match: a longer path the declared one starts, /abs/in.md of /abs/in.md.bak or a file under a
-     declared directory, still names it), or when it holds an ancestor directory of the path as its own
-     token (not extended by a path character into a sibling, and not glued to another word): a verifier
+     declared directory, still names it; a declared directory written with a trailing slash is also
+     matched by its spelling without one, as its own token), or when it holds an ancestor directory of
+     the path as its own token (not extended by a path character into a sibling, and not glued to another
+     word; an ancestor written with a trailing slash, bare, in backticks or followed by punctuation,
+     still names it, since the slash extends it into no sibling): a verifier
      that could not read the parent did not read the input. A declared INPUT: / has no ancestor and, as a
      one-character substring, is named by any answer text holding a slash. The brief is the --brief file
      already read for its pin and questions. INPUT declarations are read by the SAME parser as the brief
-     lint's P6 (tools/_input_declarations.py): a declaration is one canonical shape at a line's start
-     OUTSIDE fenced code blocks (optional spaces or tabs, at most one bullet list marker, then INPUT:,
-     **INPUT:** or **INPUT**:, then one path, quoted with " or ` when it holds a space); a fenced INPUT
-     line declares nothing and is NOT checked; and a brief holding a line separator other than LF
-     anywhere, a format character outside a fence, a malformed declaration or a look-alike label (the
-     folded token INPUT and a colon-like character or table pipe, anywhere in a line outside fences) is
+     lint's P6 (tools/_input_declarations.py), which reads the brief as the CommonMark document the
+     vendored parser builds (opf/tools/_vendor/marko, pinned 2.2.4): a declaration is a top-level or
+     list-item paragraph line whose rendered, folded text begins with INPUT: and one path (one word, one
+     code span, or one double-quoted span), so **INPUT:**, __INPUT:__, an escaped or character-referenced
+     colon and a confusable-spelt label all declare as a reader shows them; code (a fenced or indented
+     block, a code span) declares nothing and is never a look-alike; and a brief holding a line separator
+     other than LF anywhere, a format character outside code, a malformed declaration or a look-alike
+     label (a rendered paragraph line, heading or table cell opening with the token INPUT or INPUTS and a
+     colon in any case, or a table cell that is exactly INPUT or INPUTS) is
      CANNOT_EVALUATE, exactly what the brief lint refuses before a brief is sent, so the two readings
-     cannot disagree. The path is compared as text and never opened. A BLOCKERS FOUND or any other verdict
+     cannot disagree, and a text the vendored parser cannot read is CANNOT_EVALUATE, never read another
+     way. The path is compared as text and never opened. A BLOCKERS FOUND or any other verdict
      is unchanged, and an UNVERIFIABLE answer that names no declared input is legitimate as above.
      Coverage n/m is reported: n answered answers, m the brief's numbered questions.
   C2 verbatim. Every fenced code block, every blockquote run and every inline double-quoted span must
@@ -322,10 +329,14 @@ an answer that names the input another way
 starts another named path (/a/in.md of /a/in.md.bak, a directory of a file under it) reads as named, toward
 NO_VOTE, and so does an ancestor named with only a sentence stop or an extension dot after it (/a/b.txt
 beside the ancestor /a/b), an accepted over-withholding, while an ancestor extended by a path character
-(/a/b2, /a/b/other.md) is a sibling and does not name it; INPUT lines are read by the brief lint's own
-parser (tools/_input_declarations.py), so a brief the lint would refuse (a non-LF line separator, a format
-character outside a fence, a malformed declaration, a look-alike label) is CANNOT_EVALUATE here rather
-than read another way, a fenced INPUT line declares nothing and is not checked, and the two tools cannot
+other than a closing slash (/a/b2, /a/b/other.md) is a sibling and does not name it (an ancestor written
+/a/b/ with nothing path-like after the slash names it, and a declared directory written with a trailing
+slash is also matched by its spelling without one); INPUT lines are read by the brief lint's own
+parser (tools/_input_declarations.py) over the parsed CommonMark document, so a brief the lint would
+refuse (a non-LF line separator, a format
+character outside code, a malformed declaration, a look-alike label, a text the vendored parser cannot
+read) is CANNOT_EVALUATE here rather
+than read another way, code declares nothing and is not checked, and the two tools cannot
 disagree on what a brief declares; a verifier that skips a declared input without answering UNVERIFIABLE
 for it is not
 caught (that needs a per-input acknowledgement in the delivery format); and an UNVERIFIABLE answer naming
@@ -452,7 +463,9 @@ CLEAN_VERDICT = "NO BLOCKERS"
 # above as _read_declared), the same reading the brief lint's P6 takes (_declared_inputs). For the
 # ancestor-directory reading (_names_input): a character of INPUT_NAME_CONTINUES after an ancestor's
 # occurrence extends it into a deeper or longer path (a sibling), so that occurrence does not name the
-# directory itself, and a character of INPUT_NAME_GLUED before it glues it to another word
+# directory itself, EXCEPT a closing slash followed by no further INPUT_NAME_CONTINUES character (the
+# trailing-slash spelling of the directory itself, bare, in backticks or before punctuation), and a
+# character of INPUT_NAME_GLUED before it glues it to another word
 INPUT_NAME_CONTINUES = frozenset("/_-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 INPUT_NAME_GLUED = frozenset("._~-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 ANSWER_HEAD_RE = re.compile(r"Q([0-9]+)\.(?=[ \t]|$)")
@@ -2075,15 +2088,20 @@ def _rule_all_unverifiable(verdict, answered, total):
 
 def _declared_inputs(text):
     """(brief line, path) for the first declaration of each input the brief declares on an INPUT line,
-    read by the SAME parser as the brief lint's P6 (tools/_input_declarations.py): one canonical shape at
-    a line's start outside fences declares, a fenced INPUT line declares nothing and is not checked, and
-    the brief is CANNOT_EVALUATE when it holds a line separator other than LF anywhere, a format
-    character outside a fence, a malformed declaration or a look-alike label (the brief lint refuses such
-    a brief before it is sent, so a delivery over one proves nothing). The path is text, never opened."""
-    found = _brief_forbidden(text)
-    if found is not None:
-        raise CannotEvaluate("brief line {}: {}".format(*found))
-    inputs, bad = _read_declared(text)
+    read by the SAME parser as the brief lint's P6 (tools/_input_declarations.py) over the parsed
+    CommonMark document: a top-level or list-item paragraph line whose rendered, folded text begins with
+    INPUT: declares one path; code declares nothing and is not checked; and the brief is CANNOT_EVALUATE
+    when it holds a line separator other than LF anywhere, a format character outside code, a malformed
+    declaration, a look-alike label, or a text the vendored parser cannot read (the brief lint refuses
+    such a brief before it is sent, so a delivery over one proves nothing). The path is text, never
+    opened."""
+    try:
+        found = _brief_forbidden(text)
+        if found is not None:
+            raise CannotEvaluate("brief line {}: {}".format(*found))
+        inputs, bad = _read_declared(text)
+    except _input_declarations.DeclarationError as exc:
+        raise CannotEvaluate("brief: {}".format(exc))
     if bad:
         raise CannotEvaluate("brief line {}: {}".format(*bad[0]))
     declared, seen = [], set()
@@ -2097,21 +2115,27 @@ def _declared_inputs(text):
 def _names_input(text, path):
     """Whether an answer's text names the declared input `path`: the path as a plain substring (so a
     longer path the declared one starts, /abs/in.md of /abs/in.md.bak, still names it), or an ANCESTOR
-    directory of it (each prefix cut at a /, the root alone excluded) as its own token: an occurrence
+    directory of it (each prefix cut at a /; the root alone excluded; for a declared directory written
+    with a trailing slash, its own spelling without that slash included) as its own token: an occurrence
     extended by a character of INPUT_NAME_CONTINUES is a deeper or longer path (a sibling, not the
-    directory), and one glued after a character of INPUT_NAME_GLUED is part of another word; a sentence
-    stop directly after an ancestor still counts, so a sibling FILE whose name adds only an extension
-    (/abs/b.txt beside the ancestor /abs/b) is read as naming it, an accepted over-withholding."""
+    directory), EXCEPT a closing slash that no further INPUT_NAME_CONTINUES character follows, which is
+    the directory's own trailing-slash spelling (bare at the text's end, in backticks, or before
+    punctuation or a space) and still names it; one glued after a character of INPUT_NAME_GLUED is part
+    of another word; a sentence stop directly after an ancestor still counts, so a sibling FILE whose
+    name adds only an extension (/abs/b.txt beside the ancestor /abs/b) is read as naming it, an accepted
+    over-withholding."""
     if path in text:
         return True
     parts = path.rstrip("/").split("/")
-    for depth in range(2, len(parts)):
+    top = len(parts) + 1 if path.endswith("/") and len(parts) > 2 else len(parts)
+    for depth in range(2, top):
         ancestor = "/".join(parts[:depth])
         start = text.find(ancestor)
         while start >= 0:
             end = start + len(ancestor)
             glued = start > 0 and text[start - 1] in INPUT_NAME_GLUED
-            extended = end < len(text) and text[end] in INPUT_NAME_CONTINUES
+            extended = end < len(text) and text[end] in INPUT_NAME_CONTINUES and not (
+                text[end] == "/" and (end + 1 == len(text) or text[end + 1] not in INPUT_NAME_CONTINUES))
             if not glued and not extended:
                 return True
             start = text.find(ancestor, start + 1)
@@ -2425,27 +2449,68 @@ def _self_test_cases(fx):
         (_mixed(sha, {3: "Q3. UNVERIFIABLE: " + spaced + " could not be listed."}),
          BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: \"" + spaced + "\"\n")))],
           ["NO_VOTE"] * 5)
-    # a fenced INPUT line declares nothing (the same parser as the brief lint's P6 reads), so the clean
-    # verdict stands over an UNVERIFIABLE answer naming its path
-    check("c1/fenced-input-declares-nothing", verdict(fx.run(
-        unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n```\nINPUT: /abs/in.md\n```\n"))),
-        "PASS")
+    # what a reader shows as INPUT: declares, exactly as the brief lint's P6 reads it: underscore and
+    # asterisk emphasis, a numbered list item, an escaped or character-referenced colon, a fullwidth or
+    # confusable-spelt label, a combining character the fold removes, strikethrough, a code-span path,
+    # and a declaration after a list item's fence or an indented code block (which hide nothing)
+    check("c1/markdown-declared-forms-no-vote", [verdict(fx.run(unread, BRIEF_INPUT.replace(
+        "BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n" + line + "\n"))) for line in (
+        "__INPUT:__ /abs/in.md", "_INPUT:_ /abs/in.md", "*INPUT:* /abs/in.md", "+ INPUT: /abs/in.md",
+        "INPUT\\: /abs/in.md", "INPUT&#58; /abs/in.md", "INPUT： /abs/in.md",
+        "ＩＮＰＵＴ: /abs/in.md", "ІNPUT: /abs/in.md",
+        "I" + chr(0x034F) + "NPUT: /abs/in.md", "INPUT" + chr(0xFE0F) + ": /abs/in.md",
+        "~~INPUT:~~ /abs/in.md",
+        "INPUT: `/abs/in.md`")],
+        ["NO_VOTE"] * 13)
+    # a declaration after a list item's fence or after an indented code block is read (the parsed
+    # document hides nothing there); asserted on the declaration reading itself, since this suite's
+    # question parser separately refuses such a brief's fence shape
+    check("c1/markdown-fence-briefs-declare", [_declared_inputs(BRIEF_INPUT.replace(
+        "BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n" + line + "\n").format(pin=sha)) for line in (
+        "- ```text\n  example\n  ```\n\nINPUT: /abs/in.md",
+        "\n    ```\n\nINPUT: /abs/in.md")],
+        [[(7, "/abs/in.md")], [(6, "/abs/in.md")]])
+    # code declares nothing (the same parser as the brief lint's P6 reads): a fenced INPUT line, an
+    # indented code block's inputs: key, a tab-indented INPUT line and the label in a code span, so the
+    # clean verdict stands over an UNVERIFIABLE answer naming the path
+    check("c1/fenced-input-declares-nothing", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n```\nINPUT: /abs/in.md\n```\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n\n    inputs:\n      target: x\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n\n\tINPUT: /abs/in.md\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n`INPUT: /abs/in.md`\n"))],
+        ["PASS"] * 4)
+    # ordinary prose and tables that only mention the word input pass: the look-alike scan is anchored at
+    # the rendered start of a paragraph line, heading or table cell
+    check("c1/prose-input-mention-passes", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nThe tool's input: a TOML file.\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n`cat input | wc -l`\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nStep 1 - INPUT: /abs/in.md\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n| INPUT | /abs/in.md |\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n",
+                            "BRIEF-PIN: {pin}\n\n| Input | Expected |\n|---|---|\n| a | b |\n"))],
+        ["PASS"] * 5)
     # a brief the lint would refuse is CANNOT_EVALUATE here, never read another way
     check("c1/brief-separator-cannot-evaluate", [verdict(fx.run(unread, brief)) for brief in (
         BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "INPUT: /abs/in.md\r\n"),
         BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "x" + chr(0x2028) + "y\n"),
-        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "x" + chr(0x0085) + "y\n"))],
-        ["CANNOT_EVALUATE"] * 3)
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "x" + chr(0x0085) + "y\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "x" + chr(0x0C) + "y\n"))],
+        ["CANNOT_EVALUATE"] * 4)
     check("c1/brief-format-cannot-evaluate", verdict(fx.run(
         unread, BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: /abs/i" + chr(0x200B) + "n.md"))),
         "CANNOT_EVALUATE")
     check("c1/malformed-declaration-cannot-evaluate", [verdict(fx.run(unread, brief)) for brief in (
-        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "Step 1 - INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "Input: /abs/in.md"),
         BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2013) + " INPUT: /abs/in.md"),
         BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2014) + " INPUT: /abs/in.md"),
-        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "| INPUT | /abs/in.md |"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "- [ ] INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "> INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "INPUT: /abs/in.md\n\n## Inputs:\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n",
+                                     "INPUT: /abs/in.md\n\n| INPUT | x |\n|---|---|\n| a | b |\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: <scratch>/in.md"),
         BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: relative/in.md"))],
-        ["CANNOT_EVALUATE"] * 5)
+        ["CANNOT_EVALUATE"] * 9)
     # the declarations come from the shared parser seam: with it patched to declare nothing, the en-dash
     # look-alike is read past (the legacy per-tool reading) and the clean verdict stands
     endash = BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2013) + " INPUT: /abs/in.md")
@@ -2459,10 +2524,27 @@ def _self_test_cases(fx):
           (verdict(report), "/abs/in.md (brief line 3)" in " ".join(report["reasons"])), ("NO_VOTE", True))
     check("flip/c1-parent-directory", verdict(_patched(
         "_names_input", lambda text, path: path in text, lambda: fx.run(parent, BRIEF_INPUT_DECLARED))), "PASS")
+    # the ancestor's trailing-slash spelling names it: bare at the end, before punctuation or a space,
+    # and in backticks; a character after the slash extends it into a sibling again (the boundary runs
+    # just inside, exactly at, and just outside the closing slash)
+    check("c1/parent-trailing-slash-no-vote", [verdict(fx.run(_mixed(sha, {3: answer}), BRIEF_INPUT_DECLARED))
+          for answer in ("Q3. UNVERIFIABLE: cannot list /abs/",
+                         "Q3. UNVERIFIABLE: cannot list /abs/ (permission denied).",
+                         "Q3. UNVERIFIABLE: cannot list `/abs/`.")], ["NO_VOTE"] * 3)
     check("c1/sibling-path-vote-stands", [verdict(fx.run(_mixed(sha, {3: answer}), BRIEF_INPUT_DECLARED))
           for answer in ("Q3. UNVERIFIABLE: /abs/other could not be read.",
                          "Q3. UNVERIFIABLE: /ab could not be listed.",
                          "Q3. UNVERIFIABLE: /absolute could not be listed.")], ["PASS"] * 3)
+    # a declared directory with a trailing slash is matched by its spelling without one, as its own
+    # token; a name that extends it is still a sibling
+    slash_brief = BRIEF_MIXED.replace(
+        "3. Quote the sentence in docs/gamma.md.", "3. Quote the sentence in /abs/dir/in.md.").replace(
+        "BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: /abs/dir/\n")
+    check("c1/declared-directory-slash-spelling", [verdict(fx.run(_mixed(sha, {3: answer}), slash_brief))
+          for answer in ("Q3. UNVERIFIABLE: cannot read /abs/dir.",
+                         "Q3. UNVERIFIABLE: cannot read /abs/dir",
+                         "Q3. UNVERIFIABLE: cannot read /abs/dirx.")],
+          ["NO_VOTE", "NO_VOTE", "PASS"])
     # an answer naming an absolute path its question does not name already fails on that absent reference
     report = fx.run(unread, BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: /abs/in.md\n"))
     check("c1/declared-input-absent-reference-fail-wins",

@@ -227,16 +227,24 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        states the cure shape (CURE_SHAPE). With no pin the rule does not fire.
   P6 declared input    HARD, for every family. INPUT declarations are read by ONE shared parser
                        (tools/_input_declarations.py), the same reading check_verifier_delivery's C1 takes, so
-                       the two cannot disagree. A declaration is exactly one canonical shape at the start of a
-                       line OUTSIDE fenced code blocks: optional spaces or tabs, at most one bullet list marker
-                       (`-`, `*` or `+` and a space), then INPUT: (upper case, as written here; **INPUT:** and
-                       **INPUT**: are the only markup forms kept; no other prefix, numbered and blockquote
-                       markers included, is skipped), then one absolute path, quoted with " or ` when it holds a
-                       space, then only whitespace; the path is taken as written (no punctuation is stripped and
-                       nothing is expanded; a format character cannot stand in it, since the brief gate under
-                       TEXT refuses the whole brief first, so an input whose real name holds one cannot be
-                       declared, a named cost). The lint calls os.stat on it on the host the lint runs on: a
-                       path that does
+                       the two cannot disagree, and that parser judges the CommonMark document the vendored
+                       parser builds (opf/tools/_vendor/marko, pinned 2.2.4, with the vendored GFM elements),
+                       because the worker reads the brief through a Markdown reader. A declaration is a
+                       paragraph at the document's top level or directly in a list item (bullet or numbered),
+                       judged one rendered line at a time: the line declares when its rendered text, after the
+                       parser has applied emphasis, strikethrough, backslash escapes and character references,
+                       and after format (Cf) and combining (Mn, Me) characters are removed and each character
+                       is folded through NFKC and a bounded confusable-to-ASCII table (Greek and Cyrillic
+                       look-alikes of I N P U T; U+A789, U+2236, U+0589, U+05C3, U+02D0 and U+02F8 read as the
+                       colon), begins with INPUT: (upper case, the colon directly after, no part of the label
+                       in a code span or inline HTML), so **INPUT:**, __INPUT:__, *INPUT:*, INPUT\\:,
+                       INPUT&#58; and a fullwidth or confusable-spelt label all declare what the reader shows.
+                       After the label comes one path, taken from the rendered text: one word, one code span
+                       (the quoted form for a path with spaces or markup characters) or one double-quoted
+                       span, then only whitespace on that rendered line; emphasis inside an unquoted path is
+                       applied like any other emphasis (quote such a path in a code span, whose literal
+                       characters are then judged by shape). The lint calls os.stat on the declared path on
+                       the host the lint runs on: a path that does
                        not exist (ENOENT, or ENOTDIR for a path under a file; a dangling symbolic link is one,
                        since the link is followed) is a HARD finding (exit 1). Any other stat error (EACCES on a
                        parent directory, ELOOP, ENAMETOOLONG), a path that is neither a regular file nor a
@@ -247,23 +255,34 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        is CANNOT_EVALUATE (exit 2): no path (a bare
                        INPUT:, an empty quoted path), a path holding a placeholder, variable, home, glob or
                        brace character (< > $ ~ * ? [ ] { }) or a control character,
-                       a relative path, a `..` component, a quote that does not close on the line, or a word
-                       after the path (an unquoted space). A
-                       LOOK-ALIKE input label is never ignored: ANY other line outside fences whose text, folded
-                       to NFKC and through a bounded confusable-to-ASCII table (Greek and Cyrillic look-alikes
-                       of the letters I N P U T; U+A789, U+2236, U+0589, U+05C3, U+02D0 and U+02F8 read as the
-                       colon), holds the token INPUT or INPUTS followed, past backticks, emphasis, spaces and
-                       tabs, by a colon or a table pipe, ANYWHERE in the line and in any case (- [ ] INPUT:,
-                       a bullet of another character, 1.INPUT:, <b>INPUT:</b>, | INPUT | x |, Step 1 - INPUT:,
-                       Input:, INPUTS:, a fullwidth colon, `INPUT: x`, | INPUT: | x |) is CANNOT_EVALUATE
-                       (exit 2); the table is bounded, so an unlisted look-alike letter passes, and INPUT
-                       FILE: x (a word between the token and the colon) declares nothing and is not a
-                       look-alike, two named misses. INSIDE a fenced code block nothing is a declaration and
-                       nothing is a look-alike: a fenced INPUT line is NOT checked, so a brief may quote a
-                       GitHub Actions workflow (an indented inputs: key) or an example INPUT line in a fence. A
+                       a relative path, a `..` component, a quote that does not close on the line, a word
+                       after the path (an unquoted space), or inline HTML in the path (a <scratch>
+                       placeholder, which a reader hides). A
+                       LOOK-ALIKE input label is never ignored: a rendered paragraph line (wherever the
+                       paragraph sits), a heading or a table cell whose folded text begins, past leading
+                       whitespace, dashes and bare markup marks, with the token INPUT or INPUTS in any case
+                       and then a colon (Input:, INPUTS:, INPUT :, **INPUT: with its markup unclosed,
+                       <b>INPUT:</b>, a task-list item's label, a bulleted or dashed label, a blockquoted
+                       label, ## Inputs:), and a table cell that is exactly INPUT or INPUTS (upper case), is
+                       CANNOT_EVALUATE (exit 2), and so is a label opening a line of an HTML block or comment
+                       once its tags are stripped (a reader may hide that text). NAMED MISSES: the scan is
+                       anchored at the rendered start, so prose that only mentions the word input (The tool's
+                       input: a TOML file.), a label glued after other visible text (1.INPUT:, Step 1 -
+                       INPUT:), a mid-line table pipe in plain prose (| INPUT | x | with no delimiter row) and
+                       a | Input | Expected | header pass; the confusable table is bounded, so an unlisted
+                       look-alike letter or colon passes; INPUT FILE: x (a word between the token and the
+                       colon) declares nothing and is not a look-alike; and a link reference definition
+                       ([INPUT]: /x) renders as nothing and declares nothing. CODE is never read: inside a
+                       fenced or indented code block and a code span nothing is a declaration and nothing is a
+                       look-alike, so a brief may quote a GitHub Actions workflow (an indented inputs: key),
+                       an example INPUT line, or the label itself (`INPUT:`) in code; a tab-indented INPUT
+                       line is an indented code block and declares nothing. A
                        path in prose is never judged by P6: only a
                        declared input is, and an output the brief asks the worker to create is not declared, so
-                       it is not judged.
+                       it is not judged. A brief the vendored parser cannot read, or one over its 1 MiB
+                       ceiling, is CANNOT_EVALUATE, never read another way; conformance is exactly Marko
+                       2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
+                       CommonMark reading (a no-break space accepted after a closing fence, for one).
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -272,7 +291,7 @@ lint time: a declared input present there can be missing where the worker runs, 
 sandbox or mount, or removed or replaced after the lint runs; os.access answers for the lint's own real uid and
 groups, not the worker's, so a lint run as root passes a mode-000 file; a directory is checked for read
 permission, not for search permission; a symbolic link is followed and its target judged; a required input the
-brief names only in prose, in a fenced INPUT line (not checked by design), or not at all, is not checked; and a
+brief names only in prose, in code (not checked by design), or not at all, is not checked; and a
 verifier that skips a declared input without
 saying so is not caught here (check_verifier_delivery reads a clean verdict whose UNVERIFIABLE answer names a
 declared input, or a parent directory of one, as no vote, and no more). P2 does not follow symbolic links, so a path under the workdir lexically
@@ -466,7 +485,8 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            command (quote the def line of X, not the line that runs git push).
   exit 2  CANNOT_EVALUATE  the brief is missing, not a regular file, larger than MAX_BYTES, not UTF-8, or
                            blank; a scope range runs backwards; a pinned revision does not resolve or
-                           cannot be read (P3); an INPUT line P6 cannot check, a look-alike input label, or a
+                           cannot be read (P3); an INPUT line P6 cannot check, a look-alike input label, a
+                           brief the shared reading's vendored parser cannot read, or a
                            declared input that exists but cannot be confirmed readable (P6); the family is not
                            in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
@@ -750,15 +770,20 @@ def _blank_character(ch):
 
 def decode_brief(data):
     """The brief's text, or CannotEvaluate when it is not UTF-8, blank, or holds a line separator other
-    than LF anywhere or a format character outside a fence (forbidden_text, the shared reading of
-    tools/_input_declarations.py): such a character can hide or split a declaration, so it is refused,
-    never removed silently. A format character inside a fenced block's body is still removed for the
-    rules that read fence content (the P5 cure alone reads each cure line as written)."""
+    than LF anywhere or a format character outside a code block or code span of the parsed CommonMark
+    document (forbidden_text, the shared reading of tools/_input_declarations.py): such a character can
+    hide or split a declaration, so it is refused, never removed silently, and a brief the shared
+    reading's vendored parser cannot read (DeclarationError) is CannotEvaluate too. A format character
+    inside code is still removed for the rules that read fence content (the P5 cure alone reads each
+    cure line as written)."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise CannotEvaluate("brief: not valid UTF-8 ({})".format(exc.reason))
-    found = forbidden_text(text)
+    try:
+        found = forbidden_text(text)
+    except _input_declarations.DeclarationError as exc:
+        raise CannotEvaluate("brief: {}".format(exc))
     if found is not None:
         raise CannotEvaluate("brief: line {}: {}".format(*found))
     # A byte order mark, a zero-width or a bidirectional control is invisible and can split a word; only
@@ -2010,9 +2035,11 @@ class PreflightText:
     no such commit (bad_pins) and the commit ids of the other lines that are look-alike pin lines (near_pins, see
     near_pin; for pin agreement); the declared inputs ([(line, path)]) and the malformed declarations and
     look-alike INPUT lines, with the reason (bad_inputs), both read from `raw` by the shared parser
-    (tools/_input_declarations.py, read_inputs), the same reading check_verifier_delivery's C1 uses: outside
-    fences only, one canonical shape declares, and any other line holding the folded token INPUT and a
-    colon-like character or table pipe is bad; and whether a
+    (tools/_input_declarations.py, read_inputs), the same reading check_verifier_delivery's C1 uses: a
+    top-level or list-item paragraph line of the parsed CommonMark document whose rendered, folded text
+    begins with INPUT: declares one path, code declares nothing, and a rendered paragraph line, heading
+    or table cell opening with the folded token INPUT or INPUTS and a colon (or a cell that is exactly
+    the token) is bad; and whether a
     hand-back file is named (the words hand-back file or path and an absolute path on one line). `raw` is the
     brief's text before decode_brief removes format characters, which the P5 cure reads (cure_lines); None stands
     for `text` itself."""
@@ -2028,8 +2055,12 @@ class PreflightText:
         self.near_pins = []   # [(line, commit id)] for the look-alike pin lines (near_pin)
         self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
         # the INPUT declarations P6 checks and the malformed or look-alike INPUT lines, each [(line, ...)],
-        # read from the raw text by the shared parser so P6 and C1 cannot disagree
-        self.inputs, self.bad_inputs = read_inputs(self.raw)
+        # read from the raw text by the shared parser so P6 and C1 cannot disagree; a raw text that
+        # parser cannot read is CannotEvaluate, never an empty reading
+        try:
+            self.inputs, self.bad_inputs = read_inputs(self.raw)
+        except _input_declarations.DeclarationError as exc:
+            raise CannotEvaluate("brief: {}".format(exc))
         self.handback_named = False
         bare = None   # the line of a bare Workdir (or Workdir:, Workdir is) whose path is on the next line
         for number, line in enumerate(text.split("\n"), 1):
@@ -2978,12 +3009,13 @@ def input_state(path):
 
 
 def rule_p6(names, row, repo):
-    """P6 HARD, for every family: a declared input (an INPUT line outside a fence, read by the shared parser)
+    """P6 HARD, for every family: a declared input (a declaring paragraph line of the parsed CommonMark
+    document, read by the shared parser)
     that does not exist on the host
     the lint runs on (input_state gives an errno of MISSING_ERRNOS: ENOENT, or ENOTDIR for a path under a file).
     A malformed declaration or a look-alike label (bad_inputs), any other stat error, another
     file type and a path input_readable refuses leave the input unconfirmed: CannotEvaluate, never a pass. Paths in
-    prose and fenced INPUT lines are not judged."""
+    prose and in code (a fenced or indented block, a code span) are not judged."""
     if names.bad_inputs:
         line, reason = names.bad_inputs[0]
         raise CannotEvaluate("line {}: {}".format(line, reason))
@@ -3680,13 +3712,13 @@ P5_CURE_CHAIN_WORDS = ("Run `git clone -q --no-hardlinks file:///srv/g.git w && 
                        "Make a scratch clone: `git clone --no-hardlinks /srv/w/repo <scratch>/r && git -C "
                        "<scratch>/r checkout --detach {0}`\n")
 # a cure line is read on the raw text, printable ASCII with only space or tab between words: a no-break, em,
-# ideographic or other Unicode space or a control character (unit separator, vertical tab, form feed) makes it
-# no cure line (each one a looser reading splits as a space); a carriage return never reaches P5, since the
-# brief gate refuses every non-LF line separator first
+# ideographic or other Unicode space or a control character (unit separator, vertical tab, file separator)
+# makes it no cure line (each one a looser reading splits as a space); a carriage return or a form feed never
+# reaches P5, since the brief gate refuses every non-LF line separator first
 P5_NOT_CURE_CHARACTERS = tuple(line.format(chr(code)) for line, code in (
     ("git -C w checkout{}--detach {{0}}\n", 0xA0), ("git -C w{}checkout --detach {{0}}\n", 0x2003),
     ("git{}-C w checkout --detach {{0}}\n", 0x3000), ("git -C w checkout{}--detach {{0}}\n", 0x1F),
-    ("git -C w checkout{}--detach {{0}}\n", 0x0B), ("git -C w checkout --detach{}{{0}}\n", 0x0C)))
+    ("git -C w checkout{}--detach {{0}}\n", 0x0B), ("git -C w checkout --detach{}{{0}}\n", 0x1C)))
 # and before format characters are removed: a zero-width space, a soft hyphen, a byte order mark or a bidirectional
 # control inside a cure line makes it none (each one the text with format characters removed would cure). The
 # lines stand in a fence behind the `$ ` prompt: only a fenced block's body may hold a format character (outside
@@ -4429,10 +4461,11 @@ def self_test(report_path=None):
           (1, [("R1", "ADVISORY"), ("S2", "HARD")]))
     check("structure/indented-fence-refused",
           _outcome("1. Steps for the check:\n\n    ```bash\n    python3 t.py\n    ```\n"), (1, [("S1", "HARD")]))
-    # a format character outside a fence refuses the whole brief (exit 2) before any rule runs; inside a
-    # fence it is removed, so the fenced command is read and S1 fires
+    # a format character outside code refuses the whole brief (exit 2) before any rule runs; inside a
+    # fence or a code span it is removed, so the fenced command, and the code-span command a zero-width
+    # space tried to split, are read and S1 or S3 fires
     check("structure/bom-refused", _outcome(BOM_BRIEF), "CannotEvaluate")
-    check("structure/zero-width-split-refused", _outcome(ZERO_WIDTH_SPLIT), "CannotEvaluate")
+    check("structure/zero-width-split-refused", _outcome(ZERO_WIDTH_SPLIT), (1, [("S3", "HARD")]))
     check("structure/fenced-format-removed", _outcome(FENCED_ZERO_WIDTH), (1, [("S1", "HARD")]))
     check("structure/indented-code-refused", _outcome("    git show HEAD\n"), (1, [("S3", "HARD")]))
     # ---------- S1: an executable fence ----------
@@ -5855,25 +5888,64 @@ def self_test(report_path=None):
             "INPUT: {T}/in.md\n", "INPUT: \"{T}/dir with space/in.md\"\n", "INPUT: `{T}/dir with space/in.md`\n",
             "INPUT: {T}\n", "INPUT: \"{T}/dir with space\"\n", "**INPUT:** {T}/in.md\n", "**INPUT**: {T}/in.md\n",
             "- INPUT: {T}/in.md\n", "* INPUT: {T}/in.md\n", "+ INPUT: {T}/in.md\n")], [(0, [])] * 10)
+        # every form a reader shows as INPUT: declares: emphasis however it is spelt, a numbered item, an
+        # escaped or character-referenced colon, a fullwidth or confusable spelling, a combining or format
+        # character the fold removes, strikethrough, and a declaration after a list item's fence or an
+        # indented code block (the parsed document hides nothing there); each with the input present
+        check("preflight/p6-markdown-present-quiet", [p6(text) for text in (
+            "__INPUT:__ {T}/in.md\n", "_INPUT:_ {T}/in.md\n", "*INPUT:* {T}/in.md\n",
+            "1. INPUT: {T}/in.md\n", "INPUT\\: {T}/in.md\n", "INPUT&#58; {T}/in.md\n",
+            "INPUT： {T}/in.md\n", "ＩＮＰＵＴ: {T}/in.md\n",
+            "I" + chr(0x034F) + "NPUT: {T}/in.md\n", "INPUT" + chr(0xFE0F) + ": {T}/in.md\n",
+            "~~INPUT:~~ {T}/in.md\n",
+            "- ```text\n  example\n  ```\n\nINPUT: {T}/in.md\n",
+            "Intro.\n\n    ```\n\nINPUT: {T}/in.md\n",
+            "INPUT: {T}/in.md")], [(0, [])] * 14)
         # the end of the declaration: exactly at the path's end, just inside (trailing whitespace), just outside
         check("preflight/p6-trailing-boundary", [p6(text) for text in (
             "INPUT: {T}/in.md\n", "INPUT: {T}/in.md  \t \n", "INPUT: {T}/in.md extra\n")],
             [(0, []), (0, []), "CannotEvaluate"])
-        # prose is never judged: a missing input named only in prose, an output to create, a placeholder clone line
+        # prose is never judged: a missing input named only in prose, an output to create, a placeholder
+        # clone line, a mid-line mention of the word input, a glued or mid-line label, a lone pipe row
+        # with no delimiter row, an unlisted look-alike letter or colon (the bounded table's named miss)
+        # and a link reference definition (which renders as nothing) all pass
         check("preflight/p6-prose-quiet", [p6(text) for text in (
             "Read {T}/missing.md and summarise it.\n", "Write your notes to {T}/out/new.md (create it).\n",
             "Make a scratch clone: `git clone --no-hardlinks <url> <scratch>/r && git -C <scratch>/r checkout "
-            "--detach <pin>`\n", "Input files are listed below: {T}/missing.md\n")], [(0, [])] * 4)
+            "--detach <pin>`\n", "Input files are listed below: {T}/missing.md\n",
+            "The tool's input: a TOML file.\n", "1.INPUT: {T}/missing.md\n",
+            "Step 1 - INPUT: {T}/missing.md\n", "| INPUT | {T}/missing.md |\n",
+            "| INPUT: | {T}/missing.md |\n",
+            "| Input | Expected |\n|---|---|\n| a | b |\n",
+            "ɪɴᴘᴜᴛ: {T}/missing.md\n", "INPUTꓽ {T}/missing.md\n",
+            "[INPUT]: {T}/missing.md \"title\"\n")], [(0, [])] * 13)
         check("preflight/p6-missing-hard", [p6(text) for text in (
             "INPUT: {T}/missing.md\n", "**INPUT:** {T}/missing.md\n", "**INPUT**: {T}/missing.md\n",
             "INPUT: {T}/dangling.md\n", "INPUT: {T}/in.md/x\n")]
             + [p6("INPUT: {T}/missing.md\n", "gamma")], [p6_missing] * 6)
-        # inside a fenced block nothing is a declaration and nothing is a look-alike: a missing input, a
-        # quoted workflow's inputs: key and a format character in a fenced INPUT line are all unread
+        # the declaring forms above go HARD the same way when their input is missing, the list-fence and
+        # indented-code briefs and a brief with no final newline included
+        check("preflight/p6-markdown-missing-hard", [p6(text) for text in (
+            "__INPUT:__ {T}/missing.md\n", "_INPUT:_ {T}/missing.md\n", "*INPUT:* {T}/missing.md\n",
+            "1. INPUT: {T}/missing.md\n", "INPUT\\: {T}/missing.md\n", "INPUT&#58; {T}/missing.md\n",
+            "ІNPUT: {T}/missing.md\n", "I" + chr(0x034F) + "NPUT: {T}/missing.md\n",
+            "- ```text\n  example\n  ```\n\nINPUT: {T}/missing.md\n",
+            "Intro.\n\n    ```\n\nINPUT: {T}/missing.md\n",
+            "Intro.\n\n\t```\n\nINPUT: {T}/missing.md\n",
+            "INPUT: {T}/missing.md")], [p6_missing] * 12)
+        # inside code nothing is a declaration and nothing is a look-alike: a fenced or tab-indented INPUT
+        # line, a quoted workflow's indented inputs: key, the label in a code span, a shell snippet, an
+        # unclosed fence (whose four-space closer closes nothing, so the rest stays code) and a format
+        # character in fenced or code-span text are all unread
         check("preflight/p6-fence-quiet", [p6(text) for text in (
             "```\nINPUT: {T}/missing.md\n```\n", "~~~\nInput: {T}/missing.md\n~~~\n",
             "A quoted workflow:\n```yaml\non:\n  workflow_dispatch:\n    inputs:\n      target:\n```\nRead it.\n",
             "```\nINPUT: {T}/i" + chr(0x200B) + "n.md\n```\n")], [(0, [])] * 4)
+        check("preflight/p6-code-quiet", [p6(text) for text in (
+            "\tINPUT: {T}/missing.md\n", "Intro.\n\n    INPUT: {T}/missing.md\n",
+            "Intro.\n\n    inputs:\n      target: x\n", "`INPUT: {T}/missing.md`\n",
+            "`cat input | wc -l`\n", "```\ncode\n    ```\nINPUT: {T}/missing.md\n",
+            "a `co" + chr(0x200B) + "de` span\n")], [(0, [])] * 7)
         table = parse_table(TABLE_FIXTURE.encode("utf-8"))
         second = evaluate("INPUT: {T}/in.md\nINPUT: {T}/missing.md\n".replace("{T}", str(inputs)).encode("utf-8"),
                           "alpha", table)
@@ -5885,31 +5957,39 @@ def self_test(report_path=None):
             "INPUT: \"{T}/in.md\n", "INPUT: {T}/dir with space/in.md\n", "**INPUT: {T}/in.md\n",
             "INPUT:** {T}/in.md\n")], ["CannotEvaluate"] * 13)
         check("preflight/p6-look-alike-cannot-evaluate", [p6(text) for text in (
-            "Input: {T}/in.md\n", "input: {T}/in.md\n", "INPUTS: {T}/in.md\n", "INPUT： {T}/in.md\n",
-            "ＩＮＰＵＴ: {T}/in.md\n", "`INPUT: {T}/in.md`\n", "| INPUT: | {T}/in.md |\n",
-            "INPUT : {T}/in.md\n")], ["CannotEvaluate"] * 8)
-        # the look-alike scan reads the whole line, not only its start: a task-list item, another bullet,
-        # a glued numbered marker, markup, a table cell, a lead-in and a dash prefix are never ignored,
-        # and the markers the canonical shape dropped (numbered, blockquote) are look-alikes too
-        check("preflight/p6-look-alike-anywhere-cannot-evaluate", [p6(text) for text in (
-            "- [ ] INPUT: {T}/in.md\n", chr(0x2022) + " INPUT: {T}/in.md\n", "1.INPUT: {T}/in.md\n",
-            "<b>INPUT:</b> {T}/in.md\n", "| INPUT | {T}/in.md |\n", "Step 1 - INPUT: {T}/in.md\n",
+            "Input: {T}/in.md\n", "input: {T}/in.md\n", "INPUTS: {T}/in.md\n",
+            "INPUT : {T}/in.md\n", chr(0x0456) + "nput: {T}/in.md\n", "**INPUT: {T}/in.md\n",
+            "x\nInput: {T}/in.md\n")], ["CannotEvaluate"] * 7)
+        # the look-alike scan reads each rendered paragraph line's, heading's or table cell's start, past
+        # leading dashes, bullets and bare markup marks: a task-list item, another bullet, inline HTML
+        # around the label, a dash prefix, a blockquoted label, a heading, a header cell that is exactly
+        # the token, and a label line of an HTML block or comment are never ignored
+        check("preflight/p6-look-alike-start-cannot-evaluate", [p6(text) for text in (
+            "- [ ] INPUT: {T}/in.md\n", chr(0x2022) + " INPUT: {T}/in.md\n",
+            "<b>INPUT:</b> {T}/in.md\n",
             chr(0x2013) + " INPUT: {T}/in.md\n", chr(0x2014) + " INPUT: {T}/in.md\n",
-            "1. INPUT: {T}/in.md\n", "> INPUT: {T}/in.md\n")], ["CannotEvaluate"] * 10)
-        # the bounded confusable fold: Cyrillic and Greek I, and a colon-like character, fold to ASCII
-        check("preflight/p6-confusable-cannot-evaluate", [p6(text) for text in (
+            "> INPUT: {T}/in.md\n", "## Inputs:\n",
+            "| INPUT | x |\n|---|---|\n| a | b |\n",
+            "<p>INPUT: {T}/in.md</p>\n", "<!--\nINPUT: {T}/in.md\n-->\n")], ["CannotEvaluate"] * 10)
+        # the bounded confusable fold serves the declaration itself: Cyrillic and Greek I and a colon-like
+        # character fold to the exact label, which declares and is judged on the host
+        check("preflight/p6-confusable-declares", [p6(text) for text in (
             chr(0x0406) + "NPUT: {T}/in.md\n", chr(0x0399) + "NPUT: {T}/in.md\n",
-            "INPUT" + chr(0xA789) + " {T}/in.md\n", "INPUT" + chr(0x2236) + " {T}/in.md\n",
-            chr(0x0456) + "nput: {T}/in.md\n")], ["CannotEvaluate"] * 5)
+            "INPUT" + chr(0xA789) + " {T}/in.md\n", "INPUT" + chr(0x2236) + " {T}/in.md\n")], [(0, [])] * 4)
+        check("preflight/p6-confusable-missing-hard", [p6(text) for text in (
+            chr(0x0406) + "NPUT: {T}/missing.md\n", chr(0x0399) + "NPUT: {T}/missing.md\n",
+            "INPUT" + chr(0xA789) + " {T}/missing.md\n")], [p6_missing] * 3)
         # the named misses of the bounded fold: a word between the token and the colon declares nothing
-        # and is no look-alike, and prose naming the token with no colon or pipe after it passes
+        # and is no look-alike, and prose naming the token with no colon after it passes
         check("preflight/p6-word-miss-quiet", [p6(text) for text in (
             "INPUT FILE: {T}/missing.md\n", "The INPUT files are described here.\n",
             "Input files are below: {T}/missing.md\n")], [(0, [])] * 3)
-        # a line separator other than LF, anywhere, refuses the brief before any rule runs
+        # a line separator other than LF, anywhere, refuses the brief before any rule runs (a form feed is
+        # one here, since the parser reads it as a line ending)
         check("preflight/p6-separator-cannot-evaluate", [p6(text) for text in (
             "INPUT: {T}/in.md\r\n", "x\rINPUT: {T}/in.md\n", "x" + chr(0x2028) + "y\n",
-            "x" + chr(0x2029) + "y\n", "x" + chr(0x0085) + "y\n")], ["CannotEvaluate"] * 5)
+            "x" + chr(0x2029) + "y\n", "x" + chr(0x0085) + "y\n", "x" + chr(0x0C) + "y\n")],
+            ["CannotEvaluate"] * 6)
         # a format character outside a fence refuses the brief: one inside a declared path, one glued to
         # the label, a byte order mark at the brief's start and one in plain prose
         check("preflight/p6-format-cannot-evaluate", [p6(text) for text in (
@@ -5956,22 +6036,31 @@ def self_test(report_path=None):
             forbidden_text=lambda text: None,
             read_inputs=lambda text: _input_declarations.read(
                 "".join(ch for ch in text if unicodedata.category(ch) != "Cf"))))
-        # with fence reading patched out, a quoted workflow's indented inputs: key is a look-alike again
+        # with the code-block rule patched out, a quoted workflow's indented inputs: key is a look-alike
         check("revert/p6-fence-red", *parser_flip(
             [lambda: p6_code("```yaml\non:\n  workflow_dispatch:\n    inputs:\n      target:\n```\n")],
-            ["CannotEvaluate"], _fence_opens=lambda line: None))
-        # with the scan anchored back at the line's start, a task-list item's label is ignored again
-        check("revert/p6-look-alike-anywhere-red", *parser_flip(
-            [lambda: p6_code("- [ ] INPUT: {T}/in.md\n")], [0],
-            NEAR_INPUT_RE=re.compile(r"\AINPUTS?+[`*_ \t]*+[:|]", re.I)))
-        # with the confusable table emptied, a Cyrillic I hides the label again
+            ["CannotEvaluate"], CODE_BLOCKS_ARE_CODE=False))
+        # with the code-span rule patched out, a label quoted in backticks is a look-alike again
+        check("revert/p6-code-span-red", *parser_flip(
+            [lambda: p6_code("`Input: {T}/in.md`\n")], ["CannotEvaluate"], CODE_SPANS_ARE_CODE=False))
+        # with the ignored categories emptied, a combining character splits the label unseen
+        check("revert/p6-ignored-categories-red", *parser_flip(
+            [lambda: p6_code("I" + chr(0x034F) + "NPUT: {T}/missing.md\n")], [0], IGNORED_CATEGORIES=()))
+        # with quoted paragraphs declaring, a blockquoted INPUT line is a declaration, not a look-alike
+        check("revert/p6-declaring-kind-red", *parser_flip(
+            [lambda: p6_code("> INPUT: {T}/missing.md\n")], [1],
+            unit_declares=lambda kind: kind in ("paragraph", "quoted")))
+        # with the cell tokens emptied, a header cell that is exactly INPUT passes
+        check("revert/p6-cell-token-red", *parser_flip(
+            [lambda: p6_code("| INPUT | x |\n|---|---|\n| a | b |\n")], [0], CELL_TOKENS=()))
+        # with the confusable table emptied, a Cyrillic I hides the label (and its missing path) again
         check("revert/p6-confusable-red", *parser_flip(
-            [lambda: p6_code(chr(0x0406) + "NPUT: {T}/in.md\n")], [0], CONFUSABLES={}))
+            [lambda: p6_code(chr(0x0406) + "NPUT: {T}/missing.md\n")], [0], CONFUSABLES={}))
     finally:
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 197)
+    check("revert/every-flip-ran", len(flipped), 200)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -6021,12 +6110,14 @@ def self_test(report_path=None):
           "negation before another verb, a prohibition word in a code span or after `=`, a second listed command "
           "line and a later clause are judged), and prints one reached from prose, gh pr checkout, a web address "
           "naming a branch or a "
-          "submodule update --remote (P5), refuses a declared input (a canonical INPUT: line outside a fence, "
-          "read by the parser C1 shares; a fenced INPUT line is not checked) missing on this host, a dangling "
+          "submodule update --remote (P5), refuses a declared input (a declaring paragraph line of the parsed "
+          "CommonMark document whose rendered, folded text begins with INPUT:, read by the parser C1 shares; "
+          "code declares nothing and is not checked) missing on this host, a dangling "
           "link or a path under a file included, never a path in prose, and "
-          "exits 2 on an INPUT line it cannot check, a look-alike label anywhere in a line (folded through the "
-          "bounded confusable table), a brief holding a non-LF line separator or a format character outside a "
-          "fence, a FIFO or device, or an input this uid "
+          "exits 2 on an INPUT line it cannot check, a look-alike label opening a rendered paragraph line, "
+          "heading or table cell (folded through the bounded confusable table), a brief holding a non-LF line "
+          "separator or a format character outside code, a brief the vendored parser cannot read, a FIFO or "
+          "device, or an input this uid "
           "cannot read (P6), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
