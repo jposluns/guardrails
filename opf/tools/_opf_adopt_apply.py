@@ -134,12 +134,17 @@ byte for byte; a moved revision, a changed observed item (sources, targets, stor
 a changed worksheet refuses into a fresh plan with its own single approval. Replay admission precedes
 freshness: a run whose base transaction exists refuses on the one-apply rule itself. A plan row whose
 handler needs what this driver cannot supply (_DRIVER_UNSUPPLIED: planned create-file bytes, a consumer
-postimage model, a pack, observations, a receipt, init-store's own sequencing) refuses before anything is
-written, naming it. Apply then composes, into the one base transaction, the preservation pass
+postimage model, observations, a receipt, init-store's own sequencing) refuses before anything is
+written, naming it. A plan with a plant-governance row then takes ONE release-pack gather
+(gather_release_pack): the release manifest, root.txt and exactly those rows' source members, read beside
+the running opf/ and held in memory, so both composition passes compose from identical bytes and a gather
+refusal (an absent or unreadable file) still writes nothing; verify_pack_member stays the only judge of
+the gathered bytes. Apply then composes, into the one base transaction, the preservation pass
 (compose_preservation), then every plan op in plan order in the apply stage, each handler with its typed
 context (_driver_contexts: ONE OpContext for the file ops, ONE RegistrationContext for the registration
 ops, a HookContext for enable-hook) or, for every other handler, the context table (`ops`, the
-transaction's ApplyOps; `plan`; `approval`; `product_root`, run_apply's own argument; `stage`), then
+transaction's ApplyOps; `plan`; `approval`; `product_root`, run_apply's own argument; `stage`; and `pack`,
+the gathered release pack, only when the plan has a plant-governance row), then
 the driver's mandatory receipt stage (DRIVER_STAGES; spec 14 ends apply with the receipt and its
 outcome-event chain, which no plan row can carry). It refuses any composed remove or write of a plan
 source that occupies no managed destination (such a source stays frozen in place until the retirement
@@ -5772,6 +5777,50 @@ def _context_plan(context):
     return plan
 
 
+# --- the release pack shipped beside the running opf/ (spec 14.1: the b.5 pack bytes) ------------------
+
+# The release manifest and its ROOT report, each read only at its own path under _RELEASE_ROOT: the
+# directory holding the opf/ this module runs from (the _opf_adopt_complete._PACK_ROOT idiom, one level
+# higher), never the product root, an environment variable, a CLI argument or the network. Only the
+# self-test redirects the root, by patching this module attribute over a fixture release tree.
+RELEASE_MANIFEST_REL = ".aiqt/manifest.toml"
+RELEASE_ROOT_TXT_REL = ".aiqt/release/root.txt"
+_RELEASE_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def gather_release_pack(source_members):
+    """The pack verify_pack_member judges, observed from the release shipped beside the running opf/: the
+    release manifest (RELEASE_MANIFEST_REL) and root.txt (RELEASE_ROOT_TXT_REL) under _RELEASE_ROOT, and
+    the bytes of exactly the named `source_members`, each read at its own source path under that same
+    root, nothing else. Every read is contained, no-follow, regular and single-linked (_read_live), and an
+    absent or unreadable file raises AdoptApplyError naming its path: there is no fallback location. This
+    gather makes NO trust decision: every returned byte is judged by verify_pack_member against the plan's
+    agreed ROOT, so a wrong or substituted release tree refuses there, never here. Disclosed: an opf-only
+    copy shipped without .aiqt/ beside opf/ cannot supply a plant-governance row (the absent manifest
+    refuses here, naming what an opf-only distribution must ship; a plan with no plant row never reads the
+    release); the manifest is the whole release's, so a source row outside the named members needs no file
+    present; root.txt sits in the same writable tree as the manifest, so it is no independent anchor
+    (independence is the plan's captured anchor_sha256, verify_pack_member's first gate); and each member
+    is read in full, bounded by the journal's contained-read cap, before any digest judges it."""
+    root_fd = _open_product_root(_RELEASE_ROOT)
+    try:
+        def read(rel):
+            _fst, data = _read_live(root_fd, rel)
+            if data is None:
+                raise AdoptApplyError(
+                    "the release file {!r} is absent beside opf/ (under {!r}); an opf-only distribution "
+                    "must ship {} and {}, with every pack source, beside opf/, and there is no fallback "
+                    "location (fail-closed)".format(rel, str(_RELEASE_ROOT), RELEASE_MANIFEST_REL,
+                                                    RELEASE_ROOT_TXT_REL))
+            return data
+        manifest = read(RELEASE_MANIFEST_REL)
+        root = read(RELEASE_ROOT_TXT_REL)
+        members = dict((rel, read(rel)) for rel in sorted(set(source_members)))
+    finally:
+        store._close_fd_exc_safe(root_fd)
+    return dict(manifest=manifest, root=root, members=members)
+
+
 def verify_pack_member(plan, pack, source_member):
     """The b.5 trust gate for ONE pack member (spec 14.1: the release identity, bound by digest). `pack`
     carries the release manifest's exact bytes (`manifest`), the caller-observed `root.txt` bytes (`root`)
@@ -5827,7 +5876,8 @@ def verify_pack_member(plan, pack, source_member):
 
 def _plant_governance(op_row, context=None):
     """plant-governance (spec 14.1): create-only planting of ONE pack member whose bytes passed the trust
-    gate (verify_pack_member, against context["plan"] and context["pack"]) and whose verified digest is the
+    gate (verify_pack_member, against context["plan"] and context["pack"], the release pack run_apply
+    gathers beside the running opf/, gather_release_pack) and whose verified digest is the
     row's content_digest, composed into the transaction context["ops"] carries. ApplyOps.create re-observes
     the path absent (a pre-existing different file routes to retire-file plus create-file under explicit
     plan rows, never an overwrite). The store tree is the engine's, never a governance adapter's, so a path
@@ -6587,8 +6637,6 @@ _DRIVER_UNSUPPLIED = {
                                         "content_digest, and no bound source supplies the bytes)"),
     (_execute_registration_op, "repoint-consumer"): ("the consumer's planned postimage model (the plan binds "
                                                      "only its new_digest)"),
-    (_plant_governance, None): ("context pack (the release manifest, root.txt and member bytes, which only "
-                                "the trust-anchor gather can supply)"),
     (_render_views, None): ("context observations (the inert git observations the store checks read, which "
                             "this driver does not gather)"),
     (_record_adoption, None): ("context receipt and now (the receipt core and its instant, which only the "
@@ -6608,7 +6656,7 @@ def _unsupplied(rows):
     return found
 
 
-def _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest=None):
+def _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest=None, pack=None):
     """The contexts the plan op handlers of ONE apply-stage composition take, built from the sealed plan, the
     captured approval and `product_root`, run_apply's own argument (the root it admitted the plan against
     and re-derived it over), never from other ambient state (spec 14.1); only the table carries
@@ -6619,11 +6667,15 @@ def _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest=None
     registration chain extends link by link) and `manifest_digest`, the store manifest digest of the
     observation rederive_bound_or_refuse re-derived (plan-bound: the byte-identical plan's inventory_digest seals
     it; None binds nothing, so a live manifest refuses), and the enable-hook handler to a HookContext. Every other
-    handler, and the receipt stage, takes `table` (`ops`, `plan`, `approval`, `product_root`, `stage`).
+    handler, and the receipt stage, takes `table` (`ops`, `plan`, `approval`, `product_root`, `stage`, and
+    `pack` only when given: the release pack run_apply gathers beside the running opf/ for a plan with a
+    plant-governance row, gather_release_pack; the default None, a plan with no such row, adds no pack key).
     No typed context carries a value the plan does not bind: the OpContext holds no planned bytes, the
     RegistrationContext no consumer model and the HookContext only `ops`, and run_apply refuses a row that
     needs a value no context carries (_DRIVER_UNSUPPLIED) before anything is composed."""
     table = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root, stage=APPLY_STAGE)
+    if pack is not None:
+        table["pack"] = pack
     kept = dict((row["path"], row["digest"]) for row in plan_doc["sources"] if row["disposition"] == "keep")
     typed = {_execute_file_op: OpContext(ops, plan_doc["sources"]),
              _execute_registration_op: RegistrationContext(ops, plan_doc["store"], kept=kept,
@@ -6902,7 +6954,14 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     mandatory receipt stage (DRIVER_STAGES), has not landed, so an unlanded step refuses the whole apply fail-closed by
     construction, never half of it; and refuse a row whose handler needs what this driver cannot supply
     (_DRIVER_UNSUPPLIED: a value neither the sealed plan nor its approval carries, or init-store's own
-    sequencing), naming it, never composing the row over a default.
+    sequencing), naming it, never composing the row over a default. A plan with a plant-governance row then
+    takes ONE release-pack gather (gather_release_pack, after that refusal and before any composition): the
+    release manifest, root.txt and exactly the plant rows' source members, read beside the running opf/ and
+    held in memory, so the preflight and the transaction compose from the same bytes and a release tree
+    swapped mid-run changes nothing planted; a gather refusal (an absent or unreadable file, named) also
+    precedes the journal, so it writes nothing, and a plan with no plant-governance row reads no release at
+    all. The gathered bytes carry no trust of their own: verify_pack_member alone judges them, against the
+    plan's agreed ROOT.
 
     Composition is the driver's, and so are its rules. One compose function stages the plan, approval and
     sealed planning-inventory bytes (the inventory rederive_bound_or_refuse returned, proved to seal to the
@@ -6961,6 +7020,9 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
         raise AdoptApplyError("{}; this driver supplies only what the sealed plan, its approval and the product "
                               "root carry, and apply never composes a row over a default, so it refuses before "
                               "anything is written (fail-closed)".format("; ".join(unsupplied)))
+    plant_members = [row["source_member"] for row in rows
+                     if OP_HANDLERS.get(row["op"]) is _plant_governance]
+    pack = gather_release_pack(plant_members) if plant_members else None
     frozen = set(row["path"] for row in plan_doc["sources"] if not row["occupying"])
 
     def compose(ops):
@@ -6969,7 +7031,8 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
             ops.create(approval_rel(run_id), approval_bytes)
             ops.create(planning_inventory_rel(run_id), inventory_bytes)
             compose_preservation(ops, plan_doc)
-            context, typed = _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest)
+            context, typed = _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest,
+                                              pack=pack)
             for i, row in enumerate(rows):
                 verdict = dispatch(row, typed.get(OP_HANDLERS.get(row["op"]), context))
                 if verdict.status != store.VALID:
@@ -13642,8 +13705,9 @@ def _self_test_checks():
     # 11b: the driver's typed contexts and its one preservation pass (B2, B3), over a planner-frozen fixture
     # with a kept file (register-unmanaged), a non-occupying retire source (retire-file), a non-occupying
     # migrate source (no op row) and an adopter registration its enable-hook row merges. The rows whose
-    # handlers this build cannot run under the driver (init-store, render-views and plant-governance, which
-    # _DRIVER_UNSUPPLIED names) and the receipt stage are stand-ins; the retire-file, register-unmanaged
+    # handlers this build cannot run under the driver (init-store and render-views, which _DRIVER_UNSUPPLIED
+    # names) and the receipt stage are stand-ins, and so is plant-governance (its rows verify only against
+    # the fixture release tree of 11d, which drives the REAL handler); the retire-file, register-unmanaged
     # and enable-hook rows run their REAL handlers, the first two spied at their per-op composers, which a
     # handler reaches only through its typed context. Each check names the mutant it is red against, or
     # says it is a fixture PRECONDITION or a GREEN-ON-REVERT GUARD (green against the pre-B2/B3 driver too).
@@ -13747,17 +13811,6 @@ def _self_test_checks():
         check("driver-apply-unsupplied-observations-refused", "render-views" in (err or "")
               and "needs context observations" in (err or "") and "before anything is written" in (err or "")
               and not reached and _snapshot(root) == before, observed=err)
-        # plant-governance keeps its REAL handler: the plan's enforcement plant rows need the pack (the
-        # release manifest, root.txt and member bytes), which this driver cannot supply, so apply names
-        # that value for the plant rows alone and writes nothing (red against a _DRIVER_UNSUPPLIED without
-        # the plant-governance entry, where the real handler composes against an absent pack).
-        with typed_driver({"init-store": scaffold, "render-views": benign}):
-            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
-        check("driver-apply-unsupplied-pack-refused",
-              "('plant-governance') needs context pack" in (err or "")
-              and "('render-views')" not in (err or "") and "('init-store')" not in (err or "")
-              and "before anything is written" in (err or "") and not reached and _snapshot(root) == before,
-              observed=err)
         # init-store keeps its REAL handler: apply names its unsequenced substrate run before anything is
         # written (red against a _DRIVER_UNSUPPLIED without the init-store entry, where the real handler
         # dispatches and refuses at its member-set precondition instead, the substrate run unnamed).
@@ -13807,14 +13860,23 @@ def _self_test_checks():
               and "legacy.md (an archive copy at another digest" in (err or "")
               and _snapshot(root) == before, observed=err)
         del reached[:], composed_creates[:]
-        with typed_driver(stood_in):
-            ttxn, terr = attempt(run_apply, root, typed_plan, typed_approval, sheet)
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as unread:
+            unread_release = Path(unread).resolve()
+            with typed_driver(stood_in), \
+                    mock.patch.object(sys.modules[__name__], "_RELEASE_ROOT", unread_release):
+                ttxn, terr = attempt(run_apply, root, typed_plan, typed_approval, sheet)
+            unread_left = os.listdir(unread_release)
         after = _snapshot(root)
         # red against the plain context table for every handler, against typed contexts missing or mis-keying
         # any of the three handlers (that row takes the table and refuses), against a pass that also archives
         # a file-op row's source (the second create refuses), and against a driver that skips the pass
         # (_require_archived_once refuses the unarchived migrate source).
         check("driver-apply-typed-contexts-commit", ttxn == trid and terr is None, observed=terr)
+        # the release is read only for a row the plant-governance handler itself handles: with every plant
+        # row stood in, this commit ran with _RELEASE_ROOT pointing at an empty directory, which stayed
+        # empty and absent of any release file (red against an unconditional gather, which would refuse the
+        # whole apply on the absent release manifest; 11d drives the gather with the real handler).
+        check("driver-apply-no-plant-rows-reads-no-release", ttxn == trid and unread_left == [])
         # red against the plain table or a missing file-op mapping (the handler refuses before its composer).
         check("driver-file-op-row-reaches-handler-with-opcontext", ("retire-file", "OpContext") in reached
               and ("retire-file", "dict") not in reached)
@@ -13859,13 +13921,14 @@ def _self_test_checks():
     named = _unsupplied([schema.canonical_op(name) for name in (
         "create-file", "repoint-consumer", "plant-governance", "record-adoption", "render-views", "init-store",
         "retire-file", "move-file", "register-unmanaged", "enable-hook")])
-    check("driver-unsupplied-names-each-missing-value", len(named) == 6 and all(
+    check("driver-unsupplied-names-each-missing-value", len(named) == 5 and all(
         any(needle in finding for finding in named) for needle in (
             "('create-file') needs the created file's planned bytes",
             "('repoint-consumer') needs the consumer's planned postimage model",
-            "('plant-governance') needs context pack", "('record-adoption') needs context receipt and now",
+            "('record-adoption') needs context receipt and now",
             "('render-views') needs context observations",
-            "('init-store') needs its own journaled substrate run")), observed=named)
+            "('init-store') needs its own journaled substrate run"))
+          and not any("plant-governance" in finding for finding in named), observed=named)
     # a stand-in handler for the same op needs none of them (red against an _unsupplied keyed by op name
     # alone), and the ops the driver supplies in full name nothing.
     with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, lambda op_row, context=None: schema._ok())):
@@ -13978,6 +14041,235 @@ def _self_test_checks():
               and store.moved_dest("legacy/MOVE.md") not in after
               and len(taken) == 2 and all(c.count(todo_copy) == 1 for c in taken)
               and verify_bundle(root, mrid).status == VALID)
+
+    # 11d: the release pack beside the running opf/ (gather_release_pack) and run_apply's one gather of it.
+    # The unit vectors drive the gather alone over fixture release trees; the driver vectors freeze a plan
+    # whose release binding and enforcement member digests name a REAL fixture release tree, patch
+    # _RELEASE_ROOT over it (the complete self-test's _PACK_ROOT idiom) and run the REAL plant-governance
+    # handler end to end, verify_pack_member alone judging the gathered bytes.
+    import _opf_pack_manifest as pack_manifest
+    here = sys.modules[__name__]
+
+    def release_fixture(base, payloads, absent=None, name="release"):
+        """A fixture release tree under base/name: .aiqt/manifest.toml whose source rows are exactly
+        `payloads` plus `absent` (rows listed in the manifest with no file written), root.txt naming the
+        manifest's own ROOT, and each payloads member written at its own source path. Returns (release
+        root, manifest bytes, agreed ROOT digest)."""
+        release_root = Path(base) / name
+        listed = dict(payloads, **(absent or dict()))
+        rows = [dict(path=path, sha256=_sha256(listed[path]))
+                for path in sorted(listed, key=lambda path: path.encode("utf-8"))]
+        q = chr(34)
+        lines = ["format-version = 1", "release-version = " + q + "1.3.0" + q, "genesis = true",
+                 "tree-sha256 = " + q + pack_manifest.compute_tree(rows) + q]
+        for row in rows:
+            lines += ["", "[[sources]]", "path = " + q + row["path"] + q,
+                      "bytes = " + str(len(listed[row["path"]])), "sha256 = " + q + row["sha256"] + q]
+        lines += ["", "[[artifacts]]", "artifact-id = " + q + "file:" + rows[0]["path"] + q,
+                  "path = " + q + rows[0]["path"] + q, "kind = " + q + "file" + q,
+                  "sha256 = " + q + rows[0]["sha256"] + q]
+        manifest = ("\n".join(lines) + "\n").encode("utf-8")
+        agreed = "sha256:" + pack_manifest.compute_root(manifest)
+        written = dict(payloads)
+        written[RELEASE_MANIFEST_REL] = manifest
+        written[RELEASE_ROOT_TXT_REL] = (agreed + "\n").encode("ascii")
+        for rel, data in written.items():
+            target = release_root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        return release_root, manifest, agreed
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        base = Path(temp).resolve()
+        member_rel = "opf/enforcement/codex/AGENTS.opf.md"
+        spare_rel = "opf/enforcement/cursor/opf.mdc"
+        member_payload = b"the release's member bytes\n"
+        release_root, manifest, _agreed = release_fixture(
+            base, dict([(member_rel, member_payload)]), absent=dict([(spare_rel, b"a row, no file\n")]))
+        root_txt = (release_root / RELEASE_ROOT_TXT_REL).read_bytes()
+        with mock.patch.object(here, "_RELEASE_ROOT", release_root):
+            pack, err = attempt(gather_release_pack, [member_rel])
+        # the gather returns the release tree's exact bytes, judged by nothing here (red against a gather
+        # reading another location, whose bytes differ or are absent).
+        check("release-pack-reads-beside-opf", err is None
+              and pack == dict(manifest=manifest, root=root_txt,
+                               members=dict([(member_rel, member_payload)])), observed=err)
+        # only the NAMED members are read: the manifest's spare source row has no file on disk, and the
+        # gather neither reads nor misses it (red against a gather reading every manifest source row).
+        check("release-pack-reads-only-named-sources", err is None
+              and ("path = " + chr(34) + spare_rel) in manifest.decode("utf-8")
+              and set((pack or dict()).get("members", dict())) == set([member_rel]), observed=err)
+        bare = base / "bare"
+        (bare / ".aiqt").mkdir(parents=True)
+        with mock.patch.object(here, "_RELEASE_ROOT", bare):
+            err = refusal(gather_release_pack, [member_rel])
+        check("release-pack-manifest-absent-refused", RELEASE_MANIFEST_REL in (err or "")
+              and "beside opf/" in (err or "") and "no fallback" in (err or ""), observed=err)
+        noroot = base / "noroot"
+        (noroot / ".aiqt").mkdir(parents=True)
+        (noroot / RELEASE_MANIFEST_REL).write_bytes(manifest)
+        with mock.patch.object(here, "_RELEASE_ROOT", noroot):
+            err = refusal(gather_release_pack, [])
+        check("release-pack-root-txt-absent-refused", RELEASE_ROOT_TXT_REL in (err or "")
+              and "beside opf/" in (err or ""), observed=err)
+        linked = base / "linked"
+        shutil.copytree(release_root, linked)
+        (linked / RELEASE_MANIFEST_REL).unlink()
+        os.symlink(str(linked / RELEASE_ROOT_TXT_REL), str(linked / RELEASE_MANIFEST_REL))
+        with mock.patch.object(here, "_RELEASE_ROOT", linked):
+            err = refusal(gather_release_pack, [])
+        check("release-pack-symlinked-manifest-refused", "not a regular file" in (err or "")
+              and RELEASE_MANIFEST_REL in (err or ""), observed=err)
+        hard = base / "hard"
+        shutil.copytree(release_root, hard)
+        os.link(str(hard / member_rel), str(hard / "opf/enforcement/codex/second-link"))
+        with mock.patch.object(here, "_RELEASE_ROOT", hard):
+            err = refusal(gather_release_pack, [member_rel])
+        check("release-pack-hardlinked-member-refused", member_rel in (err or "")
+              and "hard links" in (err or ""), observed=err)
+        with mock.patch.object(here, "_RELEASE_ROOT", release_root):
+            err = refusal(gather_release_pack, ["../" + member_rel])
+        check("release-pack-traversing-source-refused",
+              "not a contained relative file path" in (err or ""), observed=err)
+
+    # the release beside THIS running module: a repository or installed tree ships a self-consistent
+    # release (root.txt names the manifest's ROOT, every opf/tools/ source row reads back at its recorded
+    # size and digest); the standalone-closure materialization (opf/ copied alone, no .aiqt/) exercises the
+    # absent-manifest refusal instead, so both shipped shapes are pinned. The branch probes the LITERAL
+    # shipped path, so a wrong RELEASE_MANIFEST_REL or RELEASE_ROOT_TXT_REL is red here on a repository
+    # tree: the first branch's gather then refuses on the misnamed constant.
+    if (_RELEASE_ROOT / ".aiqt" / "manifest.toml").is_file():
+        head_pack, err = attempt(gather_release_pack, [])
+        document, graded = (None, None) if err is not None else pack_manifest.parse_manifest(
+            head_pack["manifest"])
+        tool_rows = [row for row in (document or dict()).get("sources", [])
+                     if row["path"].startswith("opf/tools/")]
+        tools_pack, terr = (None, "no opf/tools/ source rows gathered") if not tool_rows else attempt(
+            gather_release_pack, [row["path"] for row in tool_rows])
+        check("release-pack-real-tree", err is None and graded is not None and graded.status == VALID
+              and pack_manifest.parse_root_txt(head_pack["root"])
+              == pack_manifest.compute_root(head_pack["manifest"])
+              and bool(tool_rows) and terr is None and all(
+                  len(tools_pack["members"][row["path"]]) == row["bytes"]
+                  and _sha256(tools_pack["members"][row["path"]]) == row["sha256"] for row in tool_rows),
+              observed=(err, terr))
+    else:
+        err = refusal(gather_release_pack, [])
+        check("release-pack-real-tree", RELEASE_MANIFEST_REL in (err or "")
+              and "beside opf/" in (err or ""), observed=err)
+
+    # 11d (driver): run_apply over a planner-frozen fixture whose plant rows run their REAL handler.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        base = Path(temp).resolve()
+        root = base / "product"
+        root.mkdir()
+        (root / "keep.md").write_bytes(b"kept\n")
+        (root / "legacy.md").write_bytes(b"legacy rules\n")
+        preg_rel = ".claude/settings.json"
+        preg_old = hook._emit(hook.canonical_registration())
+        preg_new = hook.merge_registration(preg_old, schema.HOOK_COMMAND).new_bytes
+        (root / preg_rel).parent.mkdir()
+        (root / preg_rel).write_bytes(preg_old)
+        # the product root's own decoy release: present before the plan freezes, internally consistent,
+        # and at ANOTHER ROOT than the plan's agreed one, so a gather reading under the product root
+        # would refuse at verify_pack_member rather than commit (red for a product-root gather).
+        decoy_manifest = b"# the product root's own manifest, never the release's\n"
+        (root / ".aiqt/release").mkdir(parents=True)
+        (root / RELEASE_MANIFEST_REL).write_bytes(decoy_manifest)
+        (root / RELEASE_ROOT_TXT_REL).write_bytes(
+            ("sha256:" + pack_manifest.compute_root(decoy_manifest) + "\n").encode("ascii"))
+        head = _selftest_git_commit(root)
+        hook_op = dict(op="enable-hook", registration_path=preg_rel, plugin_entry=schema.HOOK_COMMAND,
+                       old_digest=plan_digest(preg_old), new_digest=plan_digest(preg_new))
+        sheet = _sheet_with(root, head, [dict(path="keep.md", disposition="keep", actor="fixture"),
+                                         dict(path="legacy.md", disposition="retire", actor="fixture")],
+                            hook_op)
+        # rebind the worksheet to the fixture release: every planted member digest is its own fixture
+        # payload's, and the release binding agrees on the fixture manifest's ROOT, so the frozen plan's
+        # plant rows verify against exactly that tree (the registration member keeps its merge digest).
+        payloads = dict()
+        for row in sheet["bindings"]["enforcement"]:
+            for member in row["members"]:
+                if member["path"] != preg_rel:
+                    source = schema.pack_source(member["path"])
+                    payloads[source] = b"the released bytes of " + source.encode("utf-8") + b"\n"
+        release_root, _manifest, agreed = release_fixture(base, payloads)
+        for row in sheet["bindings"]["enforcement"]:
+            row["members"] = [member if member["path"] == preg_rel else dict(
+                member, digest="sha256:" + _sha256(payloads[schema.pack_source(member["path"])]))
+                for member in row["members"]]
+        sheet["bindings"]["release"] = dict(sheet["bindings"]["release"],
+                                            manifest_sha256=agreed, anchor_sha256=agreed)
+        sheet["ops"] = sheet["ops"][:2] + schema.enforcement_install_ops(sheet["bindings"]["enforcement"],
+                                                                         hook_op["old_digest"])
+        plant_plan = _freeze(root, sheet)[0] or b""
+        plant_doc = tomllib.loads(plant_plan.decode("utf-8")) if plant_plan else dict(
+            run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
+        prid = plant_doc["run_id"]
+        plant_approval = attempt(capture_approval, root, plant_plan, sheet, "adopter", now)[0] or b""
+        plant_rows = [row for row in plant_doc["ops"] if row["op"] == "plant-governance"]
+        # PRECONDITION: the fixture froze and was approved, its plant rows naming exactly the fixture
+        # release's sources (a failed freeze turns this and every check below red).
+        check("driver-plant-fixture-frozen-and-approved", bool(plant_plan) and bool(plant_approval)
+              and bool(plant_rows)
+              and set(row["source_member"] for row in plant_rows) == set(payloads))
+
+        def plant_scaffold(op_row, context):
+            # init-store's stand-in, as in 11b: the scaffolded manifest, staged through the context table.
+            if not isinstance(context, dict):
+                return schema._cannot("the init-store stand-in composes only through the context table")
+            context["ops"].create(schema.store_manifest(plant_doc["store"]),
+                                  _opf_init.build_manifest().encode("utf-8"))
+            return schema._ok()
+
+        def plant_benign(op_row, context):
+            return schema._ok()
+
+        def plant_receipt(context):
+            return schema._ok()
+
+        def plant_driver():
+            stack = contextlib.ExitStack()
+            stack.enter_context(mock.patch.dict(OP_HANDLERS, dict([
+                ("init-store", plant_scaffold), ("render-views", plant_benign)])))
+            stack.enter_context(mock.patch.dict(DRIVER_STAGES, dict([(RECEIPT_STAGE, plant_receipt)])))
+            return stack
+
+        # the gather refusal precedes the journal: an absent release manifest refuses the whole apply with
+        # the tree byte-identical and no journal directory created (red against a gather moved inside
+        # compose, after the journal is prepared).
+        before = _snapshot(root)
+        vacant = base / "vacant"
+        vacant.mkdir()
+        with plant_driver(), mock.patch.object(here, "_RELEASE_ROOT", vacant):
+            err = refusal(run_apply, root, plant_plan, plant_approval, sheet)
+        check("driver-apply-pack-gather-refusal-writes-nothing",
+              RELEASE_MANIFEST_REL in (err or "") and "beside opf/" in (err or "")
+              and _snapshot(root) == before and not (root / JOURNAL_REL).exists(), observed=err)
+        gathered = []
+        real_gather = gather_release_pack
+
+        def counting_gather(source_members):
+            gathered.append(sorted(set(source_members)))
+            return real_gather(source_members)
+        # the REAL plant-governance handler end to end: run_apply gathers ONCE beside the (patched) release
+        # root, both composition passes compose from those held bytes, and every planted path carries its
+        # own fixture payload byte-identically; the product root's decoy release stays unjudged and
+        # untouched (red against a dropped pack= in the table, where the handler reports "carries no pack
+        # manifest"; against a restored _DRIVER_UNSUPPLIED plant entry, which would refuse this plan;
+        # against a product-root gather, whose decoy ROOT verify_pack_member refuses; and against a
+        # per-composition-pass gather, which counts 2).
+        with plant_driver(), mock.patch.object(here, "_RELEASE_ROOT", release_root), \
+                mock.patch.dict(globals(), dict(gather_release_pack=counting_gather)):
+            ptxn, perr = attempt(run_apply, root, plant_plan, plant_approval, sheet)
+        after = _snapshot(root)
+        check("driver-apply-supplies-pack-for-plant-governance",
+              ptxn == prid and perr is None
+              and all(after.get(row["path"]) == payloads[row["source_member"]] for row in plant_rows)
+              and after.get(RELEASE_MANIFEST_REL) == decoy_manifest
+              and verify_bundle(root, prid).status == VALID, observed=perr)
+        check("driver-apply-gathers-once",
+              gathered == [sorted(set(row["source_member"] for row in plant_rows))], observed=gathered)
 
     # 12: the finish ops (slice 5), see _finish_ops_self_test.
     _finish_ops_self_test(check)
