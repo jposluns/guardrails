@@ -58,7 +58,10 @@ plain name cannot, so no plainly named remote can collide with the argument; con
 not git's only name source, though: for an argument with NO '/' (an scp-style host:path whose path
 part has none, like host:repo.git), git falls back to reading the legacy remotes/ and branches/
 files under the git common directory as the remote's definition, so sync also refuses any non-empty
-entry under those two directories before every transport (the legacy-store gate below). The
+entry under those two directories before every transport (the legacy-store gate below). For a
+file-transport target (an absolute path or a file:// URL) git resolves the PATH itself as well,
+trying sibling spellings and following a gitfile, so sync requires before every transport that
+the path is itself the repository (the path-target gate below). The
 argument is passed to git unencoded; the DESTINATION SOURCES table below enumerates every name
 source git consults for it and the gate that covers each. A detached or unborn HEAD refuses.
 7. Compare with `merge-base --is-ancestor` both ways
@@ -99,7 +102,7 @@ forced off for the transport call: core.hooksPath to the null device (no reposit
 other hook runs), core.fsmonitor off, protocol.allow=never with only file, https and ssh
 re-allowed, and core.sshCommand pinned to the adopter's own global-or-system value (or plain `ssh`
 where none is set), so a repository-local core.sshCommand never executes while a global one is
-honoured as the adopter's own setting. Two gates then protect every fetch and push, both
+honoured as the adopter's own setting. Four gates then protect every fetch and push, all
 fail-closed. First, the repository scopes (--local and --worktree) are listed by name and every
 listed key must sit on a CLOSED ALLOWLIST of keys that, under the gates stated here, can neither
 name a program nor redirect the transport: core.repositoryformatversion, core.filemode, core.bare,
@@ -186,14 +189,28 @@ git COMMON directory so a linked worktree's shared store is covered, whatever th
 shape: refusing every entry needs no reimplementation of git's name-matching rule, a store
 repository has no sanctioned use for the deprecated format, and the empty branches/ directory an
 old `git init` template leaves behind still passes.
+Fourth, the PATH-TARGET gate: for a file-transport target (an absolute path, or a file:// URL),
+git resolves the path itself (path.c enter_repo, in the local upload-pack and receive-pack),
+trying <path>/.git, <path>, <path>.git/.git and <path>.git in turn and following a gitfile at the
+one it picks, so a target that is absent or an empty non-repository directory beside a
+<path>.git reaches that sibling, and a gitfile or symbolic link at <path> or <path>/.git reaches
+any repository; the push then reports success while the verified path was never written. Sync
+requires the path to be itself a git directory, or a working tree whose .git is a real directory,
+decided with lstat and with git's own `--git-dir` test on that directory, so no gitfile is
+followed, and refuses naming the path otherwise. A file:// URL is admitted to that test only in
+the file:///<absolute path> spelling without a percent escape (git decodes escapes and reads the
+host part its own way); a symbolic link at the path itself is followed, as git follows it.
+ORDER: before each fetch and push, the gates run as the allowlist, the effective rewrite and
+remote-shadow gates, the path-target gate, and the legacy-store gate LAST, so no git process runs
+between the legacy directory listing and the transport launch.
 
 DESTINATION SOURCES (git 2.53): every source git consults to turn the fetch or push argument into
 a destination, read from git's documentation and the source text it describes (remote.c
 remote_get/remote_get_1 try the argument as a remote NAME over the configuration, then as a
 legacy remotes/ or branches/ entry where valid_remote_nick admits it, and only then use the
 argument itself as the URL; url.* rewrites and the transport's scheme and helper handling then
-apply). Each row names the source, how sync covers it (refused, neutralized, or shown
-unreachable), and the self-test vector that proves it:
+apply). Each row names the source, how sync covers it (refused, neutralized, shown unreachable,
+or disclosed and honoured), and the self-test vector that proves it:
 
   source git consults for the argument   | covered how                | proving self-test vector
   ---------------------------------------+----------------------------+---------------------------
@@ -207,12 +224,15 @@ unreachable), and the self-test vector that proves it:
   remote.<name>.* from environment       | neutralized: _transport_   | "an environment-config
   config (GIT_CONFIG_COUNT/KEY/VALUE,    | env drops every GIT_*      | remote named the verified
   GIT_CONFIG_PARAMETERS, GIT_CONFIG_     | override by construction   | URL never reaches the
-  GLOBAL/SYSTEM)                         |                            | transport ..."
+  GLOBAL/SYSTEM)                         |                            | transport ..." (carried by
+                                         |                            | GIT_CONFIG_PARAMETERS) and
+                                         |                            | its inherited-environment
+                                         |                            | control
   <git-common-dir>/remotes/<argument>    | refused: the legacy-store  | "a legacy remotes/ entry
   (read_remotes_file, behind             | gate refuses any non-empty | refuses the fetch/push
   valid_remote_nick)                     | entry, argument-           | ..." and their flips;
-                                         | independent                | the shape and worktree
-                                         |                            | vectors
+                                         | independent, run last      | the shape, worktree and
+                                         | before the launch          | runs-last vectors
   <git-common-dir>/branches/<argument>   | refused: the same legacy-  | "a legacy branches/ entry
   (read_branches_file, behind            | store gate                 | refuses ..."; the empty-
   valid_remote_nick)                     |                            | directory vector
@@ -233,6 +253,23 @@ unreachable), and the self-test vector that proves it:
                                          | ssh re-allowed; the per-   |
                                          | protocol repository key    |
                                          | refuses on the allowlist)  |
+  the file transport's own path          | refused: the path-target   | "a file-path target that
+  resolution for an absolute-path or     | gate (the path must itself | is absent beside a
+  file:// target (enter_repo tries       | be the repository, decided | <path>.git refuses ...",
+  <path>/.git, <path>, <path>.git/.git   | without following a        | the empty-directory,
+  and <path>.git, following a gitfile)   | gitfile); an ssh or https  | gitfile, symbolic-link and
+                                         | path is resolved by the    | file:// vectors and their
+                                         | server, the target's own   | flip; the bare and
+                                         | trust domain               | non-bare targets that sync
+  below the URL, from the global and     | disclosed and honoured:    | none for the honoured
+  system scopes and the ssh client:      | the adopter's own trust    | sources (honoured by
+  core.sshCommand (the program the ssh   | domain (core.sshCommand is | design, not gated); "a
+  transport runs), the ssh client        | pinned to the global-or-   | repository-scope
+  configuration (~/.ssh/config and the   | system value); the         | core.sshCommand is outside
+  system ssh_config: HostName,           | repository scope of each   | the allowlist ..." for the
+  ProxyCommand, ProxyJump),              | git key refuses on the     | repository scope
+  http.<url>.curloptResolve and          | allowlist                  |
+  http.proxy / http.<url>.proxy          |                            |
 
 SUBMODULES: a store whose repository carries any git submodule machinery refuses before any step:
 a .gitmodules file at the store root or at the repository toplevel (the only working-tree path git
@@ -256,13 +293,20 @@ mechanism for the writes sync itself makes is a lock ref at the target (for exam
 written with an atomic compare-and-swap push, and until it ships the lease is local to this host, so
 the section 17 propagation window stands: two systems can both begin, and the divergence check here
 is the overlapping control that catches that collision after the fact (the two layers together, not
-the lease alone, are the guarantee, spec 5.7/17). Between the LAST configuration gate and the
-transport launch there is a time-of-check/time-of-use window: every gate reads the repository's
-configuration and git directory, then git starts, and a writer that lands a redirecting key or
-legacy file inside that window is read by the transport but by no gate. No gate run from this
-process can close that window; such a writer already holds write access to the store repository's
-own .git directory, the very trust domain the gates verify, and the bound on it is the filesystem
-permission on that directory, not this module (disclosed, not gated). The pre-operation
+the lease alone, are the guarantee, spec 5.7/17). Between each gate and the transport launch
+there is a time-of-check/time-of-use window: every gate reads the repository's configuration, its
+git directory or the target path, then git starts, and a writer that lands a redirecting key,
+legacy file or target-path entry inside that window is read by the transport but by no gate. The
+legacy-store gate runs LAST, so for a legacy remotes/ or branches/ entry the window is only the
+span from that gate's directory listing to git's own read of the file inside the launched
+transport, with no git process between; for a repository configuration key it also spans the
+git processes run after the allowlist gate (the global and system core.sshCommand lookups, the
+rewrite and remote-shadow enumerations, the path-target test and the legacy gate's
+common-directory lookup), and for the target path the legacy gate's lookup. No gate run from
+this process can close that window; a writer inside it already holds write access to the store
+repository's own .git directory, or to the target path, the very trust domain the gates verify,
+and the bound on it is the filesystem permission there, not this module (disclosed, not gated).
+The pre-operation
 reconciliation spec 5.7 requires
 of EVERY other operation is not yet enforced by the other verbs; the shared pre-operation reconcile
 is its own later unit, and until it lands a writing verb on a dedicated-target store does not refuse
@@ -321,6 +365,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import os
 import re
+import stat
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1180,6 +1225,81 @@ def _refuse_legacy_remote_stores(git, store_root):
                                 len(entries), "y" if len(entries) == 1 else "ies", legacy, path))
 
 
+def _refuse_path_target_redirect(git, store_root, url):
+    """THE PATH-TARGET GATE: for a file-transport target (an absolute path, or a file:// URL),
+    require before every fetch and push that the path is itself a git directory, or a working tree
+    whose .git is a real directory, decided without following a gitfile. git resolves such a path
+    itself (path.c enter_repo, run by the local upload-pack and receive-pack): it tries
+    <path>/.git, <path>, <path>.git/.git and <path>.git in that order and follows a gitfile (a
+    regular file holding `gitdir: <elsewhere>`) at the one it picks, so a target that is absent,
+    or an empty non-repository directory, beside a <path>.git sends the fetch and the push to that
+    sibling, and a gitfile or a symbolic link at <path> or <path>/.git sends them to any
+    repository, while the destination agreement compared only the string. <path>/.git is read
+    with lstat and, where present, must be a real directory (a gitfile, a symbolic link or any
+    other entry refuses); where it is absent, <path> itself must be a directory (a regular file
+    there is a gitfile or a bundle git would read in its place); the chosen directory must then
+    be a git directory to git itself (`--git-dir` naming a directory, never a file, so no gitfile
+    is followed). A directory git would skip (a .git directory that is not a git directory)
+    refuses rather than letting git fall through to the next candidate. A file:// URL is checked
+    only in the file:///<absolute path> spelling with no percent escape: git decodes escapes and
+    reads the host part its own way, so any other spelling refuses rather than being re-parsed
+    here. A symbolic link at <path> itself is followed, as git follows it (a path and its link are
+    two spellings of one target). An ssh or https target names a path the server resolves, inside
+    the target's own trust domain, and is not checked here."""
+    scheme, sep, rest = url.partition("://")
+    if url.startswith("/"):
+        path = url
+    elif sep and scheme.lower() == "file":
+        if not rest.startswith("/") or "%" in rest:
+            raise SyncError("the sync target {!r} is a file:// URL with a host part or a percent "
+                            "escape, which git reads its own way, so the repository it would "
+                            "open cannot be shown; record the target as git:<absolute path> or "
+                            "file:///<absolute path> with no escape, and re-run "
+                            "(fail-closed)".format(url))
+        path = rest
+    else:
+        return
+    remedy = ("; git would resolve the path itself, trying <path>/.git, <path>, <path>.git/.git "
+              "and <path>.git and following a gitfile, so the fetch or push could reach a "
+              "repository other than the verified one; make the target path the bare repository "
+              "(or a working tree with a real .git directory) and re-run (fail-closed)")
+    dotgit = os.path.join(path, ".git")
+    try:
+        found = os.lstat(dotgit)
+    except (FileNotFoundError, NotADirectoryError):
+        found = None
+    except OSError as exc:
+        raise SyncError("the sync target's .git entry {} cannot be examined ({}); which "
+                        "repository git would open cannot be shown{}".format(dotgit, exc, remedy))
+    if found is not None:
+        if not stat.S_ISDIR(found.st_mode):
+            raise SyncError("the sync target path {} holds a .git entry that is not a directory "
+                            "(a gitfile or a symbolic link, which git follows to another "
+                            "repository){}".format(path, remedy))
+        candidate = dotgit
+    else:
+        try:
+            found = os.stat(path)
+        except FileNotFoundError:
+            raise SyncError("the sync target path {} does not exist{}".format(path, remedy))
+        except OSError as exc:
+            raise SyncError("the sync target path {} cannot be examined ({}){}".format(
+                path, exc, remedy))
+        if not stat.S_ISDIR(found.st_mode):
+            raise SyncError("the sync target path {} is not a directory (a regular file there is "
+                            "a gitfile or a bundle git reads in its place){}".format(path, remedy))
+        candidate = path
+    out = _opf_observe._run_git(git, store_root, ["--git-dir=" + candidate, "rev-parse",
+                                                  "--absolute-git-dir"])
+    if not out.completed:
+        raise SyncError("could not run git to examine the sync target path {} ({}){}".format(
+            path, out.err.strip(), remedy))
+    if out.rc != 0:
+        raise SyncError("the sync target path {} is not a git repository: {} is not a git "
+                        "directory (rc {}: {}){}".format(path, candidate, out.rc, out.err.strip(),
+                                                         remedy))
+
+
 def _refuse_index_gitlinks(git, toplevel, why):
     """Refuse a gitlink (mode 160000) entry anywhere in the repository's INDEX, read bounded with
     `ls-files -s` from the toplevel so the scan covers the whole index even under a nested store. A
@@ -1355,11 +1475,11 @@ def _refuse_effective_remote_shadow(git, store_root, env, url):
 
 def _run_transport(git, store_root, args, url, timeout=_TRANSPORT_TIMEOUT_S):
     """Run ONE fetch or push of the verified URL under the transport environment and overrides,
-    bounded, after the repository-scope refusals, the legacy-store gate, the effective-rewrite
-    gate and the effective remote-name shadow gate over that URL.
+    bounded, after the repository-scope refusals, the effective-rewrite gate and the effective
+    remote-name shadow gate over that URL, the path-target gate, and LAST the legacy-store gate,
+    so no git process runs between the legacy directory listing and the launch.
     Every other git call this module makes goes through the read-only scrubbed boundary instead."""
     _refuse_local_redirect_config(git, store_root)
-    _refuse_legacy_remote_stores(git, store_root)
     overrides = _transport_overrides(git)
     env = _transport_env()
     env["GIT_CONFIG_COUNT"] = str(len(overrides))
@@ -1368,6 +1488,8 @@ def _run_transport(git, store_root, args, url, timeout=_TRANSPORT_TIMEOUT_S):
         env["GIT_CONFIG_VALUE_{}".format(i)] = value
     _refuse_effective_url_rewrite(git, store_root, env, url)
     _refuse_effective_remote_shadow(git, store_root, env, url)
+    _refuse_path_target_redirect(git, store_root, url)
+    _refuse_legacy_remote_stores(git, store_root)
     cmd = [git, "--no-pager", "--no-replace-objects", "-C", str(store_root)] + list(args)
     return _opf_observe._capture_bounded(cmd, env, timeout, _TRANSPORT_MAX_OUTPUT)
 
@@ -1640,10 +1762,11 @@ def _run_sync(mode, root):
     branch = _current_branch(git, res.store_root)
     # The repository gates run here, before the destination agreement (which itself holds the
     # recorded remote to a plain name and reads every url and pushurl value), the fetch and every
-    # local step that could reach a repository-chosen program; _run_transport re-runs the allowlist
-    # gate, the legacy-store gate and the effective rewrite and remote-shadow gates before
-    # each fetch and push. The submodule gate runs first, so a populated submodule is named as the
-    # reason even where its submodule.* bookkeeping keys would refuse on the allowlist too.
+    # local step that could reach a repository-chosen program; before each fetch and push,
+    # _run_transport runs the allowlist gate again, the effective rewrite and remote-shadow gates,
+    # the path-target gate and, last, the legacy-store gate again. The submodule gate runs first,
+    # so a populated submodule is named as the reason even where its submodule.* bookkeeping keys
+    # would refuse on the allowlist too.
     _refuse_submodules(git, res.store_root)
     _refuse_local_redirect_config(git, res.store_root)
     _refuse_legacy_remote_stores(git, res.store_root)
@@ -1720,7 +1843,13 @@ def self_test():
     variant, scp targets with and without '/', an https target, empty template directories passing,
     and a linked worktree's shared common directory), the linked-worktree config handling (a store
     without the worktreeConfig extension syncs; the extension without its per-worktree file refuses
-    naming what is missing), the environment-config drop shown at the destination, the
+    naming what is missing), the PATH-TARGET refusals (an absent target or an empty
+    non-repository directory beside a <path>.git, in the plain and the file:// spelling, a gitfile
+    at the target path, and a gitfile or symbolic link at <path>/.git, each refused before any
+    transport, the fetch and push redirects shown live once the gate is dropped, a file:// URL
+    with a host part or a percent escape refused, and ordinary bare, non-bare and symlinked
+    targets still syncing), the environment-config drop shown at the destination through
+    GIT_CONFIG_PARAMETERS with the redirect shown live under an inherited environment, the
     repository-config ALLOWLIST
     gate (an ordinary store carrying every allowlisted key still syncs; every documented family key
     and every unlisted key, core.sshCommand and core.hooksPath included, refuses before any fetch
@@ -1767,7 +1896,8 @@ def self_test():
         return 1
     print("opf-sync self-test: PASS ({} checks: grammar, pattern refusals, admission, "
           "classification, pull, push, destination agreement, remote-name and pushurl-value gates, "
-          "legacy remote-store refusals, worktree-scope handling, environment-config drop, "
+          "legacy remote-store refusals, worktree-scope handling, path-target refusals, "
+          "environment-config drop, "
           "lease, repository-config allowlist, format-record refusals, "
           "submodule and index-gitlink refusals, transport neutralization, URL-rewrite and "
           "remote-shadow refusals, working-tree driver "
@@ -2255,6 +2385,10 @@ def _self_test_units(check):
             # qualifies) and takes the destination from the file. The gate refuses ANY non-empty
             # entry under either directory, whatever the argument's shape, so it never matches
             # names; the empty directory an old `git init` template leaves must still pass.
+            # The checks marked POSITIVE CONTROL are not flips: one drops the gate itself to show
+            # the vector is live in git, so removing the gate from the source cannot turn it red
+            # (the refusal check beside it is the one that goes red); another exercises the pass
+            # side, so it goes red only under a gate that over-refuses.
             lg_target = "git@example.invalid:repo.git"
             lg_root = _store("legacyremotes", "git:" + lg_target)
             _git(lg_root, "remote", "add", "origin", lg_target)
@@ -2276,8 +2410,9 @@ def _self_test_units(check):
             check("a legacy remotes/ entry refuses the fetch before any transport",
                   rc == EXIT_MALFORMED and "legacy" in out and "remotes" in out
                   and _no_fetch_head(lg_root) and _head(lg_root) == lg_head)
-            # the named flip: with the legacy-store gate dropped, git reads the remotes file for
-            # the scp argument and the fetch lands the UNVERIFIED repository's tip in FETCH_HEAD
+            # POSITIVE CONTROL (the vector is live): with the legacy-store gate dropped, git reads
+            # the remotes file for the scp argument and the fetch lands the UNVERIFIED
+            # repository's tip in FETCH_HEAD
             with patch.object(module, "_refuse_legacy_remote_stores", lambda *a, **k: None):
                 rc, out = run(["--root", lg_root])
             check("dropping the legacy-store gate redirects the fetch through the remotes file "
@@ -2287,26 +2422,65 @@ def _self_test_units(check):
                   and _head(lg_root) == lg_head)
             # the push side: the same file redirects the push, which would then report success
             # while the verified target was never contacted
-            lp_target = "git@example.invalid:repo2.git"
-            lp_root = _store("legacypush", "git:" + lp_target)
-            _git(lp_root, "remote", "add", "origin", lp_target)
-            lp_evil = os.path.join(base, "legacypush-evil.git")
-            _git(base, "init", "--bare", lp_evil)
-            _git(lp_root, "push", lp_evil, "main")
-            _local_commit(lp_root, "data.txt", "pending legacy\n")
-            os.makedirs(os.path.join(lp_root, ".git", "remotes"))
-            (Path(lp_root) / ".git" / "remotes" / lp_target).write_text(
-                "URL: {}\n".format(lp_evil), encoding="utf-8")
+
+            def _legacy_push(name, target):
+                # a store one commit AHEAD of an unverified repository its remotes/ file names
+                root = _store(name, "git:" + target)
+                _git(root, "remote", "add", "origin", target)
+                evil = os.path.join(base, name + "-evil.git")
+                _git(base, "init", "--bare", evil)
+                _git(root, "push", evil, "main")
+                _local_commit(root, "data.txt", "pending legacy\n")
+                os.makedirs(os.path.join(root, ".git", "remotes"))
+                (Path(root) / ".git" / "remotes" / target).write_text(
+                    "URL: {}\n".format(evil), encoding="utf-8")
+                return root, evil
+
+            lp_root, lp_evil = _legacy_push("legacypush", "git@example.invalid:repo2.git")
             lp_tip = _tip(lp_evil)
             rc, out = run(["--push", "--root", lp_root])
             check("a legacy remotes/ entry refuses the push before any transport",
                   rc == EXIT_MALFORMED and "legacy" in out and _no_fetch_head(lp_root)
                   and _tip(lp_evil) == lp_tip)
+            # POSITIVE CONTROL (the vector is live), on a FRESH fixture so its outcome never
+            # depends on what the refusal vector above left behind (an unrefused push there would
+            # already have landed, and this run would then find the two sides equal)
+            lq_root, lq_evil = _legacy_push("legacypush2", "git@example.invalid:repo3.git")
             with patch.object(module, "_refuse_legacy_remote_stores", lambda *a, **k: None):
-                rc, out = run(["--push", "--root", lp_root])
+                rc, out = run(["--push", "--root", lq_root])
             check("dropping the legacy-store gate lands the push at the remotes-file repository "
                   "and reports success (shown red)",
-                  rc == EXIT_OK and "pushed" in out and _tip(lp_evil) == _head(lp_root))
+                  rc == EXIT_OK and "pushed" in out and _tip(lq_evil) == _head(lq_root))
+            # the legacy-store gate runs LAST before the launch: an entry that appears while any
+            # earlier transport-time gate runs (planted here as each one returns) is still seen
+            lo_target = "git@example.invalid:repo4.git"
+            lo_root = _store("legacylast", "git:" + lo_target)
+            _git(lo_root, "remote", "add", "origin", lo_target)
+            lo_evil = os.path.join(base, "legacylast-evil.git")
+            _git(base, "init", "--bare", lo_evil)
+            _git(lo_root, "push", lo_evil, "main")
+            lo_remotes = os.path.join(lo_root, ".git", "remotes")
+
+            def _planting(orig):
+                def wrapper(*a, **k):
+                    result = orig(*a, **k)
+                    os.makedirs(lo_remotes, exist_ok=True)
+                    Path(lo_remotes, lo_target).write_text("URL: {}\n".format(lo_evil),
+                                                           encoding="utf-8")
+                    return result
+                return wrapper
+
+            with patch.object(module, "_transport_overrides", _planting(_transport_overrides)), \
+                    patch.object(module, "_refuse_effective_url_rewrite",
+                                 _planting(_refuse_effective_url_rewrite)), \
+                    patch.object(module, "_refuse_effective_remote_shadow",
+                                 _planting(_refuse_effective_remote_shadow)), \
+                    patch.object(module, "_refuse_path_target_redirect",
+                                 _planting(_refuse_path_target_redirect)):
+                rc, out = run(["--root", lo_root])
+            check("a legacy entry that appears during the earlier transport-time gates is still "
+                  "refused (the legacy-store gate runs last)",
+                  rc == EXIT_MALFORMED and "legacy" in out and _no_fetch_head(lo_root))
             # the branches/ variant refuses through the same gate
             lb_root = _store("legacybranches", "git:" + lg_target)
             _git(lb_root, "remote", "add", "origin", lg_target)
@@ -2336,8 +2510,8 @@ def _self_test_units(check):
             rc, out = run(["--root", lh_root])
             check("an https target still refuses on a legacy remotes/ entry",
                   rc == EXIT_MALFORMED and "legacy" in out and _no_fetch_head(lh_root))
-            # the other edge: EMPTY remotes/ and branches/ directories (git init templates) hold
-            # no entry git could read, and must not refuse
+            # POSITIVE CONTROL (no over-refusal), the other edge: EMPTY remotes/ and branches/
+            # directories (git init templates) hold no entry git could read, and must not refuse
             le_root, _le_bare = _paired("legacyempty")
             os.makedirs(os.path.join(le_root, ".git", "remotes"))
             os.makedirs(os.path.join(le_root, ".git", "branches"))
@@ -2373,34 +2547,190 @@ def _self_test_units(check):
                   "what is missing",
                   rc == EXIT_MALFORMED and "extensions.worktreeConfig" in out
                   and "config file" in out)
+            # POSITIVE CONTROL (no over-refusal): the remedy the refusal names restores sync
             _git(wt_store, "config", "--worktree", "user.name", "OPF Self Test")
             rc, out = run(["--root", wt_store])
             check("creating the per-worktree config file restores the linked-worktree store",
                   rc == EXIT_OK and "EQUAL" in out)
 
+            # -- a file-path target is resolved by git itself: the path must BE the repository ----
+            # git's enter_repo tries <path>/.git, <path>, <path>.git/.git and <path>.git and
+            # follows a gitfile at the one it picks, so an absent target or an empty
+            # non-repository directory beside a <path>.git, or a gitfile or symbolic link at
+            # <path> or <path>/.git, would send the fetch and the push to another repository
+            # while the destination agreement compared only the string.
+
+            def _path_target(name, spelling="{}"):
+                # a store whose sync target is <base>/<name>/store, created by the caller (or not)
+                d = os.path.join(base, name)
+                os.makedirs(d)
+                tpath = os.path.join(d, "store")
+                url = spelling.format(tpath)
+                root = _store(name + "-st", "git:" + url)
+                _git(root, "remote", "add", "origin", url)
+                return root, tpath
+
+            def _unverified(bare, root, name, advance=True):
+                # a bare repository holding the store's history, plus one commit the store lacks
+                _git(base, "init", "--bare", bare)
+                _git(root, "push", bare, "main")
+                if advance:
+                    _writer_commit(bare, name)
+                return _tip(bare)
+
+            pa_root, pa_path = _path_target("ptabsent")
+            pa_tip = _unverified(pa_path + ".git", pa_root, "ptabsent")
+            rc, out = run(["--root", pa_root])
+            check("an absent file-path target beside a <path>.git refuses before any transport",
+                  rc == EXIT_MALFORMED and "does not exist" in out and pa_path in out
+                  and _no_fetch_head(pa_root))
+            # POSITIVE CONTROL (the vector is live): with the path-target gate dropped, git opens
+            # the sibling <path>.git and the fetch lands its tip in FETCH_HEAD
+            with patch.object(module, "_refuse_path_target_redirect", lambda *a, **k: None):
+                rc, out = run(["--root", pa_root])
+            check("dropping the path-target gate redirects the fetch to the sibling <path>.git "
+                  "(shown red)",
+                  rc == EXIT_MALFORMED and "BEHIND" in out
+                  and _git(pa_root, "rev-parse", "FETCH_HEAD").strip() == pa_tip)
+            pe_root, pe_path = _path_target("ptempty")
+            os.makedirs(pe_path)
+            _unverified(pe_path + ".git", pe_root, "ptempty")
+            rc, out = run(["--root", pe_root])
+            check("an empty non-repository target directory beside a <path>.git refuses",
+                  rc == EXIT_MALFORMED and "not a git repository" in out
+                  and _no_fetch_head(pe_root))
+            pu_root, pu_path = _path_target("ptfileurl", "file://{}")
+            _unverified(pu_path + ".git", pu_root, "ptfileurl")
+            rc, out = run(["--root", pu_root])
+            check("the file:// spelling of an absent target beside a <path>.git refuses",
+                  rc == EXIT_MALFORMED and "does not exist" in out and _no_fetch_head(pu_root))
+            for idx, (spelling, label) in enumerate((("file://localhost{}", "a host part"),
+                                                     ("file://{}%2e", "a percent escape"))):
+                ph_root, ph_path = _path_target("pturl{}".format(idx), spelling)
+                _git(base, "init", "--bare", ph_path)
+                _git(ph_root, "push", ph_path, "main")
+                rc, out = run(["--root", ph_root])
+                check("a file:// target with {} refuses (git reads it its own way)".format(label),
+                      rc == EXIT_MALFORMED and "file:// URL" in out and _no_fetch_head(ph_root))
+            # the push side: the store is AHEAD of the sibling, and the push would land there and
+            # report success while the verified path was never written
+            pp_root, pp_path = _path_target("ptpush")
+            pp_tip = _unverified(pp_path + ".git", pp_root, "ptpush", advance=False)
+            _local_commit(pp_root, "data.txt", "pending path\n")
+            rc, out = run(["--push", "--root", pp_root])
+            check("an absent file-path target refuses the push before any transport",
+                  rc == EXIT_MALFORMED and "does not exist" in out
+                  and _tip(pp_path + ".git") == pp_tip)
+            # POSITIVE CONTROL (the vector is live), on a FRESH fixture so its outcome never
+            # depends on what the refusal vector above left behind
+            pq_root, pq_path = _path_target("ptpush2")
+            _unverified(pq_path + ".git", pq_root, "ptpush2", advance=False)
+            _local_commit(pq_root, "data.txt", "pending path\n")
+            with patch.object(module, "_refuse_path_target_redirect", lambda *a, **k: None):
+                rc, out = run(["--push", "--root", pq_root])
+            check("dropping the path-target gate lands the push at the sibling <path>.git and "
+                  "reports success (shown red)",
+                  rc == EXIT_OK and "pushed" in out and _tip(pq_path + ".git") == _head(pq_root)
+                  and not os.path.exists(pq_path))
+            # a gitfile AT the target path, and a gitfile or symbolic link at <path>/.git inside a
+            # real bare target, each name another repository git would open instead
+            pg_root, pg_path = _path_target("ptgitfile")
+            pg_other = os.path.join(base, "ptgitfile", "elsewhere.git")
+            pg_tip = _unverified(pg_other, pg_root, "ptgitfile")
+            Path(pg_path).write_text("gitdir: {}\n".format(pg_other), encoding="utf-8")
+            rc, out = run(["--root", pg_root])
+            check("a gitfile at the file-path target refuses before any transport",
+                  rc == EXIT_MALFORMED and "not a directory" in out and _no_fetch_head(pg_root))
+            with patch.object(module, "_refuse_path_target_redirect", lambda *a, **k: None):
+                rc, out = run(["--root", pg_root])
+            check("dropping the path-target gate follows the gitfile to the other repository "
+                  "(shown red)",
+                  rc == EXIT_MALFORMED and "BEHIND" in out
+                  and _git(pg_root, "rev-parse", "FETCH_HEAD").strip() == pg_tip)
+            for kind in ("gitfile", "symlink"):
+                pd_root, pd_path = _path_target("ptdotgit-" + kind)
+                _unverified(pd_path, pd_root, "ptdotgit-" + kind, advance=False)
+                pd_other = os.path.join(base, "ptdotgit-" + kind, "elsewhere.git")
+                _unverified(pd_other, pd_root, "ptdotgit-" + kind + "-other")
+                if kind == "gitfile":
+                    Path(pd_path, ".git").write_text("gitdir: {}\n".format(pd_other),
+                                                     encoding="utf-8")
+                else:
+                    os.symlink(pd_other, os.path.join(pd_path, ".git"))
+                rc, out = run(["--root", pd_root])
+                check("a .git {} inside a bare file-path target refuses before any "
+                      "transport".format(kind),
+                      rc == EXIT_MALFORMED and ".git entry that is not a directory" in out
+                      and _no_fetch_head(pd_root))
+            # a .git directory that is not a git directory is one git would skip; the gate
+            # refuses it rather than let git fall through to the next candidate
+            pn_root, pn_path = _path_target("ptnotgit")
+            _unverified(pn_path, pn_root, "ptnotgit", advance=False)
+            os.makedirs(os.path.join(pn_path, ".git"))
+            rc, out = run(["--root", pn_root])
+            check("a .git directory that is not a git directory refuses (fail-closed)",
+                  rc == EXIT_MALFORMED and "not a git repository" in out
+                  and _no_fetch_head(pn_root))
+            # POSITIVE CONTROL (no over-refusal): an ordinary bare target, a non-bare target (a
+            # working tree with a real .git directory), and a symbolic link at the target path to
+            # a bare repository (followed, as git follows it) each still sync
+            ob_root, ob_path = _path_target("ptbare")
+            _unverified(ob_path, ob_root, "ptbare", advance=False)
+            rc, out = run(["--root", ob_root])
+            check("an ordinary bare file-path target still syncs", rc == EXIT_OK and "EQUAL" in out)
+            _local_commit(ob_root, "data.txt", "pending bare\n")
+            rc, out = run(["--push", "--root", ob_root])
+            check("an ordinary bare file-path target still takes the push",
+                  rc == EXIT_OK and "pushed" in out and _tip(ob_path) == _head(ob_root))
+            on_root, on_path = _path_target("ptnonbare")
+            _git(base, "clone", on_root, on_path)
+            rc, out = run(["--root", on_root])
+            check("an ordinary non-bare file-path target still syncs",
+                  rc == EXIT_OK and "EQUAL" in out)
+            ol_root, ol_path = _path_target("ptlink")
+            ol_real = os.path.join(base, "ptlink", "real.git")
+            _unverified(ol_real, ol_root, "ptlink", advance=False)
+            os.symlink(ol_real, ol_path)
+            rc, out = run(["--root", ol_root])
+            check("a symbolic link at the file-path target to a bare repository still syncs",
+                  rc == EXIT_OK and "EQUAL" in out)
+
             # -- environment-config overrides never reach the transport ---------------------------
-            # A remote defined only through the GIT_CONFIG_COUNT/KEY/VALUE environment, named the
-            # verified URL, would redirect the fetch if the transport honoured it; the transport
-            # env drops every GIT_* override by construction, so the fetch lands at the verified
-            # target (EQUAL), not at the advanced repository the environment names (BEHIND)
-            ev_root, ev_bare = _paired("envconfig")
+            # A remote named the verified file:// URL (a name git admits; only a name beginning
+            # with '/' is skipped) and defined only through GIT_CONFIG_PARAMETERS would redirect
+            # the fetch if the transport honoured the environment. GIT_CONFIG_PARAMETERS carries
+            # it because the transport's own GIT_CONFIG_KEY_<n>/VALUE_<n> override pairs would
+            # overwrite an inherited indexed pair and hide the leak. The transport env drops every
+            # GIT_* override by construction, so the fetch lands at the verified target (EQUAL),
+            # not at the advanced repository the environment names
+            ev_bare = os.path.join(base, "envconfig-target.git")
+            _git(base, "init", "--bare", ev_bare)
+            ev_url = "file://" + ev_bare
+            ev_root = _store("envconfig", "git:" + ev_url)
+            _git(ev_root, "remote", "add", "origin", ev_url)
+            _git(ev_root, "push", ev_bare, "main")
             ev_evil = os.path.join(base, "envconfig-evil.git")
-            _git(base, "init", "--bare", ev_evil)
-            _git(ev_root, "push", ev_evil, "main")
-            evw = os.path.join(base, "envconfig-writer")
-            _git(base, "clone", ev_evil, evw)
-            (Path(evw) / "data.txt").write_text("unverified env\n", encoding="utf-8")
-            _git(evw, "add", "-A")
-            _git(evw, "commit", "-m", "advance")
-            _git(evw, "push", "origin", "main")
-            with patch.dict(os.environ,
-                            GIT_CONFIG_COUNT="1",
-                            GIT_CONFIG_KEY_0="remote.{}.url".format(ev_bare),
-                            GIT_CONFIG_VALUE_0=ev_evil):
+            ev_evil_tip = _unverified(ev_evil, ev_root, "envconfig")
+            ev_params = "'{}'".format("remote.{}.url={}".format(ev_url, ev_evil).replace(
+                "'", "'\\''"))
+            with patch.dict(os.environ, GIT_CONFIG_PARAMETERS=ev_params):
                 rc, out = run(["--root", ev_root])
             check("an environment-config remote named the verified URL never reaches the "
                   "transport (the overrides are dropped and the destination is the target)",
-                  rc == EXIT_OK and "EQUAL" in out)
+                  rc == EXIT_OK and "EQUAL" in out
+                  and _git(ev_root, "rev-parse", "FETCH_HEAD").strip() == _tip(ev_bare))
+            # POSITIVE CONTROL (the vector is live): a transport env that inherits the whole
+            # environment, with the remote-shadow gate (which would read the same environment)
+            # dropped, resolves the argument to the environment's remote
+            with patch.dict(os.environ, GIT_CONFIG_PARAMETERS=ev_params), \
+                    patch.object(module, "_transport_env", lambda: dict(os.environ)), \
+                    patch.object(module, "_refuse_effective_remote_shadow",
+                                 lambda *a, **k: None):
+                rc, out = run(["--root", ev_root])
+            check("an inherited environment lets the environment-config remote redirect the "
+                  "fetch (shown red)",
+                  rc == EXIT_MALFORMED and "BEHIND" in out
+                  and _git(ev_root, "rev-parse", "FETCH_HEAD").strip() == ev_evil_tip)
 
             # -- divergence halts in every mode, merging nothing ---------------------------------
             v_root, v_bare = _paired("diverged")
@@ -3259,12 +3589,16 @@ def _self_test_units(check):
                   and _head(t_root) == dirty_head)
 
             # -- a failed fetch is a cannot-evaluate, never equal ---------------------------------
-            absent = os.path.join(base, "absent-target.git")
-            f_root = _store("fetchfail", "git:" + absent)
-            _git(f_root, "remote", "add", "origin", absent)
+            # the target is a real but EMPTY bare repository (an absent path refuses earlier, at
+            # the path-target gate), so git itself fails the fetch: the branch is missing
+            empty = os.path.join(base, "empty-target.git")
+            _git(base, "init", "--bare", empty)
+            f_root = _store("fetchfail", "git:" + empty)
+            _git(f_root, "remote", "add", "origin", empty)
             rc, out = run(["--root", f_root])
             check("a failed fetch is a cannot-evaluate, never read as equal",
-                  rc == EXIT_MALFORMED and "fetch" in out and "EQUAL" not in out)
+                  rc == EXIT_MALFORMED and "git fetch from the sync target failed" in out
+                  and "EQUAL" not in out)
 
             # -- a detached or unborn HEAD refuses ------------------------------------------------
             dt_root, _dt_bare = _paired("detached")
