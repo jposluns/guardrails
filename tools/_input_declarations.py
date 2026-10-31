@@ -44,7 +44,9 @@ deep (judged by _nesting_refused, a conservative prescan over marker runs and in
 follows block structure, resetting where a new top-level block must start, so a block's outcome never
 depends on content before its block; after a quote marker it consumes one optional non-LF whitespace
 character as a column, exactly as the parser's own quote prefix does, so a no-break space or a
-vertical tab after > hides no level) is refused up front too; and so is a line holding a run of more than
+vertical tab after > hides no level; and it skips a fenced code block's content, which opens nothing,
+placing each fence where the parser's FencedCode opens and closes it and skipping nothing from the first
+fence-shaped line it cannot place) is refused up front too; and so is a line holding a run of more than
 MAX_WHITESPACE_RUN consecutive whitespace characters (the class the parser itself reads as whitespace,
 vertical tab and no-break space included, never only space and tab). Both prescans run on every text, so
 neither refusal depends on whether the rest of the brief forces a parse. The earlier additive total-cost
@@ -166,6 +168,8 @@ PARSE_DEADLINE_SECONDS = 10.0
 MAX_NESTING_DEPTH = 20
 # the block-structure resets of _nesting_refused, a patchable seam for its callers' self-tests
 NESTING_RESETS = True
+# the fenced-code skip of _nesting_refused, a patchable seam for its callers' self-tests
+NESTING_FENCES = True
 # the longest run of consecutive whitespace characters a line may hold, judged in forbidden() before any
 # parse. The run class is the parser's own whitespace by construction, never a remembered list: every
 # whitespace test in the vendored tree is Python's \s or the isspace/strip predicate behind it
@@ -774,7 +778,7 @@ def _lead_shape(line):
     the parser requires) and of the whitespace columns between and before them (a tab counts four; after
     a quote mark, one character of any whitespace but LF counts one column, exactly the one optional
     whitespace character the parser's own quote prefix consumes there). The scan stops at the first
-    character that is neither; it never reads the rest of the line."""
+    character that is neither, the third value (its position); it never reads the rest of the line."""
     markers = columns = position = 0
     length = len(line)
     while position < length:
@@ -808,10 +812,11 @@ def _lead_shape(line):
                 markers += 1
                 position += 1
             else:
+                position = first   # digits that open no marker are the line's text, not its lead
                 break
         else:
             break
-    return markers, columns
+    return markers, columns, position
 
 
 # a line that must start a new block at the document's top level when it carries no lead markers and
@@ -821,6 +826,110 @@ def _lead_shape(line):
 # a paragraph, so it is never a lazy continuation, and under two columns it cannot continue any list
 # item's content, whose indent is at least two
 BLOCK_START_RE = re.compile(r" ?(?:#{1,6}(?=\s|$)|`{3,}[^`\n]*$|~{3,})")
+# a line whose lead (_lead_shape) is followed by three backticks or three tildes is shaped like a fence:
+# the prescan places it exactly as the parser reads it, or skips no fenced line from there on
+FENCE_SHAPE_RE = re.compile(r"`{3}|~{3}")
+# a fence's opening run as FencedCode.pattern and FencedCode.match read it after the container prefix:
+# three or more backticks with no backtick in the rest of the line, or three or more tildes with any rest
+FENCE_OPEN_RE = re.compile(r"(`{3,})[^`]*$|(~{3,})")
+# a line that can close an open fence (FencedCode.parse): its leading whitespace, a run of one fence
+# character, then only whitespace; it closes when its run is the opening character at least as long and
+# its leading spaces fit the container
+FENCE_CLOSE_RE = re.compile(r"([ \t]*)(`+|~+)[^\S\n]*$")
+# a list marker and the spaces after it, read one marker at a time across a fence line's lead
+LIST_MARK_RE = re.compile(r"(\d{1,9}[.)]|[-*+])( +)")
+# a lead that may open an HTML block the parser reads on to an end marker, across blank lines and fence
+# lines alike (HTMLBlock.match, its types 1 to 4 in its own order); the value builds the end marker
+HTML_END_STARTS = ((re.compile(r"<(script|pre|style|textarea)(?:[>\s]|$)", re.I),
+                    lambda found: re.compile(r"(?i)</{}>".format(found.group(1).lower()))),
+                   (re.compile(r"<!--"), lambda found: re.compile(r"-->")),
+                   (re.compile(r"<\?"), lambda found: re.compile(r"\?>")),
+                   (re.compile(r"<!"), lambda found: re.compile(r">")))
+
+
+def _fence_opening(line, position, markers, running, after_blank):
+    """How the parser reads a line shaped like a fence (FENCE_SHAPE_RE at `position`, the end of its lead)
+    while no fence is open: (mode, character, run length, column) for a fence it surely opens, None for
+    a line it surely reads as no fence, and False where this prescan cannot place the line. The modes:
+    "top", a fence at the document's top level (a lead of no markers and under two columns, which no list
+    item or quote can hold, or under four columns where no level is open); "item", a fence opened on a
+    list marker line, whose item's content column is exactly the fence's column; "range", a fence on a
+    line of two or three columns under an open level, in a list item whose content column is at most its
+    own or at the top level. A quote marker or a tab in the lead, a marker followed by five or more
+    spaces, a lead of four or more columns under an open level, and an ordered marker other than 1 right
+    after a non-blank line (a paragraph's continuation, never an item) are not placed."""
+    lead = line[:position]
+    run = FENCE_OPEN_RE.match(line, position)
+    if run is None:   # a backtick run with a backtick after it opens no fence anywhere
+        return None
+    opened = run.group(1) or run.group(2)
+    fence = (opened[0], len(opened), position)
+    if "\t" in lead or ">" in lead:
+        return False
+    first = len(lead) - len(lead.lstrip(" "))
+    if markers == 0:
+        if first <= 1 or (running == 0 and first <= 3):
+            return ("top",) + fence
+        if running == 0:   # four or more columns at the top level: an indented code line or paragraph text
+            return None
+        return ("range",) + fence if first <= 3 else False
+    if first > 3:
+        return False if running else None
+    at = first
+    while at < position:
+        mark = LIST_MARK_RE.match(lead, at)
+        if mark is None or len(mark.group(2)) > 4:
+            return False
+        if at == first and mark.group(1)[:-1].isdigit() and int(mark.group(1)[:-1]) != 1 \
+                and not after_blank:
+            return False
+        at = mark.end()
+    return ("item",) + fence
+
+
+def _fence_holds(fence, line):
+    """How the parser reads `line` inside the open `fence` (_fence_opening): "content", "closed" (the line
+    is the closing fence), "exit" (the line ends the fence's list item, and the fence with it, and is read
+    outside any fence), or False where this prescan cannot place the line. A top-level fence holds every
+    line up to a closing run indented by at most three spaces, to the text's end when none comes; an item
+    fence holds the lines indented at least to its column and every line of spaces alone (the parser's
+    prefix test pads a blank line), and closes on a run indented zero to three columns past it; a range
+    fence holds what both of its readings hold and is unplaced where they differ."""
+    mode, character, length, column = fence
+    close = FENCE_CLOSE_RE.match(line)
+    closes = close is not None and close.group(2)[0] == character and len(close.group(2)) >= length
+    lead = close.group(1) if closes else ""
+    if mode == "top":
+        return "closed" if closes and "\t" not in lead and len(lead) <= 3 else "content"
+    expanded = line.expandtabs(4)
+    held = len(expanded) - len(expanded.lstrip(" ")) >= column or not expanded.strip(" ")
+    if mode == "item":
+        if closes:
+            if "\t" in lead:
+                return False
+            if column <= len(lead) <= column + 3:
+                return "closed"
+        return "content" if held else "exit"
+    if closes:
+        if lead == " " * column:
+            return "closed"
+        if "\t" in lead or len(lead) <= column + 3:
+            return False
+    return "content" if held else False
+
+
+def _opaque_start(rest):
+    """The block the parser may read on from a line whose text after its lead is `rest`, where a line
+    shaped like a fence is not a fence: an end-marker pattern for an HTML block of types 1 to 4
+    (HTML_END_STARTS), "html" for any other < (an HTML block that ends at a blank line), "link" for [ (a
+    link reference definition, read on to an empty line), None otherwise."""
+    if rest.startswith("<"):
+        for start, end in HTML_END_STARTS:
+            found = start.match(rest)
+            if found:
+                return end(found)
+        return "html"
+    return "link" if rest.startswith("[") else None
 
 
 def _nesting_refused(text):
@@ -835,15 +944,45 @@ def _nesting_refused(text):
     as item content, which needs two columns, or as a lazy continuation, which needs an open paragraph)
     or opens an ATX heading or code fence (BLOCK_START_RE, which breaks a paragraph too), so a block's
     outcome never depends on content before its block; blank is what the parser's BlankLine reads as
-    blank (str.strip, every whitespace character). Over-counting only refuses more (a fenced example
-    shaped like a deeper-than-the-ceiling list is refused with the real thing), never less."""
+    blank (str.strip, every whitespace character). A fenced code block's content lines are skipped, since
+    the parser reads them as code that opens nothing: a fence opens and closes where the parser's
+    FencedCode does (_fence_opening, _fence_holds: backtick and tilde runs of three or more, indented zero
+    to three columns in their container, an unclosed fence running to its container's end), at the top
+    level and in a list item. From the first fence-shaped line it cannot place exactly (a fence in a
+    quote, a tab in a fence line's lead, a fence-shaped line where an HTML block or link reference
+    definition may be open, which the parser reads on as that block) it skips no line, so a misplaced
+    fence can only count more. Over-counting only refuses more, never less."""
     running = 0
     after_blank = True
+    placed = NESTING_FENCES   # False from the first fence-shaped line the prescan cannot place
+    fence = None              # the open fence (_fence_opening), whose content lines are skipped
+    # the blocks that may be open across a fence-shaped line (_opaque_start): a set, so it holds at most
+    # nine kinds however many lines open one, and each line's update stays constant time
+    opaque = set()
     for number, line in enumerate(text.split("\n"), 1):
+        closing = False
+        if placed and fence is not None:
+            held = _fence_holds(fence, line)
+            if held == "content":
+                continue
+            fence = None
+            placed = held is not False
+            closing = held == "closed"
         if not line.strip():
             after_blank = True
+            opaque = {kind for kind in opaque if not isinstance(kind, str) or (kind == "link" and line)}
             continue
-        markers, columns = _lead_shape(line)
+        markers, columns, position = _lead_shape(line)
+        if placed and not closing:
+            if FENCE_SHAPE_RE.match(line, position):
+                fence = False if opaque else _fence_opening(line, position, markers, running, after_blank)
+                placed = fence is not False
+                fence = fence or None
+            else:
+                opaque = {kind for kind in opaque if isinstance(kind, str) or not kind.search(line)}
+                started = _opaque_start(line[position:])
+                if started is not None and (isinstance(started, str) or not started.search(line)):
+                    opaque.add(started)
         if NESTING_RESETS and markers == 0 and columns < 2 \
                 and (after_blank or BLOCK_START_RE.match(line)):
             running = 0

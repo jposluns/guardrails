@@ -4992,6 +4992,62 @@ def self_test(report_path=None):
         wide_fence, tall_list + "\n# Notes\n\n" + wide_fence,
         tall_list + "# Notes\n" + wide_fence,
         tall_list + "\nplain prose.\n" + wide_fence)], [([], [])] * 6)
+    # a fenced code block's content opens nothing, so the prescan skips it where the parser's FencedCode
+    # opens and closes: a quoted diff whose marker lines march deeper line by line and end on a line
+    # indented 51 spaces (a real brief's shape) is read in a backtick fence, a tilde fence closed by a
+    # longer run, an unclosed fence (to the text's end), a fence on a numbered item's continuation line, a
+    # fence on a bullet's own line, and a four-backtick fence holding a three-backtick line
+    diff_body = "".join(" " * (2 * level) + "-+"[level % 2] + " x\n" for level in range(30)) + " " * 51 + "- y\n"
+    indented_body = lambda indent: "".join(indent + line + "\n" for line in diff_body.splitlines())  # noqa: E731
+    fenced_diffs = (
+        "```diff\n" + diff_body + "```\n",
+        "~~~ diff\n" + diff_body + "~~~~\nafter.\n",
+        "```\n" + diff_body,
+        "1. Apply this:\n\n   ```diff\n" + indented_body("   ") + "   ```\n",
+        "- ```diff\n" + indented_body("  ") + "  ```\n",
+        "````\n```\n" + diff_body + "````\n")
+    check("structure/nesting-fence-skipped", [read_inputs(parse_lead + text) for text in fenced_diffs],
+          [([], [])] * len(fenced_diffs))
+
+    def fenced_at(text, needle):
+        """Whether the parsed document reads the last `needle` in `text` inside a FencedCode block."""
+        at = text.rindex(needle)
+        spans = []
+
+        def walk(node):
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    if child.get("kind") == "FencedCode" and child.get("span"):
+                        spans.append(child["span"])
+                    walk(child)
+
+        walk(_input_declarations._parse(text))
+        return any(start <= at < end for start, end in spans)
+
+    # the reader agrees: in each of those briefs the parsed document holds the 51-space line in a fence
+    check("structure/nesting-fence-reader-agrees",
+          [fenced_at(parse_lead + text, " " * 51 + "- y") for text in fenced_diffs], [True] * len(fenced_diffs))
+    # real nesting outside a fence is still refused: after a closed fence, after a bullet-line fence whose
+    # item an unindented line ends, after a backtick line with a backtick in its info string (no fence),
+    # after a tilde fence that a backtick line does not close, after a four-space line at the top level
+    # (indented code, no fence), and after a fence-shaped line the prescan cannot place (in an HTML block,
+    # which the parser reads on to the blank line; in a quote)
+    deep21 = "".join("  " * level + "- a\n" for level in range(21))
+    check("cannot/nesting-fence-bounds", [_outcome(text) for text in (
+        "```\nquoted\n```\n" + deep21, "- ```\n  code\n" + deep21, "``` a`\n" + deep21,
+        "~~~\n```\n~~~\n" + deep21, "    ```\n" + deep21, "<div>\n```\n\n" + deep21,
+        "> ```\n" + deep21)], ["CannotEvaluate"] * 7)
+    # each fence bound just inside, exactly at and just outside it: an opening run indented three columns
+    # opens, four does not; a closing run indented three columns closes, four does not (the deep list
+    # after it stays fence content); a closing run one shorter than the opening run does not close, as
+    # long or longer does; an opening run of two backticks opens nothing, three does (True: the prescan
+    # passes the text)
+    check("structure/nesting-fence-boundary", [_input_declarations._nesting_refused(text) is None for text in (
+        "   ```\n" + diff_body, "    ```\n" + diff_body,
+        "```\nx\n   ```\n" + deep21, "```\nx\n    ```\n" + deep21,
+        "````\nx\n```\n" + deep21, "````\nx\n````\n" + deep21, "````\nx\n`````\n" + deep21,
+        "``\n" + diff_body, "```\n" + diff_body)],
+          [True, False, False, True, True, False, False, False, True])
     # the whitespace-run prescan refuses the same way on both paths
     check("cannot/whitespace-run-2", [_outcome(text) for text in (
         "a" + " " * 2001 + "b\n", "Input notes.\n\na" + " " * 2001 + "b\n")], ["CannotEvaluate"] * 2)
@@ -6459,12 +6515,20 @@ def self_test(report_path=None):
              lambda: p6_code("Input notes.\n\na" + "\xa0" * 2001 + "b\n")], [0, 0],
             WHITESPACE_RUN_RE=re.compile(r"[ \t]{2001}")))
         # with the block-structure resets patched out, a block's outcome depends on the unrelated deep
-        # list before it again (each of these briefs reads clean with the resets)
+        # list before it again (each of these briefs reads clean with the resets); the wide line is
+        # indented code, not a fence, so the fenced-code skip takes no part
+        wide_code = " " * 40 + "- x\n"
         check("revert/nesting-resets-red", *parser_flip(
-            [lambda: p6_code("Input notes.\n\n" + deep_list + "\n# Notes\n\n" + deep_yaml),
-             lambda: p6_code("Input notes.\n\n" + tall_list + "\n# Notes\n\n" + wide_fence),
-             lambda: p6_code("Input notes.\n\n" + tall_list + "# Notes\n" + wide_fence)],
+            [lambda: p6_code("Input notes.\n\n" + tall_list + "\n# Notes\n\n" + wide_code),
+             lambda: p6_code("Input notes.\n\n" + tall_list + "# Notes\n" + wide_code),
+             lambda: p6_code("Input notes.\n\n" + tall_list + "\nplain prose.\n" + wide_code)],
             ["CannotEvaluate"] * 3, NESTING_RESETS=False))
+        # with the fenced-code skip patched out, a quoted diff's deeply indented marker lines count as
+        # nesting again and the brief is refused (each reads clean with the skip)
+        check("revert/nesting-fences-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n```diff\n" + diff_body + "```\n"),
+             lambda: p6_code("Input notes.\n\n- ```diff\n" + indented_body("  ") + "  ```\n")],
+            ["CannotEvaluate"] * 2, NESTING_FENCES=False))
         # with the nesting ceiling lifted, the no-break-space quote lead is read too, so the ceiling is
         # load-bearing for the quote-prefix vectors (their text never forces a parse)
         check("revert/nesting-quote-prefix-red", *parser_flip(
@@ -6555,7 +6619,7 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 213)
+    check("revert/every-flip-ran", len(flipped), 214)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
