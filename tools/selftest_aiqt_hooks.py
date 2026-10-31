@@ -4136,6 +4136,153 @@ def _gw_lin_usage_failures():
     return out
 
 
+# The cost rows that hold one call on one long command to a budget (lex-cost, ci-wr-rebase-cpu and the
+# commit-identity rows past the read limit) count that budget in reference passes over the same command
+# (_cost_reference_pass), timed in this process right beside the call, so a host, or a moment of it, slower for
+# every Python pass cancels from the verdict. A fixed CPU-second bound did not cancel it: on an 80-core host with
+# Python 3.14.4, gate_weakening on retry-deep-nesting took 0.45 to 0.52 s of CPU alone and up to 1.11 s beside
+# sixteen CPU-bound processes, over the 1 s bound that row held, with its wall-clock time equal to its CPU time and
+# about one involuntary context switch per call, so the call itself ran slower; the collector was not the cause
+# (with it disabled the call slowed the same way), nor was time spent waiting for a CPU (sharing one CPU with a
+# memory-bound process doubled the wall-clock time and left the CPU time as it was alone).
+_COST_REFERENCE_PASSES = 4
+# The budgets, in reference passes: a call fails when the least of its timings is at least this many times the
+# least reference pass (_cost_budget_ratio). _COST_BUDGET holds lex-cost and ci-wr-rebase-cpu: on the host above,
+# as the least of three timed ratios, the costliest row (gate_weakening on retry-deep-nesting) took 4.9 passes alone
+# and 6.2 beside the sixteen processes, and with the nesting stack's membership test put back to a plain list's
+# scan it took about 1,400. _COST_LONG_BUDGET holds the commit-identity rows past the read limit, whose 1 MiB
+# commands the reader does not read: at most 0.68 passes there in any single timing, alone or beside the sixteen
+# processes, where reading such a command in full took about 7 s of CPU on an earlier host (by estimate 8 to 13
+# passes).
+_COST_BUDGET = 20
+_COST_LONG_BUDGET = 2
+
+
+def _cost_reference_pass(command):
+    """The cost rows' clock: _COST_REFERENCE_PASSES plain-Python passes over every character of command, a branch
+    per character, a stack push or pop at each parenthesis and a word sliced at each blank or separator, the
+    least work a lexer of this shell does per character. It calls nothing in aiqt_hooks, so no change there can
+    slow the clock a call is measured against."""
+    nest, words, start = [], [], 0
+    for _ in range(_COST_REFERENCE_PASSES):
+        for at, c in enumerate(command):
+            if c == "(":
+                nest.append(c)
+            elif c == ")":
+                if nest:
+                    nest.pop()
+            elif c in " \t\n;&|":
+                if at > start:
+                    words.append(command[start:at])
+                start = at + 1
+        nest.clear()
+        words.clear()
+        start = 0
+    return None
+
+
+def _cost_budget_ratio(command, scan, budget, once=_gw_scan_once):
+    """One cost row's timing: (ratio, t_reference, t_scan, timings, decisions), ratio being the CPU time of
+    scan(command) over that of _cost_reference_pass(command), each timed by once in this process, the pass right
+    before the call. While the ratio is at or over budget both are timed again (at most _GW_TIMINGS timings of
+    each) and the least time of each is compared, so one call or pass charged for stray work cannot decide the
+    row, while a call over its budget in every timing still fails; decisions lists every timed call's decision, in
+    order. A reference pass that measured no time gives an infinite ratio, so the row fails rather than pass
+    unmeasured."""
+    t_ref = once(command, _cost_reference_pass)[0]
+    t_scan, decision, _use = once(command, scan)
+    decisions = [decision]
+    timings = 1
+    while (t_ref <= 0 or t_scan >= budget * t_ref) and timings < _GW_TIMINGS:
+        timings += 1
+        again_ref = once(command, _cost_reference_pass)[0]
+        again_scan, decision, _use = once(command, scan)
+        decisions.append(decision)
+        t_ref, t_scan = min(t_ref, again_ref), min(t_scan, again_scan)
+    return (t_scan / t_ref if t_ref > 0 else float("inf")), t_ref, t_scan, timings, decisions
+
+
+def _cost_budget_text(ratio, t_ref, t_scan, timings, budget):
+    """The clause a failed cost row reports for one _cost_budget_ratio result."""
+    return ("{:.2f} s of CPU, {:.1f} times a reference pass over the same command ({:.3f} s), the least of {} "
+            "timing(s) of each; the budget is under {} reference passes".format(t_scan, ratio, t_ref, timings,
+                                                                                budget))
+
+
+def _cost_budget_edge_failures():
+    """(cost-budget-edge) _cost_budget_ratio over scripted times (no pass or call runs): each pair is
+    (t_reference, t_scan) for one timing of both. A first ratio just under the budget is final with one timing;
+    one exactly at it or just over it retimes, and stays at or over it through _GW_TIMINGS timings of each; one
+    over it and then under it passes on the least times; a slow retimed reference never replaces a faster one
+    (a call that would pass against the slow one fails), and a reference that measured no time retimes and stays
+    infinite."""
+    out = []
+    budget = 20
+    for name, pairs, want_ratio, want_timings in (
+            ("under", [(0.25, 4.99)], 4.99 / 0.25, 1),
+            ("at", [(0.25, 5.0), (0.25, 5.0), (0.25, 5.0)], 20.0, _GW_TIMINGS),
+            ("over", [(0.25, 5.01), (0.25, 5.01), (0.25, 5.01)], 5.01 / 0.25, _GW_TIMINGS),
+            ("over-then-under", [(0.25, 5.5), (0.3, 4.9)], 4.9 / 0.25, 2),
+            ("slow-reference", [(0.2, 4.5), (0.4, 4.4), (0.5, 4.3)], 4.3 / 0.2, _GW_TIMINGS),
+            ("unmeasured", [(0.0, 0.1), (0.0, 0.1), (0.0, 0.1)], float("inf"), _GW_TIMINGS)):
+        times = [t for pair in pairs for t in pair]
+        taken = []
+
+        def once(cmd, scan):
+            taken.append(scan)
+            return times[len(taken) - 1], "allow", None
+
+        ratio, _t_ref, _t_scan, timings, decisions = _cost_budget_ratio("x", None, budget, once)
+        within = ratio < budget
+        if (ratio != want_ratio or timings != want_timings or within != (want_ratio < budget)
+                or taken != [_cost_reference_pass, None] * timings or decisions != ["allow"] * timings):
+            out.append("(cost-budget-edge) {}: the scripted times {} gave ratio {!r} over {} timing(s), want {!r} "
+                       "over {}".format(name, pairs, ratio, timings, want_ratio, want_timings))
+    return out
+
+
+def _cost_budget_cpu_failures():
+    """(cost-budget-cpu-green, cost-budget-cpu-red) The budget in CPU time, through stand-in calls that run the
+    reference pass themselves: a call of half the budget in passes stays under it, and one of twice the budget
+    stays over it through every timing, so the reference is a clock the rows can be held to, not one a call
+    always passes."""
+    out = []
+    command = "( a `b` c; " * 1600
+
+    def passes(count):
+        def scan(cmd):
+            for _ in range(count):
+                _cost_reference_pass(cmd)
+            return None
+        return scan
+
+    for label, count, within in (("cost-budget-cpu-green", _COST_BUDGET // 2, True),
+                                 ("cost-budget-cpu-red", 2 * _COST_BUDGET, False)):
+        ratio, t_ref, t_scan, timings, _decisions = _cost_budget_ratio(command, passes(count), _COST_BUDGET)
+        if (ratio < _COST_BUDGET) != within:
+            out.append("({}) a stand-in of {} reference passes took {}, want {} the budget".format(
+                label, count, _cost_budget_text(ratio, t_ref, t_scan, timings, _COST_BUDGET),
+                "under" if within else "at or over"))
+    return out
+
+
+def _lex_cost_failures(cost_inputs, guards, budget=_COST_BUDGET):
+    """(lex-cost-<input>) Each guard on each (name, command) of cost_inputs within budget reference passes
+    (_cost_budget_ratio): (failures, decisions), decisions mapping each (name, guard name) to the list of the
+    decisions its timed calls gave."""
+    out = []
+    decisions = {}
+    for name, command in cost_inputs:
+        for guard in guards:
+            ratio, t_ref, t_scan, timings, got = _cost_budget_ratio(
+                command, lambda cmd, guard=guard: _decision(guard, cmd), budget)
+            decisions[name, guard.__name__] = got
+            if ratio >= budget:
+                out.append("(lex-cost-{}) {} took {} on a {}-character command".format(
+                    name, guard.__name__, _cost_budget_text(ratio, t_ref, t_scan, timings, budget), len(command)))
+    return out, decisions
+
+
 # Commands for the lexer's skip_empty reading: runs of separators, blank lines, a comment and a quoted heredoc
 # opener (segments with no word and no redirect, some with a raw slice that is not blank), redirect-only
 # segments (kept), and commands the lexer refuses or, in partial mode, recovers in part.
@@ -16292,7 +16439,8 @@ def _main_isolated(monitor):
         # each guard below decides these inputs in well under its hook timeout: a 256 KiB line of blank-led '#'
         # inside a double-quoted substitution, where the substitution skip searched to the end of the line from
         # every '#', and a 128 KiB run of open parentheses and backquote substitutions, where the nesting stack
-        # was searched or copied for every word, skip and backquote. Each must take under 1 s of CPU. Measured
+        # was searched or copied for every word, skip and backquote. Each was held to 1 s of CPU when the figures
+        # in this comment were measured (BUDGET below gives the budget each row now holds). Measured
         # on one host as the max of five runs per guard, this code took at most 0.051 s on the first input
         # (protected_line) and 0.049 s on the second (gate_weakening), a margin of about nineteen times, and
         # the code before the linear skip and the counted
@@ -16326,15 +16474,24 @@ def _main_isolated(monitor):
         # _nest_track that row took 12.5 s in gate_weakening and 12.2 s in bash_absolute_paths (one run each)
         # while every row above fit that code, and unchanged it takes a fraction of a second (on one host at
         # most 0.18 s as the max of five runs in gate_weakening), a margin of about five times against the same
-        # 1 s bound; the figure and the margin are host-specific, and the 1 s bound is what each row
-        # enforces. The doubt-comment-pipes row is the linearity guard for the fail-closed sink test behind
-        # a '#' the lexer cannot judge under both readings (_gate_doubt_sink): a 256 KiB run of '# |' comment
+        # 1 s bound; the figure and the margin are host-specific. The doubt-comment-pipes row is the linearity
+        # guard for the fail-closed sink test behind a '#' the lexer cannot judge under both readings (_gate_doubt_sink): a 256 KiB run of '# |' comment
         # lines between a checker's pipe and an off-list terminal word, so the test scans the whole text and
         # finds no listed sink word. Its clock is time.process_time (per-process CPU, as every row here). A
         # probe that re-read the remaining comment lines from every '|' grew about fourfold per doubling
         # there and took about 20 s of CPU in gate_weakening on a quarter of this input, far over the bound;
         # the single-pass test took at most 0.21 s on the full input as the max of five runs on one host
-        # across the three guards, a margin of about five times against the same enforced 1 s bound.
+        # across the three guards, a margin of about five times against the 1 s bound the row then held.
+        # BUDGET. A fixed CPU-second bound moved with the host's load (the comment above _COST_REFERENCE_PASSES),
+        # and this code has grown slower on these inputs since the figures above: on an 80-core host with Python
+        # 3.14.4, as the max of five runs, gate_weakening took 0.77 s on doubt-comment-pipes, 0.66 s on
+        # floor-long-words and 0.54 s on retry-deep-nesting, so a load that slowed the call by half again failed
+        # the 1 s bound. Each guard on each input is now held to _COST_BUDGET reference passes over the same
+        # command (_lex_cost_failures, _cost_budget_ratio). On that host, as the least of three timed ratios, the
+        # costliest took 4.9 passes (gate_weakening on retry-deep-nesting) alone and 6.2 beside sixteen CPU-bound
+        # processes, and with the nesting stack's membership test put back to a plain list's scan the same call
+        # took 82.7 s, about 1,400 passes, so the row still fails such a stack. The other regressions recorded
+        # above were timed on other hosts and code, so how many passes each would take here is not measured.
         _cost_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\n"
         _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("deep-nesting", "(" * 56000 + " `a`" * (56000 // 3)),
@@ -16344,17 +16501,13 @@ def _main_isolated(monitor):
                         ("floor-long-words", _cost_form + "echo " + "a " * (128 * 1024)),
                         ("main-reading-long-words", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\necho " + "a " * (128 * 1024)),
                         ("doubt-comment-pipes", "(true #'\n)\npytest |\n" + "# |\n" * (64 * 1024) + "wc"))
-        _cost_doubt_got = None
-        for _cost_name, _cost_cmd in _cost_inputs:
-            for _cost_guard in (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line):
-                _cost_t0 = time.process_time()
-                _cost_got = _decision(_cost_guard, _cost_cmd)
-                _cost_cpu = time.process_time() - _cost_t0
-                if _cost_cpu >= 1.0:
-                    failures.append("(lex-cost-{}) {} took {:.2f} s of CPU on a {}-character command; the bound "
-                                    "is 1 s".format(_cost_name, _cost_guard.__name__, _cost_cpu, len(_cost_cmd)))
-                if _cost_name == "doubt-comment-pipes" and _cost_guard is aiqt_hooks.gate_weakening:
-                    _cost_doubt_got = _cost_got
+        failures.extend(_cost_budget_edge_failures())
+        failures.extend(_cost_budget_cpu_failures())
+        _cost_problems, _cost_decisions = _lex_cost_failures(
+            _cost_inputs, (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line))
+        failures.extend(_cost_problems)
+        _cost_doubt_gots = set(_cost_decisions["doubt-comment-pipes", "gate_weakening"])
+        _cost_doubt_got = _cost_doubt_gots.pop() if len(_cost_doubt_gots) == 1 else sorted(_cost_doubt_gots)
         # The doubt-comment-pipes row bounds the fail-closed sink test only while its input still reaches
         # that test: the lex must keep raising the uncertain-'#' doubt on it and gate_weakening must keep
         # giving it the checker-and-pipe note (its terminal word is off the deny list), or the row would
@@ -23270,10 +23423,13 @@ def _main_isolated(monitor):
         # the segment for each of them cost time quadratic in it (about 1.5 s to 4 s of CPU time at 65,536
         # characters for the two forms below). The bound is the handler's CPU time in this process over 'sudo -E git
         # rebase x ...' and over 'sudo -E git rebase -x x ...', each padded to 65,536 characters and to
-        # _CMTIDN_READ_LIMIT, the longest command the reader reads (131,072 characters): 0.5 s at 65,536 and 1 s at
-        # 131,072, the same bound per character, against at most about 0.035 s and 0.07 s measured, a margin of
-        # about 14 times. The run-line read is counted through a shim, so a handler that allows a long command
-        # without reading it fails too: every rebase of the command is read, and in the -x form each one's exec line
+        # _CMTIDN_READ_LIMIT, the longest command the reader reads (131,072 characters): _COST_BUDGET reference
+        # passes over the same command (_cost_budget_ratio), the same budget per character at both lengths. It was
+        # 0.5 s at 65,536 and 1 s at 131,072 when the handler took at most about 0.035 s and 0.07 s; on an 80-core
+        # host with Python 3.14.4 the -x form later took up to 0.17 s and 0.40 s (max of five runs), about 2.5
+        # times inside that bound, where it takes at most about 5.5 passes, so a fixed bound no longer cancelled
+        # the host's load (the comment above _COST_REFERENCE_PASSES). The run-line read is counted through a shim,
+        # so a handler that allows a long command without reading it fails too: every rebase of the command is read, and in the -x form each one's exec line
         # is built. For each form the command at the limit runs only when the shorter one is within its bound, so a
         # quadratic reader fails in seconds.
         _ci_saved = aiqt_hooks._cmtidn_run_lines
@@ -23289,21 +23445,28 @@ def _main_isolated(monitor):
         try:
             aiqt_hooks._cmtidn_run_lines = _ci_counted_rebase_lines
             for _ci_unit in (" -E git rebase x", " -E git rebase -x x"):
-                for _ci_size, _ci_cap in ((64 << 10, 0.5), (aiqt_hooks._CMTIDN_READ_LIMIT, 1.0)):
+                for _ci_size in (64 << 10, aiqt_hooks._CMTIDN_READ_LIMIT):
                     _ci_reps = (_ci_size - 4) // len(_ci_unit)
                     _ci_cmd = "sudo" + _ci_unit * _ci_reps
                     _ci_cmd += " " * (_ci_size - len(_ci_cmd))
                     _ci_want = [_ci_reps, _ci_reps if " -x " in _ci_unit else 0]
-                    _ci_counts[:] = [0, 0]
-                    _ci_start = time.process_time()
-                    _ci_got = _decision(cig, _ci_cmd)
-                    _ci_spent = time.process_time() - _ci_start
-                    if _ci_got != "allow" or _ci_spent > _ci_cap or _ci_counts != _ci_want:
-                        failures.append("(ci-wr-rebase-cpu) {} characters of 'sudo{} ...' gave {} after {:.2f} s of "
-                                        "CPU time, {} rebase reads and {} run lines built (want allow within {} s, "
+                    _ci_seen = []
+
+                    def _ci_counted_call(cmd):
+                        _ci_counts[:] = [0, 0]
+                        got = _decision(cig, cmd)
+                        _ci_seen.append(list(_ci_counts))
+                        return got
+                    _ci_cost = _cost_budget_ratio(_ci_cmd, _ci_counted_call, _COST_BUDGET)
+                    _ci_gots = _ci_cost[4]
+                    if (_ci_cost[0] >= _COST_BUDGET or any(_ci_g != "allow" for _ci_g in _ci_gots)
+                            or any(_ci_c != _ci_want for _ci_c in _ci_seen)):
+                        failures.append("(ci-wr-rebase-cpu) {} characters of 'sudo{} ...' gave {} after {}, with {} "
+                                        "(rebase reads, run lines built) per call (want allow within the budget, "
                                         "{} rebase reads and {} run lines){}".format(
-                                            len(_ci_cmd), _ci_unit, _ci_got, _ci_spent, _ci_counts[0],
-                                            _ci_counts[1], _ci_cap, _ci_want[0], _ci_want[1],
+                                            len(_ci_cmd), _ci_unit, _ci_gots, _cost_budget_text(*_ci_cost[:4],
+                                                                                                _COST_BUDGET),
+                                            _ci_seen, _ci_want[0], _ci_want[1],
                                             "; the longer command was not run" if _ci_size == 64 << 10 else ""))
                         break
         finally:
@@ -23680,8 +23843,11 @@ def _main_isolated(monitor):
         # command the tokenizer cannot parse is. ci-wr-long-limit pins the limit just under, at and just past it.
         # Over the costliest command shape measured, repeated wrapped git bisect run words
         # nested three deep and ending in a locale quote, padded to 1 MiB, which took about 7 s of CPU time to read
-        # in full, each decision below is made within 1 s of CPU time: an AI --author value that an ANSI-C quote
-        # splits, an AI --author value after a quote character that the reader keeps, and an AI co-author trailer
+        # in full (an estimate of about 8 to 13 reference passes, against the 0.52 to 0.83 s a pass over 1 MiB
+        # took on an 80-core host with Python 3.14.4), each decision below is made within _COST_LONG_BUDGET
+        # reference passes over its own command (_cost_budget_ratio; a fixed 1 s bound before, which ci-wr168
+        # came within about 2.3 times of on that host at a load average of about 40): an AI --author value that
+        # an ANSI-C quote splits, an AI --author value after a quote character that the reader keeps, and an AI co-author trailer
         # that a backslash-newline splits deny, as the reader denies them (ci-wr135 to ci-wr137); a commit message
         # that merely names an AI product, or holds an AI name inside a longer word, denies (ci-wr138, ci-wr139, the
         # disclosed over-deny); and a command that names no AI identity allows (ci-wr-c47). Each was decided only
@@ -23699,8 +23865,8 @@ def _main_isolated(monitor):
         # them (ci-wr167 to ci-wr169, each allowed while that scan was not run past the limit). The co-author
         # context of that scan takes each whitespace run whole, so after a co-author name, a run of 40,000 newlines
         # and a quote, which took about 7 s of CPU time to scan while the run was given back one character at a
-        # time, an AI co-author trailer still denies within 1 s, in a command the tokenizer cannot parse and in a
-        # heredoc past the limit (ci-wr170, ci-wr171; the first was denied only after that time, the second allowed
+        # time, an AI co-author trailer still denies within that budget, in a command the tokenizer cannot parse
+        # and in a heredoc past the limit (ci-wr170, ci-wr171; the first was denied only after that time, the second allowed
         # while that scan was not run past the limit). Both scans for a command too long to read find what they seek
         # in every command that a vector of this section denies through the reader, among them a git commit on the
         # line after a word (ci-wr164), and every command that the fallback denies at a length the reader reads, on
@@ -23755,12 +23921,11 @@ def _main_isolated(monitor):
                  "denies (the disclosed over-deny)", '; git commit -m "thanks Claudette"', "deny"),
                 ("(ci-wr-c47) a command past the read limit that names no AI identity allows",
                  "; git commit -m x", "allow")):
-            _ci_start = time.process_time()
-            _ci_got = _decision(cig, _ci_wide + _ci_tail)
-            _ci_spent = time.process_time() - _ci_start
-            if _ci_got != _ci_want or _ci_spent > 1.0:
-                failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
-                                .format(_ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_got, _ci_spent))
+            _ci_cost = _cost_budget_ratio(_ci_wide + _ci_tail, lambda cmd: _decision(cig, cmd), _COST_LONG_BUDGET)
+            if _ci_cost[0] >= _COST_LONG_BUDGET or any(_ci_g != _ci_want for _ci_g in _ci_cost[4]):
+                failures.append("{}: over {} characters expected {} within the budget, got {} after {}".format(
+                    _ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_cost[4],
+                    _cost_budget_text(*_ci_cost[:4], _COST_LONG_BUDGET)))
         _ci_body = "cat > notes.txt <<'EOF'\n" + "the claude adapter notes\n" * ((1 << 20) // 25) + "EOF"
         _ci_heredoc = "\ncat > notes.txt <<EOF\n{}EOF"
         _ci_unparsed = ('/usr/bin/gi? commit --author="Claude <c@x>" -m x' + _ci_heredoc,
@@ -23797,12 +23962,11 @@ def _main_isolated(monitor):
                  _ci_body + "\nsetconf user.name Claude", "deny"),
                 ("(ci-wr165) an AI identity variable spelled in lower case, which the reader also judges, with no git "
                  "word, past the read limit, denies", _ci_body + "\ngit_committer_email=claude@x make", "deny")):
-            _ci_start = time.process_time()
-            _ci_got = _decision(cig, _ci_long)
-            _ci_spent = time.process_time() - _ci_start
-            if _ci_got != _ci_want or _ci_spent > 1.0:
-                failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
-                                .format(_ci_label, len(_ci_long), _ci_want, _ci_got, _ci_spent))
+            _ci_cost = _cost_budget_ratio(_ci_long, lambda cmd: _decision(cig, cmd), _COST_LONG_BUDGET)
+            if _ci_cost[0] >= _COST_LONG_BUDGET or any(_ci_g != _ci_want for _ci_g in _ci_cost[4]):
+                failures.append("{}: over {} characters expected {} within the budget, got {} after {}".format(
+                    _ci_label, len(_ci_long), _ci_want, _ci_cost[4], _cost_budget_text(*_ci_cost[:4],
+                                                                                       _COST_LONG_BUDGET)))
         _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                        "tool_input": {"command": _ci_cmd + " " * _ci_limit}})[1]
         _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
