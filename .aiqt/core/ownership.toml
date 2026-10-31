@@ -37,6 +37,10 @@ path = ".github/workflows/msg-leaks.yml"
 reason = "CI message/metadata leak workflow; tracked, not shipped. Exact literal, not a glob (F-235)."
 
 [[exclusion]]
+path = ".github/workflows/selftest-weekly.yml"
+reason = "CI weekly self-test workflow; tracked, not shipped. Exact literal, not a glob."
+
+[[exclusion]]
 path = ".github/check_newtab_contract.py"
 reason = "Repository-local NEWTAB declaration-content assertion; tracked, not shipped."
 

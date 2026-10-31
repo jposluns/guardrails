@@ -1,0 +1,900 @@
+name: Weekly self-tests
+
+# A scheduled run of the full self-test suites on main, deliberately SEPARATE from the Quality workflow.
+# quality.yml runs only on a labelled merge-train pull request and on a push to main, so a week with no
+# merge runs no self-test at all, while the runner image, its git and the newest 3.14 patch release can
+# still move under an unchanged tree. This workflow runs every self-test command tools/run_all_checks.sh
+# and quality.yml run, weekly and on manual dispatch, so such drift turns this scheduled run red in the
+# Actions tab without ever blocking a pull request. It is not a required status and gates nothing.
+#
+# Self-tests only: the live gates and drift checks judge the tree itself, which quality.yml already
+# judged on the push that made it, so they are not repeated here. The local runner's three opf.py
+# --self-test-group lines are not repeated either: the one whole opf.py --self-test below runs the same
+# registered self-tests. Each job keeps the checkout and Python setup of its quality.yml counterpart,
+# and the child-status probe stays the step right after the Python setup step of every job.
+
+on:
+  schedule:
+    # 07:23 UTC every Tuesday. Off Monday and off the top of the hour to avoid the scheduler herd, and
+    # away from the monthly currency.yml slot.
+    - cron: '23 7 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets-site:
+    name: Secrets, leaks and site self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Secret scan self-test
+        shell: bash
+        run: python3 -I -B tools/check_secrets.py --self-test
+
+      - name: Gitleaks pin self-test
+        shell: bash
+        run: python3 -I -B tools/check_gitleaks_pin.py --self-test
+
+      - name: Leak denylist self-test
+        shell: bash
+        run: python3 -I -B tools/check_leaks.py --self-test
+
+      # quality.yml does not run this one; its live scan needs pull request event context and lives in
+      # msg-leaks.yml. The local runner runs the self-test, so it runs here too.
+      - name: Message leak scan self-test
+        shell: bash
+        run: python3 -I -B tools/check_msg_leaks.py --self-test
+
+      - name: Portability self-test
+        shell: bash
+        run: python3 -I -B tools/check_portability.py --self-test
+
+      - name: Derived command parameters self-test
+        shell: bash
+        run: python3 -I -B tools/check_derived_command_parameters.py --self-test
+
+      - name: Relied exit pipes self-test
+        shell: bash
+        run: python3 -I -B tools/check_relied_exit_pipes.py --self-test
+
+      - name: Dashes self-test
+        shell: bash
+        run: python3 -I -B tools/check_no_dashes.py --self-test
+
+      - name: Site logo-consistency self-test
+        shell: bash
+        run: python3 -I -B tools/check_site.py --self-test
+
+      - name: Overclaim lint self-test
+        shell: bash
+        run: python3 -I -B tools/check_overclaim.py --self-test
+
+      - name: License-qualification self-test
+        shell: bash
+        run: python3 -I -B tools/check_license_qualification.py --self-test
+
+      - name: Footer coverage self-test
+        shell: bash
+        run: python3 -I -B tools/check_footer.py --self-test
+
+      - name: New-tab external links self-test
+        shell: bash
+        run: python3 -I -B tools/check_newtab.py --self-test
+
+      - name: Site version currency self-test
+        shell: bash
+        run: python3 -I -B tools/check_site_versions.py --self-test
+
+      - name: Render driver behaviour self-test
+        shell: bash
+        run: python3 -I -B tools/selftest_opf_render.py
+
+  opf-tooling-a:
+    name: OPF tooling self-tests A
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF homes contract self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_homes.py --self-test
+
+      - name: OPF journal direct self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_journal.py --self-test
+
+      - name: OPF prompt-pack manifest drift gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
+
+      - name: OPF adoption schema and read-only planning self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt.py --self-test
+
+      - name: OPF adoption completion evaluator self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
+
+      - name: OPF adoption HTTPS observer and quarantine self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
+
+      - name: OPF adoption source-discovery self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
+
+      - name: OPF init resume-substrate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_init_substrate.py --self-test
+
+      - name: OPF init operation-layer self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_init_operation.py --self-test
+
+  opf-tooling-b:
+    name: OPF tooling self-tests B
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF observe direct self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_observe.py --self-test
+
+      - name: OPF store-integrity gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_doctor.py --self-test
+
+      - name: OPF enforcement-pack platform coverage gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_platforms.py --self-test
+
+      - name: OPF adoption apply-shell self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
+
+      - name: OPF import completion per-source evaluator self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_import_complete.py --self-test
+
+      - name: OPF source-only init gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init.py --self-test
+
+      - name: OPF init Keep-contract validator self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_init_contract.py --self-test
+
+      - name: OPF init builders self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_init.py --self-test
+
+  opf-tooling-c:
+    name: OPF tooling self-tests C
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF render-drift gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_drift.py --self-test
+
+      - name: OPF record-authoring gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
+
+      - name: OPF adoption state self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_state.py --self-test
+
+      - name: OPF adoption enable-hook merge-core self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
+
+      - name: OPF import batch parser self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_import_batch.py --self-test
+
+      - name: OPF pack manifest parser self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
+
+      - name: OPF init contract consistency gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init_contract.py --self-test
+
+      - name: OPF operation-lock self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_oplock.py --self-test
+
+      - name: OPF init P0 ratified-contracts self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init_p0.py --self-test --red-on-revert
+
+      - name: OPF init raw-history reader self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
+
+  # The whole OPF tooling self-test, once, on '3.14'. In quality.yml it runs only in the host-patch job.
+  opf-selftest:
+    name: OPF tooling self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF tooling self-test
+        shell: bash
+        run: python3 -I -B opf/tools/opf.py --self-test
+
+  # Five jobs for the same reason as in quality.yml: the closure self-test's worst case does not fit one
+  # job's time limit. Each passes the quality.yml job name its legs are partitioned under.
+  opf-closure-a:
+    name: OPF standalone closure self-test A
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-a
+
+  opf-closure-b:
+    name: OPF standalone closure self-test B
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-b
+
+  opf-closure-c:
+    name: OPF standalone closure self-test C
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-c
+
+  opf-closure-d:
+    name: OPF standalone closure self-test D
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-d
+
+  opf-closure-e:
+    name: OPF standalone closure self-test E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-e
+
+  release:
+    name: Corpus, release and versioning self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Corpus-core library self-test
+        shell: bash
+        run: python3 -I -B tools/selftest_aiqt_corpus.py
+
+      - name: Release cut self-test
+        shell: bash
+        run: python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
+
+      - name: Version monotonicity self-test
+        shell: bash
+        run: python3 -I -B tools/check_version_monotonicity.py --self-test
+
+      - name: Branch root self-test
+        shell: bash
+        run: python3 -I -B tools/check_branch_root.py --self-test
+
+      - name: Release delta self-test
+        shell: bash
+        run: python3 -I -B tools/check_release_delta.py --self-test
+
+      - name: Release build self-test
+        shell: bash
+        run: python3 -I -B tools/check_release_build.py --self-test
+
+      - name: Clause inventory self-test
+        shell: bash
+        run: python3 -I -B tools/check_clauses.py --self-test
+
+      - name: Crosswalk generator self-test
+        shell: bash
+        run: python3 -I -B tools/gen_crosswalk.py --self-test
+
+      - name: Crosswalk gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_crosswalk.py --self-test
+
+      - name: Migration engine crash-injection self-test
+        shell: bash
+        run: python3 -I -B tools/migrate.py --self-test
+
+      - name: Pin lifecycle self-test
+        shell: bash
+        run: python3 -I -B tools/pin.py --self-test
+
+      - name: Doctor self-test
+        shell: bash
+        run: python3 -I -B tools/doctor.py --self-test
+
+  generated:
+    name: Generated surfaces self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Rules self-test
+        shell: bash
+        run: python3 -I -B tools/gen_rules.py --self-test
+
+      - name: Artifact checksums self-test
+        shell: bash
+        run: python3 -I -B tools/check_artifact_checksums.py --self-test
+
+      - name: Agents self-test
+        shell: bash
+        run: python3 -I -B tools/gen_agents.py --self-test
+
+      - name: First-pin demonstration self-test
+        shell: bash
+        run: python3 -I -B tools/gen_first_pin_demo.py --self-test
+
+      - name: Must-deliver prefix self-test
+        shell: bash
+        run: python3 -I -B tools/check_must_deliver.py --self-test
+
+      - name: Mappings page self-test
+        shell: bash
+        run: python3 -I -B tools/gen_mappings.py --self-test
+
+      - name: Reference roster self-test
+        shell: bash
+        run: python3 -I -B tools/gen_reference_facts.py --self-test
+
+      - name: Reference facts self-test
+        shell: bash
+        run: python3 -I -B tools/check_reference_facts.py --self-test
+
+      - name: Disclosure generator self-test
+        shell: bash
+        run: python3 -I -B tools/gen_disclosure.py --self-test
+
+      - name: Install page block self-test
+        shell: bash
+        run: python3 -I -B tools/gen_install.py --self-test
+
+      - name: Install page tripwire self-test
+        shell: bash
+        run: python3 -I -B tools/check_install_page.py --self-test
+
+      - name: Sized instructions self-test
+        shell: bash
+        run: python3 -I -B tools/check_sized_instructions.py --self-test
+
+      - name: Instruction budget self-test
+        shell: bash
+        run: python3 -I -B tools/check_instruction_budget.py --self-test
+
+      - name: Brief capability self-test
+        shell: bash
+        run: python3 -I -B tools/check_brief_capability.py --self-test
+
+      - name: CLAUDE.md self-test
+        shell: bash
+        run: python3 -I -B tools/gen_claude.py --self-test
+
+      - name: Cursor self-test
+        shell: bash
+        run: python3 -I -B tools/gen_cursor.py --self-test
+
+      - name: Worker-pack self-test
+        shell: bash
+        run: python3 -I -B tools/gen_worker_pack.py --self-test
+
+      - name: Hooks generator self-test
+        shell: bash
+        run: python3 -I -B tools/gen_hooks.py --self-test
+
+      - name: Secret-patterns generator self-test
+        shell: bash
+        run: python3 -I -B tools/gen_secret_patterns.py --self-test
+
+      - name: Hooks behaviour self-test
+        shell: bash
+        run: python3 -I -B tools/selftest_aiqt_hooks.py
+
+      - name: Char-policy validator generator self-test
+        shell: bash
+        run: python3 -I -B tools/gen_char_policy.py --self-test
+
+      - name: Hooks preview self-test
+        shell: bash
+        run: python3 -I -B tools/check_hooks_preview.py --self-test
+
+  selftest-execution:
+    name: Execution-reconciled self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Selftest-execution gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --self-test
+
+      - name: Orchestrator-integrity behaviour self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
+
+      - name: CI-status behaviour self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+
+      - name: Instruction-budget self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
+
+      - name: Brief-capability self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
+
+      - name: Hook-latency harness self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite hook-latency-selftest
+
+      - name: Entry-guard self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
+
+      - name: Verifier delivery self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
+
+      - name: Child-status probe self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite child-status-selftest
+
+      - name: Child-status coverage self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite child-status-coverage-selftest
+
+      - name: OPF declaration self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
+
+  # The four git-fixture-env suites, one per job, on ubuntu-24.04, the image of the quality.yml
+  # host-patch jobs. They pin '3.14', not the host patch release: tools/check_python_floor.py accepts a
+  # patch-release pin only inside the host-patch jobs of quality.yml, so this file runs them on whatever
+  # '3.14' resolves to, and the host pin gate's live leg, which fails on any other release, is not run.
+  git-fixture-env-core:
+    name: Git-fixture-env core self-test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env core behaviour self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
+
+  git-fixture-env-config-combined:
+    name: Git-fixture-env combined config lane
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
+
+  git-fixture-env-config-malformed:
+    name: Git-fixture-env malformed config lane
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
+
+  git-fixture-env-config-system:
+    name: Git-fixture-env system config lane
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
+
+  registry:
+    name: Records, manifest and parity self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Record-drift self-test
+        shell: bash
+        run: python3 -I -B tools/check_record_drift.py --self-test
+
+      - name: Record-section preservation self-test
+        shell: bash
+        run: python3 -I -B tools/check_record_sections.py --self-test
+
+      - name: Mistakes-register self-test
+        shell: bash
+        run: python3 -I -B tools/check_mistakes_register.py --self-test
+
+      - name: Mistakes-register append self-test
+        shell: bash
+        run: python3 -I -B tools/orch_register.py --self-test
+
+      - name: AEI enumerator self-test
+        shell: bash
+        run: python3 -I -B tools/aei_backlog_md.py --self-test
+
+      - name: Skill self-test
+        shell: bash
+        run: python3 -I -B tools/gen_skill.py --self-test
+
+      - name: Gensrc registry self-test
+        shell: bash
+        run: python3 -I -B tools/gen_gensrc.py --self-test
+
+      - name: Gensrc fail-close self-test
+        shell: bash
+        run: python3 -I -B tools/check_gensrc_failclose.py --self-test
+
+      - name: Enforceability ledger self-test
+        shell: bash
+        run: python3 -I -B tools/gen_enforceability.py --self-test
+
+      - name: Enforcement register self-test
+        shell: bash
+        run: python3 -I -B tools/gen_enforcement_register.py --self-test
+
+      - name: Launcher isolation self-test
+        shell: bash
+        run: python3 -I -B tools/check_python_launcher_isolation.py --self-test
+
+      - name: Python floor self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest
+
+      # Only the self-test: its vectors run main() against a stand-in interpreter version, while the
+      # live leg fails on any release but the host patch, which this file cannot pin.
+      - name: Python host pin self-test
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py --self-test
+
+      - name: Renderer declaration self-test
+        shell: bash
+        run: python3 -I -B tools/gen_renderers.py --self-test
+
+      - name: Manifest generator self-test
+        shell: bash
+        run: python3 -I -B tools/gen_manifest.py --self-test
+
+      - name: Manifest integrity self-test
+        shell: bash
+        run: python3 -I -B tools/check_manifest.py --self-test
+
+      - name: Byte canon self-test
+        shell: bash
+        run: python3 -I -B tools/check_byte_canon.py --self-test
+
+      - name: Rule placement self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite rule-placement-selftest
+
+      - name: Applicability tags self-test
+        shell: bash
+        run: python3 -I -B tools/check_applies.py --self-test
+
+      - name: Cited standards repository corpus contract self-test
+        shell: bash
+        run: python3 -I -B .github/check_cited_standards_contract.py --self-test
+
+      - name: Cited standards self-test
+        shell: bash
+        run: python3 -I -B tools/check_cited_standards.py --self-test
+
+      - name: Conformance suite self-test
+        shell: bash
+        run: python3 -I -B tools/conformance.py --self-test
+
+      - name: CommonMark heading adapter self-test
+        shell: bash
+        run: python3 -I -B opf/tools/selftest_commonmark_headings.py
+
+      - name: CommonMark conformance replay
+        shell: bash
+        run: python3 -I -B opf/tools/selftest_commonmark_conformance.py
+
+      - name: Standards currency self-test
+        shell: bash
+        run: python3 -I -B tools/check_standards_currency.py --self-test
+
+      - name: CWE importer self-test
+        shell: bash
+        run: python3 -I -B tools/import_cwe.py --self-test
+
+      - name: CI parity self-test
+        shell: bash
+        run: python3 -I -B tools/check_ci_parity.py --self-test
+
+      - name: Git option table self-test
+        shell: bash
+        run: python3 -I -B tools/check_git_option_table.py --self-test
+
+      - name: Dangerous-API lint self-test
+        shell: bash
+        run: python3 -I -B tools/check_dangerous_api.py --self-test
+
+      - name: QA adapter self-test
+        shell: bash
+        run: python3 -I -B tools/_qa_adapter.py --self-test
+
+      - name: Reference audit self-test
+        shell: bash
+        run: python3 -I -B tools/audit_reference.py --self-test
+
+      - name: Internal-name leak self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite internal-names-selftest
+
+  # The byte-canon vectors on both platforms quality.yml covers.
+  byte-canon-matrix:
+    name: Byte canon vectors (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Byte canon self-test (vectors)
+        shell: bash
+        run: python3 -I -B tools/check_byte_canon.py --self-test
