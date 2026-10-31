@@ -76,10 +76,16 @@ interrupted earlier run, and that recovery, where one is needed, writes the stor
 while SUPPORTED_HOMES is 1 (below) that is every store this build writes, so the shipped verb refuses it
 until activation. The item must be seated once in the active backlog index at unqualified `done`,
 schema-valid and authored by a clean-series author, and its row must be exactly the row the prior commit
-(HEAD) holds, read through the doctor's own prior-snapshot reader (_require_committed_item) while planning
-and read again under the held lease immediately before anything is reserved or published
-(_require_committed_held): the final doctor accepts no pending status change for this subcommand, so the
-reviewed edit is committed first. A clean receipt authored by a non-importer actor that already names
+(HEAD) holds, read through the doctor's own prior-snapshot reader (_require_committed_item) while planning,
+read again under the held lease immediately before anything is reserved or published
+(_require_committed_held), and read a third time after the final doctor (_require_committed_published,
+a refusal after publication): the final doctor accepts no pending status change for this subcommand, so
+the reviewed edit is committed first. A store the final doctor would certainly fail on in a way the
+receipt join and the preconditions do not otherwise inspect refuses before anything is written: a
+backlog index that is not canonical (the doctor's canonical-bytes leg grades the file this repair only
+reads), and a backlog_item or done record, active or archived, whose actor kind cannot be read
+(_require_known_provenance: C-RECEIPTS is then CANNOT-EVALUATE whichever item the record names). A
+clean receipt authored by a non-importer actor that already names
 the item, in the active done index or the archive (read through the doctor's own archive walk), refuses
 (_require_unreceipted), and an archive the walk does not pass refuses too, never skipped, as does an
 active backlog or done row the doctor's receipt join cannot read or interpret (_require_interpreted_rows),
@@ -180,13 +186,15 @@ recovery text); receipt-repair reads the prior commit (HEAD) for its committed-r
 and again under the held lease immediately before anything is reserved or published, so a HEAD moved
 after planning to a commit that no longer holds the item's row at done refuses with nothing written, but
 git takes no lease, so a HEAD moved after that second read and before the post-publication render and
-final doctor read it (a commit, reset or checkout in another shell) is not re-checked: where the moved
-HEAD holds the item at a status other than done, the post-publication render, which validates the store
-first, and the final doctor accept no pending status change for this subcommand, so the run refuses after
-publication and the change is left for review the same way; where the moved HEAD does not hold the item
-at all, the doctor's history check, which walks only the records the prior commit holds, never reaches
-it, so the final doctor passes and the run reports the receipt recorded (exit 0) over an item HEAD does
-not hold; a completed transaction's journal directory
+final doctor read it (a commit, reset or checkout in another shell) cannot be refused before the
+publication: the receipt is then already written, and the run reads the prior commit a third time after
+the final doctor (_require_committed_published), so a HEAD that no longer holds the item's row at done
+refuses after publication (exit 2, cannot-evaluate) with the scoped recovery text, never exit 0 over an
+item HEAD does not hold; a HEAD moved after that third read is not re-checked, and a HEAD moved away
+and back between the second and third reads passes the third read although the final doctor graded the
+store against the commit HEAD held in between (where that commit does not hold the item, the doctor's
+history check, which walks only the records the prior commit holds, never reaches it); a completed
+transaction's journal directory
 is retained under the generation's record journal home as local recovery evidence; the lease is not made observable at a sync target (no
 sync runtime in this build, so the guarantee is single-host single-writer); a signal
 delivered at any point may leave a lease, an operation capability record or a journal lock in place,
@@ -1746,42 +1754,47 @@ def _require_done_item(row, rid):
                               "done-with-receipt" if current == "done/proposed" else ""))
 
 
-def _committed_prior(ctx):
+_NOTHING_WRITTEN = "nothing written (fail-closed)"
+_PUBLISHED_FOR_REVIEW = "the publication is already applied and is left for review (fail-closed)"
+
+
+def _committed_prior(ctx, outcome=_NOTHING_WRITTEN):
     """The prior committed snapshot (HEAD), read through the doctor's own prior-snapshot reader
     (_opf_observe.gather, the observations the final doctor grades the store against), or a refusal when
-    it cannot be read: whether the reviewed edit is committed then cannot be told."""
+    it cannot be read: whether the reviewed edit is committed then cannot be told. `outcome` ends the
+    refusal: nothing written before publication, the publication left for review after it."""
     try:
         observations, notes = _opf_observe.gather(ctx.res)
     except Exception as exc:  # noqa: BLE001  an observation escape is cannot-evaluate, never a pass
         raise RecordError("receipt-repair cannot read the prior committed snapshot ({!r}), so whether the "
-                          "reviewed edit is committed cannot be told; nothing written (fail-closed)".format(exc))
+                          "reviewed edit is committed cannot be told; {}".format(exc, outcome))
     prior = observations.get("prior")
     if not isinstance(prior, dict):
         raise RecordError("receipt-repair cannot read the prior committed snapshot ({}), so whether the "
-                          "reviewed edit is committed cannot be told; nothing written (fail-closed)".format(
-                              "; ".join(notes) or "no snapshot was observed"))
+                          "reviewed edit is committed cannot be told; {}".format(
+                              "; ".join(notes) or "no snapshot was observed", outcome))
     return prior
 
 
-def _require_committed_item(ctx, row, rid):
+def _require_committed_item(ctx, row, rid, outcome=_NOTHING_WRITTEN):
     """The reviewed edit that put the item at `done` must be committed: the item's current row must be
     exactly the row the prior commit (HEAD) holds, at `done`, by the doctor's own body digest. This
     subcommand changes no status, so its final doctor accepts no pending snapshot comparison
     (_snapshot_pending), and an uncommitted status change would otherwise fail only after publication.
-    Refused with every byte untouched."""
-    prior = _committed_prior(ctx)
+    Refused with every byte untouched while planning and under the held lease; after publication
+    (_require_committed_published) `outcome` says the publication is left for review instead."""
+    prior = _committed_prior(ctx, outcome)
     records = prior.get("records") if isinstance(prior.get("records"), dict) else {}
     digests = prior.get("digests") if isinstance(prior.get("digests"), dict) else {}
     try:
         same = _opf_check._record_digest_matches(row, digests.get(rid))
     except _opf_emit.EmitError as exc:
-        raise RecordError("receipt-repair cannot compute the body digest of {} ({}); nothing written "
-                          "(fail-closed)".format(rid, exc))
+        raise RecordError("receipt-repair cannot compute the body digest of {} ({}); {}".format(rid, exc, outcome))
     if records.get(rid) != (BACKLOG, "done") or not same:
         raise RecordError("receipt-repair refused (uncommitted-item): {} in {} is not exactly the row the prior "
                           "commit (HEAD) holds at done; commit the reviewed edit first, then repair its "
                           "receipt (this subcommand changes no status, so its final doctor accepts no "
-                          "pending status change); nothing written (fail-closed)".format(rid, ctx.backlog.rel))
+                          "pending status change); {}".format(rid, ctx.backlog.rel, outcome))
 
 
 def _require_committed_held(ctx, req):
@@ -1789,8 +1802,8 @@ def _require_committed_held(ctx, req):
     immediately before anything is reserved or published, over the item's row in the backlog index the
     held re-read has just confirmed unchanged: git takes no lease, so a HEAD moved after planning (a
     commit, reset or checkout in another shell) to a commit that holds the item at another state, or does
-    not hold it at all, refuses here with nothing written. A HEAD moved after this read is still not
-    re-checked (the module's residuals). Every other subcommand passes without reading the prior commit."""
+    not hold it at all, refuses here with nothing written. A HEAD moved after this read is read again only
+    after publication (_require_committed_published; the module's residuals). Every other subcommand passes without reading the prior commit."""
     if req.subcommand != "receipt-repair":
         return
     (rid,) = req.positionals
@@ -1799,6 +1812,26 @@ def _require_committed_held(ctx, req):
     except RecordError as exc:
         raise RecordError("under the held lease, immediately before publication, the prior commit (HEAD) was "
                           "read again: {}".format(exc))
+
+
+def _require_committed_published(ctx, req):
+    """A receipt repair's committed-row check (_require_committed_item), run a third time after the final
+    doctor, still under the held lease, over the same row _require_committed_held read: git takes no lease,
+    so a HEAD moved after the held read and before the render and the final doctor read it (a commit,
+    reset or checkout in another shell) cannot be refused before the publication. Where the moved HEAD
+    does not hold the item, the doctor's history check never reaches it and the final doctor passes, so
+    this read is what keeps that run from reporting the receipt recorded. A refusal here is a
+    _PostPublication (exit 2, cannot-evaluate, with the scoped recovery text), never exit 0, and a prior
+    commit that cannot be read refuses the same way. Every other subcommand passes without reading the
+    prior commit."""
+    if req.subcommand != "receipt-repair":
+        return
+    (rid,) = req.positionals
+    try:
+        _require_committed_item(ctx, _locate(ctx.backlog, rid), rid, _PUBLISHED_FOR_REVIEW)
+    except RecordError as exc:
+        raise _PostPublication("after the final doctor, the prior commit (HEAD) was read again and the receipt "
+                               "is not offered as recorded: {}".format(exc))
 
 
 def _receipt_records(ctx, rows):
@@ -1852,7 +1885,8 @@ def _require_unreceipted(ctx, operand, rid):
     _require_interpreted_rows(_index_rows(ctx.backlog), BACKLOG, ctx.backlog.rel, rid)
     rows = _index_rows(operand)
     _require_interpreted_rows(rows, "done", operand.rel, rid)
-    naming = [rec for rec in _receipt_records(ctx, rows)
+    records = _receipt_records(ctx, rows)
+    naming = [rec for rec in records
               if rec.rtype == "done" and rec.location != "imported" and rec.actor_kind != "importer"
               and ("receipt_of", rid) in rec.links]
     held = [rec.id for rec in naming if isinstance(rec.id, str)]
@@ -1869,6 +1903,44 @@ def _require_unreceipted(ctx, operand, rid):
                           "nothing written (fail-closed)".format(
                               rid, operand.rel if rec.location == "active" else "the archive, " + rec.location,
                               _opf_store._safe_display(rec.id)))
+    _require_known_provenance(ctx, records, rid)
+
+
+def _require_known_provenance(ctx, records, rid):
+    """Every clean backlog_item or done record the doctor's receipt join reads (the active backlog rows, and
+    `records`: the active done rows and every archived record, _receipt_records) must have an actor kind
+    the doctor can read. One it cannot (_make_rec's `unparsed` "actor": absent, not a string, or a
+    lookalike the schema does not admit) makes C-RECEIPTS CANNOT-EVALUATE whichever item that record
+    names (_opf_check._check_receipts), so the final doctor certainly fails and the repair would publish
+    and then refuse. A done record of that kind naming this item was already refused as a held receipt
+    (_require_unreceipted), and the item's own row as schema-invalid (_require_valid_current); this
+    refuses the rest, a record naming another item or none, before anything is written."""
+    rows = [_opf_check._make_rec(r, BACKLOG, "active") for r in _index_rows(ctx.backlog) if isinstance(r, dict)]
+    for rec in rows + list(records):
+        if rec.rtype in (BACKLOG, "done") and rec.location != "imported" and "actor" in rec.unparsed:
+            raise RecordError("receipt-repair refused: the {} record {} ({}) has an actor kind that cannot be "
+                              "read, so the final doctor's receipt join (C-RECEIPTS) is CANNOT-EVALUATE "
+                              "whichever item it names, and the repair of {} would publish and then fail; "
+                              "repair that record first; nothing written (fail-closed)".format(
+                                  rec.rtype, _opf_store._safe_display(rec.id),
+                                  ctx.backlog.rel if rec.rtype == BACKLOG and rec.location == "active"
+                                  else ctx.done_index.rel if rec.location == "active"
+                                  else "the archive, " + rec.location, rid))
+
+
+def _require_canonical_backlog(ctx):
+    """The backlog index a receipt repair only reads must be canonical too: the precondition proves only
+    the files this operation rewrites, while the final doctor's canonical-bytes leg
+    (_opf_check._check_canonical_store_files, under C-CONTAINMENT) grades every managed machine-store
+    TOML file by the same predicate (_opf_emit.matches_store_bytes), so a non-canonical backlog index is
+    a certain final-doctor finding and the repair would publish and then fail. Refused before anything is
+    written."""
+    if not _opf_emit.matches_store_bytes(ctx.backlog.raw, _emit_bytes(ctx.backlog.model)):
+        raise RecordError("receipt-repair refused: {} is not in canonical new-document form (it carries "
+                          "comments or non-canonical serialization), which the final doctor's canonical-bytes "
+                          "leg (C-CONTAINMENT) reports as a finding, so the repair would publish and then "
+                          "fail; restore it from the integration base first (spec 5.7); nothing written "
+                          "(fail-closed)".format(ctx.backlog.rel))
 
 
 def _plan_receipt_repair(req, ctx, operand, now):
@@ -1877,11 +1949,13 @@ def _plan_receipt_repair(req, ctx, operand, now):
     `receipt_of`, and its own worklog entry, in one publication; `operand` is the done index. The item is
     read from the backlog index (ctx.backlog), never rewritten: it must be seated once, at unqualified
     `done`, schema-valid, clean-authored, committed as it stands (_require_committed_item, read again under
-    the held lease by _require_committed_held), and hold no clean receipt (_require_unreceipted). The claim
-    runs only at homes 2 (_require_reservation_home)."""
+    the held lease by _require_committed_held and after the final doctor by _require_committed_published),
+    and hold no clean receipt (_require_unreceipted), and the backlog index it is read from must be
+    canonical (_require_canonical_backlog). The claim runs only at homes 2 (_require_reservation_home)."""
     (rid,) = req.positionals
     _require_repair_maintainer(req.actor)
     _require_reservation_home(ctx)
+    _require_canonical_backlog(ctx)
     row = _locate(ctx.backlog, rid)
     _require_done_item(row, rid)
     _require_valid_current(row, BACKLOG, ctx, rid, ctx.backlog.rel)
@@ -3406,9 +3480,13 @@ def _render(root, transition=None):
 
 
 def _recovery_text(ctx, scope):
-    """Scoped recovery advice for a post-publication failure. The cleanliness gate proved HEAD holds the
-    pre-operation bytes of every planned path, so restoring the listed paths together discards the
-    uncommitted publication as one unit (the claimed ids were never reported). Never a whole-tree restore."""
+    """Scoped recovery advice for a post-publication failure. The cleanliness gate proved HEAD held the
+    pre-operation bytes of every planned path when it ran, so while HEAD has not moved since, restoring the
+    listed paths together discards the uncommitted publication as one unit (the claimed ids were never
+    reported). git takes no lease, so HEAD may have moved after that gate (a commit, reset or checkout in
+    another shell; a receipt repair refused by _require_committed_published is one such run), and `git
+    restore` then restores the moved HEAD's bytes instead: the advice says so and asks for a comparison
+    against HEAD first. Never a whole-tree restore."""
     store_root = str(ctx.res.store_root)
     product_root = str(ctx.res.product_root if ctx.res.product_root is not None else ctx.res.store_root)
     lines = ["opf record: the uncommitted change is left for review. Resolve the findings above and run opf "
@@ -3423,6 +3501,9 @@ def _recovery_text(ctx, scope):
     lines.append("  inspect first: git -C {} --literal-pathspecs status --ignored=matching "
                  "--untracked-files=all -- {}".format(shlex.quote(store_root),
                                                       " ".join(shlex.quote(p) for p in scope["store"])))
+    lines.append("  These restore the bytes HEAD holds when you run them. HEAD held the pre-operation bytes of "
+                 "these paths when this run checked them; if HEAD has moved since (a commit, reset or checkout "
+                 "in another shell), compare first (git diff HEAD -- the paths above) before restoring.")
     lines.append("  Never run a whole-tree restore (git restore . / git reset --hard): it would destroy "
                  "unrelated uncommitted work.")
     return "\n".join(lines)
@@ -3669,6 +3750,9 @@ def _run_operation(req):
             try:
                 _render(root, plan.transition)
                 snapshot_pending = _final_gate(root, plan.transition)
+                # A receipt repair reads the prior commit (HEAD) a third time: HEAD may have moved after
+                # the held read, and the final doctor never reaches an item the moved HEAD does not hold.
+                _require_committed_published(ctx, req)
             except _PostPublication as exc:
                 raise _PostPublication("{}\n{}".format(exc, _recovery_text(ctx, scope)))
             # 9. release the lease, THEN report (R5).
@@ -4242,15 +4326,16 @@ def _self_test_receipt_repair(check, ctx_of, full, now):
         return {"records": {r["id"]: (BACKLOG, r["status"]) for r in rows},
                 "digests": {r["id"]: _opf_check._record_digest(r) for r in rows}}
 
-    def plan(args=argv, items=(item,), dones=(), homes=2, prior=None, archived=([], []), dn=0):
+    def plan(args=argv, items=(item,), dones=(), homes=2, prior=None, archived=([], []), dn=0, comment=b""):
         c = ctx_of(dict(counters, DN=dn))
         c.homes = homes
         c.backlog = _model_operand(c.rel(BACKLOG + _opf_check.INDEX_SUFFIX),
                                    {"schema": 1, "record": copy.deepcopy(list(items))})
+        c.backlog.raw += comment
         c.done_index = _model_operand(c.done_index.rel, {"schema": 1, "record": copy.deepcopy(list(dones))})
         r = parse_request(list(args))
         snap = snapshot_of(items) if prior is None else prior
-        seams["_committed_prior"] = lambda ctx: snap
+        seams["_committed_prior"] = lambda ctx, outcome=_NOTHING_WRITTEN: snap
         _opf_check.archived_records = lambda *a, **k: archived
         try:
             return _PLANNERS[r.subcommand](r, c, c.done_index, now), c
@@ -4330,9 +4415,45 @@ def _self_test_receipt_repair(check, ctx_of, full, now):
             ("an archived clean receipt", {"archived": ([archived_held], []), "dn": 1},
              "already holds the clean done receipt 'DN-1'"),
             ("an archive the walk does not pass", {"archived": ([], ["C-ARCHIVE-ENUM: unreadable bucket"])},
-             "doctor's own archive walk")):
+             "doctor's own archive walk"),
+            ("a done row of unreadable provenance naming another item",
+             {"dones": [dict(held, actor={}, links=[{"rel": "receipt_of", "id": "BI-2"}])], "dn": 1},
+             "the done record 'DN-1' (" + c.done_index.rel + ") has an actor kind that cannot be read"),
+            ("a done row of lookalike provenance naming no item",
+             {"dones": [dict(held, actor={"kind": "Importer"}, links=[])], "dn": 1},
+             "the done record 'DN-1' (" + c.done_index.rel + ") has an actor kind that cannot be read"),
+            ("an archived done of unreadable provenance naming another item",
+             {"archived": ([_opf_check._make_rec(dict(held, actor={"kind": 7},
+                                                     links=[{"rel": "receipt_of", "id": "BI-2"}]),
+                                                "done", "archive/2026")], []), "dn": 1},
+             "the done record 'DN-1' (the archive, archive/2026) has an actor kind that cannot be read"),
+            ("a backlog row of unreadable provenance beside the item",
+             {"items": [item, dict(item, id="BI-2", actor={"kind": "importer-legacy"})],
+              "prior": snapshot_of([item])},
+             "the backlog_item record 'BI-2' (" + c.backlog.rel + ") has an actor kind that cannot be read"),
+            ("a backlog index carrying a comment", {"comment": b"# a hand note\n"},
+             c.backlog.rel + " is not in canonical new-document form")):
         check("receipt-repair refuses {}".format(label),
               _refuses(lambda kw=kw: plan(**kw), needle))
+
+    def plans(**kw):
+        try:
+            return plan(**kw)[0].ids == ["DN-{}".format(kw.get("dn", 0) + 1), "WL-2"]
+        except RecordError:
+            return False
+    check("an importer-authored done naming another item is planned, its provenance read",
+          plans(dones=[dict(held, actor={"kind": "importer"}, links=[{"rel": "receipt_of", "id": "BI-2"}])], dn=1))
+    # Each up-front refusal dropped, its vector plans: the refusal above is that guard's, never a later one.
+    for name, flip, kw in (
+            ("_require_known_provenance", lambda ctx, records, rid: None,
+             {"dones": [dict(held, actor={}, links=[{"rel": "receipt_of", "id": "BI-2"}])], "dn": 1}),
+            ("_require_canonical_backlog", lambda ctx: None, {"comment": b"# a hand note\n"})):
+        real = seams[name]
+        seams[name] = flip
+        try:
+            check("without {} the vector it refuses is planned".format(name), plans(**kw))
+        finally:
+            seams[name] = real
     check("a done row whose id is not a string is never reported as a held receipt",
           not _refuses(lambda: plan(dones=[dict(held, id=7)], dn=1), "already holds"))
     # A TOML array mixing a table and an integer parses, but has no canonical emission, so this row is
@@ -4341,14 +4462,14 @@ def _self_test_receipt_repair(check, ctx_of, full, now):
           _refuses(lambda: _require_interpreted_rows([item, 7], BACKLOG, "b.toml", "BI-1"),
                    "the backlog_item record row b.toml#2 is not a table"))
 
-    def held_recheck(prior, args=argv):
+    def held_recheck(prior, args=argv, gate=_require_committed_held):
         c = ctx_of(counters)
         c.homes = 2
         c.backlog = _model_operand(c.rel(BACKLOG + _opf_check.INDEX_SUFFIX),
                                    {"schema": 1, "record": [dict(item)]})
-        seams["_committed_prior"] = prior
+        seams["_committed_prior"] = lambda ctx, outcome=_NOTHING_WRITTEN: prior(ctx)
         try:
-            return _require_committed_held(c, parse_request(list(args)))
+            return gate(c, parse_request(list(args)))
         finally:
             seams["_committed_prior"] = real_prior
 
@@ -4368,6 +4489,31 @@ def _self_test_receipt_repair(check, ctx_of, full, now):
           held_recheck(lambda ctx: snapshot_of([item])) is None)
     check("the held committed-row re-check never reads the prior commit for another subcommand",
           held_recheck(unreadable, ["transition", "BI-1", "active", "--actor", "maintainer"]) is None)
+
+    def published_refusal(prior):
+        try:
+            held_recheck(prior, gate=_require_committed_published)
+        except _PostPublication as exc:
+            return str(exc)
+        return ""
+    after = "after the final doctor, the prior commit (HEAD) was read again and the receipt is not offered as " \
+            "recorded: "
+    for label, prior, needle in (
+            ("a HEAD moved after the held read to a commit not holding the item", lambda ctx: snapshot_of([]),
+             after + "receipt-repair refused (uncommitted-item): BI-1"),
+            ("a HEAD moved after the held read to a commit holding the item at active",
+             lambda ctx: snapshot_of([dict(item, status="active")]), after + "receipt-repair refused (uncommitted-item)"),
+            ("a prior commit unreadable after the final doctor", unreadable, after + "receipt-repair cannot read")):
+        message = published_refusal(prior)
+        check("the post-publication committed-row re-check refuses {} as a post-publication failure".format(label),
+              needle in message and "nothing written" not in message)
+    check("the post-publication refusal says the publication is left for review, never that nothing was written",
+          published_refusal(lambda ctx: snapshot_of([])).endswith(_PUBLISHED_FOR_REVIEW))
+    check("the post-publication committed-row re-check passes the item HEAD still holds at done",
+          held_recheck(lambda ctx: snapshot_of([item]), gate=_require_committed_published) is None)
+    check("the post-publication committed-row re-check never reads the prior commit for another subcommand",
+          held_recheck(unreadable, ["transition", "BI-1", "active", "--actor", "maintainer"],
+                       gate=_require_committed_published) is None)
     assistant = parse_request(["receipt-repair", "BI-1", "--actor", "maintainer", "--reason", "r"])
     assistant.actor = {"kind": "assistant"}
     c = ctx_of(counters)
