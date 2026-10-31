@@ -39,12 +39,23 @@ refused here (record that resolved URL); a local dir:/path target names no git r
 (a filesystem target is reachable as git:<absolute path>, the file transport); a value that begins
 with `-` (an option look-alike), a remote-helper `<helper>::<address>` transport (ext:: included),
 and any scheme outside file, https and ssh are refused. 5. Require the destination agreement of
-spec 5.6 before any fetch or push: the resolved pointer (where it names a remote) and the store
-repository's own single recorded remote must agree with the recorded sync_target, by canonical
-host+path where both sides canonicalize and by exact string equality otherwise; a destination that
+spec 5.6 before any fetch or push: the resolved pointer (where it names a remote) must agree with
+the recorded sync_target, the store repository's single recorded remote must carry a PLAIN remote
+name (below), and EVERY url and pushurl value of that remote (`git remote get-url --all` and
+`get-url --push --all`, so a second pushurl can never hide behind an agreeing first one) must agree
+with the recorded sync_target, by canonical host+path where both sides canonicalize and by exact
+string equality otherwise; several values that do not all agree refuse, and a destination that
 appears from anywhere else is surfaced and refused, never fetched from or pushed to. 6. Fetch by
-explicit URL (never by remote name) on the store's CURRENT branch, recording only FETCH_HEAD from
-the target; a detached or unborn HEAD refuses. 7. Compare with `merge-base --is-ancestor` both ways
+explicit URL on the store's CURRENT branch, recording only FETCH_HEAD from the target. git resolves
+a fetch or push argument that EQUALS a configured remote's name to that remote's configuration, so
+a remote named with the target's URL string would redirect the fetch to its url values and the push
+to every pushurl; sync therefore refuses any configured remote whose name is not a plain remote
+name (letters, digits, '-', '_' and '.' only, never '.', '..' or a leading '-'), both at the
+repository scopes (the allowlist admits a remote.<name>.* key only under a plain name) and at the
+recorded remote itself, and the effective-configuration gate below refuses a remote of ANY scope
+whose name equals the verified URL string. Every allowed target string contains ':' or '/', which a
+plain name cannot, so once these hold the URL argument cannot resolve as a remote name and needs no
+re-encoding. A detached or unborn HEAD refuses. 7. Compare with `merge-base --is-ancestor` both ways
 and report, or run the one requested step:
 
 - BEHIND + --pull: the section 9.2 refusals are applied AGAIN to the manifest the fetched state
@@ -84,12 +95,17 @@ re-allowed, and core.sshCommand pinned to the adopter's own global-or-system val
 where none is set), so a repository-local core.sshCommand never executes while a global one is
 honoured as the adopter's own setting. Two gates then protect every fetch and push, both
 fail-closed. First, the repository scopes (--local and --worktree) are listed by name and every
-listed key must sit on a CLOSED ALLOWLIST of data-only keys that can neither name a program nor
-redirect the transport: core.repositoryformatversion, core.filemode, core.bare,
-core.logallrefupdates, core.ignorecase, core.precomposeunicode and core.symlinks (the keys
-`git init` itself writes), remote.<name>.url, remote.<name>.fetch and remote.<name>.pushurl (the
-one recorded remote the spec 5.6 destination agreement verifies, the push URL included because the
-agreement reads `git remote get-url --push`), branch.<name>.remote and branch.<name>.merge
+listed key must sit on a CLOSED ALLOWLIST of keys that, under the gates stated here, can neither
+name a program nor redirect the transport: core.repositoryformatversion, core.filemode, core.bare,
+core.logallrefupdates, core.ignorecase, core.precomposeunicode and core.symlinks (the keys a
+DEFAULT `git init` writes; a reftable or partial-clone repository writes format keys outside the
+allowlist, an accepted cost disclosed below), remote.<name>.url, remote.<name>.fetch and
+remote.<name>.pushurl, admitted ONLY where <name> is a plain remote name (any other subsection
+refuses: git resolves a transport argument equal to a remote's name to that remote's
+configuration) and held to the spec 5.6 destination agreement, which reads EVERY url and pushurl
+value of the one recorded remote (`git remote get-url --all` and `get-url --push --all`) and
+refuses any value that does not agree with the recorded sync_target, branch.<name>.remote and
+branch.<name>.merge
 (upstream records), user.name and user.email (identity data), and extensions.worktreeConfig and
 extensions.objectFormat (repository-format records; worktreeConfig is what gives the --worktree
 scope enumerated here its own file). ANY key outside that allowlist refuses sync before the fetch
@@ -144,15 +160,25 @@ Second, the EFFECTIVE url.* rewrites are read under the exact environment and ov
 transport call runs with, so every source git would honour (global, system, local, worktree,
 include, command) is the source checked, and any insteadOf or pushInsteadOf whose prefix matches
 the verified URL refuses: the URL the destination agreement verified is then, byte for byte, the
-URL the transport uses. Refusal is chosen over an override in both gates because a GIT_CONFIG_*
-pair appends to a multi-valued key rather than resetting it (an empty insteadOf value is itself a
-match-everything rewrite), while an unrelated rewrite of the adopter's own matches nothing here
-and keeps working.
+URL the transport uses. The same effective enumeration refuses a configured remote OF ANY SCOPE
+whose name equals the verified URL string: git resolves a fetch or push argument that equals a
+remote's name to that remote's configuration, so such a remote (even one in the adopter's own
+global configuration, which the repository-scope gates cannot see) would redirect the transport
+exactly as a matching insteadOf would, while every ordinarily named remote of the adopter's
+matches nothing here and keeps working. Refusal is chosen over an override in these gates because
+a GIT_CONFIG_* pair appends to a multi-valued key rather than resetting it (an empty insteadOf
+value is itself a match-everything rewrite), while an unrelated rewrite of the adopter's own
+matches nothing here and keeps working.
 
-SUBMODULES: a store that carries any git submodule machinery refuses before any step: a
-.gitmodules file at the store root, a gitlink entry anywhere in HEAD's tree, or any entry under
-the repository's modules directory (.git/modules). A submodule's own repository (its config under
-.git/modules/<name>/) is a configuration scope the repository-scope allowlist cannot enumerate,
+SUBMODULES: a store whose repository carries any git submodule machinery refuses before any step:
+a .gitmodules file at the store root or at the repository toplevel (the only working-tree path git
+reads it from), a gitlink (mode 160000) entry anywhere in the INDEX (`ls-files -s`, read bounded
+from the toplevel: a staged-only embedded repository already carries its own live config, and the
+clean-check status probe descends into it) or anywhere in HEAD's WHOLE tree
+(`ls-tree -r --full-tree`, so a store nested below the toplevel cannot sit beside machinery
+outside its own subtree), or any entry under the repository's modules directory (.git/modules). A
+submodule's own repository (its config under .git/modules/<name>/, or inside a staged embedded
+repository) is a configuration scope the repository-scope allowlist cannot enumerate,
 and git's worktree operations (the clean-check status probe, a checkout) descend into a populated
 submodule and can run a program that config names (a clean, smudge or process filter the
 submodule's own .gitattributes assigns), so the whole class is refused rather than enumerated.
@@ -184,9 +210,20 @@ ssh.variant, http.sslCert / sslKey, the proxy TLS paths and http.pinnedPubkey): 
 scope each is refused by construction, and each keeps working from the adopter's global
 configuration, which the transport honours. core.autocrlf is refused at repository scope too:
 this module does not otherwise handle content rewriting, so it is not shown safe here.
-remote.<name>.url and pushurl stay data under the destination agreement (a second remote section
-refuses under its single-remote rule, and the one recorded remote's push URL must agree with the
-recorded target before any transport), while the program-naming remote keys (receivepack,
+extensions.refStorage (written by `git init --ref-format=reftable`), extensions.partialClone,
+remote.<name>.promisor and remote.<name>.partialclonefilter (written by `git clone --filter`) are
+refused too, and for THESE keys the usual remedy does not apply: git reads them in the repository
+itself, so moving them to global configuration would break the repository rather than restore
+sync. A store in a reftable or partial-clone repository is outside sync's scope until the store is
+recreated in a default-format, full clone (an accepted cost: a partial clone can also lazily fetch
+through a promisor remote this module never verified, so the class is not shown safe to
+allowlist). remote.<name>.url and pushurl stay data under three gates that all run before any
+transport: the single-remote rule (a second remote refuses), the plain-remote-name rule (a remote
+named with a URL string, which git would resolve a transport argument to, refuses by
+construction), and the destination agreement over EVERY url and pushurl value of the recorded
+remote (`git remote get-url --all` and `get-url --push --all`; git fetches from the url values and
+pushes to every pushurl, so several values that do not all agree refuse), while the program-naming
+remote keys (receivepack,
 uploadpack, vcs) are outside the allowlist like everything else. A store carrying any submodule
 machinery is refused outright (above): a store with submodules is out of sync's scope until the
 submodule is removed. The destination agreement compares by exact
@@ -292,6 +329,15 @@ _LOCAL_INCLUDE_KEYS = (b"include.path", b"includeif.path")
 # program belongs in the adopter's own global configuration (spec 5.6), like the exec keys above.
 _LOCAL_FILTER_KEYS = (b"filter.clean", b"filter.smudge", b"filter.process")
 _LOCAL_CONTENT_DRIVER_KEYS = (b"diff.command", b"diff.textconv", b"merge.driver")
+# Repository-format and clone-shape records (extensions.refStorage is written by
+# `git init --ref-format=reftable`; the other three by `git clone --filter`). They are refused like
+# every other unlisted key, but with their OWN remedy text: unlike every other refused key they
+# cannot move to the adopter's global configuration (git reads them in the repository itself, so
+# moving them would break the repository), so the store must be recreated in a default-format, full
+# clone. They are not allowlisted because the class is not shown data-only here: a partial clone can
+# lazily fetch through a promisor remote this module never verified.
+_LOCAL_FORMAT_KEYS = (b"extensions.refstorage", b"extensions.partialclone",
+                      b"remote.promisor", b"remote.partialclonefilter")
 # THE GATE: the closed allowlist of repository-scope keys sync accepts, each chosen because it is
 # data that can neither name a program nor redirect the transport. Everything else refuses by
 # construction (_refuse_local_redirect_config), so a newly learned dangerous key never needs a new
@@ -301,10 +347,14 @@ _LOCAL_CONTENT_DRIVER_KEYS = (b"diff.command", b"diff.textconv", b"merge.driver"
 #   _self_test_units _store and _paired, carry exactly these); core.ignorecase,
 #   core.precomposeunicode and core.symlinks are the same `git init` probe results on other
 #   platforms and filesystems.
-# - remote.<name>.url and remote.<name>.fetch: `git remote add` writes both (the _paired fixture
-#   does); remote.<name>.pushurl is allowed because the spec 5.6 destination agreement reads the
-#   push URL (`git remote get-url --push`, _opf_observe._observe_remote) and refuses one that
-#   disagrees with the recorded sync_target before any transport.
+# - remote.<name>.url, remote.<name>.fetch and remote.<name>.pushurl: `git remote add` writes the
+#   first two (the _paired fixture does). They are admitted ONLY under a plain remote name
+#   (_remote_name_plain; any other subsection refuses, because git resolves a fetch or push
+#   argument equal to a configured remote's name to that remote's configuration, and a remote
+#   named with the target's URL string would redirect the transport), and the spec 5.6 destination
+#   agreement reads EVERY url and pushurl value of the one recorded remote
+#   (`git remote get-url --all` and `get-url --push --all`, _remote_url_values) and refuses any
+#   value that disagrees with the recorded sync_target before any transport.
 # - branch.<name>.remote and branch.<name>.merge: upstream records (`git push -u` and
 #   `git branch --set-upstream-to` write them); names of refs and remotes, not programs.
 # - user.name and user.email: identity data.
@@ -314,21 +364,36 @@ _LOCAL_CONTENT_DRIVER_KEYS = (b"diff.command", b"diff.textconv", b"merge.driver"
 # Deliberately NOT listed: core.autocrlf (this module does not otherwise handle content rewriting,
 # so it is not shown safe here and stays refused at repository scope); every http.*, protocol.*
 # and ssh.* routing or shaping key (data-only cannot be shown for the class, so they belong in the
-# adopter's global configuration); and submodule.* (a store with submodule machinery refuses
+# adopter's global configuration); the format and clone-shape records (_LOCAL_FORMAT_KEYS above,
+# whose remedy is recreating the store in a default-format full clone, never a move to global
+# configuration); and submodule.* (a store with submodule machinery refuses
 # outright, _refuse_submodules). No opf tool writes a repository-scope key in production code:
 # `opf init` runs no git config write, and this module injects its transport overrides only as
 # command-scope GIT_CONFIG_* pairs that never touch .git/config.
 # Matching (_local_key_allowlisted): the exact folded name for _ALLOWED_EXACT_KEYS, or section.key
 # with a NON-EMPTY subsection between them for _ALLOWED_SUBSECTION_KEYS (remote.<name>.url; plain
 # remote.url, an empty subsection, or an extra subsection such as core.<x>.bare is outside the
-# allowlist and refuses).
+# allowlist and refuses), where a remote.* subsection must additionally be a plain remote name
+# (_remote_name_plain).
 _ALLOWED_EXACT_KEYS = (
     b"core.repositoryformatversion", b"core.filemode", b"core.bare", b"core.logallrefupdates",
     b"core.ignorecase", b"core.precomposeunicode", b"core.symlinks",
     b"user.name", b"user.email",
     b"extensions.worktreeconfig", b"extensions.objectformat")
-_ALLOWED_SUBSECTION_KEYS = (b"remote.url", b"remote.fetch", b"remote.pushurl",
-                            b"branch.remote", b"branch.merge")
+_ALLOWED_REMOTE_SUBSECTION_KEYS = (b"remote.url", b"remote.fetch", b"remote.pushurl")
+_ALLOWED_SUBSECTION_KEYS = _ALLOWED_REMOTE_SUBSECTION_KEYS + (b"branch.remote", b"branch.merge")
+# A fetch or push argument that EQUALS a configured remote's NAME resolves to that remote's
+# configuration (git remote.c, remote_get: an exact name lookup over every config scope; only a
+# name beginning with '/' is skipped at config parse, with a warning, and valid_remote_nick --
+# no empty name, no '.' or '..', no directory separator -- gates just the legacy .git/branches and
+# .git/remotes files), so git's own rule leaves a URL string usable as a remote name, and a remote
+# named with the verified URL string would redirect the fetch to its url values and the push to
+# EVERY pushurl. The plain-name rule here is deliberately stricter than git's: letters, digits,
+# '-', '_' and '.' only, never '.', '..' or a leading '-'. Every allowed sync target string
+# contains ':' or '/' (validate_target admits only scheme URLs, scp-style host:path and absolute
+# paths), which a plain name cannot, so no plainly named remote can collide with the transport
+# argument.
+_REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 _TRANSPORT_TIMEOUT_S = 120
 _TRANSPORT_MAX_OUTPUT = 8 << 20
 # The one fast-forward command; --ff-only is load-bearing (a divergence must never merge).
@@ -497,24 +562,92 @@ def validate_target(sync_target):
     return tgt, url
 
 
-def _actual_remote(git, store_root):
-    """The store repository's single recorded push destination, through the read-only observation
-    boundary. "" is an observed no-remote; an unobservable destination (several remotes, or a git
-    error) is a cannot-evaluate refusal, never a silently skipped agreement."""
-    notes = []
-    actual = _opf_observe._observe_remote(git, store_root, notes)
-    if actual is None:
-        raise SyncError("the store repository's push destination cannot be established ({}); the "
-                        "spec 5.6 destination agreement is required before any fetch or push "
-                        "(fail-closed)".format("; ".join(notes) if notes else "unobservable"))
-    return actual
+def _remote_name_plain(name):
+    """Whether one configured remote name is a PLAIN remote name this module accepts: letters,
+    digits, '-', '_' and '.' only (no ':', '/', '@', whitespace or any other character), never '.',
+    '..' or a name beginning with '-'. git's own rule at source is far wider (remote.c:
+    handle_config skips only a name beginning with '/', and valid_remote_nick gates just the legacy
+    .git/branches and .git/remotes files), wide enough that a URL string is a usable remote name
+    that a fetch or push argument would resolve to; this stricter rule exists so no configured
+    remote name can equal an allowed sync target string, every one of which contains ':' or '/'."""
+    return (_REMOTE_NAME_RE.fullmatch(name) is not None
+            and name not in (".", "..") and not name.startswith("-"))
 
 
-def _require_destination_agreement(sync_target, tgt, url, pointer_target, actual):
+def _refuse_remote_shadow(name, url):
+    """Refuse a recorded remote whose name could resolve as the transport argument: a name that is
+    not a plain remote name (_remote_name_plain), or one that equals the verified URL string (the
+    plain-name rule already excludes every allowed URL shape, so the equality leg is defence in
+    depth). Validated BEFORE the name is ever passed back to git as an argument."""
+    if not _remote_name_plain(name):
+        raise SyncError("the store repository's recorded remote is named {!r}, not a plain remote "
+                        "name (letters, digits, '-', '_' and '.' only, never '.', '..' or a "
+                        "leading '-'): git resolves a fetch or push argument that equals a "
+                        "configured remote's name to that remote's configuration, so such a name "
+                        "could redirect the transport past the spec 5.6 destination agreement; "
+                        "rename the remote and re-run (fail-closed)".format(name))
+    if name == url:
+        raise SyncError("the store repository's recorded remote is named exactly the verified sync "
+                        "target string {!r}; git would resolve the transport argument to that "
+                        "remote's configuration instead of the verified URL (spec 5.6); rename the "
+                        "remote and re-run (fail-closed)".format(name))
+
+
+def _remote_url_values(git, store_root, url):
+    """The store repository's single recorded remote with EVERY one of its fetch and push URL
+    values: (name, url values, pushurl values), through the read-only observation boundary.
+    ("", [], []) is an observed no-remote. Several remotes refuse (which of several is
+    authoritative is not git's to guess); the remote's name is validated BEFORE it is passed back
+    to git as an argument (_refuse_remote_shadow); `git remote get-url --all` and
+    `get-url --push --all` supply every value (git fetches from the url values and pushes to EVERY
+    pushurl, and the push listing falls back to the url values exactly as git's own push does); an
+    unreadable listing or an empty value set is a cannot-evaluate refusal, never a silently skipped
+    agreement."""
+    listing = _opf_observe._run_git(git, store_root, ["remote"])
+    if not listing.completed or listing.rc != 0:
+        raise SyncError("could not list the store repository's remotes ({}); the spec 5.6 "
+                        "destination agreement is required before any fetch or push "
+                        "(fail-closed)".format(
+                            listing.err.strip() if not listing.completed
+                            else "rc {}: {}".format(listing.rc, listing.err.strip())))
+    names = [ln.strip() for ln in listing.out.decode("utf-8", "replace").splitlines() if ln.strip()]
+    if not names:
+        return "", [], []
+    if len(names) > 1:
+        raise SyncError("the store repository declares {} remotes ({}); sync verifies ONE recorded "
+                        "remote against the recorded sync_target, and which of several is "
+                        "authoritative is not git's to guess (spec 5.6); nothing is fetched or "
+                        "pushed (fail-closed)".format(len(names), ", ".join(sorted(names))))
+    name = names[0]
+    _refuse_remote_shadow(name, url)
+    collected = []
+    for what, args in (("url", ["remote", "get-url", "--all", name]),
+                       ("pushurl", ["remote", "get-url", "--push", "--all", name])):
+        out = _opf_observe._run_git(git, store_root, args)
+        if not out.completed or out.rc != 0:
+            raise SyncError("could not read every {} value of the remote {!r} ({}); the spec 5.6 "
+                            "destination agreement is required before any fetch or push "
+                            "(fail-closed)".format(
+                                what, name,
+                                out.err.strip() if not out.completed
+                                else "rc {}: {}".format(out.rc, out.err.strip())))
+        values = [v for v in out.out.decode("utf-8", "replace").splitlines() if v.strip()]
+        if not values:
+            raise SyncError("the remote {!r} reports no {} value; the spec 5.6 destination "
+                            "agreement cannot be evaluated (fail-closed)".format(name, what))
+        collected.append(values)
+    return name, collected[0], collected[1]
+
+
+def _require_destination_agreement(sync_target, tgt, url, pointer_target, git, store_root):
     """The spec 5.6 egress rule before any fetch or push: the resolved pointer (where it names a
-    remote) and the store repository's own recorded remote must agree with the recorded sync target,
-    by canonical host+path where both sides canonicalize, by exact string equality otherwise. A
-    destination that appears from anywhere else is surfaced and refused, never fetched or pushed."""
+    remote) must agree with the recorded sync target, the store repository's single recorded remote
+    must carry a plain remote name (_refuse_remote_shadow, inside _remote_url_values), and EVERY
+    url and pushurl value of that remote must agree with the recorded sync target, by canonical
+    host+path where both sides canonicalize, by exact string equality otherwise. git fetches from
+    the url values and pushes to EVERY pushurl, so an agreeing first value proves nothing about the
+    rest; several values that do not all agree refuse. A destination that appears from anywhere
+    else is surfaced and refused, never fetched or pushed."""
     tcanon, _tun = _opf_check._target_remote_canon(tgt)
     if pointer_target is not None and not pointer_target.local:
         pcanon, _pun = _opf_check._target_remote_canon(pointer_target)
@@ -526,21 +659,27 @@ def _require_destination_agreement(sync_target, tgt, url, pointer_target, actual
             raise SyncError("the resolved pointer remote {!r} does not agree with the manifest "
                             "sync_target {!r} (spec 5.6); nothing is fetched or pushed "
                             "(fail-closed)".format(pointer_target.value, sync_target))
-    if actual == "":
+    name, fetch_urls, push_urls = _remote_url_values(git, store_root, url)
+    if name == "":
         raise SyncError("the manifest declares a dedicated sync_target {!r} but the store repository "
                         "has no recorded remote (spec 5.6); the destination cannot be confirmed "
                         "against the repository's own record, so nothing is fetched or pushed; add "
                         "the agreeing remote and re-run (fail-closed)".format(sync_target))
-    acanon = _opf_check._canonical_remote(actual)
-    if acanon is not None and tcanon:
-        agree = _opf_check._canon_sets_agree({acanon}, tcanon, tgt.kind)
-    else:
-        agree = actual.strip() == url
-    if not agree:
-        raise SyncError("the store repository's recorded remote {!r} does not agree with the "
-                        "manifest sync_target {!r} (spec 5.6): a destination from ambient "
-                        "configuration or a stale remote is surfaced and refused, never fetched "
-                        "from or pushed to (fail-closed)".format(actual, sync_target))
+    for what, values in (("url", fetch_urls), ("pushurl", push_urls)):
+        for actual in values:
+            acanon = _opf_check._canonical_remote(actual)
+            if acanon is not None and tcanon:
+                agree = _opf_check._canon_sets_agree({acanon}, tcanon, tgt.kind)
+            else:
+                agree = actual.strip() == url
+            if not agree:
+                raise SyncError("the store repository's recorded remote {!r} carries a {} value "
+                                "{!r} that does not agree with the manifest sync_target {!r} "
+                                "(spec 5.6): git fetches from the url values and pushes to EVERY "
+                                "pushurl, so each value must agree; a destination from ambient "
+                                "configuration or a stale remote is surfaced and refused, never "
+                                "fetched from or pushed to (fail-closed)".format(
+                                    name, what, actual, sync_target))
 
 
 # --- read-only git questions (the scrubbed observation boundary) ---------------------------------------
@@ -694,15 +833,36 @@ def _local_key_listed(low, keys):
     return False
 
 
+def _remote_key_subsection(low):
+    """The subsection of a folded remote.<name>.url / .fetch / .pushurl key, or None where the name
+    is not that shape (an empty subsection returns None and stays outside the allowlist). The
+    subsection carries the remote's NAME, which git's -z listing preserves byte for byte between
+    the folded section and key; folding the whole name first is harmless here because the plain
+    charset is closed under case folding."""
+    for listed in _ALLOWED_REMOTE_SUBSECTION_KEYS:
+        section, _dot, key = listed.partition(b".")
+        if (low.startswith(section + b".") and low.endswith(b"." + key)
+                and len(low) > len(section) + len(key) + 2):
+            return low[len(section) + 1:-(len(key) + 1)]
+    return None
+
+
 def _local_key_allowlisted(low):
     """Whether one folded repository-scope config name is on the closed sync allowlist: an exact
     listed name (_ALLOWED_EXACT_KEYS), or a listed section.key with a NON-EMPTY subsection between
     the section and the key (_ALLOWED_SUBSECTION_KEYS; the subsection itself may contain dots, as a
-    remote named `a.b` does). Plain remote.url, an empty subsection (remote..url) and an extra
-    subsection on an exact key (core.<x>.bare) all fall outside the allowlist and refuse."""
+    remote named `a.b` does). A remote.<name>.url/.fetch/.pushurl key is allowlisted ONLY where
+    <name> is a plain remote name (_remote_name_plain): git resolves a fetch or push argument equal
+    to a configured remote's name to that remote's configuration, so a remote named with a URL
+    string refuses by construction, whatever keys it carries. Plain remote.url, an empty subsection
+    (remote..url) and an extra subsection on an exact key (core.<x>.bare) all fall outside the
+    allowlist and refuse."""
     if low in _ALLOWED_EXACT_KEYS:
         return True
-    for listed in _ALLOWED_SUBSECTION_KEYS:
+    sub = _remote_key_subsection(low)
+    if sub is not None:
+        return _remote_name_plain(sub.decode("utf-8", "replace"))
+    for listed in (b"branch.remote", b"branch.merge"):
         section, _dot, key = listed.partition(b".")
         if (low.startswith(section + b".") and low.endswith(b"." + key)
                 and len(low) > len(section) + len(key) + 2):
@@ -743,7 +903,14 @@ def _refuse_local_redirect_config(git, store_root):
     or merge.<name>.driver driver (git runs the program such a key names while it compares or merges
     working-tree content; no step of the reference pull path is shown to reach those drivers, so
     they stay refused as fail-closed defence in depth, at the cost that an adopter with a
-    repository-scope textconv must move it to global configuration). The family texts are matched
+    repository-scope textconv must move it to global configuration), and a repository-format or
+    clone-shape record (extensions.refStorage, extensions.partialClone, remote.<name>.promisor,
+    remote.<name>.partialclonefilter), whose refusal names its OWN remedy: such a key cannot move
+    to global configuration (git reads it in the repository itself), so the store must be recreated
+    in a default-format, full clone. A remote.<name>.url/.fetch/.pushurl key whose subsection is
+    not a plain remote name refuses with the remote-name reason (git resolves a transport argument
+    equal to a remote's name to that remote's configuration), not the move-to-global one. The
+    family texts are matched
     from the _LOCAL_* lists alone (_local_key_listed) and only word the refusal; the gate is the
     allowlist.
     Both repository scopes are enumerated, --local and --worktree (without the worktreeConfig
@@ -806,7 +973,20 @@ def _refuse_local_redirect_config(git, store_root):
          "pull path is shown to reach it, so it is refused as fail-closed defence in depth; the "
          "cost is that an adopter with a repository-scope textconv (or external diff or merge "
          "driver) must move it to the adopter's own global configuration (spec 5.6); remove it "
-         "and re-run (fail-closed)"))
+         "and re-run (fail-closed)"),
+        (_LOCAL_FORMAT_KEYS,
+         ", a repository-format or clone-shape record (a reftable ref store, a partial or "
+         "promisor clone) that sync does not allowlist: the class is not shown data-only here, "
+         "and unlike every other refused key its remedy is NOT a move to global configuration "
+         "(git reads it in the repository itself, so moving it would break the repository); "
+         "recreate the store in a default-format, full clone before sync will run (an accepted "
+         "cost; fail-closed)"))
+    remote_name_why = (", a remote whose name is not a plain remote name (letters, digits, '-', "
+                       "'_' and '.' only, never '.', '..' or a leading '-'): git resolves a fetch "
+                       "or push argument that equals a configured remote's name to that remote's "
+                       "configuration, so a remote named with a URL string could redirect the "
+                       "transport past the spec 5.6 destination agreement; rename the remote and "
+                       "re-run (fail-closed)")
     generic_why = (", a repository-scope key outside sync's closed allowlist of data-only keys "
                    "(only a key that can neither name a program nor redirect the transport is "
                    "allowlisted); the key belongs in the adopter's own global configuration "
@@ -833,32 +1013,70 @@ def _refuse_local_redirect_config(git, store_root):
             if _local_key_allowlisted(low):
                 continue
             why = generic_why
-            for keys, family_why in refusals:
-                if _local_key_listed(low, keys):
-                    why = family_why
-                    break
+            sub = _remote_key_subsection(low)
+            if sub is not None and not _remote_name_plain(sub.decode("utf-8", "replace")):
+                why = remote_name_why
+            else:
+                for keys, family_why in refusals:
+                    if _local_key_listed(low, keys):
+                        why = family_why
+                        break
             raise SyncError("the store repository's git configuration carries {!r}{}".format(
                 kb.decode("utf-8", "replace"), why))
 
 
+def _refuse_index_gitlinks(git, toplevel, why):
+    """Refuse a gitlink (mode 160000) entry anywhere in the repository's INDEX, read bounded with
+    `ls-files -s` from the toplevel so the scan covers the whole index even under a nested store. A
+    staged-only embedded repository already carries its own live config (a scope the allowlist
+    cannot enumerate), and the clean-check status probe descends into it, so the index is gated
+    exactly as HEAD's tree is. An unreadable listing, or one that exceeds the read bound, is a
+    cannot-evaluate, never read as no-gitlinks."""
+    index = _opf_observe._run_git(git, toplevel, ["ls-files", "-s", "-z"],
+                                  max_output_bytes=64 << 20)
+    if not index.completed or index.rc != 0:
+        raise SyncError("could not enumerate the index for gitlink (submodule) entries ({}); the "
+                        "store cannot be shown submodule-free (fail-closed)".format(
+                            index.err.strip() if not index.completed
+                            else "rc {}: {}".format(index.rc, index.err.strip())))
+    raw = index.out
+    if raw and not raw.endswith(b"\x00"):
+        raise SyncError("git ls-files returned a payload that is not NUL-terminated; the store "
+                        "cannot be shown submodule-free (fail-closed)")
+    for record in raw.split(b"\x00"):
+        if record.startswith(b"160000 "):
+            entry = record.partition(b"\t")[2].decode("utf-8", "replace")
+            raise SyncError("the index carries a gitlink (submodule) entry at {!r}".format(entry)
+                            + why)
+
+
 def _refuse_submodules(git, store_root):
-    """Refuse a store that carries any git submodule machinery, before any fetch and before any
-    local step that could reach a program: a .gitmodules file at the store root, a gitlink entry in
-    HEAD's tree, or any entry under the repository's modules directory (.git/modules). A
-    submodule's own repository config (under .git/modules/<name>/) is a configuration scope the
-    repository-config allowlist cannot enumerate, and git's worktree operations (the clean-check
-    status probe, a checkout) descend into a populated submodule and can run a program that config
-    names (a clean, smudge or process filter the submodule's own .gitattributes assigns), so the
-    class is refused rather than enumerated. An unreadable probe is a cannot-evaluate, never read
-    as no-submodules; a tree whose full ls-tree listing exceeds the read bound is likewise a
-    cannot-evaluate (fail-closed, disclosed)."""
+    """Refuse a store whose repository carries any git submodule machinery, before any fetch and
+    before any local step that could reach a program: a .gitmodules file at the store root or at
+    the repository toplevel (the only working-tree path git reads it from), a gitlink entry
+    anywhere in the INDEX (_refuse_index_gitlinks) or anywhere in HEAD's WHOLE tree
+    (`ls-tree -r --full-tree`, so a store nested below the toplevel cannot sit beside machinery
+    outside its own subtree), or any entry under the repository's modules directory (.git/modules).
+    A submodule's own repository config (under .git/modules/<name>/, or inside a staged embedded
+    repository) is a configuration scope the repository-config allowlist cannot enumerate, and
+    git's worktree operations (the clean-check status probe, a checkout) descend into a populated
+    submodule and can run a program that config names (a clean, smudge or process filter the
+    submodule's own .gitattributes assigns), so the class is refused rather than enumerated. An
+    unreadable probe is a cannot-evaluate, never read as no-submodules; an index or tree listing
+    that exceeds the read bound is likewise a cannot-evaluate (fail-closed, disclosed)."""
     why = (" (a submodule's own repository configuration is a scope the repository-config "
            "allowlist cannot enumerate, and a worktree step can run a program it names); sync "
            "refuses a store with any submodule machinery; remove the submodule and re-run "
            "(fail-closed)")
     if os.path.lexists(os.path.join(str(store_root), ".gitmodules")):
         raise SyncError("the store carries a .gitmodules file" + why)
-    tree = _opf_observe._run_git(git, store_root, ["ls-tree", "-r", "-z", "HEAD"],
+    top = _read_git(git, store_root, ["rev-parse", "--show-toplevel"],
+                    "locate the repository toplevel")
+    toplevel = os.fsdecode(top.out.removesuffix(b"\n"))
+    if os.path.lexists(os.path.join(toplevel, ".gitmodules")):
+        raise SyncError("the repository carries a .gitmodules file at its toplevel" + why)
+    _refuse_index_gitlinks(git, toplevel, why)
+    tree = _opf_observe._run_git(git, store_root, ["ls-tree", "-r", "-z", "--full-tree", "HEAD"],
                                  max_output_bytes=64 << 20)
     if not tree.completed or tree.rc != 0:
         raise SyncError("could not enumerate HEAD's tree for gitlink (submodule) entries ({}); the "
@@ -933,9 +1151,57 @@ def _refuse_effective_url_rewrite(git, store_root, env, url):
                                 name.decode("utf-8", "replace"), value.decode("utf-8", "replace")))
 
 
+def _refuse_effective_remote_shadow(git, store_root, env, url):
+    """Refuse a configured remote OF ANY SCOPE whose name equals the verified URL string, read from
+    the EFFECTIVE configuration under the exact environment and override pairs the transport call
+    runs with (global, system, local, worktree, include, command). git resolves a fetch or push
+    argument that equals a configured remote's name to that remote's configuration (an exact name
+    lookup), so such a remote would redirect the fetch to its url values and the push to every
+    pushurl, past the spec 5.6 destination agreement. The repository scopes are already held to
+    plain remote names by the allowlist gate; this gate covers the scopes beyond them, where the
+    adopter's own remotes keep working because only a name EQUAL to the verified URL string can
+    shadow it, and no plain name can (every allowed target string contains ':' or '/'). The
+    section and key of a listed name are folded by git while the subsection (the remote's name) is
+    preserved byte for byte, which is exactly the byte-exact comparison the lookup uses. An
+    enumeration that does not complete at git's documented match/no-match codes refuses."""
+    cmd = [git, "--no-pager", "--no-replace-objects", "-C", str(store_root),
+           "config", "-z", "--name-only", "--get-regexp", r"^remote\."]
+    out = _opf_observe._capture_bounded(cmd, env, 30, 1 << 20)
+    if not out.completed:
+        raise SyncError("could not enumerate the remote.* configuration the transport would honour "
+                        "({}); the verified URL cannot be confirmed as the transport URL "
+                        "(fail-closed)".format(out.err.strip()))
+    if out.rc not in (0, 1):
+        raise SyncError("git config --get-regexp over the transport's remote configuration failed "
+                        "(rc {}): {}; the verified URL cannot be confirmed as the transport URL "
+                        "(fail-closed)".format(out.rc, out.err.strip()))
+    raw = out.out
+    if raw and not raw.endswith(b"\x00"):
+        raise SyncError("git config returned a payload that is not NUL-terminated; the transport "
+                        "configuration cannot be trusted (fail-closed)")
+    url_b = os.fsencode(url)
+    prefix = b"remote."
+    for record in raw.split(b"\x00"):
+        if not record:
+            continue
+        name = record.partition(b"\n")[0]
+        if not name.startswith(prefix):
+            continue
+        last = name.rfind(b".")
+        if last <= len(prefix):
+            continue     # no subsection (remote.pushdefault and kin carry no remote name)
+        if name[len(prefix):last] == url_b:
+            raise SyncError("the git configuration the transport honours carries a remote named "
+                            "exactly the verified URL ({!r}): git would resolve the fetch or push "
+                            "argument to that remote's configuration instead of the verified "
+                            "destination (spec 5.6); rename or remove that remote and re-run "
+                            "(fail-closed)".format(name.decode("utf-8", "replace")))
+
+
 def _run_transport(git, store_root, args, url, timeout=_TRANSPORT_TIMEOUT_S):
     """Run ONE fetch or push of the verified URL under the transport environment and overrides,
-    bounded, after the repository-scope refusals and the effective-rewrite gate over that URL.
+    bounded, after the repository-scope refusals, the effective-rewrite gate and the effective
+    remote-name shadow gate over that URL.
     Every other git call this module makes goes through the read-only scrubbed boundary instead."""
     _refuse_local_redirect_config(git, store_root)
     overrides = _transport_overrides(git)
@@ -945,6 +1211,7 @@ def _run_transport(git, store_root, args, url, timeout=_TRANSPORT_TIMEOUT_S):
         env["GIT_CONFIG_KEY_{}".format(i)] = key
         env["GIT_CONFIG_VALUE_{}".format(i)] = value
     _refuse_effective_url_rewrite(git, store_root, env, url)
+    _refuse_effective_remote_shadow(git, store_root, env, url)
     cmd = [git, "--no-pager", "--no-replace-objects", "-C", str(store_root)] + list(args)
     return _opf_observe._capture_bounded(cmd, env, timeout, _TRANSPORT_MAX_OUTPUT)
 
@@ -1168,7 +1435,7 @@ def _push_pending(git, res, sync_target, tgt, url, branch, local, fetched):
     re-checked, the claim taken (a push is allowed only while no lease is present), then one push to
     the verified URL, never with --force. Returns the exit code."""
     _require_toplevel(git, res.store_root)
-    _require_destination_agreement(sync_target, tgt, url, res.target, _actual_remote(git, res.store_root))
+    _require_destination_agreement(sync_target, tgt, url, res.target, git, res.store_root)
 
     def body():
         return _run_transport(git, res.store_root, _push_args(url, branch), url)
@@ -1215,14 +1482,15 @@ def _run_sync(mode, root):
     tgt, url = validate_target(sync_target)
     git = _git_or_refuse()
     branch = _current_branch(git, res.store_root)
-    # Both gates run here, before the destination agreement, the fetch and every local step that
-    # could reach a repository-chosen program; _run_transport re-runs the allowlist gate before
+    # Both repository gates run here, before the destination agreement (which itself holds the
+    # recorded remote to a plain name and reads every url and pushurl value), the fetch and every
+    # local step that could reach a repository-chosen program; _run_transport re-runs the allowlist
+    # gate and the effective rewrite and remote-shadow gates before
     # each fetch and push. The submodule gate runs first, so a populated submodule is named as the
     # reason even where its submodule.* bookkeeping keys would refuse on the allowlist too.
     _refuse_submodules(git, res.store_root)
     _refuse_local_redirect_config(git, res.store_root)
-    _require_destination_agreement(sync_target, tgt, url, res.target,
-                                   _actual_remote(git, res.store_root))
+    _require_destination_agreement(sync_target, tgt, url, res.target, git, res.store_root)
     fetch_target(git, res.store_root, url, branch)
     local = _rev(git, res.store_root, "HEAD")
     fetched = _rev(git, res.store_root, "FETCH_HEAD")
@@ -1285,11 +1553,20 @@ def self_test():
     network): the argument grammar, the no-dedicated-target refusals, the spec 9.2 admission of the
     local and the fetched manifest, the equal/behind/ahead/divergent classification, the read-only
     bare report, the fast-forward pull with its doctor gate, the authorized push with its
-    destination agreement, the held-lease refusal (never seized), the repository-config ALLOWLIST
+    destination agreement, the held-lease refusal (never seized), the REMOTE-NAME and
+    EVERY-URL-VALUE gates (a remote named with the target's URL string over a file://, https or
+    ssh-shaped target, a second pushurl, several remotes, and a global-scope remote named the
+    verified URL, each refused before any transport with FETCH_HEAD shown absent, and the fetch and
+    push redirects shown live once those gates are dropped), the repository-config ALLOWLIST
     gate (an ordinary store carrying every allowlisted key still syncs; every documented family key
     and every unlisted key, core.sshCommand and core.hooksPath included, refuses before any fetch
     with FETCH_HEAD shown absent; dropping the allowlist is shown running a repository-chosen
-    program), the SUBMODULE refusals (a .gitmodules file, a gitlink in HEAD's tree and a
+    program), the format-record refusals (a promisor or partial-clone key, and a real reftable
+    repository where this git can create one, each refused naming the recreate-the-store remedy),
+    the SUBMODULE refusals (a .gitmodules file at the store root or the repository toplevel, a
+    gitlink in HEAD's full tree or in the INDEX (a staged embedded repository whose own config
+    names a filter program, the program never running, shown running once the index scan is
+    dropped), a nested store beside toplevel machinery, and a
     .git/modules entry each alone, plus a populated submodule whose own config names a filter
     program, refused with the program never running and shown running once the gates are dropped),
     the transport neutralization kept as defence in depth behind the gate, the effective
@@ -1325,8 +1602,10 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return 1
     print("opf-sync self-test: PASS ({} checks: grammar, pattern refusals, admission, "
-          "classification, pull, push, destination agreement, lease, repository-config allowlist, "
-          "submodule refusals, transport neutralization, URL-rewrite refusals, working-tree driver "
+          "classification, pull, push, destination agreement, remote-name and pushurl-value gates, "
+          "lease, repository-config allowlist, format-record refusals, "
+          "submodule and index-gitlink refusals, transport neutralization, URL-rewrite and "
+          "remote-shadow refusals, working-tree driver "
           "refusals, target validation, fetch and HEAD refusals, dropped-guard flips)".format(
               checked[0]))
     return EXIT_OK
@@ -1625,6 +1904,184 @@ def _self_test_units(check):
                 run(["--push", "--root", d_root])
             check("dropping the destination-agreement gate pushes (shown red)",
                   _tip(d_bare) == _head(d_root))
+
+            # -- a remote named with the target's URL string cannot redirect the transport --------
+            # git resolves a fetch or push argument that equals a configured remote's name to that
+            # remote's configuration, so a remote named exactly the verified URL string would fetch
+            # from its url values and push to EVERY pushurl. The plain-remote-name rule and the
+            # every-value destination agreement refuse before any transport; the flips below put
+            # back a first-push-value-only agreement and show both redirects live.
+            def first_push_value_only(g, r, u):
+                value = _opf_observe._observe_remote(g, r, [])
+                return "origin", [value], [value]
+
+            rd_bare = os.path.join(base, "shadow-target.git")
+            _git(base, "init", "--bare", rd_bare)
+            rd_url = "file://" + rd_bare
+            rd_evil = os.path.join(base, "shadow-evil.git")
+            _git(base, "init", "--bare", rd_evil)
+            rd_root = _store("shadow", "git:" + rd_url)
+            _git(rd_root, "push", rd_bare, "main")
+            _git(rd_root, "push", rd_evil, "main")
+            # the unverified repository advances past the store, so a redirected fetch is visible
+            rdw = os.path.join(base, "shadow-writer")
+            _git(base, "clone", rd_evil, rdw)
+            (Path(rdw) / "data.txt").write_text("unverified\n", encoding="utf-8")
+            _git(rdw, "add", "-A")
+            _git(rdw, "commit", "-m", "advance the unverified repository")
+            _git(rdw, "push", "origin", "main")
+            rd_evil_tip = _tip(rd_evil)
+            # the single remote is NAMED the verified URL string; its url points elsewhere while
+            # its first push URL agrees (the exact shape a first-value-only agreement passes)
+            _git(rd_root, "config", "remote.{}.url".format(rd_url), rd_evil)
+            _git(rd_root, "config", "remote.{}.pushurl".format(rd_url), rd_url)
+            rd_head = _head(rd_root)
+            rc, out = run(["--root", rd_root])
+            check("a remote named the verified URL string refuses before any transport",
+                  rc == EXIT_MALFORMED and "plain remote name" in out and _no_fetch_head(rd_root)
+                  and _head(rd_root) == rd_head and _tip(rd_evil) == rd_evil_tip)
+            # the named flip: with the plain-name rule, the every-value agreement and the effective
+            # shadow gate all dropped, the fetch argument resolves as the remote's name and the
+            # fetch lands the UNVERIFIED repository's tip in FETCH_HEAD
+            with patch.object(module, "_remote_name_plain", lambda name: True), \
+                    patch.object(module, "_remote_url_values", first_push_value_only), \
+                    patch.object(module, "_refuse_effective_remote_shadow", lambda *a, **k: None):
+                rc, out = run(["--root", rd_root])
+            check("dropping the remote gates redirects the fetch to the unverified repository "
+                  "(shown red)",
+                  rc == EXIT_MALFORMED and "BEHIND" in out
+                  and _git(rd_root, "rev-parse", "FETCH_HEAD").strip() == rd_evil_tip
+                  and _head(rd_root) == rd_head)
+
+            # a second pushurl on a URL-named remote: the push would land at BOTH repositories
+            p2_bare = os.path.join(base, "pushshadow-target.git")
+            _git(base, "init", "--bare", p2_bare)
+            p2_url = "file://" + p2_bare
+            p2_evil = os.path.join(base, "pushshadow-evil.git")
+            _git(base, "init", "--bare", p2_evil)
+            p2_root = _store("pushshadow", "git:" + p2_url)
+            _git(p2_root, "push", p2_bare, "main")
+            _git(p2_root, "push", p2_evil, "main")   # shared history: a redirected push would land
+            _git(p2_root, "config", "remote.{}.url".format(p2_url), p2_url)
+            _git(p2_root, "config", "remote.{}.pushurl".format(p2_url), p2_url)
+            _git(p2_root, "config", "--add", "remote.{}.pushurl".format(p2_url), p2_evil)
+            _local_commit(p2_root, "data.txt", "pending\n")
+            p2_tip = _tip(p2_bare)
+            p2_evil_tip = _tip(p2_evil)
+            rc, out = run(["--push", "--root", p2_root])
+            check("a second pushurl behind a URL-named remote refuses the push before any "
+                  "transport",
+                  rc == EXIT_MALFORMED and "plain remote name" in out and _no_fetch_head(p2_root)
+                  and _tip(p2_bare) == p2_tip and _tip(p2_evil) == p2_evil_tip)
+            with patch.object(module, "_remote_name_plain", lambda name: True), \
+                    patch.object(module, "_remote_url_values", first_push_value_only), \
+                    patch.object(module, "_refuse_effective_remote_shadow", lambda *a, **k: None):
+                rc, _out = run(["--push", "--root", p2_root])
+            check("dropping the remote gates pushes HEAD to the verified target AND the second "
+                  "pushurl (shown red)",
+                  rc == EXIT_OK and _tip(p2_bare) == _head(p2_root)
+                  and _tip(p2_evil) == _head(p2_root))
+
+            # every pushurl value must agree even on a plainly named remote: the agreement reads
+            # `git remote get-url --all` and `get-url --push --all`, never only the first value
+            pv_root, pv_bare = _paired("pushvalues")
+            pv_evil = os.path.join(base, "pushvalues-evil.git")
+            _git(base, "init", "--bare", pv_evil)
+            _git(pv_root, "config", "remote.origin.pushurl", pv_bare)
+            _git(pv_root, "config", "--add", "remote.origin.pushurl", pv_evil)
+            _local_commit(pv_root, "data.txt", "pending two\n")
+            pv_tip = _tip(pv_bare)
+            rc, out = run(["--push", "--root", pv_root])
+            check("a second disagreeing pushurl value refuses before any transport",
+                  rc == EXIT_MALFORMED and "does not agree" in out and "pushurl" in out
+                  and _no_fetch_head(pv_root) and _tip(pv_bare) == pv_tip
+                  and _tip_or_none(pv_evil) is None)
+
+            # an https-shaped target: the remote named that URL would redirect the transport to a
+            # LOCAL repository without any network, refused on the name before any transport
+            hs_root = _store("httpsshadow", "git:https://example.invalid/repo.git")
+            hs_evil = os.path.join(base, "httpsshadow-evil.git")
+            _git(base, "init", "--bare", hs_evil)
+            _git(hs_root, "push", hs_evil, "main")
+            hsw = os.path.join(base, "httpsshadow-writer")
+            _git(base, "clone", hs_evil, hsw)
+            (Path(hsw) / "data.txt").write_text("unverified https\n", encoding="utf-8")
+            _git(hsw, "add", "-A")
+            _git(hsw, "commit", "-m", "advance")
+            _git(hsw, "push", "origin", "main")
+            hs_evil_tip = _tip(hs_evil)
+            _git(hs_root, "config", "remote.https://example.invalid/repo.git.url", hs_evil)
+            _git(hs_root, "config", "remote.https://example.invalid/repo.git.pushurl",
+                 "https://example.invalid/repo.git")
+            rc, out = run(["--root", hs_root])
+            check("an https-shaped target whose remote is named that URL refuses before any "
+                  "transport",
+                  rc == EXIT_MALFORMED and "plain remote name" in out and _no_fetch_head(hs_root))
+            with patch.object(module, "_remote_name_plain", lambda name: True), \
+                    patch.object(module, "_remote_url_values", first_push_value_only), \
+                    patch.object(module, "_refuse_effective_remote_shadow", lambda *a, **k: None):
+                rc, out = run(["--root", hs_root])
+            check("dropping the remote gates redirects the https-shaped fetch to a local "
+                  "repository (shown red)",
+                  rc == EXIT_MALFORMED and "BEHIND" in out
+                  and _git(hs_root, "rev-parse", "FETCH_HEAD").strip() == hs_evil_tip)
+
+            # an ssh-shaped (scp-style) target: the same name rule refuses it
+            ss_root = _store("sshshadow", "git:git@example.invalid:repo.git")
+            ss_evil = os.path.join(base, "sshshadow-evil.git")
+            _git(base, "init", "--bare", ss_evil)
+            _git(ss_root, "config", "remote.git@example.invalid:repo.git.url", ss_evil)
+            _git(ss_root, "config", "remote.git@example.invalid:repo.git.pushurl",
+                 "git@example.invalid:repo.git")
+            rc, out = run(["--root", ss_root])
+            check("an ssh-shaped target whose remote is named that URL refuses before any "
+                  "transport",
+                  rc == EXIT_MALFORMED and "plain remote name" in out and _no_fetch_head(ss_root))
+
+            # several remotes refuse: which of several is authoritative is not git's to guess
+            tr_root, tr_bare = _paired("tworemotes")
+            _git(tr_root, "remote", "add", "second", tr_bare)
+            rc, out = run(["--root", tr_root])
+            check("several remotes refuse before any transport",
+                  rc == EXIT_MALFORMED and "remotes" in out and _no_fetch_head(tr_root))
+
+            # a remote of ANY scope named the verified URL redirects; the effective gate, read
+            # under the exact transport environment, refuses a global one the repository gates
+            # cannot see
+            es_bare = os.path.join(base, "effshadow-target.git")
+            _git(base, "init", "--bare", es_bare)
+            es_url = "file://" + es_bare
+            es_evil = os.path.join(base, "effshadow-evil.git")
+            _git(base, "init", "--bare", es_evil)
+            es_root = _store("effshadow", "git:" + es_url)
+            _git(es_root, "remote", "add", "origin", es_url)
+            _git(es_root, "push", es_bare, "main")
+            _git(es_root, "push", es_evil, "main")
+            esw = os.path.join(base, "effshadow-writer")
+            _git(base, "clone", es_evil, esw)
+            (Path(esw) / "data.txt").write_text("unverified global\n", encoding="utf-8")
+            _git(esw, "add", "-A")
+            _git(esw, "commit", "-m", "advance")
+            _git(esw, "push", "origin", "main")
+            es_evil_tip = _tip(es_evil)
+            es_head = _head(es_root)
+            gcfg = Path(home) / ".gitconfig"
+            gcfg.write_text('[remote "{}"]\n\turl = {}\n'.format(es_url, es_evil),
+                            encoding="utf-8")
+            rc, out = run(["--root", es_root])
+            check("a global-scope remote named the verified URL refuses before any transport",
+                  rc == EXIT_MALFORMED and "named exactly the verified URL" in out
+                  and _no_fetch_head(es_root) and _head(es_root) == es_head)
+            # the named flip: with the effective shadow gate dropped the fetch resolves the URL
+            # argument as the GLOBAL remote's name and lands the unverified tip in FETCH_HEAD
+            with patch.object(module, "_refuse_effective_remote_shadow", lambda *a, **k: None):
+                rc, out = run(["--root", es_root])
+            check("dropping the effective remote-shadow gate redirects the fetch through the "
+                  "global remote (shown red)",
+                  rc == EXIT_MALFORMED and "BEHIND" in out
+                  and _git(es_root, "rev-parse", "FETCH_HEAD").strip() == es_evil_tip
+                  and _head(es_root) == es_head)
+            gcfg.unlink()
 
             # -- divergence halts in every mode, merging nothing ---------------------------------
             v_root, v_bare = _paired("diverged")
@@ -2080,6 +2537,39 @@ def _self_test_units(check):
                       "({})".format(" ".join(argv) or "bare"),
                       rc == EXIT_MALFORMED and "program launch" in out
                       and not os.path.exists(gh_marker) and _no_fetch_head(gh_root))
+            # -- a format or clone-shape record refuses with ITS OWN remedy: such a key cannot
+            # move to global configuration (git reads it in the repository itself), so the refusal
+            # names recreating the store in a default-format, full clone instead
+            fm_root, _fm_bare = _paired("formatrec")
+            for fm_key, fm_value in (("remote.origin.promisor", "true"),
+                                     ("remote.origin.partialCloneFilter", "blob:none"),
+                                     ("extensions.partialClone", "origin")):
+                _git(fm_root, "config", "--local", fm_key, fm_value)
+                rc, out = run(["--root", fm_root])
+                _git(fm_root, "config", "--local", "--unset", fm_key)
+                check("a repository-scope {} refuses as a format record, never with the "
+                      "move-to-global remedy".format(fm_key),
+                      rc == EXIT_MALFORMED and "default-format, full clone" in out
+                      and "move it there" not in out and _no_fetch_head(fm_root))
+            # a real reftable repository (where this git can create one) refuses the same way:
+            # `git init --ref-format=reftable` itself writes extensions.refStorage
+            rt_root = os.path.join(base, "reftable")
+            os.makedirs(rt_root)
+            rt_manifest = _opf_init._manifest_model()
+            rt_manifest["store"]["sync_target"] = "git:" + os.path.join(base, "reftable-absent.git")
+            _write_manifest(rt_root, rt_manifest)
+            (Path(rt_root) / "data.txt").write_text("one\n", encoding="utf-8")
+            rt_init = _git_run(rt_root, "init", "--ref-format=reftable")
+            if rt_init.returncode == 0:
+                _git(rt_root, "add", "-A")
+                _git(rt_root, "commit", "-m", "seed reftable")
+                rc, out = run(["--root", rt_root])
+                check("a reftable repository refuses as a format record before any fetch",
+                      rc == EXIT_MALFORMED and "default-format, full clone" in out
+                      and _no_fetch_head(rt_root))
+            else:
+                check("this git cannot create a reftable repository; the extensions.refStorage "
+                      "refusal rides the key sweep below", True)
             # -- every allowlisted repository-scope key still syncs (the gate's other edge) -------
             # One concrete instance per allowlist entry, all set together at --local scope on an
             # equal store; the coverage check pins the instance map to the allowlist, so a key
@@ -2251,6 +2741,80 @@ def _self_test_units(check):
             rc, out = run(["--root", md_root])
             check("an entry under .git/modules alone refuses before any step",
                   rc == EXIT_MALFORMED and "modules" in out and _no_fetch_head(md_root))
+            # an INDEX-ONLY gitlink (a staged embedded repository, absent from HEAD) refuses
+            # before any step: the embedded repository's own config is live, and the clean-check
+            # status probe would descend into it and run the clean filter that config names
+            ix_marker = os.path.join(base, "indexlink-marker")
+            ix_prog = Path(base) / "indexlink-prog"
+            ix_prog.write_text("#!/bin/sh\n: > {}\ncat\n".format(ix_marker), encoding="utf-8")
+            os.chmod(str(ix_prog), 0o755)
+            ix_root, ix_bare = _paired("indexlink")
+            ix_sub = os.path.join(ix_root, "sub")
+            os.makedirs(ix_sub)
+            (Path(ix_sub) / "inner.txt").write_text("inner\n", encoding="utf-8")
+            (Path(ix_sub) / ".gitattributes").write_text("* filter=pwn\n", encoding="utf-8")
+            _git(ix_sub, "init")
+            _git(ix_sub, "add", "-A")
+            _git(ix_sub, "commit", "-m", "embedded seed")
+            _git(ix_sub, "config", "filter.pwn.clean", str(ix_prog))
+            (Path(ix_sub) / "inner.txt").write_text("locally edited\n", encoding="utf-8")
+            ix_inner = _head(ix_sub)
+            _git(ix_root, "update-index", "--add", "--cacheinfo",
+                 "160000,{},sub".format(ix_inner))
+            # the target records a gitlink at the same path (the other system commits it)
+            ixw = os.path.join(base, "indexlink-writer")
+            _git(base, "clone", ix_bare, ixw)
+            _git(ixw, "update-index", "--add", "--cacheinfo", "160000,{},sub".format(ix_inner))
+            _git(ixw, "commit", "-m", "record gitlink")
+            _git(ixw, "push", "origin", "main")
+            ix_head = _head(ix_root)
+            for argv in ([], ["--pull"]):
+                rc, out = run(argv + ["--root", ix_root])
+                check("an index-only gitlink refuses before any step, the embedded repository's "
+                      "filter never running ({})".format(" ".join(argv) or "bare"),
+                      rc == EXIT_MALFORMED and "index" in out and "gitlink" in out
+                      and not os.path.exists(ix_marker) and _head(ix_root) == ix_head
+                      and _no_fetch_head(ix_root))
+            # the named flip: with the index scan dropped (nothing else fires: the gitlink is in
+            # no tree and no .gitmodules or .git/modules entry exists), the pull's clean probe
+            # descends into the staged embedded repository and RUNS the program its own config
+            # names, before the dirty-tree refusal and with HEAD unmoved
+            with patch.object(module, "_refuse_index_gitlinks", lambda *a, **k: None):
+                run(["--pull", "--root", ix_root])
+            check("dropping the index scan runs the staged embedded repository's configured "
+                  "program (shown red)",
+                  os.path.exists(ix_marker) and _head(ix_root) == ix_head)
+            # a store NESTED below its repository toplevel cannot sit beside submodule machinery
+            # outside its own subtree: the .gitmodules check covers the toplevel and the gitlink
+            # scans cover the whole index and HEAD's full tree
+            nt_top = os.path.join(base, "nested-top")
+            nt_store = os.path.join(nt_top, "store")
+            os.makedirs(nt_store)
+            nt_manifest = _opf_init._manifest_model()
+            nt_manifest["store"]["sync_target"] = "git:" + os.path.join(base, "nested-absent.git")
+            _write_manifest(nt_store, nt_manifest)
+            (Path(nt_store) / "data.txt").write_text("one\n", encoding="utf-8")
+            _git(nt_top, "init")
+            _git(nt_top, "add", "-A")
+            _git(nt_top, "commit", "-m", "seed nested")
+            (Path(nt_top) / ".gitmodules").write_text("", encoding="utf-8")
+            rc, out = run(["--root", nt_store])
+            check("a .gitmodules file at the repository toplevel refuses a nested store",
+                  rc == EXIT_MALFORMED and ".gitmodules" in out and "toplevel" in out
+                  and _no_fetch_head(nt_top))
+            (Path(nt_top) / ".gitmodules").unlink()
+            _git(nt_top, "update-index", "--add", "--cacheinfo",
+                 "160000,{},linked".format(_head(nt_top)))
+            rc, out = run(["--root", nt_store])
+            check("a gitlink outside a nested store's subtree refuses through the index scan",
+                  rc == EXIT_MALFORMED and "index" in out and "gitlink" in out
+                  and _no_fetch_head(nt_top))
+            _git(nt_top, "commit", "-m", "gitlink at toplevel")
+            with patch.object(module, "_refuse_index_gitlinks", lambda *a, **k: None):
+                rc, out = run(["--root", nt_store])
+            check("a gitlink outside a nested store's subtree refuses through HEAD's full tree",
+                  rc == EXIT_MALFORMED and "HEAD's tree" in out and "gitlink" in out
+                  and _no_fetch_head(nt_top))
 
             # every entry of every documentation list refuses, plain, under a subsection and in
             # any case, through the same enumeration (its listing stubbed); a name one character
@@ -2276,7 +2840,7 @@ def _self_test_units(check):
             for family in (_LOCAL_REDIRECT_KEYS, _LOCAL_EXEC_KEYS, _LOCAL_SIGN_KEYS,
                            _LOCAL_REMOTE_PROGRAM_KEYS, _LOCAL_PROTOCOL_KEYS, _LOCAL_TRUST_KEYS,
                            _LOCAL_COOKIE_KEYS, _LOCAL_BUNDLE_KEYS, _LOCAL_INCLUDE_KEYS,
-                           _LOCAL_FILTER_KEYS, _LOCAL_CONTENT_DRIVER_KEYS):
+                           _LOCAL_FILTER_KEYS, _LOCAL_CONTENT_DRIVER_KEYS, _LOCAL_FORMAT_KEYS):
                 for listed in family:
                     section, _dot, key = listed.partition(b".")
                     _sweep(listed, True)
@@ -2300,6 +2864,21 @@ def _self_test_units(check):
                 _sweep(section + b".." + key, True, want_needle="allowlist")
                 _sweep(section + b".origin." + key + b"x", True, want_needle="allowlist")
                 _sweep(section + b".origin.x" + key, True, want_needle="allowlist")
+            # a remote.* subsection must be a PLAIN remote name: a URL-shaped or otherwise
+            # resolvable name refuses with the remote-name reason (git resolves a transport
+            # argument equal to a remote's name to that remote's configuration), tested just inside
+            # and just outside the plain charset at each edge, while a branch subsection stays free
+            # (a branch name legitimately contains '/')
+            for bad_sub in (b"file:///t/example.git", b"https://example.invalid/r.git",
+                            b"git@example.invalid:r.git", b"a/b", b"a:b", b"a@b", b"a b",
+                            b"-lead", b".", b".."):
+                for allowed in _ALLOWED_REMOTE_SUBSECTION_KEYS:
+                    _sweep(b"remote." + bad_sub + b"." + allowed.partition(b".")[2], True,
+                           want_needle="plain remote name")
+            for ok_sub in (b"origin", b"a.b", b"mirror-2", b"UP_stream", b"lead-"):
+                _sweep(b"remote." + ok_sub + b".url", False)
+            _sweep(b"branch.feature/x.merge", False)
+            _sweep(b"branch.a@b.remote", False)
             check("the stubbed sweep holds at every edge: documented keys refuse in each form, "
                   "near-miss names refuse through the allowlist, allowlisted names pass, and the "
                   "spellings just outside the allowlist refuse ({})".format(sweep_misses[:8]),
