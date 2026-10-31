@@ -87,6 +87,17 @@
 #                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
 #                        it. When a queued fold lands, record its measured cost here against the 559-unit
 #                        estimate.
+#                        Not raised on 2026-10-31 when track-launched-work gained its paragraph that a
+#                        disposition recorded as waiting on another unit of work names work that exists
+#                        (trkasy.7). This is the queued seed fold for track-launched-work: measured 456 units
+#                        against the 559 units estimated for all four queued folds, leaving 103 of that
+#                        estimate for the other three. Rule files 117926 -> 118382; managed block 360 and
+#                        file headers 16136 unchanged. Measured PACK 134422 -> 134878, within the ratchet,
+#                        with no ratchet change. Drift before this fold, measured, not estimated: PACK 133432
+#                        at the 2026-10-29 raise -> 134422 at this change's base (+990 units, all in rule
+#                        files 116936 -> 117926; managed block and file headers unchanged), from rule
+#                        changes merged after that raise. Together they spend 1446 of the 1559 units the
+#                        estimate and the margin added, so PACK is 113 units under the ratchet.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.

@@ -561,6 +561,12 @@ so its result and its failure are lost unless they are collected. Such work is l
 background mechanism that keeps its completion observable; where its result and completion are genuinely
 not needed, detaching it is a deliberate, recorded choice, not a reflex.
 
+A disposition recorded as waiting on another unit of work names work that exists: its reference resolves to a
+live dispatch record or to a delivered result not yet collected. A dispatch record of work that failed, was
+killed or ended without a result is not live, and a reference resolving to neither is raised as a finding, not
+rested on. Resolving is a necessary condition only, never a grant: continue-by-default still decides whether
+the wait blocks.
+
 ## Validation is a gate on apply
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
