@@ -54,8 +54,14 @@ name (letters, digits, '-', '_' and '.' only, never '.', '..' or a leading '-'),
 repository scopes (the allowlist admits a remote.<name>.* key only under a plain name) and at the
 recorded remote itself, and the effective-configuration gate below refuses a remote of ANY scope
 whose name equals the verified URL string. Every allowed target string contains ':' or '/', which a
-plain name cannot, so once these hold the URL argument cannot resolve as a remote name and needs no
-re-encoding. A detached or unborn HEAD refuses. 7. Compare with `merge-base --is-ancestor` both ways
+plain name cannot, so no plainly named remote can collide with the argument; configured remotes are
+not git's only name source, though: for an argument with NO '/' (an scp-style host:path whose path
+part has none, like host:repo.git), git falls back to reading the legacy remotes/ and branches/
+files under the git common directory as the remote's definition, so sync also refuses any non-empty
+entry under those two directories before every transport (the legacy-store gate below). The
+argument is passed to git unencoded; the DESTINATION SOURCES table below enumerates every name
+source git consults for it and the gate that covers each. A detached or unborn HEAD refuses.
+7. Compare with `merge-base --is-ancestor` both ways
 and report, or run the one requested step:
 
 - BEHIND + --pull: the section 9.2 refusals are applied AGAIN to the manifest the fetched state
@@ -169,6 +175,64 @@ matches nothing here and keeps working. Refusal is chosen over an override in th
 a GIT_CONFIG_* pair appends to a multi-valued key rather than resetting it (an empty insteadOf
 value is itself a match-everything rewrite), while an unrelated rewrite of the adopter's own
 matches nothing here and keeps working.
+Third, the LEGACY-STORE gate: git's name lookup does not end at the configuration. For a fetch or
+push argument that names no configured remote, remote_get falls back to reading
+<git-common-dir>/remotes/<argument> and then <git-common-dir>/branches/<argument> as the remote's
+definition whenever valid_remote_nick admits the argument (a non-empty name that is not '.' or
+'..' and contains no '/'), and an allowed scp-style target whose path part has no '/'
+(host:repo.git) is exactly such a name, so a file there would redirect the fetch AND the push to
+the URL it records. Sync refuses ANY non-empty entry under either directory, resolved through the
+git COMMON directory so a linked worktree's shared store is covered, whatever the argument's
+shape: refusing every entry needs no reimplementation of git's name-matching rule, a store
+repository has no sanctioned use for the deprecated format, and the empty branches/ directory an
+old `git init` template leaves behind still passes.
+
+DESTINATION SOURCES (git 2.53): every source git consults to turn the fetch or push argument into
+a destination, read from git's documentation and the source text it describes (remote.c
+remote_get/remote_get_1 try the argument as a remote NAME over the configuration, then as a
+legacy remotes/ or branches/ entry where valid_remote_nick admits it, and only then use the
+argument itself as the URL; url.* rewrites and the transport's scheme and helper handling then
+apply). Each row names the source, how sync covers it (refused, neutralized, or shown
+unreachable), and the self-test vector that proves it:
+
+  source git consults for the argument   | covered how                | proving self-test vector
+  ---------------------------------------+----------------------------+---------------------------
+  remote.<name>.* of the repository      | refused: the allowlist's   | "a remote named the
+  scopes (--local/--worktree) whose      | plain-name rule, the       | verified URL string
+  name equals the argument               | single-remote rule and the | refuses ..." and its flip;
+                                         | every-value agreement      | the stubbed sweep
+  remote.<name>.* of the global, system  | refused: the effective     | "a global-scope remote
+  and included scopes whose name equals  | remote-shadow gate under   | named the verified URL
+  the argument                           | the exact transport env    | refuses ..." and its flip
+  remote.<name>.* from environment       | neutralized: _transport_   | "an environment-config
+  config (GIT_CONFIG_COUNT/KEY/VALUE,    | env drops every GIT_*      | remote named the verified
+  GIT_CONFIG_PARAMETERS, GIT_CONFIG_     | override by construction   | URL never reaches the
+  GLOBAL/SYSTEM)                         |                            | transport ..."
+  <git-common-dir>/remotes/<argument>    | refused: the legacy-store  | "a legacy remotes/ entry
+  (read_remotes_file, behind             | gate refuses any non-empty | refuses the fetch/push
+  valid_remote_nick)                     | entry, argument-           | ..." and their flips;
+                                         | independent                | the shape and worktree
+                                         |                            | vectors
+  <git-common-dir>/branches/<argument>   | refused: the same legacy-  | "a legacy branches/ entry
+  (read_branches_file, behind            | store gate                 | refuses ..."; the empty-
+  valid_remote_nick)                     |                            | directory vector
+  branch.<name>.remote/pushRemote and    | shown unreachable: these   | "an ordinary store
+  remote.pushDefault (the defaults when  | are read only when NO      | carrying every allowlisted
+  no argument is given)                  | argument is given, and     | key still syncs" (branch.
+                                         | fetch_target and           | main.remote and .merge set
+                                         | _push_args always pass the | while the transport still
+                                         | verified URL explicitly    | reaches the target)
+  the argument itself as the URL         | the intended path; the     | the insteadOf and
+  (add_url_alias), then url.<base>.      | rewrites are refused by    | pushInsteadOf vectors,
+  insteadOf / pushInsteadOf rewrites     | the effective-rewrite gate | their flips and boundary
+  over it                                | over every honoured scope  | spellings
+  the transport over the resulting URL   | refused before any launch  | the bad-target vectors and
+  (a <helper>:: program, the scheme      | (validate_target), and     | their flip; the protocol.
+  list, protocol.<name>.allow)           | pinned (protocol.allow=    | allow vectors
+                                         | never with file, https and |
+                                         | ssh re-allowed; the per-   |
+                                         | protocol repository key    |
+                                         | refuses on the allowlist)  |
 
 SUBMODULES: a store whose repository carries any git submodule machinery refuses before any step:
 a .gitmodules file at the store root or at the repository toplevel (the only working-tree path git
@@ -192,7 +256,14 @@ mechanism for the writes sync itself makes is a lock ref at the target (for exam
 written with an atomic compare-and-swap push, and until it ships the lease is local to this host, so
 the section 17 propagation window stands: two systems can both begin, and the divergence check here
 is the overlapping control that catches that collision after the fact (the two layers together, not
-the lease alone, are the guarantee, spec 5.7/17). The pre-operation reconciliation spec 5.7 requires
+the lease alone, are the guarantee, spec 5.7/17). Between the LAST configuration gate and the
+transport launch there is a time-of-check/time-of-use window: every gate reads the repository's
+configuration and git directory, then git starts, and a writer that lands a redirecting key or
+legacy file inside that window is read by the transport but by no gate. No gate run from this
+process can close that window; such a writer already holds write access to the store repository's
+own .git directory, the very trust domain the gates verify, and the bound on it is the filesystem
+permission on that directory, not this module (disclosed, not gated). The pre-operation
+reconciliation spec 5.7 requires
 of EVERY other operation is not yet enforced by the other verbs; the shared pre-operation reconcile
 is its own later unit, and until it lands a writing verb on a dedicated-target store does not refuse
 a stale store (this module is the surfaced step it will name). A pull or push operates only on a
@@ -384,11 +455,15 @@ _ALLOWED_REMOTE_SUBSECTION_KEYS = (b"remote.url", b"remote.fetch", b"remote.push
 _ALLOWED_SUBSECTION_KEYS = _ALLOWED_REMOTE_SUBSECTION_KEYS + (b"branch.remote", b"branch.merge")
 # A fetch or push argument that EQUALS a configured remote's NAME resolves to that remote's
 # configuration (git remote.c, remote_get: an exact name lookup over every config scope; only a
-# name beginning with '/' is skipped at config parse, with a warning, and valid_remote_nick --
-# no empty name, no '.' or '..', no directory separator -- gates just the legacy .git/branches and
-# .git/remotes files), so git's own rule leaves a URL string usable as a remote name, and a remote
-# named with the verified URL string would redirect the fetch to its url values and the push to
-# EVERY pushurl. The plain-name rule here is deliberately stricter than git's: letters, digits,
+# name beginning with '/' is skipped at config parse, with a warning), so git's own rule leaves a
+# URL string usable as a remote name, and a remote named with the verified URL string would
+# redirect the fetch to its url values and the push to EVERY pushurl. The configuration is not the
+# only name source: where no configured remote matches, remote_get reads the legacy remotes/ and
+# branches/ files under the git common directory for any argument valid_remote_nick admits (no
+# empty name, no '.' or '..', no '/'), and an allowed scp-style target whose path part has no '/'
+# (host:repo.git) IS such an argument, so those files are a live redirect source for it; they are
+# closed by _refuse_legacy_remote_stores, which refuses any non-empty entry under either
+# directory. The plain-name rule here is deliberately stricter than git's: letters, digits,
 # '-', '_' and '.' only, never '.', '..' or a leading '-'. Every allowed sync target string
 # contains ':' or '/' (validate_target admits only scheme URLs, scp-style host:path and absolute
 # paths), which a plain name cannot, so no plainly named remote can collide with the transport
@@ -566,10 +641,13 @@ def _remote_name_plain(name):
     """Whether one configured remote name is a PLAIN remote name this module accepts: letters,
     digits, '-', '_' and '.' only (no ':', '/', '@', whitespace or any other character), never '.',
     '..' or a name beginning with '-'. git's own rule at source is far wider (remote.c:
-    handle_config skips only a name beginning with '/', and valid_remote_nick gates just the legacy
-    .git/branches and .git/remotes files), wide enough that a URL string is a usable remote name
-    that a fetch or push argument would resolve to; this stricter rule exists so no configured
-    remote name can equal an allowed sync target string, every one of which contains ':' or '/'."""
+    handle_config skips only a name beginning with '/'), wide enough that a URL string is a usable
+    remote name that a fetch or push argument would resolve to; this stricter rule exists so no
+    configured remote name can equal an allowed sync target string, every one of which contains
+    ':' or '/'. The configuration is not git's only name source: for an argument with no '/' (an
+    scp-style target like host:repo.git), valid_remote_nick lets remote_get read the legacy
+    remotes/ and branches/ files under the git common directory as the remote's definition; that
+    source is closed separately by _refuse_legacy_remote_stores, never by this name rule."""
     return (_REMOTE_NAME_RE.fullmatch(name) is not None
             and name not in (".", "..") and not name.startswith("-"))
 
@@ -870,6 +948,25 @@ def _local_key_allowlisted(low):
     return False
 
 
+def _worktree_config_enabled(git, store_root):
+    """Whether the repository enables extensions.worktreeConfig, read at --local scope (the
+    repository's own config file, the only place git honours an extension from) and normalized as
+    a boolean. Unset or false reads as disabled: git then reads no per-worktree config file, so
+    the --worktree scope cannot carry a key the transport would honour. An unreadable or
+    non-boolean value is a cannot-evaluate, never read as disabled (fail-closed)."""
+    out = _opf_observe._run_git(git, store_root, ["config", "--local", "--get", "--type=bool",
+                                                  "extensions.worktreeconfig"])
+    if out.completed and out.rc == 1:
+        return False
+    if out.completed and out.rc == 0:
+        return out.out.decode("utf-8", "replace").strip() == "true"
+    raise SyncError("could not read extensions.worktreeConfig ({}); whether the repository has a "
+                    "per-worktree configuration scope cannot be shown, so the transport cannot be "
+                    "verified (fail-closed)".format(
+                        out.err.strip() if not out.completed
+                        else "rc {}: {}".format(out.rc, out.err.strip())))
+
+
 def _refuse_local_redirect_config(git, store_root):
     """THE REPOSITORY-CONFIG ALLOWLIST GATE: enumerate both repository scopes (--local and
     --worktree) by name and refuse the first key that is not allowlisted (_local_key_allowlisted),
@@ -916,7 +1013,11 @@ def _refuse_local_redirect_config(git, store_root):
     Both repository scopes are enumerated, --local and --worktree (without the worktreeConfig
     extension the latter reads the same .git/config), through the scrubbed read-only boundary
     (--name-only: no value, so a malicious command body is never read); an unreadable scope is a
-    cannot-evaluate, never read as empty."""
+    cannot-evaluate, never read as empty, with ONE carve-out shown safe: in a repository with
+    linked worktrees and no worktreeConfig extension, `git config --worktree` itself refuses to
+    run, and git then honours no per-worktree file anywhere, so that one failure shape is treated
+    as the scope not existing (_worktree_config_enabled) and the store syncs; with the extension
+    enabled, an unreadable worktree config still refuses, naming the missing file."""
     refusals = (
         (_LOCAL_REDIRECT_KEYS,
          ", a URL rewrite that would silently redirect the verified destination (spec 5.6); remove "
@@ -999,6 +1100,19 @@ def _refuse_local_redirect_config(git, store_root):
                             "the transport cannot be verified (fail-closed)".format(
                                 scope.lstrip("-"), listing.err.strip()))
         if listing.rc != 0:
+            if scope == "--worktree" and not _worktree_config_enabled(git, store_root):
+                # Without the worktreeConfig extension git reads no per-worktree file at all (in
+                # a repository with linked worktrees, `git config --worktree` itself refuses to
+                # run), so this scope holds no key the transport would honour, and the --local
+                # scope above was already enumerated: the store syncs instead of refusing here.
+                continue
+            if scope == "--worktree":
+                raise SyncError("the store repository enables extensions.worktreeConfig but this "
+                                "worktree's own configuration cannot be read (rc {}): {}; what is "
+                                "missing is the worktree's config file under its git directory "
+                                "(any `git config --worktree` write creates it); create it or "
+                                "disable the extension, then re-run (fail-closed)".format(
+                                    listing.rc, listing.err.strip()))
             raise SyncError("git config {} --list failed (rc {}); the store repository's {} "
                             "configuration is unreadable, so the transport cannot be verified "
                             "(fail-closed)".format(scope, listing.rc, scope.lstrip("-")))
@@ -1023,6 +1137,47 @@ def _refuse_local_redirect_config(git, store_root):
                         break
             raise SyncError("the store repository's git configuration carries {!r}{}".format(
                 kb.decode("utf-8", "replace"), why))
+
+
+def _refuse_legacy_remote_stores(git, store_root):
+    """THE LEGACY-STORE GATE: refuse any non-empty entry under the git COMMON directory's remotes/
+    and branches/ directories, before every fetch and push. For a transport argument that names no
+    configured remote, git's remote_get falls back to reading <git-common-dir>/remotes/<argument>
+    and then <git-common-dir>/branches/<argument> as the remote's definition whenever
+    valid_remote_nick admits the argument (non-empty, not '.' or '..', no '/'), and an allowed
+    scp-style target whose path part has no '/' (host:repo.git) is such an argument, so a file
+    there redirects the fetch AND the push to the URL it records, past every configuration gate.
+    Refusal is by construction, not by name matching: ANY entry refuses, whatever the argument's
+    shape, so the gate never re-implements git's name rule and cannot rot against it, a store
+    repository has no sanctioned use for the deprecated format, and the EMPTY branches/ (or
+    remotes/) directory an old `git init` template leaves behind still passes. The common
+    directory is resolved through git itself, so a linked worktree's shared store is covered. A
+    directory that exists but cannot be enumerated is a cannot-evaluate, never read as empty; a
+    path that is absent, or present but not a directory (git's per-entry open then fails the same
+    way), reads as no entries."""
+    out = _read_git(git, store_root, ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                    "locate the repository's common git directory")
+    common = os.fsdecode(out.out.removesuffix(b"\n"))
+    for legacy in ("remotes", "branches"):
+        path = os.path.join(common, legacy)
+        try:
+            entries = os.listdir(path)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            raise SyncError("the repository's legacy {} directory ({}) cannot be enumerated ({}); "
+                            "whether git would read a remote from it cannot be shown, so nothing "
+                            "is fetched or pushed (fail-closed)".format(legacy, path, exc))
+        if entries:
+            raise SyncError("the repository carries {} entr{} under its legacy {} directory ({}): "
+                            "git reads a fetch or push argument that names no configured remote "
+                            "and contains no '/' (an scp-style target like host:repo.git) as such "
+                            "an entry's name and takes the destination from the file instead of "
+                            "the verified URL, so any entry there can redirect the transport past "
+                            "the spec 5.6 destination agreement; sync refuses every entry rather "
+                            "than matching names; move the entries to config-based remotes, "
+                            "remove them, and re-run (fail-closed)".format(
+                                len(entries), "y" if len(entries) == 1 else "ies", legacy, path))
 
 
 def _refuse_index_gitlinks(git, toplevel, why):
@@ -1200,10 +1355,11 @@ def _refuse_effective_remote_shadow(git, store_root, env, url):
 
 def _run_transport(git, store_root, args, url, timeout=_TRANSPORT_TIMEOUT_S):
     """Run ONE fetch or push of the verified URL under the transport environment and overrides,
-    bounded, after the repository-scope refusals, the effective-rewrite gate and the effective
-    remote-name shadow gate over that URL.
+    bounded, after the repository-scope refusals, the legacy-store gate, the effective-rewrite
+    gate and the effective remote-name shadow gate over that URL.
     Every other git call this module makes goes through the read-only scrubbed boundary instead."""
     _refuse_local_redirect_config(git, store_root)
+    _refuse_legacy_remote_stores(git, store_root)
     overrides = _transport_overrides(git)
     env = _transport_env()
     env["GIT_CONFIG_COUNT"] = str(len(overrides))
@@ -1482,14 +1638,15 @@ def _run_sync(mode, root):
     tgt, url = validate_target(sync_target)
     git = _git_or_refuse()
     branch = _current_branch(git, res.store_root)
-    # Both repository gates run here, before the destination agreement (which itself holds the
+    # The repository gates run here, before the destination agreement (which itself holds the
     # recorded remote to a plain name and reads every url and pushurl value), the fetch and every
     # local step that could reach a repository-chosen program; _run_transport re-runs the allowlist
-    # gate and the effective rewrite and remote-shadow gates before
+    # gate, the legacy-store gate and the effective rewrite and remote-shadow gates before
     # each fetch and push. The submodule gate runs first, so a populated submodule is named as the
     # reason even where its submodule.* bookkeeping keys would refuse on the allowlist too.
     _refuse_submodules(git, res.store_root)
     _refuse_local_redirect_config(git, res.store_root)
+    _refuse_legacy_remote_stores(git, res.store_root)
     _require_destination_agreement(sync_target, tgt, url, res.target, git, res.store_root)
     fetch_target(git, res.store_root, url, branch)
     local = _rev(git, res.store_root, "HEAD")
@@ -1557,7 +1714,14 @@ def self_test():
     EVERY-URL-VALUE gates (a remote named with the target's URL string over a file://, https or
     ssh-shaped target, a second pushurl, several remotes, and a global-scope remote named the
     verified URL, each refused before any transport with FETCH_HEAD shown absent, and the fetch and
-    push redirects shown live once those gates are dropped), the repository-config ALLOWLIST
+    push redirects shown live once those gates are dropped), the LEGACY remotes/ and branches/
+    store refusals (an entry under the git common directory's remotes/ directory refused for the
+    fetch and for the push with both redirects shown live once the gate is dropped, the branches/
+    variant, scp targets with and without '/', an https target, empty template directories passing,
+    and a linked worktree's shared common directory), the linked-worktree config handling (a store
+    without the worktreeConfig extension syncs; the extension without its per-worktree file refuses
+    naming what is missing), the environment-config drop shown at the destination, the
+    repository-config ALLOWLIST
     gate (an ordinary store carrying every allowlisted key still syncs; every documented family key
     and every unlisted key, core.sshCommand and core.hooksPath included, refuses before any fetch
     with FETCH_HEAD shown absent; dropping the allowlist is shown running a repository-chosen
@@ -1603,6 +1767,7 @@ def self_test():
         return 1
     print("opf-sync self-test: PASS ({} checks: grammar, pattern refusals, admission, "
           "classification, pull, push, destination agreement, remote-name and pushurl-value gates, "
+          "legacy remote-store refusals, worktree-scope handling, environment-config drop, "
           "lease, repository-config allowlist, format-record refusals, "
           "submodule and index-gitlink refusals, transport neutralization, URL-rewrite and "
           "remote-shadow refusals, working-tree driver "
@@ -2082,6 +2247,160 @@ def _self_test_units(check):
                   and _git(es_root, "rev-parse", "FETCH_HEAD").strip() == es_evil_tip
                   and _head(es_root) == es_head)
             gcfg.unlink()
+
+            # -- the legacy remotes/ and branches/ stores under the git common directory ----------
+            # For a fetch or push argument that names no configured remote and contains no '/',
+            # git reads <git-common-dir>/remotes/<argument> and then branches/<argument> as the
+            # remote's definition (an scp-style target like host:repo.git has no '/', so it
+            # qualifies) and takes the destination from the file. The gate refuses ANY non-empty
+            # entry under either directory, whatever the argument's shape, so it never matches
+            # names; the empty directory an old `git init` template leaves must still pass.
+            lg_target = "git@example.invalid:repo.git"
+            lg_root = _store("legacyremotes", "git:" + lg_target)
+            _git(lg_root, "remote", "add", "origin", lg_target)
+            lg_evil = os.path.join(base, "legacyremotes-evil.git")
+            _git(base, "init", "--bare", lg_evil)
+            _git(lg_root, "push", lg_evil, "main")
+            lgw = os.path.join(base, "legacyremotes-writer")
+            _git(base, "clone", lg_evil, lgw)
+            (Path(lgw) / "data.txt").write_text("unverified legacy\n", encoding="utf-8")
+            _git(lgw, "add", "-A")
+            _git(lgw, "commit", "-m", "advance the unverified repository")
+            _git(lgw, "push", "origin", "main")
+            lg_evil_tip = _tip(lg_evil)
+            os.makedirs(os.path.join(lg_root, ".git", "remotes"))
+            (Path(lg_root) / ".git" / "remotes" / lg_target).write_text(
+                "URL: {}\n".format(lg_evil), encoding="utf-8")
+            lg_head = _head(lg_root)
+            rc, out = run(["--root", lg_root])
+            check("a legacy remotes/ entry refuses the fetch before any transport",
+                  rc == EXIT_MALFORMED and "legacy" in out and "remotes" in out
+                  and _no_fetch_head(lg_root) and _head(lg_root) == lg_head)
+            # the named flip: with the legacy-store gate dropped, git reads the remotes file for
+            # the scp argument and the fetch lands the UNVERIFIED repository's tip in FETCH_HEAD
+            with patch.object(module, "_refuse_legacy_remote_stores", lambda *a, **k: None):
+                rc, out = run(["--root", lg_root])
+            check("dropping the legacy-store gate redirects the fetch through the remotes file "
+                  "(shown red)",
+                  rc == EXIT_MALFORMED and "BEHIND" in out
+                  and _git(lg_root, "rev-parse", "FETCH_HEAD").strip() == lg_evil_tip
+                  and _head(lg_root) == lg_head)
+            # the push side: the same file redirects the push, which would then report success
+            # while the verified target was never contacted
+            lp_target = "git@example.invalid:repo2.git"
+            lp_root = _store("legacypush", "git:" + lp_target)
+            _git(lp_root, "remote", "add", "origin", lp_target)
+            lp_evil = os.path.join(base, "legacypush-evil.git")
+            _git(base, "init", "--bare", lp_evil)
+            _git(lp_root, "push", lp_evil, "main")
+            _local_commit(lp_root, "data.txt", "pending legacy\n")
+            os.makedirs(os.path.join(lp_root, ".git", "remotes"))
+            (Path(lp_root) / ".git" / "remotes" / lp_target).write_text(
+                "URL: {}\n".format(lp_evil), encoding="utf-8")
+            lp_tip = _tip(lp_evil)
+            rc, out = run(["--push", "--root", lp_root])
+            check("a legacy remotes/ entry refuses the push before any transport",
+                  rc == EXIT_MALFORMED and "legacy" in out and _no_fetch_head(lp_root)
+                  and _tip(lp_evil) == lp_tip)
+            with patch.object(module, "_refuse_legacy_remote_stores", lambda *a, **k: None):
+                rc, out = run(["--push", "--root", lp_root])
+            check("dropping the legacy-store gate lands the push at the remotes-file repository "
+                  "and reports success (shown red)",
+                  rc == EXIT_OK and "pushed" in out and _tip(lp_evil) == _head(lp_root))
+            # the branches/ variant refuses through the same gate
+            lb_root = _store("legacybranches", "git:" + lg_target)
+            _git(lb_root, "remote", "add", "origin", lg_target)
+            os.makedirs(os.path.join(lb_root, ".git", "branches"))
+            (Path(lb_root) / ".git" / "branches" / lg_target).write_text(
+                lg_evil + "\n", encoding="utf-8")
+            rc, out = run(["--root", lb_root])
+            check("a legacy branches/ entry refuses before any transport",
+                  rc == EXIT_MALFORMED and "legacy" in out and "branches" in out
+                  and _no_fetch_head(lb_root))
+            # argument independence: an scp target WITH '/' (a name git's own nick rule would not
+            # read a legacy file for) and an https target refuse on the entry all the same
+            ls_root = _store("legacyslash", "git:git@example.invalid:org/repo.git")
+            _git(ls_root, "remote", "add", "origin", "git@example.invalid:org/repo.git")
+            os.makedirs(os.path.join(ls_root, ".git", "remotes"))
+            (Path(ls_root) / ".git" / "remotes" / "entry").write_text(
+                "URL: {}\n".format(lg_evil), encoding="utf-8")
+            rc, out = run(["--root", ls_root])
+            check("an scp target with '/' still refuses on a legacy remotes/ entry (the gate is "
+                  "argument-independent)",
+                  rc == EXIT_MALFORMED and "legacy" in out and _no_fetch_head(ls_root))
+            lh_root = _store("legacyhttps", "git:https://example.invalid/repo.git")
+            _git(lh_root, "remote", "add", "origin", "https://example.invalid/repo.git")
+            os.makedirs(os.path.join(lh_root, ".git", "remotes"))
+            (Path(lh_root) / ".git" / "remotes" / "entry").write_text(
+                "URL: {}\n".format(lg_evil), encoding="utf-8")
+            rc, out = run(["--root", lh_root])
+            check("an https target still refuses on a legacy remotes/ entry",
+                  rc == EXIT_MALFORMED and "legacy" in out and _no_fetch_head(lh_root))
+            # the other edge: EMPTY remotes/ and branches/ directories (git init templates) hold
+            # no entry git could read, and must not refuse
+            le_root, _le_bare = _paired("legacyempty")
+            os.makedirs(os.path.join(le_root, ".git", "remotes"))
+            os.makedirs(os.path.join(le_root, ".git", "branches"))
+            rc, out = run(["--root", le_root])
+            check("empty legacy remotes/ and branches/ directories (git init templates) do not "
+                  "refuse",
+                  rc == EXIT_OK and "EQUAL" in out)
+
+            # -- a linked worktree: the legacy stores live in the COMMON directory, and the
+            # --worktree config scope only exists once the worktreeConfig extension is on ---------
+            wt_main, _wt_bare = _paired("wtmain")
+            _git(wt_main, "branch", "parked")
+            _git(wt_main, "switch", "parked")
+            wt_store = os.path.join(base, "wtstore")
+            _git(wt_main, "worktree", "add", wt_store, "main")
+            wt_gitdir = _git(wt_store, "rev-parse", "--absolute-git-dir").strip()
+            os.makedirs(os.path.join(wt_main, ".git", "remotes"))
+            (Path(wt_main) / ".git" / "remotes" / "entry").write_text(
+                "URL: {}\n".format(lg_evil), encoding="utf-8")
+            rc, out = run(["--root", wt_store])
+            check("a legacy remotes/ entry in the shared common directory refuses a "
+                  "linked-worktree store",
+                  rc == EXIT_MALFORMED and "legacy" in out
+                  and not os.path.exists(os.path.join(wt_gitdir, "FETCH_HEAD")))
+            shutil.rmtree(os.path.join(wt_main, ".git", "remotes"))
+            rc, out = run(["--root", wt_store])
+            check("a linked-worktree store without the worktreeConfig extension syncs (the "
+                  "--worktree scope holds no key git honours)",
+                  rc == EXIT_OK and "EQUAL" in out)
+            _git(wt_main, "config", "--local", "extensions.worktreeConfig", "true")
+            rc, out = run(["--root", wt_store])
+            check("the worktreeConfig extension without its per-worktree file refuses naming "
+                  "what is missing",
+                  rc == EXIT_MALFORMED and "extensions.worktreeConfig" in out
+                  and "config file" in out)
+            _git(wt_store, "config", "--worktree", "user.name", "OPF Self Test")
+            rc, out = run(["--root", wt_store])
+            check("creating the per-worktree config file restores the linked-worktree store",
+                  rc == EXIT_OK and "EQUAL" in out)
+
+            # -- environment-config overrides never reach the transport ---------------------------
+            # A remote defined only through the GIT_CONFIG_COUNT/KEY/VALUE environment, named the
+            # verified URL, would redirect the fetch if the transport honoured it; the transport
+            # env drops every GIT_* override by construction, so the fetch lands at the verified
+            # target (EQUAL), not at the advanced repository the environment names (BEHIND)
+            ev_root, ev_bare = _paired("envconfig")
+            ev_evil = os.path.join(base, "envconfig-evil.git")
+            _git(base, "init", "--bare", ev_evil)
+            _git(ev_root, "push", ev_evil, "main")
+            evw = os.path.join(base, "envconfig-writer")
+            _git(base, "clone", ev_evil, evw)
+            (Path(evw) / "data.txt").write_text("unverified env\n", encoding="utf-8")
+            _git(evw, "add", "-A")
+            _git(evw, "commit", "-m", "advance")
+            _git(evw, "push", "origin", "main")
+            with patch.dict(os.environ,
+                            GIT_CONFIG_COUNT="1",
+                            GIT_CONFIG_KEY_0="remote.{}.url".format(ev_bare),
+                            GIT_CONFIG_VALUE_0=ev_evil):
+                rc, out = run(["--root", ev_root])
+            check("an environment-config remote named the verified URL never reaches the "
+                  "transport (the overrides are dropped and the destination is the target)",
+                  rc == EXIT_OK and "EQUAL" in out)
 
             # -- divergence halts in every mode, merging nothing ---------------------------------
             v_root, v_bare = _paired("diverged")
