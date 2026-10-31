@@ -979,6 +979,14 @@ def _rdp_cases(tmp):
     check("rdp/malformed-binding-without-tool-input-unverifiable", _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
         hook_event_name="PreToolUse", cwd=str(mf.root), tool_name="Bash", tool_input="ls"))), "unverifiable")
     mf.write_registry(mf.binding)
+    # In a session the binding scopes, every malformed shape is withheld through the shared reader, the
+    # reason naming the malformed field.
+    _mb = [aiqt_hooks.review_dispatch_pin(dict(hook_event_name="PreToolUse", cwd=str(mf.root), session_id="s1",
+                                               tool_name="Bash", **fields)) for fields in _MALFORMED_BASH_FIELDS]
+    check("rdp/malformed-command-shapes-unverifiable",
+          [(_rdp_kind(r), "not a JSON object" in _rwh_reason(r) or "not a string" in _rwh_reason(r)
+            or "holds a NUL" in _rwh_reason(r)) for r in _mb],
+          [("unverifiable", True)] * len(_MALFORMED_BASH_FIELDS))
     real_review_git = aiqt_hooks._review_git
 
     failed_probe = []
@@ -1773,6 +1781,50 @@ def _rwh_without_gate(fn):
         aiqt_hooks._rwh_program_gate = saved
 
 
+# A Bash payload whose command cannot be read: the malformed command shapes (absent, null, an array, an
+# integer, a float, an object, an object whose only key is __str__, a boolean, and a string holding a NUL,
+# which bash ends at its first NUL, at the end and at the start), then a tool_input that is itself missing
+# or not an object (the same class), as the payload fields beside the event, the tool name and the cwd.
+_MALFORMED_BASH_FIELDS = (
+    {"tool_input": {}}, {"tool_input": {"command": None}}, {"tool_input": {"command": ["git", "push"]}},
+    {"tool_input": {"command": 42}}, {"tool_input": {"command": 1.5}},
+    {"tool_input": {"command": {"command": "git push"}}}, {"tool_input": {"command": {"__str__": "git push"}}},
+    {"tool_input": {"command": True}}, {"tool_input": {"command": "git diff\x00"}},
+    {"tool_input": {"command": "\x00sleep 5 &"}},
+    {}, {"tool_input": None}, {"tool_input": ["git push"]}, {"tool_input": "git push"}, {"tool_input": 7})
+_MALFORMED_BASH_COMMAND_SHAPES = 10  # the leading entries above whose tool_input is an object
+
+
+def _nul_field(fields):
+    """True for the malformed shapes whose command is a string holding a NUL: the scoped hooks fail closed
+    on those through their own NUL test, so a revert of another reader leaves them refused."""
+    tool_input = fields.get("tool_input")
+    return isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str) and \
+        "\x00" in tool_input["command"]
+
+
+def _lax_bash_command(fn):
+    """fn() with the reader every Bash hook shares (_bash_command) reverted to the lax read that took an
+    unreadable command for an empty one: the revert leg of the malformed-payload rows."""
+    saved = aiqt_hooks._bash_command
+    aiqt_hooks._bash_command = lambda data: ("", None)
+    try:
+        return fn()
+    finally:
+        aiqt_hooks._bash_command = saved
+
+
+def _nul_as_absent(fn):
+    """fn() with the scoped hooks' NUL test (_bash_command_holds_nul) reverted, so a command string holding
+    a NUL reads as an absent command again: the revert leg of the NUL-whatever-the-scope rows."""
+    saved = aiqt_hooks._bash_command_holds_nul
+    aiqt_hooks._bash_command_holds_nul = lambda data: False
+    try:
+        return fn()
+    finally:
+        aiqt_hooks._bash_command_holds_nul = saved
+
+
 def _rwh_reason(result):
     """The decision reason text of a hook result, '' when it carries none: some refuse cases share
     one kind (unverifiable) and are told apart by the cause their reason names."""
@@ -1829,6 +1881,42 @@ def _rwh_cases(tmp):
         return _rdp_kind(run(cwd, command))
 
     marker("rev-1")
+
+    def malformed_kinds():
+        return [_rdp_kind(aiqt_hooks.review_workdir_hold(dict(
+            hook_event_name="PreToolUse", cwd=str(main), session_id="s1", tool_name="Bash", **fields)))
+            for fields in _MALFORMED_BASH_FIELDS]
+    # while a hold is live, every malformed shape the shared reader reports is withheld, its reason naming
+    # the malformed field; with the hold reader reverted the same shapes are allowed (red on revert), except
+    # a command string holding a NUL, which stays withheld whatever the holds
+    _mh = aiqt_hooks.review_workdir_hold(dict(hook_event_name="PreToolUse", cwd=str(main), session_id="s1",
+                                              tool_name="Bash", tool_input={"command": True}))
+    check("rwh/malformed-command-live-hold-unverifiable-red-on-revert",
+          [malformed_kinds(), "tool_input.command is a boolean" in _rwh_reason(_mh),
+           _rwh_without_hold(malformed_kinds)],
+          [["unverifiable"] * len(_MALFORMED_BASH_FIELDS), True,
+           ["unverifiable" if _nul_field(f) else "allow" for f in _MALFORMED_BASH_FIELDS]])
+    # a NUL command aimed at a held worktree of ANOTHER repository, run from a session repository with no
+    # hold: bash runs the text before the NUL, so it is withheld; with the NUL test reverted only the
+    # session repository's holds are read and the same commands are allowed (red on revert)
+    nul_tails = (" reset --hard\x00", " reset --hard\x00 # note", " checkout -- f\x00echo ok",
+                 " switch -c x\x00")
+
+    def nul_cross():
+        return [kind(free, "git -C " + str(held) + tail) for tail in nul_tails]
+    check("rwh/nul-command-cross-repo-hold-unverifiable-red-on-revert",
+          [nul_cross(), _nul_as_absent(nul_cross)],
+          [["unverifiable"] * len(nul_tails), ["allow"] * len(nul_tails)])
+    # the review dispatch pin, from the same session with no review dispatch binding: a NUL command is
+    # withheld whatever the binding scope; reverted, the unbound session's inert allow returns
+    nul_rdp = [dict(hook_event_name="PreToolUse", cwd=str(free), session_id="s1", tool_name="Bash",
+                    tool_input=dict(command="git -C " + str(held) + tail)) for tail in nul_tails]
+
+    def nul_unbound():
+        return [_rdp_kind(aiqt_hooks.review_dispatch_pin(p)) for p in nul_rdp]
+    check("rdp/nul-command-unbound-session-unverifiable-red-on-revert",
+          [nul_unbound(), _nul_as_absent(nul_unbound)],
+          [["unverifiable"] * len(nul_tails), ["allow"] * len(nul_tails)])
     # ---------- refuse cases (git forms that can reach the held worktree), each red on revert ----------
     co = "git -C " + str(held) + " checkout " + seed
     check("rwh/held-checkout-denies-red-on-revert",
@@ -13221,6 +13309,16 @@ def _main_isolated(report_path=None):
         _oos_array["tool_input"] = ["long_job &"]
         check("trunc/oos-array-tool-input-notes",
               _verdict(aiqt_hooks.orch_truncation_guard(_oos_array)), "warn")
+        # a command string holding a NUL is not absent (bash runs the text before it), so it denies with
+        # no registry too; with the NUL test reverted it takes the unreadable-input note again
+        _oos_nul = [ti.payload("PreToolUse", "Bash", {"command": c, "run_in_background": rib})
+                    for c in ("long_job &\x00", "\x00sleep 5 &", "git diff\x00") for rib in (False, True)]
+
+        def _oos_nul_kinds():
+            return [_verdict(aiqt_hooks.orch_truncation_guard(p)) for p in _oos_nul]
+        check("trunc/oos-nul-command-denies-red-on-revert",
+              [_oos_nul_kinds(), _nul_as_absent(_oos_nul_kinds)],
+              [["deny"] * len(_oos_nul), ["warn"] * len(_oos_nul)])
         _bad_note = (aiqt_hooks.orch_truncation_guard(_oos_bad)[1] or {}).get("systemMessage", "")
         _flag_note = (aiqt_hooks.orch_truncation_guard(ti.payload(
             "PreToolUse", "Bash",
@@ -13639,16 +13737,38 @@ def _main_isolated(report_path=None):
               raw({"tool_input": {"command": "ls", "run_in_background": None}}), "deny")
         check("trunc/malformed-fg-command-nonstr-denies", raw({"tool_input": {"command": 42}}), "deny")
         check("trunc/malformed-fg-command-missing-denies", raw({"tool_input": {}}), "deny")
+        # every malformed shape of the class, foreground and (for the command shapes) background, read
+        # through the shared reader: with it reverted to the lax read that took an unreadable command for
+        # an empty one, every foreground shape goes red (an empty foreground command is allowed), while a
+        # background dispatch still denies on its own empty-command rule
+        def _trunc_shapes():
+            return ([raw(fields) for fields in _MALFORMED_BASH_FIELDS] +
+                    [raw({"tool_input": dict(fields["tool_input"], run_in_background=True)})
+                     for fields in _MALFORMED_BASH_FIELDS[:_MALFORMED_BASH_COMMAND_SHAPES]])
+        check("trunc/malformed-command-shapes-deny", _trunc_shapes(),
+              ["deny"] * (len(_MALFORMED_BASH_FIELDS) + _MALFORMED_BASH_COMMAND_SHAPES))
+        check("trunc/malformed-command-shapes-red-on-lax-read", _lax_bash_command(_trunc_shapes),
+              ["allow"] * len(_MALFORMED_BASH_FIELDS) + ["deny"] * _MALFORMED_BASH_COMMAND_SHAPES)
+        # A NUL in the command names itself in the deny reason, in the foreground and the background.
+        _nul_reasons = [_rwh_reason(aiqt_hooks.orch_truncation_guard(dict(
+            {"hook_event_name": "PreToolUse", "cwd": str(t.root), "session_id": "s1", "tool_name": "Bash"},
+            tool_input=dict(command="git diff\x00", run_in_background=rib)))) for rib in (False, True)]
+        check("trunc/nul-command-reason-names-nul",
+              ["holds a NUL character at offset 8" in reason for reason in _nul_reasons], [True, True])
         check("trunc/rib-omitted-foreground-allows", raw({"tool_input": {"command": "ls -la"}}), "allow")
         check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
               "deny")
         # Registry scope, the disclosed residual: BY DEFAULT (this run pops AIQT_ORCH_REQUIRE_REGISTRY) with NO
         # registry file the guard denies nothing (a readable foreground detach draws only the note,
-        # and input it cannot read draws the unreadable-input note, never a deny), while a PRESENT
-        # but unreadable or invalid registry keeps it active (fail-closed).
+        # and input it cannot read draws the unreadable-input note), while a PRESENT
+        # but unreadable or invalid registry keeps it active (fail-closed). A command string holding a NUL
+        # is not unread input but text whose head runs, so it denies with no registry too.
         check("trunc/malformed-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
              "tool_input": None})), "warn")
+        check("trunc/nul-no-registry-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+            {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
+             "tool_input": {"command": "sleep 5\x00 &"}})), "deny")
         # The doctor's default-mode scope report for a no-registry root is pinned the same way: it
         # says the guard denies nothing there, and reports no deny.
         _scope_lines, _scope_denies = aiqt_hooks._orch_guard_scope_report(str(ti.root))
@@ -15151,10 +15271,30 @@ def _main_isolated(report_path=None):
             w.payload("PreToolUse", "Bash", {}))), "deny")
         check("wl/failopen-empty", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             w.payload("PreToolUse", "Bash", {"command": ""}))), "allow")
+        # Every malformed shape denies in registry scope through the shared reader, and each goes red (the
+        # empty-command allow) with that reader reverted to the lax read, except a command string holding a
+        # NUL, which the hook's own NUL test still denies (it goes red with that test reverted too).
+
+        def _wl_shapes():
+            return [_verdict(aiqt_hooks.orch_untracked_wait_loop(w.payload(
+                "PreToolUse", extra=dict({"tool_name": "Bash"}, **fields)))) for fields in _MALFORMED_BASH_FIELDS]
+        check("wl/failclosed-malformed-shapes", _wl_shapes(), ["deny"] * len(_MALFORMED_BASH_FIELDS))
+        check("wl/failclosed-malformed-shapes-red-on-lax-read",
+              [_lax_bash_command(_wl_shapes), _lax_bash_command(lambda: _nul_as_absent(_wl_shapes))],
+              [["deny" if _nul_field(f) else "allow" for f in _MALFORMED_BASH_FIELDS],
+               ["allow"] * len(_MALFORMED_BASH_FIELDS)])
         wi = Fixture(tmp, "waitloop-inert")
         (wi.root / ".aiqt" / "orchestration.local.json").unlink()
         check("wl/failopen-no-registry", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             wi.payload("PreToolUse", "Bash", {"command": BASE}))), "allow")
+        # a command string holding a NUL is not absent (bash runs the text before it), so it denies with
+        # no registry too; with the NUL test reverted the inert allow returns (red on revert)
+        _wl_nul = [wi.payload("PreToolUse", "Bash", {"command": c}) for c in (BASE + "\x00", "\x00" + BASE)]
+
+        def _wl_nul_kinds():
+            return [_verdict(aiqt_hooks.orch_untracked_wait_loop(p)) for p in _wl_nul]
+        check("wl/nul-command-no-registry-denies-red-on-revert",
+              [_wl_nul_kinds(), _nul_as_absent(_wl_nul_kinds)], [["deny", "deny"], ["allow", "allow"]])
         check("wl/failclosed-missing-tool-name-no-registry", aiqt_hooks.orch_untracked_wait_loop(
             wi.payload("PreToolUse", extra={"tool_input": {"command": BASE}})),
             aiqt_hooks._deny_missing_tool_name("trkasy"))
