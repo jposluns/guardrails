@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c2875d7c41b515b4799cfdc23d6067beb05197e0336c8eb2351af2c89d4e45c5"
+tree-sha256 = "02c09019cbe3a18334e3b22e3aa8fee0a3332d3f204deecada29057bb9553689"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2486,13 +2486,13 @@ sha256 = "3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262"
 
 [[sources]]
 path = "opf/enforcement/ci/opf-ci.sh"
-bytes = 2271
-sha256 = "4e0ffdc6c33ac4affec871513b28aeb0aa1e545d31bc5a1d29066aa14f0d11ce"
+bytes = 2367
+sha256 = "1654c4d42af032b218d37f38aca4f3dce924288e44e27ddbddb4239da65281fe"
 
 [[sources]]
 path = "opf/enforcement/claude/pretooluse_deny.py"
-bytes = 180984
-sha256 = "da84d1ed4736950eb9e57e6b8d76a99b426b9f8a2984bc4184809a053fd94e9c"
+bytes = 181081
+sha256 = "841da3daeadaa14cb63220c67f073c431c230a8ceb676d2fc6054a66a6422713"
 
 [[sources]]
 path = "opf/enforcement/claude/settings.opf.json"
@@ -2516,8 +2516,8 @@ sha256 = "fc2cf56a4c48dfae4d6ba7d04e1de03040ed9fccf09bc54838d707d8b1340d4c"
 
 [[sources]]
 path = "opf/enforcement/platforms.toml"
-bytes = 7017
-sha256 = "3b8dd00dadae8a7979ceb45d748917e7c61e3bdf79d98a5a1bf3c19684ed5d18"
+bytes = 7080
+sha256 = "c67c0f2ef516c6afdabd1949fc5cfa76b77d79a7f5cb3c6bef1515c24caf3172"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
@@ -2531,8 +2531,8 @@ sha256 = "55a0fdf5f4ba22edf5c6c05a368ec3d92d9a7e7c2461a4077dc5e07dd41a0ed2"
 
 [[sources]]
 path = "opf/enforcement/residuals.toml"
-bytes = 5329
-sha256 = "c90fb606be9fd7b1e3d44917097234e47fe11924949296103c695a7a44ee006b"
+bytes = 6294
+sha256 = "82e32132462982a53e14b197004693abca6366f0ea0c3f222b2f74cfcfc0a82e"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/SKILL.md"
@@ -2777,7 +2777,7 @@ sha256 = "3d70e8f5a117d4a75b3bf3080dccc03bab881d8e441bb1f9e119ac8650414f62"
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
 bytes = 174891
-sha256 = "2fda0df9708d00863a5fe405738e24a9fc4ec6f1a20cdd9617a1fd97fa4564ed"
+sha256 = "6800c8d09052030d061491c2a56a164f0b0b55953e18dcc3a3ec82ede4fa7347"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_discover.py"

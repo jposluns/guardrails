@@ -233,7 +233,8 @@ assignment-bearing command is never the allowance.
      allowance also holds under an R6 roster failure, so the in-session repair path stays open.
 
 RESIDUALS (spec 14.1 requires each disclosed; the pack's residual register, opf/enforcement/residuals.toml,
-and the plan's per-platform residual coverage carry the same list):
+and the plan's per-platform residual coverage carry the spec 14.1 residual tokens, and each member lists
+its own fuller residuals, as this list does for this hook):
   - A Bash write the matcher cannot see: a protected path reaching the filesystem through a shell
     variable, glob, alias, function, command or process substitution, an interpreter one-liner, or
     any other spelling in which no protected token appears textually in the command string. This

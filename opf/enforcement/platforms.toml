@@ -6,7 +6,8 @@
 # that platform's residual disclosed. One [[platform]] row per supported assistant platform, in the order
 # of _opf_adopt.ENFORCEMENT_MEANS (opf/tools/_opf_adopt.py). The CI and pre-commit members (ci/ and
 # precommit/) are platform-independent and carry no row here.
-# Their residuals, with every member's, are disclosed in the pack's residual register, residuals.toml.
+# The pack's residual register, residuals.toml, carries the spec 14.1 residual tokens for every member,
+# these included; each member lists its own fuller residuals.
 #
 # tools/check_opf_enforce_platforms.py validates this file and the members it names: the roster, the
 # means vocabulary and required residuals (_opf_adopt), the rule that a deny-hook row needs a deny
