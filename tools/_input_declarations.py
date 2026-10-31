@@ -173,6 +173,9 @@ NESTING_FENCES = True
 # the open-label reading of _nesting_refused (a link label kept open across empty lines until its "]"), a
 # patchable seam for its callers' self-tests
 NESTING_LABELS = True
+# the held depth of _nesting_refused while a link reference definition's label or title is open (no
+# block-structure reset there), a patchable seam for its callers' self-tests
+NESTING_DEFINITIONS = True
 # the longest run of consecutive whitespace characters a line may hold, judged in forbidden() before any
 # parse. The run class is the parser's own whitespace by construction, never a remembered list: every
 # whitespace test in the vendored tree is Python's \s or the isspace/strip predicate behind it
@@ -958,7 +961,9 @@ def _nesting_refused(text):
     no lead markers and under two lead columns that either follows a blank line (nothing open can read it
     as item content, which needs two columns, or as a lazy continuation, which needs an open paragraph)
     or opens an ATX heading or code fence (BLOCK_START_RE, which breaks a paragraph too), so a block's
-    outcome never depends on content before its block; blank is what the parser's BlankLine reads as
+    outcome never depends on content before its block; it never resets while a link reference
+    definition's label or title may be open (_opaque_start), which the parser reads on in the
+    definition's container, at its full depth after it; blank is what the parser's BlankLine reads as
     blank (str.strip, every whitespace character). A fenced code block's content lines are skipped, since
     the parser reads them as code that opens nothing: a fence opens and closes where the parser's
     FencedCode does (_fence_opening, _fence_holds: backtick and tilde runs of three or more, indented zero
@@ -992,24 +997,27 @@ def _nesting_refused(text):
                       or (kind == "label" and NESTING_LABELS) or (kind in ("label", "link") and line)}
             continue
         markers, columns, position = _lead_shape(line)
-        if placed and not closing:
-            if FENCE_SHAPE_RE.match(line, position):
-                fence = False if opaque else _fence_opening(line, position, markers, running, after_blank)
-                placed = fence is not False
-                fence = fence or None
-            else:
-                opaque = {kind for kind in opaque if isinstance(kind, str) or not kind.search(line)}
-                if "label" in opaque:
-                    ended = LABEL_END_RE.match(line)
-                    if ended is not None:   # the label closes ("]") or its search fails ("[")
-                        opaque.discard("label")
-                        if ended.group(1) == "]":
-                            opaque.add("link")
-                started = _opaque_start(line[position:])
-                if started is not None and (isinstance(started, str) or not started.search(line)):
-                    opaque.add(started)
+        if placed and not closing and FENCE_SHAPE_RE.match(line, position):
+            fence = False if opaque else _fence_opening(line, position, markers, running, after_blank)
+            placed = fence is not False
+            fence = fence or None
+        elif not closing:
+            # followed past the first unplaced fence line too, since the reset below reads it
+            opaque = {kind for kind in opaque if isinstance(kind, str) or not kind.search(line)}
+            if "label" in opaque:
+                ended = LABEL_END_RE.match(line)
+                if ended is not None:   # the label closes ("]") or its search fails ("[")
+                    opaque.discard("label")
+                    if ended.group(1) == "]":
+                        opaque.add("link")
+            started = _opaque_start(line[position:])
+            if started is not None and (isinstance(started, str) or not started.search(line)):
+                opaque.add(started)
+        # an open label or title reads the line as part of its definition, and the parser stays in the
+        # definition's container and resumes at its full depth after it, so the depth holds there
         if NESTING_RESETS and markers == 0 and columns < 2 \
-                and (after_blank or BLOCK_START_RE.match(line)):
+                and (after_blank or BLOCK_START_RE.match(line)) \
+                and not (NESTING_DEFINITIONS and ("label" in opaque or "link" in opaque)):
             running = 0
         after_blank = False
         depth = min(running, columns // 2) + markers

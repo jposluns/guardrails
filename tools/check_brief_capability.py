@@ -5048,6 +5048,28 @@ def self_test(report_path=None):
         "[a\n\n\n```\n]: /u\n" + deep21, "[a\\]\n\n```\n]: /u\n" + deep21,
         "[a]: /u\n\n```\n" + deep21, "[a]: /u 't\n\n```\n'\n" + deep21, "[a[b\n```\n" + deep21)],
           [False, False, True, True, True])
+    # a margin line inside an open link reference definition resets nothing: the parser reads it as part
+    # of the definition, stays in the definition's list item and resumes at its full depth after it, so
+    # the list that marches on past the ceiling after it is refused, with the line in an open label
+    # (across an empty line), in a title across a line of spaces alone, in two labels chained (each
+    # alone below the ceiling), and in each form after a fence line the prescan cannot place
+    rungs = lambda start, stop: "".join("  " * level + "- a\n" for level in range(start, stop))  # noqa: E731
+    held_label = rungs(0, 14) + "  " * 14 + "- [x\n\ny\n]: /u\n"
+    held_title = rungs(0, 14) + "  " * 14 + "- [x]: /u 't\n  \ny\n'\n"
+    held_definitions = (
+        held_label + rungs(15, 26), held_title + rungs(15, 26),
+        held_label + rungs(15, 28) + "  " * 28 + "- [z\n\ny\n]: /u\n" + rungs(29, 40),
+        "> ```\n\n" + held_label + rungs(15, 26), "> ```\n\n" + held_title + rungs(15, 26))
+    check("cannot/nesting-definition-hold", [_outcome(text) for text in held_definitions],
+          ["CannotEvaluate"] * len(held_definitions))
+    # the definition bound just inside, exactly at and just outside it: a label still open at the margin
+    # line holds the depth (refused); a label closed on its own line, a title cut by an empty line and a
+    # definition ended by an empty line hold nothing, so the margin line resets the depth (True: the
+    # prescan passes the text, which the parser reads in the definition's item no deeper than 15 levels)
+    check("structure/nesting-definition-boundary", [_input_declarations._nesting_refused(text) is None for text in (
+        held_label + rungs(15, 26), rungs(0, 14) + "  " * 14 + "- [x]\n\ny\n" + rungs(15, 26),
+        rungs(0, 14) + "  " * 14 + "- [x]: /u 't\n\ny\n'\n" + rungs(15, 26),
+        rungs(0, 14) + "  " * 14 + "- [x]: /u\n\ny\n" + rungs(15, 26))], [False, True, True, True])
     # each fence bound just inside, exactly at and just outside it: an opening run indented three columns
     # opens, four does not; a closing run indented three columns closes, four does not (the deep list
     # after it stays fence content); a closing run one shorter than the opening run does not close, as
@@ -6546,6 +6568,12 @@ def self_test(report_path=None):
         check("revert/nesting-labels-red", *parser_flip(
             [lambda: p6_code("Input notes.\n\n[a\n\n```\n]: /u\n" + deep21),
              lambda: p6_code("Input notes.\n\n[a\n\n~~~\n]: /u\n" + deep21)], [0, 0], NESTING_LABELS=False))
+        # with the depth reset again at a margin line inside an open link label or title, the list after
+        # the definition is counted from zero, the parser's deeper reading is never refused and each brief
+        # is read clean (each is refused with the depth held)
+        check("revert/nesting-definitions-red", *parser_flip(
+            [lambda text=text: p6_code("Input notes.\n\n" + text) for text in held_definitions],
+            [0] * len(held_definitions), NESTING_DEFINITIONS=False))
         # with the nesting ceiling lifted, the no-break-space quote lead is read too, so the ceiling is
         # load-bearing for the quote-prefix vectors (their text never forces a parse)
         check("revert/nesting-quote-prefix-red", *parser_flip(
@@ -6636,7 +6664,7 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 215)
+    check("revert/every-flip-ran", len(flipped), 216)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
