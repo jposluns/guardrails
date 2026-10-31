@@ -193,6 +193,7 @@ guarded-surfaces = [
     "tools/orch_preflight.py",
     "tools/orch_register.py",
     "tools/pin.py",
+    "tools/push_branch.py",
     "tools/selftest_aiqt_corpus.py",
     "tools/selftest_aiqt_hooks.py",
     "tools/selftest_ci_status.py",

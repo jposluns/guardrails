@@ -53,11 +53,6 @@ text = "It differs from the\ncompleteness-claim-enumerates-its-set rule, which g
 reason = "Scope note separating this rule from the completeness-claim rule (setcmp); no obligation of its own."
 
 [[exempt]]
-corpus-id = "dscres"
-text = "A coverage boundary named where the guard is defined is\nreviewable; a boundary left implicit reads as a guarantee the guard cannot honour."
-reason = "Rationale for dscres.1 to dscres.3; no obligation of its own."
-
-[[exempt]]
 corpus-id = "evgcmp"
 text = "A stated intention is a claim"
 reason = "Premise of evgcmp.7, the clause after the ';', which carries the obligation."
@@ -214,22 +209,22 @@ reason = "Scope carve-out bounding expbnd.3 that defers to the confirm-execution
 
 [[exempt]]
 corpus-id = "expbnd"
-text = "The preference is to remove the ambient dependency, not merely to check it: an explicit binding\nremoves that ambient dependency, whereas a confirmed ambient binding is correct only until the\nsurrounding state next shifts."
+text = "The preference is to remove the ambient dependency, not merely to check it: a confirmed ambient\nbinding is correct only until the surrounding state next shifts."
 reason = "Rationale for the preference expbnd.5 states; no obligation of its own."
 
 [[exempt]]
 corpus-id = "expbnd"
-text = "This is the prefer-removing-a-path preference applied to how an\naction names its referent, and it sits beside confirm-execution-target, which governs the residual\ncase where only an ambient binding exists, and absolute-paths, its file-path instance."
+text = "This applies prefer-removing-a-path\nto how an action names its referent and sits beside confirm-execution-target, which governs the case\nwhere only an ambient binding exists, and absolute-paths, its file-path instance."
 reason = "Cross-reference to the prefer-removing-a-path (rmvpth), confirm-execution-target (exetgt) and absolute-paths rules; no obligation of its own."
 
 [[exempt]]
 corpus-id = "expbnd"
-text = "An explicit\nbinding is still not proof of intent: a named target can be the wrong target, and confirming it is\nconfirm-execution-target's obligation."
+text = "An explicit binding\ndoes not prove intent; confirming a named target is confirm-execution-target's obligation."
 reason = "Cross-reference: confirming a named target is the confirm-execution-target rule's (exetgt) obligation, not this rule's."
 
 [[exempt]]
 corpus-id = "expbnd"
-text = "When an ambient binding would discard uncommitted work or\nabsorb unrelated changes into a change set, preserve-uncommitted-work and separate-task-changes\ngovern that loss; this rule governs the prior choice of what the action was bound to."
+text = "When an\nambient binding would discard uncommitted work or absorb unrelated changes into a change set,\npreserve-uncommitted-work and separate-task-changes govern that loss; this rule governs the prior\nbinding choice."
 reason = "Scope note separating this rule from the preserve-uncommitted-work (prsunc) and separate-task-changes rules; no obligation of its own."
 
 [[exempt]]
@@ -373,11 +368,6 @@ text = "When asked to assess, advise, consider, evaluate, review, compare, or we
 reason = "Defines the request class that asadv1.1 governs; the obligation (assess and stop) is asadv1.1."
 
 [[exempt]]
-corpus-id = "asadv1"
-text = "This is a specific instance of\nrequiring express authorization before execution."
-reason = "Cross-reference to the express-authorization rule (exauth); no obligation of its own."
-
-[[exempt]]
 corpus-id = "atmclm"
 text = "The mechanism can be a transaction, a conditional write, a compare-and-set, or a lock; the\natomicity is what matters, not the primitive."
 reason = "Scope note: any atomic primitive satisfies atmclm.1; it adds no obligation."
@@ -401,3 +391,23 @@ reason = "Lead-in to humovs.1 to humovs.4; no obligation of its own."
 corpus-id = "recncl"
 text = "Records-first establishes the record; this keeps it true."
 reason = "Cross-reference to the records-first discipline; no obligation of its own."
+
+[[exempt]]
+corpus-id = "cnsprd"
+text = "Calls issued together have no ordering."
+reason = "Rationale for cnsprd.1 and cnsprd.2; no obligation of its own."
+
+[[exempt]]
+corpus-id = "cnsprd"
+text = "Independent calls stay free to run together."
+reason = "Scope carve-out bounding cnsprd.1; a permission, not an obligation."
+
+[[exempt]]
+corpus-id = "cnsprd"
+text = "an unreadable required input fails\nunder check-fails-closed-on-unreadable."
+reason = "Cross-reference to the check-fails-closed-on-unreadable (chkfcl) rule, which owns failure on an absent or unusable required input; no obligation of its own."
+
+[[exempt]]
+corpus-id = "cnsprd"
+text = "A per-call hook cannot see sibling calls, so this ordering rests\non the caller."
+reason = "Scope note on enforcement: states why a per-call hook cannot enforce cnsprd.1; no obligation of its own."

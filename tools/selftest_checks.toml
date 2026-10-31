@@ -3024,6 +3024,7 @@ expected-check-ids = [
   "behaviour/gitleaks-pin-refuses",
   "behaviour/must-deliver-refuses",
   "behaviour/verifier-delivery-refuses",
+  "behaviour/push-branch-refuses",
   "control/opf-cli-default-runs",
   "control/launcher-cli-default-runs",
   "control/coverage-gate-default-runs",

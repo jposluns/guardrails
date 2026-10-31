@@ -9,7 +9,7 @@ main, and each push to main, against the rules the gates cite, a subset of the s
 and built to be read.
 
 <!-- COUNTS-PROOF:BEGIN (generated) -->
-**132 rules. 122 CI gates that check this repository. 30 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
+**133 rules. 123 CI gates that check this repository. 30 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
 <!-- COUNTS-PROOF:END -->
 
 The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
@@ -26,8 +26,8 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 <!-- COUNTS-TABLE:BEGIN (generated) -->
 | Piece | In one breath | Tag |
 | --- | --- | --- |
-| **The standard** | 132 clear, single-behaviour rules across the four AIQT facets, plus a security floor covering confidentiality, integrity, availability, and privacy. | Rules |
-| **Technical controls** | 122 CI gates that check this repository and 30 Claude Code hooks shipped as an opt-in plugin (23 blocking, 7 warning). Today 40 of the 132 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
+| **The standard** | 133 clear, single-behaviour rules across the four AIQT facets, plus a security floor covering confidentiality, integrity, availability, and privacy. | Rules |
+| **Technical controls** | 123 CI gates that check this repository and 30 Claude Code hooks shipped as an opt-in plugin (23 blocking, 7 warning). Today 40 of the 133 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
 | **Generated adapters** | The Claude, AGENTS.md, Gemini, Copilot, and Cursor surfaces are generated from one source and drift-checked in CI. | Generated |
 | **A standards crosswalk** | Mappings from the rules to 17 pinned external control catalogues, for teams that report against a framework. | Mappings |
 <!-- COUNTS-TABLE:END -->

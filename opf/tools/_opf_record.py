@@ -2429,6 +2429,37 @@ def _leftover_lock_outcome(owner, states):
         name, "was rolled back" if state == "rolled-back" else "never opened")
 
 
+def _claim_for_recovery(ctx, pending):
+    """The single-writer lease claimed for RECOVERY (_opf_write_guard.acquire_lease_for_recovery): its
+    (payload, released report or None). A claim that refuses or fails refuses as a RecordError before any
+    recovery write: a WriteGuardError with its text, a release report it carries included, and a close of
+    the lease directory that failed once the claim had written its lease in full (lease_created, raised as
+    itself by the claim) with that error and every note on it, naming the lease it LEFT in place as one
+    that STAYS and the release of any leftover before it (released_report), never the verb's
+    unexpected-error backstop, whose repr drops those notes. Any other exception propagates unchanged."""
+    try:
+        return _opf_write_guard.acquire_lease_for_recovery(ctx.root_fd, ctx.machine_rel, VERB)
+    except _opf_write_guard.WriteGuardError as exc:
+        raise RecordError("an interrupted opf record publication needs reconciliation ({}), and reconciliation "
+                          "writes the store, so it runs only under the single-writer lease: {} No operand, "
+                          "journal entry or journal lock was written by this recovery (fail-closed)".format(
+                              pending, exc))
+    except OSError as exc:
+        if getattr(exc, "lease_created", False) is not True:
+            raise
+        said = _journal._msg_said(exc)
+        released = getattr(exc, "released_report", None)
+        raise RecordError("an interrupted opf record publication needs reconciliation ({}), and reconciliation "
+                          "writes the store, so it runs only under the single-writer lease, whose claim failed "
+                          "after it wrote the lease {}/{} in full ({}): that lease STAYS and is never seized "
+                          "(spec 5.7); once no opf run is live, release it as your own reconciliation step, then "
+                          "re-run. No operand, journal entry or journal lock was written by this recovery "
+                          "(fail-closed){}".format(
+                              pending, ctx.machine_rel, _opf_check.LEASE_NAME, said,
+                              "" if not released or released in said else
+                              ". Before that claim, {}.".format(released)))
+
+
 def _with_recovery_lease(ctx, pending, recover):
     """Run `recover` holding the single-writer lease, claimed for RECOVERY through
     _opf_write_guard.acquire_lease_for_recovery: the atomic claim publication uses, with the spec 5.7
@@ -2438,7 +2469,8 @@ def _with_recovery_lease(ctx, pending, recover):
     live or possibly-live holder, a cross-host holder, or one with a malformed payload refuses before any
     recovery write and is never seized, and releasing any such lease stays the operator's explicit
     reconciliation step. A
-    released leftover is REPORTED whatever follows it: it heads the outcome lines `recover` returns, a
+    released leftover is REPORTED whatever follows it: a failed claim reports it (_claim_for_recovery), it
+    heads the outcome lines `recover` returns, a
     RecordError that `recover` raises carries it appended, a WriteGuardError from the release after a
     clean recovery carries it appended, and any other failure surfaces it on stderr (best-effort, never
     displacing the failure), so no outcome reads as written-nothing over the released lease.
@@ -2447,13 +2479,7 @@ def _with_recovery_lease(ctx, pending, recover):
     saying the lease may be left, and never displaces the refusal, whatever the release raised, with a
     surfacing print that itself fails dropped rather than let it displace the refusal (PR D fix 12), and
     a release failure after a clean recovery is the run's own failure."""
-    try:
-        lease, released = _opf_write_guard.acquire_lease_for_recovery(ctx.root_fd, ctx.machine_rel, VERB)
-    except _opf_write_guard.WriteGuardError as exc:
-        raise RecordError("an interrupted opf record publication needs reconciliation ({}), and reconciliation "
-                          "writes the store, so it runs only under the single-writer lease: {} No operand, "
-                          "journal entry or journal lock was written by this recovery (fail-closed)".format(
-                              pending, exc))
+    lease, released = _claim_for_recovery(ctx, pending)
     try:
         result = recover()
     except BaseException as failure:

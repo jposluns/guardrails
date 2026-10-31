@@ -2,7 +2,13 @@
 # Run every quality gate, in the same order CI runs them.
 # Never pipe this to a truncating sink: a masked exit code defeats the gate.
 set -uo pipefail
-cd "$(dirname "$0")/.." || exit 2
+# The repository root, resolved in checked steps: a dirname that fails or prints nothing exits 2 here,
+# before any gate, rather than leaving the runner in the calling directory's parent or at /. CDPATH is
+# cleared for the cd, as in opf/enforcement/ci/opf-ci.sh: a relative start (tools/run_all_checks.sh)
+# would otherwise resolve through a CDPATH entry holding a tools directory and run that tree's gates.
+dir=$(dirname -- "$0") || exit 2
+[ -n "$dir" ] || exit 2
+CDPATH= cd -- "$dir/.." || exit 2
 
 # Every gate below launches isolated: `python3 -I -B tools/<gate>.py`. `-I` (isolated mode) drops the
 # script's own directory from sys.path so a tool-written sibling (a stray tools/os.py) cannot shadow a
@@ -85,6 +91,7 @@ run_gate "gitleaks-pin" python3 -I -B tools/check_gitleaks_pin.py
 run_gate "leaks"     python3 -I -B tools/check_leaks.py
 run_gate "leaks-selftest" python3 -I -B tools/check_leaks.py --self-test
 run_gate "msg-leaks-selftest" python3 -I -B tools/check_msg_leaks.py --self-test  # real scan needs CI event context
+run_gate "push-branch-selftest" python3 -I -B tools/push_branch.py --self-test  # the live run is a maintainer's push, never a CI step
 run_gate "portability-selftest" python3 -I -B tools/check_portability.py --self-test
 run_gate "portability" python3 -I -B tools/check_portability.py
 run_gate "derived-command-parameters-selftest" python3 -I -B tools/check_derived_command_parameters.py --self-test
