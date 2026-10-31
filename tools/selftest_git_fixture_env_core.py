@@ -6,7 +6,9 @@ module docstring for the architecture and the disclosed residuals).
 In the original suite order this runner carries: layer 1, the shared scrub itself (unit checks,
 the F-367 auto-maintenance probes, the repo-wide maintenance-pin tripwire scan and its planted
 red/contract legs, the in-place and caller-env child probes, the OPF inherited-env probe and the
-lifecycle system-pin checks); layer 2, the per-member routing, function-scoped routing and
+lifecycle system-pin checks); layer 2, the per-member routing, function-scoped routing (with the
+restore probe's wrapper check over the lifecycle's wrapper and mutants of it, and its argument
+check over synthetic entry points) and
 real-repository trust checks; the registry roster checks (including the prefixed-recursion
 exclusion over all four git-fixture-env suite ids); the OPF lifecycle graph checks; the
 member-timeout, member-close and verdict controls for the bounded config-member machinery; the
@@ -57,7 +59,8 @@ from selftest_git_fixture_env import (  # noqa: E402
     _archive_reads_use_caller_env, _auto_maintenance_children, _binding_calls, _build_decoy,
     _call_name, _caller_env_archive_only, _calls_any, _close_lock_sites, _command_identity,
     _closing_refusal_control, _config_member_bound, _handshake_expired, _is_timeout,
-    _kill_recorded, _lane_return_fail_closed, _lifecycle_finding, _main_verdict_scenarios,
+    _kill_recorded, _lane_return_fail_closed, _lifecycle_finding, _lifecycle_scoped_first,
+    _main_verdict_scenarios,
     _maintenance_pin_scan,
     _member_group_empty, _member_timeout_timely, _opf_lifecycle_delegates, _oracle_down_sites,
     _partial_timeout_cause, _pid_state, _pidfd_group_signal_supported, _poison_environ,
@@ -2333,6 +2336,258 @@ def _opf_lifecycle_graph_checks():
     check("env/opf-lifecycle-bypass-denied", denial, expected_denial)
 
 
+def _lifecycle_scope_checks():
+    """The lifecycle form of the scope check over synthetic entry points, one check per row of
+    (check id, the source of a def that delegates to iso(), the expected result, the member file
+    name the closed table is read for); the rows are written out in the loop so the execution
+    gate's static layer reads every id. The function is entry() in fixture.py except where a case
+    needs another entry point's listed statements to reach the branch it tests. The first two are
+    accepted: the conforming shape the others are built from, and the isolated main's call on the
+    entry point's own parameters and a constant. They are positive controls: they fail if the
+    check refuses a conforming entry point, not if one of its refusals is removed, which only the
+    refusal rows show. Each other shape is refused, and the refusal
+    names what was refused. They cover an early return or raise, try statements with an except
+    handler, a finally body or an else body, an os.environb write, an aliased from-import,
+    environment access through getattr, a scrub, a path-setup variant, another entry point's
+    listed statement and an aliased lifecycle before the with; a missing lifecycle import; a bare
+    lifecycle call; an unreachable isolated main; a second context; a statement after the with;
+    an except handler or an unlisted finally statement on the try holding the with; a statement
+    after the with inside the try holding it; a lifecycle call that is an attribute or takes an
+    argument or a keyword; a with binding that is not a plain name; a call, a launch, a keyword
+    or another name passed to the isolated main; a decorator; a non-constant default, positional
+    or keyword-only; an annotation; and a type parameter."""
+    head = "def entry():\n    from _git_fixture_env import fixture_git_lifecycle\n"
+    tail = "    with fixture_git_lifecycle():\n        return iso()\n"
+    held = "    try:\n        with fixture_git_lifecycle():\n            return iso()\n"
+    where = "the fixture_git_lifecycle() with"
+    imported = "    from _git_fixture_env import fixture_git_lifecycle\n"
+    plain = "fixture.py"
+
+    def before(kind, statement):
+        return "entry(): {} ({!r}) precedes {} and is not on the lifecycle allowlist".format(
+            kind, statement, where)
+
+    def argument(shown):
+        return ("entry(): {} passes {!r} to iso(); each argument may only be a parameter of "
+                "entry() or a constant".format(where, shown))
+    for check_id, source, want, member in (
+        # Positive controls: these two guard against over-refusal, not against a removed refusal.
+        ("scope/lifecycle-conforming-accepted", head + tail, True, plain),
+        ("scope/lifecycle-parameter-arguments-accepted",
+         "def entry(flag, *rest, mode=None, **options):\n" + imported
+         + "    with fixture_git_lifecycle():\n        return iso(flag, 0, rest, mode=mode)\n",
+         True, plain),
+        ("scope/lifecycle-refuses-early-return", head + "    return 0\n" + tail,
+         before("a return statement", "return 0"), plain),
+        ("scope/lifecycle-refuses-raise", head + "    raise SystemExit(0)\n" + tail,
+         before("a raise statement", "raise SystemExit(0)"), plain),
+        ("scope/lifecycle-refuses-try-except",
+         head + "    try:\n        pass\n    except OSError:\n        scrub_git_environment()\n"
+         + tail, before("a try statement with an except handler", "try:"), plain),
+        ("scope/lifecycle-refuses-try-finally",
+         head + "    try:\n        pass\n    finally:\n        os.environ['HOME'] = '/x'\n" + tail,
+         before("a try statement with a finally body", "try:"), plain),
+        ("scope/lifecycle-refuses-try-else",
+         head + "    try:\n        pass\n    except OSError:\n        pass\n    else:\n"
+         "        subprocess.run(['true'])\n" + tail,
+         before("a try statement with an except handler and an else body", "try:"), plain),
+        ("scope/lifecycle-refuses-environb", head + "    os.environb[b'HOME'] = b'/x'\n" + tail,
+         before("an assignment", "os.environb[b'HOME'] = b'/x'"), plain),
+        ("scope/lifecycle-refuses-from-import-alias",
+         head + "    from os import environ as E\n    E['HOME'] = '/x'\n" + tail,
+         before("an import", "from os import environ as E"), plain),
+        ("scope/lifecycle-refuses-getattr",
+         head + "    getattr(os, 'env' + 'iron')['HOME'] = '/x'\n" + tail,
+         before("an assignment", "getattr(os, 'env' + 'iron')['HOME'] = '/x'"), plain),
+        ("scope/lifecycle-refuses-scrub-first", head + "    scrub_git_environment()\n" + tail,
+         before("an expression statement", "scrub_git_environment()"), plain),
+        ("scope/lifecycle-refuses-path-setup-variant",
+         head + "    sys.path.insert(0, os.environ['HOME'])\n" + tail,
+         before("an expression statement", "sys.path.insert(0, os.environ['HOME'])"), plain),
+        ("scope/lifecycle-refuses-other-entry-statement", head + "    saved_git = _GIT\n" + tail,
+         before("an assignment", "saved_git = _GIT"), plain),
+        ("scope/lifecycle-refuses-lifecycle-alias",
+         "def entry():\n    from contextlib import nullcontext as fixture_git_lifecycle\n" + tail,
+         before("an import", "from contextlib import nullcontext as fixture_git_lifecycle"),
+         plain),
+        ("scope/lifecycle-refuses-missing-import", "def entry():\n" + tail,
+         "entry(): no 'from _git_fixture_env import fixture_git_lifecycle' precedes {}, so the "
+         "name it enters is not shown to be the lifecycle".format(where), plain),
+        ("scope/lifecycle-refuses-bare-call",
+         head + "    fixture_git_lifecycle()\n    return iso()\n",
+         "entry(): no top-level with fixture_git_lifecycle()", plain),
+        ("scope/lifecycle-refuses-unreachable-main",
+         head + "    with fixture_git_lifecycle():\n        return 0\n        return iso()\n",
+         "entry(): a return statement ('return 0') precedes the iso() call in {} and is not on "
+         "the lifecycle allowlist".format(where), plain),
+        ("scope/lifecycle-refuses-isolated-named-twice",
+         head + "    with fixture_git_lifecycle():\n        return iso(lambda: iso())\n",
+         "entry(): iso is named 2 times; only the return in {} may name it".format(where), plain),
+        ("scope/lifecycle-refuses-second-context",
+         head + "    with fixture_git_lifecycle(), open(os.devnull):\n        return iso()\n",
+         "entry(): {} enters 2 contexts; it may enter only the lifecycle".format(where), plain),
+        ("scope/lifecycle-refuses-statement-after", head + tail + "    scrub_git_environment()\n",
+         "entry(): an expression statement ('scrub_git_environment()') follows {}".format(where),
+         plain),
+        ("scope/lifecycle-refuses-holder-except",
+         head + held + "    except Exception:\n        return 0\n",
+         "entry(): the try holding {} has an except handler".format(where), plain),
+        ("scope/lifecycle-refuses-holder-finally",
+         head + held + "    finally:\n        scrub_git_environment()\n",
+         "entry(): an expression statement ('scrub_git_environment()') in the finally body of "
+         "the try holding {} is not on the lifecycle allowlist".format(where), plain),
+        # _qa_adapter._self_test's listed finally statement, so the case reaches the check for a
+        # statement after the with inside the try that holds it.
+        ("scope/lifecycle-refuses-statement-after-in-try",
+         "def _self_test():\n" + imported + held + "        scrub_git_environment()\n"
+         "    finally:\n        _GIT = saved_git\n",
+         "_self_test(): an expression statement ('scrub_git_environment()') follows {} in its "
+         "try body".format(where), "_qa_adapter.py"),
+        ("scope/lifecycle-refuses-lifecycle-attribute",
+         head + "    with _git_fixture_env.fixture_git_lifecycle():\n        return iso()\n",
+         "entry(): {} enters '_git_fixture_env.fixture_git_lifecycle()', not a plain "
+         "fixture_git_lifecycle() call".format(where), plain),
+        ("scope/lifecycle-refuses-lifecycle-argument",
+         head + "    with fixture_git_lifecycle(scrub_git_environment()):\n        return iso()\n",
+         "entry(): {} enters 'fixture_git_lifecycle(scrub_git_environment())', not a plain "
+         "fixture_git_lifecycle() call".format(where), plain),
+        ("scope/lifecycle-refuses-lifecycle-keyword",
+         head + "    with fixture_git_lifecycle(env=os.environ.copy()):\n        return iso()\n",
+         "entry(): {} enters 'fixture_git_lifecycle(env=os.environ.copy())', not a plain "
+         "fixture_git_lifecycle() call".format(where), plain),
+        ("scope/lifecycle-refuses-binding-target",
+         head + "    with fixture_git_lifecycle() as os.environ['GIT_DIR']:\n"
+         "        return iso()\n",
+         "entry(): {} binds \"os.environ['GIT_DIR']\", not a plain name".format(where), plain),
+        ("scope/lifecycle-refuses-call-argument",
+         head + "    with fixture_git_lifecycle():\n"
+         "        return iso(os.environ.update(GIT_DIR='/x'))\n",
+         argument("os.environ.update(GIT_DIR='/x')"), plain),
+        ("scope/lifecycle-refuses-launch-argument",
+         head + "    with fixture_git_lifecycle():\n"
+         "        return iso(subprocess.run(['git', 'gc']))\n",
+         argument("subprocess.run(['git', 'gc'])"), plain),
+        ("scope/lifecycle-refuses-keyword-argument",
+         head + "    with fixture_git_lifecycle():\n"
+         "        return iso(flag=scrub_git_environment())\n",
+         argument("flag=scrub_git_environment()"), plain),
+        ("scope/lifecycle-refuses-free-name-argument",
+         head + "    with fixture_git_lifecycle():\n        return iso(os)\n", argument("os"),
+         plain),
+        ("scope/lifecycle-refuses-decorator", "@env_mutating_wrapper\n" + head + tail,
+         "entry(): a decorator ('env_mutating_wrapper') wraps the entry point, which may have "
+         "none", plain),
+        ("scope/lifecycle-refuses-default-argument",
+         "def entry(x=os.environ.setdefault('GIT_DIR', '/x')):\n" + imported + tail,
+         "entry(): a default argument (\"os.environ.setdefault('GIT_DIR', '/x')\") is not a "
+         "constant", plain),
+        ("scope/lifecycle-refuses-keyword-only-default",
+         "def entry(*, x=scrub_git_environment()):\n" + imported + tail,
+         "entry(): a default argument ('scrub_git_environment()') is not a constant", plain),
+        ("scope/lifecycle-refuses-annotation",
+         "def entry(x: os.environ.clear() = None):\n" + imported + tail,
+         "entry(): an annotation ('os.environ.clear()') is on the entry point's signature, "
+         "which may carry none", plain),
+        ("scope/lifecycle-refuses-type-parameter",
+         "def entry[T: os.environ.clear()]():\n" + imported + tail,
+         "entry(): a type parameter ('T: os.environ.clear()') is on the entry point's "
+         "signature, which may carry none", plain),
+    ):
+        owner = ast.parse(source).body[0]
+        check(check_id, _lifecycle_scoped_first(owner, owner.name, "iso", member), want)
+
+
+def _restore_probe_wrapper_checks():
+    """The restore probe's wrapper check (tools/_entry_restore_selftest.py) passes the lifecycle's
+    own wrapper and refuses each mutant of it for its own reason alone: a wrapper that prints a
+    stand-in record, or plants one that does not carry this run's nonce, without running the
+    caller's git, exports GIT_DIR, exits before its exec line, runs the caller's git twice or
+    overrides a pin. The git-dir mutant that also overrides a pin must be refused for both defects
+    and, judged under git-dir's reason and again under pin-override's, must count as refused for
+    neither alone. Those two judgements go through the same verdict line as the six mutants, and
+    their rows expect the verdict's refusal, compared up to the ": " that starts the problems it
+    lists: a verdict line that lets any matching problem count fails both, and one that drops the
+    exactly-one-problem rule fails the pin-override one.
+    env/restore-probe-lifecycle-wrapper-accepted is a positive control: it fails if the wrapper
+    check refuses the lifecycle's own wrapper, not if a refusal is removed, which only the mutant
+    rows show. The rows are written out so the execution gate's static layer reads every id;
+    env/restore-probe-mutants-covered requires them to name exactly the wrappers and judgements
+    the probe reports on, so one added there needs its row here."""
+    from _entry_restore_selftest import wrapper_mutant_failures
+    found = wrapper_mutant_failures()
+    covered = []
+    not_alone = ("the wrapper check refused the git-dir-and-pin-override mutant wrapper for other "
+                 "than its own reason alone")
+    for check_id, name, want in (
+        # Positive control: guards against over-refusal, not against a removed refusal.
+        ("env/restore-probe-lifecycle-wrapper-accepted", "lifecycle", []),
+        ("env/restore-probe-refuses-stdout-record", "stdout-record", []),
+        ("env/restore-probe-refuses-stale-nonce", "stale-nonce", []),
+        ("env/restore-probe-refuses-git-dir", "git-dir", []),
+        ("env/restore-probe-refuses-exit-before-exec", "exit-before-exec", []),
+        ("env/restore-probe-refuses-runs-twice", "runs-twice", []),
+        ("env/restore-probe-refuses-pin-override", "pin-override", []),
+        ("env/restore-probe-mutant-second-defect-refused", "git-dir-and-pin-override", []),
+        ("env/restore-probe-second-defect-not-counted-as-git-dir",
+         "git-dir-and-pin-override judged as git-dir", [not_alone]),
+        ("env/restore-probe-second-defect-not-counted-as-pin-override",
+         "git-dir-and-pin-override judged as pin-override", [not_alone]),
+    ):
+        covered.append(name)
+        got = found.get(name, ["no wrapper check result for " + name])
+        if want:
+            # A refusal is expected: compare it without the problems it lists after ": ".
+            got = [report.partition(": ")[0] for report in got]
+        check(check_id, got, want)
+    check("env/restore-probe-mutants-covered", sorted(covered), sorted(found))
+
+
+def _restore_probe_argument_checks(base):
+    """The restore probe's argument check (tools/_entry_restore_selftest.py) over three synthetic
+    tools written under base. In each, entry(flag) enters the lifecycle and returns iso(...): one
+    passes flag on, one passes the constant False in its place, as a self_test that drops its
+    red_on_revert would, and one passes the constant [{'flag': 1}]. The first, run with flag True,
+    with flag False and with flag [{'flag': True}], must be accepted; it is a positive control,
+    failing if the probe refuses a conforming entry point, not if the argument check is removed.
+    The second, run with flag True, must be refused for the argument it passed and nothing else,
+    after the return and after the raise. The third, run with flag [{'flag': True}], must be
+    refused the same way: its argument differs only in a type nested in a list and an object (1
+    for True), which a comparison of top-level types alone would let through."""
+    from _entry_restore_selftest import entry_restore_failures
+    source = ("def entry(flag):\n"
+              "    from _git_fixture_env import fixture_git_lifecycle\n"
+              "    with fixture_git_lifecycle():\n"
+              "        return iso({})\n\n\n"
+              "def iso(flag):\n"
+              "    return 0\n")
+    synthetic = base / "restore-probe-arguments"
+    synthetic.mkdir()
+    forwards = synthetic / "forwards_parameter.py"
+    forwards.write_text(source.format("flag"), encoding="utf-8")
+    constant = synthetic / "passes_constant.py"
+    constant.write_text(source.format("False"), encoding="utf-8")
+    nested = synthetic / "passes_nested_int.py"
+    nested.write_text(source.format("[{'flag': 1}]"), encoding="utf-8")
+    # Positive control: guards against over-refusal, not against a removed argument check.
+    check("env/restore-probe-forwarded-argument-accepted",
+          entry_restore_failures(forwards, "entry", "iso", args=(True,))
+          + entry_restore_failures(forwards, "entry", "iso", args=(False,))
+          + entry_restore_failures(forwards, "entry", "iso", args=([{"flag": True}],)), [])
+    shown = ("the entry point called its isolated main with arguments [False] and keywords {}, "
+             "expected exactly the probe's arguments [True] and no keywords")
+    check("env/restore-probe-refuses-constant-argument",
+          entry_restore_failures(constant, "entry", "iso", args=(True,)),
+          ["passes_constant.py entry(): " + shown,
+           "passes_constant.py entry(): around a raising stand-in, " + shown])
+    shown = ("the entry point called its isolated main with arguments [[{'flag': 1}]] and "
+             "keywords {}, expected exactly the probe's arguments [[{'flag': True}]] and no "
+             "keywords")
+    check("env/restore-probe-refuses-nested-type-change",
+          entry_restore_failures(nested, "entry", "iso", args=([{"flag": True}],)),
+          ["passes_nested_int.py entry(): " + shown,
+           "passes_nested_int.py entry(): around a raising stand-in, " + shown])
+
+
 def _trace2_tail_results(base, probe=_trace2_maintenance_children):
     """The maintenance probe's trace2 read over seeded files, with a scripted clock (read after
     every trace read) and a sleep that can complete the final event, so each leg is deterministic.
@@ -2709,14 +2964,42 @@ def _core_lanes(base):
              "_suite_isolated", "fixture_env", "_scrubbed_env", False),
     ):
         check(check_id, _binding_calls(ROOT / member, owner, binding, factory, launches), True)
-    for check_id, member, owner in (
-            ("scope/check-manifest", "tools/check_manifest.py", "self_test_main"),
-            ("scope/check-record-sections", "tools/check_record_sections.py", "self_test"),
-            ("scope/qa-adapter", "tools/_qa_adapter.py", "_self_test"),
-            ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main"),
+    # Each entry matches the lifecycle allowlist: only permitted statements (the lifecycle import,
+    # module-path setup and the statements listed for that entry) before a top-level with that
+    # enters fixture_git_lifecycle() alone and returns the named isolated main's call, and nothing
+    # after it. The lifecycle saves the caller's environment and then scrubs, so a scrub before it
+    # would make it restore the scrubbed values. The synthetic shapes after these rows show the
+    # allowlist refusing what it must.
+    for check_id, member, owner, isolated in (
+            ("scope/check-manifest", "tools/check_manifest.py", "self_test_main",
+             "_self_test_main_isolated"),
+            ("scope/check-record-sections", "tools/check_record_sections.py", "self_test",
+             "_self_test_isolated"),
+            ("scope/qa-adapter", "tools/_qa_adapter.py", "_self_test", "_self_test_isolated"),
+            ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main",
+             "_self_test_main_isolated"),
+            # Its public self_test_main reports a failed setup as a named NOT RUN and enters the
+            # lifecycle through this function; its restore probe still runs self_test_main.
+            ("scope/check-portability", "tools/check_portability.py", "_self_test_main_lifecycle",
+             "_self_test_main_isolated"),
+            ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main",
+             "_main_isolated"),
+            ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main",
+             "_main_with_recorder"),
+            ("scope/check-release-build", "tools/check_release_build.py", "self_test_main",
+             "_self_test_main_isolated"),
+            ("scope/check-release-delta", "tools/check_release_delta.py", "self_test_main",
+             "_self_test_main_isolated"),
+            # Its statements are all common ones and it passes its own red_on_revert parameter
+            # on, so it needs no closed-table entry.
+            ("scope/check-release-cut", "tools/check_release_cut.py", "self_test",
+             "_self_test_isolated"),
     ):
-        check(check_id, _scrub_scoped_first(ROOT / member, owner,
-                                           "fixture_git_lifecycle"), True)
+        check(check_id, _scrub_scoped_first(ROOT / member, owner, "fixture_git_lifecycle",
+                                            isolated), True)
+    _lifecycle_scope_checks()
+    _restore_probe_wrapper_checks()
+    _restore_probe_argument_checks(base)
     check("trust/caller-env-archive-only", _caller_env_archive_only(), True)
 
     check("route/selftest-aiqt-hooks-fixture-env",
@@ -2731,17 +3014,12 @@ def _core_lanes(base):
     # protections removed. Each named self-test entry must itself lead with the in-place
     # scrub, a top-level call with no process-launching call before it.
     for check_id, member_rel, func_name in (
-            ("scope/check-portability", "tools/check_portability.py", "self_test_main"),
             ("scope/selftest-aiqt-corpus-setup", "tools/selftest_aiqt_corpus.py", "GitTests.setUp"),
-            ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main"),
-            ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main"),
             ("scope/check-record-drift", "tools/check_record_drift.py", "self_test"),
             ("scope/check-mistakes-register", "tools/check_mistakes_register.py",
              "self_test"),
             ("scope/check-version-monotonicity", "tools/check_version_monotonicity.py",
              "self_test_main"),
-            ("scope/check-release-build", "tools/check_release_build.py", "self_test_main"),
-            ("scope/check-release-delta", "tools/check_release_delta.py", "self_test_main"),
     ):
         check(check_id, _scrub_scoped_first(ROOT / member_rel, func_name,
                                             "scrub_git_environment"), True)
