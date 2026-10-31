@@ -701,6 +701,12 @@ ALLOWLIST = (
     ("tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
      "execution-report bootstrap: runs the runner script named in its own argv as __main__ under its"
      " audit hook, the same trust as running that script directly with python3; no other input"),
+    ("opf/tools/_fail_closed_child.py", "_child_main", "code", 1,
+     "fail-closed-child bootstrap: runs the payload script named in its own argv as __main__ under"
+     " its observation hooks, the same trust as running that script directly with python3; no other"
+     " input"),
+    ("opf/tools/_fail_closed_child.py", "_load_mutant", "code", 1,
+     _MUTANT + " (each FLIPS entry, written to the self-test's temporary directory first)"),
     ("tools/check_opf_enforce_platforms.py", "load_hook", "code", 1,
      "check harness: loads the repository's own Claude Code deny hook as a private module, never"
      " entered in sys.modules and its main() never called, the equivalent of an import; no external"
