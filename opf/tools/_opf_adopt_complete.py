@@ -4,10 +4,11 @@ wiring probe frame of check 5 (slice 2) (OPF-SPEC 2.0.0).
 
 Spec sections implemented: 14.1 (the clean-start completion-check roster: checks 1 authority and freshness,
 2 discovery accounting, 3 preservation and restore, 4 operational readiness and 6 retirement readiness; a
-completion-check failure or cannot-evaluate reports incomplete and retires nothing), 14.1's homes-1 clause
-(the completion checks re-read inventories and payload digests themselves, because C-EVIDENCE-ENUM is
-inactive until homes 2) and 4.2 (C-EVIDENCE-ENUM MUST NOT run or read anything on homes 1; the section 14.1
-completion checks carry the evidence digest verification). Check 5 (wiring) verifies the deny-capable
+completion-check failure or cannot-evaluate reports incomplete and retires nothing), 14.1's explicit
+evidence coverage (the completion checks "MUST re-read inventories and payload digests themselves, as
+defence in depth beside C-EVIDENCE-ENUM rather than relying on it") and 4.2 ("The section 14.1 completion
+checks MUST still carry their own evidence digest verification beside C-EVIDENCE-ENUM"). Check 5 (wiring)
+verifies the deny-capable
 enforcement surface is installed as planned and runs its four probes through a caller-supplied prober, but
 it is never VALID in this release: the shipped pack carries no deny program and no live probe adapter (the
 deferred enforcement pack, PR6), so with every other condition met it is CANNOT-EVALUATE naming PR6, and the
