@@ -1024,7 +1024,7 @@ _CONTRACT = {
         "The base defines one implementation model and no implementation conformance classes: a declared scope, exclusion, profile, or posture MUST NOT waive a base requirement, and current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind every implementation.",
         _D('An implementation supports base spec_version 2.0.0 and homes generation 2, the only ones this specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and initializes stores directly at them.'),
         _D('The reference tooling initializes and validates base 2.0.0 stores with homes = 2, and it makes no claim of conformance to this specification.'),
-        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0, and it does not yet implement post-adoption import.'),
+        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0, and of post-adoption import it implements only the read-only opf import --prompt, --status and --verify that section 14.1 defines, not the batch writer or the completion writer.'),
         _D('The reference tooling defines no store upgrade: its opf upgrade refuses every invocation with exit 2, reading and writing nothing.'),
         'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
@@ -7601,12 +7601,15 @@ def _self_test_vectors():
               'and may also upgrade older stores.'),
             )),
             # The reference tooling's adoption status at base 2.0.0: red when the sentence says the
-            # journal is read or that apply and reconcile run.
+            # journal is read, that apply and reconcile run, or that it implements more of
+            # post-adoption import than the read-only verbs.
             ('Its opf adopt plan, approve and status', (
              ('run at base 2.0.0 without reading the adoption journal,',
               'run at base 2.0.0 and read the adoption journal,'),
-             ('refuse at base 2.0.0, and it does not yet implement',
-              'run at base 2.0.0, and it does not yet implement'),
+             ('refuse at base 2.0.0, and of post-adoption import',
+              'run at base 2.0.0, and of post-adoption import'),
+             ('it implements only the read-only',
+              'it implements the batch writer and the read-only'),
             )),
     ))
     spec_vectors("17", (

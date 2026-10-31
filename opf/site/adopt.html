@@ -175,7 +175,8 @@
     <p><code>doctor</code> distinguishes <b style="color:var(--ink)">0</b> clean,
       <b style="color:var(--ink)">1</b> a finding, and <b style="color:var(--ink)">2</b> cannot-evaluate.
       <code>render --check</code> uses exit 1 for drift; <code>render --write</code> can also exit 1
-      on a finding. The retired <code>import</code> modes exit 2. Mutating commands can also
+      on a finding. The read-only <code>import</code> verbs exit 0, 1, or 2 the same way
+      (<code>--prompt</code> only 0 or 2), and a retired <code>import</code> mode exits 2. Mutating commands can also
       exit 2 on a refusal
       or an unsuccessful operation: <code>render --write</code> requires passing source-integrity
       checks, with no internal or unattributed faults; otherwise it exits 2 and writes nothing.
@@ -325,6 +326,9 @@
       otherwise complete is reported cannot-evaluate.</p>
     <p><b style="color:var(--ink)">Result.</b> No store change, whatever the verb: nothing is staged
       under <code>.working/imports/</code>, no lease is taken, and nothing is promoted into the store.
+      One touch outside the store remains: <code>--verify</code> observes the working tree through
+      git, and in a repository with a split index, git's read refreshes the timestamp of the shared
+      index file in <code>.git</code>. No content changes.
       <code>--prompt</code> exits 0 when it prints and 2 on every refusal or cannot-evaluate.
       <code>--status</code> exits 0 on a clean report, 1 on a finding, and 2 when it cannot evaluate.
       <code>--verify</code> exits 0 only when every source is complete, 1 on an incomplete source, and

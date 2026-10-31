@@ -2163,8 +2163,9 @@ initializes stores directly at them. The reference tooling
 initializes and validates base 2.0.0 stores with `homes = 2`, and it makes no claim of conformance
 to this specification. Its `opf adopt plan`, `approve` and `status` run at base 2.0.0 without
 reading the adoption journal, and `status` says the journal is not read; its `opf adopt apply` and
-`reconcile` refuse at base 2.0.0, and it does not yet implement post-adoption import. The reference
-tooling defines no store upgrade: its
+`reconcile` refuse at base 2.0.0, and of post-adoption import it implements only the read-only
+`opf import --prompt`, `--status` and `--verify` that section 14.1 defines, not the batch writer or
+the completion writer. The reference tooling defines no store upgrade: its
 `opf upgrade` refuses every invocation with exit 2, reading and writing nothing.
 
 An implementation MUST declare, in the documentation of each release and in every report its emitter

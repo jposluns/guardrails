@@ -19122,20 +19122,20 @@ def _import_migrate_rows(plan):
 
 def _import_prompt(root_abs, run_id):
     """`opf import --prompt` (spec 14.1): print the approved import prompt surface, read-only. It reads
-    only the shipped prompt pack and the adoption run's approved plan: the pack is verified by the
-    prompt-pack gate's own validator (every member's bytes against the manifest, the manifest against
-    the pack digest), the plan's prompt_pack {version, digest} binding must be exactly the verified
-    pack, and the member roster is re-read and held to that verified version and digest, so a pack that
-    changed between the two reads refuses. Prints the pack version and digest, each import member's
-    path and sha256, and the approved migrate-source scope (path, plan digest, archived or frozen).
-    Writes nothing. Exit 0 printed; exit 2 every refusal or cannot-evaluate (an unverifiable pack, a
-    binding mismatch, no adoption run, an unreadable plan)."""
-    import tomllib
+    only the shipped prompt pack and the adoption run's approved plan. The pack's manifest is read once,
+    by the prompt-pack gate's own verified_pack (every member's bytes against the manifest, the manifest
+    against the pack digest), which hands back the member rows it verified; the plan's prompt_pack
+    {version, digest} binding must be exactly the verified pack. The printed roster is those verified
+    rows, never a second read of pack.toml, so a manifest changed after verification cannot reach the
+    output, and nothing prints until every check has passed. Prints the pack version and digest, each
+    import member's path and sha256, and the approved migrate-source scope (path, plan digest, archived
+    or frozen). Writes nothing. Exit 0 printed; exit 2 every refusal or cannot-evaluate (an unverifiable
+    pack, a binding mismatch, no adoption run, an unreadable plan)."""
     import check_opf_prompt_pack as pack_gate
     run = _import_select_run(root_abs, run_id)
     plan = _import_approved_plan(root_abs, run)
     try:
-        version, digest, _count = pack_gate._validate(Path(pack_gate.DEFAULT_PACK_DIR))
+        version, digest, members = pack_gate.verified_pack(Path(pack_gate.DEFAULT_PACK_DIR))
     except pack_gate._Refusal as refusal:
         print("opf import --prompt: cannot evaluate: the shipped prompt pack does not verify ({}: "
               "{})".format(refusal.guard, refusal), file=sys.stderr)
@@ -19147,33 +19147,16 @@ def _import_prompt(root_abs, run_id):
               "versioned pack (spec 14.1)".format(version, digest, bound["version"], bound["digest"]),
               file=sys.stderr)
         return EXIT_MALFORMED
-    try:
-        raw = pack_gate._read_regular(Path(pack_gate.DEFAULT_PACK_DIR) / pack_gate.MANIFEST_NAME,
-                                      pack_gate.MAX_MANIFEST_BYTES, "manifest")
-    except pack_gate._Refusal as refusal:
-        print("opf import --prompt: cannot evaluate: {}".format(refusal), file=sys.stderr)
-        return EXIT_MALFORMED
-    # The roster read is a second read of the manifest, so its bytes are not the ones _validate parsed:
-    # a manifest replaced between the two reads that no longer decodes or parses refuses here.
-    try:
-        roster = tomllib.loads(raw.decode("utf-8"))
-    except (RecursionError, MemoryError, ValueError) as exc:
-        print("opf import --prompt: cannot evaluate: the pack manifest does not parse on the roster read "
-              "({})".format(type(exc).__name__), file=sys.stderr)
-        return EXIT_MALFORMED
-    if roster.get("version") != version or roster.get("digest") != digest:
-        print("opf import --prompt: cannot evaluate: the pack manifest changed between its verification "
-              "and the roster read", file=sys.stderr)
-        return EXIT_MALFORMED
-    print("opf import: surface {}".format(IMPORT_SURFACE))
-    print("opf import --prompt: adoption run {}".format(run))
-    print("opf import --prompt: prompt pack version {} digest {}".format(version, digest))
-    for row in roster["members"]:
-        if row["path"].startswith("import/"):
-            print("opf import --prompt: import member {} sha256 {}".format(row["path"], row["sha256"]))
-    for row in _import_migrate_rows(plan):
-        print("opf import --prompt: migrate source {} digest {} ({})".format(
-            row["path"], row["digest"], "archived at apply" if row["occupying"] else "frozen live"))
+    lines = ["opf import: surface {}".format(IMPORT_SURFACE),
+             "opf import --prompt: adoption run {}".format(run),
+             "opf import --prompt: prompt pack version {} digest {}".format(version, digest)]
+    lines += ["opf import --prompt: import member {} sha256 {}".format(path, sha256)
+              for path, sha256 in members if path.startswith("import/")]
+    lines += ["opf import --prompt: migrate source {} digest {} ({})".format(
+        row["path"], row["digest"], "archived at apply" if row["occupying"] else "frozen live")
+        for row in _import_migrate_rows(plan)]
+    for line in lines:
+        print(line)
     return EXIT_OK
 
 
@@ -20381,8 +20364,11 @@ def _cli_self_test():
             printing the shipped version, digest, the import members and the migrate scope, 2 when the
             verified pack differs from the plan's binding (the validator seam returning another
             version), 2 when the shipped pack does not verify (DEFAULT_PACK_DIR patched to a broken
-            scratch pack), and 2 when the manifest verified and its roster read then returns bytes that
-            do not decode or parse. --verify, with the observation gather and store_doctor seams stubbed to the
+            scratch pack), and, over a real copy of the shipped pack whose pack.toml is rewritten right
+            after verified_pack returns (a member row altered under the same version and digest, members
+            malformed or absent, bytes that do not decode or parse), 0 with exactly the unswapped output
+            and no altered row: the roster printed is the verified one, never a second read. --verify,
+            with the observation gather and store_doctor seams stubbed to the
             evaluator's full-roster doctor (on a real store that roster is ungraded and the verdict is
             CANNOT-EVALUATE, the evaluator's disclosed residual), exits 0 over a fixture whose two
             migrate sources are both imported, naming both record ids and no INVALID, 1 over the
@@ -20390,7 +20376,8 @@ def _cli_self_test():
             recorded nothing; an unknown --run exits 2. Every fixture tree is byte-identical after all
             rows, so no verb wrote. Flips: rerouting the dispatch, dropping the surface line, a parser
             check or the drift finding, mapping INVALID to 0 in --verify, skipping the pack-binding
-            comparison or the pack validation in --prompt, or adding any write turns its row red."""
+            comparison or the pack validation in --prompt, restoring a second read of pack.toml for the
+            --prompt roster, or adding any write turns its row red."""
             import tomllib
             from unittest import mock
             import _opf_import_complete as impc
@@ -20442,9 +20429,10 @@ def _cli_self_test():
                 return EXIT_MALFORMED
             try:
                 try:
-                    shipped = tomllib.loads(pack_gate._read_regular(
+                    shipped_raw = pack_gate._read_regular(
                         Path(pack_gate.DEFAULT_PACK_DIR) / pack_gate.MANIFEST_NAME,
-                        pack_gate.MAX_MANIFEST_BYTES, "manifest").decode("utf-8"))
+                        pack_gate.MAX_MANIFEST_BYTES, "manifest")
+                    shipped = tomllib.loads(shipped_raw.decode("utf-8"))
                 except (pack_gate._Refusal, ValueError) as exc:
                     print("opf cli self-test: harness error: the shipped prompt pack manifest is "
                           "unreadable ({})".format(exc), file=sys.stderr)
@@ -20491,6 +20479,8 @@ def _cli_self_test():
                     os.mkdir(broken_pack)
                     with open(os.path.join(broken_pack, "pack.toml"), "w", encoding="utf-8") as fh:
                         fh.write("format = 1\n")
+                    pack_copy = os.path.join(ibase, "pack")
+                    shutil.copytree(pack_gate.DEFAULT_PACK_DIR, pack_copy)
                 except OSError as exc:
                     print("opf cli self-test: harness error: could not build the import fixtures "
                           "({})".format(exc), file=sys.stderr)
@@ -20568,8 +20558,9 @@ def _cli_self_test():
                         or impc._SOURCE not in out or impc._OCCUPYING not in out or err != ""):
                     failures.append("import --prompt over the green fixture: rc={!r} stdout={!r} "
                                     "stderr={!r}".format(rc, out, err))
-                with mock.patch.object(pack_gate, "_validate",
-                                       lambda pack_dir: ("9.9.9", "sha256:" + "0" * 64, 1)):
+                prompt_out = out
+                with mock.patch.object(pack_gate, "verified_pack",
+                                       lambda pack_dir: ("9.9.9", "sha256:" + "0" * 64, ())):
                     rc, out, err = run_cli(["--prompt", "--root", green])
                 if rc != EXIT_MALFORMED or "prompt_pack binding" not in err:
                     failures.append("import --prompt with a drifted verified pack: rc={!r} stderr={!r} "
@@ -20579,17 +20570,40 @@ def _cli_self_test():
                 if rc != EXIT_MALFORMED or "does not verify" not in err:
                     failures.append("import --prompt with a broken pack: rc={!r} stderr={!r} (expected "
                                     "2 + the pack refusal)".format(rc, err))
-                # A manifest that verified and was then replaced by bytes that do not decode or parse
-                # refuses on the roster read (2), never an escape to the class-width backstop.
-                verified = (shipped["version"], shipped["digest"], len(shipped["members"]))
-                for replaced in (b"version = [\n", b"\xff\n"):
-                    with mock.patch.object(pack_gate, "_validate", lambda pack_dir: verified), \
-                            mock.patch.object(pack_gate, "_read_regular", lambda *a, b=replaced: b):
-                        rc, out, err = run_cli(["--prompt", "--root", green])
-                    if rc != EXIT_MALFORMED or out != "" or "does not parse on the roster read" not in err:
-                        failures.append("import --prompt with a manifest replaced by {!r} after it "
-                                        "verified: rc={!r} stdout={!r} stderr={!r} (expected 2 + the "
-                                        "roster-read refusal)".format(replaced, rc, out, err))
+                # A real copy of the shipped pack whose pack.toml is rewritten right after verified_pack
+                # returns: the printed roster is the verified rows, so the swap has no effect (0, the
+                # unswapped output byte for byte, no altered row). A second read of pack.toml would print
+                # the altered row at 0, or lines before the backstop on a malformed members value.
+                head = 'format = "{}"\nversion = "{}"\ndigest = "{}"\n'.format(
+                    pack_gate.PACK_FORMAT, shipped["version"], shipped["digest"])
+                altered = next(row["sha256"] for row in shipped["members"]
+                               if row["path"].startswith("import/"))
+                zero = "0" * 64
+                swaps = (shipped_raw.replace(altered.encode("ascii"), zero.encode("ascii")),
+                         (head + 'members = "x"\n').encode("utf-8"), head.encode("utf-8"),
+                         b"version = [\n", b"\xff\n")
+                if swaps[0] == shipped_raw:
+                    failures.append("import --prompt race: the altered-row swap changed nothing")
+                real_verified = pack_gate.verified_pack
+                copy_manifest = os.path.join(pack_copy, pack_gate.MANIFEST_NAME)
+                for swapped in swaps:
+                    def racing(pack_dir, swapped=swapped):
+                        verified = real_verified(pack_dir)
+                        with open(os.path.join(pack_dir, pack_gate.MANIFEST_NAME), "wb") as fh:
+                            fh.write(swapped)
+                        return verified
+
+                    try:
+                        with mock.patch.object(pack_gate, "DEFAULT_PACK_DIR", Path(pack_copy)), \
+                                mock.patch.object(pack_gate, "verified_pack", racing):
+                            rc, out, err = run_cli(["--prompt", "--root", green])
+                    finally:
+                        with open(copy_manifest, "wb") as fh:
+                            fh.write(shipped_raw)
+                    if rc != EXIT_OK or out != prompt_out or zero in out or err != "":
+                        failures.append("import --prompt with pack.toml swapped for {!r} after it "
+                                        "verified: rc={!r} stdout={!r} stderr={!r} (expected 0 + the "
+                                        "verified roster, unchanged)".format(swapped[:60], rc, out, err))
 
                 # --verify under the stubbed full-roster doctor: every source complete (0) over the
                 # green fixture; the default fixture's occupying source, with no record and no skip,
@@ -21815,7 +21829,9 @@ def _cli_self_test():
               "drifted frozen migrate source (1, its own FINDING line) and a --run naming no admitted "
               "run (2), --prompt prints the shipped pack's version, digest, import members and migrate "
               "scope when the plan's prompt-pack binding matches the verified pack (0) and refuses a "
-              "binding mismatch or an unverifiable pack (2), and --verify grades every migrate source "
+              "binding mismatch or an unverifiable pack (2), printing only the verified member rows "
+              "however pack.toml changes after verification (0, the output unchanged), and --verify "
+              "grades every migrate source "
               "through the import-completion evaluator under a stubbed full-roster doctor (0 complete, "
               "1 an unimported source named; on a real store that roster is ungraded and the verdict "
               "is CANNOT-EVALUATE, the evaluator's disclosed residual), recording nothing and saying "

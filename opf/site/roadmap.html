@@ -72,7 +72,9 @@
         <span class="chip ok"><code>opf absorb</code></span>
         <span class="chip ok"><code>opf record</code></span>
         (absorb with read-only changelog drafting and freeze-digest output; record with create,
-        transition, done-with-receipt, and worklog-append). The ordinary <code>opf import</code> modes
+        transition, done-with-receipt, and worklog-append). <code>opf import</code> offers only its
+        read-only surface, <code>--prompt</code>, <code>--status</code>, and <code>--verify</code>,
+        which changes nothing in the store; its batch writer is not offered yet. The ordinary <code>opf import</code> modes
         are retired and refuse with exit 2, and <code>opf upgrade</code> refuses with exit 2, since the
         reference tooling defines no store upgrade.</li>
       <li>Conformance is self-asserted and says so; no unqualified conformance claim is emitted.</li>

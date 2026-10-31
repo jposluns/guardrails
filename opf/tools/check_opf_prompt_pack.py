@@ -49,8 +49,9 @@ Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such 
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
 
 Inert: no writer consumes the import examples (`opf record import --batch` does not exist in this
-release). This gate reads no adoption plan: `opf import --prompt` (opf.py _import_prompt) calls _validate
-here and refuses unless the adoption run's plan binds exactly this pack's version and digest. VALID means
+release). This gate reads no adoption plan: `opf import --prompt` (opf.py _import_prompt) calls
+verified_pack here, refuses unless the adoption run's plan binds exactly this pack's version and digest,
+and prints only the member rows verified_pack returns, never a second read of pack.toml. VALID means
 the manifest agrees with the bytes on disk and each import example passes the guards above. It is not
 authentication, it does not check that a content change also bumped the version, and it does not review
 what the documents say: whether an example's history, unparsed text and missingness reasons are faithful
@@ -192,7 +193,12 @@ def _walk_files(pack_dir):
     return sorted(found)
 
 
-def _validate(pack_dir):
+def verified_pack(pack_dir):
+    """(version, digest, rows) of the pack at pack_dir from ONE read of its manifest, raising _Refusal
+    unless the pack verifies: rows is a tuple of (path, sha256) pairs, exactly the member rows whose bytes
+    were checked and over which the recorded digest was recomputed, in manifest order. A caller that
+    prints the roster prints these rows and never reads pack.toml again, so a manifest changed after this
+    returns cannot reach its output. Reads only; writes nothing."""
     try:
         mode = os.lstat(pack_dir).st_mode
     except OSError as exc:
@@ -250,7 +256,12 @@ def _validate(pack_dir):
     computed = compute_digest(version, members)
     _require(computed == recorded, "pack-digest",
              "pack digest drifted: recorded {}, computed {}".format(recorded, computed))
-    return version, recorded, len(members)
+    return version, recorded, tuple((row["path"], row["sha256"]) for row in members)
+
+
+def _validate(pack_dir):
+    version, digest, rows = verified_pack(pack_dir)
+    return version, digest, len(rows)
 
 
 def validate_pack(pack_dir):
