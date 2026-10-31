@@ -659,6 +659,7 @@ site/enforcement.html text eol=lf
 site/evidence.html text eol=lf
 site/examples.html text eol=lf
 site/favicon.svg text eol=lf
+site/images/aiqt-card.png binary
 site/index.html text eol=lf
 site/install.html text eol=lf
 site/js/install.js text eol=lf
@@ -686,6 +687,13 @@ tools/_walk.py text eol=lf
 tools/aei_backlog_md.py text eol=lf
 tools/aiqt_corpus.py text eol=lf
 tools/audit_reference.py text eol=lf
+tools/card/TAGS.md text eol=lf
+tools/card/card-safe.png binary
+tools/card/card.html binary
+tools/card/compare.png binary
+tools/card/illustration.svg text eol=lf
+tools/card/platforms.png binary
+tools/card/sizes.png binary
 tools/check_applies.py text eol=lf
 tools/check_artifact_checksums.py text eol=lf
 tools/check_branch_root.py text eol=lf

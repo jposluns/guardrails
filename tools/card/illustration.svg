@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 260" role="img" aria-labelledby="t"><title id="t">A shield with a tick, held between two guardrails</title>
+<defs>
+<linearGradient id="rail" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2e8f0"/><stop offset=".5" stop-color="#94a3b8"/><stop offset="1" stop-color="#cbd5e1"/></linearGradient>
+<linearGradient id="post" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#475569"/><stop offset=".5" stop-color="#94a3b8"/><stop offset="1" stop-color="#334155"/></linearGradient>
+<linearGradient id="shield" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5eb0ef"/><stop offset=".55" stop-color="#1d6fd0"/><stop offset="1" stop-color="#1552a6"/></linearGradient>
+<linearGradient id="inner" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7ee0c8"/><stop offset="1" stop-color="#2bb39a"/></linearGradient>
+<linearGradient id="edge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".25"/><stop offset="1" stop-color="#000" stop-opacity=".2"/></linearGradient>
+<filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#000" flood-opacity=".4"/></filter>
+</defs>
+<g filter="url(#sh)">
+<rect x="26" y="150" width="16" height="96" rx="4" fill="url(#post)"/><rect x="198" y="150" width="16" height="96" rx="4" fill="url(#post)"/>
+<rect x="8" y="160" width="224" height="26" rx="8" fill="url(#rail)"/><rect x="8" y="166" width="224" height="4" fill="#000" fill-opacity=".12"/>
+<rect x="8" y="196" width="224" height="26" rx="8" fill="url(#rail)"/><rect x="8" y="202" width="224" height="4" fill="#000" fill-opacity=".12"/>
+</g>
+<g filter="url(#sh)">
+<path d="M120 22 l70 24 v62 c0 46 -32 78 -70 94 c-38 -16 -70 -48 -70 -94 v-62 z" fill="url(#shield)"/>
+<path d="M120 22 l70 24 v62 c0 46 -32 78 -70 94 c-38 -16 -70 -48 -70 -94 v-62 z" fill="url(#edge)"/>
+<path d="M120 42 l52 18 v48 c0 36 -24 62 -52 76 c-28 -14 -52 -40 -52 -76 v-48 z" fill="#08111f" fill-opacity=".55"/>
+<polyline points="90,112 110,132 152,82" fill="none" stroke="url(#inner)" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+</svg>

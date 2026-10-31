@@ -111,8 +111,6 @@ PAGE_FIELDS = {
     "title": "Guardrail Enforcement Register",
     "description": PAGE_DESCRIPTION,
     "canonical": PAGE_URL,
-    "og-title": "Guardrail Enforcement Register",
-    "og-description": PAGE_DESCRIPTION,
     "og-url": PAGE_URL,
 }
 
@@ -761,7 +759,11 @@ def compose_page(root, html_inner):
             return substitutions[name]
         raise ValueError("{}: shell carries an unexpected placeholder {}".format(SHELL_REL, match.group(0)))
 
-    return gen_site._TOKEN_RE.sub(repl, shell)
+    page = gen_site._TOKEN_RE.sub(repl, shell)
+    # The composed page must carry the link-preview tag block exactly once, with this page's own URL in
+    # the canonical href and og:url slots (gen_site enforces the same invariant on every Markdown page).
+    gen_site._validate_head_tags(page, PAGE_FIELDS["canonical"], HTML_REL)
+    return page
 
 
 def build_views(root):
@@ -1050,9 +1052,21 @@ _SHELL = """<!doctype html>
 <title>{{title}}</title>
 <meta name="description" content="{{description}}">
 <link rel="canonical" href="{{canonical}}">
-<meta property="og:title" content="{{og_title}}">
-<meta property="og:description" content="{{og_description}}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="AIQT.ai">
 <meta property="og:url" content="{{og_url}}">
+<meta property="og:title" content="AIQT.ai - Rules your AI follows">
+<meta property="og:description" content="Rules for your chat assistant, enforcement controls for your codebase.">
+<meta property="og:image" content="https://aiqt.ai/images/aiqt-card.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="AIQT.ai: Rules your AI follows. Controls that catch what slips.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="AIQT.ai - Rules your AI follows">
+<meta name="twitter:description" content="Rules for your chat assistant, enforcement controls for your codebase.">
+<meta name="twitter:image" content="https://aiqt.ai/images/aiqt-card.png">
+<meta name="twitter:image:alt" content="AIQT.ai: Rules your AI follows. Controls that catch what slips.">
 </head>
 <body>
 <main id="main">

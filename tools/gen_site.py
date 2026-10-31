@@ -170,17 +170,96 @@ FENCE = "+++"
 # its sink before substitution; the text sink escapes `&<>` and the attr sink additionally escapes
 # `"` and `'` so a value cannot escape its surrounding attribute quotes.
 REQUIRED_FIELDS = ("title", "description", "canonical",
-                   "og-title", "og-description", "og-url",
+                   "og-url",
                    "sidebar-active")
 OPTIONAL_FIELDS = ("hand-authored",)
 FIELD_TO_TOKEN = {
     "title": ("{{title}}", "text"),
     "description": ("{{description}}", "attr"),
     "canonical": ("{{canonical}}", "attr"),
-    "og-title": ("{{og_title}}", "attr"),
-    "og-description": ("{{og_description}}", "attr"),
     "og-url": ("{{og_url}}", "attr"),
 }
+
+# The link-preview tag block every published page's head carries, in order, exactly once each. The
+# og:title/og:description/twitter text and the card image are SITE-WIDE (the shell hardcodes them);
+# only the canonical href and og:url vary, and both must be the page's OWN URL. `{url}` marks those
+# two slots. Validated per rendered page by _validate_head_tags, so a shell or frontmatter edit that
+# drops a tag, duplicates one, or points a page at another page's canonical fails closed.
+SITE_BASE_URL = "https://aiqt.ai/"
+HEAD_TAG_BLOCK = (
+    '<link rel="canonical" href="{url}">',
+    '<meta property="og:type" content="website">',
+    '<meta property="og:site_name" content="AIQT.ai">',
+    '<meta property="og:url" content="{url}">',
+    '<meta property="og:title" content="AIQT.ai - Rules your AI follows">',
+    '<meta property="og:description" content="Rules for your chat assistant, enforcement controls '
+    'for your codebase.">',
+    '<meta property="og:image" content="https://aiqt.ai/images/aiqt-card.png">',
+    '<meta property="og:image:type" content="image/png">',
+    '<meta property="og:image:width" content="1200">',
+    '<meta property="og:image:height" content="630">',
+    '<meta property="og:image:alt" content="AIQT.ai: Rules your AI follows. Controls that catch '
+    'what slips.">',
+    '<meta name="twitter:card" content="summary_large_image">',
+    '<meta name="twitter:title" content="AIQT.ai - Rules your AI follows">',
+    '<meta name="twitter:description" content="Rules for your chat assistant, enforcement controls '
+    'for your codebase.">',
+    '<meta name="twitter:image" content="https://aiqt.ai/images/aiqt-card.png">',
+    '<meta name="twitter:image:alt" content="AIQT.ai: Rules your AI follows. Controls that catch '
+    'what slips.">',
+)
+# The identifying opener of each block tag, for the duplicate check: a page must carry each exactly
+# once WHATEVER its value, so a leftover tag with a different value (e.g. a second og:title) is a
+# duplicate finding, not an invisible extra.
+HEAD_TAG_OPENERS = (
+    '<link rel="canonical"',
+    '<meta property="og:type"',
+    '<meta property="og:site_name"',
+    '<meta property="og:url"',
+    '<meta property="og:title"',
+    '<meta property="og:description"',
+    '<meta property="og:image"',
+    '<meta property="og:image:type"',
+    '<meta property="og:image:width"',
+    '<meta property="og:image:height"',
+    '<meta property="og:image:alt"',
+    '<meta name="twitter:card"',
+    '<meta name="twitter:title"',
+    '<meta name="twitter:description"',
+    '<meta name="twitter:image"',
+    '<meta name="twitter:image:alt"',
+)
+
+
+def page_url(target_rel):
+    """The page's own canonical URL, derived from its site/ target name: site/<name>.html publishes at
+    SITE_BASE_URL + <name> (the home page, index.html, publishes at the bare site root)."""
+    name = Path(target_rel).name
+    stem = name[:-len(".html")] if name.endswith(".html") else name
+    return SITE_BASE_URL if stem == "index" else SITE_BASE_URL + stem
+
+
+def _validate_head_tags(page, url, target_rel):
+    """Validate a RENDERED page carries the link-preview tag block exactly: every tag of the block
+    present exactly once with the page's own URL in the canonical href and og:url slots, and no second
+    occurrence of any block tag under a different value (a leftover or duplicated tag). A canonical or
+    og:url carrying ANOTHER page's URL fails here as a missing own-URL tag. `og:image` is checked with
+    a trailing space before its closer so the `og:image:*` openers never count toward it."""
+    for tag in HEAD_TAG_BLOCK:
+        own = tag.format(url=url)
+        c = page.count(own)
+        if c != 1:
+            raise SchemaError(
+                "{}: head must carry exactly one {!r} (its own URL is {}), found {}"
+                .format(target_rel, own, url, c))
+    for opener in HEAD_TAG_OPENERS:
+        # `og:image` and `twitter:image` are prefixes of their `:type`/`:width`/`:alt` siblings; count
+        # only the exact attribute by including the closing quote-space boundary.
+        c = page.count(opener + " ")
+        if c != 1:
+            raise SchemaError(
+                "{}: head must carry exactly one tag opening {!r}, found {}"
+                .format(target_rel, opener, c))
 
 # Sidebar active-link map: slug -> the exact href the shell's `<a>` carries. A frontmatter
 # `sidebar-active` naming a slug outside this map is a SchemaError, so a typo cannot silently produce
@@ -846,6 +925,7 @@ def main(argv):
             _validate_source_path(src, source_rel, docs_root)
             _validate_target_path(target, target_rel, site_root)
             page = render_page(shell, _read(src), source_rel)
+            _validate_head_tags(page, page_url(target_rel), target_rel)
         except SchemaError as exc:
             print("error: {}".format(exc), file=sys.stderr)
             return 2
@@ -874,8 +954,6 @@ def _self_test():
     tiny_shell = ("<!doctype html><html><head><title>{{title}}</title>"
                   "<meta name=\"description\" content=\"{{description}}\">"
                   "<link rel=\"canonical\" href=\"{{canonical}}\">"
-                  "<meta property=\"og:title\" content=\"{{og_title}}\">"
-                  "<meta property=\"og:description\" content=\"{{og_description}}\">"
                   "<meta property=\"og:url\" content=\"{{og_url}}\">"
                   "</head><body>{{content}}</body></html>")
     frontmatter = (
@@ -883,8 +961,6 @@ def _self_test():
         'title = "T"\n'
         'description = "D"\n'
         'canonical = "https://aiqt.ai/x"\n'
-        'og-title = "OT"\n'
-        'og-description = "OD"\n'
         'og-url = "https://aiqt.ai/x"\n'
         'sidebar-active = ""\n'
         '+++\n'
@@ -1297,6 +1373,53 @@ def _self_test():
     except SchemaError as exc:
         failures.append("token sink ok shell: unexpected SchemaError: {}".format(exc))
 
+    # ---- Link-preview head block validation ------------------------------------------------------
+    # The rendered-page guard: every tag of HEAD_TAG_BLOCK exactly once with the page's own URL in the
+    # canonical and og:url slots, and no second occurrence of any block tag under another value.
+    _own_url = SITE_BASE_URL + "rules"
+    ok_head = "<head>" + "\n".join(t.format(url=_own_url) for t in HEAD_TAG_BLOCK) + "</head>"
+    case_count += 1
+    try:
+        _validate_head_tags(ok_head, _own_url, "site/rules.html")
+    except SchemaError as exc:
+        failures.append("head block baseline: unexpected SchemaError: {}".format(exc))
+    # A page missing any one tag of the block fails (every tag exercised).
+    for tag in HEAD_TAG_BLOCK:
+        _expect_raises(
+            "head missing tag " + tag[:40],
+            lambda t=tag: _validate_head_tags(
+                ok_head.replace(t.format(url=_own_url), "", 1), _own_url, "site/rules.html"),
+            SchemaError, "exactly one")
+    # A page carrying a duplicate of a block tag fails: an identical second copy, and a second copy
+    # under a DIFFERENT value (a leftover old tag), which only the opener count can see.
+    _expect_raises(
+        "head duplicate tag same value",
+        lambda: _validate_head_tags(
+            ok_head + '<meta name="twitter:card" content="summary_large_image">',
+            _own_url, "site/rules.html"),
+        SchemaError, "exactly one")
+    _expect_raises(
+        "head duplicate tag different value",
+        lambda: _validate_head_tags(
+            ok_head + '<meta property="og:title" content="another title">',
+            _own_url, "site/rules.html"),
+        SchemaError, "exactly one tag opening")
+    # A page carrying another page's canonical (its own og:url intact) fails.
+    _expect_raises(
+        "head foreign canonical",
+        lambda: _validate_head_tags(
+            ok_head.replace('<link rel="canonical" href="{}">'.format(_own_url),
+                            '<link rel="canonical" href="{}about">'.format(SITE_BASE_URL), 1),
+            _own_url, "site/rules.html"),
+        SchemaError, "exactly one")
+    # page_url derivation: the home page is the bare site root; every other page is its stem.
+    case_count += 1
+    if page_url("site/index.html") != SITE_BASE_URL:
+        failures.append("page_url(index) expected the bare site root")
+    case_count += 1
+    if page_url("site/rules.html") != SITE_BASE_URL + "rules":
+        failures.append("page_url(rules) expected {}rules".format(SITE_BASE_URL))
+
     # ---- Type-6 HTML-block paragraph interruption fails loud (finding 6) -----------------------
     # A text line immediately followed by a column-0 HTML block opener is an unsupported mixed block:
     # it fails closed rather than silently escaping the opener into the paragraph text.
@@ -1374,20 +1497,62 @@ def _self_test():
         td2 = Path(td2)
         (td2 / "docs").mkdir()
         (td2 / "site").mkdir()
-        (td2 / "docs" / "_shell.html").write_text(nav_base, encoding="utf-8")
+        # The fixture shell carries the full link-preview tag block (the 14 fixed tags inserted beside
+        # the shell's canonical and og:url placeholder lines), so main()'s per-page head validation has
+        # a complete head to accept.
+        head_fixed = "".join(t for t in HEAD_TAG_BLOCK if "{url}" not in t)
+        (td2 / "docs" / "_shell.html").write_text(
+            nav_base.replace("</head>", head_fixed + "</head>"), encoding="utf-8")
         # Populate every docs/*.md source the live GENSRC_OUTPUTS declares, so this baseline exercises
         # the real registry and stays valid as pages are migrated in (a hardcoded single source would
-        # fail closed on the next declared-but-absent page).
-        for src_rel, _tgt in _declared_md_sources():
+        # fail closed on the next declared-but-absent page). Each source's canonical and og-url carry
+        # that page's OWN URL, the invariant main()'s head validation enforces.
+        def _fm_for(tgt):
+            url = page_url(tgt)
+            return (frontmatter
+                    .replace('canonical = "https://aiqt.ai/x"', 'canonical = "{}"'.format(url))
+                    .replace('og-url = "https://aiqt.ai/x"', 'og-url = "{}"'.format(url)))
+
+        for src_rel, tgt in _declared_md_sources():
             src_path = td2 / src_rel
             src_path.parent.mkdir(parents=True, exist_ok=True)
-            src_path.write_text(frontmatter + "hello\n", encoding="utf-8")
+            src_path.write_text(_fm_for(tgt) + "hello\n", encoding="utf-8")
         case_count += 1
         if _run_main(td2, []) != 0:
             failures.append("discovery baseline generate: expected exit 0")
         case_count += 1
         if _run_main(td2, ["--check"]) != 0:
             failures.append("discovery baseline check: expected exit 0")
+        # A page whose frontmatter canonical carries ANOTHER page's URL fails closed end-to-end
+        # (exit 2): its rendered canonical is not its own URL.
+        first_src, first_tgt = _declared_md_sources()[0]
+        _other_url = SITE_BASE_URL + "somewhere-else"
+        (td2 / first_src).write_text(
+            _fm_for(first_tgt).replace('canonical = "{}"'.format(page_url(first_tgt)),
+                                       'canonical = "{}"'.format(_other_url)) + "hello\n",
+            encoding="utf-8")
+        case_count += 1
+        if _run_main(td2, ["--check"]) != 2:
+            failures.append("foreign canonical: expected exit 2")
+        (td2 / first_src).write_text(_fm_for(first_tgt) + "hello\n", encoding="utf-8")
+        # A shell missing one tag of the block fails closed end-to-end (exit 2) for every page.
+        (td2 / "docs" / "_shell.html").write_text(
+            nav_base.replace("</head>", head_fixed.replace(
+                '<meta name="twitter:card" content="summary_large_image">', '', 1) + "</head>"),
+            encoding="utf-8")
+        case_count += 1
+        if _run_main(td2, ["--check"]) != 2:
+            failures.append("shell missing block tag: expected exit 2")
+        # A shell carrying a duplicate block tag fails closed end-to-end (exit 2).
+        (td2 / "docs" / "_shell.html").write_text(
+            nav_base.replace("</head>", head_fixed
+                             + '<meta property="og:type" content="website">' + "</head>"),
+            encoding="utf-8")
+        case_count += 1
+        if _run_main(td2, ["--check"]) != 2:
+            failures.append("shell duplicate block tag: expected exit 2")
+        (td2 / "docs" / "_shell.html").write_text(
+            nav_base.replace("</head>", head_fixed + "</head>"), encoding="utf-8")
         # Underscore-prefixed stray (no prefix exemption for .md).
         stray_u = td2 / "docs" / "_stray.md"
         stray_u.write_text(frontmatter + "x\n", encoding="utf-8")
