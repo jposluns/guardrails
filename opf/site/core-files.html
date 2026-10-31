@@ -489,8 +489,9 @@
       <h3>Template</h3>
       <p>The standard requires a run to take a lease before mutating an existing store and to make it
         observable at the sync target before writing. Its consistency contract includes a divergence
-        check for collisions during propagation; cross-system synchronization is planned in the
-        reference CLI. The file carries the holder, the operation, and
+        check for collisions during propagation; <code>opf sync</code> surfaces that check, while the
+        lease itself stays local to this host (making it observable at the target is planned in the
+        reference CLI). The file carries the holder, the operation, and
         an acquired-at timestamp read from the clock at acquisition: a closed four-key shape,
         <code>schema</code>, <code>holder</code>, <code>operation</code>, and <code>acquired_at</code>.
         Where the concurrent-operation module is enabled, the lease is additionally recorded as a
@@ -516,8 +517,10 @@
         The retired <code>opf import</code> modes refuse before any write and take no lock.
         <code>opf init</code> holds the lease, under the shared operation lock, only while it writes
         the store, removes the lease and releases the lock before it reports success, and clears a
-        dead run's leftover lock record only with <code>--recover</code>. <code>opf sync</code>
-        and <code>opf migrate</code> are planned, not implemented cross-system enforcement.</p>
+        dead run's leftover lock record only with <code>--recover</code>. <code>opf sync</code> takes
+        the same operation lock around a pull or push and refuses while any lease is present; it does
+        not make the lease observable at the sync target, so the propagation window above stands.
+        <code>opf migrate</code> is planned, not implemented cross-system enforcement.</p>
     </div>
   </section>
 

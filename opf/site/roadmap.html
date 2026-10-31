@@ -85,8 +85,12 @@
     <p class="eyebrow">What comes next</p>
     <h2>What comes next</h2>
     <ul class="clean">
-      <li><code>opf migrate</code> and <code>opf sync</code>, two of the standard's ten command verbs,
-        are planned and currently exit 2 (not yet implemented) in the reference CLI.</li>
+      <li><code>opf migrate</code>, one of the standard's ten command verbs,
+        is planned and currently exits 2 (not yet implemented) in the reference CLI.</li>
+      <li><code>opf sync</code> ships as the surfaced pull-and-push reconciliation step; making the
+        single-writer lease observable at the sync target (a lock ref written with an atomic
+        compare-and-swap push) remains planned, so the lease's propagation window stays a disclosed
+        residual.</li>
       <li>Full module record schemas remain planned. Digest canonicalization is already implemented in
         the reference release and changelog helpers.</li>
     </ul>

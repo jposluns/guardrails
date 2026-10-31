@@ -298,6 +298,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_observe.py --self-test
 
+      - name: OPF sync direct self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_sync.py --self-test
+
       - name: OPF render-drift gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_drift.py --self-test
