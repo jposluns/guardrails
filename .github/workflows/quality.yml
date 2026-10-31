@@ -55,6 +55,11 @@ jobs:
   # fetch-depth: 0 gives the version-monotonicity gate the changelog.toml history it compares
   # base-vs-head; fetch-tags: true is explicit (depth-0 already fetches tags) so the tag layer, once
   # a release records a tag, sees real tag objects rather than an unfetched-but-present ambiguity.
+  # persist-credentials: false keeps actions/checkout from writing the job token into the
+  # checkout's git config, where any later step could read it: no job here pushes, fetches or
+  # otherwise uses git credentials after its checkout (each gate reads the history the checkout
+  # already fetched). tools/check_ci_parity.py refuses a checkout step in any workflow without it,
+  # byte-canon-matrix's included.
   # Each gate runs as its own step so a failure names itself in the UI.
   # No step carries continue-on-error: a gate that cannot fail is decorative.
   # Every run: step binds shell: bash. GitHub documents a step-level shell as overriding the job's
@@ -67,8 +72,8 @@ jobs:
   # the local runner runs check_ci_parity.
   # Within a job the steps keep their original relative order. The Quality gates job at the end
   # is the one required status of this workflow and aggregates every job (msg-leaks.yml is a second).
-  # The heavy jobs (opf-tooling, selftest-execution, the git-fixture-env-core canary, the five host-patch
-  # jobs and byte-canon-matrix) carry one pinned job-level if:,
+  # The heavy jobs (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, the
+  # git-fixture-env-core canary, the five host-patch jobs and byte-canon-matrix) carry one pinned job-level if:,
   # so they run only on a push and on a pull request whose head is a merge-train-* branch of this
   # repository; every other job runs in every run. That if: is the second layer behind the labeled
   # trigger above, which already keeps a member head from running at all. In any other pull request
@@ -83,6 +88,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -175,6 +181,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -257,15 +264,18 @@ jobs:
         shell: bash
         run: python3 -I -B tools/selftest_opf_render.py
 
-  # The OPF tooling gates and direct self-tests run in this one '3.14' job, each step in its original
-  # relative order. The opf.py self-test itself runs in CI once, whole, in the opf-host-patch job below;
-  # no '3.14' job runs it or any opf.py --self-test-group step. The local runner runs it as its named
-  # groups (SELF_TEST_GROUPS in opf/tools/opf.py; the selector runs nothing unless they hold every
-  # registered self-test exactly once). tools/check_ci_parity.py holds, in its self-test, each group to
-  # exactly one line of tools/run_all_checks.sh and no line here, and the whole self-test to exactly one
-  # line here, in a heavy job.
-  opf-tooling:
-    name: OPF tooling gates (3.14)
+  # The OPF tooling gates and direct self-tests run in the three '3.14' jobs opf-tooling-a, opf-tooling-b
+  # and opf-tooling-c: every step kept exactly once, spread between the jobs by a local timing that stops
+  # each step at 20 seconds (whether the jobs' wall times come out close is still to be seen on a live
+  # run), each job's steps in their original relative order and a drift or live gate always right after
+  # its own self-test. The opf.py self-test itself runs in CI once, whole, in the
+  # opf-host-patch job below; no '3.14' job runs it or any opf.py --self-test-group step. The local runner
+  # runs it as its named groups (SELF_TEST_GROUPS in opf/tools/opf.py; the selector runs nothing unless
+  # they hold every registered self-test exactly once). tools/check_ci_parity.py holds, in its self-test,
+  # each group to exactly one line of tools/run_all_checks.sh and no line here, and the whole self-test to
+  # exactly one line here, in a heavy job.
+  opf-tooling-a:
+    name: OPF tooling gates A (3.14)
     if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
@@ -273,6 +283,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -294,17 +305,60 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_journal.py --self-test
 
+      - name: OPF prompt-pack manifest drift gate self-test (PR7 slice 1)
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
+
+      - name: OPF prompt-pack manifest drift gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_prompt_pack.py
+
+      - name: OPF adoption schema and read-only planning self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt.py --self-test
+
+      - name: OPF adoption completion evaluator self-test, checks 1 to 4 and 6 (PR5 slice 1)
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
+
+      - name: OPF adoption HTTPS observer and quarantine self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
+
+      - name: OPF adoption source-discovery self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
+
+      - name: OPF init resume-substrate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_init_substrate.py --self-test
+
+      - name: OPF init operation-layer self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_init_operation.py --self-test
+
+  opf-tooling-b:
+    name: OPF tooling gates B (3.14)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: OPF observe direct self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_observe.py --self-test
-
-      - name: OPF render-drift gate self-test
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_drift.py --self-test
-
-      - name: OPF render-drift gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_drift.py
 
       - name: OPF store-integrity gate self-test
         shell: bash
@@ -314,18 +368,6 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_doctor.py
 
-      - name: OPF record-authoring gate self-test
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
-
-      - name: OPF prompt-pack manifest drift gate self-test (PR7 slice 1)
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
-
-      - name: OPF prompt-pack manifest drift gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_prompt_pack.py
-
       - name: OPF enforcement-pack platform coverage gate self-test
         shell: bash
         run: python3 -I -B tools/check_opf_enforce_platforms.py --self-test
@@ -334,45 +376,17 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_opf_enforce_platforms.py
 
-      - name: OPF adoption schema and read-only planning self-test
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_adopt.py --self-test
-
       - name: OPF adoption apply-shell self-test (clean-start adoption U1)
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
-
-      - name: OPF adoption state self-test (homes-1 adoption control area and bounded adoption state)
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_adopt_state.py --self-test
-
-      - name: OPF adoption enable-hook merge-core self-test (PR3 slice 1)
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
-
-      - name: OPF adoption completion evaluator self-test, checks 1 to 4 and 6 (PR5 slice 1)
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
-
-      - name: OPF import batch parser self-test (inert until the import write mode lands)
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_import_batch.py --self-test
 
       - name: OPF import completion per-source evaluator self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_import_complete.py --self-test
 
-      - name: OPF pack manifest parser self-test
+      - name: OPF release import-history parser self-test (inert until the imported-release writer lands)
         shell: bash
-        run: python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
-
-      - name: OPF adoption HTTPS observer and quarantine self-test
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
-
-      - name: OPF adoption source-discovery self-test
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
+        run: python3 -I -B opf/tools/_opf_release_history.py --self-test
 
       - name: OPF source-only init gate self-test
         shell: bash
@@ -386,6 +400,57 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_init_contract.py --self-test
 
+      - name: OPF init builders self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_init.py --self-test
+
+  opf-tooling-c:
+    name: OPF tooling gates C (3.14)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF render-drift gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_drift.py --self-test
+
+      - name: OPF render-drift gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_drift.py
+
+      - name: OPF record-authoring gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
+
+      - name: OPF adoption state self-test (homes-1 adoption control area and bounded adoption state)
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_state.py --self-test
+
+      - name: OPF adoption enable-hook merge-core self-test (PR3 slice 1)
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
+
+      - name: OPF import batch parser self-test (inert until the import write mode lands)
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_import_batch.py --self-test
+
+      - name: OPF pack manifest parser self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
+
       - name: OPF init contract consistency gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_contract.py --self-test
@@ -398,18 +463,6 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_oplock.py --self-test
 
-      - name: OPF init resume-substrate self-test
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_init_substrate.py --self-test
-
-      - name: OPF init builders self-test
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_init.py --self-test
-
-      - name: OPF init operation-layer self-test
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_init_operation.py --self-test
-
       - name: OPF init P0 ratified-contracts self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_p0.py --self-test --red-on-revert
@@ -418,10 +471,11 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
 
-  # The closure work is split between five jobs because the whole roster's worst case does not fit
+  # The closure work is split between six jobs because the whole roster's worst case does not fit
   # one job's time limit, nor four once every leg whose command the config lanes also run is bounded
   # at or above the deadline those lanes give that command plus the launch margin (each leg bound
-  # is a deliberate shorter deadline, its expiry reported as LEG BOUND EXCEEDED, exit 2); the gate's
+  # is a deliberate shorter deadline, its expiry reported as LEG BOUND EXCEEDED, exit 2), and the
+  # sixth holds a leg the other five have no room for; the gate's
   # own self-test checks the partition (every leg in exactly one job) and each job's worst case
   # against that job's limit, and the flip (negative leg) runs in the job whose legs hold
   # opf-tooling-selftest.
@@ -433,6 +487,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -458,6 +513,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -483,6 +539,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -508,6 +565,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -533,6 +591,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -550,6 +609,32 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-e
 
+  opf-closure-f:
+    name: OPF standalone closure F
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-f
+
+      - name: OPF standalone-closure gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-f
+
   release:
     name: Corpus, release and versioning
     runs-on: ubuntu-latest
@@ -558,6 +643,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -706,6 +792,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -897,6 +984,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -952,6 +1040,13 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_child_status_coverage.py
 
+      - name: OPF declaration self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
+      - name: OPF declaration gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_declaration.py
+
   git-fixture-env-core:
     name: Git-fixture-env core self-test
     if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
@@ -961,6 +1056,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1011,6 +1107,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1041,6 +1138,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1067,6 +1165,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1093,6 +1192,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1119,6 +1219,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1144,6 +1245,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -1392,6 +1494,8 @@ jobs:
         shell: bash
         run: git config --global core.autocrlf true
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
@@ -1420,12 +1524,15 @@ jobs:
     needs:
       - secrets
       - site
-      - opf-tooling
+      - opf-tooling-a
+      - opf-tooling-b
+      - opf-tooling-c
       - opf-closure-a
       - opf-closure-b
       - opf-closure-c
       - opf-closure-d
       - opf-closure-e
+      - opf-closure-f
       - release
       - generated
       - selftest-execution
