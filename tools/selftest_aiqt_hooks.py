@@ -2786,9 +2786,10 @@ def _test_coauthor_children(failures, base, script):
          {"file_path": str(root / "lit.py"), "content": 'x = "Co\\u002dReviewed: AI"\n'})
 
     # --- landing checks: the denied command lands the trailer ungated, and not gated ---------------------
-    land_env = git_fixture_env(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
-                               GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid",
-                               GIT_EDITOR="true")
+    land_overrides = dict(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                          GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid",
+                          GIT_EDITOR="true")
+    land_env = git_fixture_env(**land_overrides)
     hooks_dir = root / "installed-hooks"
     hooks_dir.mkdir(exist_ok=True)
     shutil.copy2(script, hooks_dir / "commit-msg")
@@ -2800,7 +2801,7 @@ def _test_coauthor_children(failures, base, script):
 
     def head_count(repo, _target):
         proc = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%B"], capture_output=True,
-                              timeout=60, env=land_env)
+                              timeout=60, env=git_fixture_env(**land_overrides))
         return aiqt_hooks._cab_count(proc.stdout.decode("utf-8", "surrogateescape"))
 
     def file_count(repo, target):
@@ -2986,11 +2987,12 @@ def _test_coauthor_children(failures, base, script):
                         "and record a clean message, got exit {} with stderr {!r}".format(
                             proc.returncode, proc.stderr[-300:]))
     before = subprocess.run(["git", "-C", str(lb), "rev-parse", "HEAD"], capture_output=True, text=True,
-                            timeout=60, env=land_env).stdout
+                            timeout=60, env=git_fixture_env(**land_overrides)).stdout
     proc = subprocess.run(["git", "-C", str(lb), "commit", "-q", "--allow-empty", "-F", "-"],
-                          input="fix\n\n" + cab + "\n", capture_output=True, text=True, timeout=60, env=land_env)
+                          input="fix\n\n" + cab + "\n", capture_output=True, text=True, timeout=60,
+                          env=git_fixture_env(**land_overrides))
     after = subprocess.run(["git", "-C", str(lb), "rev-parse", "HEAD"], capture_output=True, text=True,
-                           timeout=60, env=land_env).stdout
+                           timeout=60, env=git_fixture_env(**land_overrides)).stdout
     if proc.returncode != 1 or before != after:
         failures.append("(cab-m10) a commit whose message holds the token must be refused by the installed "
                         "hook (exit 1, HEAD unchanged), got exit {}".format(proc.returncode))
@@ -3016,8 +3018,9 @@ def _test_coauthor_oracle(failures, base, script, cab_hook=None, only=None):
     child_env = dict((k, v) for k, v in os.environ.items() if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_")))
     root = base / "oracle"
     root.mkdir(parents=True, exist_ok=True)
-    env = git_fixture_env(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
-                          GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid", GIT_EDITOR="true")
+    overrides = dict(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                     GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid", GIT_EDITOR="true")
+    env = git_fixture_env(**overrides)
     hooks_dir = root / "hooks"
     hooks_dir.mkdir(exist_ok=True)
     shutil.copy2(script, hooks_dir / "commit-msg")
@@ -3044,7 +3047,7 @@ def _test_coauthor_oracle(failures, base, script, cab_hook=None, only=None):
 
     def git(repo, *args, stdin=None):
         return subprocess.run(["git", "-C", str(repo)] + list(args), capture_output=True, text=True, timeout=60,
-                              env=env, input=stdin)
+                              env=git_fixture_env(**overrides), input=stdin)
 
     def commits(repo):
         # the history of HEAD: a commit git am re-creates can hash the same as its source commit on a side
