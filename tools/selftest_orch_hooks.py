@@ -11452,6 +11452,663 @@ def _gitalias_oracle_cases(tmp):
     shutil.rmtree(str(root), ignore_errors=True)
 
 
+# ---------- the checked open of paths the guarded actor can create or replace ----------
+# A plain open() of a path the guarded actor can create or replace (a declared or state path of the orchestration
+# hooks, the recovery ledger, the real git index a recovery snapshot copies, the generated-artefact registry and its
+# authoring marker, the write-scope declaration and the frozen floor) waited on a FIFO with no peer: a Stop,
+# TeammateIdle, SessionStart, UserPromptSubmit or PostToolUse hook until the platform's hook timeout ended it, and a
+# PreToolUse hook for its whole deadline before failing closed. Every such open now goes through
+# aiqt_hooks._orch_open_checked, with O_NOFOLLOW added for the four readers that lstat before they open (a swap after
+# the lstat had reached the plain open). The source probe walks the WHOLE hooks script and refuses every call of an
+# open form in it (open by its bare name or as builtins, io or codecs.open, io.FileIO, os.open, os.fdopen, a .open,
+# .read_text, .write_text, .read_bytes, .write_bytes or .touch method call, a getattr naming open, the shutil copy
+# family and the tempfile file creators), and every spelling that reaches open without calling it by that name (a
+# reference to open, or to os, io, builtins or codecs .open, that is not the function of a call, and a from-import of
+# open under any name), outside the exact allowlist below, which names each remaining site by its innermost function,
+# its form and its mode literal or os.open flag names, with the reason it cannot block on, or read, a node that is not
+# a regular file; an allowlisted site that is gone, repeated or changed is refused too. A bare open whose first
+# argument is a call of _orch_open_checked is a form of its own, so the same open of a path is not that site.
+# os.listdir and tempfile.mkdtemp are not open forms here: each opens or makes a directory only. The vectors put a
+# regular file, a FIFO and a directory (and, for a no-follow read, a symlink) at one path of each class and run the
+# hook that opens it in a child process, so a hook that blocks reads as a timed-out row, never a hung suite.
+_OPEN_DIRECTORY = ("a directory open (O_DIRECTORY, O_PATH where the platform has it): a FIFO, a device or a regular "
+                   "file there fails ENOTDIR before any open of that node runs, so nothing there can block it or be "
+                   "read")
+_OPEN_EXCLUSIVE = ("an exclusive no-follow create (O_CREAT|O_EXCL|O_NOFOLLOW) of a fresh random temporary name, which "
+                   "never opens a node already there")
+_OPEN_RDP_READER = ("_RDP_OPEN_FLAGS is O_RDONLY|O_NONBLOCK|O_NOCTTY|O_CLOEXEC: a no-follow, non-blocking read open "
+                    "whose descriptor is fstat'ed and refused unless a regular file before any read")
+_OPEN_NOFOLLOW_READER = ("a no-follow, non-blocking read open whose descriptor is fstat'ed and refused unless a "
+                         "regular file before any read")
+_PLAIN_OPEN_ALLOWED = {
+    # (innermost function, open form, mode literal or the sorted flag names of an os.open): (count, reason)
+    ("_take_snapshot", "open(_orch_open_checked)", "rb"): (
+        1, "wraps the descriptor _orch_open_checked returned for the real git index (an int, never a path), so the "
+           "node was refused before this unless a regular file"),
+    ("_take_snapshot", "open", "xb"): (
+        1, "an exclusive create (O_CREAT|O_EXCL) of the temp index inside the fresh tempfile.mkdtemp directory, "
+           "which never opens a node already there"),
+    ("_orch_dirfd_has_registry", "os.open", "O_DIRECTORY|O_NOFOLLOW|_ORCH_O_WALK"): (1, _OPEN_DIRECTORY),
+    ("_orch_registry_walk", "os.open", "O_DIRECTORY|_ORCH_O_WALK"): (1, _OPEN_DIRECTORY),
+    ("_orch_registry_walk", "os.open", "O_DIRECTORY|O_NOFOLLOW|_ORCH_O_WALK"): (1, _OPEN_DIRECTORY),
+    ("_orch_walk_recheck", "os.open", "O_DIRECTORY|_ORCH_O_WALK"): (1, _OPEN_DIRECTORY),
+    ("_orch_git_toplevel_has_registry", "os.open", "O_DIRECTORY|_ORCH_O_WALK"): (1, _OPEN_DIRECTORY),
+    ("_orch_registry", "os.open", "O_NOFOLLOW|flags|nofollow"): (
+        1, "flags is O_RDONLY|O_NONBLOCK|O_NOCTTY|O_CLOEXEC: a non-blocking read open whose descriptor is fstat'ed "
+           "and refused unless a regular file before any read; it follows a final symlink unless nofollow is set (the "
+           "review dispatch pin sets it), the fstat judging the node the open reached"),
+    ("_orch_open_checked", "os.open", "O_CLOEXEC|O_NOCTTY|O_NONBLOCK|flags"): (
+        1, "the checked open itself: non-blocking, its descriptor fstat'ed and refused unless a regular file before "
+           "any read or write"),
+    ("_orch_write_json_atomic", "os.open", "O_CLOEXEC|O_DIRECTORY|_ORCH_O_WALK"): (1, _OPEN_DIRECTORY),
+    ("_orch_write_json_at", "os.open", "O_CLOEXEC|O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY"): (1, _OPEN_EXCLUSIVE),
+    ("_orch_mode_read", "os.open", "O_CLOEXEC|O_NOCTTY|O_NONBLOCK|O_RDONLY"): (
+        1, "a non-blocking read open whose descriptor is fstat'ed and refused unless a regular file before any read; "
+           "it follows a final symlink, the fstat judging the node the open reached"),
+    ("_orch_escape_stat", "os.open", "O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK|O_RDONLY"): (
+        1, "a no-follow, non-blocking open whose descriptor is only fstat'ed, never read; its caller refuses anything "
+           "that is not a regular file"),
+    ("_rdp_read_text", "os.open", "O_NOFOLLOW|_RDP_OPEN_FLAGS"): (1, _OPEN_RDP_READER),
+    ("_rdp_worktree_entry", "os.open", "O_CLOEXEC|O_DIRECTORY|_ORCH_O_WALK"): (1, _OPEN_DIRECTORY),
+    ("_rdp_worktree_entry", "os.open", "O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW|_ORCH_O_WALK"): (1, _OPEN_DIRECTORY),
+    ("_rdp_worktree_entry", "os.open", "O_NOFOLLOW|_RDP_OPEN_FLAGS"): (1, _OPEN_RDP_READER),
+    ("_rdp_registry_dir", "os.open", "O_CLOEXEC|O_DIRECTORY|_ORCH_O_WALK"): (1, _OPEN_DIRECTORY),
+    ("_rdp_read_small", "os.open", "O_NOFOLLOW|_RDP_OPEN_FLAGS"): (1, _OPEN_RDP_READER),
+    ("_rdp_record_read", "os.open", "O_NOFOLLOW|_RDP_OPEN_FLAGS"): (1, _OPEN_RDP_READER),
+    ("_rdp_record_write", "os.open", "O_CLOEXEC|O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY"): (1, _OPEN_EXCLUSIVE),
+    ("_rwh_read_marker", "os.open", "O_NOFOLLOW|_RDP_OPEN_FLAGS"): (1, _OPEN_RDP_READER),
+    ("_orch_register_authority", "os.open", "O_CLOEXEC|O_NOCTTY|O_NOFOLLOW|O_NONBLOCK|O_RDONLY"): (
+        1, _OPEN_NOFOLLOW_READER),
+    ("_orch_barrier_write", "open", "x"): (
+        1, "an exclusive create (O_CREAT|O_EXCL) of a fresh temporary name, the pid plus 64 random bits, never "
+           "opens a node already there, so no FIFO, device or directory planted at a path can block it; the file "
+           "is then os.replace()d onto the barrier path"),
+    ("_orch_barrier_read", "os.open", "O_CLOEXEC|O_NONBLOCK|O_RDONLY"): (
+        1, "a non-blocking read open whose descriptor is fstat'ed and refused unless a regular file before any read; "
+           "it follows a final symlink by design (the writer's replace replaces the link), the fstat judging the node "
+           "the open reached"),
+    ("_orch_lease_hb_append_checked", "os.open",
+     "O_APPEND|O_CLOEXEC|O_CREAT|O_NOCTTY|O_NOFOLLOW|O_NONBLOCK|O_WRONLY"): (
+        1, "a no-follow, non-blocking append open (a FIFO with no reader fails ENXIO) whose descriptor is fstat'ed "
+           "and refused unless a regular file with one link before any write"),
+    ("_orch_lease_hb_open", "os.open", "O_DIRECTORY|_ORCH_O_WALK|cloexec"): (1, _OPEN_DIRECTORY),
+    ("_orch_lease_hb_open", "os.open", "O_DIRECTORY|O_NOFOLLOW|_ORCH_O_WALK|cloexec"): (1, _OPEN_DIRECTORY),
+    ("_orch_lease_hb_open", "os.open", "O_DIRECTORY|O_NOFOLLOW|O_RDONLY|cloexec"): (1, _OPEN_DIRECTORY),
+    ("_orch_lease_hb_open", "os.open", "O_NOCTTY|O_NOFOLLOW|O_NONBLOCK|O_RDONLY|cloexec"): (
+        1, "the lease or lock leaf, opened no-follow and non-blocking: a lease descriptor is fstat'ed and refused "
+           "unless a regular file before any read (_orch_lease_hb_load), and a lock descriptor is only flock'ed with "
+           "LOCK_NB, never read or written"),
+    ("_orch_lease_hb_memory", "os.open", "O_CLOEXEC|O_NOCTTY|O_NOFOLLOW|O_NONBLOCK|O_RDONLY"): (
+        1, _OPEN_NOFOLLOW_READER),
+    ("_orch_lease_hb_memory_save", "os.open", "O_CLOEXEC|O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY"): (1, _OPEN_EXCLUSIVE),
+    ("_orch_lease_hb_prove", "os.open", "O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW|O_RDONLY"): (1, _OPEN_DIRECTORY),
+    ("_orch_lease_hb_verify", "os.open", "O_CLOEXEC|O_NOCTTY|O_NOFOLLOW|O_NONBLOCK|O_RDONLY"): (
+        1, "a no-follow, non-blocking read open whose descriptor is fstat'ed and refused unless a regular file before "
+           "any read (_orch_lease_hb_load)"),
+    ("_orch_lease_hb_write_field", "os.open", "O_CLOEXEC|O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY"): (1, _OPEN_EXCLUSIVE),
+}
+_SHUTIL_OPENS = ("copy", "copy2", "copyfile", "copytree", "move")
+_TEMPFILE_OPENS = ("mkstemp", "NamedTemporaryFile", "TemporaryFile", "SpooledTemporaryFile")
+_PATH_METHOD_OPENS = ("open", "read_text", "write_text", "read_bytes", "write_bytes", "touch")
+_OPEN_OWNERS = ("os", "io", "builtins", "codecs")
+
+
+def _open_site(call):
+    """(form, detail) for a call of an open form (see the section comment above _PLAIN_OPEN_ALLOWED), else None. The
+    detail is the mode literal of an open, os.fdopen, io.FileIO or .open call ('r' where none is given, '?' where it
+    is not a literal), the sorted names in an os.open flags expression (each O_ constant, attribute or getattr string,
+    and each other variable), and '' for the rest. A module reached as __import__('name') counts as that name. A bare
+    open whose first argument is a call of _orch_open_checked has the form 'open(_orch_open_checked)', and a getattr
+    whose second argument is the string 'open' has the form 'getattr(<its first argument>, "open")'."""
+    import ast
+
+    def mode():
+        given = call.args[1] if len(call.args) > 1 else next(
+            (kw.value for kw in call.keywords if kw.arg == "mode"), None)
+        return "r" if given is None else given.value if isinstance(given, ast.Constant) else "?"
+    func = call.func
+    if isinstance(func, ast.Name):
+        if func.id == "getattr" and len(call.args) > 1 and isinstance(call.args[1], ast.Constant) \
+                and call.args[1].value == "open":
+            target = call.args[0].id if isinstance(call.args[0], ast.Name) else "?"
+            return ('getattr({}, "open")'.format(target), "")
+        if func.id != "open":
+            return None
+        first = call.args[0] if call.args else None
+        checked = isinstance(first, ast.Call) and isinstance(first.func, ast.Name) \
+            and first.func.id == "_orch_open_checked"
+        return ("open(_orch_open_checked)" if checked else "open", mode())
+    if not isinstance(func, ast.Attribute):
+        return None
+    base = func.value
+    if isinstance(base, ast.Call) and isinstance(base.func, ast.Name) and base.func.id == "__import__" \
+            and base.args and isinstance(base.args[0], ast.Constant):
+        owner = base.args[0].value
+    else:
+        owner = base.id if isinstance(base, ast.Name) else None
+    if owner == "os" and func.attr == "open":
+        flags = call.args[1] if len(call.args) > 1 else next(
+            (kw.value for kw in call.keywords if kw.arg == "flags"), None)
+        names = set()
+        for node in ast.walk(flags) if flags is not None else ():
+            if isinstance(node, ast.Attribute) and node.attr.startswith("O_"):
+                names.add(node.attr)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("O_"):
+                names.add(node.value)
+            elif isinstance(node, ast.Name) and node.id not in ("os", "getattr"):
+                names.add(node.id)
+        return ("os.open", "|".join(sorted(names)) or "?")
+    if owner == "os" and func.attr == "fdopen":
+        return ("os.fdopen", mode())
+    if owner in ("builtins", "io", "codecs") and func.attr in ("open", "FileIO", "open_code"):
+        return ("{}.{}".format(owner, func.attr), mode())
+    if owner == "shutil" and func.attr in _SHUTIL_OPENS:
+        return ("shutil." + func.attr, "")
+    if owner == "tempfile" and func.attr in _TEMPFILE_OPENS:
+        return ("tempfile." + func.attr, "")
+    if func.attr in _PATH_METHOD_OPENS and owner not in ("os", "builtins", "io", "codecs", "shutil", "tempfile"):
+        return ("." + func.attr, mode() if func.attr == "open" else "")
+    return None
+
+
+def _open_reference(node, called):
+    """(form, detail) for a spelling that reaches open without calling it by that name, else None: a reference to
+    open, or to os, io, builtins or codecs .open, that is not the function of a call (called holds the id of every
+    call's function node), with the form '<that spelling> (not called)' and the detail '', and a from-import of open
+    under any name, with the form 'from <module> import open' and the detail the name it binds."""
+    import ast
+    if isinstance(node, ast.Name) and node.id == "open" and id(node) not in called:
+        return ("open (not called)", "")
+    if isinstance(node, ast.Attribute) and node.attr == "open" and isinstance(node.value, ast.Name) \
+            and node.value.id in _OPEN_OWNERS and id(node) not in called:
+        return ("{}.open (not called)".format(node.value.id), "")
+    if isinstance(node, ast.ImportFrom):
+        bound = [alias.asname or alias.name for alias in node.names if alias.name == "open"]
+        if bound:
+            return ("from {} import open".format("." * node.level + (node.module or "")), bound[0])
+    return None
+
+
+def _plain_open_findings(source):
+    """The open sites the source probe refuses in the hooks source text, as sorted (function, line, form, detail)
+    rows: every call of an open form (_open_site) and every spelling that reaches open without calling it by that
+    name (_open_reference) anywhere in the file, a nested function, a lambda and a comprehension included, keyed by
+    the innermost enclosing function ('<module>' at module level), the form and its detail. A key in
+    _PLAIN_OPEN_ALLOWED passes only when it occurs exactly its allowed number of times; any other count is one
+    ('allowlist count', function, form, detail, count) row, so the allowlist stays exact."""
+    import ast
+    found, allowed = [], {}
+    tree = ast.parse(source)
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+
+    def visit(node, chain):
+        for child in ast.iter_child_nodes(node):
+            site = _open_site(child) if isinstance(child, ast.Call) else _open_reference(child, called)
+            if site is not None:
+                key = (chain[-1] if chain else "<module>",) + site
+                if key in _PLAIN_OPEN_ALLOWED:
+                    allowed[key] = allowed.get(key, 0) + 1
+                else:
+                    found.append((key[0], child.lineno) + site)
+            named = isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            visit(child, chain + [child.name] if named else chain)
+    visit(tree, [])
+    found.sort()
+    for key, (count, _reason) in sorted(_PLAIN_OPEN_ALLOWED.items()):
+        if allowed.get(key, 0) != count:
+            found.append(("allowlist count",) + key + (allowed.get(key, 0),))
+    return found
+
+
+_PLAIN_OPEN_HOOK_CHILD = (
+    "import json, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks\n"
+    "for name, payload in json.loads(sys.argv[2]):\n"
+    "    print(json.dumps(getattr(aiqt_hooks, name)(payload)), flush=True)\n")
+
+# The helper itself: a FIFO (no writer for the read, no reader for the append, then a reader present), a directory
+# and /dev/null are each refused, the reader receiving no byte; a regular file reads as open() in text mode reads it
+# (strict and replace decoding alike, CR and CRLF line ends included); the read bound refuses one byte past it.
+_PLAIN_OPEN_HELPER_CHILD = (
+    "import errno, json, os, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks as h\n"
+    "fifo, dirp, reg = (os.path.join(sys.argv[2], n) for n in ('fifo', 'dir', 'reg'))\n"
+    "os.mkfifo(fifo)\n"
+    "os.mkdir(dirp)\n"
+    "def refusal(call, *args, **kw):\n"
+    "    try:\n"
+    "        call(*args, **kw)\n"
+    "        return 'opened'\n"
+    "    except OSError as exc:\n"
+    "        return (type(exc).__name__ + (':ENXIO' if exc.errno == errno.ENXIO else '')\n"
+    "                + (':not-regular' if 'not a regular file' in str(exc) else '')\n"
+    "                + (':bound' if 'byte bound' in str(exc) else ''))\n"
+    "def text(read, errors):\n"
+    "    try:\n"
+    "        return read(errors)\n"
+    "    except ValueError as exc:\n"
+    "        return type(exc).__name__\n"
+    "def plain(errors):\n"
+    "    with open(reg, encoding='utf-8', errors=errors) as fh:\n"
+    "        return fh.read()\n"
+    "out = [refusal(h._orch_read_checked, fifo), refusal(h._orch_read_checked, dirp),\n"
+    "       refusal(h._orch_read_checked, '/dev/null'), refusal(h._orch_write_checked, fifo, b'x', append=True),\n"
+    "       refusal(h._orch_write_checked, dirp, b'x')]\n"
+    "reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)\n"
+    "out.append(refusal(h._orch_write_checked, fifo, b'x'))\n"
+    "out.append(os.read(reader, 16).decode())\n"
+    "os.close(reader)\n"
+    "with open(reg, 'wb') as fh:\n"
+    "    fh.write(b'a\\r\\nb\\rc\\n\\r\\r\\nd\\xff')\n"
+    "mine = lambda errors: h._orch_read_checked(reg, errors=errors)\n"
+    "out.append([text(mine, e) == text(plain, e) for e in ('strict', 'replace')] + [text(mine, 'replace')])\n"
+    "h._ORCH_STATE_MAX_BYTES = 8\n"
+    "with open(reg, 'wb') as fh:\n"
+    "    fh.write(b'12345678')\n"
+    "at = refusal(h._orch_read_checked, reg)\n"
+    "with open(reg, 'ab') as fh:\n"
+    "    fh.write(b'9')\n"
+    "out.append([at, refusal(h._orch_read_checked, reg)])\n"
+    "print(json.dumps(out), flush=True)\n")
+
+# One hook call per row, as _PLAIN_OPEN_HOOK_CHILD, with three seams per row: env entries set first; a stat or lstat
+# of any of the names reporting the stand-in regular file instead, so the planted node reads as regular at a check
+# made before the open (the swap of an lstat-then-open reader, landed right after its lstat); and swap, a (path,
+# kind) pair that replaces the node at path by a FIFO or a directory right after the snapshot's status probe (the
+# git status run through aiqt_hooks._recovery_git), so git status has read the real index before the snapshot copies
+# it.
+_PLAIN_OPEN_SWAP_CHILD = (
+    "import json, os, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks\n"
+    "real_stat, real_lstat, real_git = os.stat, os.lstat, aiqt_hooks._recovery_git\n"
+    "def liar(real, names, standin):\n"
+    "    return lambda p, *a, **k: real(standin) if names and p in names else real(p, *a, **k)\n"
+    "def swapper(path, kind):\n"
+    "    def git(repo, args, *a, **k):\n"
+    "        out = real_git(repo, args, *a, **k)\n"
+    "        if 'status' in args:\n"
+    "            os.unlink(path)\n"
+    "            (os.mkfifo if kind == 'fifo' else os.mkdir)(path)\n"
+    "        return out\n"
+    "    return git\n"
+    "for name, payload, env, names, standin, swap in json.loads(sys.argv[2]):\n"
+    "    os.environ.update(env)\n"
+    "    aiqt_hooks._recovery_git = swapper(*swap) if swap else real_git\n"
+    "    os.stat, os.lstat = liar(real_stat, names, standin), liar(real_lstat, names, standin)\n"
+    "    try:\n"
+    "        result = getattr(aiqt_hooks, name)(payload)\n"
+    "    finally:\n"
+    "        os.stat, os.lstat = real_stat, real_lstat\n"
+    "    print(json.dumps(result), flush=True)\n")
+
+# One dispatcher run per row: aiqt_hooks.main() with the mode and the payload on stdin, as the platform runs a hook,
+# so a PreToolUse mode runs under its deadline and a row that blocks reads as exit 2; env entries are set first, and
+# each row prints [exit status, the stdout decision object or None, the stderr text], the shape of a handler result.
+_PLAIN_OPEN_MAIN_CHILD = (
+    "import io, json, os, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks\n"
+    "for mode, payload, env in json.loads(sys.argv[2]):\n"
+    "    os.environ.update(env)\n"
+    "    out, err = io.StringIO(), io.StringIO()\n"
+    "    sys.stdin, sys.stdout, sys.stderr = io.StringIO(json.dumps(payload)), out, err\n"
+    "    try:\n"
+    "        code = aiqt_hooks.main([mode])\n"
+    "    finally:\n"
+    "        sys.stdin, sys.stdout, sys.stderr = sys.__stdin__, sys.__stdout__, sys.__stderr__\n"
+    "    decision = json.loads(out.getvalue()) if out.getvalue().strip() else None\n"
+    "    print(json.dumps([code, decision, err.getvalue()]), flush=True)\n")
+
+
+def _plain_open_child(source, argv_tail, rows, env=None):
+    """Run source in a child interpreter (-I -B) with the hooks directory as its first argument and return its first
+    rows stdout lines parsed as JSON, padded for each row it never printed with 'child timed out' (after 30 seconds)
+    or its exit status and stderr tail, so a call that blocks fails its row instead of hanging the suite. env, when
+    given, is the child's whole environment (else it inherits this one)."""
+    hooks = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
+    try:
+        p = subprocess.run([sys.executable, "-I", "-B", "-c", source, hooks] + argv_tail,
+                           capture_output=True, text=True, timeout=30, env=env)
+        out, missing = p.stdout, "child exit {}: {}".format(p.returncode, p.stderr.strip()[-200:])
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        missing = "child timed out"
+    got = []
+    for line in out.splitlines()[:rows]:
+        try:
+            got.append(json.loads(line))
+        except ValueError:
+            got.append("unparsed child line: {}".format(line[:200]))
+    return got + [missing] * (rows - len(got))
+
+
+def _plain_open_place(path, kind, content):
+    """Put a regular file holding content (kind 'regular'), a FIFO with no peer ('fifo') or an empty directory
+    ('dir') at path, in place of whatever was there."""
+    if os.path.isdir(str(path)) and not os.path.islink(str(path)):
+        shutil.rmtree(str(path))
+    elif os.path.lexists(str(path)):
+        os.unlink(str(path))
+    if kind == "regular":
+        Path(path).write_text(content, encoding="utf-8")
+    elif kind == "fifo":
+        os.mkfifo(str(path))
+    else:
+        os.mkdir(str(path))
+
+
+def _plainopen_cases(tmp):
+    """The checked open of paths the guarded actor can create or replace: the source probe and its flips, the
+    helper's own refusals, and one vector per class of path (see the section comment above _PLAIN_OPEN_ALLOWED)."""
+    hooks_src = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    check("plainopen/source-probe-no-plain-open-outside-the-allowlist", _plain_open_findings(hooks_src), [])
+
+    def _mutant(old, new):
+        # the probe over a copy of the source with one substitution, which must apply exactly once
+        if hooks_src.count(old) != 1:
+            return "the substitution does not apply exactly once"
+        return [row if row[0] == "allowlist count" else (row[0],) + row[2:]
+                for row in _plain_open_findings(hooks_src.replace(old, new))]
+    ledger_write = "        _orch_write_checked(path, (json.dumps(record) + \"\\n\").encode(\"utf-8\"), append=True)\n"
+    # the flips: two converted sites reverted to their plain open (the turn-state read inside an orchestration
+    # function, the recovery-ledger append outside one), the allowlisted create's mode changed, O_NONBLOCK dropped
+    # from an allowlisted descriptor reader, and the index copy's open given the index path in place of the checked
+    # descriptor, so each reverted site is named and each changed site is named with the allowlist's exact count short
+    check("plainopen/source-probe-red-on-a-reverted-site-and-a-changed-allowlisted-open",
+          (_mutant("        data = json.loads(_orch_read_checked(path))\n"
+                   "        return data if isinstance(data, dict) else None\n",
+                   "        with open(path, \"r\", encoding=\"utf-8\") as fh:\n"
+                   "            data = json.load(fh)\n"
+                   "        return data if isinstance(data, dict) else None\n"),
+           _mutant(ledger_write,
+                   "        with open(path, \"a\", encoding=\"utf-8\") as fh:\n"
+                   "            fh.write(json.dumps(record) + \"\\n\")\n"),
+           _mutant('with open(tmp, "x", encoding="utf-8") as fh:', 'with open(tmp, "w", encoding="utf-8") as fh:'),
+           _mutant('fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))',
+                   'fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))'),
+           _mutant('with open(_orch_open_checked(real_index, os.O_RDONLY), "rb") as src',
+                   'with open(real_index, "rb") as src')),
+          ([("_orch_turn_state", "open", "r")],
+           [("_write_recovery_ledger", "open", "a")],
+           [("_orch_barrier_write", "open", "w"), ("allowlist count", "_orch_barrier_write", "open", "x", 0)],
+           [("_orch_barrier_read", "os.open", "O_CLOEXEC|O_RDONLY"),
+            ("allowlist count", "_orch_barrier_read", "os.open", "O_CLOEXEC|O_NONBLOCK|O_RDONLY", 0)],
+           [("_take_snapshot", "open", "rb"),
+            ("allowlist count", "_take_snapshot", "open(_orch_open_checked)", "rb", 0)]))
+    # each spelling that reaches open without calling it by that name, added once: a module-level alias of open, a
+    # reference to os.open and to io.open, a from-import of open under another name, a getattr naming open, and a
+    # Path.touch, each named where it stands
+    check("plainopen/source-probe-red-on-an-open-reached-without-calling-it-by-name",
+          (_mutant("_ORCH_STATE_MAX_BYTES = 64 << 20  #", "_fopen = open\n_ORCH_STATE_MAX_BYTES = 64 << 20  #"),
+           _mutant(ledger_write, "        _osopen = os.open\n" + ledger_write),
+           _mutant(ledger_write, "        _ioopen = io.open\n" + ledger_write),
+           _mutant(ledger_write, "        from os import open as _osopen\n" + ledger_write),
+           _mutant(ledger_write, "        getattr(os, \"open\")(path, os.O_WRONLY | os.O_APPEND)\n" + ledger_write),
+           _mutant(ledger_write, "        pathlib.Path(path).touch()\n" + ledger_write)),
+          ([("<module>", "open (not called)", "")],
+           [("_write_recovery_ledger", "os.open (not called)", "")],
+           [("_write_recovery_ledger", "io.open (not called)", "")],
+           [("_write_recovery_ledger", "from os import open", "_osopen")],
+           [("_write_recovery_ledger", 'getattr(os, "open")', "")],
+           [("_write_recovery_ledger", ".touch", "")]))
+    helper = tmp / "plainopen-helper"
+    helper.mkdir()
+    check("plainopen/helper-refuses-each-non-regular-node-promptly-and-reads-as-text-mode-open",
+          _plain_open_child(_PLAIN_OPEN_HELPER_CHILD, [str(helper)], 1),
+          [["OSError:not-regular", "IsADirectoryError", "OSError:not-regular", "OSError:ENXIO", "IsADirectoryError",
+            "OSError:not-regular", "", [True, True, "a\nb\nc\n\n\nd�"], ["opened", "OSError:bound"]]])
+
+    def _set_reg(fx, **changes):
+        regp = fx.root / ".aiqt" / "orchestration.local.json"
+        reg = json.loads(regp.read_text(encoding="utf-8"))
+        reg.update(changes)
+        regp.write_text(json.dumps(reg), encoding="utf-8")
+
+    stop = lambda fx: ["orch_stop_guard", fx.payload("Stop")]
+    resume = lambda fx: ["orch_resume_audit", fx.payload("SessionStart")]
+
+    # Each setup arranges one fixture and returns (the path the hook opens, its regular content, the call).
+    def pending(fx):
+        fx.set_items([item("PO-1", blocker=dict(kind="human-decision", ref="PD-7"))])
+        return fx.pending, "| PD-7 | 2026-01-01 | which licence | RAISED |\n", stop(fx)
+
+    def handoff(fx):
+        return fx.handoff, "Handoff notes\n", resume(fx)
+
+    def mistakes(fx):
+        _set_reg(fx, mistakes_register=str(fx.root / "mistakes.jsonl"))
+        return fx.root / "mistakes.jsonl", "", resume(fx)
+
+    def lease(fx):
+        _set_reg(fx, lease=dict(path=str(fx.lease), max_age_hours=24, holder_is_session_id=True))
+        fx.set_items([item("PO-4")])
+        return fx.lease, "holder: s1\n", stop(fx)
+
+    def turn_state(fx):
+        fx.set_items([item("PO-5")])
+        return fx.state / "turn-state.json", "{}", stop(fx)
+
+    def checkpoint(fx):
+        fx.set_items([item("PO-6", state="proposed")])
+        return (fx.state / "backlog-checkpoint.json",
+                json.dumps(dict(version=1, ts=now_iso(0), ids={"PO-6": "proposed"})), stop(fx))
+
+    def ledger_read(fx):
+        fx.set_items([item("PO-7", blocker=dict(kind="tracked-task", ref="T-9"))])
+        return (fx.state / "dispatch-ledger.jsonl", json.dumps(dict(ts=now_iso(1), event="launch", task_id="T-9",
+                                                                    tool="Bash", wake=True)) + "\n", stop(fx))
+
+    def ledger_append(fx):
+        return fx.state / "dispatch-ledger.jsonl", "", [
+            "orch_dispatch_ledger", fx.payload("PostToolUse", "Bash", dict(command="sleep 1", run_in_background=True),
+                                               extra=dict(tool_response=dict(task_id="po-8")))]
+
+    def events(fx):
+        fx.set_items([item("PO-9")])
+        return fx.state / "guard-events.jsonl", "", stop(fx)
+
+    def spoof_write(fx):
+        fx.set_items([item("PO-10")])
+        (fx.state / "ESCAPE-ALLOW-YIELD").write_text("operator\n", encoding="utf-8")  # actor-owned: a spoof
+        return fx.state / "escape-spoof.json", "{}", stop(fx)
+
+    def asks(fx):
+        fx.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
+        return fx.state / "pending-asks.jsonl", "", [
+            "orch_ask_guard", fx.payload("PreToolUse", "AskUserQuestion", dict(questions=[]))]
+
+    def surfaced(fx):
+        (fx.state / "forced-exit.jsonl").write_text(json.dumps(dict(
+            ts=now_iso(0), event="Stop", key="po-k1", open_ids=["PO-12"], reason="r", enum_status="ok")) + "\n",
+            encoding="utf-8")
+        return fx.state / "forced-exit-surfaced.json", json.dumps(dict(keys=["po-k1"])), resume(fx)
+
+    def spoof_read(fx):
+        return fx.state / "escape-spoof.json", json.dumps(dict(ts="t", detail="d")), resume(fx)
+
+    unreadable = ("warn", True)
+
+    def _row(raw, channel, needle):
+        if not (isinstance(raw, list) and len(raw) == 3):
+            return raw  # a timed-out or broken child row never matches
+        code, obj, err = raw
+        hso = obj.get("hookSpecificOutput") if isinstance(obj, dict) else None
+        reason = hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else ""
+        text = ("", str(reason or err or ""), str(obj.get("systemMessage", "")) if isinstance(obj, dict) else "")
+        verdict = _verdict((code, obj, err))
+        return verdict if channel is None else (verdict, needle in text[channel])
+
+    # (check id naming the class of path, setup, channel read for the needle or None for the verdict alone, needle,
+    # expected rows for a regular file, a FIFO and a directory): each FIFO or directory row is the hook's
+    # cannot-evaluate posture, and the regular row is its flip
+    for check_id, setup, channel, needle, want in (
+            ("plainopen/declared-record-pending-decisions-fifo-and-directory-never-block", pending, None, None,
+             ("allow", "block2", "block2")),
+            ("plainopen/declared-record-handoff-fifo-and-directory-never-block", handoff, 2,
+             "declared handoff unreadable", (("allow", False), unreadable, unreadable)),
+            ("plainopen/declared-register-mistakes-fifo-and-directory-never-block", mistakes, 2,
+             "declared mistakes register fails its inline chain/shape check",
+             (("allow", False), unreadable, unreadable)),
+            ("plainopen/declared-lease-holder-fifo-and-directory-never-block", lease, None, None,
+             ("block2", "allow", "allow")),
+            ("plainopen/state-turn-state-read-fifo-and-directory-never-block", turn_state, None, None,
+             ("block2", "warn", "warn")),
+            ("plainopen/state-checkpoint-read-fifo-and-directory-never-block", checkpoint, 1, "backlog-checkpoint",
+             (("allow", False), ("block2", True), ("block2", True))),
+            ("plainopen/state-ledger-read-fifo-and-directory-never-block", ledger_read, None, None,
+             ("allow", "block2", "block2")),
+            ("plainopen/state-ledger-append-fifo-and-directory-never-block", ledger_append, 2,
+             "dispatch-ledger write failed", (("allow", False), unreadable, unreadable)),
+            ("plainopen/state-guard-events-append-fifo-and-directory-never-block", events, 1,
+             "guard-events row for this deny", (("block2", False), ("block2", True), ("block2", True))),
+            ("plainopen/state-escape-spoof-write-fifo-and-directory-never-block", spoof_write, 1,
+             "escape-spoof.json FAILED", (("block2", False), ("block2", True), ("block2", True))),
+            ("plainopen/state-pending-asks-read-fifo-and-directory-never-block", asks, 2, "could NOT be persisted",
+             (("deny", False), ("deny", True), ("deny", True))),
+            ("plainopen/state-forced-exit-surfaced-read-fifo-and-directory-never-block", surfaced, 2,
+             "surfaced-set is unreadable", (("allow", False), unreadable, unreadable)),
+            ("plainopen/state-escape-spoof-read-fifo-and-directory-never-block", spoof_read, 2,
+             "present but unreadable", (("warn", False), unreadable, unreadable))):
+        calls = []
+        for kind in ("regular", "fifo", "dir"):
+            fx = Fixture(tmp, "plainopen-{}-{}".format(setup.__name__, kind))
+            fx.state.mkdir(parents=True, exist_ok=True)
+            path, content, call = setup(fx)
+            _plain_open_place(path, kind, content)
+            calls.append(call)
+        rows = _plain_open_child(_PLAIN_OPEN_HOOK_CHILD, [json.dumps(calls)], 3)
+        check(check_id, tuple(_row(raw, channel, needle) for raw in rows), want)
+
+    # The classes outside the orchestration hooks, each run through _PLAIN_OPEN_SWAP_CHILD. Each setup arranges one
+    # fixture for one kind of node and returns (the call row, a callable read after the child for the needle or None).
+    def _swap_place(path, kind, content):
+        # the regular content at a stand-in beside path, and at path the regular file, a FIFO, a directory or a
+        # symlink to the stand-in; returns the names a stat of path goes by (as given, and with its parent resolved)
+        # and the stand-in
+        standin = Path(str(path) + ".standin")
+        standin.write_text(content, encoding="utf-8")
+        if kind == "symlink":
+            os.symlink(str(standin), str(path))
+        else:
+            _plain_open_place(path, kind, content)
+        names = [str(path), os.path.join(os.path.realpath(str(path.parent)), path.name)]
+        return names, str(standin)
+
+    def discard(fx):
+        with open(fx.root / "seed.txt", "a", encoding="utf-8") as fh:
+            fh.write("uncommitted\n")
+        return fx.payload("PreToolUse", "Bash", dict(command="git checkout -- seed.txt"))
+
+    def write(fx, rel):
+        return fx.payload("PreToolUse", "Write", dict(file_path=str(fx.root / rel), content="x"))
+
+    def ledger(fx, kind):
+        xdg = Path(str(fx.root) + "-xdg")
+        path = xdg / "aiqt-guardrails" / "recovery.jsonl"
+        path.parent.mkdir(parents=True)
+        _plain_open_place(path, kind, "")
+        return (["git_discard", discard(fx), dict(XDG_STATE_HOME=str(xdg)), None, None, None],
+                lambda: path.is_file() and not path.is_symlink() and path.stat().st_size > 0)
+
+    def index(fx, kind):
+        path = fx.root / ".git" / "index"
+        standin = Path(str(fx.root) + "-index.standin")
+        standin.write_bytes(path.read_bytes())
+        names = [str(path), os.path.join(os.path.realpath(str(path.parent)), path.name)]
+        swap = None if kind == "regular" else [names[1], kind]
+        return (["git_discard", discard(fx), dict(XDG_STATE_HOME=str(fx.root) + "-xdg"), names if swap else None,
+                 str(standin), swap], None)
+
+    def registry(fx, kind):
+        names, standin = _swap_place(fx.root / ".aiqt" / "gensrc.json", kind, json.dumps(dict(version=1, generated=[])))
+        return ["gensrc_guard", write(fx, "x.txt"), {}, names, standin, None], None
+
+    def marker(fx, kind):
+        (fx.root / ".aiqt" / "gensrc.json").write_text(json.dumps(dict(version=1, generated=[dict(
+            kind="file", target="GEN.md", sources=["gen.py"], regenerate="python3 gen.py", scope="authoring")])),
+            encoding="utf-8")
+        names, standin = _swap_place(fx.root / ".aiqt" / "authoring.toml", kind,
+                                     'format-version = 1\nrole = "pack-authoring-repository"\n')
+        return ["gensrc_guard", write(fx, "GEN.md"), {}, names, standin, None], None
+
+    def floor(fx, kind):
+        names, standin = _swap_place(fx.root / ".aiqt" / "frozen.json", kind, json.dumps(dict(version=1, frozen=[])))
+        return ["write_scope_guard", write(fx, "x.txt"), {}, names, standin, None], None
+
+    def declaration(fx, kind):
+        (fx.root / ".aiqt" / "frozen.json").write_text(json.dumps(dict(version=1, frozen=[])), encoding="utf-8")
+        names, standin = _swap_place(fx.state / "write-scope.json", kind, json.dumps(dict(
+            version=1, slice="s", worktree_root=str(fx.root), allow=["x.txt"])))
+        return ["write_scope_guard", write(fx, "x.txt"), {}, names, standin, None], None
+
+    # (check id naming the class of path, setup, the kinds of node in row order, channel read for the needle (None
+    # where the setup's own callable answers it), needle, expected rows): a FIFO, a directory or a symlink row is the
+    # hook's cannot-evaluate posture (for the ledger, the best-effort append skipped), and the regular row is its flip.
+    # The four lstat-then-open readers and the index copy meet each node only after a check that saw a regular file,
+    # as a swap there would leave them.
+    swapped = ("regular", "fifo", "dir", "symlink")
+    for check_id, setup, kinds, channel, needle, want in (
+            ("plainopen/recovery-ledger-append-fifo-and-directory-never-block", ledger, ("regular", "fifo", "dir"),
+             None, None, (("warn", True), ("warn", False), ("warn", False))),
+            ("plainopen/recovery-real-index-copy-swapped-fifo-and-directory-never-block", index,
+             ("regular", "fifo", "dir"), 1, "the snapshot could not be created",
+             (("warn", False), ("deny", True), ("deny", True))),
+            ("plainopen/gensrc-registry-read-swapped-fifo-directory-and-symlink-refused", registry, swapped, 1,
+             "is PRESENT but could not be read",
+             (("allow", False), ("deny", True), ("deny", True), ("deny", True))),
+            ("plainopen/gensrc-authoring-marker-read-swapped-fifo-directory-and-symlink-refused", marker, swapped, 1,
+             "is PRESENT but malformed", (("deny", False), ("deny", True), ("deny", True), ("deny", True))),
+            ("plainopen/write-scope-frozen-floor-read-swapped-fifo-directory-and-symlink-refused", floor, swapped, 1,
+             "the frozen floor could not be read",
+             (("allow", False), ("deny", True), ("deny", True), ("deny", True))),
+            ("plainopen/write-scope-declaration-read-swapped-fifo-directory-and-symlink-refused", declaration,
+             swapped, 1, "the write-scope declaration could not be read",
+             (("allow", False), ("deny", True), ("deny", True), ("deny", True)))):
+        calls, afters = [], []
+        for kind in kinds:
+            fx = Fixture(tmp, "plainopen-{}-{}".format(setup.__name__, kind))
+            fx.state.mkdir(parents=True, exist_ok=True)
+            call, after = setup(fx, kind)
+            calls.append(call)
+            afters.append(after)
+        rows = _plain_open_child(_PLAIN_OPEN_SWAP_CHILD, [json.dumps(calls)], len(kinds))
+        check(check_id, tuple(_row(raw, channel, needle) if after is None or not isinstance(raw, list)
+                              else (_verdict(tuple(raw)), after()) for raw, after in zip(rows, afters)), want)
+
+    # The real index already a FIFO, a directory, a symlink to a FIFO or a symlink to a copy of it before the hook
+    # runs, each row through main() (_PLAIN_OPEN_MAIN_CHILD), so the PreToolUse deadline is armed. git status opens
+    # the index in its own process with a blocking open, so only the lstat of the index before the clean probe and
+    # before the snapshot's status probe keeps a FIFO there from holding the call to that deadline (exit 2). git
+    # reports the index path with its symlinks resolved, so a symlink is judged by the node it reaches; the regular
+    # row and the symlink to a regular copy are the flips. The rows run twice, once with no GIT_* variable in the
+    # environment (the plain decision path) and once under this suite's pinned GIT_CONFIG_* variables, which the guard
+    # reads as a non-cosmetic ambient override (its ambient path); each path reaches the clean probe and the snapshot.
+    calls = []
+    for kind in ("regular", "fifo", "dir", "symlink-fifo", "symlink-regular"):
+        fx = Fixture(tmp, "plainopen-index-in-place-{}".format(kind))
+        path = fx.root / ".git" / "index"
+        if kind.startswith("symlink"):
+            target = Path(str(fx.root) + "-index.target")
+            if kind == "symlink-fifo":
+                os.mkfifo(str(target))
+            else:
+                target.write_bytes(path.read_bytes())
+            path.unlink()
+            os.symlink(str(target), str(path))
+        elif kind != "regular":
+            _plain_open_place(path, kind, "")
+        calls.append(["git_discard", discard(fx), dict(XDG_STATE_HOME=str(fx.root) + "-xdg")])
+    runs = [_plain_open_child(_PLAIN_OPEN_MAIN_CHILD, [json.dumps(calls)], len(calls), env=env)
+            for env in ({k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, None)]
+    want = (("warn", False), ("deny", True), ("deny", True), ("deny", True), ("warn", False))
+    check("plainopen/recovery-real-index-already-fifo-directory-or-symlink-to-fifo-refused-through-main",
+          tuple(tuple(_row(raw, 1, "the repository index is not a regular file") for raw in rows) for rows in runs),
+          (want, want))
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -17904,6 +18561,7 @@ def _main_isolated(report_path=None):
               set(json.loads((hsd / "forced-exit-surfaced.json").read_text(
                   encoding="utf-8")).get("keys", [])), {"k1", "k2"})
         check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
+        _plainopen_cases(tmp)
         _leasehb_cases(tmp)
         _leasehb_fix2_cases(tmp)
         _leasehb_write_integrity_cases(tmp)

@@ -8931,8 +8931,12 @@ def _tree_is_clean(repo):
     from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
     _isolate_git_env (the allowlist posture, re-applying only GIT_OPTIONAL_LOCKS after the scrub) so the
     probe reads the REAL repo at `-C <repo>` rather than a foreign preset that could redirect it to a decoy
-    clean repo and win a false ALLOW, and writes no ambient GIT_TRACE file."""
+    clean repo and win a false ALLOW, and writes no ambient GIT_TRACE file. The real index is checked first
+    (_recovery_index_fault): one that is not a regular file reads as None before git status runs, since git
+    opens the index with a blocking open and a FIFO there had held this probe to its timeout."""
     try:
+        if _recovery_index_fault(repo):
+            return None  # a non-regular real index: git status would open it, so the probe cannot evaluate
         env = _isolate_git_env(dict(os.environ))
         env["GIT_OPTIONAL_LOCKS"] = "0"
         result = subprocess.run(
@@ -9844,6 +9848,34 @@ def _recovery_toplevel(repo):
     return top
 
 
+def _recovery_index_fault(repo):
+    """None when the real index of repo (`git rev-parse --path-format=absolute --git-path index`, run through
+    _recovery_git, so every ambient GIT_* is scrubbed as for the status probes) is a regular file or is
+    absent, else the reason it is not. The check is one os.lstat, which neither opens the node nor follows
+    a symlink, made before a git child that reads the index: git opens the index with a blocking open in
+    its own process, so a FIFO there held the clean probe to its 5s timeout and then the snapshot's status
+    probe until the PreToolUse deadline failed the guard closed. A FIFO, a device or a directory there is
+    refused at once. The path git reports has its symlinks resolved (git 2.53.0 resolves the final one too,
+    a dangling one included), so a symlink at the index is judged by the node it reaches: one to a FIFO is
+    refused, one to a regular file is not, and a git that reported the link itself would have it refused,
+    the safe direction. A node swapped in after this lstat is not judged here: the checked open of the
+    snapshot copy (_take_snapshot) refuses one swapped in after the status probe read the index, and one
+    swapped in before that is opened by git itself. Raises what _recovery_git raises."""
+    ri = _recovery_git(repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], timeout=5)
+    if ri.returncode != 0:
+        return "the repository index path could not be resolved (git rev-parse --git-path index failed)"
+    try:
+        st = os.lstat(ri.stdout.strip())
+    except FileNotFoundError:
+        return None  # no index yet: git reads none, so nothing there can block it
+    except (OSError, ValueError) as exc:
+        return "the repository index could not be examined ({})".format(exc)
+    if not stat.S_ISREG(st.st_mode):
+        return ("the repository index is not a regular file (a FIFO, a device, a directory or a symlink), so "
+                "it is refused before any git child opens it")
+    return None
+
+
 def _recovery_status_entries(repo, top):
     """(classes, total_bytes) from a read-only, config-forced porcelain probe of repo: `classes` is the
     set of covered classes among {'staged','tracked','untracked'} across every changed/untracked entry,
@@ -9910,8 +9942,15 @@ def _take_snapshot(repo, top, verb):
     refs/aiqt-recovery/<utc-ts>-<pid> ref. `top` is the resolved repo TOPLEVEL (the containment anchor and
     the size-estimate root; the session cwd may be a subdir). In a NORMAL repo writes only git objects and
     that one ref; the real index, worktree, HEAD, and every branch are untouched (see the block comment above
-    _SNAPSHOTTABLE_VERBS for the repo-config residual). Returns ('ok', info) with info =
-    {ref, sha, classes, restore}, or ('fail', reason)."""
+    _SNAPSHOTTABLE_VERBS for the repo-config residual). The real index is checked first
+    (_recovery_index_fault), so one that is not a regular file fails the snapshot before the status probe
+    runs git on it. Returns ('ok', info) with info = {ref, sha, classes, restore}, or ('fail', reason)."""
+    try:
+        index_fault = _recovery_index_fault(repo)
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        return ("fail", "the repository index could not be examined ({})".format(exc))
+    if index_fault:
+        return ("fail", index_fault)
     try:
         classes, total = _recovery_status_entries(repo, top)
     except (subprocess.SubprocessError, OSError) as exc:
@@ -9946,8 +9985,15 @@ def _take_snapshot(repo, top, verb):
             return ("fail", "the repository index path could not be resolved to seed the staged snapshot "
                             "(git rev-parse --git-path index failed)")
         real_index = ri.stdout.strip()
-        if real_index and os.path.exists(real_index):
-            shutil.copyfile(real_index, tmp_index)  # else: git creates a fresh temp index on add --all
+        if real_index and os.path.exists(real_index):  # else: git creates a fresh temp index on add --all
+            # The real index is a path the guarded actor can replace. The lstat at the top refused one that
+            # was not a regular file before the status probe; this open, by _orch_open_checked, refuses a
+            # FIFO, a device or a directory swapped in since, after the status probe read the index, at once.
+            # shutil.copyfile refused a FIFO only at its own stat, so one swapped in after that stat blocked
+            # its open until the PreToolUse deadline failed the guard closed. The temp index is an exclusive
+            # create in the fresh tmpdir.
+            with open(_orch_open_checked(real_index, os.O_RDONLY), "rb") as src, open(tmp_index, "xb") as dst:
+                shutil.copyfileobj(src, dst)
         env = {"GIT_INDEX_FILE": tmp_index}
         # capture the PURE STAGED (index) tree NOW, BEFORE `git add --all` overlays the
         # worktree over the seeded index. A blob staged but differing from - or absent from - the worktree is
@@ -10067,7 +10113,10 @@ def _write_recovery_ledger(repo, top, verb, info):
     an OSError) is swallowed to False (the ref itself is the recovery point; the ledger is a convenience
     trace read later), so a ledger fault never changes the guard's decision. The containment check anchors on
     `top` (the resolved toplevel), so a per-user path landing inside the worktree ABOVE the session cwd is
-    still refused. Returns True on a successful write, else False."""
+    still refused. The append goes through _orch_write_checked, so a FIFO, a device or a directory at the
+    ledger path (a per-user path the guarded actor can replace) fails it at once, where a plain open() of a
+    FIFO with no reader held the hook until the PreToolUse deadline failed the guard closed. Returns True on
+    a successful write, else False."""
     path = _recovery_ledger_path()
     if not path:
         return False
@@ -10078,8 +10127,7 @@ def _write_recovery_ledger(repo, top, verb, info):
               "classes": info["classes"], "restore": info["restore"]}
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
+        _orch_write_checked(path, (json.dumps(record) + "\n").encode("utf-8"), append=True)
         return True
     except Exception:
         return False
@@ -18860,28 +18908,26 @@ def _load_gensrc_registry(root):
     guard cannot fully read is BAD (it cannot prove no-match). Unknown extra keys within version 1 are
     tolerated: the version field pins the schema, and strictness on additions would break a
     forward-compatibly authored registry. "scope" is the one optional key this guard reads; a guard older
-    than it tolerated the key as unknown, so it honours an authoring-only entry in every tree. This loader
-    is BEST-EFFORT against the ACCIDENTAL case, not a hardened TOCTOU check: it rejects a STATIONARY
-    non-regular registry and fails a delete race safe to
-    BAD, but a registry concurrently SWAPPED to a different file type in the lstat-to-open window is a
-    disclosed residual (see the comment below and the control residue), a sibling of the hard-link,
+    than it tolerated the key as unknown, so it honours an authoring-only entry in every tree. A registry
+    SWAPPED to another file type in the lstat-to-open window is BAD at once too: the open is no-follow and
+    non-blocking and checks the type on the opened descriptor (_orch_read_bytes_checked), so the swapped-in
+    symlink is never followed and the FIFO never blocks the hook. What stays outside this loader (see the
+    control residue) is which regular file holds the name at the open, a sibling of the hard-link,
     case-insensitive-filesystem, and NFC/NFD aliases."""
     path = os.path.join(root, _GENSRC_REGISTRY_REL)
     # A generated-artefact registry must be a trusted REGULAR file. Anything that is NOT a regular file (a
     # symlink dangling or redirecting, a FIFO, a directory, a socket, a device) is BAD: a symlink could
     # make a foreign or nonexistent target read as this repo's registry, and a FIFO at the path would block
-    # the open until the hook timeout. os.lstat is probed BEFORE the open: it does NOT follow a symlink and
-    # does NOT block on a FIFO, so a STATIONARY non-regular registry (a symlink, FIFO, directory, ...) is
-    # rejected as non-regular. A FileNotFoundError from lstat is genuine absence (a non-symlink ENOENT) ->
-    # inert absent (the ONLY inert-absent path); any other lstat OSError is BAD; a path that resolves to
+    # a plain open until the hook timeout. os.lstat is probed BEFORE the open: it does NOT follow a symlink
+    # and does NOT block on a FIFO, so a STATIONARY non-regular registry (a symlink, FIFO, directory, ...)
+    # is rejected as non-regular. A FileNotFoundError from lstat is genuine absence (a non-symlink ENOENT)
+    # -> inert absent (the ONLY inert-absent path); any other lstat OSError is BAD; a path that resolves to
     # something other than a regular file is BAD; and an open-time disappearance (a delete race in the
-    # lstat->open window) fails safe to BAD, handled at the open below. This read is BEST-EFFORT against
-    # the ACCIDENTAL case, not a hardened check: a registry concurrently SWAPPED to a different type in the
-    # lstat->open window (the lstat sees a regular file, the open then binds a substituted symlink/FIFO) is
-    # a DISCLOSED residual OUTSIDE the accidental-case scope - a sibling of the hard-link, case-insensitive
-    # -filesystem, and NFC/NFD normalization residuals. It requires a concurrent writer inside the repo,
-    # who could equally just author the registry, so O_NOFOLLOW/fstat is deliberately NOT added; the
-    # disclosure is the honest resolution.
+    # lstat->open window) fails safe to BAD, handled at the open below. The open itself is O_NOFOLLOW,
+    # non-blocking and fstat-checked (_orch_read_bytes_checked), so a registry concurrently SWAPPED to a
+    # different type in the lstat->open window (the lstat sees a regular file, the open then meets a
+    # substituted symlink, FIFO, directory or device) is BAD at once as well, where the plain open() this
+    # replaces followed the symlink and blocked on the FIFO until the PreToolUse deadline failed it closed.
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -18895,8 +18941,7 @@ def _load_gensrc_registry(root):
         # BINARY read so the size bound is on BYTES, not characters: read one byte past the cap, and if the
         # file exceeds the cap treat it as malformed (a SECA resource bound a multibyte-oversize file must
         # not slip through a char-count read). Decode is done explicitly below so a decode fault is BAD.
-        with open(path, "rb") as handle:
-            raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
+        raw_bytes = _orch_read_bytes_checked(path, _GENSRC_MAX_BYTES, os.O_NOFOLLOW)
     except FileNotFoundError:
         # The lstat above saw a regular file, but it is gone at open: a concurrent DELETE race in the
         # lstat->open window. This is BAD (gensrc_guard denies it fail-closed), never absent: absence is ONLY
@@ -18981,8 +19026,8 @@ def _gensrc_authoring_marker(root):
     is probed BEFORE the open, so a STATIONARY FIFO never blocks), a marker gone at the open (a delete race
     in the lstat->open window, never read as absent), an unreadable, oversized (over _GENSRC_MAX_BYTES, the
     same bound gen_hooks applies), non-UTF-8, unparseable or too deeply nested file, or any other content. A
-    marker SWAPPED to another type in the lstat->open window is the same disclosed residual as the registry
-    read."""
+    marker SWAPPED to another type in the lstat->open window is BAD at once, as for the registry read: the
+    open is no-follow, non-blocking and fstat-checked (_orch_read_bytes_checked)."""
     path = os.path.join(root, _GENSRC_MARKER_REL)
     try:
         st = os.lstat(path)
@@ -18993,8 +19038,7 @@ def _gensrc_authoring_marker(root):
     if not stat.S_ISREG(st.st_mode):
         return ("bad", "the authoring marker is not a regular file (a symlink, FIFO, directory, ...)")
     try:
-        with open(path, "rb") as handle:
-            raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
+        raw_bytes = _orch_read_bytes_checked(path, _GENSRC_MAX_BYTES, os.O_NOFOLLOW)
     except FileNotFoundError:
         return ("bad", "the authoring marker disappeared during the read (a concurrent change); failing safe")
     except OSError as exc:
@@ -21238,7 +21282,8 @@ def _orch_registry(root, nofollow=False, files=_ORCH_REGISTRY_FILES):
     bad, never absent: an lstat FAULT (a permission or I/O error), a read/parse error, a file that is not a
     regular file, or a non-version-1 object all fail closed rather than silently disarming a caller that
     locates confinement through it. The file is opened non-blocking and its type is checked on the open
-    descriptor, so a FIFO or device registry is bad at once rather than blocking the hook; with nofollow a
+    descriptor, so a FIFO or device registry is bad at once rather than blocking the hook. Without nofollow
+    the open follows a final symlink, the fstat judging the node the link reaches; with nofollow a
     symlinked registry is bad too (the review dispatch pin reads it that way). The
     machine-local .aiqt/orchestration.local.json takes WHOLE-FILE precedence over the committed
     .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous. files narrows the read
@@ -21328,24 +21373,122 @@ def _orch_state_dir_for_root(root):
     return _state_dir_from_registry(root, reg if status == "ok" else None)
 
 
+_ORCH_STATE_MAX_BYTES = 64 << 20  # _orch_read_checked refuses a declared or state file larger than this
+
+
+def _orch_open_checked(path, flags, mode=0o666):
+    """The ONE open of a path the guarded actor can create or replace that has no descriptor reader of its
+    own: a declared or state path in the orchestration hooks (a registry-declared record, register or
+    lease, or a file in the state directory), the generated-artefact registry and the authoring marker,
+    the write-scope declaration and the frozen floor (those four read with O_NOFOLLOW added), the
+    recovery ledger and the real git index a recovery snapshot copies. It is also the open of every
+    _orch_write_checked write and append (the state files, the guard-events rows and the recovery ledger
+    among them). Without O_NOFOLLOW in flags the open follows a final symlink, the fstat judging the node
+    the link reaches, so a write through _orch_write_checked, which passes O_CREAT and no O_NOFOLLOW, at a
+    dangling symlink creates the link's target and writes there, as the plain open() it replaced did; that
+    behaviour is kept, not changed here. For a read (O_RDONLY) or a write
+    (O_WRONLY | O_CREAT, with O_APPEND for an append), in the _orch_mode_read pattern: os.open(path, flags |
+    O_NONBLOCK | O_NOCTTY | O_CLOEXEC, mode), so a FIFO with no writer opens for a read at once instead of
+    waiting for one and a FIFO with no reader fails a write open at once (ENXIO); the descriptor is then
+    fstat'ed and anything that is not a regular file (a FIFO, a device, a directory) is closed and refused
+    before any read or write. Returns the descriptor of a regular file, which the caller closes. Every
+    refusal raises an OSError: FileNotFoundError where the open reports not found, IsADirectoryError for a
+    directory (as open() raised for one), and a plain OSError naming the path for any other node that is
+    not a regular file (a socket fails at the open itself, and with O_NOFOLLOW so does a symlink), so each
+    caller's existing OSError branch takes the refusal in that hook's documented cannot-evaluate direction;
+    a path holding a NUL character raises ValueError, as open() does. A plain open() here waited on a FIFO
+    with no peer: a Stop, TeammateIdle, SessionStart, UserPromptSubmit or PostToolUse hook, which runs with
+    no deadline, until the platform's hook timeout ended it (whether the platform then lets the event
+    proceed is unverified), and a PreToolUse hook for its whole deadline before failing closed.
+    tools/selftest_orch_hooks.py's source probe fails on any open of a path anywhere in this file outside
+    its reasoned allowlist. Not bounded here: the path lookup can stall on a hung mount, and what opening a
+    device node does is up to its driver; the hook timeout bounds each such stall."""
+    fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                 | getattr(os, "O_CLOEXEC", 0), mode)
+    try:
+        kind = os.fstat(fd).st_mode
+    except BaseException:
+        os.close(fd)
+        raise
+    if stat.S_ISREG(kind):
+        return fd
+    os.close(fd)
+    if stat.S_ISDIR(kind):
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
+    raise OSError("not a regular file (a FIFO or a device): {!r}".format(path))
+
+
+def _orch_read_checked(path, errors="strict"):
+    """The text of the regular file at path, opened by _orch_open_checked (see there) and read through
+    that descriptor, at most _ORCH_STATE_MAX_BYTES + 1 bytes in all (a longer file raises OSError), then
+    decoded as UTF-8 with errors (a strict decode failure raises UnicodeDecodeError, a ValueError) with its
+    line endings translated as open() in text mode translates them (\\r\\n and \\r read as \\n), so each
+    caller parses the text open(path, encoding="utf-8", errors=errors).read() gave it before. The
+    descriptor is closed once on every path."""
+    blob = _orch_read_bytes_checked(path, _ORCH_STATE_MAX_BYTES)
+    if len(blob) > _ORCH_STATE_MAX_BYTES:
+        raise OSError("larger than the {}-byte bound: {!r}".format(_ORCH_STATE_MAX_BYTES, path))
+    return blob.decode("utf-8", errors).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _orch_read_bytes_checked(path, limit, flags=0):
+    """At most limit + 1 bytes of the regular file at path, opened by _orch_open_checked(path, O_RDONLY |
+    flags) (see there) and read through that descriptor, so the caller tells a file longer than limit by
+    the length it gets. Raises what _orch_open_checked raises, and OSError on a failed read; the
+    descriptor is closed once on every path."""
+    fd = _orch_open_checked(path, os.O_RDONLY | flags)
+    chunks, total = [], 0
+    try:
+        while total <= limit:
+            chunk = os.read(fd, min(1 << 20, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _orch_write_checked(path, blob, append=False):
+    """Write the bytes blob to the regular file at path through a descriptor _orch_open_checked opened
+    (O_WRONLY | O_CREAT, with O_APPEND for an append), so a FIFO, a device or a directory there is refused
+    before any byte is written and a FIFO with no reader never blocks the open. A missing file is created
+    with mode 0o666 less the umask, as open() created it (the O_CREAT can leave that empty file even where
+    the write then fails); a write that is not an append truncates the file only after the regular-file
+    check (ftruncate on the descriptor, never O_TRUNC at the open), then writes blob whole. Raises OSError
+    on every failure; the descriptor is closed once on every path."""
+    fd = _orch_open_checked(path, os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else 0))
+    try:
+        if not append:
+            os.ftruncate(fd, 0)
+        view = memoryview(blob)
+        while view:
+            view = view[os.write(fd, view):]
+    finally:
+        os.close(fd)
+
+
 def _orch_append_jsonl(path, obj):
-    """Best-effort JSONL append (parents created). Returns True on success; the CALLER decides what a
-    failed write means (a recorder surfaces it; a guard never changes its decision over it)."""
+    """Best-effort JSONL append (parents created) through _orch_write_checked, so a FIFO, a device or a
+    directory at path fails the append at once rather than blocking the hook. Returns True on success; the
+    CALLER decides what a failed write means (a recorder surfaces it; a guard never changes its decision
+    over it)."""
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(obj, sort_keys=True) + "\n")
+        _orch_write_checked(path, (json.dumps(obj, sort_keys=True) + "\n").encode("utf-8"), append=True)
         return True
     except (OSError, ValueError):
         return False
 
 
 def _orch_read_jsonl(path):
-    """Read a JSONL file: (rows, bad_line_count), or (None, 0) when the file is absent or unreadable,
-    so a caller can distinguish nothing-recorded from cannot-read (chkfcl)."""
+    """Read a JSONL file through _orch_read_checked: (rows, bad_line_count), ([], 0) when the file is
+    absent, or (None, 0) when it is unreadable (a FIFO, a device or a directory, or one larger than
+    _ORCH_STATE_MAX_BYTES, included, each refused without blocking), so a caller can distinguish
+    nothing-recorded from cannot-read (chkfcl)."""
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+        lines = _orch_read_checked(path).splitlines()
     except FileNotFoundError:
         return ([], 0)
     except (OSError, ValueError):
@@ -21367,12 +21510,13 @@ def _orch_read_jsonl(path):
 
 
 def _orch_write_json(path, obj):
-    """Best-effort JSON overwrite (parents created). Returns True on success; the CALLER decides what
-    a failed write means (a recorder surfaces it; a guard never changes its decision over it)."""
+    """Best-effort JSON overwrite (parents created) through _orch_write_checked, so a FIFO, a device or a
+    directory at path fails the write at once rather than blocking the hook. Returns True on success; the
+    CALLER decides what a failed write means (a recorder surfaces it; a guard never changes its decision
+    over it)."""
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(obj, fh, sort_keys=True)
+        _orch_write_checked(path, json.dumps(obj, sort_keys=True).encode("utf-8"))
         return True
     except (OSError, ValueError):
         return False
@@ -21511,14 +21655,15 @@ def _orch_warn_tail(*warns):
 def _orch_turn_state(root):
     """The turn-state dict, or None on an unreadable/malformed file (the loop guard treats None as
     bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies).
+    The file is read through _orch_read_checked, so a FIFO, a device or a directory there reads as
+    unreadable (None) at once, never blocking the hook.
     In a state directory the hook cannot search, os.path.lexists reports False (EACCES), so the file reads
     as absent and the result is {} (a fresh turn-state): a counter recorded there is not seen."""
     path = os.path.join(_orch_state_dir_for_root(root), "turn-state.json")
     try:
         if not os.path.lexists(path):
             return {}
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        data = json.loads(_orch_read_checked(path))
         return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
@@ -21571,11 +21716,12 @@ def _orch_mode_read(path):
     The path must encode as strict UTF-8, before any open: a path that is not (a lone surrogate, which is
     also how a surrogate-escaped non-UTF-8 name arrives) is refused as bad, fail-closed, even where the OS
     could open it, and so is a path with a NUL character. The open is os.open(O_RDONLY | O_NONBLOCK |
-    O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting. A socket is refused
-    at that open (it reports ENXIO on Linux, so the reason is the open's OSError), and so is any node the
-    open itself fails on (a regular file without read permission, /dev/tty with no controlling terminal);
-    after a successful open the descriptor is fstat'ed and anything not a regular file (a FIFO, a device such
-    as /dev/zero, a directory) is bad without a read. The read asks for at most
+    O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting; it carries no
+    O_NOFOLLOW, so it follows a final symlink, the fstat below judging the node the link reaches. A socket
+    is refused at that open (it reports ENXIO on Linux, so the reason is the open's OSError), and so is any
+    node the open itself fails on (a regular file without read permission, /dev/tty with no controlling
+    terminal); after a successful open the descriptor is fstat'ed and anything not a regular file (a FIFO,
+    a device such as /dev/zero, a directory) is bad without a read. The read asks for at most
     _ORCH_MODE_MAX_BYTES + 1 bytes in all and a longer file is bad. Any exception on the way (an OSError,
     a decode error, any other) is bad, named by its type, and the descriptor is closed exactly once. Not
     bounded here: the path lookup can stall on a hung mount, a regular file on a stalled filesystem can
@@ -21778,11 +21924,12 @@ def _orch_scope_live(reg, root, session_id=None):
                         # STRICT opt-in holder scoping: the caller must carry a session id AND the lease
                         # must be readable AND name that id as a whole token; anything else is a NON-holder
                         # (a co-located worker or an id-less session never inherits the global backlog).
+                        # The read goes through _orch_read_checked, so a lease swapped for a FIFO, a device
+                        # or a directory after the stat is a NON-holder at once, never a blocked hook.
                         if not (isinstance(session_id, str) and session_id):
                             return False
                         try:
-                            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                                held = fh.read()
+                            held = _orch_read_checked(path, errors="replace")
                         except OSError:
                             return False
                         if not _orch_token_present(session_id, held):
@@ -22020,7 +22167,8 @@ def _orch_pending_haystack(reg, root):
     """The human-decision proof surface: the DECLARED pending-decisions record ONLY. The machine-written
     pending-asks keys are NOT decision rows and are excluded (an ask key session::tool_use could otherwise
     forge a row via the id-colon match). Returns None when no surface is declared or it is
-    unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate) rather
+    unreadable (a FIFO, a device or a directory included, refused at once by _orch_read_checked), so an
+    undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate) rather
     than demoting it to a definite actionable; FIX 1 DENIES the stop on that cannot-evaluate below the loop
     bound (ignorance refuses the wind-down), the operator escape releasing a genuine block."""
     rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
@@ -22028,8 +22176,7 @@ def _orch_pending_haystack(reg, root):
     if not declared:
         return None
     try:
-        with open(declared, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read()
+        return _orch_read_checked(declared, errors="replace")
     except OSError:
         return None
 
@@ -22057,8 +22204,7 @@ def _orch_attestation_refs(reg, root, staleness):
         return None
     path = os.path.join(_orch_state_dir_for_root(root), "attestations-validated.json")
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            snap = json.load(fh)
+        snap = json.loads(_orch_read_checked(path))
     except (OSError, ValueError):
         return "unreadable"
     if not isinstance(snap, dict) or snap.get("status") != "ok" \
@@ -22441,8 +22587,8 @@ def _orch_checkpoint_union(root, payload, record=True, warnings=None):
     present = os.path.lexists(path)
     try:
         if present:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            # read through _orch_read_checked: a FIFO, a device or a directory here is unreadable at once
+            data = json.loads(_orch_read_checked(path))
             ids = data.get("ids") if isinstance(data, dict) else None
             if isinstance(ids, dict) and all(isinstance(v, str) for v in ids.values()):
                 prior = ids
@@ -31276,14 +31422,15 @@ def _orch_resume_audit_findings(status, reg, root):
 
 def _orch_resume_probes(reg, root):
     """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
-    finding strings; empty means the recorded state matches observed reality."""
+    finding strings; empty means the recorded state matches observed reality. Each declared record is
+    read through _orch_read_checked, so a FIFO, a device or a directory at a declared path is an
+    unreadable cannot-evaluate finding at once, never a blocked SessionStart."""
     findings = []
     rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
     handoff_path = _orch_path(root, rec.get("handoff"))
     if handoff_path:
         try:
-            with open(handoff_path, "r", encoding="utf-8", errors="replace") as fh:
-                handoff = fh.read()
+            handoff = _orch_read_checked(handoff_path, errors="replace")
         except OSError as exc:
             findings.append("declared handoff unreadable ({}): cannot-evaluate, the barrier holds"
                             .format(exc))
@@ -31310,8 +31457,7 @@ def _orch_resume_probes(reg, root):
         path = _orch_path(root, rec.get(key))
         if path:
             try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    fh.read()
+                _orch_read_checked(path, errors="replace")
             except OSError as exc:
                 findings.append("declared record surface {} unreadable ({}): cannot-evaluate"
                                 .format(key, exc))
@@ -31355,8 +31501,7 @@ def _orch_merge_pending_findings(reg, root):
     if not path:
         return []
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
+        text = _orch_read_checked(path, errors="replace")  # a FIFO, a device or a directory: unreadable at once
     except OSError as exc:
         return ["declared findings register unreadable ({}): cannot-evaluate".format(exc)]
     prs = set()
@@ -31390,10 +31535,11 @@ def _orch_chained_rows(path, prefix):
     sequence, or id-prefix discipline, so a tampered or malformed register can never read as a
     smaller clean one. A compact inline mirror of the authoritative gate
     (tools/check_mistakes_register.py): the hooks script is standalone in adopter repos and cannot
-    import tools/, so the CI gate remains the authoritative checker and this feeds only the audit."""
+    import tools/, so the CI gate remains the authoritative checker and this feeds only the audit. The
+    register is read through _orch_read_checked, so a FIFO, a device or a directory there is unreadable
+    at once, never a blocked hook."""
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+        lines = _orch_read_checked(path).splitlines()
     except OSError as exc:
         return (None, "unreadable ({})".format(exc))
     sha = __import__("hashlib").sha256
@@ -31435,10 +31581,11 @@ def _orch_register_authority(root, path):
     anchored prefix. An actor with filesystem write ALONE can therefore APPEND rows past that prefix
     (uncommitted; git status M) and have them counted as the tip, so the git/anchor authority defends
     the register-SWAP and prefix-REWRITE classes but not an appended approved row (A2); the categorical
-    residual is closed only by an operator-owned, assistant-non-writable register at the OS layer."""
+    residual is closed only by an operator-owned, assistant-non-writable register at the OS layer. The
+    register is read through _orch_read_checked, so a FIFO, a device or a directory there is a HOLD at
+    once, never a blocked hook."""
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+        lines = _orch_read_checked(path).splitlines()
     except OSError as exc:
         return ("hold", "register unreadable ({})".format(exc), None)
     env = _isolate_git_env(dict(os.environ))
@@ -31688,8 +31835,8 @@ def _orch_forced_exit_findings(sd):
         return findings
     surfaced_path = os.path.join(sd, "forced-exit-surfaced.json")
     try:
-        with open(surfaced_path, "r", encoding="utf-8") as fh:
-            surfaced = set(json.load(fh).get("keys", []))
+        # read through _orch_read_checked: a FIFO, a device or a directory here is unreadable at once
+        surfaced = set(json.loads(_orch_read_checked(surfaced_path)).get("keys", []))
     except FileNotFoundError:
         surfaced = set()
     except (OSError, ValueError):
@@ -31728,8 +31875,8 @@ def _orch_pending_artefact_findings(root):
     path = os.path.join(sd, "escape-spoof.json")
     try:
         if os.path.lexists(path):
-            with open(path, "r", encoding="utf-8") as fh:
-                rec = json.load(fh)
+            # read through _orch_read_checked: a FIFO, a device or a directory here is unreadable at once
+            rec = json.loads(_orch_read_checked(path))
             rec = rec if isinstance(rec, dict) else {}
             findings.append("an actor-owned or malformed escape sentinel was ignored at {} ({})"
                             .format(rec.get("ts", "unknown"),
@@ -31761,7 +31908,10 @@ def _orch_barrier_write(path, obj):
     the replace raises IsADirectoryError and the directory stays until someone removes it. What it writes
     always fits the reader's bound (_orch_barrier_fit): a finding list too long for it is stored as its
     first findings plus one line counting the rest, and an object that still cannot fit raises ValueError
-    before any file is created."""
+    before any file is created. Its "x" open is on the allowlist of the source probe in
+    tools/selftest_orch_hooks.py: an exclusive create of a fresh name never opens a node already there, so
+    a FIFO or a directory planted at the barrier path cannot block it (the replace puts the new file in a
+    FIFO's place)."""
     obj = _orch_barrier_fit(obj, os.path.dirname(path))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = "{}.{}.{}.tmp".format(path, os.getpid(), os.urandom(8).hex())
@@ -35229,7 +35379,10 @@ def _wrtscp_read_json_artifact(path, max_bytes):
     EVERY other fault is BAD, never absent, so an unreadable input can never read as no-coverage
     (integ-check-fails-closed-on-unreadable): a non-regular file (symlink/FIFO/directory/device), a
     stat/read error, an oversize file (byte-bounded), a non-UTF-8 decode, malformed JSON, or a non-object.
-    A delete race in the lstat->open window fails safe to BAD. Read AT DECISION TIME, never cached."""
+    A delete race in the lstat->open window fails safe to BAD, and so does a swap there to a symlink, a FIFO,
+    a directory or a device: the open is no-follow, non-blocking and fstat-checked (_orch_read_bytes_checked),
+    where a plain open() followed the symlink and blocked on the FIFO until the PreToolUse deadline failed it
+    closed. Read AT DECISION TIME, never cached."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -35239,8 +35392,7 @@ def _wrtscp_read_json_artifact(path, max_bytes):
     if not stat.S_ISREG(st.st_mode):
         return ("bad", "is not a regular file (a symlink, FIFO, directory, ...)")
     try:
-        with open(path, "rb") as handle:
-            raw_bytes = handle.read(max_bytes + 1)
+        raw_bytes = _orch_read_bytes_checked(path, max_bytes, os.O_NOFOLLOW)
     except FileNotFoundError:
         return ("bad", "disappeared during the read (a concurrent change); failing safe")
     except OSError as exc:
