@@ -3503,6 +3503,38 @@ class _Homes2SpecGate:
         return getattr(_opf_store, name)
 
 
+# The dispatcher refuses every store verb whose installed declaration contradicts the build (spec 16.1), and the
+# build homes 2 is activated as here, SUPPORTED_HOMES = 2, is one whose declaration says homes = 2. So every
+# vector that runs a verb under that patch also points the runtime check at that build's declaration: the file
+# HOMES2_DECLARATION beside the case roots (the in-process vectors and their children name the same file, written
+# with the same bytes by every writer) and the shipped-file digest of those bytes. The runtime check runs
+# unpatched, and the declared release, spec_version and worklog generation are this build's own.
+HOMES2_DECLARATION = "homes2-declaration/opf-declaration.toml"
+
+
+def _homes2_declaration_bytes():
+    import _opf_declaration
+    return _opf_declaration.declaration_bytes(_opf_declaration.RELEASE_IDENTITY, _opf_store.SUPPORTED_SPEC_VERSION,
+                                              2, _opf_store.SUPPORTED_WORKLOG)
+
+
+@contextlib.contextmanager
+def _homes2_declaration(root):
+    """Point the dispatcher's runtime check at the homes-2 build's declaration, written beside `root`."""
+    import hashlib
+    import _opf_declaration
+    data = _homes2_declaration_bytes()
+    path = Path(root).parent / HOMES2_DECLARATION
+    path.parent.mkdir(exist_ok=True)
+    staged = path.parent / "{}.{}".format(path.name, secrets.token_hex(8))
+    staged.write_bytes(data)
+    os.replace(staged, path)
+    with patch.object(opf, "_installed_declaration", lambda: path), \
+            patch.object(_opf_declaration, "SHIPPED_DECLARATION_BYTES", data), \
+            patch.object(_opf_declaration, "SHIPPED_DECLARATION_SHA256", hashlib.sha256(data).hexdigest()):
+        yield
+
+
 def _self_test_homes2_active(root):
     """Activate homes 2 over a fixture store: the manifest on disk declares the real homes-2 pair,
     spec_version HOMES2_SPEC_VERSION (2.0.0) and homes = 2, which the shipped validate_manifest accepts
@@ -3526,7 +3558,7 @@ def _self_test_homes2_active(root):
         path.write_text(emit.emit_checked(model), encoding="utf-8")
         try:
             with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
-                    patch.object(record, "_opf_store", _Homes2SpecGate()):
+                    patch.object(record, "_opf_store", _Homes2SpecGate()), _homes2_declaration(root):
                 yield
         finally:
             path.write_bytes(original)
@@ -3549,8 +3581,11 @@ record._record_run_id = lambda lock_id: "record-create." + str(os.getpid()) + ".
 # necessary until activation flips SUPPORTED_HOMES, since homes_generation activates nothing at 1 and
 # _load_manifest admits only the shipped SUPPORTED_SPEC_VERSION). The claim itself runs the REAL
 # homes-2 seam: the reservation scan, the spec 8.2 derivation, and the run id reservation published
-# before the publication.
+# before the publication. The runtime check reads the homes-2 build's declaration that the enclosing
+# _self_test_homes2_active wrote beside the case roots (HOMES2_DECLARATION, the same bytes).
 HOMES2_CHILD_FLIP = """
+import hashlib
+import _opf_declaration
 import _opf_store
 _opf_store.SUPPORTED_HOMES = 2
 class _Homes2SpecGate:
@@ -3559,6 +3594,11 @@ class _Homes2SpecGate:
             return _opf_store.HOMES2_SPEC_VERSION
         return getattr(_opf_store, name)
 record._opf_store = _Homes2SpecGate()
+_homes2_declared = _opf_declaration.declaration_bytes(
+    _opf_declaration.RELEASE_IDENTITY, _opf_store.SUPPORTED_SPEC_VERSION, 2, _opf_store.SUPPORTED_WORKLOG)
+_opf_declaration.SHIPPED_DECLARATION_BYTES = _homes2_declared
+_opf_declaration.SHIPPED_DECLARATION_SHA256 = hashlib.sha256(_homes2_declared).hexdigest()
+opf._installed_declaration = lambda: Path(sys.argv[1]).parent / """ + repr(HOMES2_DECLARATION) + """
 """
 
 
@@ -7360,7 +7400,7 @@ def t78_homes2_needs_the_pair(fx):
         def choosing(homes, chosen=chosen, journal_rel=journal_rel):
             chosen.append(homes)
             return journal_rel(homes)
-        with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+        with patch.object(_opf_store, "SUPPORTED_HOMES", 2), _homes2_declaration(root):
             before = snapshot(root)
             with patch.object(record, "_record_journal_rel", choosing):
                 result = record_cli(env, root, CREATE)
