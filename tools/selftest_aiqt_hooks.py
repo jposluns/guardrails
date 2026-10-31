@@ -88,7 +88,10 @@ off-roster verb and data an accepted scan consumed stay allowed; a checker-shape
 (|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
 verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
 one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-value, post-'--', and
-push/merge -n edges stay allowed; and the parse-error fallback fails safe.
+push/merge -n edges stay allowed; and the parse-error fallback fails safe, with one narrowing there that
+allows a git commit whose only out-of-grammar construct is a here-string or a -F/--file process
+substitution feeding the message and that carries no hook-skip spelling (a skip before, after or clustered
+with -F, inside the construct, or a non-commit verb still denies).
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -2778,6 +2781,66 @@ def _test_pgrep_self_match(failures):
     if (aiqt_hooks.HANDLERS.get("pgrep_self_match") is not handler or
             aiqt_hooks.HANDLER_EVENT.get("pgrep_self_match") != aiqt_hooks.PRETOOL):
         failures.append("(psm-wiring) pgrep_self_match handler/event wiring is missing or wrong")
+
+
+# Real-bash oracle rows for the gate_weakening here-string / -F process-substitution narrowing:
+# (label, command, want_decision, want_hook_ran). Each runs under real bash in a throwaway git repo
+# whose pre-commit hook records when it fires, so the row proves the allowed (message-only) shapes keep
+# the verification hook running and the denied (hook-skipping) shapes would have skipped it. Each row is
+# a lone commit (the gate judges the raw command; the oracle runs it in the repo cwd).
+_GW_ORACLE_ROWS = (
+    ("(gw-oracle-f-procsub) a -F process substitution feeds the message and runs the hook",
+     "git commit -F <(printf 'oracle %s\\n' msg)", "allow", True),
+    ("(gw-oracle-herestring) a here-string on a plain commit runs the hook",
+     "git commit -m omsg <<<ignored", "allow", True),
+    ("(gw-oracle-cluster-nF) a clustered -nF carries -n and skips the hook",
+     "git commit -nF <(printf 'oracle %s\\n' msg)", "deny", False),
+    ("(gw-oracle-n-after-F) a -n after the -F process substitution skips the hook",
+     "git commit -F <(printf 'oracle %s\\n' msg) -n", "deny", False),
+    ("(gw-oracle-n-before-F) a -n before -F skips the hook",
+     "git commit -n -F <(printf 'oracle %s\\n' msg)", "deny", False),
+    ("(gw-oracle-noverify-hs) a --no-verify beside a here-string skips the hook",
+     "git commit --no-verify -m omsg <<<ignored", "deny", False),
+)
+
+
+def _gw_commit_oracle(failures, tmp):
+    """Run each _GW_ORACLE_ROWS command under real bash in a throwaway git repo whose pre-commit hook
+    records when it runs, and require the gate_weakening decision to match AND the real pre-commit to run
+    exactly for the allowed message-only shapes and be skipped for the denied hook-skipping ones."""
+    if shutil.which("bash") is None or shutil.which("git") is None:
+        failures.append("(gw-oracle) the real-bash commit oracle needs bash and git on PATH")
+        return
+    repo = tmp / "gw-oracle"
+    try:
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True,
+                       capture_output=True, text=True, timeout=30, env=git_fixture_env())
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "config", "user.email", "test@example.invalid")
+        _git(repo, "config", "commit.gpgsign", "false")
+        marker = repo / "hook-ran"
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\n: > \"{}\"\n".format(marker), encoding="utf-8")
+        os.chmod(hook, 0o755)
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(gw-oracle-setup) could not build the oracle repo: {}".format(exc))
+        return
+    for index, (label, command, want_decision, want_ran) in enumerate(_GW_ORACLE_ROWS):
+        (repo / "f{}".format(index)).write_text("content {}\n".format(index), encoding="utf-8")
+        _git(repo, "add", "f{}".format(index))
+        if marker.exists():
+            marker.unlink()
+        run = subprocess.run(["bash", "-c", command], cwd=str(repo), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+                             env=git_fixture_env(), check=False)
+        got = _decision(aiqt_hooks.gate_weakening, command)
+        ran = marker.exists()
+        if got != want_decision:
+            failures.append("{}: gate_weakening decision {}, want {} (bash exit {}, stderr {!r})"
+                            .format(label, got, want_decision, run.returncode, run.stderr[:160]))
+        if ran != want_ran:
+            failures.append("{}: real pre-commit ran={}, want {} (bash exit {}, stderr {!r})"
+                            .format(label, ran, want_ran, run.returncode, run.stderr[:160]))
 
 
 # === PreToolUse deadline posture ======================================================================
@@ -18012,26 +18075,130 @@ def _main_isolated(monitor):
         # Quoting alone is no ground to deny: an ordinary command whose quotes touch letters, behind a
         # here-string or a process substitution, and that spells no bypass in any reading keeps the raw
         # probes' allow (the same decision the main branch gives it).
-        # Except on a roster-verb git segment: the closed literal grammar refuses a here-string or a process
-        # substitution there, so a git commit carrying one denies, quoted message or not (the stricter
-        # fail-closed choice where the two readings disagree).
-        gexpect("(gw-pf3) here-string commit with a quoted message denies by the closed grammar",
-                'git commit -m "fix bug" <<<x', "deny")
+        # On a roster-verb git segment the closed literal grammar refuses a here-string or a process
+        # substitution, with ONE narrowing on the ordinary parse-error path (_gate_commit_message_construct):
+        # a git commit whose only departure from the grammar is a here-string (which bash consumes as a stdin
+        # redirection) or a -F/--file process substitution (which feeds the commit message), and which carries
+        # no hook-skip spelling, ALLOWS. A quoted or plain message keeps that allow; the rows below the allows
+        # pin every form that still denies.
+        gexpect("(gw-pf3) here-string commit with a quoted message allows (the here-string feeds stdin, not "
+                "git options, and no hook-skip spelling is present)",
+                'git commit -m "fix bug" <<<x', "allow")
         gexpect("(gw-pf12) here-string with a quoted word allows", 'wc -l <<<"hello"', "allow")
         gexpect("(gw-pf13) quoted pattern and here-string allows", 'grep "foo" <<<"bar"', "allow")
-        # A process substitution on a roster-verb git commit segment denies by the closed grammar (the
-        # stricter fail-closed choice), as gw-fb-procsub pins.
-        gexpect("(gw-pf14) commit message from a process substitution with a quoted word denies by the closed "
-                "grammar", 'git commit -F <(echo "msg")', "deny")
+        # A -F/--file process substitution feeds the commit message and carries no hook-skip option, so it
+        # allows; the deny rows below pin that a skip option before or after -F, clustered, or inside the body
+        # still denies, and gw-fb-procsub (a body naming a dash token holding an 'n') denies on the de-quoted
+        # walk, not the closed grammar.
+        gexpect("(gw-pf14) commit message from a -F process substitution with a quoted word allows",
+                'git commit -F <(echo "msg")', "allow")
         gexpect("(gw-pf15) two process substitutions with quoted paths allow",
                 'diff <(sort "a.txt") <(sort "b.txt")', "allow")
         gexpect("(gw-pf16) an ANSI-C here-string whose escapes decode to no bypass allows",
                 "cat <<<$'line1\\nline2'", "allow")
-        # A here-string on a roster-verb git commit segment denies by the closed grammar even with no bypass
-        # flag (the stricter fail-closed choice).
-        gexpect("(gw-pf4) here-string commit with no bypass flag denies by the closed grammar",
-                "git commit -m x <<<x", "deny")
+        # A here-string on a roster-verb git commit with no hook-skip spelling allows (bash feeds its word to
+        # stdin; it never reaches git as an option).
+        gexpect("(gw-pf4) here-string commit with no bypass flag allows", "git commit -m x <<<x", "allow")
         gexpect("(gw-pf5) here-string non-git command still allows", "wc -l <<<x", "allow")
+        # The narrowing is a CLOSED allow: every shape that can carry a hook-skip option, or that is not the
+        # message-only commit above, still DENIES. A skip before, after or clustered with -F, inside the
+        # here-string word or the substitution body, a --no-verify= form, a process substitution that is not a
+        # -F value, a leading -c config or wrapper, and a non-commit roster verb are each pinned here.
+        gexpect("(gw-pf17) a skip option before -F denies", "git commit -n -F <(printf msg)", "deny")
+        gexpect("(gw-pf18) a skip option after the -F process substitution denies",
+                "git commit -F <(printf msg) -n", "deny")
+        gexpect("(gw-pf19) a clustered -nF carries the -n skip and denies", "git commit -nF <(printf msg)",
+                "deny")
+        gexpect("(gw-pf20) a --no-verify beside a here-string denies", "git commit --no-verify <<<x", "deny")
+        gexpect("(gw-pf21) a --no-verify= attached to the process substitution denies",
+                "git commit --no-verify=<(printf msg)", "deny")
+        gexpect("(gw-pf22) a skip spelling inside the here-string word denies", "git commit -m x <<<-n", "deny")
+        gexpect("(gw-pf23) a skip spelling inside the substitution body denies",
+                "git commit -F <(echo -n force)", "deny")
+        gexpect("(gw-pf24) a process substitution that is not a -F value is not message-only and denies",
+                "git commit -m x <(echo y)", "deny")
+        gexpect("(gw-pf25) a leading -c config that can skip hooks denies",
+                "git -c core.hooksPath=/dev/null commit -m x <<<y", "deny")
+        gexpect("(gw-pf26) a here-string on a non-commit roster verb keeps the deny",
+                "git push origin main <<<x", "deny")
+        gexpect("(gw-pf27) a command wrapper before the commit keeps the deny", "sudo git commit -m x <<<y",
+                "deny")
+        # The narrowing holds only when every interior is fully literal: a substitution body or here-string word
+        # holding an expansion, a substitution, a backquote, an operator, or a body run by anything but printf,
+        # echo or cat (eval, source, a dot command, another shell, a second git) keeps the closed-grammar deny,
+        # since bash runs that body as commands of its own and an inner commit there skips no outer check. A
+        # verification run piped into a sink or with its status swallowed inside an interior denies too.
+        _gw_interior_denies = (
+            "git commit -F <(eval \"git commit -$(echo n) -m inner\"; echo outer)",
+            "git commit -F <(echo `git commit -$(echo n) -m inner` outer)",
+            "git commit -F <(echo `printf x` outer)",
+            "git commit -F <(echo $(git commit -$(echo n) -m inner) outer)",
+            "git commit -F <(echo $HOME)",
+            "git commit -F <(eval git commit -m inner)",
+            "git commit -F <(source ./skip.sh; echo outer)",
+            "git commit -F <(. ./skip.sh)",
+            "git commit -F <(bash -c \"git commit -m inner\"; echo outer)",
+            "git commit -F <(sh -c 'git commit -m inner')",
+            "git commit -F <(git commit -m inner)",
+            "git commit -F <(printf msg; git commit -m inner)",
+            "git commit -F <(cat ~/msg)",
+            "git commit -F <(cat *.txt)",
+            "git commit -m x <<<\"$(eval \"git commit -$(echo n) -m inner\")\"",
+            "git commit -m x <<<`git commit -m inner`",
+            "git commit -m x <<<$(git commit -m inner)",
+            "git commit -m x <<<\"$(source ./skip.sh)\"",
+            "git commit -m x <<<\"$(. ./skip.sh)\"",
+            "git commit -m x <<<\"$(bash -c 'git commit -m inner')\"",
+            "git commit -m x <<<$HOME",
+            "git commit -F <(python3 -m pytest | head -1)",
+            "git commit -F <(pytest || true)",
+            "git commit -m x <<<\"$(python3 -m pytest | head -1)\"",
+            "git commit -m x <<<\"$(pytest || true)\"",
+            "git commit -F <(printf msg | head -1)",
+        )
+        for _gw_cmd in _gw_interior_denies:
+            gexpect("(gw-pf28) a non-literal interior keeps the closed-grammar deny: {!r}".format(_gw_cmd),
+                    _gw_cmd, "deny")
+        for _gw_cmd in ("git commit -m x <<<'hello world'", "git commit -F <(printf 'oracle %s\\n' msg)",
+                        "git commit --file <(cat msg.txt)", "git commit -F <(echo fix: bump to 1.2)"):
+            gexpect("(gw-pf29) a fully literal interior keeps the message-only allow: {!r}".format(_gw_cmd),
+                    _gw_cmd, "allow")
+        # A FLIP of the literal-only test: with _gate_commit_interior_literal accepting every interior, the
+        # body rows that hide no skip spelling (the reported eval shape included) allow, so the denies above
+        # genuinely rest on that test and a revert turns this red.
+        _gw_flip_rows = ("git commit -F <(eval \"git commit -$(echo n) -m inner\"; echo outer)",
+                         "git commit -F <(bash -c \"git commit -m inner\"; echo outer)",
+                         "git commit -F <(source ./skip.sh)", "git commit -F <(pytest || true)")
+        _gw_literal_saved = aiqt_hooks._gate_commit_interior_literal
+        aiqt_hooks._gate_commit_interior_literal = lambda text, body: True
+        try:
+            for _gw_nr in _gw_flip_rows:
+                if _decision(gwg, _gw_nr) == "deny":
+                    failures.append("(gw-pf-literal-flip) with the literal-only test removed {!r} should no longer "
+                                    "deny, got deny".format(_gw_nr))
+        finally:
+            aiqt_hooks._gate_commit_interior_literal = _gw_literal_saved
+        for _gw_nr in _gw_flip_rows:
+            if _decision(gwg, _gw_nr) != "deny":
+                failures.append("(gw-pf-literal-flip-restore) after restoring the literal-only test {!r} should "
+                                "deny, got {}".format(_gw_nr, _decision(gwg, _gw_nr)))
+        # The narrowing is pinned by a FLIP: with _gate_commit_message_construct reverted to never qualify a
+        # command (the pre-narrowing behaviour), the three message-only rows deny again through the closed
+        # grammar, so the allows above genuinely rest on the narrowing and a revert turns this red.
+        _gw_narrow_rows = ('git commit -m "fix bug" <<<x', "git commit -m x <<<x", 'git commit -F <(echo "msg")')
+        _gw_narrow_saved = aiqt_hooks._gate_commit_message_construct
+        aiqt_hooks._gate_commit_message_construct = lambda command: False
+        try:
+            for _gw_nr in _gw_narrow_rows:
+                if _decision(gwg, _gw_nr) != "deny":
+                    failures.append("(gw-pf-flip) with the narrowing reverted {!r} should deny again, got {}"
+                                    .format(_gw_nr, _decision(gwg, _gw_nr)))
+        finally:
+            aiqt_hooks._gate_commit_message_construct = _gw_narrow_saved
+        for _gw_nr in _gw_narrow_rows:
+            if _decision(gwg, _gw_nr) != "allow":
+                failures.append("(gw-pf-flip-restore) after restoring the narrowing {!r} should allow, got {}"
+                                .format(_gw_nr, _decision(gwg, _gw_nr)))
         # The ANSI-C decoder behind gw-pf9 to gw-pf11, at each escape's bounds (just inside, at, just past):
         # \x reads one or two hex digits, an octal escape one to three digits (its value keeps its low
         # eight bits, 0o377 the last value kept whole), \u one to four and \U one to eight hex digits (a
@@ -20143,17 +20310,18 @@ def _main_isolated(monitor):
         gexpect("(gw-dbt-note-latest) control: 'latest' carries no checker part, allows",
                 "(true #'\n)\ntools/latest.py | cut -c1", "allow")
         # The doubt tests run ONLY behind a '#' the lexer cannot judge under both readings; the plain
-        # parse-error fallback keeps the conservative raw probes (adding only a deny for a bypass that a
-        # de-quoted reading spells), and the failed-main-reading floor keeps the raw probes alone, so these
-        # commands keep the allow the probes have always given them (each was denied while widened spelling
-        # probes ran on every fallback path, though no path here can read a bypass in them).
+        # parse-error fallback keeps the conservative raw probes (adding a deny for a bypass that a de-quoted
+        # reading spells, and allowing the message-only here-string/process-substitution commit of the gw-pf
+        # rows above), and the failed-main-reading floor keeps the raw probes alone, so these commands keep
+        # the allow the probes have always given them (no path here can read a bypass in them).
         gexpect("(gw-fb-herestring) outside the doubt path, a here-string parse error with a '-name' "
                 "operand in another segment still allows",
                 "git commit -m x && find . -name z <<<y", "allow")
-        # This one denies through the closed literal grammar, which refuses a process substitution on a git
-        # commit segment, not through a widened spelling probe.
-        gexpect("(gw-fb-procsub) a process-substitution parse error passing '-Dname' through denies by the "
-                "closed grammar",
+        # This one denies on the de-quoted unread reading, whose any-word walk reads the '-Dname' in the
+        # substitution body as a single-dash word holding an 'n' (a possible -n it cannot bind to git), not
+        # through the closed grammar, which the gw-pf14 narrowing now allows for a -F body naming no such word.
+        gexpect("(gw-fb-procsub) a process-substitution parse error whose body names a dash token holding an "
+                "'n' denies on the de-quoted walk",
                 "git commit -F <(echo \"pass -Dname through\")", "deny")
         # The closed literal grammar accepts the git commit message form on a parsed command
         # (_gate_heredoc_message), so these two allow, as on main; the floor's raw probes find no bypass.
@@ -27150,6 +27318,7 @@ def _main_isolated(monitor):
 
         _test_git_stash_ref(failures)
         _test_pgrep_self_match(failures)
+        _gw_commit_oracle(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
