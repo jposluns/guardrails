@@ -321,7 +321,7 @@ _SAVED = ("self-test stub: keeps the real subprocess.run or Popen to delegate to
           " turns shell on")
 ALLOWLIST = (
     ("tools/check_footer.py", "_close_vectors", "code", 1,
-     _MUTANT + " (the _read_regular_page close revert)"),
+     _MUTANT + " (the _read_regular_page close revert, loaded by exec_module from a scratch file)"),
     ("tools/check_release_cut.py", "_close_vectors", "code", 1,
      _MUTANT + " (the working_blob close revert)"),
     ("tools/check_release_cut.py", "_self_test_isolated", "code", 1,
@@ -590,6 +590,12 @@ ALLOWLIST = (
      _MUTANT + " (each route mutant, written to the self-test's temporary directory first)"),
     ("opf/tools/check_opf_init.py", "_suite_isolated.load_plain", "code", 1,
      _MUTANT + " (each boot mutant, written to the self-test's temporary directory first)"),
+    ("tools/check_opf_declaration.py", "_mutant", "code", 1,
+     _MUTANT + " (each opf/tools/_opf_declaration.py revert, written to the self-test's temporary directory"
+     " first)"),
+    ("tools/check_opf_declaration.py", "_copy_mutant", "code", 1,
+     _MUTANT + " (each revert of opf/tools/opf.py or of this gate's own source, written to the self-test's"
+     " temporary directory first)"),
     ("tools/_load_bound.py", "_acquiring_popen", "shell", 1,
      "ownership spawn: subclasses the current subprocess.Popen so run() holds the handle before the"
      " fork; the subclass forwards run()'s own argv list and keywords, and no call in this file"

@@ -107,8 +107,13 @@ missing tool_name or an absent target field fails closed. Every secret fixture i
 It also covers the generated-artefact edit guard (gensrc_guard, gensrc): a Write/Edit/MultiEdit whose
 file_path resolves onto a kind=file or kind=tree entry of the per-repo .aiqt/gensrc.json (read at
 decision time) DENIES and names the source to edit, while a source edit, an unregistered path, and a
-kind=block entry ALLOW, Bash is out of scope, and component-boundary matching means gen-extra/ and
-GEN.md.bak do not match gen/ and GEN.md. A PRESENT registry it cannot read (unreadable, malformed, or
+kind=block entry ALLOW, and component-boundary matching means gen-extra/ and GEN.md.bak do not match gen/
+and GEN.md. The registry is the one at the toplevel of the TARGET repository. On Bash (the gb cases) a
+literal write sink onto a registered target (a redirect, tee, an in-place sed or perl, the destination of
+cp, mv, ln, install or rsync, truncate, dd of=, time -o, a python -c write, a git path from another
+revision) DENIES, reads and generator runs ALLOW before any registry read, a git restore from the index or
+HEAD notes, an uncleared write notes only when the command names a registered target, and an unreadable
+command or a detector fault denies. A PRESENT registry it cannot read (unreadable, malformed, or
 unknown-version, or a malformed entry) DENIES, fail closed; the other cannot-evaluate branches (an
 unresolvable repo root, a non-contained target, an unreadable payload field) ALLOW with a note; an absent
 registry is the inert ALLOW, and a missing tool_name also denies. An entry scoped "authoring" (the shipped
@@ -4635,6 +4640,11 @@ _DEADLINE_SHAPES = {
     "git_segments_reset": lambda n, base: ("Bash", {"command": _repeat("git reset --hard; ", n)}),
     "sep_semicolon": lambda n, base: ("Bash", {"command": _repeat("true;", n)}),
     "redirects_many": lambda n, base: ("Bash", {"command": "echo x" + _repeat(" > a", n - 6)}),
+    # One writer with a long operand run, repeated and distinct: the operand-flag lookup and the
+    # per-effect registry matching must both stay linear in it.
+    "tee_operands": lambda n, base: ("Bash", {"command": "tee" + _repeat(" same", n - 4)}),
+    "tee_operands_distinct": lambda n, base: ("Bash", {"command": "tee " + " ".join(
+        "f{}".format(k) for k in range(max(1, n // 8)))}),
     "heredocs": lambda n, base: ("Bash", {"command": _repeat("cat <<EOF\nx\nEOF\n", n)}),
     "nest_parens": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
     "nest_cmdsubst": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 3) + "true"
@@ -4772,7 +4782,8 @@ _DEADLINE_CASES = {
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
                        "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after",
                        "fg_setsid_options"),
-    "gensrc_guard": ("write_content", "write_deep_path"),
+    "gensrc_guard": ("write_content", "write_deep_path", "redirects_many", "heredocs", "nest_parens",
+                     "tee_operands", "tee_operands_distinct"),
     "git_discard": ("git_segments_reset", "nest_parens", "procsubst_run_after"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens", "ansi_c_herestr"),
@@ -4859,13 +4870,26 @@ _DEADLINE_CHILD_TIMEOUT = 900
 
 
 def _deadline_fixtures(tmp):
-    """A plain non-git directory and an orchestration repository (a version-1 registry), as cwds."""
+    """A plain non-git directory, an orchestration repository (a version-1 registry), and a repository
+    carrying a populated gensrc registry (the shipped registry's size class), as cwds. The gensrc shapes
+    run in the registry repository so their relative sinks resolve to a root and the timed call reaches
+    the registry read and the per-entry matching, the code whose cost grows with the command."""
     plain = tmp / "deadline-plain"
     plain.mkdir(parents=True, exist_ok=True)
     orch = _init_repo(tmp / "deadline-orch")
     (orch / ".aiqt").mkdir(exist_ok=True)
     (orch / ".aiqt" / "orchestration.json").write_text('{"version": 1}\n', encoding="utf-8")
-    return plain, orch
+    gensrc = _init_repo(tmp / "deadline-gensrc")
+    (gensrc / ".aiqt").mkdir(exist_ok=True)
+    entries = [{"kind": "file", "target": "GEN.md", "sources": ["src.toml"],
+                "regenerate": "python3 tools/gen_x.py"},
+               {"kind": "tree", "target": "gen/", "sources": ["src/"],
+                "regenerate": "python3 tools/gen_tree.py"}]
+    entries += [{"kind": "file", "target": "gen{:02d}.md".format(k), "sources": ["src.toml"],
+                 "regenerate": "python3 tools/gen_x.py"} for k in range(40)]
+    (gensrc / ".aiqt" / "gensrc.json").write_text(
+        json.dumps({"version": 1, "generated": entries}), encoding="utf-8")
+    return plain, orch, gensrc
 
 
 def _cpu_seconds():
@@ -4899,11 +4923,12 @@ def _deadline_shape_case(name, shape, size, cwd):
 def _deadline_shape_runs(tmp, sizes):
     """Every (handler, shape, size) case once (_deadline_shape_case): [(handler, shape, size, cwd,
     cpu_seconds, wall_seconds, outcome)]."""
-    plain, orch = _deadline_fixtures(tmp)
+    plain, orch, gensrc = _deadline_fixtures(tmp)
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
         # The citation check is inert outside a git toplevel, so it is timed in the repository as well.
-        cwd = str(orch if name.startswith(("orch_", "review_", "citation_")) else plain)
+        cwd = str(orch if name.startswith(("orch_", "review_", "citation_")) else
+                  gensrc if name == "gensrc_guard" else plain)
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
@@ -7242,6 +7267,438 @@ def _test_deadline_posture(failures, tmp):
             proc.returncode, (proc.stdout + proc.stderr)[-2000:]))
         return
     failures.extend(found)
+
+
+# THE BOUNDED HERE-DOCUMENT END (_heredoc_body_ends_early and the span comment in _lex_pass). Each row hides
+# _HD_EARLY_END_HIDDEN after a here-document body read inside a substitution or group, and bash 5.3.9 runs it
+# in every row (a fake git first on PATH recorded its arguments, under bash -c and under eval alike), while the
+# lexer at 848c60f1 read it as body: protected_line allowed each row there and denies the hidden command alone.
+# In V2 to V8 bash ends the body early: V2 to V7 end at a line that starts with the delimiter
+# and holds the closer later on it (')' after a blank, a tab of the <<- form, a nested substitution or a
+# comment, and '}' for '${ cmd; }'), rule (a); V3 has no exact delimiter line either, rule (b) too; V8 ends a
+# backquote substitution at a backquote in the body, rule (c). V7's '<<' and glued-eof's sit inside an open
+# '${', so the lexer now refuses each at that operator (_HD_DOLLAR_BRACE_ROWS) before any body is read; glued-eof
+# was this table's rule (b) row. rule-b is a '<<' after a command word that a shell alias expands to an open
+# array assignment, where bash 5.3.9 opens no here-document (it reports a syntax error at the '<<' and runs the
+# next line) and the lexer, which reads no alias, reads one that no line ends, so only rule (b) holds there; its
+# earlier '<<' inside an arithmetic command, and then inside an array assignment written out, are now refused
+# at that operator (_HD_ARITH_ROWS, _HD_TEXT_MARK_ROWS).
+# brace-word is an untrusted body only through
+# the '${' element of the trust test: the '}' after echo is a word to bash, so the '${ ' substitution stays
+# open, but the lexer's nesting stack pops its '${' there, and nothing else marks the body untrusted.
+_HD_EARLY_END_HIDDEN = "git -c core.hooksPath=/dev/null commit -m x"
+_HD_EARLY_END_REFUSED = "ValueError: uncertain here-document body end in a substitution or group"
+_HD_DOLLAR_BRACE_REFUSED = "ValueError: uncertain here-document while a '${' is open"
+_HD_EARLY_END_ROWS = (
+    ("V2", "x=$(cat <<'EOF'\nEOF ); ", "\nEOF\n)", _HD_EARLY_END_REFUSED),
+    ("V3", "msg=$(cat <<'EOF'\nFix\nEOF )\n", "", _HD_EARLY_END_REFUSED),
+    ("V4", "x=$(cat <<-'EOF'\n\tEOF ); ", "\n\tEOF\n)", _HD_EARLY_END_REFUSED),
+    ("V5", "x=$(echo $(cat <<'EOF'\nEOF )); ", "\nEOF\n))", _HD_EARLY_END_REFUSED),
+    ("V6", "x=$(cat <<'EOF'\nEOF #)\n", "\nEOF\n)", _HD_EARLY_END_REFUSED),
+    ("V7", "x=${ cat <<'EOF'\nEOF}; ", "\nEOF\n}", _HD_DOLLAR_BRACE_REFUSED),
+    ("V8", "x=`cat <<'EOF'\nfoo`; ", "; y=`\nEOF\n`", _HD_EARLY_END_REFUSED),
+    ("glued-eof", "echo ${x:-<<'EOF'}\n", "\nEOF", _HD_DOLLAR_BRACE_REFUSED),
+    ("rule-b", "shopt -s expand_aliases\nalias a='x=( 1 '\na <<'EOF' )\n", "", _HD_EARLY_END_REFUSED),
+    ("brace-word", "x=${ echo }; cat <<'EOF'\nEOF }; ", "\nEOF\n}", _HD_EARLY_END_REFUSED),
+)
+# The exact reading the rule keeps, each with the hidden command after the body as a visible segment: a body
+# read outside every substitution and group ends only at its exact delimiter line, so a line that starts with
+# the delimiter, or a backquote, is body text there (bash 5.3.9 prints such a line as body); and rule (c) holds
+# only where a backquote substitution is open, so a backquote in a body inside '$(...)' leaves it readable.
+_HD_EARLY_END_KEPT = (
+    ("top-delim-prefix", "cat <<'EOF'\nEOF) is body text\nEOF\n", [["cat"]]),
+    ("top-backquote", "cat <<'EOF'\nfoo`\nEOF\n", [["cat"]]),
+    ("subst-backquote", "x=$(cat <<'EOF'\nfoo`\nEOF\n)\n", [["x=$"], ["cat"], [], []]),
+)
+
+
+def _heredoc_early_end_failures():
+    """(hd-early-end-*) Each row of _HD_EARLY_END_ROWS beside its bare control: the shared lexer refuses the
+    row (the uncertain body end, or for V7 and glued-eof the '<<' read while a '${' is open) and protected_line
+    denies it, as it denies the hidden command alone (hd-early-end-control). Every row fails on 848c60f1, where
+    the lex read the hidden command as body and protected_line allowed it; V2, V4 to V6 and brace-word also fail
+    where rule (a) is removed (rule (b) still refuses V3), V8 where rule (c) is, rule-b where rule (b) is, and
+    brace-word where the trust test drops '${'. hd-early-end-kept-*: the lexer reads each
+    _HD_EARLY_END_KEPT body as before, the hidden command a visible segment after it (REGRESSION GUARDS that
+    pass on 848c60f1 too and fail where the rule reaches a body it should read exactly)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    control = _decision(aiqt_hooks.protected_line, hidden)
+    if control != "deny":
+        out.append("(hd-early-end-control) protected_line must deny the bare hidden command {!r}, got {}".format(
+            hidden, control))
+    for name, before, after, refused in _HD_EARLY_END_ROWS:
+        command = before + hidden + after
+        try:
+            lexed = [seg.argv for seg in aiqt_hooks._lex_command(command)]
+        except ValueError as exc:
+            lexed = "ValueError: {}".format(exc)
+        if lexed != refused:
+            out.append("(hd-early-end-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, refused, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-early-end-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, want in _HD_EARLY_END_KEPT:
+        command = before + hidden
+        try:
+            lexed = [seg.argv for seg in aiqt_hooks._lex_command(command)]
+        except ValueError as exc:
+            lexed = "ValueError: {}".format(exc)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-early-end-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
+
+
+# A HERE-DOCUMENT WHILE A '${' IS OPEN (the two raises of _HEREDOC_DOLLAR_BRACE_OPEN in _lex_pass). Inside a
+# '${...}' parameter expansion bash reads '<<' and a newline as text, so it opens no here-document there and
+# starts no body; bash 5.3.9 runs _HD_EARLY_END_HIDDEN in every _HD_DOLLAR_BRACE_ROWS row (a fake git first on
+# PATH recorded its arguments, under bash -c and under eval alike), while the lexer at 116214e1 read it as body
+# and protected_line allowed it, or, in late-open, read it inside a quoted word that an apostrophe in bash's
+# body opens (protected_line denied that one there, its commit grammar reading the word, not the segments).
+# space and glued are the two top-level shapes; subst holds the expansion inside a '$(...)'; paren-text
+# is refused only because the '${' counts wherever it sits on the stack (a '(' that is text to bash is
+# innermost at the '<<'); late-open opens the '${' after the '<<', so only the newline raise holds there. In each
+# _HD_DOLLAR_BRACE_UNCERTAIN row the '<<' IS an operator to bash (a bash 5.3 '${ cmd; }' or '${| cmd; }'
+# substitution, or a '$(...)' an expansion holds) and bash 5.3.9 reads the hidden command as body: the lexer
+# cannot tell that from an expansion on its stack, so it refuses those too (a disclosed over-refusal), never
+# reading them either way. _HD_DOLLAR_BRACE_KEPT rows keep their exact read: a '${' inside double quotes, and
+# one closed before the '<<' or before the newline.
+_HD_DOLLAR_BRACE_ROWS = (
+    ("space", "echo ${x:-<<'EOF' }\n", "\nEOF"),
+    ("glued", "echo ${x:-<<'EOF'}\n", "\nEOF}"),
+    ("subst", "y=$(echo ${x:-<<'EOF' })\n", "\nEOF"),
+    ("paren-text", "echo ${x:-(<<'EOF' )}\n", "\nEOF"),
+    ("late-open", "cat <<'EOF' ${x:-\nEOF\n}\nit's\nEOF\n", "\necho '"),
+)
+_HD_DOLLAR_BRACE_UNCERTAIN = (
+    ("funsub", "x=${ cat <<'EOF'\n", "\nEOF\n}"),
+    ("funsub-pipe", "x=${| cat <<'EOF'\n", "\nEOF\n}"),
+    ("param-subst", "echo ${x:-$(cat <<'EOF'\n", "\nEOF\n)}"),
+)
+_HD_DOLLAR_BRACE_KEPT = (
+    ("dq-param", "echo \"${x:-<<'EOF' }\"\n", [["echo", "${x:-<<'EOF' }"]]),
+    ("closed-before", "echo ${x:-a}; cat <<'EOF'\nbody\nEOF\n", [["echo", "${x:-a}"], ["cat"]]),
+    ("closed-on-line", "cat <<'EOF' ${x:-a}\nbody\nEOF\n", [["cat", "${x:-a}"]]),
+)
+
+
+def _hd_lex_outcome(command):
+    """The argv of each segment the shared lexer reads in command, or 'ValueError: <message>' where it refuses."""
+    try:
+        return [seg.argv for seg in aiqt_hooks._lex_command(command)]
+    except ValueError as exc:
+        return "ValueError: {}".format(exc)
+
+
+def _heredoc_dollar_brace_failures():
+    """(hd-dollar-brace-*) Each row of _HD_DOLLAR_BRACE_ROWS beside its bare control: the shared lexer refuses
+    the row (_HD_DOLLAR_BRACE_REFUSED) and protected_line denies it, as it denies the hidden command alone
+    (hd-dollar-brace-control). Every row fails on 116214e1, where the lex read the hidden command as body or
+    quoted text (protected_line allowed each there but late-open); space, subst and paren-text also fail where
+    the raise at the '<<' is removed (glued still meets the newline raise, its '${' open at the newline),
+    late-open where the raise at the newline is, and paren-text where the raise at the '<<' reads only the
+    innermost entry of the stack.
+    hd-dollar-brace-uncertain-*: the lexer refuses each _HD_DOLLAR_BRACE_UNCERTAIN row rather than read its body
+    either way. hd-dollar-brace-kept-*: the lexer reads each _HD_DOLLAR_BRACE_KEPT command as before, the hidden
+    command a visible segment after it (REGRESSION GUARDS that pass on 116214e1 too)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    control = _decision(aiqt_hooks.protected_line, hidden)
+    if control != "deny":
+        out.append("(hd-dollar-brace-control) protected_line must deny the bare hidden command {!r}, got {}".format(
+            hidden, control))
+    for name, before, after in _HD_DOLLAR_BRACE_ROWS:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_DOLLAR_BRACE_REFUSED:
+            out.append("(hd-dollar-brace-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_DOLLAR_BRACE_REFUSED, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-dollar-brace-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, after in _HD_DOLLAR_BRACE_UNCERTAIN:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_DOLLAR_BRACE_REFUSED:
+            out.append("(hd-dollar-brace-uncertain-{}) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_DOLLAR_BRACE_REFUSED, lexed))
+    for name, before, want in _HD_DOLLAR_BRACE_KEPT:
+        command = before + hidden
+        lexed = _hd_lex_outcome(command)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-dollar-brace-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
+
+
+# A HERE-DOCUMENT WHILE A '((' IS OPEN (THE ARITHMETIC MARK above aiqt_hooks._HEREDOC_ARITH_OPEN, and the two
+# raises of _HEREDOC_ARITH_OPEN in _lex_pass). Inside an arithmetic command or expansion bash reads '<<' as a
+# shift and a newline as text, so it opens no here-document there and starts no body; bash 5.3.9 runs
+# _HD_EARLY_END_HIDDEN in every _HD_ARITH_ROWS row (a fake git first on PATH recorded its arguments, under bash -c
+# and under eval alike), while the lexer at f1248b31 read it as body and protected_line allowed it, as every
+# other PreToolUse handler did. command, expansion and assignment are the three shapes; for-arith is a
+# 'for ((...))' loop; nested holds the expansion inside a '$(...)'; paren-inner puts an unmarked '(' innermost
+# at the '<<', so it is refused only because the mark counts wherever it sits on the stack; comsub is a '$(('
+# that bash reads as a command substitution, where only the mark on its first '(' is still open at the '<<';
+# subshells is a '((' that bash reads again as nested subshells and still runs the line after; continued puts a
+# backslash-newline between the two '('; late-open opens the expansion after the '<<', so only the newline raise
+# holds there, and hides the command in a substitution inside the arithmetic text, which bash expands
+# (hd-arith-control-subst is its bare control). In each _HD_ARITH_UNCERTAIN row bash 5.3.9 reads a here-document
+# and the hidden command as its body (nested subshells, and a command substitution a '$((' opens): the mark
+# cannot tell those from arithmetic, so the lexer refuses them too (a disclosed over-refusal). _HD_ARITH_KEPT rows
+# keep their exact read: '( (' and '$( (', which are never arithmetic, and a '((' or '$((' closed before the
+# '<<' (by a '))' run, a single ')', a 'for' loop's '))') or before the newline.
+_HD_ARITH_REFUSED = "ValueError: uncertain here-document while a '((' is open"
+_HD_ARITH_ROWS = (
+    ("command", "(( 1 <<'EOF' ))\n", "\nEOF"),
+    ("expansion", "echo $(( 1 <<'EOF' ))\n", "\nEOF"),
+    ("assignment", "x=$(( 1 <<'EOF' ))\n", "\nEOF"),
+    ("for-arith", "for (( i=0; i<1<<'EOF'; i++ )); do :; done\n", "\nEOF"),
+    ("nested", "y=$(echo $(( 1 <<'EOF' )))\n", "\nEOF"),
+    ("paren-inner", "echo $(( (1 <<'EOF') ))\n", "\nEOF"),
+    ("comsub", "echo $(( 1 ) <<'EOF' )\n", "\nEOF"),
+    ("subshells", "((cat <<'EOF'\n", "\nEOF\n) )"),
+    ("continued", "(\\\n( 1 <<'EOF' ))\n", "\nEOF"),
+    ("late-open", "cat <<'EOF' $(( 1 +\n$(", ") ))\nEOF\n"),
+)
+_HD_ARITH_UNCERTAIN = (
+    ("closed-early", "(( 1 ) <<'EOF' )\n", "\nEOF"),
+    ("subst-subshell", "echo $((cat <<'EOF'\n", "\nEOF\n) )"),
+)
+_HD_ARITH_KEPT = (
+    ("spaced", "( (cat <<'EOF'\nbody\nEOF\n) )\n", [[], [], ["cat"], [], [], []]),
+    ("subst-spaced", "echo $( (cat <<'EOF'\nbody\nEOF\n) )\n", [["echo", "$"], [], ["cat"], [], [], []]),
+    ("closed-run", "(( 1 )) && cat <<'EOF'\nbody\nEOF\n", [[], [], ["1"], [], [], ["cat"]]),
+    ("closed-single", "echo $(( 1 ) ); cat <<'EOF'\nbody\nEOF\n", [["echo", "$"], [], ["1"], [], [], ["cat"]]),
+    ("closed-for", "for ((;;)); do break; done; cat <<'EOF'\nbody\nEOF\n",
+     [["for"], [], [], [], [], [], [], ["do", "break"], ["done"], ["cat"]]),
+    ("closed-on-line", "cat <<'EOF'; (( 1 ))\nbody\nEOF\n", [["cat"], [], [], ["1"], [], []]),
+)
+
+
+def _heredoc_arith_failures():
+    """(hd-arith-*) Each row of _HD_ARITH_ROWS beside its bare control: the shared lexer refuses the row
+    (_HD_ARITH_REFUSED) and protected_line denies it, as it denies the hidden command alone (hd-arith-control,
+    and hd-arith-control-subst for late-open's substitution). Every row fails on f1248b31, where the lex read
+    the hidden command as body and protected_line allowed it; command, expansion, assignment, for-arith, nested,
+    paren-inner, comsub and continued also fail where the raise at the '<<' is removed (subshells and late-open
+    still meet the newline raise, a mark open at their newline), late-open where the raise at the newline is,
+    every row but comsub where both raises read only the innermost entry of the stack, comsub and continued
+    where the mark goes on the second '(' of a run instead of the first, and continued where the mark's
+    look-ahead does not skip backslash-newlines. hd-arith-uncertain-*: the lexer refuses each
+    _HD_ARITH_UNCERTAIN row rather than read its body either way. hd-arith-kept-*: the lexer reads each
+    _HD_ARITH_KEPT command as before, the hidden command a visible segment after it (REGRESSION GUARDS that pass on
+    f1248b31 too; closed-run, closed-for and closed-on-line fail where a ')' run does not pop a mark, and
+    closed-single where a single ')' does not)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    for tag, control in (("control", hidden), ("control-subst", "x=$(" + hidden + ")")):
+        got = _decision(aiqt_hooks.protected_line, control)
+        if got != "deny":
+            out.append("(hd-arith-{}) protected_line must deny the bare hidden command {!r}, got {}".format(
+                tag, control, got))
+    for name, before, after in _HD_ARITH_ROWS:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_ARITH_REFUSED:
+            out.append("(hd-arith-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_ARITH_REFUSED, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-arith-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, after in _HD_ARITH_UNCERTAIN:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != _HD_ARITH_REFUSED:
+            out.append("(hd-arith-uncertain-{}) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, _HD_ARITH_REFUSED, lexed))
+    for name, before, want in _HD_ARITH_KEPT:
+        command = before + hidden
+        lexed = _hd_lex_outcome(command)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-arith-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
+
+
+# A HERE-DOCUMENT WHILE ONE OF THE TEXT MARKS IS OPEN (above aiqt_hooks._HEREDOC_TEXT_MARKS: the raises of
+# _heredoc_text_mark, _HEREDOC_SUBST_LATE and _HEREDOC_BACKQUOTE_CLOSED in _lex_pass, and the '$[' and
+# backslash-newline openers of _dollar_opener). bash 5.3.9 runs _HD_EARLY_END_HIDDEN in every _HD_TEXT_MARK_ROWS,
+# _HD_TEXT_MARK_DQ and _HD_TEXT_MARK_HASH row (a fake git first on PATH recorded its arguments, under bash -c and
+# under eval alike), while the lexer at 60c56153 read it as body, as quoted text or as a comment; there every
+# PreToolUse handler allowed each row (cwd a repository on a feature branch) but backquote-late, which
+# gate_weakening denied, and the _HD_TEXT_MARK_HASH rows, which protected_line denied through its raw scan.
+# In _HD_TEXT_MARK_ROWS: inside a '$[...]' or a command word's subscript bash reads '<<' as text
+# (dollar-bracket and its valid-arithmetic, nested '[', inner '(' and backslash-newline forms; subscript,
+# subscript-assign and subscript-then); in an array assignment's '(' it reports a syntax error at the '<<' and
+# reads the next line (array, array-append, array-declare, array-export); in a pattern's '(' it reads it as text
+# ('[[ == ]]' patterns always, others under extglob); dollar-bracket-late, subscript-late and pattern-late open
+# the frame after the '<<', so only the newline raise holds there, and hide the command in a substitution inside
+# it, which bash expands (hd-text-mark-control-subst is its bare control); subst-late, its backslash-newline
+# form, subst-late-reopened (a substitution opened after an entry the '<<' sat in has closed) and
+# backquote-late open a substitution after the '<<', so bash starts the bodies past the line that closes it;
+# backquote-closed reads a '<<' inside a backquote substitution closed on its line, which gives it no body, and
+# backquote-closed-forked reads it again in each reading of an uncertain '#' after it, each resumed from where
+# the first lex stopped (_LexFork) with a copy of the nesting stack. Each
+# _HD_TEXT_MARK_DQ row holds a '$[', or a '$' apart from its opener by a backslash-newline, inside double
+# quotes, where bash reads the nested quotes as one word and opens no here-document: the lexer reads that word
+# whole now, and the hidden command after it. Each _HD_TEXT_MARK_HASH row holds a '#' inside a '$[' or a
+# subscript, text to bash, which the lexer read as a comment hiding the rest of the line: the mark now makes it
+# uncertain, so one reading holds the command. In each _HD_TEXT_MARK_UNCERTAIN row bash 5.3.9 reads a
+# here-document and the hidden command as its body ('$$[' is '$$' and '[' to bash, an argument's 'x[' is no
+# subscript, a here-document in a substitution an array assignment holds, an array assignment opened after the
+# '<<', where bash reads the body at the newline inside it and then a second one after its ')', and a '!('
+# subshell with extglob unset): the marks cannot tell those apart, so the lexer refuses them too (a disclosed
+# over-refusal). _HD_TEXT_MARK_KEPT rows keep their exact read: each frame closed before the '<<' or the
+# newline, a subshell's newline after a '<<' (bash starts the body there), a here-document a backquote
+# substitution holds whole, a here-document in a command substitution opened before its '<<' with an uncertain
+# '#' after it (both readings), and a '#' inside a double-quoted '$[', text to bash.
+_HD_BRACKET_REFUSED = "ValueError: uncertain here-document while a '$[' or subscript '[' is open"
+_HD_ARRAY_REFUSED = "ValueError: uncertain here-document while an array assignment's '(' is open"
+_HD_PATTERN_REFUSED = "ValueError: uncertain here-document while a pattern's '(' is open"
+_HD_SUBST_LATE_REFUSED = "ValueError: uncertain here-document while a substitution opened after it is open"
+_HD_BACKQUOTE_CLOSED_REFUSED = "ValueError: uncertain here-document in a backquote substitution closed before its body"
+_HD_TEXT_MARK_ROWS = (
+    ("dollar-bracket", "echo $[ 1 <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-valid", "echo $[ 1 <<\"2\" ]\n", "\n2", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-nested", "echo $[ x+a[1] <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-paren", "echo $[ ( 1 <<'EOF' ) ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-continued", "echo $\\\n[ 1 <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("dollar-bracket-late", "cat <<'EOF' $[ 1 +\n$(", ") ]\nEOF\n", _HD_BRACKET_REFUSED),
+    ("subscript", "x[ 1 <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("subscript-assign", "x[1<<\"2\"]=1\n", "\n2", _HD_BRACKET_REFUSED),
+    ("subscript-then", "if true; then x[ 1 <<'EOF' ]; fi\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("subscript-late", "cat <<'EOF'; x[1\n$(", ")\nEOF\n]=1\n", _HD_BRACKET_REFUSED),
+    ("array", "x=( 1 <<'EOF' )\n", "\nEOF", _HD_ARRAY_REFUSED),
+    ("array-append", "x+=( 1 <<'EOF' )\n", "\nEOF", _HD_ARRAY_REFUSED),
+    ("array-declare", "declare -a x=( 1 <<'EOF' )\n", "\nEOF", _HD_ARRAY_REFUSED),
+    ("array-export", "export x=( 1 <<'EOF' )\n", "\nEOF", _HD_ARRAY_REFUSED),
+    ("pattern-cond", "[[ a == @(a|<<'EOF' ) ]]\n", "\nEOF", _HD_PATTERN_REFUSED),
+    ("pattern-cond-bang", "[[ a == !(b|<<'EOF' ) ]]\n", "\nEOF", _HD_PATTERN_REFUSED),
+    ("pattern-extglob", "shopt -s extglob\necho @(a <<'EOF' )\n", "\nEOF", _HD_PATTERN_REFUSED),
+    ("pattern-continued", "shopt -s extglob\necho @\\\n(a <<'EOF' )\n", "\nEOF", _HD_PATTERN_REFUSED),
+    ("pattern-late", "cat <<'EOF'; [[ a == @(a|\n$(", ")\nEOF\n) ]]\n", _HD_PATTERN_REFUSED),
+    ("subst-late", "cat <<'EOF' $(true\n", "\nEOF\n)\nEOF", _HD_SUBST_LATE_REFUSED),
+    ("subst-late-continued", "cat <<'EOF' $\\\n(true\n", "\nEOF\n)\nEOF", _HD_SUBST_LATE_REFUSED),
+    ("subst-late-reopened", "(cat <<'EOF') | cat $(true\n", "\nEOF\n)\nEOF", _HD_SUBST_LATE_REFUSED),
+    ("backquote-late", "cat <<'EOF' `true\n", "\nEOF\n`\nEOF", _HD_SUBST_LATE_REFUSED),
+    ("backquote-closed", "x=`cat <<'EOF' `\n", "\nEOF", _HD_BACKQUOTE_CLOSED_REFUSED),
+    ("backquote-closed-forked", "x=`cat <<'EOF' `; (true # c\n", "\nEOF\n)",
+     "ValueError: a reading of an uncertain '#' does not lex: uncertain here-document in a backquote substitution"
+     " closed before its body"),
+)
+_HD_TEXT_MARK_DQ = (
+    ("dq-dollar-bracket", "echo \"$[ \" <<'EOF' \" ]\"\n", "\nEOF", ["echo", "$[ \" <<'EOF' \" ]"]),
+    ("dq-dollar-bracket-nested", "echo \"$[ a[1] \" <<'EOF' \" ]\"\n", "\nEOF",
+     ["echo", "$[ a[1] \" <<'EOF' \" ]"]),
+    ("dq-continued-paren", "echo \"$\\\n( \" <<'EOF' \" )\"\n", "\nEOF", ["echo", "$\\\n( \" <<'EOF' \" )"]),
+    ("dq-continued-brace", "echo \"$\\\n{x:- \" <<'EOF' \" }\"\n", "\nEOF", ["echo", "$\\\n{x:- \" <<'EOF' \" }"]),
+    ("dq-continued-bracket", "echo \"$\\\n[ \" <<'EOF' \" ]\"\n", "\nEOF", ["echo", "$\\\n[ \" <<'EOF' \" ]"]),
+)
+_HD_TEXT_MARK_HASH = (
+    ("hash-dollar-bracket", "false && echo $[ 1 # ]; "),
+    ("hash-subscript", "false && x[ 1 # ]; "),
+)
+_HD_TEXT_MARK_UNCERTAIN = (
+    ("dollar-dollar-bracket", "echo $$[ 1 <<'EOF' ]\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("argument-subscript", "echo x[ 1 <<'EOF' ]=1\n", "\nEOF", _HD_BRACKET_REFUSED),
+    ("array-subst", "x=( $(cat <<'EOF'\n", "\nEOF\n) )", _HD_ARRAY_REFUSED),
+    ("array-late", "cat <<'EOF'; x=( a\nX\n$(", ")\nEOF\n)\n", _HD_ARRAY_REFUSED),
+    ("bang-subshell", "!(cat <<'EOF'\n", "\nEOF\n)", _HD_PATTERN_REFUSED),
+)
+_HD_TEXT_MARK_KEPT = (
+    ("closed-dollar-bracket", "echo $[ 1 ]; cat <<'EOF'\nbody\nEOF\n", [["echo", "$[", "1", "]"], ["cat"]]),
+    ("closed-on-line-dollar-bracket", "cat <<'EOF' $[ 1 ]\nbody\nEOF\n", [["cat", "$[", "1", "]"]]),
+    ("closed-subscript", "x[1]=2; cat <<'EOF'\nbody\nEOF\n", [["x[1]=2"], ["cat"]]),
+    ("argument-brackets", "cat a[1] <<'EOF'\nbody\nEOF\n", [["cat", "a[1]"]]),
+    ("closed-array", "x=( a b ); cat <<'EOF'\nbody\nEOF\n", [["x="], ["a", "b"], [], ["cat"]]),
+    ("closed-on-line-array", "cat <<'EOF'; x=( a b )\nbody\nEOF\n", [["cat"], ["x="], ["a", "b"], []]),
+    ("closed-pattern", "[[ a == @(a|b) ]] && cat <<'EOF'\nbody\nEOF\n",
+     [["[[", "a", "==", "@"], ["a"], ["b"], ["]]"], ["cat"]]),
+    ("subshell-late", "cat <<'EOF'; (true\nbody\nEOF\n)\n", [["cat"], [], ["true"], [], []]),
+    ("closed-subst-on-line", "cat <<'EOF' $(true)\nbody\nEOF\n", [["cat", "$"], ["true"], []]),
+    ("backquote-body", "x=`cat <<'EOF'\nbody\nEOF\n`\n", [["x=`cat"], ["`"]]),
+    ("subst-heredoc-hash", "x=$(cat <<'EOF' # c\nbody\nEOF\n)\n",
+     [["x=$"], ["cat"], [], [], _HD_EARLY_END_HIDDEN.split(), ["x=$"], ["cat", "#", "c"], [], []]),
+    ("dq-bracket-hash", "echo \"$[ 1 # ]\"\n", [["echo", "$[ 1 # ]"]]),
+)
+
+
+def _heredoc_text_mark_failures():
+    """(hd-text-mark-*) Each row of _HD_TEXT_MARK_ROWS beside its bare control: the shared lexer refuses the row
+    with that row's message and protected_line denies it, as it denies the hidden command alone
+    (hd-text-mark-control, and hd-text-mark-control-subst for the late rows' substitution). Every row fails on
+    60c56153, where the lex read the hidden command as body and protected_line allowed it; the dollar-bracket
+    rows fail where no "[" goes on after a '$', the subscript rows where none goes on a word that is so far an
+    identifier, dollar-bracket-nested where a '[' inside an open one pushes nothing, the array rows where a '('
+    after a '=' is not marked, the pattern rows where one after a pattern character is not, every row whose
+    frame closes on its line where the raise at the '<<' is removed, the three late rows where the newline
+    raise for the marks is, dollar-bracket-paren where both read only the innermost entry, subst-late, its
+    continued and reopened forms and backquote-late where the newline raise for a substitution opened after the
+    '<<' is,
+    subst-late-continued and pattern-continued where the look-behind of _lex_paren_entry skips no
+    backslash-newlines, subst-late-reopened where a pop does not lower the stack's low, both backquote-closed
+    rows where the raise for a closed backquote is removed, and backquote-closed-forked where a copy of the
+    stack drops its heredoc_bq. hd-text-mark-dq-*: the lexer reads each _HD_TEXT_MARK_DQ
+    word whole and the hidden command after it (fails where a double-quoted '$[' opens nothing, or where
+    _dollar_opener skips no backslash-newline); hd-text-mark-hash-*: one reading of each _HD_TEXT_MARK_HASH row
+    holds the hidden command and protected_line denies it (fails where no "[" goes on). hd-text-mark-uncertain-*:
+    the lexer refuses each _HD_TEXT_MARK_UNCERTAIN row rather than read its body either way.
+    hd-text-mark-kept-*: the lexer reads each _HD_TEXT_MARK_KEPT command as before, the hidden command a visible
+    segment after it (REGRESSION GUARDS that pass on 60c56153 too; the closed rows fail where a ']' or a ')'
+    does not pop its mark, backquote-body where a backquote still open counts as closed, subst-heredoc-hash
+    where a copy of the stack drops its low, and dq-bracket-hash where a '#' inside a double-quoted '$['
+    follows the comment rule)."""
+    out = []
+    hidden = _HD_EARLY_END_HIDDEN
+    for tag, control in (("control", hidden), ("control-subst", "x=$(" + hidden + ")")):
+        got = _decision(aiqt_hooks.protected_line, control)
+        if got != "deny":
+            out.append("(hd-text-mark-{}) protected_line must deny the bare hidden command {!r}, got {}".format(
+                tag, control, got))
+    for name, before, after, refused in _HD_TEXT_MARK_ROWS:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != refused:
+            out.append("(hd-text-mark-{}-lex) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, refused, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-text-mark-{}) protected_line must deny {!r} as it denies its bare control, got {}".format(
+                name, command, got))
+    for name, before, after, word in _HD_TEXT_MARK_DQ:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != [word, hidden.split(), ["EOF"]]:
+            out.append("(hd-text-mark-dq-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, [word, hidden.split(), ["EOF"]], lexed))
+    for name, before in _HD_TEXT_MARK_HASH:
+        command = before + hidden
+        lexed = _hd_lex_outcome(command)
+        if isinstance(lexed, str) or hidden.split() not in lexed:
+            out.append("(hd-text-mark-hash-{}-lex) a reading of {!r} must hold the hidden command, got {!r}".format(
+                name, command, lexed))
+        got = _decision(aiqt_hooks.protected_line, command)
+        if got != "deny":
+            out.append("(hd-text-mark-hash-{}) protected_line must deny {!r}, got {}".format(name, command, got))
+    for name, before, after, refused in _HD_TEXT_MARK_UNCERTAIN:
+        command = before + hidden + after
+        lexed = _hd_lex_outcome(command)
+        if lexed != refused:
+            out.append("(hd-text-mark-uncertain-{}) the lexer must refuse {!r} ({}), got {!r}".format(
+                name, command, refused, lexed))
+    for name, before, want in _HD_TEXT_MARK_KEPT:
+        command = before + hidden
+        lexed = _hd_lex_outcome(command)
+        if lexed != want + [hidden.split()]:
+            out.append("(hd-text-mark-kept-{}) the lexer must read {!r} as {!r}, got {!r}".format(
+                name, command, want + [hidden.split()], lexed))
+    return out
 
 
 def main():
@@ -12957,14 +13414,20 @@ def _main_isolated(monitor):
         # parenthesis after it on its line, are judged under both readings of that '#' (the shared lexer's
         # comment rule, applied inside _skip_quoting): the comment reading, the one bash takes, ends the
         # substitution at the next line's ')"' and lexes the push as its own segment, so the parsed
-        # classifier denies it first with its own reason. The three whose quoted here-document sits inside a
+        # classifier denies it first with its own reason. The exception is commented-close: its word-text
+        # reading reads the next line's <<'EOF' as a quoted here-document whose body runs to the end of the
+        # command, a body end the lexer cannot place (rule (b) of _heredoc_body_ends_early), so the whole lex
+        # fails and the guard denies through its failed-lex path, whose commit proof reports the incomplete
+        # parse first, as its fallback alone does (a disclosed over-refusal: bash reads no here-document
+        # there). The three whose quoted here-document sits inside a
         # double-quoted command substitution are lexed as bash reads them too: the skip reads the body as
         # text, so the substitution ends at the ')"' after the delimiter line and the push is its own
         # segment, which the parsed classifier denies first (the unquoted one's body is still read as code,
         # so the fallback decides it). Each still denies; the fallback beneath it stays witnessed on the same
         # command (pl-uncertain-<shape>-<spelling>-fallback).
-        _unc_parsed_shapes = ('comment-paren', 'comment-apostrophe', 'commented-close', 'commented-close-heredoc',
+        _unc_parsed_shapes = ('comment-paren', 'comment-apostrophe', 'commented-close-heredoc',
                               'heredoc-paren', 'heredoc-quote', 'nested-heredoc-close')
+        _unc_refused_shapes = ('commented-close',)
         for _unm, _ucmd in _unc_shapes:  # each _ucmd still spells the pl-mispair push; re-spelled below
             for _usn, _usp in (
                 ('head', 'git push --force origin HEAD'),
@@ -12974,7 +13437,17 @@ def _main_isolated(monitor):
             ):
                 _ucmdx = _ucmd.replace('git push --force origin main', _usp)
                 _udetail = 'appears to force-push or delete'
-                if _unm in _unc_parsed_shapes:
+                if _unm in _unc_refused_shapes:
+                    try:
+                        aiqt_hooks._lex_readings(_ucmdx)
+                        _ulex = 'lexed'
+                    except ValueError as _ulex_exc:
+                        _ulex = str(_ulex_exc)
+                    if 'uncertain here-document body end' not in _ulex:
+                        failures.append('(pl-uncertain-{}-{}-lex) the lexer must refuse the word-text reading\'s '
+                                        'here-document body; got {!r}'.format(_unm, _usn, _ulex))
+                    _udetail = 'incomplete shell parse'
+                if _unm in _unc_parsed_shapes + _unc_refused_shapes:
                     _ufall = aiqt_hooks._protected_line_fallback(_ucmdx)
                     _ufall_obj = _ufall[1] if isinstance(_ufall[1], dict) else {}
                     _ufall_reason = _ufall_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -12982,7 +13455,8 @@ def _main_isolated(monitor):
                         failures.append('(pl-uncertain-{}-{}-fallback) the uncertain-lex fallback must deny the '
                                         'shape on its own, with its reason; got uncertain={} reason={!r}'.format(
                                             _unm, _usn, aiqt_hooks._lex_uncertain(_ucmdx), _ufall_reason))
-                    _udetail = 'this git push force-pushes'
+                    if _unm in _unc_parsed_shapes:
+                        _udetail = 'this git push force-pushes'
                 if _usn == 'frag':
                     # The backstop's de-quoted reading now denies the fragmented protected name
                     # first (deny reason changed, decision unchanged); the layer beneath it stays
@@ -15611,14 +16085,21 @@ def _main_isolated(monitor):
         # No guard decides a reviewed shape less strictly than main (e47da1de) does: the shapes above, the two
         # commit message shapes, a body that a nested substitution's line holds (bash 5.3.9 reads its 'git
         # commit' line as body text), two here-documents on one operator line, and a top-level assignment
-        # whose here-document bash ends at 'EOF)' (main and this code allow it alike). Main's decisions were
-        # recorded by running main's module on each command, per guard in _hd_floor_guards order, and each guard
-        # must decide exactly as main does, except the seven guards _hd_retry_over names on the eleven rows of
-        # _hd_then and on two-on-operator-line, which must decide at least as strictly: there the lex starts
-        # again reading no body, one reading of the body's '#' does not lex, and those guards take their
-        # cannot-evaluate path, an over-deny kept from the commit that added the retry. The eleven rows of
-        # _hd_then fail on the code before that retry; the last five rows pass there too and are REGRESSION
-        # GUARDS.
+        # whose here-document bash ends at 'EOF)'. Main's decisions were recorded by running main's module on
+        # each command, per guard in _hd_floor_guards order, and each guard must decide exactly as main does,
+        # except the seven guards _hd_retry_over names on the eleven rows of _hd_then and on
+        # two-on-operator-line, which must decide at least as strictly: there the lex starts again reading no
+        # body, one reading of the body's '#' does not lex, and those guards take their cannot-evaluate path,
+        # an over-deny kept from the commit that added the retry; and except the top-level assignment (below).
+        # The eleven rows of _hd_then fail on the code before that retry; the next four rows pass there too and
+        # are REGRESSION GUARDS. The top-level assignment records decisions stricter than main's: bash 5.3.9
+        # ends its body at the 'EOF)' line and runs the rest of that line (with git replaced by echo it prints
+        # commit --no-verify -m x), which main's lexer read as body, so main's commit_msg_subst and
+        # protected_line allowed a commit bash runs. The lexer now refuses an untrusted body whose end is
+        # uncertain (the bounded rule of _heredoc_body_ends_early; here a line that starts with the delimiter
+        # and is not exactly it), and both guards take their failed-lex fallback and deny, the fail-closed
+        # outcome; the row fails on code whose lexer reads that body to its exact delimiter line, as main's
+        # does. _heredoc_early_end_failures holds the rows for the rest of that rule.
         _hd_floor_guards = (aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.git_explicit_binding,
                             aiqt_hooks.commit_identity, aiqt_hooks.bash_absolute_paths, aiqt_hooks.branch_root,
                             aiqt_hooks.git_discard, aiqt_hooks.git_stash_ref, aiqt_hooks.commit_msg_subst,
@@ -15669,7 +16150,8 @@ def _main_isolated(monitor):
              ("allow",) * 9 + ("deny",), ()),
             ("two-on-operator-line", "echo \"$(cat <<'EOF'; echo $(cat <<B\n# Don't\nEOF\n$(" + _hd_nv + ")\nB\n))\"",
              _hd_main_then, _hd_retry_over),
-            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)", ("allow",) * 10, ()),
+            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)",
+             ("allow",) * 8 + ("deny", "deny"), ()),
         ]
         # The two commit message shapes keep main's decisions exactly: the closed literal grammar accepts the
         # form on a parsed command, so gate_weakening allows them as main does, and both rows fail on code whose
@@ -15677,6 +16159,10 @@ def _main_isolated(monitor):
         for _hdn, _hdc, _hdmain, _hdover in _hd_floor:
             _hd_main_check("hd-main-floor-" + _hdn, _hdc, _hdmain, _hdover,
                            exact=_hdn in ("apostrophe", "five-headings"))
+        failures.extend(_heredoc_early_end_failures())
+        failures.extend(_heredoc_dollar_brace_failures())
+        failures.extend(_heredoc_arith_failures())
+        failures.extend(_heredoc_text_mark_failures())
         # MAIN'S DECISION AS A FLOOR (the comment above _MainHashReading). Main's lex fails on the commit
         # message form whose body holds an apostrophe, and its guards then take their failed-lex path, whose raw
         # scans read the whole text, a command inside a string included; reading that body made the lex clean,
@@ -23849,14 +24335,16 @@ def _main_isolated(monitor):
         # present-but-unreadable registry cases (gs-i*, gs-q, ...) and the mis-wired event (gs-s).
         gexpect("(gs-k) a missing tool_name DENIES (fail-closed contract)", "deny",
                 file_path=os.path.join(gr, "GEN.md"), cwd=gr, with_tool=False)
-        # ALLOW with a note: no session cwd, so the root cannot be resolved.
-        gexpect("(gs-l) a missing cwd allows with a note (root cannot be resolved)", "allow-note",
+        # DENY: the registry is found from the TARGET, so an absolute registered target denies with no session
+        # cwd at all (target-rooted; gs-l2 below covers the relative file_path that does need a cwd).
+        gexpect("(gs-l) a missing cwd still DENIES an absolute registered target (target-rooted)", "deny",
                 tool="Write", file_path=os.path.join(gr, "GEN.md"), with_cwd=False)
         # ALLOW with a note: a target outside the repo cannot be cleared against this repo registry.
         gexpect("(gs-m) a target outside the repo allows with a note (non-contained)", "allow-note",
                 tool="Write", file_path=str(tmp / "outside.md"), cwd=gr)
-        # ALLOW: Bash is out of scope by design (defensive branch; the matcher excludes it too).
-        gexpect("(gs-n) Bash is out of scope (allow)", "allow",
+        # DENY: a Bash payload with no readable command cannot be read by the write-sink detector, so it fails
+        # closed (the gb block covers the Bash channel itself).
+        gexpect("(gs-n) a Bash payload with no command DENIES fail-closed", "deny",
                 tool="Bash", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
         # ALLOW with a note: payload cannot-evaluate cases (non-dict tool_input, missing file_path).
         gexpect("(gs-o) a non-dict tool_input allows with a note", "allow-note",
@@ -23982,15 +24470,15 @@ def _main_isolated(monitor):
             os.path.commonpath = _real_commonpath
         # gs-aj: the registry-entry fault branch ("a registry entry could not be resolved for containment").
         # The injected realpath raises ONLY on the joined registry-entry path (root_c + "GEN.md", the first
-        # entry) AND only when its caller is _gensrc_match (gensrc_guard's own target resolution and the
-        # _gensrc_within containment check resolve the same string and must succeed). The case asserts
-        # the fault actually fired there, so it cannot pass through an earlier branch.
-        # Falsifiable: making that branch a silent allow (or a match/no-match) is not "allow-note".
+        # entry) AND only when its caller is _gensrc_entry_real, the one place entry targets resolve
+        # (gensrc_guard's own target resolution and the containment check resolve the same string and must
+        # succeed). The case asserts the fault actually fired there, so it cannot pass through an earlier
+        # branch. Falsifiable: making that branch a silent allow (or a match/no-match) is not "allow-note".
         _gs_entry_path = os.path.join(os.path.realpath(gr), "GEN.md")
         _gs_entry_hits = []
 
         def _raise_entry_realpath(path, *a, **k):
-            if path == _gs_entry_path and sys._getframe(1).f_code.co_name == "_gensrc_match":
+            if path == _gs_entry_path and sys._getframe(1).f_code.co_name == "_gensrc_entry_real":
                 _gs_entry_hits.append(path)
                 raise OSError("injected registry-entry realpath fault (gs-aj)")
             return _real_realpath(path, *a, **k)
@@ -24016,12 +24504,12 @@ def _main_isolated(monitor):
         try:
             aiqt_hooks._gensrc_fail_ask = lambda _detail: (0, {"systemMessage": " \t\n"}, None)
             _gs_ws = gdecide({"hook_event_name": "PreToolUse", "tool_name": "Write",
-                              "tool_input": {"file_path": _gs_inj_fp}})
+                              "tool_input": {"file_path": "GEN.md"}})
             aiqt_hooks._gensrc_fail_ask = lambda _detail: (
                 0, {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"},
                     "systemMessage": "explicit allow with a note"}, None)
             _gs_xn = gdecide({"hook_event_name": "PreToolUse", "tool_name": "Write",
-                              "tool_input": {"file_path": _gs_inj_fp}})
+                              "tool_input": {"file_path": "GEN.md"}})
         finally:
             aiqt_hooks._gensrc_fail_ask = _real_fail_ask
         try:
@@ -24134,6 +24622,28 @@ def _main_isolated(monitor):
                            "is a convention, not enforced", "the two apply the same size bound"):
             if _gs_phrase not in _gs_residue:
                 failures.append("(gs-res-local) the residue must state: {!r}".format(_gs_phrase))
+
+        # (gs-res-bash) The residue states the Bash channel as the gb cases prove it: the sinks are judged, reads
+        # and generator runs are allowed structurally, restores note, the residuals and the OPF boundary are
+        # disclosed, the registry is target-rooted, and Bash is no longer said to be excluded.
+        for _gs_phrase in ("the write sinks a Bash command spells literally", "READS ARE NEVER JUDGED",
+                           "structural regeneration allowance", "DISCLOSED RESIDUALS (not caught)",
+                           "OPF BOUNDARY", "of the TARGET",
+                           "they restore the index or HEAD bytes their options choose",
+                           "The mention filter is an over-denial trigger and noise control, not a coverage "
+                           "claim",
+                           "a fault inside the Bash detector itself",
+                           "never shadows the enclosing registry",
+                           "a deliberate, disclosed OVER-DENIAL",
+                           "never resolved to a guessed path",
+                           "a resolution budget, not a syscall limit"):
+            if _gs_phrase not in _gs_residue:
+                failures.append("(gs-res-bash) the residue must state the Bash channel: {!r}".format(_gs_phrase))
+        if ("Bash is EXCLUDED by design" in _gs_residue or "git toplevel of the SESSION cwd" in _gs_residue
+                or "restore committed bytes" in _gs_residue
+                or "longer than any path a write syscall accepts" in _gs_residue):
+            failures.append("(gs-res-bash-stale) the residue still says Bash is excluded, roots at the session "
+                            "cwd, claims restores are committed bytes, or claims a syscall path limit")
 
         # === gs-auth: an authoring-scoped registry entry never blocks an adopter's own settings ==========
         # The fixtures hold the REAL .aiqt/gensrc.json bytes this repository ships (tools/gen_gensrc.py scopes
@@ -24326,6 +24836,801 @@ def _main_isolated(monitor):
             os.remove(str(_gs_marker))
         except OSError as exc:
             failures.append("(gs-auth-f-setup) could not plant a marker at the size bound: {}".format(exc))
+
+        # === gb: the gensrc Bash write-sink detector (gensrc_guard on a Bash call) ========================
+        # Judged by the STRUCTURED decision (gdecide). Each case is (label, expected, command, cwd); {gr} is
+        # replaced by the registry repo path and {bN} by the budget repos. The commands are inspected, never
+        # executed. gr carries a real gen/ directory (a tree-entry root that exists, so a copy into it joins the
+        # source basename) and gr3 a malformed registry; four empty repos exercise the 4-root budget.
+        try:
+            os.makedirs(os.path.join(gr, "gen"), exist_ok=True)
+            gs_reg3.write_text("{ not json", encoding="utf-8")
+            gb_extra = [str(_gs_init("gbroot{}".format(n))) for n in range(1, 5)]
+            # A registry repo with a git repository NESTED inside its registered gen/ tree (and one in an
+            # unregistered directory as the control): a nested repo must not shadow the enclosing registry.
+            gs_nest = _gs_init("gsnest")
+            (gs_nest / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_nest / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
+            _gs_init(os.path.join("gsnest", "gen"))
+            _gs_init(os.path.join("gsnest", "other"))
+            # Five nested repositories (the registry at the outermost): a target under the deepest sits
+            # past the 4-root ancestor-walk budget, a cannot-evaluate, never a silent allow.
+            gs_deep = _gs_init("gsdeep")
+            (gs_deep / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_deep / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
+            _gs_deep_rel = "gsdeep"
+            for _gs_part in ("na", "nb", "nc", "nd"):
+                _gs_deep_rel = os.path.join(_gs_deep_rel, _gs_part)
+                _gs_init(_gs_deep_rel)
+            # A directory change the guard cannot pin: the session repo gscds (the shared registry, with sub/
+            # and d/) links d/l to gscdt/sub and d/l2 to gscdt/ogen/inner, a sibling repo whose registry holds
+            # OTHER.md and ogen/. The session registry names neither, so a gb-cd deny there comes from the
+            # directory a change may reach, never from a mention.
+            gs_cds = _gs_init("gscds")
+            (gs_cds / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_cds / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
+            gs_cdt = _gs_init("gscdt")
+            (gs_cdt / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_cdt / ".aiqt" / "gensrc.json").write_text(json.dumps({"version": 1, "generated": [
+                {"kind": "file", "target": "OTHER.md", "sources": ["o.toml"], "regenerate": "python3 tools/gen_o.py"},
+                {"kind": "tree", "target": "ogen/", "sources": ["osrc/"],
+                 "regenerate": "python3 tools/gen_otree.py"}]}), encoding="utf-8")
+            for _gs_part in (gs_cds / "sub", gs_cds / "d", gs_cdt / "sub", gs_cdt / "ogen" / "inner"):
+                _gs_part.mkdir(parents=True, exist_ok=True)
+            os.symlink(str(gs_cdt / "sub"), str(gs_cds / "d" / "l"))
+            os.symlink(str(gs_cdt / "ogen" / "inner"), str(gs_cds / "d" / "l2"))
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the gensrc Bash fixtures: {}".format(exc), file=sys.stderr)
+            return 2
+        gnest = str(gs_nest)
+        gdeep = str(gs_deep)
+        gdeepest = os.path.join(gdeep, "na", "nb", "nc", "nd")
+        # Real paths, so a change through no link reads the same lexically and physically wherever the
+        # temporary directory lives (a linked /tmp would make every physical reading differ).
+        gcs, gct = os.path.realpath(str(gs_cds)), os.path.realpath(str(gs_cdt))
+        # The guard reads an inherited CDPATH and POSIXLY_CORRECT (_gensrc_cd_context), so every gb case is judged
+        # with neither; the (gb-cd-env*) and (gb-posix-env*) cases set one for themselves.
+        os.environ.pop("CDPATH", None)
+        os.environ.pop("POSIXLY_CORRECT", None)
+
+        def bdata(command, cwd):
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+            if cwd is not None:
+                data["cwd"] = cwd
+            return data
+
+        def bexpect(label, want, command, cwd):
+            command = command.replace("{gr}", gr)
+            for n, root in enumerate(gb_extra, 1):
+                command = command.replace("{b%d}" % n, root)
+            got = gdecide(bdata(command, cwd))
+            if got != want:
+                failures.append("{}: expected {}, got {} for {!r}".format(label, want, got, command))
+
+        def breason(command, cwd):
+            _code, _obj, _err = aiqt_hooks.gensrc_guard(bdata(command.replace("{gr}", gr), cwd))
+            try:
+                return _obj["hookSpecificOutput"]["permissionDecisionReason"]
+            except (TypeError, KeyError):
+                return ""
+
+        # The target resolution budget, tested at both ends: a path of exactly 4096 bytes (the budget) is
+        # judged normally, and one a byte over is never resolved (uncleared). The budget bounds resolution
+        # work; it is NOT a syscall limit (a short relative operand in a deep working directory writes past
+        # any absolute cutoff), so the deep-cwd pair below tests the same ends through a 5-byte operand.
+        _gb_deep_at = os.path.join(gr, "gen", "a" * (4095 - len(os.fsencode(os.path.join(gr, "gen")))))
+        _gb_deep_over = _gb_deep_at + "a"
+        # cwd strings whose joined "b.md" sink lands exactly at, and one byte past, the 4096-byte budget.
+        _gb_cwd_at = os.path.join(gr, "gen", "a" * (4090 - len(os.fsencode(os.path.join(gr, "gen")))))
+        _gb_cwd_over = _gb_cwd_at + "a"
+        _gb_cases = [
+            # incident reproduction: Bash routing, the redirect sink, the heredoc retry and target-rooting
+            ("(gb-01) the incident append to a registered file denies", "deny",
+             "printf '%s\\n' '- X1 [ ] t' >> {gr}/GEN.md", gr),
+            ("(gb-02) a relative append denies", "deny", "echo x >> GEN.md", gr),
+            ("(gb-03) a heredoc append with the redirect first denies", "deny", "cat >> {gr}/GEN.md <<EOF\nl\nEOF", gr),
+            ("(gb-04) a heredoc append with the redirect after the delimiter denies (lex retry)", "deny",
+             "cat <<EOF >> {gr}/GEN.md\nl\nEOF", gr),
+            ("(gb-05) a write from another repo is judged by the target repo registry", "deny",
+             "printf x >> {gr}/GEN.md", gr2),
+            # regeneration stays open: no sink, no registry read
+            ("(gb-10) a generator run allows silently", "allow", "python3 tools/gen_x.py", gr),
+            ("(gb-11) an isolated generator check allows silently", "allow", "python3 -I -B tools/gen_x.py --check", gr),
+            ("(gb-12) cd, regenerate and git add allows silently", "allow",
+             "cd {gr} && python3 tools/gen_x.py && git add GEN.md", gr),
+            # a sink on a generator run is judged like any other: no regenerate-text allowance
+            ("(gb-13) a generator redirected onto its own output denies", "deny", "python3 tools/gen_x.py > GEN.md", gr),
+            ("(gb-14) a generator run then an append denies", "deny", "python3 tools/gen_x.py && printf x >> GEN.md", gr),
+            ("(gb-15) appending the regenerate text itself denies", "deny", "echo \"python3 tools/gen_x.py\" >> GEN.md", gr),
+            # reads are never judged
+            ("(gb-r1) cat allows", "allow", "cat GEN.md", gr),
+            ("(gb-r2) grep allows", "allow", "grep a GEN.md", gr),
+            ("(gb-r3) an input redirect allows", "allow", "wc -l < GEN.md", gr),
+            ("(gb-r4) diff allows", "allow", "diff GEN.md src.toml", gr),
+            ("(gb-r5) git diff allows", "allow", "git diff -- GEN.md", gr),
+            ("(gb-r6) sed without -i allows", "allow", "sed -n 1p GEN.md", gr),
+            ("(gb-r7) copying a registered file away allows", "allow", "cp GEN.md /tmp/c", gr),
+            ("(gb-r8) a python read allows", "allow", "python3 -c \"print(open('GEN.md').read())\"", gr),
+            ("(gb-r9) a descriptor duplication allows", "allow", "ls 2>&1", gr),
+            ("(gb-r10) a /dev/null redirect allows", "allow", "ls > /dev/null", gr),
+            # every output redirect kind
+            ("(gb-k1) a truncating colon redirect denies", "deny", ": > GEN.md", gr),
+            ("(gb-k2) a clobber redirect denies", "deny", "echo >| GEN.md", gr),
+            ("(gb-k3) a both-streams redirect denies", "deny", "ls &> GEN.md", gr),
+            ("(gb-k4) a both-streams append denies", "deny", "ls &>> GEN.md", gr),
+            ("(gb-k5) a stderr redirect denies", "deny", "ls 2> GEN.md", gr),
+            ("(gb-k6) a read-write fd redirect denies", "deny", "exec 3<> GEN.md", gr),
+            ("(gb-k7) a csh-style redirect to a file denies", "deny", "ls >& GEN.md", gr),
+            ("(gb-k8) a registered first redirect denies (every redirect counts)", "deny", "echo a > GEN.md > /tmp/x", gr),
+            # tee, sed and perl
+            ("(gb-t1) tee denies", "deny", "echo x | tee GEN.md", gr),
+            ("(gb-t2) tee -a denies", "deny", "tee -a GEN.md < src.toml", gr),
+            ("(gb-t3) tee --append -- denies", "deny", "tee --append -- GEN.md < src.toml", gr),
+            ("(gb-t4) sed -i denies", "deny", "sed -i s/a/b/ GEN.md", gr),
+            ("(gb-t5) sed -iSUFFIX denies", "deny", "sed -i.bak s/a/b/ GEN.md", gr),
+            ("(gb-t6) sed --in-place= with -e denies", "deny", "sed --in-place=.b -e s/a/b/ GEN.md", gr),
+            ("(gb-t7) a sed cluster holding i denies", "deny", "sed -ni p GEN.md", gr),
+            ("(gb-t8) perl -pi -e denies", "deny", "perl -pi -e s/a/b/ GEN.md", gr),
+            ("(gb-t9) perl -i.bak -pe denies", "deny", "perl -i.bak -pe s/a/b/ GEN.md", gr),
+            ("(gb-t10) sed without -i allows", "allow", "sed s/a/b/ GEN.md", gr),
+            ("(gb-t11) perl without -i allows", "allow", "perl -ne print GEN.md", gr),
+            ("(gb-t12) sed -i on a source allows", "allow", "sed -i s/a/b/ src.toml", gr),
+            ("(gb-t13) sed --in-pl (a unique long prefix) denies", "deny", "sed --in-pl s/a/b/ GEN.md", gr),
+            ("(gb-t14) truncate denies", "deny", "truncate -s0 GEN.md", gr),
+            ("(gb-t15) dd of= denies", "deny", "dd if=/dev/zero of=GEN.md count=1", gr),
+            ("(gb-t16) dd reading a registered file allows", "allow", "dd if=GEN.md of=/tmp/x", gr),
+            ("(gb-t17) time -o denies", "deny", "/usr/bin/time -o GEN.md true", gr),
+            ("(gb-t18) a perl cluster the parser cannot fully resolve denies on a registered name (-lpi is "
+             "-l -p -i to perl)", "deny", "perl -lpi -e s/a/b/ GEN.md", gr),
+            ("(gb-t19) the same cluster naming no registered target notes", "allow-note",
+             "perl -lpi -e s/a/b/ unregistered.txt", gr),
+            ("(gb-t20) a tee operand of - is uncleared and notes (a literal file to GNU tee)", "allow-note",
+             "echo x | tee -", gr),
+            ("(gb-t21) an in-place suffix writes a backup beside the file (GEN plus .md could land on "
+             "GEN.md), so it is uncleared and notes", "allow-note", "sed -i.md s/a/b/ GEN", gr),
+            ("(gb-t22) the same suffix in a command naming GEN.md denies", "deny",
+             "perl -pi.md -e s/a/b/ GEN; cat GEN.md", gr),
+            # cp, mv, ln, install and rsync destinations
+            ("(gb-c1) cp onto a file denies", "deny", "cp a GEN.md", gr),
+            ("(gb-c2) cp into a tree directory joins the basename and denies", "deny", "cp a gen/", gr),
+            ("(gb-c3) cp -t into a tree denies", "deny", "cp -t gen a", gr),
+            ("(gb-c4) cp --parents into a tree denies", "deny", "cp --parents x gen", gr),
+            ("(gb-c5) mv onto a file denies", "deny", "mv a GEN.md", gr),
+            ("(gb-c6) ln -sf onto a file denies", "deny", "ln -sf a GEN.md", gr),
+            ("(gb-c7) install -m onto a file denies", "deny", "install -m644 a GEN.md", gr),
+            ("(gb-c8) install -d inside a tree denies", "deny", "install -d gen/sub", gr),
+            ("(gb-c9) a recursive copy into a tree denies", "deny", "cp -r src/ gen/", gr),
+            ("(gb-c10) cp onto GEN.md.bak allows (equality, not prefix)", "allow", "cp a GEN.md.bak", gr),
+            ("(gb-c11) cp under gen-extra allows (component boundary)", "allow", "cp a gen-extra/x", gr),
+            ("(gb-c12) a recursive merge into the root names no target, so it is uncleared and notes",
+             "allow-note", "cp -r src/. .", gr),
+            ("(gb-c13) the same merge naming GEN.md denies (uncleared write naming a registered target)",
+             "deny", "cp -r src/. . && ls GEN.md", gr),
+            ("(gb-c14) cp -T onto a tree root denies", "deny", "cp -T a gen", gr),
+            ("(gb-c15) an unknown cp option naming no target notes", "allow-note", "cp --frobnicate a b", gr),
+            ("(gb-c16) an unknown cp option naming GEN.md denies", "deny", "cp --frobnicate a GEN.md", gr),
+            ("(gb-c17) a cp backup option writes a side file, so it is uncleared and notes", "allow-note",
+             "cp -b --suffix=.md x GEN", gr),
+            ("(gb-y1) rsync onto a file denies", "deny", "rsync a GEN.md", gr),
+            ("(gb-y2) rsync -a with a trailing-slash source onto a tree denies", "deny", "rsync -a src/ gen/", gr),
+            ("(gb-y3) a remote rsync destination allows", "allow", "rsync a host:GEN.md", gr),
+            ("(gb-y4) rsync --dry-run allows", "allow", "rsync --dry-run a GEN.md", gr),
+            ("(gb-y5) rsync --files-from naming GEN.md denies", "deny", "rsync --files-from=l . GEN.md", gr),
+            ("(gb-y6) an rsync remote source naming GEN.md denies (the local name is not the spelling)",
+             "deny", "rsync host:GEN.md .", gr),
+            ("(gb-y7) an rsync remote source naming nothing notes", "allow-note", "rsync host:a .", gr),
+            ("(gb-y8) an rsync backup option is not modelled, so naming the gen tree denies", "deny",
+             "rsync -b --backup-dir=gen a b", gr),
+            # python -c, parsed and never executed
+            ("(gb-p1) python open for write denies", "deny", "python3 -c \"open('GEN.md','w').write('x')\"", gr),
+            ("(gb-p2) python open mode=a denies", "deny", "python3 -c \"open('GEN.md', mode='a')\"", gr),
+            ("(gb-p3) python Path.write_text denies", "deny",
+             "python3 -c \"import pathlib; pathlib.Path('GEN.md').write_text('x')\"", gr),
+            ("(gb-p4) python shutil.copy denies", "deny", "python3 -c \"import shutil; shutil.copy('a','GEN.md')\"", gr),
+            ("(gb-p5) python open for read allows", "allow", "python3 -c \"open('GEN.md')\"", gr),
+            ("(gb-p6) python open on a computed path naming GEN.md denies", "deny",
+             "python3 -c \"p='GEN.md'; open(p,'w')\"", gr),
+            ("(gb-p7) python -I -c open for write denies", "deny", "python3 -Ic \"open('GEN.md','x')\"", gr),
+            ("(gb-p8) a python program that does not parse and names GEN.md denies", "deny",
+             "python3 -c \"open('GEN.md',\"", gr),
+            ("(gb-p9) python Path.open for write into a tree denies", "deny",
+             "python3 -c \"from pathlib import Path; Path('gen/a').open('w')\"", gr),
+            ("(gb-p10) a python directory change leaves a relative write uncleared, so it notes (no "
+             "registered name in this session)", "allow-note",
+             "python3 -c \"import os; os.chdir('{gr}'); open('GEN.md','w')\"", gr2),
+            ("(gb-p11) a python directory change leaves an absolute constant write judged", "deny",
+             "python3 -c \"import os; os.chdir('/tmp'); open('{gr}/GEN.md','w')\"", gr2),
+            ("(gb-p12) a python shutil copy from a computed source naming GEN.md denies", "deny",
+             "python3 -c \"import shutil,sys; shutil.copy(sys.argv[1], '.')\" GEN.md", gr),
+            # tree containment and the boundary
+            ("(gb-e1) a redirect into a tree denies", "deny", "echo x > gen/new.md", gr),
+            ("(gb-e2) a redirect under gen-extra allows", "allow", "echo x > gen-extra/x.md", gr),
+            ("(gb-e3) a block target allows (block exclusion)", "allow", "echo x >> CLAUDE.md", gr),
+            # a nested repository never shadows an enclosing registry (every chain root is judged)
+            ("(gb-e4) a write into a repository nested inside a registered tree denies", "deny",
+             "echo x > gen/x.md", gnest),
+            ("(gb-e5) a write into a nested repository outside every registered tree allows", "allow",
+             "echo x > other/y.md", gnest),
+            # git restore and sink split (decision b)
+            ("(gb-g1) git checkout -- P restores and notes", "allow-note", "git checkout -- GEN.md", gr),
+            ("(gb-g2) git restore P restores and notes", "allow-note", "git restore GEN.md", gr),
+            ("(gb-g3) git checkout HEAD -- P restores and notes", "allow-note", "git checkout HEAD -- GEN.md", gr),
+            ("(gb-g4) git restore --staged alone is not judged", "allow", "git restore --staged GEN.md", gr),
+            ("(gb-g5) git checkout from another revision denies", "deny", "git checkout HEAD~3 -- GEN.md", gr),
+            ("(gb-g6) git restore --source=REV denies", "deny", "git restore --source=v1 GEN.md", gr),
+            ("(gb-g7) git -C into the registry repo with -s REV denies", "deny", "git -C {gr} restore -s main~1 GEN.md", gr2),
+            ("(gb-g8) git checkout REV -- a tree directory denies", "deny", "git checkout v1 -- gen/", gr),
+            ("(gb-g9) git checkout without -- naming GEN.md denies", "deny", "git checkout v1 GEN.md", gr),
+            ("(gb-g10) git checkout REV -- the repo root denies (it holds a target)", "deny", "git checkout v1 -- .", gr),
+            ("(gb-g11) git restore -SW --source=REV denies", "deny", "git restore -SW --source=v1 GEN.md", gr),
+            ("(gb-g12) a git branch switch is an uncleared checkout operand, so it notes", "allow-note",
+             "git checkout main", gr),
+            ("(gb-g13) git --git-dir naming GEN.md denies", "deny", "git --git-dir=x checkout v1 -- GEN.md", gr),
+            ("(gb-g14) git pathspec magic naming GEN.md denies", "deny", "git checkout v1 -- :/GEN.md", gr),
+            # wrapper peeling
+            ("(gb-w1) sudo tee denies", "deny", "sudo tee GEN.md", gr),
+            ("(gb-w2) env VAR sed -i denies", "deny", "env A=1 sed -i s/a/b/ GEN.md", gr),
+            ("(gb-w3) timeout cp denies", "deny", "timeout 5 cp a GEN.md", gr),
+            ("(gb-w4) nice -n cp denies", "deny", "nice -n 10 cp a GEN.md", gr),
+            ("(gb-w5) command cp denies", "deny", "command cp a GEN.md", gr),
+            ("(gb-w6) a leading assignment then cp denies", "deny", "A=1 cp a GEN.md", gr),
+            ("(gb-w7) env -C makes the directory unknown, so naming GEN.md denies", "deny",
+             "env -C /tmp cp a GEN.md", gr),
+            ("(gb-w8) an unmodelled sudo option naming GEN.md denies", "deny", "sudo -u x tee GEN.md", gr),
+            # working-directory tracking: a cd is followed only while its effect is certain
+            ("(gb-d1) cd into the registry repo then an && append denies", "deny", "cd {gr} && echo x >> GEN.md", gr2),
+            ("(gb-d2) cd into a tree then an && relative redirect denies", "deny", "cd gen && echo x > part.md", gr),
+            ("(gb-d3) cd - makes the directory unknown, so naming GEN.md denies", "deny",
+             "cd - && echo x >> GEN.md", gr),
+            ("(gb-d4) a subshell cd keeps its redirect outside", "allow", "(cd /tmp && echo x > GEN.md)", gr),
+            ("(gb-d5) a subshell cd is undone after the subshell", "deny", "(cd /tmp) && echo x > GEN.md", gr),
+            ("(gb-d6) a cd in a pipeline changes nothing", "deny", "cd /tmp | true; echo x > GEN.md", gr),
+            ("(gb-d7) a cd in a background job changes nothing", "deny", "cd /tmp & echo x > GEN.md", gr),
+            ("(gb-d8) a relative sink with no session cwd is uncleared and notes (no session repo)",
+             "allow-note", "echo x > GEN.md", None),
+            ("(gb-d9) an absolute sink with no session cwd still denies", "deny", "echo x > {gr}/GEN.md", None),
+            ("(gb-d10) a conditional cd may be skipped, so a later relative append naming GEN.md denies",
+             "deny", "false && cd {b1}; echo x >> GEN.md", gr),
+            ("(gb-d11) a cd can fail, so a relative append after ; naming GEN.md denies", "deny",
+             "cd nodir; echo x >> GEN.md", gr),
+            ("(gb-d12) after cd, || runs its alternative in the original directory, so naming GEN.md denies",
+             "deny", "cd /tmp || echo x >> GEN.md", gr),
+            ("(gb-d13) a cd inside a brace group may not take effect, so naming GEN.md denies", "deny",
+             "f() { cd /tmp; }; echo x > GEN.md", gr),
+            ("(gb-d14) a case pattern close-paren leaves the directory unknown, so naming GEN.md denies",
+             "deny", "case 1 in 1) cp a GEN.md;; esac", gr),
+            ("(gb-d15) a conditional cd then a sink naming nothing notes", "allow-note",
+             "false && cd {b1}; echo x >> unregistered.txt", gr2),
+            # a directory change the guard cannot pin (a stack rotation, a pushd option, -P or set -P, a ..
+            # across a link, a CDPATH or cdable_vars lookup) leaves the directory unknown, and a relative sink is
+            # also judged from each directory the change may reach: each case denies, and its flip (the same
+            # shape with the change pinned, or with a sink that reaches nothing registered) allows or notes
+            ("(gb-cd1) pushd +1 rotates back to the session repo, so a relative GEN.md append denies", "deny",
+             "pushd sub && pushd +1 && echo x > GEN.md", gcs),
+            ("(gb-cd1-flip) without the rotation the pushd is certain and lands in sub/", "allow",
+             "pushd sub && echo x > GEN.md", gcs),
+            ("(gb-cd1-note) a rotation then a sink no reachable directory registers notes", "allow-note",
+             "pushd sub && pushd +1 && echo x > notes.txt", gcs),
+            ("(gb-cd2) cd -P resolves .. physically, into the sibling repo, so its OTHER.md denies", "deny",
+             "cd -P d/l/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd2-flip) cd -P through no link reads the same physically, so it is certain", "allow",
+             "cd -P sub/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd3) a CDPATH prefix looks the operand up in the sibling repo, into its ogen/ tree", "deny",
+             "CDPATH=" + gct + " cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd3-flip) a ./ operand is never looked up in CDPATH", "allow",
+             "CDPATH=" + gct + " cd ./ogen && echo x > b.txt", gcs),
+            ("(gb-cd4) pushd -n moves only the stack, so a relative GEN.md append denies", "deny",
+             "pushd -n sub && echo x > GEN.md", gcs),
+            ("(gb-cd4-flip) pushd -n then a sink no reachable directory registers notes", "allow-note",
+             "pushd -n sub && echo x > notes.txt", gcs),
+            ("(gb-cd5) a .. across a link falls back to the physical path when the lexical one is absent",
+             "deny", "cd d/l/../ogen && echo x > b.txt", gcs),
+            ("(gb-cd5-flip) a .. across no link reads the same both ways, so it is certain", "allow",
+             "cd sub/../ogen && echo x > b.txt", gcs),
+            ("(gb-cd6) set -P makes a later cd physical", "deny", "set -P && cd d/l/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd6-flip) set -P then a cd through no link is certain", "allow",
+             "set -P && cd sub/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd7) set -o physical makes a later cd physical", "deny",
+             "set -o physical; cd d/l/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd7-flip) set -o physical then a cd through no link is certain", "allow",
+             "set -o physical; cd sub/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd8) a CDPATH assignment segment steers a later cd", "deny",
+             "CDPATH=" + gct + "; cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd8-flip) the same with a ./ operand", "allow", "CDPATH=" + gct + "; cd ./ogen && echo x > b.txt",
+             gcs),
+            ("(gb-cd9) an exported CDPATH steers a later cd", "deny",
+             "export CDPATH=" + gct + " && cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd9-flip) the same with a ./ operand", "allow",
+             "export CDPATH=" + gct + " && cd ./ogen && echo x > b.txt", gcs),
+            ("(gb-cd10) cdable_vars puts a variable value in place of the operand", "deny",
+             "shopt -s cdable_vars; ogen=" + gct + "/ogen; cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd10-flip) the same assignment without cdable_vars is no lookup", "allow",
+             "ogen=" + gct + "/ogen; cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd11) after cd -P the directory is physical, so a later cd .. leaves the sibling repo's sub/",
+             "deny", "cd -P d/l && cd .. && echo x > OTHER.md", gcs),
+            ("(gb-cd11-flip) cd -P into no link, then cd .., is certain", "allow",
+             "cd -P sub && cd .. && echo x > OTHER.md", gcs),
+            ("(gb-cd12) a later ../ogen from a linked directory falls back to the physical path", "deny",
+             "cd d/l && cd ../ogen && echo x > b.txt", gcs),
+            ("(gb-cd12-flip) the same from a directory that is no link is certain", "allow",
+             "cd sub && cd ../ogen && echo x > b.txt", gcs),
+            ("(gb-cd13) cd -P lands physically inside the registered ogen/ tree", "deny",
+             "cd -P d/l2/.. && echo x > b.txt", gcs),
+            ("(gb-cd13-flip) cd -P landing outside every registered tree notes", "allow-note",
+             "cd -P d/l/.. && echo x > b.txt", gcs),
+            ("(gb-cd14) pushd falls back across a link as cd does", "deny",
+             "pushd d/l/../ogen && echo x > b.txt", gcs),
+            ("(gb-cd14-flip) pushd across no link is certain", "allow", "pushd sub/../ogen && echo x > b.txt", gcs),
+            ("(gb-cd15) a CDPATH prefix steers pushd as it does cd", "deny",
+             "CDPATH=" + gct + " pushd ogen && echo x > b.txt", gcs),
+            ("(gb-cd15-flip) the same with a ./ operand", "allow", "CDPATH=" + gct + " pushd ./ogen && echo x > b.txt",
+             gcs),
+            ("(gb-cd16) a rotation may return to a repository pushed earlier, so its OTHER.md denies", "deny",
+             "pushd " + gct + " && pushd " + gcs + " && pushd +1 && echo x > OTHER.md", gcs),
+            ("(gb-cd16-flip) without the rotation the last pushd is certain", "allow",
+             "pushd " + gct + " && pushd " + gcs + " && echo x > OTHER.md", gcs),
+            ("(gb-cd17) a .. across a link is judged from both readings even where the shell takes the lexical one "
+             "(a disclosed over-denial)", "deny", "cd d/l && cd .. && echo x > OTHER.md", gcs),
+            ("(gb-cd17-flip) a cd .. out of a directory that is no link reads the same both ways, so it is certain",
+             "allow", "cd sub && cd .. && echo x > OTHER.md", gcs),
+            ("(gb-cd18) env cd runs a child process that never moves the shell, so GEN.md is judged where it was",
+             "deny", "env cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd18-flip) command cd is the builtin and moves the shell", "allow",
+             "command cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd19) a time program spelled as a path runs cd as a child too", "deny",
+             "/usr/bin/time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd19-flip) the time keyword keeps cd the builtin", "allow",
+             "time cd " + gct + " && echo x > GEN.md", gcs),
+            # bash reads time as its keyword only where the raw word is a bare time and nothing but reserved words
+            # or a keyword time stands before it; the lexer decodes \time, 'time' and "time" to time, so the raw
+            # segment decides, and any other time word is the time program, which runs cd as a child
+            ("(gb-cd20) a backslash-escaped time is the time program, so GEN.md is judged where it was", "deny",
+             "\\time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd20-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "\\time cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd21) a single-quoted time is the time program", "deny",
+             "'time' cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd21-flip) the time keyword with -p keeps cd the builtin", "allow",
+             "time -p cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd22) a double-quoted time is the time program", "deny",
+             "\"time\" cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd22-flip) the time keyword after a reserved word keeps cd the builtin", "allow",
+             "{ time cd " + gct + " && echo x > GEN.md; }", gcs),
+            ("(gb-cd23) a time with an escape inside the word is the time program", "deny",
+             "t\\ime cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd23-flip) a keyword time after a keyword time keeps cd the builtin", "allow",
+             "time time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd24) a time after a VAR=value word is the time program", "deny",
+             "X=1 time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd24-flip) a time after an assignment that ends its own segment is the keyword", "allow",
+             "X=1; time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd25) a time after command is the time program", "deny",
+             "command time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd25-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "command time cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd26) a time after a redirection is the time program", "deny",
+             ">/dev/null time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd26-flip) a redirection after the keyword time keeps cd the builtin", "allow",
+             "time cd " + gct + " >/dev/null && echo x > GEN.md", gcs),
+            ("(gb-cd27) a backslash-escaped time the keyword times is still the time program", "deny",
+             "time \\time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd27-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "time \\time cd " + gct + " && echo x > notes.txt", gcs),
+            # bash in posix mode does not read time as its keyword before a word starting with - (time -p, time --,
+            # time -o FILE), so where a word of the command may turn posix mode on (one holding posix or
+            # POSIXLY_CORRECT), such a time is the time program and runs cd as a child; a time with no such word
+            # after it stays the keyword
+            ("(gb-cd28) after set -o posix, time -p is the time program, so GEN.md is judged where it was", "deny",
+             "set -o posix\ntime -p cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd28-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "set -o posix\ntime -p cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd29) after a POSIXLY_CORRECT assignment, time -- is the time program", "deny",
+             "POSIXLY_CORRECT=1\ntime -- cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd29-flip) in posix mode a time with no word starting with - after it is still the keyword",
+             "allow", "set -o posix\ntime cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd30) in posix mode time -o FILE is the time program too", "deny",
+             "set -o posix\ntime -o /dev/null cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd30-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "set -o posix\ntime -o /dev/null cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd31) a posix-mode time -p in a brace group after && is the time program", "deny",
+             "set -o posix\ntrue && { time -p cd " + gct + " && echo x > GEN.md; }", gcs),
+            ("(gb-cd31-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "set -o posix\ntrue && { time -p cd " + gct + " && echo x > notes.txt; }", gcs),
+            ("(gb-cd32) a set -o posix on the line of the time is read the same way, though bash parsed that time "
+             "before the mode changed (a disclosed over-denial)", "deny",
+             "set -o posix; time -p cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd32-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "set -o posix; time -p cd " + gct + " && echo x > notes.txt", gcs),
+            # a cd command word spelled other than cd (a path, another case) names no builtin: bash runs a program
+            # for it, a child process that never moves the shell
+            ("(gb-cd33) a cd spelled as a path is a program, so GEN.md is judged where it was", "deny",
+             "/usr/bin/cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd33-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "/usr/bin/cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd34) a cd spelled in capitals names no builtin either", "deny",
+             "CD " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd34-flip) the builtin cd spelled exactly cd moves the shell", "allow",
+             "cd " + gct + " && echo x > GEN.md", gcs),
+            # the cannot-evaluate posture (decision d): an uncleared write denies on a registered name, notes otherwise
+            ("(gb-m1) an opaque redirect naming nothing notes", "allow-note", "echo x > \"$F\"", gr),
+            ("(gb-m2) an opaque redirect in a command naming GEN.md denies", "deny", "F=GEN.md; echo x > \"$F\"", gr),
+            ("(gb-m3) the same with no registry notes (nothing registered to name)", "allow-note",
+             "F=GEN.md; echo x > \"$F\"", gr2),
+            ("(gb-m4) an unfinished lex naming GEN.md denies", "deny", "cat <<< x > GEN.md", gr),
+            ("(gb-m5) a mention bounded by a path character is no mention, so it notes", "allow-note",
+             "F=GEN.md.bak; echo x > \"$F\"", gr),
+            # an uncertain '#' (the comment rule above _nest_track): every reading is judged, each from the session
+            # cwd; past the readings bound (a fifth such '#') the lexer reads nothing after the first one, and the
+            # shared fallback decides (_gensrc_doubt_unread): text spelling no redirect, sink program or wrapper,
+            # in quoting the fallback decodes, holds no judged write, and any other is an incomplete lex
+            ("(gb-h1) five uncertain '#' in a command spelling no sink allows", "allow",
+             "(true #a #b #c #d #e\n)", gr),
+            ("(gb-h2) five uncertain '#' and a read naming GEN.md allows (nothing there can write)", "allow",
+             "(true #a #b #c #d #e\n) ; cat GEN.md", gr),
+            ("(gb-h3) five uncertain '#' and a redirect naming GEN.md denies (an incomplete lex)", "deny",
+             "(true #a #b #c #d #e\n) > GEN.md", gr),
+            ("(gb-h4) five uncertain '#' and a redirect naming no registered target notes", "allow-note",
+             "(true #a #b #c #d #e\n) > out.txt", gr),
+            ("(gb-h5) five uncertain '#' and a sink program, spelled in capitals, past them notes", "allow-note",
+             "(true #a #b #c #d #e\nTEE b)", gr),
+            ("(gb-h6) five uncertain '#' and a wrapper past them notes", "allow-note",
+             "(true #a #b #c #d #e\nenv -X b)", gr),
+            ("(gb-h7) five uncertain '#' in quoting the fallback does not decode notes", "allow-note",
+             "(echo $'x' #a #b #c #d #e\n)", gr),
+            ("(gb-h8) a redirect only the word reading of an uncertain '#' sees denies", "deny",
+             "(true #a > GEN.md\n)", gr),
+            ("(gb-h9) a reading's directory never reaches another reading, so the restore notes", "allow-note",
+             "(cd /tmp #a ) ; git restore GEN.md", gr),
+            ("(gb-h10) a subshell with no cd restores the directory at its ), so a relative sink after it is "
+             "judged from cwd", "allow", "(true) ; echo x > out.txt", gr),
+            ("(gb-h11) the walk reads the empty segment a newline ends after a cd's && (the directory becomes "
+             "unknown), so naming GEN.md denies", "deny", "cd /tmp &&\necho x > GEN.md", gr),
+            # the target resolution budget: a sink over 4,096 normalized bytes is never resolved (uncleared)
+            ("(gb-n1) a sink of exactly 4096 bytes is judged at the budget (a tree member, so it denies)", "deny",
+             "echo x > " + _gb_deep_at, gr),
+            ("(gb-n2) a sink one byte over the budget is uncleared and names gen, so it denies", "deny",
+             "echo x > " + _gb_deep_over, gr),
+            ("(gb-n3) an over-budget sink naming no registered target notes", "allow-note",
+             "echo x > /x/" + "a" * 4200, gr),
+            ("(gb-n4) a copy whose joined destination is over the budget is uncleared and names gen, so it "
+             "denies", "deny", "cp -t gen " + "a" * 4200, gr),
+            ("(gb-n5) a short relative sink joined just past the budget in a deep directory is uncleared "
+             "and notes", "allow-note", "echo x > b.md", _gb_cwd_over),
+            ("(gb-n6) a short relative sink joined exactly at the budget is judged (a tree member, so it "
+             "denies)", "deny", "echo x > b.md", _gb_cwd_at),
+            # pinned residuals: each allows, so a future coverage claim must update the residue
+            ("(gb-x1) eval spells no sink", "allow", "eval \"echo x > GEN.md\"", gr),
+            ("(gb-x2) an sh -c string spells no sink", "allow", "sh -c 'echo x > GEN.md'", gr),
+            ("(gb-x3) an invoked script spells no sink", "allow", "./fix.sh", gr),
+            ("(gb-x4) a heredoc-fed interpreter naming GEN.md denies (an uncleared write)", "deny",
+             "python3 - <<EOF\nopen('GEN.md','w')\nEOF", gr),
+            ("(gb-x5) deleting a generated file is not judged", "allow", "rm GEN.md", gr),
+            # registry states
+            ("(gb-s1) no registry allows", "allow", "echo x >> GEN.md", gr2),
+            ("(gb-s2) a malformed registry denies a sink into its repo", "deny", "echo x >> GEN.md", gr3),
+            ("(gb-s4) a malformed registry leaves a git restore of it open", "allow", "git checkout -- .aiqt/gensrc.json", gr3),
+            ("(gb-s5) a malformed registry does not judge a sink elsewhere", "allow", "echo x > /tmp/y", gr3),
+            ("(gb-s6) a malformed session registry denies an uncleared write", "deny", "echo x > \"$F\"", gr3),
+            ("(gb-s7) a target outside every git work tree allows silently", "allow", "echo x >> " + gng + "/GEN.md", gng),
+            # the 4-root budget, in command order
+            ("(gb-b1) the registry repo first among five roots denies", "deny",
+             "echo x > {gr}/GEN.md; echo x > {b1}/f; echo x > {b2}/f; echo x > {b3}/f; echo x > {b4}/f", gr),
+            ("(gb-b2) the registry repo fifth is past the budget, an uncleared write naming GEN.md, so it "
+             "denies", "deny",
+             "echo x > {b1}/f; echo x > {b2}/f; echo x > {b3}/f; echo x > {b4}/f; echo x > {gr}/GEN.md", gr),
+            # the authoring scope on the Bash channel (the shipped registry)
+            ("(gb-a1) an adopter tree may write its own .claude/settings.json", "allow",
+             "echo {} > .claude/settings.json", gad),
+            ("(gb-a2) the authoring tree denies a write to .claude/settings.json", "deny",
+             "echo {} > .claude/settings.json", gau),
+            ("(gb-a3) an adopter tree still denies an unscoped registered target", "deny",
+             "echo x >> .claude/RULES-INDEX.md", gad),
+        ]
+        if len({case[0] for case in _gb_cases}) != len(_gb_cases):
+            failures.append("(gb-labels) two gb cases share a label")
+        for _gb_label, _gb_want, _gb_cmd, _gb_cwd in _gb_cases:
+            bexpect(_gb_label, _gb_want, _gb_cmd, _gb_cwd)
+        # (gb-reach-*) the skip_empty pre-pass of _gensrc_bash against the full lex, on every gb command: both
+        # lexes give the same flags (gb-reach-flags); a command any reading of whose full lex has an effect holds a
+        # segment that can add one (_gensrc_reach, gb-reach-writes); and where its text holds no ) and no segment
+        # is a cd, pushd or popd, the segments skip_empty leaves out change no effect (gb-reach-skip).
+        # Falsifiable: an effect source _gensrc_reach does not read, or a walk state those segments move without
+        # a ) or a directory change, fails a gb command here.
+        for _gb_label, _gb_want, _gb_cmd, _gb_cwd in _gb_cases:
+            _gb_text = _gb_cmd.replace("{gr}", gr)
+            for _gb_n, _gb_root in enumerate(gb_extra, 1):
+                _gb_text = _gb_text.replace("{b%d}" % _gb_n, _gb_root)
+            _gb_full = aiqt_hooks._gensrc_lex(_gb_text)
+            _gb_skip = aiqt_hooks._gensrc_lex(_gb_text, skip_empty=True)
+            _gb_reach = [aiqt_hooks._gensrc_reach(seg) for segs in _gb_skip[0] for seg in segs]
+            _gb_fx = [eff for segs in _gb_full[0] for eff in aiqt_hooks._bash_write_effects(segs, _gb_cwd)]
+            if _gb_full[1:] != _gb_skip[1:]:
+                failures.append("(gb-reach-flags) {}: the full and skip_empty lexes give flags {!r} and {!r}".format(
+                    _gb_label, _gb_full[1:], _gb_skip[1:]))
+            if _gb_fx and not any(writes for writes, _moves in _gb_reach):
+                failures.append("(gb-reach-writes) {}: the full lex has effects {!r}, but no skip_empty segment "
+                                "can add one".format(_gb_label, _gb_fx))
+            if ")" not in _gb_text and not any(moves for _writes, moves in _gb_reach):
+                _gb_sfx = [eff for segs in _gb_skip[0] for eff in aiqt_hooks._bash_write_effects(segs, _gb_cwd)]
+                if _gb_sfx != _gb_fx:
+                    failures.append("(gb-reach-skip) {}: with no ) and no directory change, the skip_empty "
+                                    "segments give effects {!r}, the full lex {!r}".format(_gb_label, _gb_sfx, _gb_fx))
+        # (gb-s3) the structural regeneration allowance: a sink-free command is allowed BEFORE any registry
+        # read (the recorder fails the case if the loader runs at all), even where the registry is malformed.
+        _gb_reg_reads = []
+        _gb_real_load = aiqt_hooks._load_gensrc_registry
+
+        def _gb_load_recorder(root):
+            _gb_reg_reads.append(root)
+            return _gb_real_load(root)
+
+        try:
+            aiqt_hooks._load_gensrc_registry = _gb_load_recorder
+            bexpect("(gb-s3) a malformed registry leaves the registry generator open", "allow",
+                    "python3 tools/gen_gensrc.py", gr3)
+            if _gb_reg_reads:
+                failures.append("(gb-s3-structural) a sink-free command must be allowed before any registry "
+                                "read, got reads of {!r}".format(_gb_reg_reads))
+        finally:
+            aiqt_hooks._load_gensrc_registry = _gb_real_load
+        # (gb-pb*) the distinct-path budget, at both ends with the budget pinned low: sinks within it are
+        # judged normally; the first past it is an uncleared write (denying on a registered name).
+        _gb_real_paths = aiqt_hooks._GENSRC_MAX_PATHS
+        try:
+            aiqt_hooks._GENSRC_MAX_PATHS = 2
+            bexpect("(gb-pb1) distinct sinks up to the path budget are judged, so a read-only GEN.md mention "
+                    "stays allowed", "allow", "cat GEN.md; echo x > f1; echo x > f2", gr)
+            bexpect("(gb-pb2) a sink past the path budget is uncleared, so the GEN.md mention denies", "deny",
+                    "cat GEN.md; echo x > f1; echo x > f2; echo x > f3", gr)
+            bexpect("(gb-pb3) a sink past the path budget naming no registered target notes", "allow-note",
+                    "echo x > f1; echo x > f2; echo x > f3", gr2)
+        finally:
+            aiqt_hooks._GENSRC_MAX_PATHS = _gb_real_paths
+        # (gb-cd-env*) a CDPATH this process inherits (the one the shell is assumed to inherit too) steers a bare
+        # relative cd as a spelled one does; a ./ operand is never looked up, and with no CDPATH the cd is certain.
+        try:
+            os.environ["CDPATH"] = gct
+            bexpect("(gb-cd-env1) an inherited CDPATH steers cd ogen into the sibling repo's ogen/ tree", "deny",
+                    "cd ogen && echo x > b.txt", gcs)
+            bexpect("(gb-cd-env1-flip) an inherited CDPATH never looks up a ./ operand", "allow",
+                    "cd ./ogen && echo x > b.txt", gcs)
+        finally:
+            os.environ.pop("CDPATH", None)
+        bexpect("(gb-cd-env2) with no CDPATH the same cd is certain", "allow", "cd ogen && echo x > b.txt", gcs)
+        # (gb-posix-env*) a POSIXLY_CORRECT this process inherits (the one the shell is assumed to inherit, which
+        # starts bash in posix mode) makes time -p the time program as a spelled one does; with none, the
+        # (gb-cd21-flip) case keeps it the keyword.
+        try:
+            os.environ["POSIXLY_CORRECT"] = "1"
+            bexpect("(gb-posix-env1) an inherited POSIXLY_CORRECT makes time -p the time program", "deny",
+                    "time -p cd " + gct + " && echo x > GEN.md", gcs)
+            bexpect("(gb-posix-env1-flip) the same with a sink no reachable directory registers notes",
+                    "allow-note", "time -p cd " + gct + " && echo x > notes.txt", gcs)
+        finally:
+            os.environ.pop("POSIXLY_CORRECT", None)
+        # (gb-home*) a word spelling HOME steers a ~: a ~ cd operand or ~ sink is then read from every value HOME may
+        # hold (each literal HOME=VALUE, the HOME of this process, and one the guard cannot name), never from the
+        # HOME of this process alone; with no such word, ~ is that HOME (the empty self-test home unless a case
+        # sets one), and the cd is certain.
+        bexpect("(gb-home1) a HOME assignment steers cd ~ into the sibling repo, so its OTHER.md denies", "deny",
+                "HOME=" + gct + "; cd ~ && echo x > OTHER.md", gcs)
+        bexpect("(gb-home1-flip) the same cd then a sink no reachable directory registers notes", "allow-note",
+                "HOME=" + gct + "; cd ~ && echo x > notes.txt", gcs)
+        bexpect("(gb-home2) an exported HOME steers cd ~/ogen into the sibling repo's ogen/ tree", "deny",
+                "export HOME=" + gct + " && cd ~/ogen && echo x > b.txt", gcs)
+        bexpect("(gb-home2-flip) the same into a directory no registry covers notes", "allow-note",
+                "export HOME=" + gct + " && cd ~/sub && echo x > b.txt", gcs)
+        bexpect("(gb-home3) a HOME assignment steers a ~ redirect onto the sibling repo's OTHER.md", "deny",
+                "HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
+        bexpect("(gb-home3-flip) the same redirect onto a file nothing registers notes", "allow-note",
+                "HOME=" + gct + "; echo x > ~/notes.txt", gcs)
+        bexpect("(gb-home4) a HOME assignment steers a ~ tee operand as it does a redirect", "deny",
+                "HOME=" + gct + "; tee ~/OTHER.md < /dev/null", gcs)
+        bexpect("(gb-home4-flip) the same tee onto a file nothing registers notes", "allow-note",
+                "HOME=" + gct + "; tee ~/notes.txt < /dev/null", gcs)
+        bexpect("(gb-home5-flip) a HOME prefix on cd ~ under an inherited HOME no registry covers notes",
+                "allow-note", "HOME=" + gcs + " cd ~ && echo x > OTHER.md", gcs)
+        # (gb-home7, gb-home9 to gb-home11) a ~ right after = or : in a word is a tilde bash may expand (it does in
+        # an assignment-shaped argument or redirection target outside posix mode), never a literal ~ path: such a
+        # sink is uncleared, a dd of=~ value is also judged as a leading ~ is, and such a cd operand reaches no
+        # directory the guard names.
+        bexpect("(gb-home7) a HOME assignment steers the ~ of dd of=~/x onto the sibling repo's OTHER.md", "deny",
+                "HOME=" + gct + "; dd if=/dev/null of=~/OTHER.md", gcs)
+        bexpect("(gb-home7-flip) the same dd onto a file nothing registers notes", "allow-note",
+                "HOME=" + gct + "; dd if=/dev/null of=~/notes.txt", gcs)
+        bexpect("(gb-home9) a ~ after = in a tee operand is uncleared, so naming GEN.md denies", "deny",
+                "tee x=~/GEN.md < /dev/null", gcs)
+        bexpect("(gb-home9-flip) the same tee naming nothing registered notes", "allow-note",
+                "tee x=~/notes.txt < /dev/null", gcs)
+        bexpect("(gb-home10) a ~ after = in a redirection target is uncleared, so naming GEN.md denies", "deny",
+                "echo x > x=~/GEN.md", gcs)
+        bexpect("(gb-home10-flip) the same redirect naming nothing registered notes", "allow-note",
+                "echo x > x=~/notes.txt", gcs)
+        bexpect("(gb-home11) a cd operand with a ~ after = leaves the directory unknown, so naming GEN.md denies",
+                "deny", "cd x=~ && echo x > GEN.md", gcs)
+        bexpect("(gb-home11-flip) the same cd then a sink naming nothing registered notes", "allow-note",
+                "cd x=~ && echo x > notes.txt", gcs)
+        _gb_home = os.environ["HOME"]
+        try:
+            os.environ["HOME"] = gct
+            bexpect("(gb-home5) a HOME prefix on cd is assigned only after ~ expands, so the inherited HOME is read",
+                    "deny", "HOME=" + gcs + " cd ~ && echo x > OTHER.md", gcs)
+            bexpect("(gb-home6) with no word spelling HOME, cd ~ is certain into the HOME of this process", "deny",
+                    "cd ~ && echo x > OTHER.md", gcs)
+            bexpect("(gb-home6-flip) the same certain cd then a sink nothing registers allows", "allow",
+                    "cd ~ && echo x > notes.txt", gcs)
+            bexpect("(gb-home8) with no word spelling HOME, the ~ of dd of=~/x is read as the HOME of this process",
+                    "deny", "dd if=/dev/null of=~/OTHER.md", gcs)
+            bexpect("(gb-home8-flip) the same dd onto a file nothing registers notes (a ~ after = stays uncleared)",
+                    "allow-note", "dd if=/dev/null of=~/notes.txt", gcs)
+        finally:
+            os.environ["HOME"] = _gb_home
+        # (gb-hb*) the HOME reading budget at both ends, pinned at the size of one ~ segment (two words and one
+        # redirect): within it the segment is read under each value of the spelled HOME, so a value landing on a
+        # registered target denies; past it the ~ is read under no value, an uncleared write naming no registered
+        # target of a consulted registry, so it notes.
+        _gb_real_home = aiqt_hooks._GENSRC_MAX_HOME
+        try:
+            aiqt_hooks._GENSRC_MAX_HOME = 3
+            bexpect("(gb-hb1) a ~ segment within the HOME budget is judged under each value, so OTHER.md denies",
+                    "deny", "HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
+            aiqt_hooks._GENSRC_MAX_HOME = 2
+            bexpect("(gb-hb1-flip) the same segment past the HOME budget is read under no value, so it notes",
+                    "allow-note", "HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
+            # (gb-hb1-names) the past-budget note says the budget applies to each reading of the command and that
+            # HOME may hold a literal value the command sets, never only that its value cannot be named.
+            _gb_code, _gb_obj, _gb_err = aiqt_hooks.gensrc_guard(bdata("HOME=" + gct + "; echo x > ~/OTHER.md", gcs))
+            _gb_note = str((_gb_obj or {}).get("systemMessage"))
+            if "applies to each reading" not in _gb_note or "a literal value the command sets" not in _gb_note:
+                failures.append("(gb-hb1-names) the past-budget note must say the budget applies to each reading "
+                                "and that HOME may hold a literal value, got {!r}".format(_gb_note))
+        finally:
+            aiqt_hooks._GENSRC_MAX_HOME = _gb_real_home
+        # (gb-01-names) the incident deny names the source and the regenerate command; (gb-s2-names) the
+        # malformed-registry deny names the registry; (gb-g1-names) the restore note names the regenerate command.
+        _gb_why = breason("printf x >> {gr}/GEN.md", gr)
+        if "src.toml" not in _gb_why or "python3 tools/gen_x.py" not in _gb_why:
+            failures.append("(gb-01-names) the Bash deny must name src.toml and python3 tools/gen_x.py, got {!r}"
+                            .format(_gb_why))
+        _gb_why = breason("echo x >> GEN.md", gr3)
+        if ".aiqt/gensrc.json" not in _gb_why or "PRESENT but could not be read" not in _gb_why:
+            failures.append("(gb-s2-names) the malformed-registry deny must name the registry, got {!r}"
+                            .format(_gb_why))
+        _gb_code, _gb_obj, _gb_err = aiqt_hooks.gensrc_guard(bdata("git restore GEN.md", gr))
+        if "python3 tools/gen_x.py" not in str((_gb_obj or {}).get("systemMessage")):
+            failures.append("(gb-g1-names) the restore note must name the regenerate command, got {!r}"
+                            .format(_gb_obj))
+        # (gb-cd2-names) a sink judged from a directory an uncertain change may reach names that directory.
+        _gb_why = breason("cd -P d/l/.. && echo x > OTHER.md", gcs)
+        if "judged from {}, a directory an uncertain cd".format(gct) not in _gb_why:
+            failures.append("(gb-cd2-names) the deny must name the directory it judged the sink from, got {!r}"
+                            .format(_gb_why))
+        # (gb-home3-names) a ~ sink judged under a HOME value the command spells names that value.
+        _gb_why = breason("HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
+        if "reading ~ as {}, a value HOME may hold".format(gct) not in _gb_why:
+            failures.append("(gb-home3-names) the deny must name the HOME value it read ~ as, got {!r}"
+                            .format(_gb_why))
+        # (gb-f*) fail-closed inputs: a Bash payload whose command cannot be read, and a fault inside the
+        # detector, deny (the detector never lets an unread command through).
+        for _gb_n, _gb_input in enumerate(({"command": None}, {"command": ""}, {"command": 7}, {}, "not-a-dict")):
+            _gb_got = gdecide({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _gb_input,
+                               "cwd": gr})
+            if _gb_got != "deny":
+                failures.append("(gb-f-input-{}) an unreadable Bash command must deny, got {}".format(_gb_n, _gb_got))
+        _gb_real_effects = aiqt_hooks._bash_write_effects
+
+        def _gb_raise(*_a, **_k):
+            raise OSError("injected detector fault (gb-f-fault)")
+
+        try:
+            aiqt_hooks._bash_write_effects = _gb_raise
+            bexpect("(gb-f-fault) a fault inside the detector denies fail-closed", "deny", "echo x > /tmp/y", gr)
+        finally:
+            aiqt_hooks._bash_write_effects = _gb_real_effects
+        # (gs-m2, gs-l2) the Write branch is target-rooted: a registered target denies whatever the session cwd,
+        # and the session cwd is needed only for a relative file_path.
+        gexpect("(gs-m2) Write a registered target from another repo cwd DENIES (target-rooted)", "deny",
+                tool="Write", file_path=os.path.join(gr, "GEN.md"), cwd=gr2)
+        gexpect("(gs-l2) a MultiEdit relative file_path with no cwd allows with a note", "allow-note",
+                tool="MultiEdit", file_path="GEN.md", edits=[{"old_string": "a", "new_string": "b"}],
+                with_cwd=False)
+        # (gs-dp*) the target resolution budget on the Write channel, at both ends and NORMALIZED FIRST:
+        # exactly 4096 bytes is judged (a tree member, so it denies); one byte over is never resolved and
+        # allows with a note; a path long as spelled but short once normalized (./ runs) is judged like its
+        # normalized form, so a registered target behind ./ padding still denies; one still over the budget
+        # after normalization allows with a note.
+        gexpect("(gs-dp1) a Write target of exactly 4096 bytes is judged at the budget", "deny",
+                tool="Write", file_path=_gb_deep_at, cwd=gr)
+        gexpect("(gs-dp2) a Write target one byte over the budget allows with a note", "allow-note",
+                tool="Write", file_path=_gb_deep_over, cwd=gr)
+        _gs_dotted = os.path.join(gr, "./" * ((4200 - len(os.fsencode(gr))) // 2), "GEN.md")
+        if len(os.fsencode(_gs_dotted)) <= 4096 or len(os.fsencode(os.path.normpath(_gs_dotted))) > 4096:
+            failures.append("(gs-dp3-fixture) the dotted path must be over the budget raw and under it "
+                            "normalized, got {} and {}".format(
+                                len(os.fsencode(_gs_dotted)),
+                                len(os.fsencode(os.path.normpath(_gs_dotted)))))
+        gexpect("(gs-dp3) a Write target over the budget as spelled but normalizing onto a registered file "
+                "DENIES (normalize before the budget)", "deny", tool="Write", file_path=_gs_dotted, cwd=gr)
+        gexpect("(gs-dp4) a Write target still over the budget after normalization allows with a note",
+                "allow-note", tool="Write", file_path=_gb_deep_over + "/./x", cwd=gr)
+        # (gs-n*) a nested repository never shadows an enclosing registry on the Write channel either, and a
+        # nest past the 4-root ancestor-walk budget is a cannot-evaluate (allow-note), never a silent allow.
+        gexpect("(gs-n1) a Write into a repository nested inside a registered tree DENIES", "deny",
+                tool="Write", file_path=os.path.join(gnest, "gen", "x.md"), cwd=gnest)
+        gexpect("(gs-n2) a Write into a nested repository outside every registered tree allows", "allow",
+                tool="Write", file_path=os.path.join(gnest, "other", "y.md"), cwd=gnest)
+        gexpect("(gs-n3) a Write under more nested repositories than the walk budget allows with a note",
+                "allow-note", tool="Write", file_path=os.path.join(gdeepest, "x.md"), cwd=gdeep)
+        # (gb-nn*) the same nest on the Bash channel: past the budget the write is uncleared, denying on a
+        # registered name and noting otherwise.
+        bexpect("(gb-nn1) a Bash sink under more nested repositories than the walk budget naming GEN.md "
+                "denies", "deny", "echo x > " + os.path.join(gdeepest, "x.md") + "; cat GEN.md", gdeep)
+        bexpect("(gb-nn2) the same sink naming nothing notes", "allow-note",
+                "echo x > " + os.path.join(gdeepest, "x.md"), gdeep)
+        # (gb-wire) the manifest matcher covers Bash, and the generated project settings and plugin hooks.json
+        # carry it unchanged (tools/gen_hooks.py renders both).
+        try:
+            _gb_hook = [h for h in load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+                        if h.get("id") == "gensrc-edit-guard"][0]
+            _gb_settings = json.loads((repo_root() / ".claude" / "settings.json").read_text(encoding="utf-8"))
+            _gb_plugin = json.loads((repo_root() / "plugin" / "aiqt-guardrails-hooks" / "hooks" / "hooks.json")
+                                    .read_text(encoding="utf-8"))
+            _gb_matchers = {g.get("matcher") for g in _gb_plugin["hooks"]["PreToolUse"]
+                            if any("gensrc_guard" in json.dumps(x) for x in g.get("hooks", []))}
+            if not re.fullmatch(_gb_hook["matcher"], "Bash"):
+                failures.append("(gb-wire) the gensrc-edit-guard matcher must match Bash")
+            if _gb_settings["hooks"]["PreToolUse"][0]["matcher"] != _gb_hook["matcher"]:
+                failures.append("(gb-wire-settings) .claude/settings.json must carry the manifest gensrc matcher")
+            if _gb_matchers != {_gb_hook["matcher"]}:
+                failures.append("(gb-wire-plugin) hooks.json must carry the manifest gensrc matcher, got {!r}"
+                                .format(_gb_matchers))
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+            failures.append("(gb-wire-read) could not read the gensrc wiring: {}".format(exc))
+        # (gb-parse) the extracted option parser preserves the review-dispatch-pin behaviour: FROZEN expected
+        # results over sampled cp, mv and ln words (an independent expectation, not a self-comparison, so a
+        # regression in the shared parser fails here even though _rdp_writer_parse delegates to it), None for
+        # a program outside the table, and the gensrc-only specs parse their own options while the rdp table
+        # stays without them.
+        _gb_parse_common = {
+            ("a", "b"): (set(), ["a", "b"], [], []),
+            ("-t", "d", "a"): ({"target-directory"}, ["a"], ["d"], []),
+            ("--target-directory=d", "a"): ({"target-directory"}, ["a"], ["d"], []),
+            ("-T", "a", "b"): ({"no-target-directory"}, ["a", "b"], [], []),
+            ("-S", ".b", "a", "b"): ({"suffix"}, ["a", "b"], [], [("suffix", ".b")]),
+            ("--frob", "a"): None,
+            ("--", "-a", "b"): (set(), ["-a", "b"], [], []),
+            ("--no-t", "a", "b"): ({"no-target-directory"}, ["a", "b"], [], []),
+        }
+        _gb_parse_vectors = {}
+        for _gb_name in ("cp", "mv", "ln"):
+            _gb_parse_vectors[_gb_name] = dict(_gb_parse_common)
+        _gb_parse_vectors["cp"].update({
+            ("-r", "a", "b"): ({"recursive"}, ["a", "b"], [], []),
+            ("--parents", "x", "d"): ({"parents"}, ["x", "d"], [], []),
+            ("-sf", "a", "b"): ({"f", "s"}, ["a", "b"], [], []),
+        })
+        _gb_parse_vectors["mv"].update({
+            ("-r", "a", "b"): None,
+            ("--parents", "x", "d"): None,
+            ("-sf", "a", "b"): None,
+        })
+        _gb_parse_vectors["ln"].update({
+            ("-r", "a", "b"): ({"r"}, ["a", "b"], [], []),
+            ("--parents", "x", "d"): None,
+            ("-sf", "a", "b"): ({"f", "s"}, ["a", "b"], [], []),
+        })
+        for _gb_name, _gb_table in sorted(_gb_parse_vectors.items()):
+            for _gb_args, _gb_want in sorted(_gb_table.items()):
+                _gb_got = aiqt_hooks._rdp_writer_parse(_gb_name, list(_gb_args))
+                if _gb_got != _gb_want:
+                    failures.append("(gb-parse-{}) expected {!r} for {!r}, got {!r}"
+                                    .format(_gb_name, _gb_want, list(_gb_args), _gb_got))
+        if aiqt_hooks._rdp_writer_parse("install", ["-d", "x"]) is not None or (
+                aiqt_hooks._writer_options_parse(None, ["a"]) is not None):
+            failures.append("(gb-parse-table) install stays outside the rdp table, and no spec parses nothing")
+        if aiqt_hooks._writer_options_parse(aiqt_hooks._gensrc_writer_spec("install"), ["-d", "x"]) != (
+                {"directory"}, ["x"], [], []):
+            failures.append("(gb-parse-install) the gensrc install spec must read -d as directory")
 
         # === abspth: absolute paths across typed-path tools and the Bash cwd floor (GS-7) ============
         # FAILING-FIRST battery: no abspth coverage existed before GS-7, and every case here is one the
@@ -26647,7 +27952,8 @@ def _main_isolated(monitor):
 
     _bash_guards = [aiqt_hooks.diff_source_pretool, aiqt_hooks.bash_absolute_paths,
                     aiqt_hooks.git_explicit_binding, aiqt_hooks.git_discard, aiqt_hooks.protected_line,
-                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst]
+                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst,
+                    aiqt_hooks.gensrc_guard]
     _bash_vectors = [
         "git status", "ls -la", "git diff", "git diff --color=always | grep foo", "/usr/bin/git diff",
         "git checkout -- file.txt", "git reset --hard", "git reset --soft", "git clean -fd",
@@ -26957,10 +28263,14 @@ def _main_isolated(monitor):
           "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS"
           "; the fallback and unreadable command deny fail-safe. gensrc (gensrc_guard) "
           "DENIES-and-educates a hand-edit of a registered generated artefact (edit the source and "
-          "regenerate) AND a PRESENT-but-unreadable/malformed registry (fail-closed), and ALLOWS "
-          "with a note the remaining cannot-evaluate branches (a non-git session, an outside-repo target, a "
-          "malformed payload), the CI drift gate remaining the backstop; a genuinely-absent registry is the "
-          "inert allow and a missing tool_name also denies. secsec (secrets_shift_left) still "
+          "regenerate), by Write/Edit/MultiEdit or by a literal Bash write sink, AND a PRESENT-but-unreadable/"
+          "malformed registry (fail-closed), AND an uncleared Bash write whose command names a "
+          "registered target (a deliberate disclosed over-denial); it ALLOWS reads and generator runs before "
+          "any registry read, notes a git restore of a registered path and an uncleared Bash write naming no "
+          "registered target, ALLOWS with a note the remaining cannot-evaluate branches (a target outside "
+          "every work tree, a malformed payload), the CI drift gate remaining the backstop; a genuinely-"
+          "absent registry is the inert allow, and a missing tool_name, an unreadable Bash command and a "
+          "detector fault deny. secsec (secrets_shift_left) still "
           "DENIES a shaped secret in a Write/Edit/Bash write-form (unchanged by the no-ask work) and "
           "fails closed on a missing tool_name or target field. abspth's typed-path predicate still "
           "DENIES a required-absolute relative/drive-relative/tilde/UNC-less path and ALLOWS an absolute "
