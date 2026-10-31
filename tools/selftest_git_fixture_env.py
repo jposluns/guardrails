@@ -4913,10 +4913,6 @@ _SCAN_ALLOWED_UNPINNED = (
      "exec of _read_regular's own source with its closefd=False fdopen put back as the pre-fix"
      " fdopen ownership (red-leg mutant); the exec only defines the mutant function",
      1),
-    ("tools/check_footer.py", "_close_vectors", ("dynamic",),
-     "exec of _read_regular_page's own source with its closefd=False fdopen put back as the"
-     " pre-fix fdopen ownership (red-leg mutant); the exec only defines the mutant function",
-     1),
     ("tools/check_release_cut.py", "_close_vectors", ("dynamic",),
      "exec of working_blob's own source with its closefd=False fdopen put back as the pre-fix"
      " fdopen ownership (red-leg mutant); the exec only defines the mutant function",

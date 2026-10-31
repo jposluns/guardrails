@@ -469,9 +469,14 @@ note = "The documented adopter vendoring location; reserved, never a pack-immuta
 # bytes). They are marked binary so git preserves their bytes verbatim and byte-canon does not canonicalize
 # them; their integrity stays pinned by opf/tools/_vendor/marko-2.2.4.manifest.sha256 and the release manifest.
 # The remaining vendored files are canonical text and stay text eol=lf.
+# opf/tools/opf-declaration.toml is the OPF reference tooling's declaration file (OPF-SPEC section 16.1): its
+# runtime check compares the installed copy's bytes with the shipped-file digest, so no checkout may rewrite
+# them (a line-ending conversion would refuse every store verb). It is marked binary so git applies no text
+# conversion, filter or attribute to it; its bytes are pinned by SHIPPED_DECLARATION_SHA256 and the release
+# manifest.
 
 [checkout]
-binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed"]
+binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed", "opf/tools/opf-declaration.toml"]
 
 # --- concern-3 hook: the adopter-installed extent is defined in the adopter-experience spec -------------
 
