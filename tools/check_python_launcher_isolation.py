@@ -91,8 +91,12 @@ sys through anything but a plain `import sys` -- an assignment, deletion, def, c
 a for, with or walrus target, a parameter or type parameter, a MATCH-PATTERN CAPTURE, a global or
 nonlocal declaration -- is a finding at that scope's line (the compiler records every binding
 construct; the aliased import spellings keep their own AST findings, which tell `import sys` from
-`import x as sys`). An INLINED comprehension's iteration variable named sys is isolated by the
-compiler from the enclosing scope, so it cannot rebind that scope's sys: where it coexists with
+`import x as sys`: `import os as sys`, `from sys import argv as sys`, `from os import path as sys`
+and `from os import sys` are each a rebinding finding). A `from sys import` of a machinery or
+underscore-prefixed name bound AS sys (`from sys import _getframe as sys`) is reported once, as that
+machinery or underscore import rather than also as a rebinding: the import is refused either way,
+and the one finding names the attribute it reaches. An INLINED comprehension's iteration variable
+named sys is isolated by the compiler from the enclosing scope, so it cannot rebind that scope's sys: where it coexists with
 another binding of sys the symbol table records no binding on the scope's symbol and it alone is
 no finding (every use of the name sys inside the comprehension stays governed by the load rules),
 while a comprehension target that is the scope's ONLY binding of sys is recorded and refused.
@@ -324,7 +328,9 @@ sys.path: sys.path.append(HERE)``), a sys.path.extend of the script's own direct
 tracked directory name (it cannot rebind the module name yet still forgets its credit), a read-only
 use of an import-machinery attribute (iterating sys.path, a sys.modules lookup, a sys.flags read),
 an ``import sys as X`` whose alias only ever reads a benign attribute, a harmless underscore-prefixed
-attribute read (``sys._getframe``), a sys.path.append of
+attribute read (``sys._getframe``) and its from-import spelling (``from sys import _getframe``), an
+annotation-only ``sys: object`` (no value, so nothing is bound at runtime, yet the symbol table
+records it as an assignment of the name sys), a sys.path.append of
 a directory other than the script's own, a relative script operand whose isolated launcher is not
 the first word of its hook command string (``echo a && python3 -I hk/h.py``, or an assignment
 carrying a command substitution, ``X=$(cmd) python3 -I hk/h.py``, which surfaces as an unresolvable
@@ -2164,10 +2170,12 @@ def _sys_usage_findings(tree, table, sanctioned_ids, holder):
     parameter, a match-pattern capture, a global or nonlocal declaration) is a finding at that
     scope's line; the
     aliased import spellings keep their own AST findings (the symbol table cannot tell
-    `import sys` from `import x as sys`, the AST import walk can). An INLINED comprehension's
-    iteration variable is compiler-isolated from the enclosing scope and cannot rebind its sys:
-    beside another binding of sys the symbol table records no binding on the scope's symbol, so it
-    alone is no finding (uses of sys inside the comprehension stay governed by the load rules),
+    `import sys` from `import x as sys`, the AST import walk can); a `from sys import` of a
+    machinery or underscore-prefixed name bound as sys (`from sys import _getframe as sys`) is
+    reported once, as that import rather than also as a rebinding, refused either way. An
+    INLINED comprehension's iteration variable is compiler-isolated from the enclosing scope and
+    cannot rebind its sys: beside another binding of sys the symbol table records no binding on
+    the scope's symbol, so it alone is no finding (uses of sys inside the comprehension stay governed by the load rules),
     while a comprehension target that is the scope's only binding of sys is recorded and refused. A sys.path.insert call and the
     dotted sys.path mutations (_sys_path_mutation) keep their own construct-specific messages, and
     every sys Name inside such a reported construct is folded into that one finding rather than
@@ -2772,6 +2780,9 @@ def main():
 #      carrying sys.path, a lambda body, a bare sys call argument, a store to the name sys, the
 #      symbol-table-decided rebindings no store form spells (a match-pattern capture, a match star,
 #      a mapping-rest capture, a parameter named sys, a sole-binding comprehension target), the
+#      aliased import rebindings the symbol table cannot tell from `import sys` (`import os as
+#      sys`, `from sys import argv as sys`, `from os import path as sys`, `from os import sys`),
+#      `from sys import _getframe as sys` reported once as the underscore import, the
 #      global or nonlocal clause's rebindings (a `global sys` rebinding in a function, a
 #      module-level comprehension walrus), the underscore-prefixed attribute reads
 #      (sys.__dict__, sys._getframe()) and their from-import spellings (`from sys import
@@ -2836,7 +2847,9 @@ def main():
 #      working directory so a relative operand runs a different file, while an assignment carrying
 #      a command substitution does not, the named cost); 42k each LAUNCHER_MUTANTS source mutant
 #      (the underscore read branch off, the from-sys underscore branch off, is_assigned dropped,
-#      argv-first always True, the global or nonlocal branch off), loaded from a scratch copy of
+#      argv-first always True, the global or nonlocal branch off, and the three aliased import
+#      rebinding branches off: `import x as sys`, `from sys import x as sys`, and a from-import of
+#      another module binding sys), loaded from a scratch copy of
 #      this file, changes the exit of its named row among every replayed hook-bootstrap,
 #      settings, argv and sibling row, while an unmutated copy reproduces every row's exit.
 
@@ -2924,6 +2937,14 @@ LAUNCHER_MUTANTS = (
     ("global-nonlocal-branch-off",
      "        elif symbol.is_declared_global() or symbol.is_nonlocal():", "        elif False:",
      "hook-boot rebind-sys-comprehension-walrus"),
+    ("import-as-sys-branch-off",
+     '                elif root != "sys" and (alias.asname or root) == "sys":',
+     "                elif False:", "hook-boot rebind-sys-import-os-as-sys"),
+    ("from-sys-as-sys-branch-off", '                    elif alias.asname == "sys":',
+     "                    elif False:", "hook-boot rebind-sys-from-sys-argv-as-sys"),
+    ("from-other-binding-sys-branch-off",
+     '                    if (alias.asname or alias.name).split(".")[0] == "sys":',
+     "                    if False:", "hook-boot rebind-sys-from-os-path-as-sys"),
 )
 
 
@@ -4110,6 +4131,15 @@ def self_test_main():
         # hook-bootstrap flip, and the rows owed to the sys rule alone (every finding an insert,
         # mutation or sys-use) under the sys-rule flip, so each flip asserts every vector of its
         # rule rather than one stand-in.
+        # Rows whose every finding must carry one message, where the sys-use kind alone cannot
+        # tell a rebinding finding from an underscore-import finding.
+        rebind_text = "rebinds the name sys"
+        boot_texts = {"rebind-sys-import-os-as-sys": rebind_text,
+                      "rebind-sys-from-sys-argv-as-sys": rebind_text,
+                      "rebind-sys-from-os-path-as-sys": rebind_text,
+                      "rebind-sys-from-os-sys": rebind_text,
+                      "underscore-from-import-as-sys":
+                          "imports the underscore-prefixed sys attribute"}
         boot_flip_rows, sys_flip_rows = [], []
         mutant_rows = []                 # (name, tree, expected exit) of every row, replayed in 42k
         for label, source, want, kinds in (
@@ -4218,6 +4248,21 @@ def self_test_main():
                  ("sys-use",)),
                 ("rebind-sys-parameter", undo_pre + "def f(sys):\n    pass\nimport hooklib\n", 1,
                  ("sys-use",)),
+                # The aliased import spellings of the rebinding clause: the symbol table records
+                # each as an import, which it cannot tell from a plain `import sys`, so only the
+                # AST import walk refuses them (each row carries the rebinding text, and a 42k
+                # mutant disables each branch). `from sys import _getframe as sys` is reported
+                # once, as the underscore import, refused either way.
+                ("rebind-sys-import-os-as-sys", undo_pre + "import os as sys\nimport hooklib\n", 1,
+                 ("sys-use",)),
+                ("rebind-sys-from-sys-argv-as-sys",
+                 undo_pre + "from sys import argv as sys\nimport hooklib\n", 1, ("sys-use",)),
+                ("rebind-sys-from-os-path-as-sys",
+                 undo_pre + "from os import path as sys\nimport hooklib\n", 1, ("sys-use",)),
+                ("rebind-sys-from-os-sys", undo_pre + "from os import sys\nimport hooklib\n", 1,
+                 ("sys-use",)),
+                ("underscore-from-import-as-sys",
+                 undo_pre + "from sys import _getframe as sys\nimport hooklib\n", 1, ("sys-use",)),
                 ("match-without-sys-capture",
                  undo_pre + "match 0:\n    case _:\n        pass\nimport hooklib\n", 0, ()),
                 ("match-other-capture",
@@ -4354,6 +4399,9 @@ def self_test_main():
                     f[0] == HOOK_STUB_REL and f[1] > 0 for f in hb_failures)):
                 failures.append("the hook-bootstrap {} row expected the findings {!r}, each naming {} "
                                 "and a line (got {!r})".format(label, kinds, HOOK_STUB_REL, hb_failures))
+            elif label in boot_texts and not all(boot_texts[label] in f[3] for f in hb_failures):
+                failures.append("the hook-bootstrap {} row expected every finding to say {!r} "
+                                "(got {!r})".format(label, boot_texts[label], hb_failures))
             elif want == 2 and (hb_failures or not any(
                     e[0] == HOOK_STUB_REL and "does not parse as Python" in e[3] for e in hb_errors)):
                 failures.append("the hook-bootstrap {} row expected a parse refusal naming {} and no "
@@ -5241,7 +5289,10 @@ def self_test_main():
           "fail, one vector per spelling, the return-binding, modules-subscript, augmented-value, "
           "lambda, bare-argument and rebound-name escapes, the symbol-table rebindings no store "
           "form spells (a match capture, a match star, a mapping-rest capture, a parameter named "
-          "sys, a sole-binding comprehension target), the global or nonlocal clause's rebindings "
+          "sys, a sole-binding comprehension target), the aliased import rebindings (import os as "
+          "sys, from sys import argv as sys, from os import path as sys, from os import sys, each "
+          "the rebinding finding, with from sys import _getframe as sys the underscore import), "
+          "the global or nonlocal clause's rebindings "
           "(a global sys rebinding in a function, a module-level comprehension walrus), the "
           "underscore-prefixed reads (sys.__dict__, sys._getframe()) and their from-import "
           "spellings (from sys import __dict__, its sibling-shadowing form, from sys import "
@@ -5274,7 +5325,9 @@ def self_test_main():
           "not-first-word row passes, with the argv-first rule patched out every prefixed argv row "
           "passes, each restored failing again (every vector of each rule under its flip), "
           "each source mutant (the underscore read branch off, the from-sys underscore branch "
-          "off, is_assigned dropped, argv-first always True, the global or nonlocal branch off) "
+          "off, is_assigned dropped, argv-first always True, the global or nonlocal branch off, "
+          "and the import-as-sys, from-sys-as-sys and from-other-module-binding-sys branches "
+          "off) "
           "changes its named row's exit while an unmutated copy reproduces every row, and a "
           "real -I "
           "interpreter confirms the "
