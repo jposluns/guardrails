@@ -105,7 +105,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "cmtidn"
 status = "enforced"
-mechanisms = ["hook:commit-identity"]
+mechanisms = ["hook:coauthor-file", "hook:coauthor-file-bash", "hook:commit-identity"]
 
 [[rule]]
 corpus-id = "cnclse"

@@ -4910,7 +4910,7 @@ def diff_source_pretool(data):
 
 
 # --- cmtidn: AI identity in a git authoring command --------------------------------------------------
-# Quote-aware and token-based. The commit-MESSAGE contexts (a Co-Authored-By trailer, an --author value)
+# Quote-aware and token-based. The commit-MESSAGE contexts (a co-author trailer, an --author value)
 # are judged only on a segment that runs a git command whose subcommand is a commit-creating verb (the git
 # command is found behind leading reserved words, a function or coprocess name, VAR=value words and wrapper
 # words, _cmtidn_git_commands), so a read-side use of the same tokens (git log --author=Claude) does not trip,
@@ -4924,19 +4924,19 @@ def diff_source_pretool(data):
 # subcommand is not a git command name (an alias). Separately, an identity
 # ASSIGNMENT (a git-identity env var, or a user.name/user.email config value) is a violation on ANY
 # segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
-# a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
+# a trailer hiding inside a quoted -m message (e.g. -m "fix; <co-author trailer>: Claude", which the old
 # whitespace split broke at the ';') now lives intact in the single message token, and a substring scan
 # on that token catches it.
 AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
 COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "commit-tree")
-# A Co-Authored-By trailer inside a single token; its value is up to 160 characters, to the end of its line (the
+# A co-author trailer inside a single token; its value is up to 160 characters, to the end of its line (the
 # token IS the quoted message, so no shell quote can appear within it). The regex matches the trailer name alone
 # and reads the value in a lookahead, so a scan of its matches (_co_author_ai) resumes right after each name and
 # reaches every trailer name in the token, one inside an earlier trailer's value included: a second trailer on the
 # same line, which a regex that consumed the value passed over when its search resumed after that value (a first
-# value of 140 characters ends inside a later 'Co-authored-by: Claude' and names no AI). The only 'c' in a trailer
+# value of 140 characters ends inside a later co-author trailer naming Claude and names no AI). The only 'c' in a trailer
 # name is its first letter, so two names cannot overlap, and each place a trailer can start is read with the value
 # that the regex consuming the value found there. Each whitespace run is taken whole (\s*+), as in the fallback's
 # co-author context (_RAW_IDENTITY_CONTEXTS): giving a run back one character at a time cost time quadratic in its
@@ -5093,7 +5093,7 @@ def _ai_value_match(regex, text):
 
 
 def _co_author_ai(tok, judged):
-    """A hit label for the first Co-Authored-By trailer in the word tok whose value names an AI identity, else
+    """A hit label for the first co-author trailer in the word tok whose value names an AI identity, else
     None. Every trailer name in the word is read, one inside an earlier trailer's value included
     (CO_AUTHOR_RE), so a word costs time linear in its length, though a word of repeated trailer names reads up
     to about 13 times as many characters as it holds for the values (each name is at least 12 characters long
@@ -5111,7 +5111,7 @@ def _co_author_ai(tok, judged):
 
 def _commit_message_and_author_ai(tokens, judged):
     """A hit label if this git commit segment names an AI identity in an --author value or in a
-    Co-Authored-By trailer (scanned as a substring of a token, so the trailer that lives inside the
+    co-author trailer (scanned as a substring of a token, so the trailer that lives inside the
     single quoted -m message token is caught), else None. Each word is read as a git commit option
     (_cmtidn_option), so a value-taking option's value is read as that value before anything else, whether it
     shares the option's word (--author=X, -mMSG) or is the next word (--author X, -am MSG): an --author value is
@@ -5593,7 +5593,7 @@ def _commit_identity_fallback(command, error):
     tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
     (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
     (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
-    AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
+    AI identity in a co-author trailer, an --author value (any prefix git reads as --author), a
     git-identity env var, or a user.name/user.email value (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
     A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
     backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
@@ -5723,6 +5723,1765 @@ def commit_identity(data):
               "AI identity ({}). Remove it and commit as the maintainer.".format(hit))
     return _deny(reason,
                  "AIQT guardrail: denied a git command recording an AI commit identity (rule cmtidn).")
+
+
+# --- cmtidn (file layers): the co-author trailer token held out of files ------------------------------
+# Two further linkages of the commit-identity rule (the coauthor-file and coauthor-file-bash hooks). The
+# commit_identity layer above judges the TEXT of a git command, so a trailer that reaches a commit through
+# a FILE never crosses it: a message staged with git commit -F, a PR body file, or a trailer written into
+# an ordinary file and committed later by a background script outside this hook path. These layers hold
+# the TOKEN ITSELF out of files, whatever identity its value names. The token is TRAILER-SHAPED (_CAB_RE):
+# the co-author trailer NAME, its three words joined by one '-' or one space in any case, then optional
+# blanks and a colon (git reads blanks between a trailer name and its separator). Prose that names the
+# words with no colon after them, and an identifier that runs them together, is not counted, since counting
+# every mention refuses ordinary prose and code. The pack's own
+# sources, tests and documentation never spell the token (it is built at run time, _CAB_TOKEN), so editing
+# them does not trip these layers.
+#
+# THE RULE (fail closed): a write may leave the target file with NO occurrence of
+# the token, or with STRICTLY FEWER occurrences than it currently holds (a removal); a write that keeps an
+# occurrence in place, adds one, or cannot be evaluated is refused. The THIRD layer of the same rule is the
+# git commit-msg hook shipped at .aiqt/core/hooks/githooks/commit-msg, which refuses a commit whose message
+# file holds the token (the whole file, since a --cleanup or --[no-]verbose option a hook cannot see decides
+# what git keeps of it) in any repository where it is INSTALLED (see the README beside it).
+_CAB_WORDS = ("Co", "Authored", "By")
+_CAB_TOKEN = "-".join(_CAB_WORDS)  # the canonical spelling, built at run time, never spelled in source
+_CAB_RE = re.compile(r"(?i)co[- ]authored[- ]by[ \t]*+:")
+# The Bash layer reads '=' as a separator too: git takes '=' after a --trailer name on its command line.
+_CAB_BASH_RE = re.compile(r"(?i)co[- ]authored[- ]by[ \t]*+[:=]")
+# The token's words alone, read only in a command that also names a trailer.<name>.key setting, which makes
+# another trailer name write this one (git -c trailer.x.key=<the words> commit --trailer 'x: ...'), or a
+# --trailer option or git interpret-trailers (_CAB_TRAILER_OPT_RE).
+_CAB_WORDS_RE = re.compile(r"(?i)co[- ]authored[- ]by")
+# A --trailer option in any abbreviation (--tr to --trailer), or the interpret-trailers command. Beside one,
+# the token's words alone count: git writes a bare --trailer name as '<name>: ', and a trailer.separators
+# setting makes git read another separator and write a colon (--trailer '<name>#value' under ':#'). git
+# reads an option name in ASCII bytes, so only an ASCII name character continues it (re.ASCII).
+_CAB_TRAILER_OPT_RE = re.compile(r"(?i)--tr(?:a(?:i(?:l(?:e(?:r)?)?)?)?)?(?![\w-])|interpret-trailers", re.ASCII)
+# One word that is such a --trailer option, alone or with its '=' value (_cab_trailer_stage).
+_CAB_TRAILER_WORD_RE = re.compile(r"--tr(?:a(?:i(?:l(?:e(?:r)?)?)?)?)?(?:=|$)")
+# The Bash layer's de-quoted reading: every quote character, backslash, '$' and backquote removed.
+_CAB_DEQUOTE_RE = re.compile(r"[\"'\\$`]")
+# A file larger than this cannot be counted inside the hook deadline, so it fails closed (disclosed).
+_CAB_MAX_BYTES = 67_108_864
+# A Bash command longer than this (the commit-identity read bound) has its text scanned but its file
+# references are not extracted; it is refused when it holds a word that could redirect, write or commit.
+_CAB_MAX_COMMAND = 131_072
+_CAB_FILE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+# The whitespace the layer's patterns and word splits read, as a character class body: the ASCII characters
+# an unflagged \s matches (space, \t, \n, \v, \f, \r and \x1c to \x1f), so a reading of ASCII text is
+# unchanged, and nothing beyond ASCII. bash splits words and git reads names in bytes, so a non-ASCII space
+# (U+00A0, U+3000) stays inside a word as it does there.
+_CAB_BLANKS = r" \t\n\v\f\r\x1c-\x1f"
+_CAB_BLANK_RE = re.compile("[" + _CAB_BLANKS + "]+")
+_CAB_JSON_START_RE = re.compile("[" + _CAB_BLANKS + r"]*+[\[{]")
+# A JSON string escape of one character, decoded wherever it stands in the escape reading of a text
+# (_cab_text_count), so a JSON Lines record, a JSON document inside other text, or a string literal that
+# spells the token with \u escapes is counted as a reader decodes it.
+_CAB_JSON_ESCAPE_RE = re.compile(r"\\u([0-9A-Fa-f]{4})")
+_CAB_JSON_LINE_RE = re.compile(r"(?m)^[ \t]*+[\[{]")
+# The Edit tool's own match, where an old_string is not in the file as given: CRLF line ends read as LF
+# and curly quotes as straight ones. Neither change can make or break an occurrence of the token.
+_CAB_QUOTE_MAP = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
+
+
+def _cab_count(text):
+    """How many trailer-shaped occurrences of the co-author token the text holds (_CAB_RE, non-overlapping;
+    the token is ASCII, so a surrogateescape-decoded read counts the occurrences the bytes hold in any
+    ASCII-superset encoding)."""
+    return len(_CAB_RE.findall(text))
+
+
+def _cab_json_count(value):
+    """The count over a parsed JSON value: each string and mapping key counted, and a list holding only
+    strings joined first (a notebook cell's source and an output's text are line lists that a reader
+    renders joined, so a token split across two of them counts once). Iterative, so a deep nesting costs no
+    recursion."""
+    total, stack = 0, [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            total += _cab_count(item)
+        elif isinstance(item, list):
+            if item and all(isinstance(part, str) for part in item):
+                total += _cab_count("".join(item))
+            else:
+                stack.extend(item)
+        elif isinstance(item, dict):
+            for key, part in item.items():
+                if isinstance(key, str):
+                    total += _cab_count(key)
+                stack.append(part)
+    return total
+
+
+def _cab_text_count(text):
+    """The count a file's text is judged by, the largest of its readings: the raw count; the count with each
+    \\uXXXX escape and each \\t decoded wherever it stands (_CAB_JSON_ESCAPE_RE); where the whole text parses
+    as a JSON document (a notebook, a JSON file), the parsed count (_cab_json_count); and otherwise, where a
+    line starts with a brace or a bracket, the count with each such line that parses as JSON (a JSON Lines or
+    NDJSON record) counted parsed and every other line raw. So a spelling JSON escapes (a \\u002d hyphen) or a
+    token split across a cell's source lines counts as a reader decodes it. The current file and the result
+    are read the same way, so a removal is still judged count for count."""
+    counts = [_cab_count(text)]
+    if "\\" in text:
+        counts.append(_cab_count(_CAB_JSON_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
+                                 .replace("\\t", "\t")))
+    if _CAB_JSON_START_RE.match(text):
+        try:
+            counts.append(_cab_json_count(json.loads(text)))
+            return max(counts)
+        except (ValueError, RecursionError):
+            pass
+    if "\n" in text and _CAB_JSON_LINE_RE.search(text):
+        total = 0
+        for line in text.split("\n"):
+            if _CAB_JSON_START_RE.match(line):
+                try:
+                    total += _cab_json_count(json.loads(line))
+                    continue
+                except (ValueError, RecursionError):
+                    pass
+            total += _cab_count(line)
+        counts.append(total)
+    return max(counts)
+
+
+def _cab_read_current(path):
+    """(count, text, why) for the file a Write/Edit/MultiEdit/NotebookEdit targets: the current count
+    (_cab_text_count) and surrogateescape-decoded text, with why None; (0, "", None) when no entry exists
+    there (the write creates the file); (None, None, why) when the current state cannot be evaluated (an
+    entry that is not a regular file, one past _CAB_MAX_BYTES, or one that cannot be examined or read),
+    why naming the reason. The read follows a symlink (os.stat and the read both resolve it); whether a
+    write tool writes through one is not verified here. The race between this read and the write is a
+    disclosed residual."""
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return (0, "", None)
+    except (OSError, ValueError) as exc:
+        return (None, None, "its current state cannot be examined ({})".format(type(exc).__name__))
+    if not stat.S_ISREG(st.st_mode):
+        return (None, None, "the target exists but is not a regular file")
+    if st.st_size > _CAB_MAX_BYTES:
+        return (None, None, "the target is larger than the {}-byte read bound".format(_CAB_MAX_BYTES))
+    try:
+        data = pathlib.Path(path).read_bytes()
+    except OSError as exc:
+        return (None, None, "it cannot be read ({})".format(type(exc).__name__))
+    text = data.decode("utf-8", "surrogateescape")
+    return (_cab_text_count(text), text, None)
+
+
+def _cab_normalized(text):
+    """text as the Edit tool matches it when an old_string is not in the file as given (_CAB_QUOTE_MAP)."""
+    return text.replace("\r\n", "\n").translate(_CAB_QUOTE_MAP)
+
+
+def _cab_apply_edits(text, edits):
+    """(result, None) with the text after the Edit/MultiEdit replacements are applied in order, the first
+    occurrence or every one as replace_all says; or (None, why) when an edit cannot be simulated: one that
+    is not a mapping carrying a non-empty string old_string and a string new_string, or one whose
+    old_string the text does not hold. Such an old_string is looked for again as the Edit tool looks for it
+    (_cab_normalized), and applied there, the count taken over the normalized text (the normalization keeps
+    every occurrence as it is). One not found either way leaves the result unknown: the tool may refuse the
+    call, or match it some other way this layer does not model, so the edit is refused (fail closed),
+    whatever its new_string holds."""
+    for edit in edits:
+        if not isinstance(edit, dict):
+            return None, "an edit is not a mapping"
+        old, new = edit.get("old_string"), edit.get("new_string")
+        if not isinstance(old, str) or not old or not isinstance(new, str):
+            return None, "an edit carries no readable non-empty old_string and new_string"
+        count = -1 if edit.get("replace_all") else 1
+        if old not in text:
+            text, old, new = _cab_normalized(text), _cab_normalized(old), _cab_normalized(new)
+            if old not in text:
+                return None, ("an old_string is not in the file, also with CRLF line ends and curly quotes "
+                              "read as the Edit tool reads them, so the result cannot be computed")
+        text = text.replace(old, new, count)
+    return text, None
+
+
+def _cab_notebook_after(current_text, tool_input):
+    """The resulting count of a NotebookEdit simulated against the parsed notebook, or None when it cannot
+    be simulated (a notebook that does not parse as JSON with a cell list, an unknown edit_mode, a cell_id
+    no cell carries, or a non-string new_source where one is required). The count is the larger of the
+    re-serialized notebook's and the parsed one's (_cab_json_count, each cell's source list joined), so an
+    occurrence in an output or metadata, an escaped one, and one split across source lines all count."""
+    mode = tool_input.get("edit_mode") or "replace"
+    source = tool_input.get("new_source")
+    if mode not in ("replace", "insert", "delete"):
+        return None
+    if mode != "delete" and not isinstance(source, str):
+        return None
+    try:
+        nb = json.loads(current_text)
+    except (ValueError, RecursionError):
+        return None
+    cells = nb.get("cells") if isinstance(nb, dict) else None
+    if not isinstance(cells, list):
+        return None
+    cell_id = tool_input.get("cell_id")
+    index = None
+    if cell_id is not None:
+        for i, cell in enumerate(cells):
+            if isinstance(cell, dict) and cell.get("id") == cell_id:
+                index = i
+                break
+        if index is None:
+            return None
+    if mode == "insert":
+        cells.insert(0 if index is None else index + 1,
+                     {"cell_type": tool_input.get("cell_type") or "code", "id": "aiqt-cab-sim",
+                      "metadata": {}, "source": source})
+    elif index is None:
+        return None
+    elif mode == "replace":
+        if not isinstance(cells[index], dict):
+            return None
+        cells[index] = dict(cells[index])
+        cells[index]["source"] = source
+    else:
+        del cells[index]
+    try:
+        return max(_cab_count(json.dumps(nb)), _cab_json_count(nb))
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
+def coauthor_file(data):
+    """cmtidn (integ/commit-identity), PreToolUse on Write|Edit|MultiEdit|NotebookEdit: the resulting
+    file may hold NO trailer-shaped occurrence of the co-author token, or STRICTLY FEWER than the current
+    file holds (a removal); a write that keeps an occurrence in place or adds one, and one this layer cannot
+    evaluate (an unreadable, non-regular or oversized current file, a malformed payload, an edit it cannot
+    simulate), is refused, fail closed. The resulting content is computed against the CURRENT file (Write
+    replaces it whole; Edit/MultiEdit replacements are applied in order, an old_string the file does not
+    hold as given looked for as the Edit tool looks for it and refused when not found; a NotebookEdit is
+    simulated on the parsed notebook), so a splice that JOINS two fragments into a new token is counted,
+    and so is one that splits an occurrence (a removal). A text that parses as JSON is counted as a reader
+    decodes it as well (_cab_text_count)."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: coauthor_file wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("cmtidn")
+    if tool not in _CAB_FILE_TOOLS:
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): the {} payload was not a readable mapping, so the "
+            "co-author-token check could not run; failing closed.".format(tool),
+            "AIQT guardrail: denied a {} call with an unreadable tool_input (rule cmtidn, "
+            "fail-closed).".format(tool))
+    field = "notebook_path" if tool == "NotebookEdit" else "file_path"
+    path = tool_input.get(field)
+    if not isinstance(path, str) or not path:
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): the {} payload carried no readable {}, so the "
+            "co-author-token check could not run; failing closed.".format(tool, field),
+            "AIQT guardrail: denied a {} call with no readable {} (rule cmtidn, fail-closed)."
+            .format(tool, field))
+    if tool == "Write":
+        content = tool_input.get("content")
+        if not isinstance(content, str):
+            return _deny(
+                "AIQT rule cmtidn (commit-identity): the Write payload carried no readable content, so "
+                "the co-author-token check could not run; failing closed.",
+                "AIQT guardrail: denied a Write call with no readable content (rule cmtidn, fail-closed).")
+        after = _cab_text_count(content)
+        if after == 0:
+            return _allow()  # a whole-file replacement holding no token satisfies the rule as a removal or a no-op
+    before, current, why = _cab_read_current(path)
+    if why is not None:
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): the {} targets {!r} but {}; whether the write would "
+            "keep or add a '{}:' trailer cannot be evaluated, so it is refused (fail-closed). "
+            "Remove or shrink the target first, or write a replacement that holds no occurrence."
+            .format(tool, path, why, _CAB_TOKEN),
+            "AIQT guardrail: denied a {} whose co-author-token effect cannot be evaluated (rule cmtidn, "
+            "fail-closed).".format(tool))
+    if tool == "Edit" or tool == "MultiEdit":
+        edits = [tool_input] if tool == "Edit" else tool_input.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return _deny(
+                "AIQT rule cmtidn (commit-identity): the MultiEdit payload carried no readable edits "
+                "list, so the co-author-token check could not run; failing closed.",
+                "AIQT guardrail: denied a MultiEdit call with no readable edits (rule cmtidn, "
+                "fail-closed).")
+        result, why = _cab_apply_edits(current, edits)
+        if result is None:
+            return _deny(
+                "AIQT rule cmtidn (commit-identity): in this {} on {!r}, {}; the resulting count of the "
+                "'{}:' trailer cannot be computed, so it is refused (fail-closed). Re-read the file and "
+                "send its exact text as old_string.".format(tool, path, why, _CAB_TOKEN),
+                "AIQT guardrail: denied a {} call whose edits cannot be simulated (rule cmtidn, "
+                "fail-closed).".format(tool))
+        after = _cab_text_count(result)
+    elif tool == "NotebookEdit":
+        found = _cab_notebook_after(current, tool_input)
+        if found is None:
+            return _deny(
+                "AIQT rule cmtidn (commit-identity): this NotebookEdit could not be simulated against "
+                "{!r} (an unparseable or missing notebook, an unknown edit_mode, a missing cell, or an "
+                "unreadable new_source), so whether it keeps or adds a '{}:' trailer cannot be evaluated; "
+                "it is refused (fail-closed).".format(path, _CAB_TOKEN),
+                "AIQT guardrail: denied a NotebookEdit whose co-author-token effect cannot be evaluated "
+                "(rule cmtidn, fail-closed).")
+        after = found
+    if after == 0 or after < before:
+        return _allow()  # the write removes the token entirely, or strictly reduces its count (a removal)
+    return _deny(
+        "AIQT rule cmtidn (commit-identity): this {} would leave {!r} holding {} occurrence(s) of the "
+        "'{}:' trailer (it currently holds {}). A write may only leave a file with NO occurrence, "
+        "or with STRICTLY FEWER than it has (a removal); any other write that touches such a file is "
+        "refused. Remove the occurrence(s) in this same write, or leave the file alone."
+        .format(tool, path, after, _CAB_TOKEN, before),
+        "AIQT guardrail: denied a {} that keeps or adds the AI co-author trailer token (rule cmtidn)."
+        .format(tool))
+
+
+# The Bash layer (coauthor_bash). A UNIT is a pipeline: the commands between ;, &, &&, ||, a newline or a
+# subshell parenthesis; a STAGE is one command of it. A unit is a SINK when one of its stages is a
+# message-creating git command (a git word, or a path ending in /git, whose subcommand is in
+# _CAB_GIT_MSG_VERBS, or a git command defining an alias), any gh command (a PR, issue or release body, or
+# an api field, may come from a file it names), a write-class command (a word of _CAB_WRITE_WORDS anywhere
+# in the stage, so git mv and a wrapped cp count; git apply; a sed or perl editing in place), or a stage
+# with an output redirect onto anything but an existing non-regular file such as /dev/null. In a sink unit
+# EVERY word that names an existing file is read, in any spelling: the word itself, the value after its
+# first '=', a value after '@', and the rest of a short-option cluster after each of its first
+# _CAB_CLUSTER letters (-aFmsg, -tFILE). So the message-file, template,
+# body and field options need no per-flag list, and a reader that copies a file into a new path (cat into
+# a redirect or tee, git mv, ln, install) is judged with cp as one class. Relative paths resolve against
+# every directory the command may run in (the payload cwd, each cd or pushd before the unit, and a git
+# -C), and a relative path where that directory cannot be determined is refused. A name another stage of
+# the command writes (a redirect target, an operand of a write-class command, a git output option value, a
+# numbered patch file git format-patch writes) is refused in a sink unit whether or not it exists, since
+# what it holds when read cannot be read there.
+_CAB_GIT_MSG_VERBS = frozenset((
+    "commit", "commit-tree", "merge", "tag", "notes", "am", "revert", "cherry-pick", "rebase", "pull",
+    "stash", "fast-import", "hash-object", "mktag", "replace", "filter-branch", "filter-repo",
+    "interpret-trailers", "config", "subtree", "send-email", "format-patch", "mailinfo", "mailsplit"))
+# The git verbs whose commit runs the commit-msg hook (a core.hooksPath set in the same command would switch
+# that layer off), and those that replay a recorded message, whose commits _cab_replay_revs names.
+_CAB_GIT_HOOKED_VERBS = frozenset(("commit", "merge", "am", "cherry-pick", "rebase", "revert", "pull"))
+_CAB_GIT_REPLAY_VERBS = frozenset(("commit", "cherry-pick", "rebase", "revert"))
+# The git verbs that read a '-' operand as the previous branch (@{-1}), not as standard input.
+_CAB_GIT_DASH_VERBS = frozenset(("merge", "cherry-pick", "rebase", "revert"))
+# The options git cherry-pick and git revert read themselves. Their option reader takes no abbreviation and
+# hands every other option word to git's revision reader, where one can name commits (--all, --branches), so
+# a word that is none of these refuses the stage. Short letters: a flag, one taking a value (the rest of the
+# word, or the next word), or -S, whose value is only the rest of the word. Long names map to whether they
+# take a value as the next word; --gpg-sign takes one only after '='.
+_CAB_PICK_FLAGS = {"cherry-pick": frozenset("nersx"), "revert": frozenset("ners")}
+_CAB_PICK_VALUE_FLAGS = frozenset("mX")
+_CAB_PICK_MODES = frozenset(("quit", "continue", "abort", "skip"))
+_CAB_PICK_COMMON = {name: False for name in (
+    "no-commit", "commit", "edit", "no-edit", "signoff", "no-signoff", "no-mainline", "rerere-autoupdate",
+    "no-rerere-autoupdate", "no-strategy", "no-strategy-option", "gpg-sign", "no-gpg-sign", "no-cleanup",
+    "stdin")}
+_CAB_PICK_COMMON.update(dict.fromkeys(("cleanup", "mainline", "strategy", "strategy-option"), True))
+_CAB_PICK_LONG = {
+    "cherry-pick": dict(_CAB_PICK_COMMON, empty=True, **dict.fromkeys((
+        "ff", "no-ff", "allow-empty", "no-allow-empty", "allow-empty-message", "no-allow-empty-message",
+        "keep-redundant-commits", "no-keep-redundant-commits"), False)),
+    "revert": dict(_CAB_PICK_COMMON, **dict.fromkeys(("reference", "no-reference"), False))}
+# The git rebase options that take a value as the next word (git's option reader takes a unique abbreviation
+# of a long name), the short letters that take one as the rest of the word or the next word, and those whose
+# value is only the rest of the word.
+_CAB_REBASE_VALUE_LONG = ("onto", "strategy", "strategy-option", "exec", "whitespace", "empty")
+_CAB_REBASE_VALUE_FLAGS = frozenset("sXxC")
+_CAB_REBASE_STUCK_FLAGS = frozenset("Sr")
+# The editors git edits a rebase todo list with: the settings, and the environment variables, in git's order.
+_CAB_TODO_EDITOR_KEYS = ("sequence.editor", "core.editor")
+_CAB_TODO_EDITOR_VARS = ("GIT_SEQUENCE_EDITOR", "GIT_EDITOR", "VISUAL", "EDITOR")
+# The git verbs that read a mailbox (an mbox file, a Maildir directory, or standard input), and the git am
+# modes that resume or stop a session in progress, which read no new patch.
+_CAB_GIT_MAILBOX_VERBS = frozenset(("am", "mailsplit", "mailinfo"))
+_CAB_AM_RESUME = ("--continue", "--skip", "--abort", "--quit", "--resolved", "--show-current-patch", "--retry",
+                  "--allow-empty")
+# The long options of git am (git am -h), each mapped to whether it takes the next word as its value, and its
+# short options that do (-C <n>, -p <num>), so an option value is never read as a mailbox operand.
+_CAB_AM_LONG = {
+    "interactive": False, "no-verify": False, "verify": False, "3way": False, "quiet": False, "signoff": False,
+    "utf8": False, "keep": False, "keep-non-patch": False, "message-id": False, "keep-cr": False,
+    "scissors": False, "quoted-cr": True, "whitespace": True, "ignore-space-change": False,
+    "ignore-whitespace": False, "directory": True, "exclude": True, "include": True, "patch-format": True,
+    "reject": False, "resolvemsg": True, "continue": False, "resolved": False, "skip": False, "abort": False,
+    "quit": False, "show-current-patch": False, "retry": False, "allow-empty": False,
+    "committer-date-is-author-date": False, "ignore-date": False, "rerere-autoupdate": False, "gpg-sign": False,
+    "empty": True}
+_CAB_AM_SHORT_VALUE = "Cp"
+# A mailbox part git mailinfo decodes before it records the message (a base64 or quoted-printable transfer
+# encoding, or an RFC 2047 encoded word), and the first line of an StGit series, which names further patch
+# files git am reads. Each mailbox file is also decoded by git itself (_CabReader.decode): split by git
+# mailsplit into its messages, each run through git mailinfo, at most _CAB_MAX_MAILS messages per command.
+_CAB_MIME_RE = re.compile(r"(?im)^content-transfer-encoding:[" + _CAB_BLANKS + r"]*+(?:base64|quoted-printable)"
+                          r"|=\?[^?" + _CAB_BLANKS + r"]++\?[bq]\?")
+_CAB_STGIT_SERIES = "# This series applies on GIT commit"
+_CAB_MAX_MAILS = 256
+# The names git format-patch gives the patch files it writes: NNNN-<subject><suffix>, or a bare number under
+# --numbered-files. It numbers them in ASCII digits (re.ASCII).
+_CAB_PATCH_NAME_RE = re.compile(r"\d++(?:-.*+)?+", re.S | re.ASCII)
+_CAB_WRITE_WORDS = frozenset(("cp", "mv", "ln", "link", "install", "tee", "rsync", "dd", "patch"))
+_CAB_PUNCT = "();<>|&\n"
+# The fallback reading, read beside the shlex one: the de-quoted text split at blanks, the shell operators,
+# parentheses and braces, so a command shlex cannot tokenize (an apostrophe in a here-document body) and
+# the words of a command substitution are still read; parentheses end no unit here. Each '$(' and backquote
+# is marked first (_CAB_HEAD, a private-use character), so the word after it is read as the word a command
+# starts with (_cab_command_word); a NAME=value word before a command word is an assignment (_CAB_ASSIGN_RE).
+_CAB_CRUDE_RE = re.compile(r"\n|[;&|]+|[<>]+[&|]?|[^" + _CAB_BLANKS + r";&|<>(){}]+")
+# A file descriptor number before or after a redirect operator: bash reads one only in ASCII digits, so a
+# word of other digits (U+0663, U+FF11) is a word or a file name there.
+_CAB_DIGITS_RE = re.compile(r"\d+", re.ASCII)
+_CAB_LOCALE_QUOTE_RE = re.compile(r"\$(?=\")")
+_CAB_SUBST_OPEN_RE = re.compile(r"\$\(|`")
+_CAB_HEAD = ""
+_CAB_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*+=")
+_CAB_CLUSTER = 64
+_CAB_MAX_DIRS = 16
+_CAB_MAX_PATHS = 65_536
+_CAB_MAX_READ = 268_435_456
+_CAB_MAX_REPLAY = 1000
+_CAB_MAX_REPLAY_CALLS = 8
+# The bounds on the revisions one replay read passes to git log: their number, the length of each (a longer
+# one is refused, never dropped, since git still replays it), and how many are read one at a time when their
+# joint read fails (git log stops at one revision it cannot resolve, such as @{upstream} with none set).
+_CAB_MAX_REPLAY_REVS = 1000
+_CAB_MAX_REV_LEN = 1024
+_CAB_MAX_REPLAY_SPLIT = 32
+_CAB_GIT_TIMEOUT = 3.0
+# A command past _CAB_MAX_COMMAND is refused when any of its readings (raw, de-quoted, ANSI-C decoded, brace
+# expanded) holds one of these (its references cannot be read), so a quoted command word (c''p) counts. A
+# word boundary is read in ASCII (re.ASCII), so a non-ASCII letter or digit beside one of them still leaves
+# it a word.
+_CAB_SINK_HINT_RE = re.compile(r"[<>]|\b(?:git|gh|tee|cp|mv|ln|link|install|rsync|dd|patch|sed|perl)\b", re.ASCII)
+# Brace expansion (_cab_brace_texts): the raw words that may hold one, the private-use characters a quoted
+# or escaped brace, comma or dot is masked to while a word is expanded, and the bounds on the expansion.
+# A sequence expression (_CAB_SEQ_RE) has its ends and step read in ASCII digits only (re.ASCII), as bash
+# reads them: {1..3} spelled in other digits is left as it is.
+_CAB_CHUNK_RE = re.compile(r"[^" + _CAB_BLANKS + r";&|<>()]+")
+_CAB_MASKS = {"{": "", "}": "", ",": "", ".": ""}
+_CAB_UNMASK = str.maketrans({mask: char for char, mask in _CAB_MASKS.items()})
+_CAB_SEQ_RE = re.compile(r"(-?\d+)\.\.(-?\d+)(?:\.\.-?\d+)?|([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?", re.ASCII)
+_CAB_BRACE_CHUNK = 1024
+_CAB_BRACE_LIMIT = 4096
+
+
+def _cab_text_readings(command):
+    """(readings, bases): the texts the token scan reads, and the joined texts the brace and reference
+    readings start from. The readings are the raw command, the command with every backslash-newline removed
+    (bash joins a continued line, inside double quotes too; removed everywhere, an over-read), and, for that
+    joined text and its copy with each ANSI-C $'...' quote decoded (_ansi_c_decoded), the copies with
+    quoting removed (_CAB_DEQUOTE_RE), so a token that quotes, a continuation or an escape split is read
+    joined."""
+    joined = command.replace("\\\n", "")
+    bases = [joined]
+    if "$'" in joined:
+        bases.append(_ansi_c_decoded(joined))
+    return [command] + bases + [_CAB_DEQUOTE_RE.sub("", text) for text in bases], bases
+
+
+def _cab_brace_masked(chunk):
+    """chunk with its quoting removed and each quoted or escaped brace, comma or dot masked (_CAB_MASKS),
+    so only the braces bash would expand stay braces."""
+    out, quote, i, n = [], None, 0, len(chunk)
+    while i < n:
+        c = chunk[i]
+        if quote is None:
+            if c == "\\" and i + 1 < n:
+                out.append(_CAB_MASKS.get(chunk[i + 1], chunk[i + 1]))
+                i += 2
+                continue
+            if c == "$" and chunk[i + 1:i + 2] in ("'", '"'):
+                quote = chunk[i + 1]
+                i += 2
+                continue
+            if c in "'\"":
+                quote = c
+            elif c != "`":
+                out.append(c)
+        elif c == quote:
+            quote = None
+        elif c == "\\" and quote == '"' and i + 1 < n:
+            out.append(_CAB_MASKS.get(chunk[i + 1], chunk[i + 1]))
+            i += 2
+            continue
+        else:
+            out.append(_CAB_MASKS.get(c, c))
+        i += 1
+    return "".join(out)
+
+
+def _cab_brace_sequence(body):
+    """The words a sequence expression body ({1..9}, {a..e}) stands for, or None when body is not one. A
+    numeric sequence stands for one digit: its words are numbers, which no occurrence of the token holds."""
+    m = _CAB_SEQ_RE.fullmatch(body)
+    if m is None:
+        return None
+    if m.group(1) is not None:
+        return ["0"]
+    first, last = ord(m.group(3)), ord(m.group(4))
+    step = abs(int(m.group(5) or 1)) or 1
+    span = range(first, last + 1, step) if first <= last else range(first, last - 1, -step)
+    return [chr(point) for point in span]
+
+
+def _cab_brace_group(word):
+    """(start, end, alternatives) of the brace expression bash expands first in word, the leftmost '{'
+    whose matching '}' encloses a comma at its own level or a sequence expression, else None. One pass."""
+    opens, best = [], None
+    for j, c in enumerate(word):
+        if c == "{":
+            opens.append((j, []))
+        elif c == "," and opens:
+            opens[-1][1].append(j)
+        elif c == "}" and opens:
+            i, commas = opens.pop()
+            if best is not None and best[0] < i:
+                continue
+            if commas:
+                alts, prev = [], i + 1
+                for k in commas:
+                    alts.append(word[prev:k])
+                    prev = k + 1
+                alts.append(word[prev:j])
+                best = (i, j, alts)
+            else:
+                seq = _cab_brace_sequence(word[i + 1:j])
+                if seq is not None:
+                    best = (i, j, seq)
+    return best
+
+
+def _cab_brace_expand(word, budget):
+    """The words bash's brace expansion makes of word, in bash's order, or None when making them would
+    pass budget[0], the words left to the whole command (decremented here)."""
+    out, stack = [], [word]
+    while stack:
+        w = stack.pop()
+        group = _cab_brace_group(w)
+        if group is None:
+            out.append(w)
+            budget[0] -= 1
+            if budget[0] < 0:
+                return None
+            continue
+        start, end, alts = group
+        if len(stack) + len(alts) > budget[0]:
+            return None
+        head, tail = w[:start], w[end + 1:]
+        stack.extend(head + alt + tail for alt in reversed(alts))
+    return out
+
+
+def _cab_brace_texts(text):
+    """(texts, uncertain) for one joined reading: where text holds a word bash brace-expands, two de-quoted
+    copies of it with each such word replaced by its expansions, joined by a space (separate arguments, as
+    echo prints them) and by nothing (as printf '%s' prints them); uncertain is True when a brace word
+    holding a letter is longer than _CAB_BRACE_CHUNK or passes the expansion budget, so whether it forms
+    the token is unknown."""
+    if "{" not in text:
+        return [], False
+    spaced, packed, pos, budget, uncertain = [], [], 0, [_CAB_BRACE_LIMIT], False
+    for m in _CAB_CHUNK_RE.finditer(text):
+        chunk = m.group(0)
+        if "{" not in chunk or "}" not in chunk:
+            continue
+        masked = _cab_brace_masked(chunk)
+        if "{" not in masked or "}" not in masked:
+            continue
+        words = _cab_brace_expand(masked, budget) if len(chunk) <= _CAB_BRACE_CHUNK else None
+        if words is None:
+            uncertain = uncertain or any(c.isascii() and c.isalpha() for c in masked)
+            continue
+        if words == [masked]:
+            continue  # braces bash leaves as they are ({}, {x}, HEAD^{tree})
+        words = [w.translate(_CAB_UNMASK) for w in words]
+        spaced += [text[pos:m.start()], " ".join(words)]
+        packed += [text[pos:m.start()], "".join(words)]
+        pos = m.end()
+    if not spaced:
+        return [], uncertain
+    tail = text[pos:]
+    return [_CAB_DEQUOTE_RE.sub("", "".join(spaced) + tail),
+            _CAB_DEQUOTE_RE.sub("", "".join(packed) + tail)], uncertain
+
+
+def _cab_text_hit(readings):
+    """What the token scan finds in the readings: 'names' for a trailer-shaped occurrence (_CAB_BASH_RE),
+    'key' for a trailer.<name>.key setting beside the token's words, 'trailer' for a --trailer option or git
+    interpret-trailers beside them (_CAB_TRAILER_OPT_RE), else None."""
+    for text in readings:
+        if _CAB_BASH_RE.search(text):
+            return "names"
+        low = text.lower()
+        if "trailer." in low and ".key" in low and _CAB_WORDS_RE.search(text):
+            return "key"
+        if _CAB_WORDS_RE.search(text) and _CAB_TRAILER_OPT_RE.search(text):
+            return "trailer"
+    return None
+
+
+class _CabStage:
+    """One command of a unit: its words, its redirect sources and targets, whether its own standard input
+    comes from a redirect, a here-document or a here-string (fed) and whether from a here-document or a
+    here-string (text), the words of its here-strings (texts) and the token index its here-document body may
+    start after (doc), whether a process substitution feeds it or is one of its words (subst), the indices of
+    its words that start a command in the fallback reading (heads), the directories it runs in, whether it
+    opens its unit (first), and (set by _cab_classify) the git verb it runs, whether it defines a git alias,
+    and whether it is a message-creating or write-class command."""
+    __slots__ = ("words", "sources", "targets", "fed", "text", "texts", "doc", "subst", "heads", "dirs", "first",
+                 "verb", "alias", "msg", "write")
+
+    def __init__(self, dirs, first):
+        self.words, self.sources, self.targets, self.fed, self.dirs = [], [], [], False, dirs
+        self.text, self.texts, self.doc, self.subst, self.heads = False, [], None, False, set()
+        self.first, self.verb, self.alias, self.msg, self.write = first, None, False, False, False
+
+
+def _cab_ops(tok):
+    """The shell operators one operator token holds, in order (_cab_parse): 'unit' (; & && ||), 'line' (a
+    newline), 'pipe', 'open' and 'close' (a parenthesis), 'procsub' and 'procout' (<( and >(), 'out' (a write
+    redirect), 'in' (a read redirect), 'rw' (<>), 'doc' (a here-document), 'text' (a here-string), 'dupout'
+    and 'dupin' (>& and <&)."""
+    ops, i, n = [], 0, len(tok)
+    while i < n:
+        c, two = tok[i], tok[i:i + 2]
+        if c in ";\n":
+            ops.append("unit" if c == ";" else "line")
+            i += 1
+        elif two in ("&&", "||"):
+            ops.append("unit")
+            i += 2
+        elif two == "|&":
+            ops.append("pipe")
+            i += 2
+        elif two == "&>":
+            ops.append("out")
+            i += 3 if tok[i + 2:i + 3] == ">" else 2
+        elif c in "&|()":
+            ops.append({"&": "unit", "|": "pipe", "(": "open", ")": "close"}[c])
+            i += 1
+        elif tok.startswith("<<<", i):
+            ops.append("text")
+            i += 3
+        elif tok.startswith("<<", i):
+            ops.append("doc")
+            i += 2
+        elif two == "<>":
+            ops.append("rw")
+            i += 2
+        elif two == "<&":
+            ops.append("dupin")
+            i += 2
+        elif tok[i + 1:i + 2] == "(":
+            ops.append("procsub" if c == "<" else "procout")
+            i += 2
+        elif c == "<":
+            ops.append("in")
+            i += 1
+        else:  # '>'
+            j = i + 1
+            if tok[j:j + 1] == ">":
+                j += 1
+            if tok[j:j + 1] == "&":
+                ops.append("dupout")
+                i = j + 1
+                continue
+            if tok[j:j + 1] == "|":
+                j += 1
+            ops.append("out")
+            i = j
+    return ops
+
+
+def _cab_chdir(dirs, target, keep):
+    """The directories a command may run in after changing to target from each of dirs: None stands for a
+    directory that cannot be determined (no target, one the shell builds at run time, a '~' that does not
+    expand, or the earlier directory of 'cd -'). keep True (a cd, which may fail and leave later commands
+    where they were) adds the new directories to dirs instead of replacing them (git -C)."""
+    if target is None or target == "-" or any(ch in target for ch in "$`*?["):
+        new = {None}
+    else:
+        if target.startswith("~"):
+            target = os.path.expanduser(target)
+        if target.startswith("~"):
+            new = {None}
+        elif posixpath.isabs(target):
+            new = {posixpath.normpath(target)}
+        else:
+            new = {None if d is None else posixpath.normpath(posixpath.join(d, target)) for d in dirs}
+    result = (set(dirs) | new) if keep else new
+    return frozenset((None,)) if len(result) > _CAB_MAX_DIRS else frozenset(result)
+
+
+def _cab_after_cd(words, dirs):
+    """dirs after a unit whose only command is words: changed by a cd or pushd (its first operand, or HOME
+    when it has none), unchanged by anything else (popd returns to a directory dirs already holds)."""
+    if not words or words[0].rsplit("/", 1)[-1] not in ("cd", "pushd"):
+        return dirs
+    operands = [w for w in words[1:] if w not in ("-L", "-P", "-e", "-@", "--")]
+    if operands:
+        return _cab_chdir(dirs, operands[0], True)
+    home = os.environ.get("HOME")
+    return _cab_chdir(dirs, home if home and posixpath.isabs(home) else None, True)
+
+
+def _cab_parse(tokens, dirs, joined=None, mark=None):
+    """(units, grouped) for a token list (shlex's, or the fallback's, where a token made only of
+    _CAB_PUNCT characters is an operator token): each unit a list of _CabStage. grouped is True when the
+    command holds a subshell or a { } group, which may feed a pipeline from inside another unit. A '(' right
+    after a word ending in '$' opens a command substitution and a '<(' or '>(' a process substitution:
+    their words join the stage around them, and their ')' ends no unit. A word of digits right before a
+    redirect operator, with no blank between (joined, the indices of the word tokens an operator follows
+    directly), is the file descriptor the redirect opens (3<file) and not a word; where joined is None that
+    cannot be told, so such a word stays a word and is still read as a descriptor. Only a redirect, here-
+    document or here-string on descriptor 0, or with no number, feeds the stage's standard input. mark (the
+    fallback reading's _CAB_HEAD) records the word after it as one a command starts with (heads)."""
+    units, scopes, grouped = [], [], False
+    stage = _CabStage(dirs, True)
+    unit = [stage]
+    pending, prev, last = None, "", -1
+
+    def end_unit(new_dirs):
+        stages = [s for s in unit if s.words or s.sources or s.targets]
+        if stages:
+            units.append(stages)
+            if len(stages) == 1:
+                new_dirs = _cab_after_cd(stages[0].words, new_dirs)
+        first = _CabStage(new_dirs, True)
+        return [first], first, new_dirs
+
+    for i, tok in enumerate(tokens):
+        if mark is not None and tok == mark:
+            stage.heads.add(len(stage.words))
+            continue
+        if tok and all(ch in _CAB_PUNCT for ch in tok):
+            for k, op in enumerate(_cab_ops(tok)):
+                if op in ("unit", "line"):
+                    unit, stage, dirs = end_unit(dirs)
+                elif op == "pipe":
+                    stage = _CabStage(dirs, False)
+                    unit.append(stage)
+                elif op == "open" and prev.endswith("$") or op in ("procsub", "procout"):
+                    scopes.append(None)
+                    if op == "procsub":
+                        stage.subst = True  # a program's output, read as a file or redirected into the stage
+                        if pending is not None and pending[0] in ("in", "rw"):
+                            pending, stage.fed = None, stage.fed or pending[1] in (None, "0")
+                elif op == "open":
+                    unit, stage, dirs = end_unit(dirs)
+                    scopes.append(dirs)
+                    grouped = True
+                elif op == "close":
+                    if scopes and scopes[-1] is None:
+                        scopes.pop()
+                        continue
+                    outer = scopes.pop() if scopes else dirs
+                    unit, stage, dirs = end_unit(dirs)
+                    dirs = stage.dirs = outer
+                    grouped = True
+                else:
+                    fd = None
+                    if (k == 0 and last == i - 1 and _CAB_DIGITS_RE.fullmatch(prev) and stage.words
+                            and stage.words[-1] == prev):
+                        fd = prev
+                        if joined is not None:
+                            if i - 1 not in joined:
+                                fd = None
+                            else:
+                                stage.words.pop()  # 3<file: the descriptor, not a word
+                    pending = (op, fd)
+            prev = ""
+            continue
+        prev = tok
+        if pending is not None:
+            (kind, fd), pending = pending, None
+            stdin = fd in (None, "0")
+            target_fd = bool(_CAB_DIGITS_RE.fullmatch(tok)) or tok == "-"
+            if kind == "out" or kind == "dupout" and not target_fd:
+                stage.targets.append(tok)
+            elif kind == "in" or kind == "dupin" and not target_fd:
+                stage.sources.append(tok)
+                stage.fed = stage.fed or stdin
+            elif kind == "rw":
+                stage.targets.append(tok)
+                stage.sources.append(tok)
+                stage.fed = stage.fed or stdin
+            elif kind in ("text", "doc") and stdin:
+                stage.fed = stage.text = True  # a here-document or here-string: text the token scan reads
+                if kind == "text":
+                    stage.texts.append(tok)
+                elif stage.doc is None:
+                    stage.doc = i
+            continue
+        if tok in ("{", "}"):
+            grouped = True
+            continue
+        stage.words.append(tok)
+        last = i
+    end_unit(dirs)
+    return units, grouped
+
+
+def _cab_git_verb(words, start, dirs):
+    """(verb, dirs, rest) for the git word at words[start]: its subcommand (None when it has none), the
+    directories its -C options give it, and the words after the subcommand; git's global options are
+    stepped over with the value each takes (_GIT_ARG_OPTS)."""
+    j = start + 1
+    while j < len(words):
+        w = words[j]
+        if w == "-C":
+            dirs = _cab_chdir(dirs, words[j + 1] if j + 1 < len(words) else None, False)
+            j += 2
+        elif w in _GIT_ARG_OPTS:
+            j += 2
+        elif w.startswith("-"):
+            j += 1
+        else:
+            return w, dirs, words[j + 1:]
+    return None, dirs, []
+
+
+def _cab_classify(stage):
+    """Set stage.verb, stage.alias, stage.msg and stage.write (and narrow stage.dirs by git -C) from the
+    stage's words; git apply is write-class. One pass over the words, plus one for a git or sed/perl
+    stage."""
+    words, inplace = stage.words, None
+    for idx, w in enumerate(words):
+        base = w.rsplit("/", 1)[-1]
+        if base == "git" and stage.verb is None:
+            verb, stage.dirs, _rest = _cab_git_verb(words, idx, stage.dirs)
+            stage.verb = verb or ""
+            stage.alias = any("alias." in x.lower() for x in words)
+            if verb in _CAB_GIT_MSG_VERBS or stage.alias:
+                stage.msg = True
+            elif verb == "apply":
+                stage.write = True  # git apply writes the files its patch names, as patch does
+        elif base == "gh":
+            stage.msg = True
+        elif base in _CAB_WRITE_WORDS:
+            stage.write = True
+        elif base in ("sed", "perl"):
+            if inplace is None:
+                inplace = any(x == "--in-place" or x.startswith("--in-place=")
+                              or x[:1] == "-" and x[1:2] != "-" and "i" in x.split("=", 1)[0] for x in words)
+            stage.write = stage.write or inplace
+
+
+def _cab_candidates(word):
+    """The file names one word may stand for: itself, the value after its first '=', a value after '@'
+    (body=@file, @file), and, for a short-option cluster, the rest of the word after each of its first
+    _CAB_CLUSTER letters (-aFmsg names msg after F; -tFILE names FILE after t)."""
+    out = [word]
+    if "=" in word:
+        out.append(word.split("=", 1)[1])
+    out += [c[1:] for c in out if c.startswith("@")]
+    if word[:1] == "-" and word[1:2] != "-":
+        end = 1
+        while end < len(word) and end <= _CAB_CLUSTER and word[end].isascii() and word[end].isalpha():
+            end += 1
+        out += [word[k:] for k in range(2, end + 1) if word[k:]]
+    return out
+
+
+class _CabReader:
+    """The file reads of one coauthor_bash call: each resolved path examined once in each mode, within the
+    path and byte bounds, and the first reason found to refuse the command (why). writes and dir_writes map
+    each path the commands of the reading being read write (_cab_writes), and each directory a git output
+    option fills, to the stages that write it; patch_writes each directory git format-patch writes its
+    numbered patch files into. scratch is the private directory the mailbox decoding writes into, splits
+    and mails count the files split and the messages decoded."""
+
+    def __init__(self):
+        self.seen, self.read, self.why = set(), 0, None
+        self.writes, self.dir_writes, self.loose, self.patch_writes = {}, {}, {}, {}
+        self.scratch, self.splits, self.mails = None, 0, 0
+
+    def close(self):
+        """Remove the directory the mailbox decoding wrote into (decode)."""
+        if self.scratch is not None:
+            shutil.rmtree(self.scratch, ignore_errors=True)
+            self.scratch = None
+
+    def check(self, word, dirs, strict, fed, what, owner=None, mailbox=False, words=False):
+        """Examine every file word may name, a relative one from each of dirs. strict (a message-creating
+        stage, in the exact reading, or in the fallback one when the exact reading fails) also refuses standard
+        input ('-') that no redirect, here-document or here-string of the stage feeds (fed), and an existing
+        file that is neither regular nor a directory, since either may be read as the message. A path another
+        stage than owner writes (written) is refused, whether or not it exists now. mailbox and words select
+        the reading of each file (examine). Records the first refusal in self.why."""
+        for name in _cab_candidates(word):
+            if self.why is not None:
+                return
+            if not name or name == "--":
+                continue
+            if name == "-":
+                if strict and not fed:
+                    self.why = ("{} reads standard input ('-') that no redirect, here-document or here-string "
+                                "of its own feeds, so what it consumes cannot be read".format(what))
+                continue
+            if name.startswith("~"):
+                name = os.path.expanduser(name)
+            if posixpath.isabs(name):
+                paths = [name]
+            elif None in dirs:
+                self.why = ("{} names the relative path {!r}, and the directory the command runs in cannot "
+                            "be determined (no usable payload cwd, or a cd or git -C the layer cannot "
+                            "resolve)".format(what, name[:200]))
+                return
+            else:
+                paths = [posixpath.join(d, name) for d in sorted(dirs)]
+            for path in paths:
+                if owner is not None and self.written(posixpath.normpath(path), owner):
+                    self.why = ("{} names {!r}, which another command of this Bash command writes, so what it "
+                                "holds when it is read cannot be read".format(what, path))
+                    return
+                self.examine(path, strict, what, mailbox, words)
+
+    def written(self, path, owner):
+        """Whether a stage other than owner writes path, fills a directory path lies in, writes a relative
+        name with path's base name where its directory cannot be determined, or is a git format-patch that may
+        write path as one of its numbered patch files (_CAB_PATCH_NAME_RE)."""
+        if self.writes.get(path, {owner}) - {owner} or self.loose.get(posixpath.basename(path), {owner}) - {owner}:
+            return True
+        if self.patch_writes and _CAB_PATCH_NAME_RE.fullmatch(posixpath.basename(path)) and (
+                self.patch_writes.get(posixpath.dirname(path), {owner}) - {owner}
+                or self.patch_writes.get(None, {owner}) - {owner}):
+            return True
+        parent = posixpath.dirname(path)
+        while self.dir_writes and parent and parent != path:
+            if self.dir_writes.get(parent, {owner}) - {owner}:
+                return True
+            path, parent = parent, posixpath.dirname(parent)
+        return False
+
+    def examine(self, path, strict, what, mailbox=False, words=False, nested=False):
+        """Read one resolved path (see check). mailbox (a stage that reads a mailbox, or any stage of its unit)
+        reads a directory as a Maildir (the files in its cur and new directories, as git reads one; nested,
+        a file of one, is not read as a Maildir again), refuses a file that holds a part git mailinfo
+        decodes or is an StGit series, and reads each file again as git decodes it (decode); words (a stage
+        that writes trailers) counts the token's words with any separator after them."""
+        key = (path, mailbox, words, nested)
+        if key in self.seen or self.why is not None:
+            return
+        self.seen.add(key)
+        if len(self.seen) > _CAB_MAX_PATHS:
+            self.why = "the command names more than {} distinct paths, past the read bound".format(_CAB_MAX_PATHS)
+            return
+        try:
+            st = os.stat(path)
+        except (FileNotFoundError, NotADirectoryError, ValueError):
+            return
+        except OSError as exc:
+            if exc.errno in (errno.ENAMETOOLONG, errno.ELOOP):
+                return
+            self.why = "{} names {!r}, which cannot be examined ({})".format(what, path, type(exc).__name__)
+            return
+        if stat.S_ISDIR(st.st_mode):
+            if mailbox and not nested:
+                self.maildir(path, strict, what, words)
+            return
+        if not stat.S_ISREG(st.st_mode):
+            if strict:
+                self.why = ("{} names {!r}, which is not a regular file (a FIFO or device that may be read as "
+                            "the message), so it cannot be read".format(what, path))
+            return
+        if st.st_size > _CAB_MAX_BYTES:
+            self.why = "{} names {!r}, larger than the {}-byte read bound".format(what, path, _CAB_MAX_BYTES)
+            return
+        self.read += st.st_size
+        if self.read > _CAB_MAX_READ:
+            self.why = "the files the command names hold more than {} bytes, past the read bound".format(
+                _CAB_MAX_READ)
+            return
+        try:
+            data = pathlib.Path(path).read_bytes()
+        except OSError as exc:
+            self.why = "{} names {!r}, which cannot be read ({})".format(what, path, type(exc).__name__)
+            return
+        text = data.decode("utf-8", "surrogateescape")
+        if _cab_text_count(text) or words and _CAB_WORDS_RE.search(text):
+            self.why = "{} names {!r}, which holds the trailer token".format(what, path)
+        elif mailbox and _CAB_MIME_RE.search(text):
+            self.why = ("{} names {!r}, a mailbox holding a base64 or quoted-printable part or an encoded "
+                        "header word, which git decodes before it records the message, so the message cannot "
+                        "be read".format(what, path))
+        elif mailbox and text.lstrip().startswith(_CAB_STGIT_SERIES):
+            self.why = ("{} names {!r}, an StGit series, which names further patch files git am reads"
+                        .format(what, path))
+        elif mailbox:
+            self.decode(path, what, words)
+
+    def decode(self, path, what, words):
+        """Read the mailbox file at path as git am reads it, by git itself: git mailsplit splits it into its
+        messages, and git mailinfo decodes each (its transfer encoding, its charset recoded to UTF-8 as git am
+        does, format=flowed, encoded header words) into the subject, the message and the patch, with the whole
+        subject and the Message-ID kept and no scissors line honoured, so the reading holds at least what git
+        am records. The token in
+        any of them refuses the command, and so does a split or decode that cannot run, fails, or does not
+        finish within _CAB_GIT_TIMEOUT, and more than _CAB_MAX_MAILS messages in all (fail closed). Each git
+        runs with the scrubbed environment of the replay reads (_cab_git_env) in a private directory that
+        close removes."""
+        env = _cab_git_env()
+        try:
+            if self.scratch is None:
+                self.scratch = tempfile.mkdtemp(prefix="aiqt-cab-")
+            self.splits += 1
+            out = posixpath.join(self.scratch, "split-{}".format(self.splits))
+            os.mkdir(out)
+            subprocess.run(["git", "mailsplit", "-b", "-o" + out, "--", path], cwd=self.scratch, env=env,
+                           capture_output=True, stdin=subprocess.DEVNULL, timeout=_CAB_GIT_TIMEOUT, check=True)
+            pieces = sorted(os.listdir(out))
+            msg, patch = posixpath.join(self.scratch, "msg"), posixpath.join(self.scratch, "patch")
+            for piece in pieces:
+                self.mails += 1
+                if self.mails > _CAB_MAX_MAILS:
+                    self.why = ("{} reads mailboxes holding more than {} messages in all, past the bound on the "
+                                "messages git mailinfo decodes for this layer".format(what, _CAB_MAX_MAILS))
+                    return
+                with open(posixpath.join(out, piece), "rb") as mail:
+                    proc = subprocess.run(["git", "-c", "i18n.commitEncoding=UTF-8", "mailinfo", "-k", "-m",
+                                           "--no-scissors", "-u", msg, patch], cwd=self.scratch, env=env,
+                                          stdin=mail, capture_output=True, timeout=_CAB_GIT_TIMEOUT, check=True)
+                decoded = (proc.stdout + b"\n" + pathlib.Path(msg).read_bytes() + b"\n"
+                           + pathlib.Path(patch).read_bytes()).decode("utf-8", "surrogateescape")
+                if _cab_text_count(decoded) or words and _CAB_WORDS_RE.search(decoded):
+                    self.why = ("{} names {!r}, a mailbox whose message, as git mailinfo decodes it, holds the "
+                                "trailer token".format(what, path))
+                    return
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            self.why = ("{} names {!r}, a mailbox git mailsplit and git mailinfo could not decode for this "
+                        "layer ({}), so the message git am records cannot be read".format(
+                            what, path, type(exc).__name__))
+
+    def maildir(self, path, strict, what, words):
+        """Examine each file in the cur and new directories of the Maildir at path (a missing one is passed
+        over, as git passes it over; one that cannot be listed refuses)."""
+        for sub in ("cur", "new"):
+            folder = posixpath.join(path, sub)
+            try:
+                names = sorted(os.listdir(folder))
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as exc:
+                self.why = "{} names the Maildir {!r}, whose {} directory cannot be listed ({})".format(
+                    what, path, sub, type(exc).__name__)
+                return
+            for name in names:
+                self.examine(posixpath.join(folder, name), strict, what, True, words, True)
+                if self.why is not None:
+                    return
+
+
+def _cab_stage_sink(stage):
+    """Whether stage makes its unit a sink: a message-creating or write-class command, or an output
+    redirect onto anything but an existing non-regular file (a target that cannot be resolved counts)."""
+    if stage.msg or stage.write:
+        return True
+    for target in stage.targets:
+        name = os.path.expanduser(target) if target.startswith("~") else target
+        if posixpath.isabs(name):
+            names = [name]
+        elif None in stage.dirs:
+            return True
+        else:
+            names = [posixpath.join(d, name) for d in sorted(stage.dirs)]
+        for path in names:
+            try:
+                if stat.S_ISREG(os.stat(path).st_mode):
+                    return True
+            except (OSError, ValueError):
+                return True
+    return False
+
+
+def _cab_commit_option(word):
+    """(name, kind, value) for one git commit option word as git's option parser reads it (_cmtidn_option):
+    name is the short letter or the full long name (an abbreviation resolved), '' for a flag cluster, None
+    for a word that is not an option."""
+    kind, value = _cmtidn_option(word, _CMTIDN_COMMIT_SHORT, _CMTIDN_COMMIT_LONG)
+    if word.startswith("--"):
+        name = word[2:].partition("=")[0]
+        if name not in _CMTIDN_COMMIT_LONG:
+            names = [opt for opt in _CMTIDN_COMMIT_LONG if opt.startswith(name)]
+            name = names[0] if len(names) == 1 else ""
+        return name, kind, value
+    if word.startswith("-") and len(word) > 1:
+        for letter in word[1:]:
+            if letter in _CMTIDN_COMMIT_SHORT:
+                return letter, kind, value
+        return "", None, None
+    return None, None, None
+
+
+def _cab_pick_revs(verb, args):
+    """(revs, why) for the words after git cherry-pick or revert: every word their own option reader does not
+    take (_CAB_PICK_FLAGS, _CAB_PICK_LONG) goes to git's revision reader, so each word but such an option and
+    its value is a revision, and after --end-of-options every word is. A '--' is dropped (the option reader
+    drops it and the revision reader still reads the words after it). An option word of neither reader that
+    this layer knows may name commits, so it refuses the stage (why). A '-' operand is the previous branch
+    (@{-1}); with --quit, --continue, --abort or --skip git takes no revision."""
+    flags, long_names = _CAB_PICK_FLAGS[verb], _CAB_PICK_LONG[verb]
+    revs, j, ended = [], 0, False
+    while j < len(args):
+        word = args[j]
+        j += 1
+        if ended or not word.startswith("-"):
+            revs.append(word)
+        elif word == "-":
+            revs.append("@{-1}")
+        elif word == "--end-of-options":
+            ended = True
+        elif word.startswith("--") and word != "--":
+            name, eq, _value = word[2:].partition("=")
+            if name in _CAB_PICK_MODES:
+                return [], None
+            if name not in long_names:
+                return [], ("git {} takes the option {!r}, which git's revision reader may read as naming the "
+                            "commits it replays (--all, --branches), so they cannot be read".format(verb, word[:80]))
+            if long_names[name] and not eq:
+                j += 1
+        elif word != "--":
+            for k, letter in enumerate(word[1:], 1):
+                if letter in _CAB_PICK_VALUE_FLAGS:
+                    j += k == len(word) - 1
+                    break
+                if letter == "S":
+                    break
+                if letter not in flags:
+                    return [], ("git {} takes the option {!r}, which git's revision reader may read as naming "
+                                "the commits it replays, so they cannot be read".format(verb, word[:80]))
+    return revs, None
+
+
+def _cab_stdin_lines(texts):
+    """(revs, why) for the text git cherry-pick or revert --stdin reads: git takes each line as one revision,
+    blanks included (a trailing carriage return dropped), and a line starting with '-' as a revision only after
+    an --end-of-options line, as an option otherwise (--all, --branches, which name commits). Where that line
+    falls in what git reads cannot be told here, so such a line refuses the stage (why); an empty line and a
+    '--' line, where git stops reading, are passed over and the lines after them still read (an over-read)."""
+    revs = []
+    for text in texts:
+        for line in text.split("\n"):
+            line = line[:-1] if line.endswith("\r") else line
+            if not line or line == "--":
+                continue
+            if line.startswith("-"):
+                return [], ("git cherry-pick or revert --stdin reads the line {!r}, which git reads as an option "
+                            "that may name the commits it replays (or as a revision after an --end-of-options "
+                            "line), so they cannot be read".format(line[:80]))
+            revs.append(line)
+    return revs, None
+
+
+def _cab_replay_revs(verb, args, extra=()):
+    """(revs, walk, why) naming the commits whose recorded message a git verb replays, read from the words
+    after it: git commit's -C, -c, --reuse-message, --reedit-message, --fixup and --squash values (--amend
+    with no message option reuses HEAD's); the revisions of git cherry-pick and git revert (_cab_pick_revs),
+    with the lines of their --stdin (extra); and the range git rebase replays (the commits of <branch> not in
+    <upstream>, the configured upstream when none is named; with --root all of the branch). A '-' operand is
+    the previous branch (@{-1}). walk is False where each rev names one commit (--no-walk). why, when not
+    None, is why the commits cannot be read, which refuses the stage."""
+    revs = []
+    if verb == "commit":
+        message, amend, j = False, False, 0
+        while j < len(args):
+            word = args[j]
+            j += 1
+            if word == "--":
+                break
+            name, kind, value = _cab_commit_option(word)
+            if name is None:
+                continue
+            if kind is not None and value is None:
+                value = args[j] if j < len(args) else ""
+                j += 1
+            if name in ("C", "c", "reuse-message", "reedit-message", "fixup", "squash"):
+                revs.append(value.split(":", 1)[1] if name == "fixup" and ":" in value else value)
+            if name in ("m", "F", "message", "file"):
+                message = True
+            amend = amend or name == "amend"
+        if amend and not message and not revs:
+            revs.append("HEAD")
+        return revs, False, None
+    if verb != "rebase":
+        revs, why = _cab_pick_revs(verb, args)
+        return revs + list(extra), False, why
+    # git rebase: a long option abbreviated (--exe for --exec) or a short cluster ending in a letter that
+    # takes a value (-fs ort) takes the next word, as git's option reader does; the words after '--' are
+    # operands. The range is passed as two revisions, so a '..' inside <upstream> is not read as its end.
+    words, j, root, ended = [], 0, False, False
+    while j < len(args):
+        word = args[j]
+        j += 1
+        if ended or not word.startswith("-"):
+            words.append(word)
+        elif word == "-":
+            words.append("@{-1}")
+        elif word == "--":
+            ended = True
+        elif word in ("--continue", "--skip", "--abort", "--quit", "--edit-todo", "--show-current-patch"):
+            return [], False, None
+        elif word.startswith("--"):
+            name, eq, _value = word[2:].partition("=")
+            root = root or "root".startswith(name)
+            if not eq and not name.startswith("no-") and any(
+                    opt.startswith(name) for opt in _CAB_REBASE_VALUE_LONG):
+                j += 1
+        else:
+            for k, letter in enumerate(word[1:], 1):
+                if letter in _CAB_REBASE_VALUE_FLAGS:
+                    j += k == len(word) - 1
+                    break
+                if letter in _CAB_REBASE_STUCK_FLAGS:
+                    break
+    if root:  # git rebase --root [<branch>]
+        return [words[0] if words else "HEAD"], True, None
+    return ["^" + (words[0] if words else "@{upstream}"), words[1] if len(words) > 1 else "HEAD"], True, None
+
+
+def _cab_git_env():
+    """The scrubbed environment the layer's own git reads run with (_isolate_git_env, no optional locks, the
+    C locale)."""
+    env = _isolate_git_env(dict(os.environ))
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["LC_ALL"] = "C"
+    return env
+
+
+def _cab_replay_names(stage, args, extra=()):
+    """(revs, walk, why) a replaying git stage names (_cab_replay_revs), each rev passed to git log as one
+    argument, blanks included, and each distinct rev once. An empty word names nothing git replays (git
+    refuses it) and is passed over. A rev holding a NUL (no argument can carry it) or longer than
+    _CAB_MAX_REV_LEN, or more than _CAB_MAX_REPLAY_REVS revs, cannot be read, so the stage is refused (why)
+    rather than the rev dropped."""
+    revs, walk, why = _cab_replay_revs(stage.verb, args, extra)
+    revs = list(dict.fromkeys(rev for rev in revs if rev))
+    for rev in revs:
+        if why is None and ("\0" in rev or len(rev) > _CAB_MAX_REV_LEN):
+            why = ("git {} names the revision {!r}, which {}, so the commits it replays cannot be read".format(
+                stage.verb, rev[:80], "holds a NUL" if "\0" in rev else
+                "is longer than the {}-character bound".format(_CAB_MAX_REV_LEN)))
+    if why is None and len(revs) > _CAB_MAX_REPLAY_REVS:
+        why = ("git {} names more than {} revisions, past the bound on the reads of the commits it replays"
+               .format(stage.verb, _CAB_MAX_REPLAY_REVS))
+    return revs, walk, why
+
+
+def _cab_replay_hit(stage, revs, walk):
+    """Why the commits revs name block a replaying git stage, or None: their messages are read with git log in
+    each directory the stage runs in (git revert records only the subject of each, so only that is read for
+    it), each rev one argument after --end-of-options, and one holding the token refuses it. A read that does
+    not finish (a timeout, git not started) refuses it too. Where the joint read of revs that each name one
+    commit fails (git log stops at one it cannot resolve, such as @{upstream} with none set, which may be an
+    over-read word git itself never takes), each is read on its own, at most _CAB_MAX_REPLAY_SPLIT of them,
+    past which the stage is refused. A message the hook still cannot read (no repository, a revision git
+    cannot resolve) is passed over (disclosed): git cannot replay it there either."""
+    env = _cab_git_env()
+    for d in sorted(x for x in stage.dirs if x is not None):
+        argv = ["git", "-C", d, "-c", "core.fsmonitor=false", "log",
+                "--format=%s" if stage.verb == "revert" else "--format=%B", "--no-show-signature",
+                "--ignore-missing", "--max-count={}".format(_CAB_MAX_REPLAY)]
+        if not walk:
+            argv.append("--no-walk=unsorted")
+        sets = [revs]
+        while sets:
+            part = sets.pop(0)
+            try:
+                proc = subprocess.run(argv + ["--end-of-options"] + part + ["--"], capture_output=True,
+                                      stdin=subprocess.DEVNULL, timeout=_CAB_GIT_TIMEOUT, env=env)
+            except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                return ("the read of the commits git {} replays in {!r} did not finish ({}), so they cannot be "
+                        "read".format(stage.verb, d, type(exc).__name__))
+            if proc.returncode == 0:
+                if _cab_count(proc.stdout.decode("utf-8", "surrogateescape")):
+                    return ("git {} replays the recorded message of {} in {!r}, and a message it replays holds "
+                            "the trailer token".format(stage.verb, " ".join(part)[:200], d))
+            elif not walk and len(part) > 1:
+                if len(part) > _CAB_MAX_REPLAY_SPLIT:
+                    return ("git {} names {} revisions in {!r} whose joint read fails, more than the {} read one "
+                            "at a time, so the commits it replays cannot be read".format(
+                                stage.verb, len(part), d, _CAB_MAX_REPLAY_SPLIT))
+                sets.extend([rev] for rev in part)
+    return None
+
+
+def _cab_config_set(stage, keys):
+    """Whether stage's words SET one of the git settings keys names (lower case): the value of a -c or
+    --config-env option naming it, a GIT_CONFIG_* assignment whose value names it, or a git config command
+    naming it as a word of its own. A setting name built at run time (a -c or --config-env name, a
+    GIT_CONFIG_KEY_<n> or a GIT_CONFIG_PARAMETERS value holding '$' or a backquote) may name any of them, so
+    it counts. A word that only mentions a key (a message, a core.hooksPath=<dir> in prose) is none of these."""
+    words = stage.words
+
+    def named(name):
+        return name in keys or "$" in name or "`" in name
+
+    for j, word in enumerate(words):
+        low = word.lower()
+        if low in ("-c", "--config-env") and j + 1 < len(words) and named(words[j + 1].lower().partition("=")[0]):
+            return True
+        if low.startswith("--config-env=") and named(low[13:].partition("=")[0]):
+            return True
+        if low.startswith("git_config"):
+            name, _eq, value = low.partition("=")
+            if any(key in value for key in keys) or (name.startswith("git_config_key_") or
+                                                     name == "git_config_parameters") and named(value):
+                return True
+    return stage.verb == "config" and any(word.lower() in keys for word in words)
+
+
+def _cab_hooks_setting(stage):
+    """Whether stage's words SET core.hooksPath (_cab_config_set)."""
+    return _cab_config_set(stage, ("core.hookspath",))
+
+
+def _cab_editor_setting(stage):
+    """Whether stage's words set an editor git edits a rebase todo list with: a sequence.editor or
+    core.editor setting (_cab_config_set), or a GIT_SEQUENCE_EDITOR, GIT_EDITOR, VISUAL or EDITOR
+    assignment."""
+    return _cab_config_set(stage, _CAB_TODO_EDITOR_KEYS) or any(
+        "=" in word and word.partition("=")[0] in _CAB_TODO_EDITOR_VARS for word in stage.words)
+
+
+def _cab_todo_edit(rest):
+    """Whether the words after git rebase ask for its todo list to be edited: -i in a short cluster, or
+    --interactive or --edit-todo in an abbreviation of two letters or more."""
+    for word in rest:
+        if word == "--":
+            break
+        if word.startswith("--"):
+            name = word[2:].partition("=")[0]
+            if len(name) >= 2 and ("interactive".startswith(name) or "edit-todo".startswith(name)):
+                return True
+        elif word.startswith("-") and "i" in word[1:]:
+            return True
+    return False
+
+
+def _cab_trailer_stage(stage):
+    """Whether stage writes trailers (git interpret-trailers, or a git command with a --trailer option),
+    so a file it reads is counted by the token's words with any separator (a trailer.separators setting
+    makes git rewrite '<name>#value' with a colon)."""
+    return stage.verb == "interpret-trailers" or stage.verb is not None and any(
+        _CAB_TRAILER_WORD_RE.match(word) for word in stage.words)
+
+
+def _cab_git_rest(stage):
+    """The words after the subcommand of stage's git command."""
+    idx = next(i for i, w in enumerate(stage.words) if w.rsplit("/", 1)[-1] == "git")
+    return _cab_git_verb(stage.words, idx, stage.dirs)[2]
+
+
+def _cab_command_word(stage):
+    """Whether the git word of stage is the word its command starts with: the first word of the stage, or
+    the first word of a command substitution in it (heads, marked in the fallback reading), NAME=value
+    assignments before it aside."""
+    k = next(i for i, w in enumerate(stage.words) if w.rsplit("/", 1)[-1] == "git")
+    while k > 0 and k not in stage.heads and _CAB_ASSIGN_RE.match(stage.words[k - 1]):
+        k -= 1
+    return k == 0 or k in stage.heads
+
+
+def _cab_stage_writes(stage):
+    """(names, dir_names, patch_dirs) stage may write: its redirect targets; for a write-class stage every
+    word after its command word in each spelling _cab_candidates reads, an option word itself aside; for a
+    git stage the value of an output option (-o, -oVALUE, or --output or --output-directory in an
+    abbreviation of five characters or more, with '=' or as the next word), whose directory a git command
+    may fill (dir_names); for a git format-patch with no such option and no --stdout, the directory it runs
+    in, where it writes its numbered patch files (patch_dirs, _CAB_PATCH_NAME_RE), and the value of a -c
+    format.outputDirectory setting (dir_names); and each operand of git interpret-trailers and git mailinfo,
+    which write their operands."""
+    names, dir_names, patch_dirs = list(stage.targets), [], []
+    if stage.write:
+        for word in stage.words[1:]:
+            found = _cab_candidates(word)
+            names += found[1:] if word.startswith("-") else found
+    if stage.verb:
+        rest = _cab_git_rest(stage)
+        output = "--stdout" in rest
+        for j, word in enumerate(rest):
+            name, eq, value = word.partition("=")
+            if name == "-o" or len(name) >= 5 and "--output-directory".startswith(name):
+                output = True
+                if eq:
+                    dir_names.append(value)
+                elif j + 1 < len(rest):
+                    dir_names.append(rest[j + 1])
+            elif name.startswith("-o") and not name.startswith("--"):
+                output = True
+                dir_names.append(word[2:])
+            elif stage.verb in ("interpret-trailers", "mailinfo") and not word.startswith("-"):
+                names.append(word)
+        if stage.verb == "format-patch" and not output:
+            patch_dirs.append(".")
+            words = stage.words
+            dir_names += [words[j + 1].partition("=")[2] for j in range(len(words) - 1) if words[j] == "-c"
+                          and words[j + 1].lower().partition("=")[0] == "format.outputdirectory"]
+    return names + dir_names, dir_names, patch_dirs
+
+
+def _cab_writes(units):
+    """(writes, dir_writes, loose, patch_writes) for one reading: each normalized path a stage may write
+    (_cab_stage_writes), each directory a git output option names, the base name of each relative name
+    written where a directory the stage runs in cannot be determined, and each directory a git format-patch
+    writes its numbered patch files into (None for one that cannot be determined), mapped to the ids of the
+    stages that write it. A relative name is resolved from each directory the stage runs in that can be
+    determined."""
+    writes, dir_writes, loose, patch_writes = {}, {}, {}, {}
+    for unit in units:
+        for stage in unit:
+            names, dir_names, patch_dirs = _cab_stage_writes(stage)
+            if patch_dirs:
+                for d in stage.dirs:
+                    patch_writes.setdefault(d, set()).add(id(stage))
+            for name in names:
+                is_dir = name in dir_names
+                if not name or name == "-":
+                    continue
+                if name.startswith("~"):
+                    name = os.path.expanduser(name)
+                bases = [None] if posixpath.isabs(name) else sorted(d for d in stage.dirs if d is not None)
+                if not posixpath.isabs(name) and None in stage.dirs:
+                    loose.setdefault(posixpath.basename(posixpath.normpath(name)), set()).add(id(stage))
+                for base in bases:
+                    path = posixpath.normpath(name if base is None else posixpath.join(base, name))
+                    writes.setdefault(path, set()).add(id(stage))
+                    if is_dir:
+                        dir_writes.setdefault(path, set()).add(id(stage))
+    return writes, dir_writes, loose, patch_writes
+
+
+def _cab_am_operands(rest):
+    """The operands of git am among the words after it, or None when it resumes or stops a session
+    (_CAB_AM_RESUME, -r), reading no new patch. An option word is no operand, and neither is the value a
+    value-taking option takes from the next word (_CAB_AM_LONG, _CAB_AM_SHORT_VALUE; a long option in an
+    abbreviation that could name one is read as one, the safe direction)."""
+    operands, j = [], 0
+    while j < len(rest):
+        word = rest[j]
+        j += 1
+        if word == "--":
+            return operands + rest[j:]
+        if word.startswith("--"):
+            name, eq, _value = word[2:].partition("=")
+            if len(name) > 0 and any(opt.startswith("--" + name) for opt in _CAB_AM_RESUME):
+                return None
+            matches = [opt for opt in _CAB_AM_LONG if opt.startswith(name)] if not name.startswith("no-") else []
+            if not eq and (_CAB_AM_LONG.get(name) or name not in _CAB_AM_LONG and any(
+                    _CAB_AM_LONG[opt] for opt in matches)):
+                j += 1
+        elif word.startswith("-") and len(word) > 1:
+            for k, letter in enumerate(word[1:], 1):
+                if letter == "r":
+                    return None
+                if letter in _CAB_AM_SHORT_VALUE:
+                    j += 0 if word[k + 1:] else 1
+                    break
+                if letter == "S":
+                    break
+        elif word:
+            operands.append(word)
+    return operands
+
+
+def _cab_reads_stdin(stage):
+    """Whether a mailbox-reading git stage reads its mailbox from standard input: git mailinfo always does,
+    and git am or git mailsplit does when none of its operands (_cab_am_operands for git am; for git
+    mailsplit each word that is not an option) names an existing path, git am unless it resumes or stops a
+    session. An operand that cannot be resolved counts as naming none (fail closed)."""
+    if stage.verb == "mailinfo":
+        return True
+    rest = _cab_git_rest(stage)
+    if stage.verb == "am":
+        rest = _cab_am_operands(rest)
+        if rest is None:
+            return False
+    for word in rest:
+        if word.startswith("-") or not word:
+            continue
+        name = os.path.expanduser(word) if word.startswith("~") else word
+        bases = [None] if posixpath.isabs(name) else sorted(d for d in stage.dirs if d is not None)
+        for base in bases:
+            if os.path.exists(name if base is None else posixpath.join(base, name)):
+                return False
+    return True
+
+
+def _cab_lex(prepared):
+    """(tokens, joined) of the exact reading: shlex's tokens (posix, the shell operators and a newline split
+    off, no comment reading), and the indices of the word tokens an operator follows with no blank between,
+    read from the character shlex holds back after such a word (None when this Python's shlex keeps no such
+    record, so that cannot be told). Raises ValueError where shlex cannot tokenize the text."""
+    lex = shlex.shlex(prepared, posix=True, punctuation_chars=_CAB_PUNCT)
+    lex.whitespace, lex.commenters, lex.whitespace_split = " \t\r", "", True
+    held = getattr(lex, "_pushback_chars", None)
+    tokens, joined = [], (set() if held is not None else None)
+    while True:
+        tok = lex.get_token()
+        if tok == lex.eof:
+            return tokens, joined
+        if joined is not None and held and held[0] in _CAB_PUNCT:
+            joined.add(len(tokens))
+        tokens.append(tok)
+
+
+def _cab_crude(prepared):
+    """(tokens, joined) of the fallback reading (_CAB_CRUDE_RE over the de-quoted text, each '$(' and
+    backquote marked _CAB_HEAD first), joined as in _cab_lex."""
+    text = _CAB_DEQUOTE_RE.sub("", _CAB_SUBST_OPEN_RE.sub(" " + _CAB_HEAD + " ", prepared))
+    found = list(_CAB_CRUDE_RE.finditer(text))
+    return ([m.group(0) for m in found],
+            {i for i in range(len(found) - 1) if found[i].end() == found[i + 1].start()})
+
+
+def _cab_previous_branch(stage):
+    """The indices of stage's words git reads as the previous branch (@{-1}): each '-' after the subcommand
+    of git merge, cherry-pick, rebase or revert, but a value of git merge's -F or --file, which is standard
+    input."""
+    if stage.verb not in _CAB_GIT_DASH_VERBS:
+        return set()
+    words = stage.words
+    found = set()
+    for k in range(len(words) - len(_cab_git_rest(stage)), len(words)):
+        prev = words[k - 1]
+        if words[k] == "-" and not (stage.verb == "merge" and (
+                prev[:1] == "-" and prev[1:2] != "-" and prev.endswith("F")
+                or len(prev) >= 4 and "--file".startswith(prev))):
+            found.add(k)
+    return found
+
+
+def _cab_stdin_revs(stage):
+    """Whether stage is a git cherry-pick or revert that reads the commits it replays from standard input
+    (--stdin before any --end-of-options; their option reader drops a '--' and git's revision reader still
+    takes a --stdin after it)."""
+    if stage.verb not in ("cherry-pick", "revert"):
+        return False
+    rest = _cab_git_rest(stage)
+    end = "--end-of-options"
+    return "--stdin" in (rest[:rest.index(end)] if end in rest else rest)
+
+
+def _cab_stage_problem(stage, active, what):
+    """Why how stage is fed refuses the command, or None: a mailbox-reading git stage fed by a pipe, a
+    process substitution, a here-document or a here-string (whatever produces it, since this layer does not
+    decode it as git does), or, where active (the exact reading, a fallback reading where shlex fails, or one
+    whose git word is the command word, _cab_command_word), one that reads standard input no redirect of its
+    own feeds (_cab_reads_stdin); an StGit series; and a git cherry-pick or revert --stdin that no
+    here-document or here-string of its own feeds."""
+    if stage.verb in _CAB_GIT_MAILBOX_VERBS:
+        if not stage.first:
+            return ("{} reads a mailbox a pipe feeds it, whatever produces it, so the patches or message it reads "
+                    "cannot be read".format(what))
+        if stage.subst or stage.text:
+            return ("{} reads a mailbox from a process substitution, a here-document or a here-string, which this "
+                    "layer does not decode as git does, so the patches or message it reads cannot be read"
+                    .format(what))
+        if active and not stage.fed and _cab_reads_stdin(stage):
+            return ("{} {} its mailbox from standard input, which no redirect of its own feeds, so the patches or "
+                    "message it reads cannot be read".format(what, "reads" if stage.verb == "mailinfo" else
+                                                             "names no existing patch file or Maildir, so it reads"))
+        if any("stgit-series" in word for word in stage.words):
+            return "{} reads an StGit series, which names further patch files git am reads".format(what)
+    if active and not stage.text and _cab_stdin_revs(stage):
+        return ("{} reads the commits it replays from standard input (--stdin), which no here-document or "
+                "here-string of its own feeds, so they cannot be read".format(what))
+    return None
+
+
+def _cab_reference_problem(joined, cwd, raw=None):
+    """Why the file references of a command (its joined text, backslash-newlines removed; raw, when given, its
+    text as written, whose lines a here-document feeding git cherry-pick or revert --stdin is read from) block
+    it, or None. Read twice: by shlex (_cab_lex, an ANSI-C quote decoded and a locale quote read as a double-quoted
+    string first), the exact reading, and by the fallback reading (_cab_crude), an over-read that refuses
+    standard input ('-') or a non-regular file on its own only when the exact reading fails. A
+    commit-creating git command in a command one of whose stages, in either reading, sets core.hooksPath
+    (_cab_hooks_setting) is refused, and so is a git rebase that edits its todo list in a command that sets
+    an editor it edits it with (_cab_editor_setting). In each reading, a sink unit's words, redirect sources
+    and targets are read (_CabReader); in a command holding a subshell or { } group, every word of the whole
+    command is read for a sink, since the group may feed it. A word or redirect source naming a path another
+    stage of the command writes (_cab_writes) is refused; a file of a unit holding a mailbox-reading git
+    stage is read as a mailbox, and one a trailer-writing stage reads by the token's words; how a stage is
+    fed is judged by _cab_stage_problem; and the messages a replaying git stage names are read
+    (_cab_replay_hit), each set once, at most _CAB_MAX_REPLAY_CALLS sets, past which the command is refused.
+    In the fallback reading, where shlex can tokenize the command, the standard-input rule of a mailbox
+    reader, the --stdin rule, the todo-list rule and the replay reads apply only to a stage whose git word is
+    the command word (_cab_command_word), so a here-document body that mentions such a command passes."""
+    dirs = frozenset((posixpath.normpath(cwd),)) if isinstance(cwd, str) and posixpath.isabs(cwd) else \
+        frozenset((None,))
+    prepared = joined
+    if "$'" in prepared:
+        prepared = _ANSI_C_QUOTE_RE.sub(lambda m: shlex.quote(_ansi_c_body(m)), prepared)
+    prepared = _CAB_LOCALE_QUOTE_RE.sub("", prepared)
+    readings = []
+    try:
+        readings.append((True, None) + _cab_lex(prepared))
+    except ValueError:
+        pass
+    lexed = bool(readings)
+    readings.append((False, _CAB_HEAD) + _cab_crude(prepared))
+    parsed = []
+    for exact, mark, tokens, joined_at in readings:
+        units, grouped = _cab_parse(tokens, dirs, joined_at, mark)
+        for unit in units:
+            for stage in unit:
+                _cab_classify(stage)
+        parsed.append((exact, tokens, units, grouped))
+    stages = [stage for _exact, _tokens, units, _grouped in parsed for unit in units for stage in unit]
+    if any(_cab_hooks_setting(stage) for stage in stages) and any(
+            stage.verb in _CAB_GIT_HOOKED_VERBS or stage.alias for stage in stages):
+        return ("a commit-creating git command runs in a command that sets core.hooksPath, which can switch "
+                "the commit-msg layer off")
+
+    def active(exact, stage):
+        return exact or not lexed or stage.verb is not None and _cab_command_word(stage)
+
+    if any(_cab_editor_setting(stage) for stage in stages) and any(
+            stage.verb == "rebase" and active(exact, stage) and _cab_todo_edit(_cab_git_rest(stage))
+            for exact, _tokens, units, _grouped in parsed for unit in units for stage in unit):
+        return ("git rebase edits its todo list in a command that sets an editor git edits it with "
+                "(sequence.editor, core.editor, GIT_SEQUENCE_EDITOR, GIT_EDITOR, VISUAL or EDITOR), which can "
+                "add commits whose recorded messages this layer does not read")
+    reader, replayed = _CabReader(), {}
+    try:
+        for exact, _tokens, units, grouped in parsed:
+            sinks =[unit for unit in units if any(_cab_stage_sink(stage) for stage in unit)]
+            if not sinks:
+                continue
+            reader.writes, reader.dir_writes, reader.loose, reader.patch_writes = _cab_writes(units)
+            for unit in (units if grouped else sinks):
+                mailbox = any(stage.verb in _CAB_GIT_MAILBOX_VERBS for stage in unit)
+                for stage in unit:
+                    strict = (exact or not lexed) and stage.msg
+                    words = _cab_trailer_stage(stage)
+                    what = "the {} command".format("git " + stage.verb if stage.verb else
+                                                   stage.words[0][:60] if stage.words else "redirect")
+                    live = active(exact, stage)
+                    why = _cab_stage_problem(stage, live, what)
+                    if why is not None:
+                        return why
+                    dash = _cab_previous_branch(stage)
+                    for k, word in enumerate(stage.words):
+                        if (k or "/" in word) and k not in dash:  # a bare command word is found on PATH
+                            reader.check(word, stage.dirs, strict, stage.fed, what, id(stage), mailbox, words)
+                    for source in stage.sources:
+                        reader.check(source, stage.dirs, strict, True, what + " (a redirect source)", id(stage),
+                                     mailbox, words)
+                    for target in stage.targets:
+                        reader.check(target, stage.dirs, False, True, what + " (a redirect target)")
+                    if reader.why is not None:
+                        return reader.why
+                    if not live or stage.verb not in _CAB_GIT_REPLAY_VERBS:
+                        continue
+                    extra = []
+                    if stage.text and _cab_stdin_revs(stage):
+                        texts = list(stage.texts)
+                        if stage.doc is not None:  # every line of the command text: the body and more
+                            texts += [text for base in dict.fromkeys((raw or joined, joined)) for text in (
+                                base, "\n".join(line.lstrip("\t") for line in base.split("\n")))]
+                        extra, why = _cab_stdin_lines(texts)
+                        if why is not None:
+                            return why
+                    revs, walk, why = _cab_replay_names(stage, _cab_git_rest(stage), extra)
+                    if why is not None:
+                        return why
+                    key = (stage.verb, tuple(revs), walk, stage.dirs)
+                    if not revs or key in replayed and replayed[key] is None:
+                        continue
+                    if key not in replayed:
+                        if len(replayed) >= _CAB_MAX_REPLAY_CALLS:
+                            return ("the command replays the recorded messages of more than {} sets of commits, "
+                                    "past the bound on the reads of them".format(_CAB_MAX_REPLAY_CALLS))
+                        replayed[key] = _cab_replay_hit(stage, revs, walk)
+                    if replayed[key] is not None:
+                        return replayed[key]
+    finally:
+        reader.close()
+    return None
+
+
+def coauthor_bash(data):
+    """cmtidn (integ/commit-identity), PreToolUse/Bash: deny a Bash command whose TEXT holds a
+    trailer-shaped occurrence of the co-author token (read raw, with backslash-newlines joined, de-quoted,
+    with ANSI-C escapes decoded, and with each brace expansion expanded), or names a trailer.<name>.key
+    setting, a --trailer option or git interpret-trailers beside the token's words; deny one whose brace
+    expansion is too large to expand when it could form the token; and deny one whose file references, read
+    by construction (the roster comment above _CAB_GIT_MSG_VERBS, and _cab_reference_problem), name a file
+    holding the token (a mailbox also as git mailinfo decodes it), a file that cannot be read, a path another
+    stage of the command writes, or a relative path where the run directory cannot be determined, or that
+    feeds a mailbox-reading git command from a pipe, a process substitution, a here-document, a here-string
+    or standard input it cannot read, or feeds git cherry-pick or revert --stdin other than by a
+    here-document or here-string, or replays a commit message holding the token, or sets core.hooksPath
+    beside a commit, or an editor beside a git rebase that edits its todo list. A command past
+    _CAB_MAX_COMMAND is refused when any of its readings holds a word that
+    could redirect, write or commit. Removal goes through the Write/Edit layer
+    (coauthor_file), which can PROVE the count fell; this layer cannot prove a Bash removal, so it never
+    allows one."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: coauthor_bash wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("cmtidn")
+    if tool_name != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    command = (data.get("tool_input") or {}).get("command")
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): the Bash payload carried no readable command string, "
+            "so the co-author-token check could not run; failing closed.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
+    readings, bases = _cab_text_readings(command)
+    uncertain = False
+    for base in bases:
+        texts, doubt = _cab_brace_texts(base)
+        readings += texts
+        uncertain = uncertain or doubt
+    hit = _cab_text_hit(readings)
+    if hit is not None:
+        what = ("holds a '{0}:' (or '{0}=') trailer" if hit == "names" else
+                "names a trailer.<name>.key setting beside the words of the '{0}' trailer name" if hit == "key" else
+                "names the words of the '{0}' trailer name beside a --trailer option or git interpret-trailers "
+                "(git writes a bare --trailer name as '<name>: ', and a trailer.separators setting makes it read "
+                "another separator)").format(_CAB_TOKEN)
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): this Bash command's text {} (read raw, with "
+            "backslash-newlines joined, with quoting removed, with ANSI-C escapes decoded and with brace "
+            "expansions expanded), and a Bash command can neither prove it writes no file nor prove a "
+            "removal, so it is refused (fail-closed). To REMOVE occurrences from a file, use the Edit or "
+            "Write tool, whose layer allows a write that strictly reduces the count; to SEARCH for "
+            "occurrences, use the Grep or Read tool.".format(what),
+            "AIQT guardrail: denied a Bash command naming the AI co-author trailer token (rule cmtidn).")
+    if uncertain:
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): this Bash command holds a brace expansion too large to "
+            "expand within the bound, which could form a '{}:' trailer, so it is refused (fail-closed). "
+            "Write the words out.".format(_CAB_TOKEN),
+            "AIQT guardrail: denied a Bash command whose brace expansion could form the AI co-author "
+            "trailer token (rule cmtidn, fail-closed).")
+    if len(command) > _CAB_MAX_COMMAND:
+        if not any(_CAB_SINK_HINT_RE.search(text) for text in readings):
+            return _allow()  # no word that could redirect, write or commit in any reading: nothing to carry
+        why = ("it is longer than the {}-character read bound, so its file references cannot be read, and it "
+               "holds a word that could redirect, write or commit (read raw, de-quoted, with ANSI-C escapes "
+               "decoded and with brace expansions expanded)".format(_CAB_MAX_COMMAND))
+    else:
+        why = _cab_reference_problem(bases[0], data.get("cwd"), command)
+    if why is None:
+        return _allow()
+    return _deny(
+        "AIQT rule cmtidn (commit-identity): {}; a file or commit holding (or possibly holding) a '{}:' "
+        "trailer may not be copied, moved, linked, read into a redirect or tee, rewritten in place, "
+        "replayed, or consumed as a commit message, note, tag or PR/issue body, and a reference this "
+        "layer cannot read is refused (fail-closed). Remove the occurrence first with the Edit tool, use "
+        "absolute paths, or point the command at a clean file.".format(why, _CAB_TOKEN),
+        "AIQT guardrail: denied a Bash command whose referenced file or commit holds or may hold the AI "
+        "co-author trailer token (rule cmtidn, fail-closed).")
 
 
 # --- abspth: relative path where the tool requires absolute ------------------------------------------
@@ -35884,6 +37643,8 @@ HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
     "diff_source_pretool": diff_source_pretool,
     "commit_identity": commit_identity,
+    "coauthor_file": coauthor_file,
+    "coauthor_bash": coauthor_bash,
     "absolute_paths": absolute_paths,
     "bash_absolute_paths": bash_absolute_paths,
     "git_explicit_binding": git_explicit_binding,
@@ -35925,6 +37686,8 @@ HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
     "commit_identity": PRETOOL,
+    "coauthor_file": PRETOOL,
+    "coauthor_bash": PRETOOL,
     "absolute_paths": PRETOOL,
     "bash_absolute_paths": PRETOOL,
     "git_explicit_binding": PRETOOL,

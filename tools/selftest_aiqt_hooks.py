@@ -168,6 +168,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import _signal
 import ast
+import base64
 import collections
 import contextlib
 import datetime
@@ -239,6 +240,14 @@ def _decision(handler, command, tool="Bash", cwd=None):
         data["cwd"] = cwd
     code, stdout_obj, _stderr = handler(data)
     return _reduce_result(code, stdout_obj)
+
+
+# The co-author trailer token, BUILT AT RUN TIME: the coauthor-file layer refuses any write that keeps or
+# adds the token, so this suite (like the hook source, the manifest and the generated documents) never
+# spells it; each vector assembles the spelling it drives from these parts at run time.
+_CAB_UC = "-".join(("Co", "Authored", "By"))
+_CAB_MIXED = "-".join(("Co", "authored", "by"))
+_CAB_LC = _CAB_UC.lower()
 
 
 def _declared_names(tree, name):
@@ -2104,6 +2113,1589 @@ def _test_note_shape_pins(failures, tmp):
     if leaves != want:
         failures.append("(ns-pin-leaves) the leaf constructors are {}, expected exactly {}"
                         .format(sorted(leaves), sorted(want)))
+
+
+def _test_coauthor_guards(failures, tmp):
+    """(cab-*) The co-author-token layers of the commit-identity rule: coauthor_file (Write, Edit,
+    MultiEdit and NotebookEdit against the resulting file content), coauthor_bash (the command text and
+    the file references it reads), and the shipped commit-msg git hook (run as a child on a message
+    file, the way git runs it). THE RULE each case pins: a write may leave the target with NO occurrence
+    of the trailer token, or with STRICTLY FEWER than it holds (a removal); everything else, and every
+    cannot-evaluate, is refused. Every deny case here is a flip: before these layers existed the same
+    payload was silently allowed, and each allow case is the sibling flip that fails if the layer
+    over-widens to a blanket deny. The token is BUILT AT RUN TIME (_CAB_UC/_CAB_MIXED/_CAB_LC), never
+    spelled, so this suite stays editable under the layer it tests. Fixtures are throwaway files under
+    the temp tree; the Bash commands submitted to coauthor_bash in-process here are never executed. The
+    paired battery (_test_coauthor_children) runs its cases through main() in child processes, its
+    landing checks run their commands in throwaway repositories, and the real-git oracle
+    (_test_coauthor_oracle) runs each landing vector gated by every layer with the commit-msg hook
+    installed."""
+    base = tmp / "cab"
+    base.mkdir(parents=True, exist_ok=True)
+    cab = _CAB_UC + ": Claude <c@x>"
+
+    def fdecide(tool, tool_input, event="PreToolUse", with_tool=True):
+        data = {"hook_event_name": event}
+        if with_tool:
+            data["tool_name"] = tool
+        if tool_input is not None:
+            data["tool_input"] = tool_input
+        return aiqt_hooks.coauthor_file(data)
+
+    def fexpect(label, tool, tool_input, want):
+        code, obj, _stderr = fdecide(tool, tool_input)
+        got = _reduce_result(code, obj)
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+
+    def bexpect(label, command, want, cwd=None):
+        got = _decision(aiqt_hooks.coauthor_bash, command, cwd=cwd)
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+
+    # wiring: both handlers dispatched as PreToolUse modes (the manifest linkage is gen_hooks-validated)
+    if (aiqt_hooks.HANDLERS.get("coauthor_file") is not aiqt_hooks.coauthor_file
+            or aiqt_hooks.HANDLERS.get("coauthor_bash") is not aiqt_hooks.coauthor_bash
+            or aiqt_hooks.HANDLER_EVENT.get("coauthor_file") != "PreToolUse"
+            or aiqt_hooks.HANDLER_EVENT.get("coauthor_bash") != "PreToolUse"):
+        failures.append("(cab-wiring) coauthor_file/coauthor_bash handler or event wiring is missing or wrong")
+
+    # --- the file layer: fixtures ---------------------------------------------------------------------
+    clean = base / "clean.txt"
+    clean.write_text("fix adapter\n", encoding="utf-8")
+    dirty = base / "dirty.txt"
+    dirty.write_text("fix\n\n" + cab + "\nmore\n", encoding="utf-8")
+    two = base / "two.txt"
+    two.write_text(cab + "\n" + _CAB_MIXED + ": Bob <b@x>\n", encoding="utf-8")
+    frag = base / "frag.txt"
+    frag.write_text("Co-X" + _CAB_UC[3:] + ": Bob <b@x>\n", encoding="utf-8")  # NO token until the X goes
+    huge = base / "huge.txt"
+    with open(huge, "wb") as handle:
+        handle.seek(aiqt_hooks._CAB_MAX_BYTES)
+        handle.write(b"x")  # sparse: one byte past the read bound
+
+    # Write: refuse an occurrence written into a new or existing file; allow a clean write and a removal
+    fexpect("(cab-f1) a Write of a new file holding the token denies",
+            "Write", {"file_path": str(base / "new.txt"), "content": "fix\n" + cab + "\n"}, "deny")
+    fexpect("(cab-f2) a Write of a new clean file allows",
+            "Write", {"file_path": str(base / "new2.txt"), "content": "fix adapter\n"}, "allow")
+    fexpect("(cab-f3) a Write replacing a token-holding file with clean content allows (removal to none)",
+            "Write", {"file_path": str(dirty), "content": "fix\nmore\n"}, "allow")
+    fexpect("(cab-f4) a Write replacing two occurrences with one allows (a strict reduction)",
+            "Write", {"file_path": str(two), "content": "kept: " + cab + "\n"}, "allow")
+    fexpect("(cab-f5) a Write re-writing a token-holding file still holding one occurrence denies",
+            "Write", {"file_path": str(dirty), "content": "reworded\n" + cab + "\n"}, "deny")
+    # case, separator and CRLF variants are the same token
+    fexpect("(cab-f6) the lower-case spelling denies",
+            "Write", {"file_path": str(base / "v1.txt"), "content": _CAB_LC + ": Bob <b@x>\n"}, "deny")
+    fexpect("(cab-f7) the space-separated spelling denies",
+            "Write", {"file_path": str(base / "v2.txt"), "content": _CAB_UC.replace("-", " ") + ": B <b@x>\n"},
+            "deny")
+    fexpect("(cab-f8) a CRLF line end does not hide the token, denies",
+            "Write", {"file_path": str(base / "v3.txt"), "content": "fix\r\n" + cab + "\r\n"}, "deny")
+    # Edit: the resulting content is simulated, so splices and pre-existing occurrences are judged
+    fexpect("(cab-f9) an Edit of a token-holding file that does not remove an occurrence denies",
+            "Edit", {"file_path": str(dirty), "old_string": "fix", "new_string": "repair"}, "deny")
+    fexpect("(cab-f10) an Edit removing the token line allows (removal)",
+            "Edit", {"file_path": str(dirty), "old_string": cab + "\n", "new_string": ""}, "allow")
+    fexpect("(cab-f11) an Edit adding the token to a clean file denies",
+            "Edit", {"file_path": str(clean), "old_string": "fix adapter",
+                     "new_string": "fix adapter\n" + cab}, "deny")
+    fexpect("(cab-f12) an Edit that JOINS two inert fragments into the token denies (the splice)",
+            "Edit", {"file_path": str(frag), "old_string": "X", "new_string": ""}, "deny")
+    fexpect("(cab-f13) an Edit of a clean file staying clean allows",
+            "Edit", {"file_path": str(clean), "old_string": "adapter", "new_string": "handler"}, "allow")
+    fexpect("(cab-f14) a replace_all Edit clearing every occurrence allows",
+            "Edit", {"file_path": str(two), "old_string": _CAB_UC[:3].rstrip("-"), "new_string": "nobody",
+                     "replace_all": True}, "allow")
+    # MultiEdit: edits applied in order against the same current file
+    fexpect("(cab-f15) a MultiEdit that removes one of two occurrences allows (a strict reduction)",
+            "MultiEdit", {"file_path": str(two), "edits": [
+                {"old_string": cab + "\n", "new_string": ""},
+                {"old_string": "Bob", "new_string": "Bobby"}]}, "allow")
+    fexpect("(cab-f16) a MultiEdit that removes one occurrence but writes another back denies (no net removal)",
+            "MultiEdit", {"file_path": str(two), "edits": [
+                {"old_string": cab + "\n", "new_string": ""},
+                {"old_string": "Bob", "new_string": "Bob\n" + cab}]}, "deny")
+    # fail-closed branches of the file layer
+    fexpect("(cab-f17) an Edit whose target is not a regular file denies (fail-closed)",
+            "Edit", {"file_path": str(base), "old_string": "a", "new_string": "b"}, "deny")
+    fexpect("(cab-f18) an Edit whose target is past the read bound denies (fail-closed)",
+            "Edit", {"file_path": str(huge), "old_string": "a", "new_string": "b"}, "deny")
+    fexpect("(cab-f19) a Write past the read bound with clean content still allows (the result provably "
+            "holds no token)", "Write", {"file_path": str(huge), "content": "clean\n"}, "allow")
+    fexpect("(cab-f20) a Write past the read bound whose content holds the token denies",
+            "Write", {"file_path": str(huge), "content": cab + "\n"}, "deny")
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        locked = base / "locked.txt"
+        locked.write_text(cab + "\n", encoding="utf-8")
+        os.chmod(locked, 0)
+        try:
+            fexpect("(cab-f21) an Edit of an unreadable file denies (fail-closed)",
+                    "Edit", {"file_path": str(locked), "old_string": "a", "new_string": "b"}, "deny")
+        finally:
+            os.chmod(locked, 0o600)
+    fexpect("(cab-f22) a non-mapping tool_input denies (fail-closed)", "Write", "not-a-dict", "deny")
+    fexpect("(cab-f23) a missing file_path denies (fail-closed)", "Write", {"content": "x"}, "deny")
+    fexpect("(cab-f24) a missing Write content denies (fail-closed)",
+            "Write", {"file_path": str(clean)}, "deny")
+    fexpect("(cab-f25) a missing MultiEdit edits list denies (fail-closed)",
+            "MultiEdit", {"file_path": str(clean)}, "deny")
+    fexpect("(cab-f26) an empty old_string cannot be simulated, denies (fail-closed)",
+            "Edit", {"file_path": str(clean), "old_string": "", "new_string": "b"}, "deny")
+    fexpect("(cab-f27) an out-of-scope tool allows (the matcher governs)",
+            "Read", {"file_path": str(dirty)}, "allow")
+    code, _obj, _stderr = fdecide("Write", {"file_path": str(clean), "content": "x"}, with_tool=False)
+    if _reduce_result(code, _obj) != "deny":
+        failures.append("(cab-f28) a missing tool_name must deny (fail-closed)")
+    code, _obj, _stderr = fdecide("Write", {"file_path": str(clean), "content": "x"}, event="PostToolUse")
+    if code != 2:
+        failures.append("(cab-f29) a mis-wired event must hard-block (exit 2), got {}".format(code))
+    # NotebookEdit: simulated against the parsed notebook
+    nb = base / "nb.ipynb"
+    nb_doc = {"cells": [{"cell_type": "markdown", "id": "a", "metadata": {},
+                         "source": "fix\n" + cab + "\n"},
+                        {"cell_type": "code", "id": "b", "metadata": {}, "outputs": [],
+                         "source": "print(1)\n"}],
+              "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    nb.write_text(json.dumps(nb_doc), encoding="utf-8")
+    fexpect("(cab-n1) a NotebookEdit replacing the token-holding cell with clean source allows (removal)",
+            "NotebookEdit", {"notebook_path": str(nb), "cell_id": "a", "edit_mode": "replace",
+                             "new_source": "fix\n"}, "allow")
+    fexpect("(cab-n2) a NotebookEdit replacing another cell while the occurrence stays denies",
+            "NotebookEdit", {"notebook_path": str(nb), "cell_id": "b", "edit_mode": "replace",
+                             "new_source": "print(2)\n"}, "deny")
+    fexpect("(cab-n3) a NotebookEdit deleting the token-holding cell allows (removal)",
+            "NotebookEdit", {"notebook_path": str(nb), "cell_id": "a", "edit_mode": "delete"}, "allow")
+    fexpect("(cab-n4) a NotebookEdit inserting a cell holding the token denies",
+            "NotebookEdit", {"notebook_path": str(nb), "cell_id": "b", "edit_mode": "insert",
+                             "new_source": cab + "\n"}, "deny")
+    fexpect("(cab-n5) a NotebookEdit naming a cell no notebook holds, with an occurrence involved, denies "
+            "(fail-closed)", "NotebookEdit", {"notebook_path": str(nb), "cell_id": "zz",
+                                              "edit_mode": "replace", "new_source": "x"}, "deny")
+    nb_clean = base / "nb-clean.ipynb"
+    nb_clean.write_text(json.dumps({"cells": [{"cell_type": "code", "id": "a", "metadata": {},
+                                               "outputs": [], "source": "print(1)\n"}],
+                                    "metadata": {}, "nbformat": 4, "nbformat_minor": 5}), encoding="utf-8")
+    fexpect("(cab-n6) a clean NotebookEdit on a clean notebook allows",
+            "NotebookEdit", {"notebook_path": str(nb_clean), "cell_id": "a", "edit_mode": "replace",
+                             "new_source": "print(2)\n"}, "allow")
+    broken = base / "broken.ipynb"
+    broken.write_text("not json " + cab + "\n", encoding="utf-8")
+    fexpect("(cab-n7) a NotebookEdit on an unparseable notebook holding an occurrence denies (fail-closed)",
+            "NotebookEdit", {"notebook_path": str(broken), "cell_id": "a", "edit_mode": "replace",
+                             "new_source": "x"}, "deny")
+
+    # --- the Bash layer --------------------------------------------------------------------------------
+    bexpect("(cab-b1) a redirect writing the token denies (the text scan)",
+            'echo "' + cab + '" > ' + str(base / "out.txt"), "deny")
+    bexpect("(cab-b2) a git commit -m holding the token denies, whatever the identity",
+            'git commit -m "fix" -m "' + _CAB_MIXED + ': Bob <b@x>"', "deny")
+    bexpect("(cab-b3) a quote-split spelling is read joined, denies",
+            'echo "Co-"A"' + _CAB_UC[4:] + '": x" > f', "deny")
+    bexpect("(cab-b4) a read-side search naming the trailer-shaped token denies (the disclosed over-refusal)",
+            "grep -rn '" + _CAB_LC + ":' .", "deny")
+    bexpect("(cab-b4b) a read-side search naming the words with no colon allows (the narrowed pattern)",
+            "grep -rn " + _CAB_LC + " .", "allow")
+    bexpect("(cab-b5) a heredoc body holding the token denies (the text scan sees the whole command)",
+            "cat > f <<EOF\n" + cab + "\nEOF", "deny", cwd=str(base))
+    bexpect("(cab-b5b) the same heredoc with a clean body allows (b5 is decided by the text scan)",
+            "cat > f <<EOF\nfix\nEOF", "allow", cwd=str(base))
+    bexpect("(cab-b6) git commit -F naming a file that holds the token denies",
+            "git commit -F " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b7) git commit -F naming a clean file allows",
+            "git commit -F " + str(clean), "allow", cwd=str(base))
+    bexpect("(cab-b8) git commit -F naming a missing file allows (it holds no token, and git refuses it)",
+            "git commit -F " + str(base / "absent.txt"), "allow", cwd=str(base))
+    bexpect("(cab-b9) git commit -F - consumes standard input, denies (fail-closed)",
+            "git commit -F -", "deny", cwd=str(base))
+    bexpect("(cab-b10) a relative -F path resolves against the cwd, denies on a token-holding file",
+            "git commit -F dirty.txt", "deny", cwd=str(base))
+    bexpect("(cab-b11) a relative -F path with no usable cwd denies (fail-closed)",
+            "git commit -F dirty.txt", "deny")
+    bexpect("(cab-b12) a git global option value is stepped over, -F still read, denies",
+            "git -C /repo commit --file=" + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b13) a wrapped git commit -F is still read, denies",
+            "sudo env A=1 git commit -F " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b14) git notes -F naming a token-holding file denies",
+            "git notes add -F " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b15) gh pr create --body-file naming a token-holding file denies",
+            "gh pr create --title x --body-file " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b16) gh pr edit --body-file= naming a clean file allows",
+            "gh pr edit 7 --body-file=" + str(clean), "allow", cwd=str(base))
+    bexpect("(cab-b17) cp of a token-holding file denies (the occurrence survives the copy)",
+            "cp " + str(dirty) + " " + str(base / "copy.txt"), "deny", cwd=str(base))
+    bexpect("(cab-b18) mv of a token-holding file denies",
+            "mv " + str(dirty) + " " + str(base / "moved.txt"), "deny", cwd=str(base))
+    bexpect("(cab-b19) cp of a clean file allows",
+            "cp " + str(clean) + " " + str(base / "copy2.txt"), "allow", cwd=str(base))
+    bexpect("(cab-b20) tee onto a token-holding file denies (the result cannot be evaluated)",
+            "echo hi | tee " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b21) an append redirect onto a token-holding file denies",
+            "echo hi >> " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b22) a truncating redirect onto a token-holding file denies (output unknown)",
+            "echo hi > " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b23) a redirect onto a new file allows",
+            "echo hi > " + str(base / "fresh.txt"), "allow", cwd=str(base))
+    bexpect("(cab-b24) a redirect onto a device is passed over (no file can hold the token there)",
+            "echo hi > /dev/null", "allow", cwd=str(base))
+    bexpect("(cab-b25) sed -i over a token-holding file denies (a removal cannot be proven before it runs)",
+            "sed -i s/fix/repair/ " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b26) sed -i over a clean file allows",
+            "sed -i s/fix/repair/ " + str(clean), "allow", cwd=str(base))
+    bexpect("(cab-b27) a read-only sed over a token-holding file is out of the write roster, allows",
+            "sed -n 1p " + str(dirty), "allow", cwd=str(base))
+    bexpect("(cab-b28) a plain clean commit allows",
+            "git commit -m fix", "allow", cwd=str(base))
+    bexpect("(cab-b29) an unparseable command with no token in its text allows (references cannot be "
+            "extracted; disclosed)", "echo 'unbalanced", "allow", cwd=str(base))
+    bexpect("(cab-b30) a command past the read bound with no token in its text allows (references past "
+            "the bound are disclosed)", "echo " + "a" * (aiqt_hooks._CAB_MAX_COMMAND + 10), "allow")
+    if hasattr(os, "mkfifo"):
+        pipe = base / "pipe.msg"
+        os.mkfifo(pipe)
+        bexpect("(cab-b31) git commit -F naming a FIFO denies without reading it (fail-closed, no hang)",
+                "git commit -F " + str(pipe), "deny", cwd=str(base))
+    code, obj, _stderr = aiqt_hooks.coauthor_bash({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                   "tool_input": {}})
+    if _reduce_result(code, obj) != "deny":
+        failures.append("(cab-b32) a Bash payload with no command string must deny (fail-closed)")
+    code, obj, _stderr = aiqt_hooks.coauthor_bash({"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                                                   "tool_input": {"command": "true"}})
+    if code != 2:
+        failures.append("(cab-b33) a mis-wired event must hard-block (exit 2), got {}".format(code))
+    got = _decision(aiqt_hooks.coauthor_bash, "irrelevant", tool="Glob")
+    if got != "allow":
+        failures.append("(cab-b34) a present-but-different tool must allow (the matcher governs), got {}"
+                        .format(got))
+
+    # --- the shipped commit-msg git hook (run as git runs it: a child on the message file) -------------
+    script = repo_root() / ".aiqt" / "core" / "hooks" / "githooks" / "commit-msg"
+
+    def gexpect(label, args, want_code, want_fragment):
+        proc = subprocess.run([sys.executable, "-I", "-B", str(script)] + args,
+                              capture_output=True, text=True, timeout=60)
+        if proc.returncode != want_code or (want_fragment and want_fragment not in proc.stderr):
+            failures.append("{}: expected exit {} with {!r} on stderr, got exit {} with stderr {!r}"
+                            .format(label, want_code, want_fragment, proc.returncode,
+                                    proc.stderr[-300:]))
+
+    msg_dirty = base / "msg-dirty.txt"
+    msg_dirty.write_text("fix\n\n" + cab + "\n", encoding="utf-8")
+    msg_clean = base / "msg-clean.txt"
+    msg_clean.write_text("fix adapter\n", encoding="utf-8")
+    msg_crlf = base / "msg-crlf.txt"
+    msg_crlf.write_bytes(("fix\r\n\r\n" + _CAB_LC + ": bob <b@x>\r\n").encode("utf-8"))
+    msg_spaced = base / "msg-spaced.txt"
+    msg_spaced.write_text(_CAB_UC.replace("-", " ") + " : Bob <b@x>\n", encoding="utf-8")
+    gexpect("(cab-g1) commit-msg refuses a message holding the token", [str(msg_dirty)], 1, "cmtidn")
+    gexpect("(cab-g2) commit-msg passes a clean message", [str(msg_clean)], 0, None)
+    gexpect("(cab-g3) commit-msg refuses the lower-case CRLF spelling", [str(msg_crlf)], 1, "cmtidn")
+    gexpect("(cab-g4) commit-msg refuses the space-separated spelling", [str(msg_spaced)], 1, "cmtidn")
+    gexpect("(cab-g5) commit-msg with no argument refuses the commit (fail-closed)", [], 2, "fail-closed")
+    gexpect("(cab-g6) commit-msg with an unreadable message file refuses the commit (fail-closed)",
+            [str(base / "no-such-msg.txt")], 2, "fail-closed")
+    # the shipped script itself never spells the token and stays executable
+    script_text = script.read_text(encoding="utf-8")
+    if aiqt_hooks._CAB_RE.search(script_text) or re.search("co[- ]?authored[- ]?by", script_text, re.IGNORECASE):
+        failures.append("(cab-g7) the shipped commit-msg hook spells the trailer token; build it at run time")
+    if not os.access(script, os.X_OK):
+        failures.append("(cab-g8) the shipped commit-msg hook is not executable")
+    _test_coauthor_ascii(failures, base)
+    _test_coauthor_replay(failures, base)
+    _test_coauthor_children(failures, base, script)
+    _test_coauthor_oracle(failures, base, script)
+
+
+def _test_coauthor_ascii(failures, base):
+    """(cab-ascii-*) The Bash layer reads digits, name characters and blanks in ASCII only, as bash and git
+    read them. Each row holds a non-ASCII case (U+0663 or U+FF11 where a pattern reads digits, U+00E9 where
+    it reads name characters, U+00A0 where it reads blanks) and an ASCII control. Both must hold on the
+    shipped patterns; the row is then run again with the one pattern it rests on compiled back to Unicode
+    (re.ASCII dropped, the explicit blank class read as \\s again), where the non-ASCII case must fail and
+    the ASCII control must still hold, so each row pins its pattern and the ASCII verdicts are unchanged.
+    In-process: the flip replaces the module attribute and restores it. Decisions only; nothing is run."""
+    root = base / "ascii"
+    root.mkdir(parents=True, exist_ok=True)
+    tok12 = _CAB_UC[:12]
+    long_tail = " #" + "a" * (aiqt_hooks._CAB_MAX_COMMAND + 10)
+    clean_mbox = "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\nfix\n"
+    (root / "٣-x.patch").write_text(clean_mbox, encoding="utf-8")
+    for name in ("１", "1"):
+        (root / name).write_text("fix\n", encoding="utf-8")
+
+    def decided(command, want, cwd=root):
+        return lambda: _decision(aiqt_hooks.coauthor_bash, command, cwd=str(cwd)) == want
+
+    def tokens(pattern_name, text, want):
+        return lambda: [m.group() for m in getattr(aiqt_hooks, pattern_name).finditer(text)] == want
+
+    def unicode(pattern):
+        return re.compile(pattern.pattern.replace(aiqt_hooks._CAB_BLANKS, r"\s"), pattern.flags & ~re.ASCII)
+
+    def mime(text):
+        return bool(aiqt_hooks._CAB_MIME_RE.search(text))
+
+    def json_start(text):
+        return bool(aiqt_hooks._CAB_JSON_START_RE.match(text))
+
+    rows = (
+        ("cab-ascii-seq", "_CAB_SEQ_RE", "a sequence expression whose step or ends are U+0663 or U+FF11 digits is "
+         "no sequence (bash leaves it, so no token forms); the ASCII step expands and denies",
+         lambda: (decided("echo " + tok12 + "B{y..y..٣}: Bob", "allow")()
+                  and aiqt_hooks._cab_brace_sequence("１..３") is None),
+         decided("echo " + tok12 + "B{y..y..3}: Bob", "deny")),
+        ("cab-ascii-patch", "_CAB_PATCH_NAME_RE", "a file named with a U+0663 digit is no git format-patch output, "
+         "so it is read (clean, allows); 0001-x.patch is written by the format-patch stage and denies",
+         decided("git format-patch -1 HEAD && git am ٣-x.patch", "allow"),
+         decided("git format-patch -1 HEAD && git am 0001-x.patch", "deny")),
+        ("cab-ascii-trailer", "_CAB_TRAILER_OPT_RE", "U+00E9 after --trailer does not continue the option name, so "
+         "it is read as --trailer beside the token's words and denies; an ASCII letter continues it and allows",
+         decided("git commit -m x --traileré " + _CAB_UC, "deny"),
+         decided("git commit -m x --trailerx " + _CAB_UC, "allow")),
+        ("cab-ascii-hint", "_CAB_SINK_HINT_RE", "past the read bound, U+00E9 before cp leaves cp a word, so the "
+         "command is refused; a quoted c''t holds no such word and allows",
+         decided("écp x" + long_tail, "deny"), decided("c''t x" + long_tail, "allow")),
+        ("cab-ascii-fd-target", "_CAB_DIGITS_RE", ">&U+FF11 names a file another stage writes, so git commit -F of "
+         "it denies; >&1 is a descriptor and the same read of file 1 allows",
+         decided("echo hi >&１ && git commit -F １", "deny"),
+         decided("echo hi >&1 && git commit -F 1", "allow")),
+        ("cab-ascii-fd-source", "_CAB_DIGITS_RE", "a U+0663 word before <<< is no descriptor, so the here-string "
+         "feeds git commit -F - (allows); 3<<< feeds descriptor 3, not standard input, and denies",
+         decided("git commit -F - ٣<<< fix", "allow"), decided("git commit -F - 3<<< fix", "deny")),
+        ("cab-ascii-crude", "_CAB_CRUDE_RE", "the fallback reading keeps U+00A0 inside a word; \\x1c, an ASCII "
+         "character \\s matches, still splits as before",
+         tokens("_CAB_CRUDE_RE", "a b", ["a b"]), tokens("_CAB_CRUDE_RE", "a b\tc\x1cd", ["a", "b", "c", "d"])),
+        ("cab-ascii-chunk", "_CAB_CHUNK_RE", "a brace word joined by U+00A0 is one word past the chunk bound, "
+         "uncertain, and denies; an ASCII space splits it and the short brace expands and allows",
+         decided("echo " + "a" * (aiqt_hooks._CAB_BRACE_CHUNK + 10) + " {b,c}", "deny"),
+         decided("echo " + "a" * (aiqt_hooks._CAB_BRACE_CHUNK + 10) + " {b,c}", "allow")),
+        ("cab-ascii-mime", "_CAB_MIME_RE", "U+00A0 after the header colon is not read as a blank, and it is read "
+         "inside an encoded word's charset; \\x1c and a space after the colon still read as before",
+         lambda: not mime("Content-Transfer-Encoding: base64") and mime("=?utf 8?b?x?="),
+         lambda: mime("Content-Transfer-Encoding:\x1cbase64") and mime("Content-Transfer-Encoding: base64")),
+        ("cab-ascii-json", "_CAB_JSON_START_RE", "U+00A0 before a brace is not read as a JSON start (json.loads "
+         "refuses it either way); \\x1c and an ASCII blank still are",
+         lambda: not json_start(" {}"), lambda: json_start("\x1c{}") and json_start(" \t{}")),
+    )
+    for label, name, what, non_ascii, control in rows:
+        if not (non_ascii() and control()):
+            failures.append("({}) {}: not so on the shipped patterns".format(label, what))
+        saved = getattr(aiqt_hooks, name)
+        setattr(aiqt_hooks, name, unicode(saved))
+        try:
+            flipped = (non_ascii(), control())
+        finally:
+            setattr(aiqt_hooks, name, saved)
+        if flipped != (False, True):
+            failures.append("({}-flip) with {} read as Unicode the non-ASCII case must fail and the ASCII control "
+                            "hold, got {}".format(label, name, flipped))
+
+    # A header blank git's own decoding still reads: U+00A0 after the colon is not read by _CAB_MIME_RE, and the
+    # mailbox is still refused because git mailinfo decodes the base64 body and the token is there.
+    body = base64.encodebytes(("\n" + _CAB_UC + ": Claude <c@x>\n---\n").encode("utf-8")).decode("ascii")
+    nbsp_mbox = root / "nbsp.mbox"
+    nbsp_mbox.write_text("From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\nMIME-Version: 1.0\nContent-Type: "
+                         "text/plain; charset=UTF-8\nContent-Transfer-Encoding: base64\n\n" + body,
+                         encoding="utf-8")
+    got = _decision(aiqt_hooks.coauthor_bash, "git am " + str(nbsp_mbox), cwd=str(root))
+    if got != "deny":
+        failures.append("(cab-ascii-mime-decoded) a base64 token body under a U+00A0 header blank: expected deny "
+                        "(git mailinfo decodes it), got {}".format(got))
+
+
+def _test_coauthor_replay(failures, base):
+    """(cab-replay-*) The Bash layer reads every revision a replaying git stage takes, each as one argument
+    to its git log read (blanks included), and refuses the stage where one cannot be read; it drops none.
+    Each row holds a command real git runs to land the trailer token from a recorded message, run here
+    UNGATED in a fresh repository (the vector is real), which the layer must deny, and a twin one change
+    away that lands nothing and must allow. Each row is decided again under a flip that restores the drop
+    or misreading it pins (a revision holding a blank dropped, one past the length bound or starting with '-'
+    dropped, the --stdin text split at blanks or its '-' lines dropped, an unknown git cherry-pick option word
+    skipped, a git rebase option read with no value, --root read as <upstream>), where the deny vector must
+    allow and the twin still allow."""
+    root = base / "replay"
+    root.mkdir(parents=True, exist_ok=True)
+    land_env = git_fixture_env(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                               GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid",
+                               GIT_EDITOR="true", GIT_SEQUENCE_EDITOR="true")
+    seq = [0]
+
+    def fixture():
+        """A fresh repository on main (init, add m), whose branches and refs (none with an upstream) hold
+        the token message (plain-dirty, -dirty, nb<U+00A0>dirty: 'add d') or a clean one (plain-clean,
+        -clean, nb<U+00A0>clean: 'add c'), each branched from init."""
+        seq[0] += 1
+        repo = root / "r{}".format(seq[0])
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        (repo / "a.txt").write_text("a\n", encoding="utf-8")
+        _git(repo, "add", "a.txt")
+        _git(repo, "commit", "-q", "-m", "init", env_identity=True)
+        for kind, message in (("dirty", "add d\n\n" + _CAB_UC + ": Claude <c@x>"), ("clean", "add c")):
+            _git(repo, "checkout", "-q", "-b", "plain-" + kind, "main")
+            (repo / (kind + ".txt")).write_text(kind + "\n", encoding="utf-8")
+            _git(repo, "add", kind + ".txt")
+            _git(repo, "commit", "-q", "-m", message, env_identity=True)
+            _git(repo, "branch", "-q", "nb " + kind)
+            _git(repo, "update-ref", "refs/heads/-" + kind, "plain-" + kind)
+        _git(repo, "checkout", "-q", "main")
+        (repo / "m.txt").write_text("m\n", encoding="utf-8")
+        _git(repo, "add", "m.txt")
+        _git(repo, "commit", "-q", "-m", "add m", env_identity=True)
+        return repo
+
+    def lands(command):
+        repo = fixture()
+        before = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True,
+                                timeout=30, env=land_env).stdout.strip()
+        subprocess.run(["bash", "-c", command], cwd=str(repo), env=land_env, capture_output=True,
+                       stdin=subprocess.DEVNULL, timeout=120)
+        proc = subprocess.run(["git", "-C", str(repo), "log", "--format=%B", before + "..HEAD"],
+                              capture_output=True, timeout=60, env=land_env)
+        return aiqt_hooks._cab_count(proc.stdout.decode("utf-8", "surrogateescape")) > 0
+
+    decide_repo = fixture()
+
+    def decision(command):
+        return _decision(aiqt_hooks.coauthor_bash, command, cwd=str(decide_repo))
+
+    revs_of, names_of, stdin_of = (aiqt_hooks._cab_replay_revs, aiqt_hooks._cab_replay_names,
+                                   aiqt_hooks._cab_stdin_lines)
+    stdin_rule, pick_of = aiqt_hooks._cab_stdin_revs, aiqt_hooks._cab_pick_revs
+
+    def dropping(test):
+        """_cab_replay_names dropping each rev test holds (a rebase range, read once as one word, whole)."""
+        def names(stage, args, extra=()):
+            revs, walk, why = revs_of(stage.verb, args, extra)
+            if walk and any(test(rev) for rev in revs):
+                return [], walk, why
+            return [rev for rev in revs if rev and not test(rev)], walk, why
+        return {"_cab_replay_names": names}
+
+    def split_stdin(texts):
+        return [word for text in texts for word in re.split(r"\s+", text) if word], None
+
+    def dashless_stdin(texts):
+        return [line for text in texts for line in text.split("\n") if line and not line.startswith("-")], None
+
+    def stdin_before_dashdash(stage):
+        rest = aiqt_hooks._cab_git_rest(stage)
+        return stdin_rule(stage) and "--stdin" in (rest[:rest.index("--")] if "--" in rest else rest)
+
+    def skipping_options(verb, args):
+        known = set(aiqt_hooks._CAB_PICK_LONG[verb]) | aiqt_hooks._CAB_PICK_MODES | {"", "end-of-options"}
+        return pick_of(verb, [word for word in args if not word.startswith("--")
+                              or word[2:].partition("=")[0] in known])
+
+    def root_as_upstream(verb, args, extra=()):
+        revs, walk, why = revs_of(verb, args, extra)
+        if verb == "rebase" and len(revs) == 1:
+            return ["HEAD"], walk, why
+        return revs, walk, why
+
+    blank = dropping(lambda rev: re.search(r"\s", rev))
+    stdin_split = {"_cab_stdin_lines": split_stdin}
+    long_rev = "~0" * 520
+    rows = (
+        ("cab-replay-brace-word", "git cherry-pick 'plain-dirty^{/add d}'",
+         "git cherry-pick 'plain-clean^{/add c}'", blank),
+        ("cab-replay-brace-stdin", "git cherry-pick --stdin <<< 'plain-dirty^{/add d}'",
+         "git cherry-pick --stdin <<< 'plain-clean^{/add c}'", stdin_split),
+        ("cab-replay-brace-heredoc", "git cherry-pick --stdin <<'EOF'\nplain-dirty^{/add d}\nEOF\necho done now",
+         "git cherry-pick --stdin <<'EOF'\nplain-clean^{/add c}\nEOF\necho done now", stdin_split),
+        ("cab-replay-colon-word", "git cherry-pick ':/add d'", "git cherry-pick ':/add c'", blank),
+        ("cab-replay-colon-stdin", "git cherry-pick --stdin <<< ':/add d'", "git cherry-pick --stdin <<< ':/add c'",
+         stdin_split),
+        ("cab-replay-tab-word", "git cherry-pick 'plain-dirty^{/add[^\t]d}'",
+         "git cherry-pick 'plain-clean^{/add[^\t]c}'", blank),
+        ("cab-replay-tab-stdin", "git cherry-pick --stdin <<-EOF\n\tplain-dirty^{/add[^\t]d}\n\tEOF",
+         "git cherry-pick --stdin <<-EOF\n\tplain-clean^{/add[^\t]c}\n\tEOF", stdin_split),
+        ("cab-replay-nbsp-word", "git cherry-pick nb dirty", "git cherry-pick nb clean", blank),
+        ("cab-replay-nbsp-stdin", "git cherry-pick --stdin <<< nb dirty", "git cherry-pick --stdin <<< nb clean",
+         stdin_split),
+        ("cab-replay-commit-reuse", "git commit --allow-empty -C 'plain-dirty^{/add d}'",
+         "git commit --allow-empty -C 'plain-clean^{/add c}'", blank),
+        ("cab-replay-commit-dash", "git commit --allow-empty -C -dirty", "git commit --allow-empty -C -clean",
+         dropping(lambda rev: rev.startswith("-"))),
+        ("cab-replay-end-of-options", "git cherry-pick --end-of-options -dirty",
+         "git cherry-pick --end-of-options -clean", dropping(lambda rev: rev.startswith("-"))),
+        ("cab-replay-long", "git cherry-pick plain-dirty" + long_rev, "git cherry-pick plain-clean~0~0",
+         dropping(lambda rev: len(rev) > 1024)),
+        ("cab-replay-pick-option", "git cherry-pick --all", "git cherry-pick -x plain-clean",
+         {"_cab_pick_revs": skipping_options}),
+        ("cab-replay-stdin-option", "git cherry-pick --stdin <<< --branches",
+         "git cherry-pick --stdin <<< plain-clean", {"_cab_stdin_lines": dashless_stdin}),
+        ("cab-replay-stdin-dashdash", "git cherry-pick -- --stdin <<< plain-dirty",
+         "git cherry-pick -- --stdin <<< plain-clean", {"_cab_stdin_revs": stdin_before_dashdash}),
+        ("cab-replay-rebase-brace", "git rebase 'main^{/add m}' plain-dirty", "git rebase 'main^{/add m}' plain-clean",
+         blank),
+        ("cab-replay-rebase-abbrev", "git rebase --ont main main plain-dirty", "git rebase --ont main main plain-clean",
+         {"_CAB_REBASE_VALUE_LONG": (), "_CAB_REBASE_VALUE_FLAGS": frozenset()}),
+        ("cab-replay-rebase-cluster", "git rebase -fs ort main plain-dirty", "git rebase -fs ort main plain-clean",
+         {"_CAB_REBASE_VALUE_LONG": (), "_CAB_REBASE_VALUE_FLAGS": frozenset()}),
+        ("cab-replay-rebase-root", "git rebase -f --root plain-dirty", "git rebase -f --root plain-clean",
+         {"_cab_replay_revs": root_as_upstream}),
+    )
+    for label, deny, twin, flip in rows:
+        if not lands(deny):
+            failures.append("({}) {!r} lands no trailer when run ungated, so the vector is not real".format(label, deny))
+        if lands(twin):
+            failures.append("({}) the twin {!r} lands the trailer when run ungated".format(label, twin))
+        got = (decision(deny), decision(twin))
+        if got != ("deny", "allow"):
+            failures.append("({}) expected deny for {!r} and allow for {!r}, got {}".format(label, deny, twin, got))
+        saved = {name: getattr(aiqt_hooks, name) for name in flip}
+        try:
+            for name, value in flip.items():
+                setattr(aiqt_hooks, name, value)
+            flipped = (decision(deny), decision(twin))
+        finally:
+            for name, value in saved.items():
+                setattr(aiqt_hooks, name, value)
+        if flipped != ("allow", "allow"):
+            failures.append("({}-flip) with {} restored the deny vector must allow and the twin allow, got {}"
+                            .format(label, sorted(flip), flipped))
+    # A word git log stops at (@{upstream} with none set) beside a revision git replays: the joint read fails,
+    # so each is read on its own and the token message still denies; a read past the time bound refuses.
+    split = "git cherry-pick --stdin <<EOF\nplain-dirty\nEOF\n@{upstream}"
+    joint = subprocess.run(["git", "-C", str(decide_repo), "log", "--no-walk=unsorted", "--ignore-missing",
+                            "--end-of-options", "plain-dirty", "@{upstream}", "--"], capture_output=True,
+                           timeout=60, env=land_env)
+    if joint.returncode == 0 or not lands(split) or decision(split) != "deny":
+        failures.append("(cab-replay-split) {!r}: expected a real vector whose joint read fails and that denies, "
+                        "got joint exit {}".format(split, joint.returncode))
+    saved = aiqt_hooks._CAB_GIT_TIMEOUT
+    aiqt_hooks._CAB_GIT_TIMEOUT = 1e-9
+    try:
+        got = decision("git cherry-pick plain-clean")
+    finally:
+        aiqt_hooks._CAB_GIT_TIMEOUT = saved
+    if got != "deny":
+        failures.append("(cab-replay-timeout) a replay read that does not finish must deny, got {}".format(got))
+
+
+def _test_coauthor_children(failures, base, script):
+    """(cab-c*, cab-l*, cab-m*) The paired vectors of the co-author layers. Every case runs through the
+    hook's main() in a CHILD process (python3 -I -B aiqt_hooks.py <mode>, the payload on stdin, the way the
+    platform runs it) and is PAIRED: a deny vector and the allow vector one change away, so a flip of the
+    rule in either direction fails a case (replace_all, MultiEdit order, the Bash referenced-file size,
+    unreadable and unexaminable bounds, the Bash length bound, and the commit-msg size bound included).
+    Each Bash rule that can land a commit or a file also has a LANDING check
+    in throwaway repositories (cab-l*): the denied command run UNGATED records the trailer, so the vector
+    is real; run GATED by the child's decision it records none; and its allowed twin runs gated and leaves
+    no trailer either. gh cannot land here (no network), so its rule is decision-only. The commit-msg
+    cases (cab-m*) run the shipped hook as git runs it: on a message file in a repository whose
+    configuration it reads, and through real git commits with the hook installed."""
+    hook = os.path.abspath(aiqt_hooks.__file__)
+    child_env = dict((k, v) for k, v in os.environ.items() if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_")))
+    cab = _CAB_UC + ": Claude <c@x>"
+    root = base / "children"
+    root.mkdir(parents=True, exist_ok=True)
+
+    def decide(mode, tool, tool_input, cwd):
+        payload = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
+        if cwd is not None:
+            payload["cwd"] = cwd
+        try:
+            proc = subprocess.run([sys.executable, "-I", "-B", hook, mode], capture_output=True, timeout=60,
+                                  input=json.dumps(payload).encode("utf-8"), env=child_env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return "child failed: {!r}".format(exc)
+        out = proc.stdout.decode("utf-8", "replace").strip()
+        try:
+            obj = json.loads(out) if out else None
+        except ValueError:
+            return "unparseable stdout {!r}".format(out[:200])
+        return _reduce_result(proc.returncode, obj)
+
+    def pair(label, tool, deny_input, allow_input, cwd=str(root)):
+        mode = "coauthor_bash" if tool == "Bash" else "coauthor_file"
+        for want, tool_input in (("deny", deny_input), ("allow", allow_input)):
+            got = decide(mode, tool, tool_input, cwd)
+            if got != want:
+                failures.append("({}-{}) expected {}, got {}".format(label, want, want, got))
+
+    def bpair(label, deny_command, allow_command, cwd=str(root), deny_cwd=None):
+        pair(label, "Bash", {"command": deny_command}, {"command": allow_command}, cwd)
+        if deny_cwd is not None:
+            got = decide("coauthor_bash", "Bash", {"command": deny_command}, deny_cwd)
+            if got != "deny":
+                failures.append("({}-deny-cwd) expected deny, got {}".format(label, got))
+
+    def fixture(name, data):
+        path = root / name
+        if isinstance(data, bytes):
+            path.write_bytes(data)
+        else:
+            path.write_text(data, encoding="utf-8")
+        return str(path)
+
+    dirty = fixture("dirty.txt", "fix\n\n" + cab + "\n")
+    clean = fixture("clean.txt", "fix adapter\n")
+    new = str(root / "new.txt")
+    tok12 = _CAB_UC[:12]  # the token up to its last word, so a vector can split or brace it
+
+    # --- the file layer (Edit matching, the narrowed pattern, JSON readings, replace_all, MultiEdit order) -
+    crlf = fixture("crlf.txt", b"alpha line\r\nbeta line\r\ngamma\r\n")
+    pair("cab-c1 an Edit matched only across CRLF line ends is simulated as the Edit tool matches it", "Edit",
+         {"file_path": crlf, "old_string": "alpha line\nbeta line", "new_string": "alpha line\n" + cab},
+         {"file_path": crlf, "old_string": "alpha line\nbeta line", "new_string": "alpha line\nbeta"})
+    curly = fixture("curly.txt", "say “hello” now\n")
+    pair("cab-c2 an Edit matched only across curly quotes is simulated as the Edit tool matches it", "Edit",
+         {"file_path": curly, "old_string": 'say "hello" now', "new_string": 'say "hello" now\n' + cab},
+         {"file_path": curly, "old_string": 'say "hello" now', "new_string": 'say "hi" now'})
+    pair("cab-c3 an Edit whose old_string is not found either way cannot be computed and denies, whatever "
+         "its new_string holds", "Edit",
+         {"file_path": curly, "old_string": "not in the file", "new_string": "clean"},
+         {"file_path": curly, "old_string": "say", "new_string": "tell"})
+    crlf_dirty = fixture("crlf-dirty.txt", ("keep\r\n" + cab + "\r\nend\r\n").encode("utf-8"))
+    pair("cab-c4 a removal matched across CRLF line ends allows, a rewrite keeping the token denies", "Edit",
+         {"file_path": crlf_dirty, "old_string": "keep\n" + cab + "\n", "new_string": "kept\n" + cab + "\n"},
+         {"file_path": crlf_dirty, "old_string": "keep\n" + cab + "\n", "new_string": "keep\n"})
+    lead = fixture("lead.txt", "lead\n" + cab + "\n")
+    pair("cab-c5 MultiEdit edits apply in order (reversed, the second old_string is not yet there)",
+         "MultiEdit",
+         {"file_path": lead, "edits": [{"old_string": "beta", "new_string": "gamma"},
+                                       {"old_string": cab, "new_string": "beta"}]},
+         {"file_path": lead, "edits": [{"old_string": cab, "new_string": "beta"},
+                                       {"old_string": "beta", "new_string": "gamma"}]})
+    twice = fixture("twice.txt", cab + "\n" + _CAB_MIXED + ": Bob <b@x>\nm\nm\n")
+    pair("cab-c6 replace_all is honoured: adding the token at every m keeps two (deny); breaking every "
+         "colon then adding one leaves one (allow)", "MultiEdit",
+         {"file_path": twice, "edits": [{"old_string": cab + "\n", "new_string": ""},
+                                        {"old_string": _CAB_MIXED + ": Bob <b@x>\n", "new_string": ""},
+                                        {"old_string": "m\n", "new_string": _CAB_UC + ": m\n",
+                                         "replace_all": True}]},
+         {"file_path": twice, "edits": [{"old_string": ":", "new_string": " -", "replace_all": True},
+                                        {"old_string": "m\n", "new_string": _CAB_UC + ": m\n"}]})
+    prose_words = "-".join(("co", "authored")) + " by"
+    pair("cab-c7 prose naming the words with no colon allows; the trailer-shaped token denies", "Write",
+         {"file_path": str(root / "prose1.txt"), "content": "This paper:\n" + _CAB_MIXED + ": Alice\n"},
+         {"file_path": str(root / "prose1.txt"), "content": "This paper was " + prose_words + " Alice.\n"})
+    pair("cab-c8 an identifier running the words together allows; the token in a string literal denies",
+         "Write",
+         {"file_path": str(root / "code.js"), "content": "const x = '" + _CAB_UC + ": y';\n"},
+         {"file_path": str(root / "code.js"),
+          "content": "const " + "co" + "Authored" + "By" + " = parseTrailers(msg);\n"})
+    guide = fixture("guide.txt", "This guide was " + prose_words + " Alice. teh end\n")
+    guide_dirty = fixture("guide-dirty.txt", "This guide:\n" + _CAB_MIXED + ": Alice\nteh end\n")
+    pair("cab-c9 an unrelated Edit of a file holding prose allows; of one holding the token denies", "Edit",
+         {"file_path": guide_dirty, "old_string": "teh", "new_string": "the"},
+         {"file_path": guide, "old_string": "teh", "new_string": "the"})
+    pair("cab-c10 blanks before the colon are still the token (git parses them); no colon is not", "Write",
+         {"file_path": str(root / "spaced.txt"), "content": _CAB_UC + " : Bob <b@x>\n"},
+         {"file_path": str(root / "spaced.txt"), "content": _CAB_UC + " Bob <b@x>\n"})
+
+    def notebook(first_source):
+        return json.dumps({"cells": [{"cell_type": "markdown", "id": "a", "metadata": {}, "source": first_source},
+                                     {"cell_type": "code", "id": "b", "metadata": {}, "outputs": [],
+                                      "source": "print(1)\n"}],
+                           "metadata": {}, "nbformat": 4, "nbformat_minor": 5})
+
+    escaped = fixture("escaped.ipynb", notebook("PLACEHOLDER").replace(
+        "PLACEHOLDER", "Co\\u002d" + _CAB_UC[3:] + ": Claude <c@x>"))
+    pair("cab-c11 a NotebookEdit counts the parsed notebook: an escaped occurrence kept beside another "
+         "cell's edit denies, its removal allows", "NotebookEdit",
+         {"notebook_path": escaped, "cell_id": "b", "edit_mode": "replace", "new_source": "print(2)\n"},
+         {"notebook_path": escaped, "cell_id": "a", "edit_mode": "replace", "new_source": "fix\n"})
+    split = fixture("split.ipynb", notebook(["fix\n", "\n", tok12[:7], tok12[7:] + "By: x\n"]))
+    pair("cab-c12 a cell's source list is joined before counting: the split token kept denies, its "
+         "removal allows", "NotebookEdit",
+         {"notebook_path": split, "cell_id": "b", "edit_mode": "replace", "new_source": "print(2)\n"},
+         {"notebook_path": split, "cell_id": "a", "edit_mode": "replace", "new_source": "fix\n"})
+    pair("cab-c13 a Write of JSON whose escaped hyphen decodes to the token denies; the same JSON without "
+         "it allows", "Write",
+         {"file_path": str(root / "data.json"), "content": '{"m": "Co\\u002d' + _CAB_UC[3:] + ': x"}\n'},
+         {"file_path": str(root / "data.json"), "content": '{"m": "Co\\u002dReviewed: x"}\n'})
+
+    # --- the Bash layer: message files in any spelling, run directories, gh fields ---------------------
+    bpair("cab-c20 an attached short cluster (-aFFILE) is read", "git commit -aF" + dirty, "git commit -aF" + clean)
+    bpair("cab-c21 an abbreviated long option with = is read", "git commit --fil=" + dirty,
+          "git commit --fil=" + clean)
+    bpair("cab-c22 an abbreviated long option with its value as the next word is read",
+          "git commit --fil " + dirty, "git commit --fil " + clean)
+    bpair("cab-c23 an attached template (-tFILE) is read", "git commit -t" + dirty, "git commit -t" + clean)
+    bpair("cab-c24 git commit-tree -F is read", "git commit-tree -F " + dirty + " HEAD^{tree}",
+          "git commit-tree -F " + clean + " HEAD^{tree}")
+    bpair("cab-c25 a git global setting naming a template file is read",
+          "git -c commit.template=" + dirty + " commit", "git -c commit.template=" + clean + " commit")
+    dir_dirty, dir_clean = root / "run-dirty", root / "run-clean"
+    for where, text in ((dir_dirty, "fix\n\n" + cab + "\n"), (dir_clean, "fix\n")):
+        where.mkdir(exist_ok=True)
+        (where / "m.txt").write_text(text, encoding="utf-8")
+    bpair("cab-c26 git -C sets the directory a relative message file resolves in",
+          "git -C " + str(dir_dirty) + " commit -F m.txt", "git -C " + str(dir_clean) + " commit -F m.txt",
+          cwd=str(dir_dirty), deny_cwd=str(dir_clean))
+    bpair("cab-c27 a cd earlier in the command sets the directory a relative message file resolves in",
+          "cd " + str(dir_dirty) + " && git commit -F m.txt", "cd " + str(dir_clean) + " && git commit -F m.txt",
+          cwd=str(dir_clean))
+    bpair("cab-c28 a cd the layer cannot resolve leaves the run directory undetermined, denies",
+          'cd "$X" && git commit -F m.txt', "cd " + str(dir_clean) + " && git commit -F m.txt", cwd=str(dir_clean))
+    bpair("cab-c29 a gh field file (-F body=@FILE) is read", "gh api repos/o/r/issues -F body=@" + dirty,
+          "gh api repos/o/r/issues -F body=@" + clean)
+    bpair("cab-c30 a gh body file under any flag is read", "gh pr create --title x -F " + dirty,
+          "gh pr create --title x -F " + clean)
+    bpair("cab-c31 standard input piped into a message option denies; a here-document feeding it allows",
+          "printf x | git commit -F -", "git commit -F - <<'EOF'\nfix things\nEOF")
+
+    # --- the Bash layer: continuations, brace expansion, ANSI-C -----------------------------------------
+    bpair("cab-c32 a backslash-newline is joined before the scan",
+          'git commit -m fix -m "' + tok12 + '\\\nBy: Bob <b@x>"', 'git commit -m fix -m "Reviewed-\\\nBy: Bob <b@x>"')
+    bpair("cab-c33 a brace expansion forming the token is expanded (echo)",
+          "echo " + tok12 + "{By,}: Bob >> " + clean, "echo " + tok12 + "{Xy,}: Bob >> " + clean)
+    bpair("cab-c34 a brace expansion forming the token across its words is expanded (printf %s)",
+          "printf %s {" + tok12[:7] + "," + tok12[7:] + "By:}", "printf %s {" + tok12[:7] + "," + tok12[7:] + "Xy:}")
+    bpair("cab-c35 a brace expansion past the bound that holds a letter is uncertain, denies; one of digits "
+          "allows", "echo " + "{a,b}" * 13, "echo " + "{1,2}" * 13)
+    bpair("cab-c36 an ANSI-C quote is decoded before the scan",
+          "echo $'Co-\\x41" + _CAB_UC[4:] + ": x' > " + new, "echo $'Co-\\x41" + _CAB_UC[4:] + " x' > " + new)
+    bpair("cab-c37 a trailer.<name>.key naming the token words denies",
+          "git -c trailer.ca.key=Co-$'\\x41'" + _CAB_UC[4:] + " commit -m x --trailer 'ca: Bob'",
+          "git -c trailer.ca.key=Reviewed-By commit -m x --trailer 'ca: Bob'")
+    bpair("cab-c57 a --trailer value with git's '=' separator is the token on a command line",
+          'git commit -m x --trailer "' + _CAB_MIXED + '=Bob <b@x>"',
+          'git commit -m x --trailer "Reviewed-by=Bob <b@x>"')
+    bpair("cab-c38 a newline separates commands, so the git command after it is read",
+          "true\ngit commit -F " + dirty, "true\ngit commit -F " + clean)
+    bpair("cab-c39 a command shlex cannot tokenize (an apostrophe in a here-document) is read by the "
+          "fallback", "git commit -F " + dirty + " && cat <<EOF\nit's done\nEOF",
+          "git commit -F " + clean + " && cat <<EOF\nit's done\nEOF")
+
+    # --- the Bash layer: copies into a new path as one class --------------------------------------------
+    bpair("cab-c40 cat into a redirect is a copy", "cat " + dirty + " > " + new, "cat " + clean + " > " + new)
+    bpair("cab-c41 a reader into tee is a copy", "cat " + dirty + " | tee " + new, "cat " + clean + " | tee " + new)
+    bpair("cab-c42 git mv is a move", "git mv " + dirty + " " + new, "git mv " + clean + " " + new)
+    bpair("cab-c43 ln is a copy", "ln " + dirty + " " + new, "ln " + clean + " " + new)
+    bpair("cab-c44 install is a copy", "install " + dirty + " " + new, "install " + clean + " " + new)
+    bpair("cab-c45 a { } group feeding a message command is read", "{ cat " + dirty + "; } | git hash-object -w --stdin",
+          "{ cat " + clean + "; } | git hash-object -w --stdin")
+    bpair("cab-c46 the words of a command substitution are read with the command around it",
+          'git commit -m "$(cat ' + dirty + ')"', 'git commit -m "$(cat ' + clean + ')"')
+
+    # --- the Bash layer: size, unreadable, unexaminable and length bounds --------------------------------
+    huge = root / "huge.txt"
+    with open(huge, "wb") as handle:
+        handle.seek(aiqt_hooks._CAB_MAX_BYTES)
+        handle.write(b"x")  # sparse: one byte past the read bound, and no token in it
+    bpair("cab-c47 a referenced file past the read bound denies (fail-closed)", "cat " + str(huge) + " > " + new,
+          "cat " + clean + " > " + new)
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        locked = root / "locked.txt"
+        locked.write_text("fix\n", encoding="utf-8")
+        shut = root / "shut"
+        shut.mkdir(exist_ok=True)
+        (shut / "inner.txt").write_text("fix\n", encoding="utf-8")
+        os.chmod(locked, 0)
+        os.chmod(shut, 0o600)
+        try:
+            bpair("cab-c48 an unreadable referenced file denies (fail-closed)", "cat " + str(locked) + " > " + new,
+                  "cat " + clean + " > " + new)
+            bpair("cab-c49 a referenced file that cannot be examined denies (fail-closed)",
+                  "cat " + str(shut / "inner.txt") + " > " + new, "cat " + clean + " > " + new)
+        finally:
+            os.chmod(locked, 0o600)
+            os.chmod(shut, 0o700)
+    long_text = "a" * (aiqt_hooks._CAB_MAX_COMMAND + 10)
+    bpair("cab-c50 a command past the read bound with a redirect denies (its references cannot be read); "
+          "one with no write, redirect or commit word allows", "echo " + long_text + " > " + new, "echo " + long_text)
+
+    # --- the Bash layer: replayed messages and the hooks switch ------------------------------------------
+    replay = _init_repo(root / "replay")
+    _git(replay, "checkout", "-q", "-b", "side-dirty")
+    (replay / "d.txt").write_text("d\n", encoding="utf-8")
+    _git(replay, "add", "d.txt")
+    _git(replay, "commit", "-q", "-m", "dirty side\n\n" + cab, env_identity=True)
+    _git(replay, "checkout", "-q", "-b", "side-clean", "main")
+    (replay / "c.txt").write_text("c\n", encoding="utf-8")
+    _git(replay, "add", "c.txt")
+    _git(replay, "commit", "-q", "-m", "clean side", env_identity=True)
+    _git(replay, "checkout", "-q", "main")
+    bpair("cab-c51 git cherry-pick of a commit whose message holds the token denies",
+          "git cherry-pick side-dirty", "git cherry-pick side-clean", cwd=str(replay))
+    bpair("cab-c52 git commit -C reusing such a message denies", "git commit -C side-dirty",
+          "git commit -C side-clean", cwd=str(replay))
+    bpair("cab-c53 git commit --squash and --fixup=amend: name a commit whose message is read",
+          "git commit --fixup=amend:side-dirty", "git commit --fixup=amend:side-clean", cwd=str(replay))
+    bpair("cab-c54 git rebase replays <upstream>..<branch>", "git rebase main side-dirty",
+          "git rebase main side-clean", cwd=str(replay))
+    bpair("cab-c55 -c core.hooksPath on a commit-creating git command denies",
+          "git -c core.hooksPath=" + str(root / "no-hooks") + " commit -F " + clean,
+          "git -c core.abbrev=12 commit -F " + clean)
+    bpair("cab-c56 core.hooksPath set by a git config command on its own is not refused here (the install "
+          "guidance uses it); beside a commit it is", "git config core.hooksPath /x && git commit -m fix",
+          "git config core.hooksPath /x")
+    bpair("cab-c58 a GIT_CONFIG_KEY_n naming core.hooksPath beside a commit denies; a message that only "
+          "mentions the key allows", "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/x "
+          "git commit -m fix", 'git commit -m "explain core.hooksPath in the README"')
+    bpair("cab-c75 a message spelling a core.hooksPath=<dir> value in prose allows; a -c setting denies",
+          "git -c core.hooksPath=/x commit -m docs",
+          "git commit -m 'docs: install with git config --global core.hooksPath=<dir>'")
+    bpair("cab-c76 a git config command unsetting core.hooksPath beside a commit denies",
+          "git config --unset core.hooksPath && git commit -m x", "git config --get core.abbrev && git commit -m x")
+
+    # --- the Bash layer: trailer options, writes by another stage, mailboxes, git apply, the length bound --
+    cab_words = _CAB_UC
+    bpair("cab-c59 a bare --trailer name, which git writes as '<name>: ', denies",
+          "git commit -m x --trailer " + cab_words, "git commit -m x --trailer Reviewed-by")
+    bpair("cab-c60 git interpret-trailers beside the token's words denies",
+          "git interpret-trailers --trailer " + cab_words + " " + clean,
+          "git interpret-trailers --trailer Reviewed-by " + clean)
+    bpair("cab-c61 a --trailer separator a trailer.separators setting adds denies",
+          "git -c trailer.separators=':#' commit -m x --trailer '" + cab_words + "#AI'",
+          "git -c trailer.separators=':#' commit -m x --trailer 'Reviewed-by#AI'")
+    hashed = fixture("hashed.txt", "subject\n\n" + cab_words + "# AI <ai@x>\n")
+    bpair("cab-c62 a file a trailer-writing stage reads is counted by the token's words with any separator",
+          "git -c trailer.separators=':#' interpret-trailers --in-place --trailer 'Reviewed-by: X' " + hashed,
+          "git -c trailer.separators=':#' interpret-trailers --in-place --trailer 'Reviewed-by: X' " + clean)
+    clean2 = fixture("clean2.txt", "fix\n")
+    bpair("cab-c63 a message file another stage of the command writes denies, though it does not exist yet",
+          "cat " + clean + " > " + new + " && git commit -F " + new,
+          "cat " + clean + " > " + new + " && git commit -F " + clean)
+    bpair("cab-c64 an existing clean file another stage overwrites denies (what it holds when read is unknown)",
+          "echo hi > " + clean2 + " && git commit -F " + clean2, "echo hi > " + clean2 + " && git commit -F " + clean)
+    outdir = str(root / "patches")
+    bpair("cab-c65 a file in a directory a git output option fills denies",
+          "git format-patch -o " + outdir + " HEAD~1 && git am " + outdir + "/0001-x.patch",
+          "git format-patch -o " + outdir + " HEAD~1")
+    mbox_clean = fixture("clean.mbox", "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] fix\n\nfix\n---\n")
+    bpair("cab-c66 git am reading a pipe denies; one fed by a redirect reads the file", "git format-patch -1 "
+          "--stdout HEAD | git am", "git am < " + mbox_clean)
+    bpair("cab-c67 git am with no operand reads standard input and denies; a resume reads none",
+          "git am", "git am --continue")
+    bpair("cab-c68 an option value read as an operand names no existing path, so git am still reads the pipe",
+          "printf x | git am -p 1", "git am -p 1 " + mbox_clean)
+    for name, text in (("md-dirty", "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\nx\n\n" + cab + "\n---\n"),
+                       ("md-clean", "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\nx\n---\n")):
+        for sub in ("cur", "new", "tmp"):
+            (root / name / sub).mkdir(parents=True, exist_ok=True)
+        (root / name / "new" / "1").write_text(text, encoding="utf-8")
+    bpair("cab-c69 a Maildir operand of git am is read (its cur and new files)", "git am " + str(root / "md-dirty"),
+          "git am " + str(root / "md-clean"))
+    mime = fixture("mime.mbox", "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\nContent-Transfer-Encoding: "
+                   "base64\n\neA==\n")
+    bpair("cab-c70 a mailbox with a base64 or quoted-printable part denies (git decodes it)", "git am " + mime,
+          "git am " + mbox_clean)
+    series = fixture("series", "# This series applies on GIT commit 0000\n" + mbox_clean + "\n")
+    bpair("cab-c71 an StGit series, which names further patch files, denies", "git am " + series,
+          "git am " + mbox_clean)
+    bpair("cab-c72 a forced StGit series format denies", "git am --patch-format=stgit-series " + mbox_clean,
+          "git am --patch-format=mbox " + mbox_clean)
+    bpair("cab-c73 a mailbox redirected into git mailinfo is read as a mailbox", "git mailinfo m p < " + mime,
+          "git mailinfo m p < " + mbox_clean)
+    diff_dirty = fixture("dirty.diff", "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+" + cab + "\n")
+    diff_clean = fixture("clean.diff", "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+fix\n")
+    bpair("cab-c74 git apply is write-class, so its patch is read", "git apply " + diff_dirty, "git apply " + diff_clean)
+    bpair("cab-c77 past the read bound a quoted command word is read de-quoted", "c''p " + clean + " " + new + " #"
+          + long_text, "c''t x #" + long_text)
+
+    # --- the Bash layer: how a mailbox reader is fed, and the mailbox as git itself decodes it ------------
+    bpair("cab-c78 a value git am takes from the next word is no operand, so git am still reads standard input",
+          "git am -q --exclude " + clean, "git am -q --exclude " + clean + " " + mbox_clean)
+    bpair("cab-c79 a pipe into git am denies whatever its operands; the same operand alone is read",
+          "cat " + clean + " | git am -q " + mbox_clean, "git am -q " + mbox_clean)
+    bpair("cab-c80 a redirect on descriptor 3 feeds no standard input; one on descriptor 0 does",
+          "git mailinfo m p 3< " + mbox_clean, "git mailinfo m p 0< " + mbox_clean)
+    bpair("cab-c81 a here-string feeding a mailbox reader denies; a file redirect is read",
+          "git mailinfo m p <<< x", "git mailinfo m p < " + mbox_clean)
+    bpair("cab-c82 a process substitution feeding a mailbox reader denies",
+          "git mailinfo m p < <(cat " + mbox_clean + ")", "git mailinfo m p < " + mbox_clean)
+
+    def xb64(text):
+        return ("From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\nMIME-Version: 1.0\nContent-Type: text/plain; "
+                "charset=UTF-8\nContent-Transfer-Encoding: x-base64\n\n"
+                + base64.encodebytes(("\n" + text + "\n---\n").encode("utf-8")).decode("ascii"))
+
+    bpair("cab-c83 a mailbox is decoded by git mailinfo: the token under x-base64 denies, a clean body allows",
+          "git am " + fixture("xb64-dirty.mbox", xb64(cab)), "git am " + fixture("xb64-clean.mbox", xb64("fix")))
+    bpair("cab-c84 git format-patch writes numbered patch files where it runs: git am of one denies, a commit "
+          "allows", "git format-patch -1 HEAD && git am 0001-x.patch", "git format-patch -1 HEAD && git commit -m x")
+    bpair("cab-c85 a quoted here-document body naming git am after another word allows; a line starting with it "
+          "denies", "gh pr create --title x --body \"$(cat <<'EOF'\ngit am now reads Maildirs\nEOF\n)\"",
+          "gh pr create --title x --body \"$(cat <<'EOF'\n- git am now reads Maildirs\nEOF\n)\"")
+    bpair("cab-c86 a git config name built at run time beside a commit denies; a literal other name allows",
+          "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=$K GIT_CONFIG_VALUE_0=/x git commit -m fix",
+          "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=$NAME git commit -m fix")
+    units, _grouped = aiqt_hooks._cab_parse(["git", "am", "3", "<", "x"], frozenset(("/",)), None)
+    if units[0][0].fed or units[0][0].words[-1:] != ["3"]:
+        failures.append("(cab-c87) where shlex cannot tell a joined digit word, it must be read as a descriptor that "
+                        "feeds no standard input and kept as a word")
+
+    # --- the Bash layer: replays of git revert, --stdin, the previous branch and todo-list editors -------
+    got = decide("coauthor_bash", "Bash", {"command": "git cherry-pick -"}, str(replay))
+    if got != "allow":
+        failures.append("(cab-c88-allow) git cherry-pick - with a clean previous branch: expected allow, got {}"
+                        .format(got))
+    _git(replay, "checkout", "-q", "-b", "side-subject", "main")
+    (replay / "s.txt").write_text("s\n", encoding="utf-8")
+    _git(replay, "add", "s.txt")
+    _git(replay, "commit", "-q", "-m", cab, env_identity=True)
+    _git(replay, "checkout", "-q", "-b", "side-body", "main")
+    (replay / "b.txt").write_text("b\n", encoding="utf-8")
+    _git(replay, "add", "b.txt")
+    _git(replay, "commit", "-q", "-m", "add b\n\n" + cab, env_identity=True)
+    _git(replay, "checkout", "-q", "side-dirty")
+    _git(replay, "checkout", "-q", "main")
+    got = decide("coauthor_bash", "Bash", {"command": "git cherry-pick -"}, str(replay))
+    if got != "deny":
+        failures.append("(cab-c88-deny) git cherry-pick - with the token commit on the previous branch: expected "
+                        "deny, got {}".format(got))
+    bpair("cab-c89 git revert reads the subject of each commit it reverts: a token subject denies, a token body "
+          "allows", "git revert --no-edit side-subject", "git revert --no-edit side-body", cwd=str(replay))
+    bpair("cab-c90 git cherry-pick --stdin reads its here-string as revisions", "git cherry-pick --stdin <<< side-dirty",
+          "git cherry-pick --stdin <<< side-clean", cwd=str(replay))
+    bpair("cab-c91 git cherry-pick --stdin fed by anything but a here-document or here-string denies",
+          "echo side-clean | git cherry-pick --stdin", "git cherry-pick --stdin <<EOF\nside-clean\nEOF", cwd=str(replay))
+    bpair("cab-c92 git rebase -i beside a setting of an editor of its todo list denies",
+          "GIT_SEQUENCE_EDITOR=true git rebase -i main", "git rebase -i main", cwd=str(replay))
+    bpair("cab-c93 a git cherry-pick inside a quoted command substitution is read",
+          'echo "$(git cherry-pick side-dirty)"', 'echo "$(git cherry-pick side-clean)"', cwd=str(replay))
+    many = ["git cherry-pick no-such-{}".format(k) for k in range(aiqt_hooks._CAB_MAX_REPLAY_CALLS + 1)]
+    bpair("cab-c94 more distinct replay reads than the bound deny; as many as the bound allow", "; ".join(many),
+          "; ".join(many[:-1]), cwd=str(replay))
+    pair("cab-c14 a JSON Lines record whose escaped hyphen decodes to the token denies; without it allows", "Write",
+         {"file_path": str(root / "log.jsonl"), "content": '{"m": "Co\\u002d' + _CAB_UC[3:] + ': AI"}\n{"n": 1}\n'},
+         {"file_path": str(root / "log.jsonl"), "content": '{"m": "Co\\u002dReviewed: AI"}\n{"n": 1}\n'})
+    pair("cab-c15 a \\u escape spelling the token inside other text denies", "Write",
+         {"file_path": str(root / "lit.py"), "content": 'x = "Co\\u002d' + _CAB_UC[3:] + ': AI"\n'},
+         {"file_path": str(root / "lit.py"), "content": 'x = "Co\\u002dReviewed: AI"\n'})
+
+    # --- landing checks: the denied command lands the trailer ungated, and not gated ---------------------
+    land_overrides = dict(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                          GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid",
+                          GIT_EDITOR="true")
+    land_env = git_fixture_env(**land_overrides)
+    hooks_dir = root / "installed-hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    shutil.copy2(script, hooks_dir / "commit-msg")
+    seq = [0]
+
+    def run_shell(repo, command):
+        return subprocess.run(["bash", "-c", command], cwd=str(repo), env=land_env, capture_output=True,
+                              timeout=120)
+
+    def head_count(repo, _target):
+        proc = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%B"], capture_output=True,
+                              timeout=60, env=git_fixture_env(**land_overrides))
+        return aiqt_hooks._cab_count(proc.stdout.decode("utf-8", "surrogateescape"))
+
+    def file_count(repo, target):
+        path = repo / target
+        return aiqt_hooks._cab_count(path.read_text(encoding="utf-8", errors="replace")) if path.exists() else 0
+
+    def land(label, prepare, deny_command, allow_command, count, target=None, installed=False):
+        """prepare(repo) builds the fixtures; '@REPO@' in a command stands for the repository path."""
+        repos = []
+        for kind in ("ungated", "gated", "twin"):
+            seq[0] += 1
+            repo = _init_repo(root / "land-{}-{}".format(seq[0], kind))
+            if installed:
+                _git(repo, "config", "core.hooksPath", str(hooks_dir))
+            prepare(repo)
+            repos.append(repo)
+        ungated, gated, twin = repos
+        run_shell(ungated, deny_command.replace("@REPO@", str(ungated)))
+        if not count(ungated, target):
+            failures.append("({}) the denied command does not land the trailer when run ungated, so the "
+                            "vector is not real".format(label))
+        for repo, command, want in ((gated, deny_command, "deny"), (twin, allow_command, "allow")):
+            command = command.replace("@REPO@", str(repo))
+            got = decide("coauthor_bash", "Bash", {"command": command}, str(repo))
+            if got != want:
+                failures.append("({}-{}) expected {}, got {}".format(label, want, want, got))
+            if got == "allow":
+                proc = run_shell(repo, command)
+                if want == "allow" and proc.returncode != 0 and not installed:
+                    failures.append("({}) the allowed twin failed to run (exit {}): {!r}".format(
+                        label, proc.returncode, proc.stderr[-300:]))
+            if count(repo, target):
+                failures.append("({}-{}) the trailer landed in the gated run".format(label, want))
+
+    def put(name, text):
+        def prepare(repo):
+            path = repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return prepare
+
+    def both(*steps):
+        def prepare(repo):
+            for step in steps:
+                step(repo)
+        return prepare
+
+    msg_files = both(put("dirty.msg", "fix\n\n" + cab + "\n"), put("clean.msg", "fix\n"))
+    land("cab-l1 an attached -aF message file", msg_files, "git commit -q --allow-empty -aFdirty.msg",
+         "git commit -q --allow-empty -aFclean.msg", head_count)
+    land("cab-l2 a message file after a cd", both(put("sub/m.msg", "fix\n\n" + cab + "\n"), put("m.msg", "fix\n"),
+                                                  put("other/m.msg", "fix\n")),
+         "cd sub && git commit -q --allow-empty -F m.msg", "cd other && git commit -q --allow-empty -F m.msg",
+         head_count)
+    land("cab-l3 a backslash-newline splitting the token", msg_files,
+         'git commit -q --allow-empty -m fix -m "' + tok12 + '\\\nBy: Bob <b@x>"',
+         'git commit -q --allow-empty -m fix -m "Reviewed-\\\nBy: Bob <b@x>"', head_count)
+    land("cab-l4 a brace expansion forming the token", put("notes.txt", "x\n"),
+         "echo " + tok12 + "{By,}: Bob >> notes.txt", "echo " + tok12 + "{Xy,}: Bob >> notes.txt", file_count,
+         target="notes.txt")
+    land("cab-l5 cat copying a token-holding file into a new path", msg_files, "cat dirty.msg > copy.txt",
+         "cat clean.msg > copy.txt", file_count, target="copy.txt")
+    land("cab-l6 a git command after a newline", msg_files, "true\ngit commit -q --allow-empty -F dirty.msg",
+         "true\ngit commit -q --allow-empty -F clean.msg", head_count)
+
+    def side(name, message):
+        def prepare(repo):
+            _git(repo, "checkout", "-q", "-b", name)
+            (repo / (name + ".txt")).write_text(name + "\n", encoding="utf-8")
+            _git(repo, "add", name + ".txt")
+            _git(repo, "commit", "-q", "-m", message, env_identity=True)
+            _git(repo, "checkout", "-q", "main")
+        return prepare
+
+    sides = both(side("side-dirty", "dirty side\n\n" + cab), side("side-clean", "clean side"))
+    land("cab-l7 git cherry-pick replaying the token", sides, "git cherry-pick side-dirty",
+         "git cherry-pick side-clean", head_count)
+    land("cab-l8 git commit -C reusing the token", sides, "git commit -q --allow-empty -C side-dirty",
+         "git commit -q --allow-empty -C side-clean", head_count)
+    generated = "git commit -q --allow-empty -m \"$(printf 'fix\\n\\nCo-%s-By: Bob <b@x>' Authored)\""
+    land("cab-l9 -c core.hooksPath switching the installed commit-msg hook off (the allowed twin is "
+         "generated text this layer does not read, which the installed hook then refuses)", msg_files,
+         generated.replace("git commit", "git -c core.hooksPath=@REPO@/no-hooks commit", 1), generated, head_count,
+         installed=True)
+    land("cab-l10 a message file under git -C", both(put("sub/m.msg", "fix\n\n" + cab + "\n"),
+                                                    put("other/m.msg", "fix\n"), put("m.msg", "fix\n")),
+         "git -C sub commit -q --allow-empty -F m.msg", "git -C other commit -q --allow-empty -F m.msg", head_count)
+    land("cab-l11 a cd the layer cannot resolve", both(put("sub/m.msg", "fix\n\n" + cab + "\n"), put("m.msg", "fix\n")),
+         'cd "${SUBDIR:-sub}" && git commit -q --allow-empty -F m.msg',
+         "cd . && git commit -q --allow-empty -F m.msg", head_count)
+    land("cab-l12 standard input piped into git commit -F -", msg_files,
+         "printf 'fix\\n\\nCo-%s-By: Bob <b@x>\\n' Authored | git commit -q --allow-empty -F -",
+         "git commit -q --allow-empty -F - <<'EOF'\nfix things\nEOF", head_count)
+    land("cab-l13 an ANSI-C quote spelling the token", msg_files,
+         "git commit -q --allow-empty -m fix -m $'Co-\\x41" + _CAB_UC[4:] + ": Bob <b@x>'",
+         "git commit -q --allow-empty -m fix -m $'Co-\\x41" + _CAB_UC[4:] + " Bob <b@x>'", head_count)
+    land("cab-l14 a trailer.<name>.key alias for the token", msg_files,
+         "git -c trailer.ca.key=Co-$'\\x41'" + _CAB_UC[4:] + " commit -q --allow-empty -m x --trailer 'ca: Bob <b@x>'",
+         "git -c trailer.ca.key=Reviewed-By commit -q --allow-empty -m x --trailer 'ca: Bob <b@x>'", head_count)
+    land("cab-l15 a --trailer with the '=' separator", msg_files,
+         'git commit -q --allow-empty -m x --trailer "' + _CAB_MIXED + '=Bob <b@x>"',
+         'git commit -q --allow-empty -m x --trailer "Reviewed-by=Bob <b@x>"', head_count)
+    land("cab-l16 a command shlex cannot tokenize", msg_files,
+         "git commit -q --allow-empty -F dirty.msg && cat <<EOF\nit's done\nEOF",
+         "git commit -q --allow-empty -F clean.msg && cat <<EOF\nit's done\nEOF", head_count)
+    land("cab-l17 a command substitution reading a message file", msg_files,
+         'git commit -q --allow-empty -m "$(cat dirty.msg)"', 'git commit -q --allow-empty -m "$(cat clean.msg)"',
+         head_count)
+    land("cab-l18 a { } group copied into a redirect", msg_files, "{ cat dirty.msg; } > copy.txt",
+         "{ cat clean.msg; } > copy.txt", file_count, target="copy.txt")
+
+    # --- the commit-msg hook: the whole message file counted, and its size bound -------------------------
+    msg_repo = _init_repo(root / "msg-repo")
+    semi_repo = _init_repo(root / "msg-semi")
+    _git(semi_repo, "config", "core.commentChar", ";")
+    verbatim_repo = _init_repo(root / "msg-verbatim")
+    _git(verbatim_repo, "config", "commit.cleanup", "verbatim")
+
+    def mexpect(label, repo, text, editor, want_code):
+        seq[0] += 1
+        path = root / "msg-{}.txt".format(seq[0])
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text, encoding="utf-8")
+        env = dict(land_env)
+        env["GIT_EDITOR"] = "true" if editor else ":"
+        proc = subprocess.run([sys.executable, "-I", "-B", str(script), str(path)], cwd=str(repo),
+                              capture_output=True, text=True, timeout=60, env=env)
+        if proc.returncode != want_code:
+            failures.append("({}) expected exit {}, got {} with stderr {!r}".format(
+                label, want_code, proc.returncode, proc.stderr[-300:]))
+
+    cut = "# " + "-" * 24 + " >8 " + "-" * 24 + "\n"
+    verbose = ("drop the trailer line\n\n# Please enter the commit message.\n" + cut
+               + "# Do not modify or remove the line above.\ndiff --git a/n.txt b/n.txt\n-" + cab + "\n")
+    mexpect("cab-m1 with an editor, the text below a scissors line is counted, since a --no-verbose or "
+            "--cleanup option the hook cannot see makes git keep it (deny, the disclosed over-refusal)",
+            msg_repo, verbose, True, 1)
+    mexpect("cab-m2 with no editor, git keeps that text, so it is counted (deny)", msg_repo, verbose, False, 1)
+    mexpect("cab-m3 with an editor, a comment line holding the token is counted, since --cleanup=verbatim, "
+            "whitespace or scissors keeps it (deny)", msg_repo, "fix\n# " + cab + "\n", True, 1)
+    mexpect("cab-m4 with no editor, git keeps the comment line, so it is counted (deny)",
+            msg_repo, "fix\n# " + cab + "\n", False, 1)
+    mexpect("cab-m5 a line starting with a configured comment string is counted as well (deny)",
+            semi_repo, "fix\n; " + cab + "\n", True, 1)
+    mexpect("cab-m6 a '#' line in a repository with another comment string denies",
+            semi_repo, "fix\n# " + cab + "\n", True, 1)
+    mexpect("cab-m7 commit.cleanup=verbatim keeps comment lines, so one holding the token denies",
+            verbatim_repo, "fix\n# " + cab + "\n", True, 1)
+    mexpect("cab-m12 a clean message with a scissors line and a clean verbose diff passes (allow)", msg_repo,
+            "drop a line\n\n" + cut + "diff --git a/n.txt b/n.txt\n-old line\n", True, 0)
+    mexpect("cab-m11 prose naming the words with no colon passes (the narrowed pattern)",
+            msg_repo, "fix\n\nThis guide was " + prose_words + " Alice.\n", False, 0)
+    big = root / "msg-big.txt"
+    with open(big, "wb") as handle:
+        handle.seek(67_108_864)
+        handle.write(b"x")
+    proc = subprocess.run([sys.executable, "-I", "-B", str(script), str(big)], cwd=str(msg_repo),
+                          capture_output=True, text=True, timeout=120, env=land_env)
+    if proc.returncode != 2 or "fail-closed" not in proc.stderr:
+        failures.append("(cab-m8) a message file past the size bound must refuse the commit (exit 2), got "
+                        "exit {} with stderr {!r}".format(proc.returncode, proc.stderr[-300:]))
+
+    # a real removal commit with the hook installed: made with an editor and no --verbose it passes; with
+    # -v its diff below the scissors line shows the removed line, so it is refused (the disclosed
+    # over-refusal); and a token commit is refused
+    lb = _init_repo(root / "msg-landing")
+    _git(lb, "config", "core.hooksPath", str(hooks_dir))
+    (lb / "notes.txt").write_text("keep\n" + cab + "\n", encoding="utf-8")
+    _git(lb, "add", "notes.txt")
+    _git(lb, "commit", "-q", "-m", "add notes", env_identity=True)
+    (lb / "notes.txt").write_text("keep\n", encoding="utf-8")
+    _git(lb, "add", "notes.txt")
+    proc = run_shell(lb, "git commit -q -v -e -m 'drop the trailer line from notes'")
+    if proc.returncode != 1:
+        failures.append("(cab-m9) a verbose removal commit whose diff shows the removed line must be refused by "
+                        "the installed hook (exit 1), got exit {} with stderr {!r}".format(
+                            proc.returncode, proc.stderr[-300:]))
+    proc = run_shell(lb, "git commit -q -e -m 'drop the trailer line from notes'")
+    if proc.returncode != 0 or head_count(lb, None):
+        failures.append("(cab-m13) an edited removal commit made without --verbose must pass the installed hook "
+                        "and record a clean message, got exit {} with stderr {!r}".format(
+                            proc.returncode, proc.stderr[-300:]))
+    before = subprocess.run(["git", "-C", str(lb), "rev-parse", "HEAD"], capture_output=True, text=True,
+                            timeout=60, env=git_fixture_env(**land_overrides)).stdout
+    proc = subprocess.run(["git", "-C", str(lb), "commit", "-q", "--allow-empty", "-F", "-"],
+                          input="fix\n\n" + cab + "\n", capture_output=True, text=True, timeout=60,
+                          env=git_fixture_env(**land_overrides))
+    after = subprocess.run(["git", "-C", str(lb), "rev-parse", "HEAD"], capture_output=True, text=True,
+                           timeout=60, env=git_fixture_env(**land_overrides)).stdout
+    if proc.returncode != 1 or before != after:
+        failures.append("(cab-m10) a commit whose message holds the token must be refused by the installed "
+                        "hook (exit 1, HEAD unchanged), got exit {}".format(proc.returncode))
+
+
+def _test_coauthor_oracle(failures, base, script, cab_hook=None, only=None):
+    """(cab-o*, cab-k*) The real-git oracle of the co-author layers, run with bash and git 2.x in throwaway
+    repositories. Each PROBE row (cab-o*) is a command, or a Write, that lands the trailer when nothing gates
+    it. UNGATED, in a repository WITHOUT the commit-msg hook and with no layer consulted, it must land the
+    trailer (a new commit whose message holds the token, or a named file that holds it), so the vector is
+    real. GATED, in a repository WITH the shipped commit-msg hook installed, it runs only when every
+    PreToolUse layer the platform runs for its tool allows it (Bash: coauthor_bash, commit_identity,
+    commit_msg_subst and gate_weakening; Write: coauthor_file; each through main() in a child process), and
+    then it must land nothing because the hook refused it. A row marked hook-only runs once more with the
+    hook installed and no layer consulted: the hook alone must refuse it. Each CONTROL row (cab-k*) is an
+    allowed twin: every layer must allow it, it must run to exit 0 with the hook installed, and it must land
+    nothing. The editors build the token at run time, so no layer reads it in a command. cab_hook (default:
+    the dispatcher under test) is the dispatcher the co-author modes run from, so a mutated copy can be
+    judged by the same rows, and only (default: every row) names the rows to run by their cab-o or cab-k
+    label, so a mutant can be judged on the rows it targets."""
+    hook = os.path.abspath(aiqt_hooks.__file__)
+    cab_hook = cab_hook or hook
+    child_env = dict((k, v) for k, v in os.environ.items() if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_")))
+    root = base / "oracle"
+    root.mkdir(parents=True, exist_ok=True)
+    overrides = dict(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                     GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid", GIT_EDITOR="true")
+    env = git_fixture_env(**overrides)
+    hooks_dir = root / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    shutil.copy2(script, hooks_dir / "commit-msg")
+    editors = root / "editors"
+    editors.mkdir(exist_ok=True)
+    cut = "# " + "-" * 24 + " >8 " + "-" * 24
+    ai = _CAB_UC + ": AI <ai@example.com>"
+    cab_words = _CAB_UC
+    pad = " #" + "a" * (aiqt_hooks._CAB_MAX_COMMAND + 10)
+    seq = [0]
+
+    def editor(name, text):
+        """An editor script that writes text, the token spelled {T} and built when the editor runs."""
+        (editors / name).write_text("import sys\nT = '-'.join(('Co', 'Authored', 'By'))\nopen(sys.argv[1], 'w')"
+                                    ".write({!r}.replace('{{T}}', T))\n".format(text.replace(_CAB_UC, "{T}")),
+                                    encoding="utf-8")
+        return "GIT_EDITOR='python3 {}' ".format(editors / name)
+
+    ed_cut = editor("cut.py", "subject\n" + cut + "\n" + ai + "\n")
+    ed_plain = editor("plain.py", "subject\n\n" + ai + "\n")
+    ed_hash = editor("hash.py", "subject\n\n#" + ai + "\n")
+    ed_cut_clean = editor("cut-clean.py", "subject\n" + cut + "\nReviewed-by: X\n")
+    ed_plain_clean = editor("plain-clean.py", "subject\n\nReviewed-by: X\n")
+
+    def git(repo, *args, stdin=None):
+        return subprocess.run(["git", "-C", str(repo)] + list(args), capture_output=True, text=True, timeout=60,
+                              env=git_fixture_env(**overrides), input=stdin)
+
+    def commits(repo):
+        # the history of HEAD: a commit git am re-creates can hash the same as its source commit on a side
+        # branch, so a landing is a token commit that joins HEAD's history
+        return set(git(repo, "rev-list", "HEAD").stdout.split())
+
+    def json_strings(value):
+        stack, out = [value], []
+        while stack:
+            item = stack.pop()
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, list):
+                stack.extend(item)
+            elif isinstance(item, dict):
+                stack.extend(item.keys())
+                stack.extend(item.values())
+        return out
+
+    def holds(text):
+        """Whether text holds the token raw, or in a JSON string of a line or of the whole text."""
+        if aiqt_hooks._CAB_RE.search(text):
+            return True
+        for part in [text] + text.split("\n"):
+            try:
+                if any(aiqt_hooks._CAB_RE.search(s) for s in json_strings(json.loads(part))):
+                    return True
+            except (ValueError, RecursionError):
+                continue
+        return False
+
+    def landed_commit(repo, before):
+        for rev in sorted(commits(repo) - before):
+            if aiqt_hooks._CAB_RE.search(git(repo, "log", "-1", "--format=%B", rev).stdout):
+                return True
+        return False
+
+    def landed_file(name):
+        def check(repo, _before):
+            path = repo / name
+            return path.is_file() and holds(path.read_text(encoding="utf-8", errors="replace"))
+        return check
+
+    def fresh(kind, prepare, installed):
+        seq[0] += 1
+        repo = _init_repo(root / "o-{}-{}".format(seq[0], kind))
+        prepare(repo)
+        if installed:
+            _git(repo, "config", "core.hooksPath", str(hooks_dir))  # after the fixtures, some of which hold the token
+        return repo
+
+    def layers(tool, payload, repo):
+        modes = ("coauthor_file",) if tool == "Write" else (
+            "coauthor_bash", "commit_identity", "commit_msg_subst", "gate_weakening")
+        got = {}
+        for mode in modes:
+            data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": payload, "cwd": str(repo)}
+            try:
+                proc = subprocess.run([sys.executable, "-I", "-B", cab_hook if mode.startswith("coauthor") else hook,
+                                       mode], capture_output=True, timeout=60, env=child_env,
+                                      input=json.dumps(data).encode("utf-8"))
+                out = proc.stdout.decode("utf-8", "replace").strip()
+                got[mode] = _reduce_result(proc.returncode, json.loads(out) if out else None)
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                got[mode] = "error {!r}".format(exc)
+        return got
+
+    def run(tool, payload, repo):
+        """(exit code, stderr) of running the payload in repo: a Bash command with bash, a Write by writing."""
+        if tool == "Write":
+            Path(payload["file_path"]).write_text(payload["content"], encoding="utf-8")
+            return 0, ""
+        seq[0] += 1
+        script_path = root / "cmd-{}.sh".format(seq[0])  # a file, since one argument past 128 KiB cannot be passed
+        script_path.write_text(payload["command"], encoding="utf-8")
+        proc = subprocess.run(["bash", str(script_path)], cwd=str(repo), env=env, capture_output=True, text=True,
+                              timeout=120, stdin=subprocess.DEVNULL)
+        return proc.returncode, proc.stderr
+
+    def payload_for(tool, spec, repo):
+        if tool == "Write":
+            return {"file_path": str(repo / spec[0]), "content": spec[1]}
+        return {"command": spec.replace("@REPO@", str(repo))}
+
+    def probe(label, spec, prepare=lambda repo: None, landed=landed_commit, tool="Bash", hook_only=False):
+        if only is not None and label.split(" ", 1)[0] not in only:
+            return
+        repo = fresh("ungated", prepare, False)
+        before = commits(repo)
+        run(tool, payload_for(tool, spec, repo), repo)
+        if not landed(repo, before):
+            failures.append("({}) the vector lands no trailer when run ungated, so it is not real".format(label))
+        repo = fresh("gated", prepare, True)
+        before = commits(repo)
+        payload = payload_for(tool, spec, repo)
+        got = layers(tool, payload, repo)
+        if all(v == "allow" for v in got.values()):
+            _code, stderr = run(tool, payload, repo)
+            if landed(repo, before):
+                failures.append("({}) the trailer landed with every layer allowing: {}".format(label, got))
+            elif "aiqt cmtidn" not in stderr:
+                failures.append("({}) every layer allowed and nothing landed, but the commit-msg hook did not refuse "
+                                "it: {!r}".format(label, stderr[-300:]))
+        if hook_only:
+            repo = fresh("hook", prepare, True)
+            before = commits(repo)
+            _code, stderr = run(tool, payload_for(tool, spec, repo), repo)
+            if landed(repo, before) or "aiqt cmtidn" not in stderr:
+                failures.append("({}-hook) the installed commit-msg hook alone must refuse it, got stderr {!r}"
+                                .format(label, stderr[-300:]))
+
+    def control(label, spec, prepare=lambda repo: None, landed=landed_commit, tool="Bash"):
+        if only is not None and label.split(" ", 1)[0] not in only:
+            return
+        repo = fresh("control", prepare, True)
+        before = commits(repo)
+        payload = payload_for(tool, spec, repo)
+        got = layers(tool, payload, repo)
+        if not all(v == "allow" for v in got.values()):
+            failures.append("({}) the allowed twin must pass every layer, got {}".format(label, got))
+            return
+        code, stderr = run(tool, payload, repo)
+        if code != 0:
+            failures.append("({}) the allowed twin must run to exit 0 with the hook installed, got exit {}: {!r}"
+                            .format(label, code, stderr[-300:]))
+        if landed(repo, before):
+            failures.append("({}) the allowed twin landed a trailer".format(label))
+
+    def steps(*parts):
+        def prepare(repo):
+            for part in parts:
+                part(repo)
+        return prepare
+
+    def config(key, value):
+        return lambda repo: _git(repo, "config", key, value)
+
+    def put(name, text):
+        def prepare(repo):
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text, encoding="utf-8")
+        return prepare
+
+    def side(name, message):
+        def prepare(repo):
+            _git(repo, "checkout", "-q", "-b", name)
+            (repo / (name + ".txt")).write_text(name + "\n", encoding="utf-8")
+            _git(repo, "add", name + ".txt")
+            _git(repo, "commit", "-q", "-m", message, env_identity=True)
+            _git(repo, "checkout", "-q", "main")
+        return prepare
+
+    def patch_of(rev, name):
+        return lambda repo: (repo / name).write_text(git(repo, "format-patch", "-1", "--stdout", rev).stdout,
+                                                     encoding="utf-8")
+
+    def maildir(name, mbox):
+        def prepare(repo):
+            for sub in ("cur", "new", "tmp"):
+                (repo / name / sub).mkdir(parents=True, exist_ok=True)
+            (repo / name / "new" / "1").write_text((repo / mbox).read_text(encoding="utf-8"), encoding="utf-8")
+        return prepare
+
+    def mailbox(name, body, content_type, encoding=None):
+        """A mailbox of side-mime's patch whose message body is body, under content_type and, when given, the
+        transfer encoding (one naming base64 encodes the whole body), each header replacing the patch's own."""
+        def prepare(repo):
+            head, _sep, rest = git(repo, "format-patch", "-1", "--stdout", "side-mime").stdout.partition("\n\n")
+            head = "\n".join(line for line in head.split("\n")
+                             if not line.lower().startswith(("content-transfer-encoding", "mime-version", "content-type")))
+            text = body + rest
+            if encoding and "base64" in encoding:
+                text = base64.encodebytes(text.encode("utf-8")).decode("ascii")
+            (repo / name).write_text(head + "\nMIME-Version: 1.0\nContent-Type: " + content_type + "\n"
+                                     + ("Content-Transfer-Encoding: " + encoding + "\n" if encoding else "")
+                                     + "\n" + text, encoding="utf-8")
+        return prepare
+
+    def encoded(name):
+        return mailbox(name, "\n" + ai + "\n", "text/plain; charset=UTF-8", "base64")
+
+    def previous(branch):
+        """Leave branch as the previous branch (@{-1}) of main."""
+        return lambda repo: (_git(repo, "checkout", "-q", branch), _git(repo, "checkout", "-q", "main"))
+
+    def change(message):
+        """A commit on main that adds a file, with message."""
+        def prepare(repo):
+            (repo / "n.txt").write_text("n\n", encoding="utf-8")
+            _git(repo, "add", "n.txt")
+            _git(repo, "commit", "-q", "-m", message, env_identity=True)
+        return prepare
+
+    def removal(repo):
+        (repo / "notes.txt").write_text("keep\n" + ai + "\n", encoding="utf-8")
+        _git(repo, "add", "notes.txt")
+        _git(repo, "commit", "-q", "-m", "add notes", env_identity=True)
+        (repo / "notes.txt").write_text("keep\n", encoding="utf-8")
+        _git(repo, "add", "notes.txt")
+
+    def head_file(repo):
+        (repo / "m5.txt").write_text("m5\n", encoding="utf-8")
+        _git(repo, "add", "m5.txt")
+        _git(repo, "commit", "-q", "-m", "add m5", env_identity=True)
+
+    sides = steps(side("side-dirty", "dirty side\n\n" + ai), side("side-clean", "clean side"))
+    patches = steps(sides, patch_of("side-dirty", "dirty.mbox"), patch_of("side-clean", "clean.mbox"))
+    jsonl_dirty = '{"m": "Co\\u002dAuthored\\u002d' + 'By: AI"}\n{"n": 1}\n'
+
+    # --- the commit-msg layer: the whole message file is counted -----------------------------------------
+    probe("cab-o1 an editor typing a scissors line, then the token, on a commit", ed_cut + "git commit -q --allow-empty",
+          hook_only=True)
+    probe("cab-o2 the same editor on a merge that records a commit", ed_cut + "git merge -q --no-ff -e side-clean",
+          sides, hook_only=True)
+    probe("cab-o3 a typed scissors line with the token split by a shell variable",
+          "A=" + _CAB_UC[:11] + "; GIT_EDITOR=true git commit -q --allow-empty -e -m subject -m '" + cut
+          + "' -m \"$A-By: AI <ai@example.com>\"", hook_only=True)
+    probe("cab-o4 a letter comment character the trailer line starts with, under --cleanup=verbatim",
+          ed_plain + "git -c core.commentChar=C commit -q --allow-empty --cleanup=verbatim -e -m subject",
+          hook_only=True)
+    probe("cab-o5 the same comment character configured, under --cleanup=whitespace",
+          ed_plain + "git commit -q --allow-empty --cleanup=whitespace", config("core.commentChar", "C"),
+          hook_only=True)
+    probe("cab-o6 --cleanup=scissors keeps a comment line holding the token",
+          ed_hash + "git commit -q --allow-empty --cleanup=scissors", hook_only=True)
+    probe("cab-o7 commit.verbose configured, and --no-verbose keeps the text below a typed scissors line",
+          ed_cut + "git commit -q --allow-empty --no-verbose", config("commit.verbose", "true"), hook_only=True)
+    probe("cab-o8 commit.cleanup=scissors configured, and --cleanup=strip keeps that text",
+          ed_cut + "git commit -q --allow-empty --cleanup=strip", config("commit.cleanup", "scissors"), hook_only=True)
+    probe("cab-o9 an editor writing the token with no scissors line", ed_plain + "git commit -q --allow-empty",
+          hook_only=True)
+    control("cab-k1 an editor writing a clean message with a scissors line and clean text below it",
+            ed_cut_clean + "git commit -q --allow-empty")
+    control("cab-k2 the clean editor on a merge that records a commit",
+            ed_cut_clean + "git merge -q --no-ff -e side-clean", sides)
+    control("cab-k3 a clean message under a letter comment character and --cleanup=verbatim",
+            ed_plain_clean + "git -c core.commentChar=C commit -q --allow-empty --cleanup=verbatim -e -m subject")
+    control("cab-k4 an edited removal commit made without --verbose", "git commit -q -e -m 'drop the trailer line'",
+            removal)
+
+    # --- the Bash layer: mailboxes, the length bound, trailer options, writes, git apply -----------------
+    probe("cab-o10 a format-patch of a token commit piped into git am", "git format-patch -1 --stdout side-dirty | "
+          "git am -q", sides)
+    probe("cab-o11 git am of a Maildir holding the token patch", "git am -q md", steps(patches, maildir("md", "dirty.mbox")))
+    probe("cab-o12 git am of an mbox file holding the token", "git am -q dirty.mbox", patches)
+    probe("cab-o13 a quoted git word past the read bound", "g''it am -q dirty.mbox" + pad, patches)
+    probe("cab-o14 git interpret-trailers with a bare --trailer name", "git interpret-trailers --in-place --trailer "
+          + cab_words + " msg.txt", put("msg.txt", "subject\n"), landed_file("msg.txt"))
+    probe("cab-o15 format-patch, a bare --trailer name and git am in one command",
+          "git format-patch -1 --stdout HEAD > m5.mbox && git interpret-trailers --in-place --trailer '" + cab_words
+          + "' m5.mbox && git reset -q --hard HEAD~1 && git am -q m5.mbox", head_file)
+    probe("cab-o16 a quoted cp word past the read bound", "c''p tok.txt new.txt" + pad, put("tok.txt", ai + "\n"),
+          landed_file("new.txt"))
+    probe("cab-o17 the same cp under the read bound", "c''p tok.txt new.txt", put("tok.txt", ai + "\n"),
+          landed_file("new.txt"))
+    probe("cab-o18 a JSON Lines Write whose escaped hyphens decode to the token", ("log.jsonl", jsonl_dirty),
+          landed=landed_file("log.jsonl"), tool="Write")
+    probe("cab-o19 the same text as one JSON document", ("log.json", jsonl_dirty.split("\n")[0] + "\n"),
+          landed=landed_file("log.json"), tool="Write")
+    probe("cab-o20 a patch written to a new file, then applied by git am in the same command",
+          "git format-patch -1 --stdout side-dirty > p.mbox && git am -q p.mbox", sides)
+    probe("cab-o21 the same command over an existing clean file", "git format-patch -1 --stdout side-dirty > p.mbox "
+          "&& git am -q p.mbox", steps(sides, patch_of("side-clean", "p.mbox")))
+    probe("cab-o22 git am of an mbox whose base64 body holds the token", "git am -q b64.mbox",
+          steps(side("side-mime", "add mime"), encoded("b64.mbox")))
+    probe("cab-o23 git am of an StGit series naming a token patch", "git am -q s/series",
+          steps(patches, put("s/series", "# This series applies on GIT commit 0000\np1\n"),
+                lambda repo: (repo / "s" / "p1").write_text((repo / "dirty.mbox").read_text(encoding="utf-8"),
+                                                            encoding="utf-8")))
+    probe("cab-o24 git apply of a patch adding a token line", "git apply dirty.diff",
+          put("dirty.diff", "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+" + ai + "\n"), landed_file("n.txt"))
+    probe("cab-o25 git interpret-trailers rewriting another separator to a colon",
+          "git -c trailer.separators=:# interpret-trailers --in-place --trailer 'Reviewed-by: X' m.txt",
+          put("m.txt", "subject\n\n" + cab_words + "# AI <ai@example.com>\n"), landed_file("m.txt"))
+    probe("cab-o27 a patch written to a new file, then copied in the same command",
+          "git format-patch -1 --stdout side-dirty > p.mbox && cp p.mbox copy.mbox", sides, landed_file("copy.mbox"))
+    generated = "printf 'fix\\n\\nCo-%s-By: AI\\n' Authored | xargs -0 git "
+    probe("cab-o26 -c core.hooksPath switching the hook off for text xargs reads at run time",
+          generated + "-c core.hooksPath=@REPO@/no-hooks commit -q --allow-empty -m")
+    probe("cab-o28 a git config command switching the hook off before such a commit",
+          "git config core.hooksPath @REPO@/no-hooks && " + generated + "commit -q --allow-empty -m")
+    control("cab-k6 git am of a Maildir holding a clean patch", "git am -q mdc",
+            steps(patches, maildir("mdc", "clean.mbox")))
+    control("cab-k7 a command past the read bound with no write, redirect or commit word", "echo" + pad)
+    control("cab-k8 git interpret-trailers with another trailer", "git interpret-trailers --in-place --trailer "
+            "'Reviewed-by: X' msg.txt", put("msg.txt", "subject\n"), landed_file("msg.txt"))
+    control("cab-k9 cp of a clean file", "cp clean.txt new.txt", landed=landed_file("new.txt"))
+    control("cab-k10 a JSON Lines Write with a clean escaped spelling",
+            ("log.jsonl", '{"m": "Co\\u002dReviewed: AI"}\n{"n": 1}\n'), landed=landed_file("log.jsonl"), tool="Write")
+    control("cab-k11 a patch written to a file and not consumed", "git format-patch -1 --stdout side-clean > p.mbox",
+            sides, landed_file("p.mbox"))
+    control("cab-k12 git am of a clean mbox file", "git am -q clean.mbox", patches)
+    control("cab-k13 git apply of a clean patch", "git apply clean.diff",
+            put("clean.diff", "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+fix\n"), landed_file("n.txt"))
+    control("cab-k14 a message spelling a core.hooksPath=<dir> value in prose",
+            "git commit -q --allow-empty -m 'docs: install with git config --global core.hooksPath=<dir>'")
+    control("cab-k15 git interpret-trailers under trailer.separators on a clean file",
+            "git -c trailer.separators=:# interpret-trailers --in-place --trailer 'Reviewed-by: X' msg.txt",
+            put("msg.txt", "subject\n"), landed_file("msg.txt"))
+
+    # --- mailbox readers: a pipe, a descriptor other than 0, and a mailbox decoded by git itself ----------
+    mime = steps(sides, side("side-mime", "add mime"))
+    probe("cab-o29 a pipe into git am whose --exclude value names an existing file",
+          "git format-patch -1 --stdout side-dirty | git am -q --exclude clean.txt", sides)
+    probe("cab-o30 a pipe into git am beside a here-string on descriptor 3",
+          "git format-patch -1 --stdout side-dirty | git am -q 3<<<x", sides)
+    probe("cab-o31 a pipe into git mailinfo beside a here-string on descriptor 3",
+          "git format-patch -1 --stdout side-dirty | git mailinfo msg.txt patch.txt 3<<<x", sides, landed_file("msg.txt"))
+    probe("cab-o32 git am of a mailbox under an x-base64 transfer encoding", "git am -q xb64.mbox",
+          steps(mime, mailbox("xb64.mbox", "\n" + ai + "\n", "text/plain; charset=UTF-8", "x-base64")))
+    probe("cab-o33 git am of a mailbox whose UTF-7 charset spells the token", "git am -q u7.mbox",
+          steps(mime, mailbox("u7.mbox", "\nC+AG8-" + ai[2:] + "\n", "text/plain; charset=UTF-7")))
+    probe("cab-o34 git am of a format=flowed delsp=yes mailbox splitting the token at a soft line break",
+          "git am -q fl.mbox", steps(mime, mailbox("fl.mbox", "\n" + ai[:9] + " \n" + ai[9:] + "\n",
+                                                   "text/plain; charset=UTF-8; format=flowed; delsp=yes")))
+    enc_doc = ("From 0 Mon Sep 17 00:00:00 2001\nFrom: T <t@example.invalid>\nSubject: [PATCH] x\nMIME-Version: 1.0\n"
+               "Content-Type: text/plain; charset=UTF-8\nContent-Transfer-Encoding: base64\n\n"
+               + base64.encodebytes(("\n" + ai + "\n").encode("utf-8")).decode("ascii"))
+    probe("cab-o35 a here-document of a base64 mailbox into git mailinfo",
+          "git mailinfo msg.txt patch.txt <<'EOF'\n" + enc_doc + "EOF\n", landed=landed_file("msg.txt"))
+    probe("cab-o36 a process substitution redirected into git mailinfo",
+          "git mailinfo msg.txt patch.txt < <(git format-patch -1 --stdout side-dirty)", sides, landed_file("msg.txt"))
+    probe("cab-o37 a here-string of a command substitution into git mailinfo",
+          "git mailinfo msg.txt patch.txt <<< \"$(git format-patch -1 --stdout side-dirty)\"", sides,
+          landed_file("msg.txt"))
+    probe("cab-o38 a group redirect into git mailinfo past a redirect on descriptor 3",
+          "{ git mailinfo msg.txt patch.txt 3<clean.txt; } < enc.mbox", steps(mime, encoded("enc.mbox")),
+          landed_file("msg.txt"))
+    probe("cab-o39 a group redirect into git am whose --exclude value names an existing file",
+          "{ git am -q --exclude clean.txt; } < enc.mbox", steps(mime, encoded("enc.mbox")))
+    probe("cab-o40 a pipe into git am inside a quoted command substitution",
+          "echo \"$(git format-patch -1 --stdout side-dirty | git am -q)\"", sides)
+    probe("cab-o41 a group redirect into git am inside a quoted command substitution",
+          "{ echo \"$(git am -q)\"; } < dirty.mbox", patches)
+    control("cab-k5 a quoted here-document body that names git am after another word",
+            "printf '%s\\n' \"$(cat <<'EOF'\nNotes\n\n- git am now reads Maildirs\nEOF\n)\" > pr-body.md",
+            landed=landed_file("pr-body.md"))
+    control("cab-k16 git am of a clean mailbox under an x-base64 transfer encoding", "git am -q xc.mbox",
+            steps(mime, mailbox("xc.mbox", "\nReviewed-by: X\n", "text/plain; charset=UTF-8", "x-base64")))
+
+    # --- replays: cherry-pick and revert operands, --stdin, the previous branch, todo-list editors -------
+    probe("cab-o42 git cherry-pick of a commit whose message holds the token", "git cherry-pick side-dirty", sides)
+    probe("cab-o43 git cherry-pick - with the token commit on the previous branch", "git cherry-pick -",
+          steps(sides, previous("side-dirty")))
+    probe("cab-o44 a pipe into git cherry-pick --stdin", "echo side-dirty | git cherry-pick --stdin", sides)
+    probe("cab-o45 a here-string into git cherry-pick --stdin naming the token commit",
+          "git cherry-pick --stdin <<< side-dirty", sides)
+    probe("cab-o46 a git cherry-pick inside a quoted command substitution", "echo \"$(git cherry-pick side-dirty)\"",
+          sides)
+    probe("cab-o47 git revert --no-edit of a commit whose subject is the token", "git revert --no-edit HEAD",
+          change(ai))
+    probe("cab-o48 a sequence.editor that adds a pick to git rebase -i",
+          "git -c \"sequence.editor=sed -i '1ipick side-dirty'\" rebase -q -i HEAD", sides)
+    probe("cab-o49 a GIT_EDITOR that adds a pick to git rebase -i",
+          "GIT_EDITOR=\"sed -i '1ipick side-dirty'\" git rebase -q -i HEAD", sides)
+    probe("cab-o50 git format-patch writing its numbered patch file over an older clean copy, then git am of it",
+          "git format-patch -q -1 side-dirty && git am -q 0001-dirty-side.patch",
+          steps(sides, patch_of("side-clean", "0001-dirty-side.patch")))
+    probe("cab-o51 a GIT_CONFIG_KEY_0 built from a variable switching the hook off for text xargs reads",
+          "K=core.hooksPath; " + generated.replace("| xargs", "| GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=$K "
+                                                   "GIT_CONFIG_VALUE_0=@REPO@/no-hooks xargs")
+          + "commit -q --allow-empty -m")
+    control("cab-k17 git cherry-pick - with a clean commit on the previous branch", "git cherry-pick -",
+            steps(sides, previous("side-clean")))
+    control("cab-k18 a here-string into git cherry-pick --stdin naming a clean commit",
+            "git cherry-pick --stdin <<< side-clean", sides)
+    control("cab-k19 git revert --no-edit of a commit whose body, not its subject, holds the token",
+            "git revert --no-edit HEAD", change("add n\n\n" + ai))
+    control("cab-k20 git format-patch writing its numbered patch file, then a commit naming no such file",
+            "git format-patch -q -1 side-clean && git commit -q --allow-empty -m 'add notes'", sides)
+    control("cab-k21 a UTF-7 message under i18n.commitEncoding=UTF-7, which git records undecoded",
+            "git -c i18n.commitEncoding=UTF-7 commit -q --allow-empty -F utf7.msg",
+            put("utf7.msg", "fix\n\nC+AG8-" + ai[2:].replace("-", "+AC0-") + "\n"))
 
 
 def _test_stop_dispatch_note_sites(failures, tmp):
@@ -4754,6 +6346,8 @@ _DEADLINE_CASES = {
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens", "nest_cmdsubst", "dq_case_substs",
                             "dq_case_substs_after"),
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens", "procsubst_run_after"),
+    "coauthor_bash": ("git_words", "redirects_many", "sep_semicolon"),
+    "coauthor_file": ("write_content", "write_deep_path"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
@@ -22408,7 +24002,7 @@ def _main_isolated(monitor):
         ciexpect("(ci-l11b) a leading AI identity assignment survives, a trailing redirect is removed, denies",
                  "GIT_AUTHOR_NAME=Claude git commit -m x >/dev/null", "deny")
         ciexpect("(ci-l11c) an AI co-author trailer in a redirected commit denies",
-                 'git commit -m "Co-Authored-By: Claude <c@x>" >/dev/null', "deny")
+                 'git commit -m "' + _CAB_UC + ': Claude <c@x>" >/dev/null', "deny")
         ciexpect("(ci-l11d) a redirected commit with no AI identity allows",
                  "git commit -m fix >/dev/null", "allow")
         # QA BLOCKER 1: a backslash-newline continuation must not inject an empty argv element that hid the
@@ -22461,7 +24055,7 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr18) a git -C value behind a wrapper is not read as the subcommand, denies",
                  'env git -C /repo commit --author="Claude <c@x>" -m x', "deny")
         ciexpect("(ci-wr19) an AI co-author trailer behind a wrapper denies",
-                 'sudo git commit -m "fix" -m "Co-Authored-By: Claude <c@x>"', "deny")
+                 'sudo git commit -m "fix" -m "' + _CAB_UC + ': Claude <c@x>"', "deny")
         ciexpect("(ci-wr20) a VAR=value word before a wrapper denies",
                  'LC_ALL=C sudo git commit --author="Claude <c@x>" -m x', "deny")
         ciexpect("(ci-wr21) a leading ! before git commit denies",
@@ -22610,7 +24204,7 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr35) an AI --author after an -F file name is read, denies",
                  'git commit -F msg.txt --author="Claude <c@x>"', "deny")
         ciexpect("(ci-wr36) an AI co-author trailer in a --trailer value denies",
-                 'git commit -m x --trailer "Co-authored-by: Claude <c@x>"', "deny")
+                 'git commit -m x --trailer "' + _CAB_MIXED + ': Claude <c@x>"', "deny")
         # A short option cluster is read as git reads it: letters up to the first one that takes a value, whose
         # value is the rest of the word or, when nothing follows, the next word and only that word. In git
         # commit -am -m --author=X the cluster takes -m as its message and the --author after it is a real
@@ -22837,7 +24431,7 @@ def _main_isolated(monitor):
                  'git submodule foreach "echo \'x" && git commit --author=C"laude <c@x>" -m x', "deny")
         ciexpect("(ci-wr86) an AI co-author trailer that a quote splits, in the segment after a foreach operand "
                  "that cannot be parsed, denies",
-                 'git submodule foreach "echo \'x"; git commit -m x --trailer "Co-authored-by: C"laude" <c@x>"',
+                 'git submodule foreach "echo \'x"; git commit -m x --trailer "' + _CAB_MIXED + ': C"laude" <c@x>"',
                  "deny")
         ciexpect("(ci-wr87) an AI --author value that a quote splits, in the segment after a rebase exec value "
                  "that cannot be parsed, denies",
@@ -22939,9 +24533,9 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr107) an AI --author value given as the next word, its tail in a locale quote, denies",
                  'git commit -m x --author C$"laude <c@x>"', "deny")
         ciexpect("(ci-wr108) an AI co-author trailer in a --trailer value that a locale quote splits denies",
-                 'git commit -m x --trailer "Co-authored-by: Cl"$"aude <c@x>"', "deny")
+                 'git commit -m x --trailer "' + _CAB_MIXED + ': Cl"$"aude <c@x>"', "deny")
         ciexpect("(ci-wr109) an AI co-author trailer in a -m message that a locale quote splits denies",
-                 'git commit -m x -m "Co-authored-by: Cl"$"aude <c@x>"', "deny")
+                 'git commit -m x -m "' + _CAB_MIXED + ': Cl"$"aude <c@x>"', "deny")
         ciexpect("(ci-wr110) an AI git identity variable value that $\"\" splits denies",
                  'GIT_AUTHOR_NAME=Cl$""aude git commit -m x', "deny")
         ciexpect("(ci-wr111) an AI user.name value that $\"\" splits denies",
@@ -22968,7 +24562,7 @@ def _main_isolated(monitor):
                  "git submodule foreach 'git commit --author=Ma$\"\"intainer -m x'", "allow")
         ciexpect("(ci-wr-c41) a $ inside double quotes stays a literal character, so a co-author trailer it splits "
                  "there allows",
-                 'git commit -m x -m "Co-authored-by: Cl$""aude <c@x>"', "allow")
+                 'git commit -m x -m "' + _CAB_MIXED + ': Cl$""aude <c@x>"', "allow")
         # The command and each run line are also judged with the '$' of a locale quote read as a literal
         # character, as before locale quoting was read, and an AI identity either reading finds denies: an AI name
         # followed directly by a locale quote, which the locale reading joins into one word naming no AI identity
@@ -22986,7 +24580,7 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr119) an AI --author value followed directly by a locale quote denies",
                  'git commit --author=Claude$"bot" -m x', "deny")
         ciexpect("(ci-wr120) an AI co-author trailer followed directly by a locale quote denies",
-                 'git commit -m x -m "Co-authored-by: Claude"$"bot"', "deny")
+                 'git commit -m x -m "' + _CAB_MIXED + ': Claude"$"bot"', "deny")
         ciexpect("(ci-wr121) an AI git identity variable value followed directly by a locale quote denies",
                  'GIT_AUTHOR_NAME=Claude$"bot" git commit -m x', "deny")
         ciexpect("(ci-wr122) an AI --author value followed directly by a locale quote in a foreach operand denies",
@@ -23322,8 +24916,8 @@ def _main_isolated(monitor):
         # only when the shorter one is within its bound, so a quadratic regex fails in seconds.
         for _ci_label, _ci_head, _ci_run, _ci_tail, _ci_wants in (
                 ("(ci-wr172) an AI co-author trailer after a commit message of a co-author name and a run of "
-                 "newlines, which the reader reads, denies", 'git commit -m "co-authored-by', "\n",
-                 '" -m "Co-authored-by: Claude <c@x>"',
+                 "newlines, which the reader reads, denies", 'git commit -m "' + _CAB_LC, "\n",
+                 '" -m "' + _CAB_MIXED + ': Claude <c@x>"',
                  ("this git command sets an AI identity (co-author trailer 'Claude <c@x>')",)),
                 ("(ci-wr173) an AI user.name value after user.name, a run of spaces and a quote that does not "
                  "close, in a command the tokenizer cannot parse, denies", "git config user.name", " ",
@@ -23353,23 +24947,23 @@ def _main_isolated(monitor):
         # limit (ci-wr178) deny through the raw-string scan, with a reason that names the second trailer's value.
         # Each of the five deny vectors allowed while the reader read only the first trailer name of a word and the
         # raw-string scan resumed after each value.
-        _ci_overlap = "-m 'co-authored-by: " + "x" * 140 + " co-authored-by: Claude <c@x>'"
+        _ci_overlap = "-m '" + _CAB_LC + ": " + "x" * 140 + " " + _CAB_LC + ": Claude <c@x>'"
         for _ci_label, _ci_cmd in (
                 ("(ci-wr174) an AI co-author trailer inside the 160-character value of an earlier trailer on the "
                  "same line denies", "git commit " + _ci_overlap),
                 ("(ci-wr175) an AI co-author trailer after more than 160 characters of an earlier trailer's value "
-                 "denies", "git commit -m 'co-authored-by: " + "x" * 200 + " co-authored-by: Claude <c@x>'"),
+                 "denies", "git commit -m '" + _CAB_LC + ": " + "x" * 200 + " " + _CAB_LC + ": Claude <c@x>'"),
                 ("(ci-wr176) an AI co-author trailer on the line after another trailer of the same message denies",
-                 "git commit -m 'fix\n\nCo-authored-by: Alice <a@x>\nCo-authored-by: Claude <c@x>'")):
+                 "git commit -m 'fix\n\n" + _CAB_MIXED + ": Alice <a@x>\n" + _CAB_MIXED + ": Claude <c@x>'")):
             ciexpect(_ci_label, _ci_cmd, "deny")
             _ci_got = _ci_find(_ci_cmd)
             if _ci_got != "co-author trailer 'Claude <c@x>'":
                 failures.append("{}: the reader gave {!r} (want \"co-author trailer 'Claude <c@x>'\")"
                                 .format(_ci_label, _ci_got))
         ciexpect("(ci-wr-c52) a co-author trailer inside an earlier trailer's value that names no AI identity allows",
-                 "git commit -m 'co-authored-by: " + "x" * 140 + " co-authored-by: Alice <a@x>'", "allow")
+                 "git commit -m '" + _CAB_LC + ": " + "x" * 140 + " " + _CAB_LC + ": Alice <a@x>'", "allow")
         ciexpect("(ci-wr-c53) co-author trailers on two lines of a message that name no AI identity allow",
-                 "git commit -m 'fix\n\nCo-authored-by: Alice <a@x>\nCo-authored-by: Bob <b@x>'", "allow")
+                 "git commit -m 'fix\n\n" + _CAB_MIXED + ": Alice <a@x>\n" + _CAB_MIXED + ": Bob <b@x>'", "allow")
         _ci_gi = "/usr/bin/gi? commit " + _ci_overlap
         _ci_denies.append("git commit " + _ci_overlap + " -F <(echo x)")
         for _ci_label, _ci_cmd in (
@@ -23434,8 +25028,9 @@ def _main_isolated(monitor):
         # user.name matches, the plain scan's matches that the faster scan is compared with, and the straddle
         # strings whose match is the second trailer, with the word cut by the first value's end
         _ci_counts = [0, 0, 0, 0, 0]
-        for _ci_text in _ci_strings(("co-authored-by", "Co-Authored-By: ", "coauthored by", ":", " ", "\n", "\t",
-                                     "\xa0", '"', "'", "Claude", "Co-authored-by:Claude", "x" * 140 + " ", "gpt4",
+        for _ci_text in _ci_strings((_CAB_LC, _CAB_UC + ": ", _CAB_LC.replace("-", "", 1).replace("-", " "),
+                                     ":", " ", "\n", "\t",
+                                     "\xa0", '"', "'", "Claude", _CAB_MIXED + ":Claude", "x" * 140 + " ", "gpt4",
                                      "_"), 4):
             _ci_starts = [k for k, ch in enumerate(_ci_text) if ch in "cC"]
             _ci_named = []
@@ -23609,9 +25204,9 @@ def _main_isolated(monitor):
             second value, each with whether a space, a '<' or a ':' stands before w: after each of those, and right
             after the second trailer name, where the second value starts with w."""
             for sep in (" ", "<", ":"):
-                yield True, ("co-authored-by: yyyy co-authored-by: " + "x" * (139 - d - len(sep)) + sep + w
+                yield True, (_CAB_LC + ": yyyy " + _CAB_LC + ": " + "x" * (139 - d - len(sep)) + sep + w
                              + " <a@x>")
-            yield False, "co-authored-by: " + "x" * (145 - d) + " co-authored-by" + w + " <a@x>"
+            yield False, _CAB_LC + ": " + "x" * (145 - d) + " " + _CAB_LC + w + " <a@x>"
 
         def _ci_straddles(words):
             """The straddle strings (_ci_straddle) of each word w of words, for every d from 0 to len(w) + 1."""
@@ -23748,7 +25343,7 @@ def _main_isolated(monitor):
                 ("(ci-wr136) an AI --author value after a quote character that the reader keeps, past the read "
                  "limit, denies", "; git commit --author=\"x'Cl\"aude -m x", "deny"),
                 ("(ci-wr137) an AI co-author trailer that a backslash-newline splits, past the read limit, denies",
-                 '; git commit -m x --trailer "Co-authored-by: Cl\\\naude"', "deny"),
+                 '; git commit -m x --trailer "' + _CAB_MIXED + ': Cl\\\naude"', "deny"),
                 ("(ci-wr138) a commit message that merely names an AI product, past the read limit, denies (the "
                  "disclosed over-deny)", '; git commit -m "fix claude adapter"', "deny"),
                 ("(ci-wr139) a commit message that holds an AI name inside a longer word, past the read limit, "
@@ -23765,7 +25360,7 @@ def _main_isolated(monitor):
         _ci_heredoc = "\ncat > notes.txt <<EOF\n{}EOF"
         _ci_unparsed = ('/usr/bin/gi? commit --author="Claude <c@x>" -m x' + _ci_heredoc,
                         "G=$(printf '\\147\\151\\164'); \"$G\" commit --author=\"Claude <c@x>\" -m x" + _ci_heredoc,
-                        "/usr/bin/gi? commit -m 'Co-authored-by: Claude <c@x>' -F <(echo x) '{}'")
+                        "/usr/bin/gi? commit -m '" + _CAB_MIXED + ": Claude <c@x>' -F <(echo x) '{}'")
         _ci_fill = "x\n" * ((1 << 20) // 2)
         for _ci_label, _ci_long, _ci_want in (
                 ("(ci-wr-c50) a heredoc past the read limit that writes a file naming an AI product and runs no git "
@@ -23774,7 +25369,7 @@ def _main_isolated(monitor):
                  "longer words allows", _ci_body + "\necho digits github", "allow"),
                 ("(ci-wr166) a heredoc past the read limit that writes an AI co-author trailer and --author value "
                  "to a file and runs no git denies, as the raw-string scan finds them (the disclosed over-deny)",
-                 _ci_body[:-3] + "Co-authored-by: Claude <c@x>\n--author=Claude\nEOF", "deny"),
+                 _ci_body[:-3] + _CAB_MIXED + ": Claude <c@x>\n--author=Claude\nEOF", "deny"),
                 ("(ci-wr167) an AI --author value given to a git spelled gi?, before an unquoted heredoc past the "
                  "read limit, denies", _ci_unparsed[0].format(_ci_fill), "deny"),
                 ("(ci-wr168) an AI --author value given to a git run through a variable, before an unquoted heredoc "
@@ -23783,10 +25378,10 @@ def _main_isolated(monitor):
                  "before a quoted string past the read limit, denies", _ci_unparsed[2].format(_ci_fill), "deny"),
                 ("(ci-wr170) an AI co-author trailer after a co-author name, a run of 40,000 newlines and a quote, in "
                  "a command the tokenizer cannot parse, denies",
-                 "git commit -m x co-authored-by" + "\n" * 40000 + "' Co-authored-by: Claude <c@x>", "deny"),
+                 "git commit -m x " + _CAB_LC + "\n" * 40000 + "' " + _CAB_MIXED + ": Claude <c@x>", "deny"),
                 ("(ci-wr171) an AI co-author trailer after a co-author name, a run of 40,000 newlines and a quote, in "
                  "a heredoc past the read limit that runs no git, denies",
-                 _ci_body[:-3] + "co-authored-by" + "\n" * 40000 + "'\nCo-authored-by: Claude <c@x>\nEOF", "deny"),
+                 _ci_body[:-3] + _CAB_LC + "\n" * 40000 + "'\n" + _CAB_MIXED + ": Claude <c@x>\nEOF", "deny"),
                 ("(ci-wr160) a git spelled g$'i't with an AI --author, past the read limit, denies",
                  _ci_body + "\ntrue; g$'i't commit --author=\"Claude <c@x>\" -m x", "deny"),
                 ("(ci-wr161) a git commit with an AI --author on the line after a heredoc, past the read limit, "
@@ -27157,6 +28752,7 @@ def _main_isolated(monitor):
         _test_stop_field_claim_check(failures, tmp)
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
+        _test_coauthor_guards(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
