@@ -4802,14 +4802,40 @@ def _dirname_guard_outcome(text, relative, scenario):
         return proc.returncode, _path_absent(log)
 
 
+def _passing_status(text):
+    """The exit status a passing run of a runner text gives, read from the
+    runner itself: its one pass summary echo (the last line of a
+    TERMINAL_SUMMARIES entry) and every line after it, run under bash. None
+    when the text holds no single pass echo, so no exit status matches it."""
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash not found")
+    lines = text.splitlines()
+    ends = {summary[-1] for summary in TERMINAL_SUMMARIES}
+    starts = [index for index, line in enumerate(lines) if line in ends]
+    if len(starts) != 1:
+        return None
+    proc = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", "\n".join(lines[starts[0]:]) + "\n"],
+        env=dict(LC_ALL="C"), stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=60)
+    return proc.returncode
+
+
 def dirname_guard_problems(text, relative):
     """The scenarios a runner text fails: each faulty dirname must exit 2
-    with no gate launched, and the control must launch gates."""
+    with no gate launched, and the control must launch gates and exit with
+    the status a passing run gives (_passing_status). Every stub gate passes,
+    so a control that launched gates and then failed is not a pass."""
+    passing = _passing_status(text)
     problems = []
     for scenario in ("missing", "failed", "empty", "control"):
         rc, absent = _dirname_guard_outcome(text, relative, scenario)
         if scenario == "control":
-            if absent:
+            if absent or rc != passing:
                 problems.append(scenario)
         elif (rc, absent) != (2, True):
             problems.append(scenario)
@@ -4828,7 +4854,7 @@ _STUB_PYTHON3_PWD_FUNCTION = """python3() {
 def _cdpath_outcome(text, relative):
     """Run a runner text by its RELATIVE path from its scratch tree's root
     under a CDPATH naming a decoy tree that holds the same relative directory;
-    return (tree, decoy, logged gate lines).
+    return (rc, tree, decoy, logged gate lines).
 
     dirname prints the relative directory, as the real one does for a relative
     $0. Every stub is written before the one launch, from this thread.
@@ -4864,26 +4890,31 @@ def _cdpath_outcome(text, relative):
                    CDPATH=str(decoy), stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
                    stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0")
-        subprocess.run(
+        proc = subprocess.run(
             [bash, "--noprofile", "--norc", relative],
             cwd=str(tree), env=env, stdin=subprocess.DEVNULL,
             capture_output=True, timeout=600)
         calls = ([] if _path_absent(log)
                  else log.read_text(encoding="utf-8").splitlines())
-        return str(tree), str(decoy), calls
+        return proc.returncode, str(tree), str(decoy), calls
 
 
 def cdpath_problems(text, relative):
     """What a relative start under a hostile CDPATH does wrong: "no-gate" when
     no gate launches from the true tree, "moved" when any logged gate line
     names the decoy (a moved root, or a printed CDPATH match in a captured
-    directory)."""
-    tree, decoy, calls = _cdpath_outcome(text, relative)
+    directory), and "exit" when the run does not exit with the status a
+    passing run gives (_passing_status): every stub gate passes, so a run
+    that logged a true-tree gate line and then failed is not a pass."""
+    passing = _passing_status(text)
+    rc, tree, decoy, calls = _cdpath_outcome(text, relative)
     problems = []
     if not any(call.startswith(tree + " python3 ") for call in calls):
         problems.append("no-gate")
     if any(decoy in call for call in calls):
         problems.append("moved")
+    if rc != passing:
+        problems.append("exit")
     return problems
 
 
@@ -6911,6 +6942,9 @@ def self_test():
             ("_cdpath_outcome", "read_text"): 1,
             ("_cdpath_outcome", "splitlines"): 1,
             ("_naming_scenarios", "splitlines"): 1,
+            # Splits runner text read_runner_text already returned, to run
+            # its pass summary echo and every line after it.
+            ("_passing_status", "splitlines"): 1,
             # Splits runner or quality.yml text read_runner_text already
             # returned, to read back the lines that run an opf.py group.
             ("_opf_group_lines", "splitlines"): 1,
@@ -9310,18 +9344,56 @@ def self_test():
 
     # 44. Each runner's checked directory binding, RUN under bash: a missing
     # dirname, one that fails (printing .) and one that prints nothing each
-    # exit 2 with no gate launched, while the true directory launches gates.
+    # exit 2 with no gate launched, while the true directory launches gates
+    # and exits with the status a passing run gives (_passing_status).
     # Each guard is held by its own named mutant: without the status check
     # the failing dirname runs every gate from the calling directory's
     # parent (or from it, standalone); without the non-empty check the empty
-    # name runs every gate from /. The pinned lines are the live ones.
-    count += 1
+    # name runs every gate from /. The pinned lines are the live ones. The
+    # gate-then-fail runner (the live one with exit 3 after its first gate)
+    # launches a gate under the control and then fails, so only the control's
+    # exit status holds it red; the flip restores the helper that read the
+    # control by its gate launch alone, which passed it.
+    def gate_then_fail(text):
+        first_gate = re.search(r"^run_gate .*\n", text, re.M)
+        if first_gate is None:
+            return None
+        return text[:first_gate.end()] + "exit 3\n" + text[first_gate.end():]
+
+    def control_launch_only(text, relative):
+        problems = []
+        for scenario in ("missing", "failed", "empty", "control"):
+            rc, absent = _dirname_guard_outcome(text, relative, scenario)
+            if scenario == "control":
+                if absent:
+                    problems.append(scenario)
+            elif (rc, absent) != (2, True):
+                problems.append(scenario)
+        return problems
+
+    count += 2
     for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
                               (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
         runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
         if runner_diagnostic is not None:
             failures.append("44 cannot read {}: {!r}".format(relative, runner_diagnostic))
             continue
+        failing = gate_then_fail(runner_text)
+        if failing is None:
+            failures.append("44 {} has no top-level run_gate line".format(relative))
+        else:
+            got = dirname_guard_problems(failing, relative)
+            if got != ["control"]:
+                failures.append("44 {} gate-then-fail runner gave {}, expected "
+                                "['control']".format(relative, got))
+            with patch.object(sys.modules[__name__], "dirname_guard_problems",
+                              control_launch_only):
+                flipped = dirname_guard_problems(failing, relative)
+            if flipped:
+                failures.append(
+                    "44 {} gate-then-fail runner: not red on the flip to the "
+                    "launch-only control (the flip gives {}, not [])".format(
+                        relative, flipped))
         problems = dirname_guard_problems(runner_text, relative)
         if problems:
             failures.append("44 {} dirname guard failed: {}".format(relative, problems))
@@ -9342,11 +9414,24 @@ def self_test():
     # 45. Each runner's cd runs with CDPATH cleared, RUN under bash: started by
     # its relative path from its tree's root under a CDPATH naming a decoy tree
     # that holds the same relative directory, every gate still launches from the
-    # true tree and nothing names the decoy. The pinned line without its CDPATH=
+    # true tree, nothing names the decoy, and the run exits with the status a
+    # passing run gives. The pinned line without its CDPATH=
     # prefix is held red: the bare cd resolves through the decoy, moving the
     # top-level runner's root there and printing the decoy into the standalone
-    # runner's captured directory.
-    count += 1
+    # runner's captured directory. The gate-then-fail runner of vector 44 logs
+    # a true-tree gate line and then fails, so only the exit status holds it
+    # red; the flip restores the helper that never read the exit status, which
+    # passed it.
+    def cdpath_status_unread(text, relative):
+        _rc, tree, decoy, calls = _cdpath_outcome(text, relative)
+        problems = []
+        if not any(call.startswith(tree + " python3 ") for call in calls):
+            problems.append("no-gate")
+        if any(decoy in call for call in calls):
+            problems.append("moved")
+        return problems
+
+    count += 2
     for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
                               (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
         runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
@@ -9356,6 +9441,22 @@ def self_test():
         problems = cdpath_problems(runner_text, relative)
         if problems:
             failures.append("45 {} CDPATH binding failed: {}".format(relative, problems))
+        failing = gate_then_fail(runner_text)
+        if failing is None:
+            failures.append("45 {} has no top-level run_gate line".format(relative))
+        else:
+            got = cdpath_problems(failing, relative)
+            if got != ["exit"]:
+                failures.append("45 {} gate-then-fail runner gave {}, expected "
+                                "['exit']".format(relative, got))
+            with patch.object(sys.modules[__name__], "cdpath_problems",
+                              cdpath_status_unread):
+                flipped = cdpath_problems(failing, relative)
+            if flipped:
+                failures.append(
+                    "45 {} gate-then-fail runner: not red on the flip to the "
+                    "helper that never read the exit status (the flip gives "
+                    "{}, not [])".format(relative, flipped))
         line = binding[2]
         if runner_text.count(line + "\n") != 1 or line.count("CDPATH= cd -- ") != 1:
             failures.append("45 {} binding drift: {}".format(relative, line))
