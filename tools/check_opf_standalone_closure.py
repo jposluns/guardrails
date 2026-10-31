@@ -237,8 +237,11 @@ _SUBSET = [
 # implementation-prompt pin gate, carry the slowest of three runs of each on 2026-10-31, made as the
 # gate runs it (python3 -I -B against a copy of opf/ alone) at the opf/ subtree of the merge of main
 # 328660c87cd52bb55b2c6c184f45b97061ba2c10 into the change adding that gate, plain, one run at a time,
-# on a shared 80-CPU host at load5 42.4 to 42.6: 8.65 to 8.89 s (exit 0), and 1.46 to 1.96 s (exit 1,
-# the gate's last check refusing that tree's prompt). They are INFERRED for any other opf/ tree.
+# on a shared 80-CPU host at load5 42.4 to 42.6: 8.65 to 8.89 s (exit 0), and 1.46 to 1.96 s. Those
+# opf-prompt-pin runs were recorded as exiting 1 (the gate's last check refusing that tree's prompt),
+# which the committed gate does not reproduce: it exits 0 on that tree, so they timed a gate state
+# other than the committed one, and that row is INFERRED for the committed gate. Both rows are
+# INFERRED for any other opf/ tree.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
 # an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
 # below): the host carried other work during the run, but a host loaded beyond it adds contention these

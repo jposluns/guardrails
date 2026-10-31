@@ -97,7 +97,12 @@ Checks, each a named guard:
                   headings and its own worked examples), and a paragraph with an unpaired double
                   quote is a finding because pairing cannot be trusted there
   required-rule   a fixed list of section 4.2 and section 16.1 sentences appears verbatim
-                  (whitespace-insensitively) in both the specification and the prompt
+                  (whitespace-insensitively) in both the specification and the prompt; the
+                  prompt side compares each sentence, rendered through the same vendored pipeline,
+                  with the visible text of the prompt's rendered output less its code-block
+                  content and image alt text, so a sentence inside an HTML comment (block or
+                  inline), shown only as code or carried only as alt text is not restated, while
+                  one split by inline markup or spelled through a character reference is
   prompt-controls the prompt carries no C0 control character other than LF and TAB, and no
                   U+0085, U+2028 or U+2029, anywhere (line models disagree over several of them:
                   CommonMark reads a lone CR as a line ending, marko also reads a form feed as
@@ -113,9 +118,12 @@ Checks, each a named guard:
                   _commonmark_headings), never on a hand-written line model; visible text is
                   derived from the vendored HTML renderer's own output (_visible_from_html):
                   comments (each ending where the vendored parser ends one, so `<!-->` and
-                  `<!--->` are whole comments) and tags drop, character references decode
-                  exactly once, and inline markup (a code span's delimiters, emphasis markers,
-                  link brackets) leaves exactly the text the rendered output shows; a parser or
+                  `<!--->` are whole comments) drop, the inline tags a, code, em and strong drop
+                  to nothing, so a run split by inline markup (a code span's delimiters,
+                  emphasis markers, link brackets) reads joined exactly as the rendered output
+                  shows it, every other tag (a block tag, a line break, any other raw HTML tag
+                  outside the pin section) reads as a line break, so two runs it separates never
+                  glue into one spelling, and character references decode exactly once; a parser or
                   renderer that cannot load, raises, or returns a parse that does not cover the
                   prompt is CANNOT-EVALUATE under prompt-parse, never a fallback line reading
 
@@ -124,9 +132,12 @@ Checks, each a named guard:
                                              name, that each result is stable across two runs, and
                                              that each red fixture covered by one module-level
                                              check turns green when exactly that check is disabled,
-                                             and that each fixture another rule of the same guard
+                                             that each fixture another rule of the same guard
                                              would also refuse carries the intended rule's refusal
-                                             wording
+                                             wording, and that each fixture one visible-text
+                                             reading decides (a comment, a code block, alt text,
+                                             a block tag or an inline tag) changes its result when
+                                             that reading is flipped back to a weaker one
   check_opf_prompt_pin.py --list-quotations  re-runnable probe: print every attributed quotation
                                              with its line and status (MATCH, EXEMPT with the
                                              exemption's name, or NO-MATCH) and any unpaired-quote
@@ -139,10 +150,14 @@ parser that cannot load or parse, a harness error).
 The quotation leg checks only spans whose nearby context names a pinned source; a quotation
 attributed to a document outside the pin (the git man pages the prompt also quotes) or quoted
 without nearby attribution is not checked, and an exact quotation does not prove the prose around
-it reads the source correctly. The required-rule leg compares the prompt's raw text with
-whitespace collapsed, so a required sentence a reader never sees (inside an HTML comment, say)
-still counts. The history leg authenticates nothing: it reads whatever object store the checked
-tree carries, with replacement-object resolution disabled.
+it reads the source correctly. The required-rule leg reads the prompt's visible text, so the
+line-break reading of block tags means a required sentence split across two blocks (two
+paragraphs, or runs either side of a raw block tag) still counts, and raw HTML outside the pin
+section is read with its tags dropped and its text kept, so a sentence inside a script or style
+element there still counts although a browser shows nothing of it; its specification side reads
+the specification's raw text with whitespace collapsed, so a sentence inside an HTML comment in
+the specification still counts there. The history leg authenticates nothing: it reads whatever
+object store the checked tree carries, with replacement-object resolution disabled.
 
 Retired and retargeted rules, each case accounted against main at 328660c87cd5:
   - The step 8 journal rule (the former journal-grading guard) is retired. Its cases were the
@@ -745,13 +760,20 @@ def _check_quotations(prompt_text, sources_norm):
                  "pinned source: {!r}".format(line, quote[:160]))
 
 
-def _check_required_rules(spec_norm, prompt_norm):
+def _check_required_rules(marko, document, spec_norm):
+    """Each required sentence in the specification's raw text and in the prompt's visible text,
+    whitespace-insensitively. The prompt side compares what a reader sees on both sides: the
+    sentence rendered through the same vendored pipeline (_rule_text) against the prompt's
+    credit text (_rule_credit_text), so a sentence inside an HTML comment, block or inline, shown
+    only as code or carried only as image alt text is not restated, while one split by inline
+    markup or spelled through a character reference is."""
+    prompt_visible = _rule_credit_text(marko, document)
     for name, sentence in REQUIRED_RULES:
-        wanted = _normalize(sentence)
-        _require(wanted in spec_norm, "required-rule",
+        _require(_normalize(sentence) in spec_norm, "required-rule",
                  "required rule {!r} is absent from the pinned specification".format(name))
-        _require(wanted in prompt_norm, "required-rule",
-                 "required rule {!r} is not restated in the prompt".format(name))
+        _require(_rule_text(marko, sentence) in prompt_visible, "required-rule",
+                 "required rule {!r} is not restated in the prompt's visible text (outside "
+                 "comments, code blocks and image alt text)".format(name))
 
 
 # Every C0 control character except LF and TAB, plus U+0085, U+2028 and U+2029. Line models
@@ -862,15 +884,19 @@ def _heading_level(node):
 # The rendered output's own markup, used to derive visible text from the vendored renderer's
 # HTML. The renderer escapes every text and attribute character it emits, so no visible "<"
 # survives to be read as a tag here; raw HTML it passes through verbatim is refused inside the
-# pin section before any scan, and elsewhere (the whole-prompt spelling count) it is read
-# conservatively (tags dropped, text kept). A comment ends exactly where the vendored
+# pin section before any scan, and elsewhere (the whole-prompt spelling count and the
+# required-rule credit) it is read with its tags dropped and its text kept, comments aside, which
+# drop whole. A comment ends exactly where the vendored
 # inline parser ends one (opf/tools/_vendor/marko/inline.py: `<!-->` and `<!--->` are whole
 # comments, as they are to a browser), so text after either one reads as the visible text it is
 # rather than as part of a comment running on to a later closer. Its inline tags (a, code, em,
 # strong) wrap text without separating it, so they drop to nothing and a spelling split by inline
 # markup reads exactly as rendered; every other tag opens or closes a block (or is a line break),
-# so it reads as a line break and adjacent blocks never glue together.
+# so it reads as a line break and adjacent blocks never glue together. The renderer itself writes a
+# line break after each block it closes, so the self-test discriminates the line-break reading with
+# a raw block tag between two runs inside one paragraph, which nothing else separates.
 _HTML_COMMENT_RE = re.compile(r"<!--(?:>|->|.*?-->)", re.DOTALL)
+_HTML_PRE_RE = re.compile(r"<pre>.*?</pre>", re.DOTALL)
 _HTML_IMG_RE = re.compile(r"<img\b[^>]*>")
 _HTML_IMG_ALT_RE = re.compile(r'\balt="([^"]*)"')
 _HTML_INLINE_TAG_RE = re.compile(r"</?(?:a|code|em|strong)\b[^>]*>")
@@ -893,26 +919,54 @@ def _render_html(marko, node):
     return rendered
 
 
-def _visible_from_html(rendered):
+def _visible_from_html(rendered, code_blocks=True, image_alt=True):
     """The text a reader of the rendered output sees, derived from the vendored renderer's own
     HTML with the standard library: comments drop (nothing inside one renders), each ending where
-    the vendored parser ends one; an image contributes its alt text (HTML shows alt only as an
-    attribute, so counting it can only add spellings that must agree with the pin);
+    the vendored parser ends one; code-block content stays only where code_blocks keeps it (it
+    renders literally, but text shown only as code is not the prompt stating a rule, so
+    required-rule credit excludes it); an image contributes its alt text only where image_alt
+    keeps it (HTML shows alt only as an attribute, so counting it in the spelling count can only
+    add spellings that must agree with the pin, while required-rule credit excludes it);
     inline tags drop to nothing; every other tag reads as a line break; and character references
     decode exactly once with html.unescape, after tag removal, so a reference the renderer left
     encoded reads as the character a reader sees while text the renderer escaped (a code span's
     literal ampersand run, say) reads as its own spelling."""
     text = _HTML_COMMENT_RE.sub("\n", rendered)
-    text = _HTML_IMG_RE.sub(
-        lambda tag: "\n" + " ".join(_HTML_IMG_ALT_RE.findall(tag.group(0))) + "\n", text)
+    if not code_blocks:
+        text = _HTML_PRE_RE.sub("\n", text)
+    if image_alt:
+        text = _HTML_IMG_RE.sub(
+            lambda tag: "\n" + " ".join(_HTML_IMG_ALT_RE.findall(tag.group(0))) + "\n", text)
+    else:
+        text = _HTML_IMG_RE.sub("\n", text)
     text = _HTML_INLINE_TAG_RE.sub("", text)
     text = _HTML_ANY_TAG_RE.sub("\n", text)
     return html.unescape(text)
 
 
-def _rendered_text(marko, node):
+def _rendered_text(marko, node, code_blocks=True, image_alt=True):
     """The visible text of one parsed node, through the renderer and _visible_from_html."""
-    return _visible_from_html(_render_html(marko, node))
+    return _visible_from_html(_render_html(marko, node),
+                              code_blocks=code_blocks, image_alt=image_alt)
+
+
+def _rule_credit_text(marko, document):
+    """The normalized text that can restate a required rule: the prompt's visible text less its
+    code-block content and image alt text."""
+    return _normalize(_rendered_text(marko, document, code_blocks=False, image_alt=False))
+
+
+def _rule_text(marko, sentence):
+    """The normalized visible form of a required sentence: parsed and rendered through the same
+    vendored pipeline as the prompt, so both sides of the comparison carry one form (a code span's
+    backticks drop on both sides, say, and the comparison is between what two rendered outputs
+    show, never between markup spellings)."""
+    try:
+        document = _commonmark_headings._new_parser(marko).parse(sentence)
+    except Exception as exc:
+        raise _Refusal(CANNOT_EVALUATE, "prompt-parse",
+                       "the vendored parser could not parse a required sentence: {}".format(exc))
+    return _rule_credit_text(marko, document)
 
 
 def _validate(root):
@@ -945,7 +999,7 @@ def _validate(root):
     sources_norm = _sources_norm(source_texts)
     spec_norm = _normalize(source_texts[SPEC_TABLE_PATH])
     _check_quotations(prompt_text, sources_norm)
-    _check_required_rules(spec_norm, _normalize(prompt_text))
+    _check_required_rules(marko, document, spec_norm)
     _check_prompt_controls(prompt_text)
     return "pin {}, {} table row(s), {}".format(pin, len(table), history)
 
@@ -1377,6 +1431,24 @@ def _vectors():
         # it.
         _build_tree(base, extra_text="![Older notes name &#100;" + "d" * 39 + "](x.png)")
 
+    def rule_hidden(name, wrap):
+        # The named required rule dropped from the prompt's prose and carried only in the form
+        # wrap gives it after the pin section: its raw bytes stay in the prompt, so a raw reading
+        # would still credit it, while the visible reading does not.
+        def build(base):
+            _build_tree(base, drop_rule=name, extra_text=wrap(dict(REQUIRED_RULES)[name]))
+        return build
+
+    def stale_runs_outside_section(separator, closer=""):
+        # Two 20-character runs of a stale commit joined by the given separator, the second
+        # followed by closer, after the pin section: the raw text never spells 40 hex characters,
+        # so only the rendered reading of the markup decides whether the visible text spells a
+        # stale commit.
+        def build(base):
+            _build_tree(base, extra_text="Older notes name " + "d" * 20 + separator + "d" * 20
+                        + closer + " here.")
+        return build
+
     def format_char_outside_section(base):
         # A word joiner (U+2060) just outside the pin section: the character rule binds the pin
         # section alone.
@@ -1550,6 +1622,39 @@ def _vectors():
          fence_in_section("~~~" + _FIXTURE_PIN)),
         ("pin-stale-commit-entity-in-image-alt-outside-section", INVALID, "pin-shape",
          "_check_pin_shape", stale_in_image_alt_outside_section),
+        # A raw block tag pair between two runs inside one paragraph: it reads as a line break,
+        # so the runs never glue into a stale spelling (the renderer separates its own blocks
+        # with a line break already, so only raw block tags inside a paragraph discriminate it).
+        ("pin-stale-runs-split-by-block-tag-outside-section", VALID, None, None,
+         stale_runs_outside_section("</p><p>")),
+        # Emphasis around the second run: inline tags drop to nothing, so the visible text spells
+        # the stale commit whole and the rendered side of the spelling comparison refuses it.
+        ("pin-stale-runs-joined-by-emphasis-outside-section", INVALID, "pin-shape",
+         "_check_pin_shape", stale_runs_outside_section("*", "*")),
+        # A required sentence present only where a reader never sees it as stated text: inside
+        # an HTML comment (a block one, and an inline one inside a paragraph), shown only as code
+        # in a fenced code block, or carried only as image alt text.
+        ("required-rule-in-block-comment", INVALID, "required-rule", "_check_required_rules",
+         rule_hidden("malformed-declaration", lambda text: "<!--\n" + text + "\n-->")),
+        ("required-rule-in-inline-comment", INVALID, "required-rule", "_check_required_rules",
+         rule_hidden("imported-counter-ancestry",
+                     lambda text: "A note <!-- " + text + " --> ends here.")),
+        ("required-rule-in-code-block", INVALID, "required-rule", "_check_required_rules",
+         rule_hidden("one-file", lambda text: "```\n" + text + "\n```")),
+        ("required-rule-in-image-alt", INVALID, "required-rule", "_check_required_rules",
+         rule_hidden("one-file", lambda text: "![" + text + "](x.png)")),
+        # A required sentence split by inline emphasis: the visible text states it whole, so it
+        # is restated, which a raw reading would miss.
+        ("required-rule-split-by-emphasis", VALID, None, None,
+         rule_hidden("one-file", lambda text: text.replace("that declaration",
+                                                           "*that declaration*", 1))),
+        # The stated residuals: a required sentence split across two paragraphs, and one inside
+        # a script element outside the pin section, each still counts as restated.
+        ("required-rule-split-across-paragraphs-residual", VALID, None, None,
+         rule_hidden("one-file",
+                     lambda text: text.replace(" as one file,", "\n\nas one file,", 1))),
+        ("required-rule-in-script-element-residual", VALID, None, None,
+         rule_hidden("one-file", lambda text: "<script>\n" + text + "\n</script>")),
         ("pin-pack-version-second-spelling-prose", INVALID, "pack-facts", "_check_pack_facts",
          stale_in_section('Older notes say version = "9.9.9" here.')),
         ("pin-pack-version-second-spelling-escaped-backticks", INVALID, "pack-facts",
@@ -1669,12 +1774,89 @@ _REFUSAL_WORDING_VECTORS = (
 def _with_check_disabled(name):
     """Replace the named module-level check with a no-op; returns the restorer. Attribute patching,
     so the disabled run exercises the real _validate with one guard removed."""
-    real = globals()[name]
+    return _with_globals({name: lambda *args, **kwargs: None})
+
+
+def _with_globals(replacements):
+    """Replace the named module-level attributes; returns the restorer, which puts every original
+    back."""
+    real = {name: globals()[name] for name in replacements}
 
     def restore():
-        globals()[name] = real
-    globals()[name] = lambda *args, **kwargs: None
+        globals().update(real)
+    globals().update(replacements)
     return restore
+
+
+class _SubWith:
+    """A stand-in for one of the rendered-markup patterns whose sub ignores the replacement the
+    caller passes and uses its own, so a reading flip changes what one kind of tag reads as."""
+
+    def __init__(self, pattern, replacement):
+        self.pattern = pattern
+        self.replacement = replacement
+
+    def sub(self, _replacement, text):
+        return self.pattern.sub(self.replacement, text)
+
+
+def _reading_flip(name, base):
+    """The module-level replacements that flip one reading back to a weaker one, for the fixture
+    tree at base: raw-rule-reading restores the raw reading of the required-rule leg (the prompt's
+    raw text and each sentence's own spelling, whitespace collapsed), code-block-credit and
+    image-alt-credit let code-block content or image alt text restate a rule, block-tags-glue
+    reads every block tag as nothing, and inline-tags-break reads every inline tag as a line
+    break."""
+    prompt = Path(base) / "opf" / PROMPT_REL
+    flips = {
+        "raw-rule-reading": lambda: {
+            "_rule_credit_text": lambda marko, document: _normalize(
+                prompt.read_text(encoding="utf-8")),
+            "_rule_text": lambda marko, sentence: _normalize(sentence)},
+        "code-block-credit": lambda: {
+            "_rule_credit_text": lambda marko, document: _normalize(
+                _rendered_text(marko, document, code_blocks=True, image_alt=False))},
+        "image-alt-credit": lambda: {
+            "_rule_credit_text": lambda marko, document: _normalize(
+                _rendered_text(marko, document, code_blocks=False, image_alt=True))},
+        "block-tags-glue": lambda: {"_HTML_ANY_TAG_RE": _SubWith(_HTML_ANY_TAG_RE, "")},
+        "inline-tags-break": lambda: {"_HTML_INLINE_TAG_RE": _SubWith(_HTML_INLINE_TAG_RE, "\n")},
+    }
+    return flips[name]()
+
+
+# Each fixture whose result one reading decides, with a flip of that reading back to a weaker one
+# and the result the fixture must then give: a red result must turn green and a green one red, so
+# each fixture discriminates the reading it names rather than passing under either.
+_READING_FLIP_VECTORS = (
+    ("required-rule-in-block-comment", "raw-rule-reading", VALID, None),
+    ("required-rule-in-inline-comment", "raw-rule-reading", VALID, None),
+    ("required-rule-in-code-block", "raw-rule-reading", VALID, None),
+    ("required-rule-in-code-block", "code-block-credit", VALID, None),
+    ("required-rule-in-image-alt", "raw-rule-reading", VALID, None),
+    ("required-rule-in-image-alt", "image-alt-credit", VALID, None),
+    ("required-rule-split-by-emphasis", "raw-rule-reading", INVALID, "required-rule"),
+    ("pin-stale-runs-split-by-block-tag-outside-section", "block-tags-glue", INVALID,
+     "pin-shape"),
+    ("pin-stale-runs-joined-by-emphasis-outside-section", "inline-tags-break", VALID, None),
+)
+
+
+def _reading_flip_checks(tmp, check):
+    builders = {name: build for name, _, _, _, build in _vectors()}
+    ran = 0
+    for vector, flip, status, guard in _READING_FLIP_VECTORS:
+        base = Path(tmp) / ("flip-" + vector + "-" + flip)
+        base.mkdir()
+        builders[vector](base)
+        restore = _with_globals(_reading_flip(flip, base))
+        try:
+            got = validate_tree(base)
+        finally:
+            restore()
+        ran += 1
+        check(vector + "-flip-" + flip, got, (status, guard))
+    return ran
 
 
 def _refusal_wording_checks(tmp, check):
@@ -1912,6 +2094,7 @@ def _self_test_isolated():
                     check(name + "-disabled-" + covering, disabled, (VALID, None))
             count += _history_vectors(tmp, check)
             count += _refusal_wording_checks(tmp, check)
+            count += _reading_flip_checks(tmp, check)
             count += _list_quotations_probe(tmp, check)
             count += _prompt_parse_probe(tmp, check)
             count += 1
