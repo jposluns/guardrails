@@ -1284,7 +1284,7 @@ def _system_pin_vector(root, scratch, real_git):
     strings."""
     global _pinned_git_env
     if real_git is None:
-        return ["system pin: no real git executable was located before the fixture lifecycle; not run"]
+        return ["system pin: no real git executable was found behind the fixture lifecycle's wrapper; not run"]
     import shlex
     failures = []
     scratch.mkdir(parents=True, exist_ok=True)
@@ -1356,7 +1356,7 @@ def _ownership_vector(root, scratch, real_git, run_check):
     run_check(root) returns (exit, stderr). Returns a list of failure strings."""
     global OWNERSHIP_REFUSAL_MARKS
     if real_git is None:
-        return ["ownership: no real git executable was located before the fixture lifecycle; not run"]
+        return ["ownership: no real git executable was found behind the fixture lifecycle's wrapper; not run"]
     import shlex
     failures = []
     home, clean = scratch / "home", scratch / "clean"
@@ -1423,16 +1423,27 @@ def _ownership_vector(root, scratch, real_git, run_check):
 
 def self_test_main():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import shutil
     from _git_fixture_env import fixture_git_lifecycle
-    # The real git, located before the lifecycle puts its system-pinning wrapper first on PATH: the system-pin
-    # and ownership vectors run it through their own shims.
-    real_git = shutil.which("git")
     with fixture_git_lifecycle():
-        return _self_test_main_isolated(real_git)
+        return _self_test_main_isolated()
 
 
-def _self_test_main_isolated(real_git=None):
+def _caller_git():
+    """The git the fixture lifecycle's system-pinning wrapper runs, for the system-pin and ownership vectors,
+    which run it through their own shims. Inside the lifecycle git resolves to that wrapper, whose directory
+    the lifecycle puts in front of the caller's PATH; every PATH entry that resolves git to the same file is
+    skipped, so this is the git the caller's PATH finds. None when there is none. Residual: called outside the
+    lifecycle, it skips the caller's own first git instead and returns the next one on PATH, or None (the
+    vectors then report themselves not run)."""
+    import shutil
+    first = shutil.which("git")
+    if first is None:
+        return None
+    rest = [d for d in os.environ.get("PATH", os.defpath).split(os.pathsep) if os.path.join(d, "git") != first]
+    return shutil.which("git", path=os.pathsep.join(rest))
+
+
+def _self_test_main_isolated():
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     import io
@@ -1444,6 +1455,8 @@ def _self_test_main_isolated(real_git=None):
     if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
         print("SELF-TEST ERROR: git is unavailable; fail-closed", file=sys.stderr)
         return 2
+    # Resolved once, for the system-pin and ownership vectors (_caller_git).
+    real_git = _caller_git()
 
     def run_quiet(root, check):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
