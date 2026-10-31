@@ -175,12 +175,14 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   neither as an exclusion.
 - **Layout.** Use `layout = "inline"` (section 9, The manifest, storage layout). `per-record`
   needs the concurrent-operation module.
-- **Modules.** Leave every module off in your project's store (`governance`,
-  `delivery_assurance`, `operational_policy`, `concurrent_operation`). Section 8.1 (Type taxonomy
-  and placement) says modules ship default-off, section 8.5 (Transition rules) gives module types
-  only in outline, and section 14.1 says adoption MUST refuse to enable a record type the writer
-  cannot author. Your implementation still builds module enablement in step C, for the same
-  reason as relocation; a conformance claim does not name modules as an exclusion.
+- **Modules.** Enable every module in your project's store (`governance`,
+  `delivery_assurance`, `operational_policy`, `concurrent_operation`), each through the step C
+  `enable-module` operation after the store exists; initialization itself still creates the store
+  with every module off, since section 8.1 (Type taxonomy and placement) says modules ship
+  default-off. Section 8.5 (Transition rules) gives each module type its full schema, and section
+  14.1 says adoption MUST refuse to enable a record type the writer cannot author, so your writer
+  supports every module type before step C enables its module; a conformance claim does not name
+  modules as an exclusion.
 - **Profiles.** Declare no profile. The `[profiles.aiqt]` table in the section 9 example is
   optional and ignored by base-only tooling (section 9.1, Base standard and profiles).
 - **Posture.** `posture = "required"` and `import_status = "none"` (section 11, Enforcement
@@ -214,9 +216,10 @@ maintainer to ratify it. Where this prompt proposes a choice, it is labelled as 
 choice or reading, and it is still yours to confirm. Once the store exists, record each open
 question as a `pending_decision` record; only the maintainer records the ruling. In your
 conformance report, list these choices as implementation choices, not as requirements of the
-standard. None of them makes a stated MUST optional. Open point 26 differs from the others: it
-names details the module types need that no choice of yours can supply, and it blocks the
-conformance claim (checklist item 19) until the maintainer resolves it.
+standard. None of them makes a stated MUST optional. Open point 26 differed from the others: it
+named details the module types need that no choice of yours could supply. The section 8.5 module
+schemas now state them, so it is resolved and no longer blocks the conformance claim (checklist
+item 19).
 
 1. **Closed schemas per type.** Section 8.3 (The record envelope) says schemas are closed and types
    add their own fields, but the specification names only some type fields: `severity` on a
@@ -618,21 +621,19 @@ conformance claim (checklist item 19) until the maintainer resolves it.
     outcome kept under a registered `x-<vendor>` table, are performed by no operation of this
     prompt, so they stay the maintainer's reviewed edit (step 14, Ordering, row R4b). If the
     maintainer wants an assistant to make them, add a writer operation for them first.
-26. **Module record schemas. This open point blocks the conformance claim.** Section 8.5 says
-    "Module types, in outline (full schemas ship with the module schemas release)", and gives each
-    module type's states and little else: it names no field of a maintainer_action, an artifact, a
-    release, a waiver, a mode, a tier_assessment or a session_lease beyond the envelope, and of a
-    gate_run only "a three-valued verdict field (`pass`, `fail`, `cannot_evaluate`), never folded
-    into status", without its name. Section 14.1 says "Adoption MUST refuse to enable a record type
-    the writer cannot author, and enforcement MUST NOT ship before the writer can perform every
-    operation it forces." Step C builds module enablement, grading and authoring as far as the
-    specification defines them. Do not invent the missing fields, and do not read them out of the
-    reference tooling's code. Ask the maintainer to resolve each one, by naming a source pinned by
-    commit and SHA-256 or by a recorded ruling, and keep the request in your implementation notes.
-    Until a module type's schema is resolved, your writer cannot author that type, so enabling its
-    module refuses before any write, naming this open point, and the step C checks that need it are
-    reported as not run. Report this as a blocker of checklist item 19, never as an exclusion from
-    your conformance scope.
+26. **Module record schemas. Resolved: section 8.5 now states the full schemas.** An earlier draft
+    of section 8.5 gave module types only in outline and deferred their fields to a later module
+    schemas release, so this point once blocked the conformance claim. The current section 8.5
+    states each module type's states, transitions, gated states and fields (for example a
+    gate_run's required `gate` and three-valued `verdict`, never folded into status, and a waiver's
+    `expires_at`, required at creation), section 8.6 states the module joins, and section 8.8
+    extends `create` and `transition` to every enabled type and defines `enable-module` and
+    `disable-module`. Build the module types from the specification alone, and still do not read
+    fields out of the reference tooling's code. Section 14.1 says "Adoption MUST refuse to enable a
+    record type the writer cannot author, and enforcement MUST NOT ship before the writer can
+    perform every operation it forces", so enablement follows your writer's support for the
+    module's types; with the schemas stated, build that support in full, and record in your
+    implementation notes that this point is resolved by the specification text itself.
 27. **A new ID in a maintainer's reviewed repair.** Section 8.2 says "allocation MUST increment its
     counter under the store's lock as one atomic claim". Some integrity defects that step 14,
     Ordering, row R22 routes to the maintainer's reviewed edit need a record with a new ID: a
@@ -688,7 +689,8 @@ In the default in-repo pattern they are the same repository.
       version.toml           release ledger (section 6.1)
       worklog.toml           durable operational record (section 6.2)
       init.toml              bootstrap provenance of the coupled init (section 9)
-      <type>.index.toml      one per enabled baseline type except worklog (sections 4.2, 8.1)
+      <type>.index.toml      one per enabled type except worklog (sections 4.2, 8.1; baseline
+                             at init, module types once step C enables their modules)
       <type>.imported.index.toml   empty imported leaf, one per enabled type except worklog
       worklog.imported.toml  the worklog's empty imported leaf (section 4.2)
     archive/                 reserved: moved/ and adoption/<run-id>/ (sections 4.2, 14.2)
@@ -988,7 +990,10 @@ record).
 - **Enabled types.** The twelve baseline types and their namespaces are in the section 8.1 table:
   backlog_item BI, done DN, worklog WL, finding FN, pending_decision PD, autonomous_decision AD,
   block BL, handoff HO, reference RF, contribution CN, maintainer_decision MD and
-  preference_pattern PP. `transaction` (TX) is excluded and reserved, and `CL` and `LF` are
+  preference_pattern PP. The eight module types and their namespaces are in the same table:
+  maintainer_action MA, artifact AR, gate_run GR, release RL, waiver WV, mode MO, tier_assessment
+  TA and session_lease SL; each joins the enabled set when step C enables its module. `transaction`
+  (TX) is excluded and reserved, and `CL` and `LF` are
   reserved and unassigned, so no type uses either (the section 8.1 table lists each as "Reserved,
   unassigned" with no type).
 - **counters.toml.** Independent monotonic high-water values per series and namespace: a key per
@@ -1650,8 +1655,9 @@ Acceptance checks:
 
 Implement section 8.8 (Authoring operations). Subcommands:
 
-- `create`: a new record of an enabled baseline type in its initial state (not `done` receipts or
-  worklog entries).
+- `create`: a new record of an enabled type, baseline or module tier, in its initial state (not
+  `done` receipts, worklog entries or `session_lease` records, which the step 7 lease bookkeeping
+  writes).
 - `transition`: a checked status change; writes `proposed_from` on an assistant or automation
   landing at `/proposed`; a rejection restores exactly the recorded `proposed_from` state, and
   leaving the `/proposed` status, by rejection or ratification, removes the field; writes or
@@ -1699,12 +1705,15 @@ Implement section 8.8 (Authoring operations). Subcommands:
   the reviewed commit records who made a correction; disclose that with the step 14 residuals.
   Its allowed delta is exactly those value changes on that one row: no ID claim, no counter change
   and no other row. It appends no entry of its own: section 8.8 requires a lifecycle entry only of
-  `create`, `transition`, `done-with-receipt` and `receipt-repair`, and section 17 says the
+  `create`, `transition`, `done-with-receipt`, `receipt-repair`, `enable-module` and
+  `disable-module`, and section 17 says the
   unreleased tail's
   mutability "rests on review and version-control history rather than machine enforcement", so the
   reviewed commit records the correction. A correction never takes `/proposed`, since a worklog
   entry never does (section 8.4), and like every subcommand it leaves the change uncommitted for the
   maintainer's review.
+- `enable-module` and `disable-module`: the maintainer-only module operations of section 8.8, each
+  with its own lifecycle worklog entry; step C builds them with their acceptance checks.
 - Handoff supersession: section 8.5 says "Posting a new handoff MUST supersede the previous in the
   same act", and section 8.8 gives no operation for it. Implement it only as open point 21
   describes, as the maintainer-performed replacement, once the maintainer has ruled. Until then,
@@ -2020,15 +2029,19 @@ Acceptance checks, on throwaway fixtures adopted by step A:
 
 ### Step C: modules
 
-Section 8.1 says "Modules ship default-off; each is enabled by one manifest edit." Build that
-enablement as a writer operation, and the grading and authoring of each module type as far as
-the specification defines them (section 8.5; open point 26). Section 4.2 says "enabling a further
+Section 8.1 says modules ship default-off and that enabling one "is a single act that performs the
+manifest edit and every section 4.2 same-act duty together"; section 8.8 defines that act as the
+maintainer-only `enable-module` operation, with `disable-module` as its counterpart. Build both,
+and the grading and authoring of each module type as section 8.5 defines it (open point 26,
+resolved). Section 4.2 says "enabling a further
 type or module later MUST create its imported leaf in the same act as its clean index", and
 "Enabling a further type or module MUST also add its imported counter row in the same act as its
 clean index, at zero only where no imported ancestry exists and otherwise at the largest `<n>` of
 that namespace's `imported:<NS>-<n>` IDs." Where the concurrent-operation module is enabled, the
-lease is additionally recorded as a `session_lease` record (section 5.7), and the `per-record`
-layout becomes available (section 9).
+lease is additionally recorded as a `session_lease` record, lease bookkeeping that carries no
+worklog entry (section 5.7), and the `per-record` layout becomes available (section 9), while an
+inline store with the module enabled stays valid. Enable all four modules in your project's store
+once these checks pass there (Choices to make before you start, Modules).
 
 Acceptance checks, on throwaway stores:
 
@@ -2037,8 +2050,12 @@ Acceptance checks, on throwaway stores:
   validator then reports valid.
 - Enabling a module whose imported ancestry holds `imported:<NS>-<n>` IDs sets that imported
   counter row to the largest such `<n>`.
-- Enabling a module whose type schema open point 26 leaves unresolved refuses before any write,
-  naming open point 26; report the checks that need that schema as not run.
+- Enabling an unknown module, a module already enabled, or a module any of whose types the writer
+  cannot author refuses before any write (sections 8.8 and 14.1).
+- Disabling refuses while any clean or imported record of the module's types exists, in the active
+  indexes or the archive; on a module whose indexes and imported leaves are all empty it clears the
+  `[modules]` flag and the `[types.<name>]` rows, removes those empty files, leaves `counters.toml`
+  untouched, and the validator then reports valid (section 8.8).
 
 ### Step D: relocation and `opf sync`
 
@@ -2136,8 +2153,9 @@ nothing rotates, and the step 6 validator already refuses an archive it cannot r
   named `toml`; section 4.2 says "the example name `toml` MUST NOT be hardcoded").
 - Only records in unqualified terminal states, other than worklog records, may rotate, so a
   `/proposed` record stays active. Worklog records rotate only as released, frozen spans. Open
-  records, active blocks, unresolved decisions, unexpired waivers, the current handoff and the
-  unreleased worklog tail never rotate (section 12), and the imported series never rotates.
+  records, active blocks, unresolved decisions, waivers at `active`, the current handoff and the
+  unreleased worklog tail never rotate (section 12: a revoked waiver confers nothing whatever its
+  `expires_at` and, like an expired one, may rotate), and the imported series never rotates.
 - Each rotation writes that year's `archive.toml`, enumerating every moved ID (and, for the
   worklog, every moved span) and its destination. Counters are untouched. Validation confirms that
   every ID exists in exactly one active or archived location, and coverage gates read active and
@@ -2347,7 +2365,7 @@ platform." Wire all four, not only the platform you run on.
   | R16a | A `working` summary's prose in `CHANGELOG.md`, the unreleased section's included, drafted or edited | 6.3, 7.2 ("edited with no ceremony"), 7.3 | any actor but an importer; publication stays R16 | a direct edit of `CHANGELOG.md`, which writes no store TOML and which no deny rule covers |
   | R16b | The `covers = "unreleased"` summary row added or removed, with its `## unreleased` heading | 6.1, 6.3, 7.1 | a maintainer; an assistant drafts the section's prose (R16a) once the row exists | maintainer's reviewed edit |
   | R17 | A manifest change other than R17a: a posture change, a registration | 8.1, 8.7, 9, 11 | a maintainer; a posture weakening only under the maintainer's recorded authorization | maintainer's reviewed edit |
-  | R17a | A module enabled: its `[modules]` flag, and for each of its types the `[types.<name>]` row, clean index, imported leaf, clean counter row and imported counter row, in one act | 4.2, 8.1, 8.2 | the operator | module enablement (step C); your project's store enables none (checklist item 5) |
+  | R17a | A module enabled: its `[modules]` flag, and for each of its types the `[types.<name>]` row, clean index, imported leaf, clean counter row and imported counter row, in one act | 4.2, 8.1, 8.2 | the operator | module enablement (step C); your project's store enables each of the four modules this way (checklist item 5) |
   | R19 | `lease.toml` taken and released | 5.7 | the running operation | the step 7 lease, inside every operation that writes the store |
   | R20 | `init.toml`, the empty imported leaves, the pointer `.opf.toml`, `.working/.gitignore` and `.working/README.md`, each created | 4.2, 9; OPF-INIT-D2B; open point 14 | the operator | `opf init` (step 9), and module enablement (step C) for an enabled module's imported leaves; no operation writes them after, and every other file init creates is then written by the rows that name it |
   | R21 | Records moved to the archive, with the year's `archive.toml` | 12 | the operator | rotation (step 12); until it exists nothing rotates |
@@ -2372,8 +2390,9 @@ platform." Wire all four, not only the platform you run on.
     correction of a valid clean record's title, summary, links, refs or registered `x-<vendor>`
     tables is a new record through `create` linking `corrects`; ask the maintainer to ratify it. A
     defect that keeps the store from validating, such as a dangling link, is repaired under R22
-    instead. No module is enabled (checklist item 5), so no module type's fields have rows;
-    enabling one is R17a, the step C operation, and section 14.1 says adoption "MUST refuse to
+    instead. A module type's records, once step C enables its module (checklist item 5), take the
+    same reading under the section 8.5 module schemas; enabling a module is R17a, the step C
+    operation, and section 14.1 says adoption "MUST refuse to
     enable a record type the writer cannot author".
   - R16, R16b and R17: none of those changes is an assistant's act here. Publication follows the
     curation flow of section 7.3, where "the published words are the curator's"; a posture weakening
@@ -2541,10 +2560,9 @@ Acceptance checks:
   tooling supports a later version, so report that branch as not run, naming that reason. The
   hand move-aside is a remedy only for a tree to be adopted, which this clone is not.
   For R17, make a change that leaves the store valid, such as registering a vendor token. For
-  R17a, enable a module with the step C operation in the throwaway clone; your project's store
-  enables no module (checklist item 5). While open point 26 leaves that module's type schemas
-  unresolved, the operation refuses, so report R17a as not run, naming open point 26, as step C
-  reports its own checks. Report each row's result by its row number.
+  R17a, enable a module with the step C operation in the throwaway clone, as the same operation
+  enables each module in your project's store (checklist item 5); open point 26 is resolved, so
+  the operation performs the enablement and R17a runs. Report each row's result by its row number.
 - Who runs a maintainer's step in these checks. A reviewed edit, and a commit with the hooks
   bypassed that builds a defect for a part b row, is the maintainer's act, made outside any
   assistant tool call. Write each such step as a script, ask the maintainer to run it in their own
@@ -2825,8 +2843,10 @@ maintainer's ruling on an open point, report the ruling with it.
 4. `.opf.toml` resolves the store; resolution and discovery fail closed in the step 2 cases.
 5. `manifest.toml` declares `standard = "opf"`, `spec_version = "2.0.0"`, `homes = 2`,
    `layout = "inline"`, `posture = "required"`, the providers as ratified under step 3 (this
-   prompt's choice: `local-directory` and `generic-git-remote`), and no module enabled.
-6. Every enabled baseline type other than `worklog` has a clean index and an imported index; the
+   prompt's choice: `local-directory` and `generic-git-remote`), and every module enabled, each
+   through the step C `enable-module` operation after initialization (which itself enables none).
+6. Every enabled type, baseline and module tier, other than `worklog` has a clean index and an
+   imported index; the
    worklog has `worklog.toml` and `worklog.imported.toml`; `counters.toml` covers every clean and
    imported namespace; `version.toml` and `worklog.toml` exist with `schema = 1`; `init.toml`,
    `CHANGELOG.md` and the `.working/README.md` of open point 14 exist.
@@ -2847,7 +2867,7 @@ maintainer's ruling on an open point, report the ruling with it.
 10. The step 8 refusals hold before any write, and `opf upgrade` refuses every invocation
     (section 9.2). Adoption (step A), post-adoption import (step B), module enablement (step C) and
     relocation with `opf sync` (step D) are implemented and passed their checks on throwaway
-    fixtures, apart from the step C checks that open point 26 leaves not run.
+    fixtures.
 11. Initialization implements `opf.init.coupled/v1` (this prompt's scope choice; see "Choices to
     make before you start"): exit 0 only on fresh observations, with the exact success sentence;
     init-created sources staged as exact entries; views unstaged; no commit created; final
@@ -2879,7 +2899,7 @@ maintainer's ruling on an open point, report the ruling with it.
     branch protection is recorded apart from the local probe results; and every row of the step 14
     Ordering table, lettered rows included, passed the table walk, R21 excepted while rotation is
     not implemented (item 15) and R30's tooling-upgrade branch reported as not run as the walk
-    says; R17a waits on open point 26, as step C's checks do.
+    says.
 18. Every open point you filled is listed with your choice and its ratification status.
 19. The conformance statement uses only the section 16 vocabulary, for example
     "`conformant_for_declared_scope` (OPFiles base, spec 2.0.0 on homes 2; self-asserted; profiles:
@@ -2890,7 +2910,8 @@ maintainer's ruling on an open point, report the ruling with it.
     `opf sync` are never named as exclusions; profiles are reported as "Out of scope for this
     prompt" says; and an open point you could not settle is named as an exclusion only where it
     waives no base requirement, while one that a base requirement depends on, as open point 26
-    does, blocks the claim rather than narrowing it.
+    did before the section 8.5 module schemas resolved it, blocks the claim rather than narrowing
+    it.
 20. The documentation of each release and every conformance report your report emitter writes
     declare the release identity and the supported `spec_version` (`2.0.0`), homes generation (2)
     and worklog storage generation (1), as section 16.1 requires, and declare no class; the

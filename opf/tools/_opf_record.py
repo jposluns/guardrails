@@ -1014,8 +1014,9 @@ def _require_create_type(rtype, ctx):
             rtype, _OTHER_SUBCOMMAND[rtype]))
     spec = _opf_schema.BASELINE_SPECS.get(rtype)
     if spec is None or rtype not in ctx.types:
-        raise RecordError("create supports the enabled baseline record types only, not {!r} (module-tier "
-                          "record schemas have not shipped); fail-closed".format(rtype))
+        raise RecordError("create supports the enabled baseline record types only, not {!r} (spec 8.5 states "
+                          "the module-tier record schemas, which this writer does not implement yet); "
+                          "fail-closed".format(rtype))
     return spec
 
 

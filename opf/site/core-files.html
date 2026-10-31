@@ -130,7 +130,9 @@
         however, what declares every other pair, because the <code>[views.*]</code> map is the registry
         the renderer and the drift gate read. It is created by <code>opf init</code>, validated before a
         byte is written; updated by the adopter's own reviewed edit to
-        enable a module, register a vendor, or record an unmanaged path, and, in the standard's planned
+        register a vendor or record an unmanaged path, by the standard's <code>enable-module</code>
+        operation to enable a module (spec section 8.8), which the standard defines and the
+        reference tooling does not implement yet, and, in the standard's planned
         <code>opf migrate</code> operation, re-pointing the recorded sync target. Migration is not yet
         implemented in the reference CLI. <code>opf render</code> reads the view map, and
         <code>opf doctor</code> checks posture, types, modules, unmanaged containment, and sync agreement.</p>

@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Record indexes | OPFiles</title>
-<meta name="description" content="The eleven baseline typed indexes, their declared generated views, and the planned module schemas.">
+<meta name="description" content="The eleven baseline typed indexes, their declared generated views, and the module record schemas.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Record indexes | OPFiles">
-<meta property="og:description" content="The eleven baseline typed indexes, their declared generated views, and the planned module schemas.">
+<meta property="og:description" content="The eleven baseline typed indexes, their declared generated views, and the module record schemas.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -51,7 +51,7 @@
   <div class="refhead pagehead">
     <p class="eyebrow">Reference</p>
     <h1>Record indexes</h1>
-    <p class="lead">Eleven baseline typed indexes, their declared generated views, and the planned module schemas. The examples show inline storage; the specification also defines per-record storage, which the reference renderer does not support. Lifecycle descriptions state the standard's rules; they do not imply an automatic writer for each transition. Choose a type to inspect.</p>
+    <p class="lead">Eleven baseline typed indexes, their declared generated views, and the module record schemas. The examples show inline storage; the specification also defines per-record storage, which the reference renderer does not support. Lifecycle descriptions state the standard's rules; they do not imply an automatic writer for each transition. Choose a type to inspect.</p>
   </div>
 
   <div class="navtabs" data-reference-hub role="tablist" aria-label="Record type">
@@ -993,7 +993,7 @@
         <span>8 record types</span>
         <span>+ 3 reserved</span>
       </div>
-      <p>Beyond the twelve baseline types, the specification names eight types in four optional modules and reserves three names or namespaces: <code>TX</code>, <code>CL</code> and <code>LF</code>. Modules default off; a manifest edit enables their declarations, while full module record schemas remain planned.</p>
+      <p>Beyond the twelve baseline types, the specification names eight types in four optional modules and reserves three names or namespaces: <code>TX</code>, <code>CL</code> and <code>LF</code>. Modules default off; enabling one is a single act that performs the manifest edit and its same-act duties together (spec section 8.8), and the specification states each module type's full record schema (spec section 8.5).</p>
     </div>
 
     <h3>The module and importer types</h3>
@@ -1047,25 +1047,25 @@
                              legacy_fragment (quarantined &#8594; resolved | ignored) in stores
                              holding such records from its retired import path
   </pre></div>
-    <p>These are outline state sets; the full module record schemas ship with the module schemas release. The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
-    <p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it. Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped. Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence. A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and its manifest declares a spec_version below 2.0.0, which the reference tooling refuses as a store, as the standard's section 9.2 validation does. In a store that holds <code>legacy_fragment</code> records, as in a store with module-tier records, doctor reports cannot-evaluate and <code>opf render --write</code> refuses, because the baseline validator does not validate those records' content schemas. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
+    <p>These are the state sets; the specification states each module type's full record schema, states, transitions, gated states and required fields included (spec section 8.5). The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
+    <p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it. Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped. Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence. A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and its manifest declares a spec_version below 2.0.0, which the reference tooling refuses as a store, as the standard's section 9.2 validation does. In a store that holds <code>legacy_fragment</code> records, as in a store with module-tier records, doctor reports cannot-evaluate and <code>opf render --write</code> refuses, because the baseline validator does not validate those records' content schemas. The specification states the module record schemas (spec section 8.5), but the reference renderer does not implement them yet: it covers the baseline types today, renders no module-type index mirror, and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>
-    <p>Default-off modules are intended to keep the baseline small while sharing an extended vocabulary. Enabling a module permits its type declarations with normative namespaces; declaring a module type without enabling its module is a validation finding. Enabling it does not supply a missing record schema.</p>
+    <p>Default-off modules are intended to keep the baseline small while sharing an extended vocabulary. Enabling a module permits its type declarations with normative namespaces; declaring a module type without enabling its module is a validation finding. The record schemas themselves come from the specification (spec section 8.5), not from enablement.</p>
 
     <dl class="refstrip">
       <div>
         <dt>Enabled by</dt>
         <dd>
           <span class="chip"><code>manifest.toml</code></span>
-          <p>One manifest edit per module, under the adopter's own review flow.</p>
+          <p>One enabling act per module, the manifest edit and its same-act duties together (spec section 8.8), under the adopter's own review flow.</p>
         </dd>
       </div>
       <div>
         <dt>Created by</dt>
         <dd>
-          <p>By process, once a module is enabled; the reference CLI's <code>opf record create</code> authors baseline types only, since the module record schemas have not shipped. Nothing creates <code>legacy_fragment</code> records now: ordinary import is retired and refuses, and the type remains only for existing stores.</p>
+          <p>By process, once a module is enabled; the reference CLI's <code>opf record create</code> authors baseline types only; it does not implement the module record schemas the specification states (spec section 8.5). Nothing creates <code>legacy_fragment</code> records now: ordinary import is retired and refuses, and the type remains only for existing stores.</p>
         </dd>
       </div>
       <div>
@@ -1081,7 +1081,7 @@
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M16.5 13.5v6M13.5 16.5h6"/></svg></span>
       <h4>Growth without fragmentation</h4>
-      <p>The intended benefit is shared semantics as projects adopt additional record types. A reviewed manifest edit enables declarations; full module record validation and rendering remain separate implementation work.</p>
+      <p>The intended benefit is shared semantics as projects adopt additional record types. A reviewed enabling act permits declarations; module record validation and rendering remain implementation work the reference tooling has not shipped.</p>
     </div>
   </div>
 </section>

@@ -343,7 +343,9 @@
     <p><b style="color:var(--ink)">Purpose.</b> Author one change to the store's records at a time,
       without editing TOML by hand.</p>
     <p><b style="color:var(--ink)">How it works.</b> Four subcommands share one operation.
-      <code>create</code> adds a record of an enabled baseline type in its initial state.
+      <code>create</code> adds a record of an enabled type in its initial state (under the standard,
+      an enabled type is baseline or module tier, spec section 8.8; the reference tooling authors
+      the baseline types).
       <code>transition</code> changes a record's status under its type's rules: an assistant or
       automation that lands a terminal or gated state gets <code>/proposed</code>, and only a
       maintainer ratifies or rejects. When it lands a proposed status, <code>transition</code> writes

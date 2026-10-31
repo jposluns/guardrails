@@ -217,6 +217,8 @@ PROFILE_KEYS = frozenset({"version", "base_compat", "posture_floor", "required_m
                           "extension_namespace"})
 PROFILE_OPTIONAL_EXTRA = frozenset({"verification_floor"})   # profile-namespaced extras a profile MAY add
 TYPE_KEYS = frozenset({"namespace"})
+# [types.tier_assessment] alone may also declare the adopter's tier vocabulary (spec 9 / 8.5).
+TIER_VOCAB_KEYS = frozenset({"tier_vocabulary"})
 PROVIDER_KEYS = frozenset({"handler", "roles"})
 PROVIDER_ROLES = ("create", "auth", "sync")
 VIEW_KEYS = frozenset({"kind", "sources", "target"})
@@ -2165,6 +2167,12 @@ def validate_manifest(data, supported_profiles=None, *, manifest_rel=None):
     spec_tuple = _validate_base(base, findings, manifest_rel)
     _validate_store_section(data.get("store"), findings)
     modules_enabled = _validate_modules(data.get("modules"), findings)
+    # Spec 9: the layouts couple to the concurrent-operation module one way only, so the per-record
+    # layout without that module enabled is a fail-closed finding (an inline store may enable it freely).
+    if base.get("layout") == "per-record" and "concurrent_operation" not in modules_enabled:
+        findings.append('[opf].layout "per-record" requires the concurrent-operation module: declare '
+                        '[modules].concurrent_operation = true or use the inline layout '
+                        '(spec 9; fail-closed)')
     registered_vendors = _validate_vendors(data.get("vendors"), findings)
     _validate_types(data.get("types"), modules_enabled, findings)
     _validate_providers(data.get("providers"), findings)
@@ -2401,6 +2409,14 @@ def _is_contained_relpath(p):
     return depth > 0        # a path that resolves AT the root (e.g. "." or "a/..") is not contained-below
 
 
+def _valid_tier_vocabulary(value):
+    """True when `value` is the spec-9 tier-vocabulary shape: a non-empty list of distinct, non-empty
+    strings (the closed set a tier_assessment record's required `tier` comes from, spec 8.5)."""
+    return (isinstance(value, list) and bool(value)
+            and all(isinstance(item, str) and item for item in value)
+            and len(set(value)) == len(value))
+
+
 def _validate_types(types, modules_enabled, findings):
     if types is not None and not isinstance(types, dict):
         findings.append("[types] is not a table")
@@ -2422,9 +2438,13 @@ def _validate_types(types, modules_enabled, findings):
         if not isinstance(tbl, dict):
             findings.append("{} is not a table".format(where))
             continue
-        extra = set(tbl) - TYPE_KEYS
+        extra = set(tbl) - TYPE_KEYS - (TIER_VOCAB_KEYS if name == "tier_assessment" else frozenset())
         if extra:
             findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
+        if name == "tier_assessment" and "tier_vocabulary" in tbl \
+                and not _valid_tier_vocabulary(tbl.get("tier_vocabulary")):
+            findings.append("[types.tier_assessment].tier_vocabulary must be a non-empty list of "
+                            "distinct, non-empty strings (spec 9)")
         ns = tbl.get("namespace")
         if not _valid_namespace(ns):
             findings.append("{}.namespace {} is not a two-letter uppercase namespace".format(
@@ -3155,6 +3175,37 @@ def self_test():
             "concurrent_operation = true", "concurrent_operation = true\ndelivery_assurance = true"))
         mv_modon = validate_manifest(m_modon)
         check("taxonomy-module-type-enabled-valid", mv_modon.status == VALID and not mv_modon.findings)
+
+        # Spec 9 layout coupling: the per-record layout without the concurrent-operation module is a
+        # finding; the same manifest with the module enabled is VALID (manifest_text enables it), and
+        # an inline store with the module enabled stays valid (every VALID vector above).
+        m_proff = _t.loads(manifest_text().replace('layout = "inline"', 'layout = "per-record"').replace(
+            "concurrent_operation = true", "concurrent_operation = false"))
+        mv_proff = validate_manifest(m_proff)
+        check("layout-per-record-module-off-invalid", mv_proff.status == INVALID)
+        check("layout-per-record-module-off-named",
+              any('"per-record" requires the concurrent-operation module' in f for f in mv_proff.findings))
+        m_pron = _t.loads(manifest_text().replace('layout = "inline"', 'layout = "per-record"'))
+        mv_pron = validate_manifest(m_pron)
+        check("layout-per-record-module-on-valid", mv_pron.status == VALID and not mv_pron.findings)
+
+        # Spec 9: [types.tier_assessment] alone may declare tier_vocabulary, a non-empty list of
+        # distinct, non-empty strings; a malformed list, and the key on any other type, are findings.
+        m_tv = _t.loads(manifest_text(
+            extra_top='[types.tier_assessment]\nnamespace = "TA"\ntier_vocabulary = ["low", "high"]'))
+        mv_tv = validate_manifest(m_tv)
+        check("tier-vocabulary-valid", mv_tv.status == VALID and not mv_tv.findings)
+        m_tvbad = _t.loads(manifest_text(
+            extra_top='[types.tier_assessment]\nnamespace = "TA"\ntier_vocabulary = ["low", "low"]'))
+        mv_tvbad = validate_manifest(m_tvbad)
+        check("tier-vocabulary-malformed-invalid", mv_tvbad.status == INVALID and any(
+            "tier_vocabulary must be a non-empty list" in f for f in mv_tvbad.findings))
+        m_tvmis = _t.loads(manifest_text().replace(
+            '[types.backlog_item]\nnamespace = "BI"',
+            '[types.backlog_item]\nnamespace = "BI"\ntier_vocabulary = ["low"]'))
+        mv_tvmis = validate_manifest(m_tvmis)
+        check("tier-vocabulary-misplaced-invalid", mv_tvmis.status == INVALID and any(
+            "unknown key(s): tier_vocabulary" in f for f in mv_tvmis.findings))
 
         # FIX 4(a): an ABSENT [types] table registers none of the store's enabled types and is INVALID
         # (spec 9/782, one [types.<name>] per enabled type). manifest_text always carries [types] so

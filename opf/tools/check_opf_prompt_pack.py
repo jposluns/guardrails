@@ -35,15 +35,62 @@ Their guards:
   example-reasons   across the set, the `unrecorded` reasons are every _opf_adopt.MISSINGNESS_REASONS
                     value, and at least one row carries `history` and one carries `unparsed`
 
+MODULE TYPE TABLE (validate_module_table, run by the default invocation beside the pack checks). The
+spec's section 8.1 type table is the normative module roster; opf/tools/_opf_store.py MODULE_TYPES is
+the tooling's single source-of-truth copy of it. The guard:
+
+  module-table      the module-tier rows of the OPF-SPEC.md section 8.1 table (type, namespace and the
+                    module family its tier names) equal _opf_store.MODULE_TYPES exactly: every row has
+                    its entry, every entry has its row, and each (namespace, module) pair matches. The
+                    section is read the way a GitHub-flavoured Markdown reader reads a table: it opens
+                    at a line of at most three columns of indentation over a delimiter row with the
+                    same cell count, and every line after the delimiter row up to the first blank line
+                    is a row, whatever its cell count (a reader's display drops cells past the
+                    header's count; this guard counts them). The section must hold exactly that one
+                    table, headed Tier | Type | Namespace. Any row whose tier is not exactly a
+                    SPEC_TIERS label (a blank, "-" or ":" cell and a misspelled, pluralized or re-cased
+                    family included), any row of other than three cells, any row indented four or more
+                    columns (which a reader may show as code), a module type listed more than once
+                    under any tier, a missing section 8.1 heading or an unreadable spec never passes.
+                    Outside the one table the rule is bounded rather than a list of table spellings:
+                    no line of the section outside the table may hold a pipe character, and no line of
+                    the section, the table's rows included, may hold an HTML table tag (<table, in any
+                    letter case),
+                    wherever the line sits (a blockquote, a list item, an HTML block, a code fence or
+                    an HTML comment included). A table a GitHub-flavoured Markdown reader opens holds a
+                    pipe in its header row (the vendored marko reader opens none without one; GitHub's
+                    own reader is not consulted here) and an HTML table opens with that tag, so no
+                    second table hides in the section.
+                    Accepted costs, each refused although a reader shows no second table or the same
+                    tier: prose or code holding a pipe anywhere in the section outside the table, and a
+                    tier cell spelled with a doubled inner space ("Delivery-assurance  module") or an
+                    escaped hyphen ("Delivery\\-assurance module"), which a reader shows as the label
+                    but which is not exactly a SPEC_TIERS label
+
   check_opf_prompt_pack.py              verify the shipped pack beside this tool (../prompt-pack), its
-                                        import examples included
+                                        import examples included, and the spec module type table against
+                                        _opf_store.MODULE_TYPES
   check_opf_prompt_pack.py --self-test  synthetic packs assert each guard's exact status and guard name;
                                         the shipped flow/SKILL.md carries each FLOW_PINNED sentence and a
                                         provenance line whose release is pack.toml's version and whose
                                         template-sha256 matches its bytes; the shipped import/SKILL.md
                                         carries each IMPORT_PINNED sentence, the missingness reasons in
-                                        order and every example path; and adopt/SKILL.md section 8 names
-                                        import/SKILL.md
+                                        order and every example path; adopt/SKILL.md section 8 names
+                                        import/SKILL.md; and the shipped spec's module type table agrees
+                                        with _opf_store.MODULE_TYPES while each deliberate flip (a
+                                        deleted row, a changed namespace or tier, an extra row under a
+                                        pluralized, re-cased, blank, "-" or ":" tier, a row of other
+                                        than three cells, an extra row indented or without outer
+                                        pipes, a row indented four spaces, a module type also listed
+                                        under another tier, a row-shaped line or a second table outside
+                                        the type table, a table in a blockquote with or without outer
+                                        pipes, nested in a list item or written in HTML, an HTML table
+                                        tag in a row, a pipe in prose or code outside the table, a tier
+                                        with a doubled inner space or an escaped hyphen, an extra
+                                        MODULE_TYPES entry) is red with the module-table guard, the
+                                        hidden tables grade VALID under the earlier pipe-led line rule,
+                                        and a row re-spelled the way a reader shows the same (indented
+                                        up to three spaces, without outer pipes, unpadded) stays VALID
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as digest drift),
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
@@ -106,6 +153,28 @@ EXIT_CODES = {VALID: 0, INVALID: 1, CANNOT_EVALUATE: 2}
 DEFAULT_PACK_DIR = Path(__file__).resolve().parent.parent / "prompt-pack"
 EXAMPLES_DIR = "import/examples/"
 EXAMPLE_SUFFIX = ".batch.toml"
+SPEC_PATH = Path(__file__).resolve().parent.parent / "spec" / "OPF-SPEC.md"
+MAX_SPEC_BYTES = 4 * 1024 * 1024
+# The section 8.1 tier labels of the module families, mapped to their [modules] keys (spec 8.1 and 9).
+MODULE_TIERS = {
+    "Governance module": "governance",
+    "Delivery-assurance module": "delivery_assurance",
+    "Operational-policy module": "operational_policy",
+    "Concurrent-operation module": "concurrent_operation",
+}
+# Every section 8.1 tier label: the module families above plus the non-module tiers. Any type table
+# row whose tier is not exactly one of these, a blank, "-" or ":" cell and a misspelled, pluralized or
+# re-cased family included, is refused INVALID rather than skipped, so an extra row under such a tier
+# never reads as agreement.
+SPEC_TIERS = frozenset(MODULE_TIERS) | {"Baseline", "Reserved, excluded", "Reserved, unassigned"}
+# The header of the section 8.1 type table, the only table its section may hold.
+TABLE_HEADER = ("Tier", "Type", "Namespace")
+# A GitHub-flavoured Markdown delimiter-row cell: hyphens with an optional colon at either end.
+_DELIMITER_CELL_RE = re.compile(r":?-+:?\Z")
+# The whitespace a GitHub-flavoured Markdown reader trims from a cell (never a no-break space).
+_CELL_SPACE = " \t\v\f\r"
+# The opening of an HTML table tag, matched against a lower-cased line (HTML tag names ignore case).
+_HTML_TABLE_TAG = "<table"
 
 
 class _Refusal(Exception):
@@ -259,6 +328,161 @@ def validate_pack(pack_dir):
     except _Refusal as refusal:
         return refusal.status, refusal.guard, str(refusal)
     return VALID, None, "version {}, digest {}, {} member(s)".format(version, digest, count)
+
+
+def _gfm_cells(line):
+    """The cells of one table line as a GitHub-flavoured Markdown reader splits them, every cell kept
+    (the reader's own display drops cells past the header's count; the caller judges the count): the
+    line's surrounding whitespace and then one leading and one trailing unescaped pipe are dropped, the
+    rest is split at each pipe no backslash escapes, and each cell is trimmed of _CELL_SPACE, with an
+    escaped pipe read as a pipe."""
+    text = line.strip(_CELL_SPACE)
+    cells, cell, i = [], "", 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            cell += text[i:i + 2]
+            i += 2
+            continue
+        if text[i] == "|":
+            cells.append(cell)
+            cell = ""
+        else:
+            cell += text[i]
+        i += 1
+    cells.append(cell)
+    if text.startswith("|"):
+        cells = cells[1:]
+    if text.endswith("|") and cells and cells[-1] == "":
+        cells = cells[:-1]
+    return [c.strip(_CELL_SPACE).replace("\\|", "|") for c in cells]
+
+
+def _indent(line):
+    """The leading columns of a line, a tab counted as four, as a Markdown reader counts indentation."""
+    return len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip(" "))
+
+
+def _is_delimiter_row(line):
+    """A GitHub-flavoured Markdown delimiter row: at most three columns of indentation, a pipe, and only
+    delimiter cells."""
+    cells = _gfm_cells(line)
+    return (_indent(line) <= 3 and "|" in line and bool(cells)
+            and all(_DELIMITER_CELL_RE.match(c) for c in cells))
+
+
+def _refused_outside_table(line):
+    """True for a section 8.1 line outside every table that holds a pipe or an HTML table tag, wherever it
+    sits: the bounded rule that leaves no second table, blockquoted, list-nested or in HTML, unread. Prose
+    or code (indented or fenced) holding a pipe in the section is refused too, the rule's accepted cost."""
+    return "|" in line or _HTML_TABLE_TAG in line.lower()
+
+
+def _spec_tables(section):
+    """The tables of a spec section, each a (header cells, [(line number, body cells)]) pair, read the
+    way a GitHub-flavoured Markdown reader reads them: a table opens at a non-blank line of at most three
+    columns of indentation whose cell count equals that of the delimiter row under it, and every line
+    after the delimiter row up to the first blank line is a body row, whatever its cell count. A body
+    row indented four or more columns, which a reader may show as code rather than as a row, is refused,
+    and so is a body row holding an HTML table tag, which would show a table inside a cell.
+    A reader ends a table early at a line that opens another block, such as a heading or a list item;
+    such a line is read as a row here and graded by the row rules (no tier label begins with a block
+    marker), never skipped. A line outside every table that holds a pipe or an HTML table tag
+    (_refused_outside_table), at any indentation and inside any block, is refused too, so no table or
+    row-shaped line in the section escapes the guard."""
+    lines = section.split("\n")
+    tables, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if (line.strip(_CELL_SPACE) and _indent(line) <= 3 and i + 1 < len(lines)
+                and _is_delimiter_row(lines[i + 1])
+                and len(_gfm_cells(line)) == len(_gfm_cells(lines[i + 1]))):
+            body, i = [], i + 2
+            while i < len(lines) and lines[i].strip(_CELL_SPACE):
+                _require(_indent(lines[i]) <= 3, "module-table",
+                         "section 8.1 table row {!r} is indented four or more columns".format(lines[i]))
+                _require(_HTML_TABLE_TAG not in lines[i].lower(), "module-table",
+                         "section 8.1 table row {!r} holds an HTML table tag".format(lines[i]))
+                body.append((i, _gfm_cells(lines[i])))
+                i += 1
+            tables.append((_gfm_cells(line), body))
+            continue
+        _require(not _refused_outside_table(line), "module-table",
+                 "section 8.1 line {!r} holds a pipe or an HTML table tag but sits in no table".format(line))
+        i += 1
+    return tables
+
+
+def _spec_module_rows(text):
+    """The module-tier rows of the spec's section 8.1 type table, as {type: (namespace, module)}. The
+    section is read by _spec_tables. It must hold exactly one table, headed exactly TABLE_HEADER, and
+    every body row of it must have exactly three cells and a tier that is exactly a SPEC_TIERS label;
+    a module type, one listed under a module tier or one _opf_store.MODULE_TYPES holds, must sit in one
+    row only, whatever the tier of each. Anything else is refused, so a blank, "-" or ":" tier, a
+    misspelled, pluralized or re-cased family, a row of other than three cells, an extra row however it
+    is indented or piped, a double row or a module type also listed under another tier never reads as
+    agreement."""
+    start = text.find("\n### 8.1 ")
+    _require(start >= 0, "module-table", "OPF-SPEC.md has no section 8.1 heading", CANNOT_EVALUATE)
+    end = text.find("\n### ", start + 1)
+    section = text[start:] if end < 0 else text[start:end]
+    tables = _spec_tables(section)
+    _require(len(tables) == 1, "module-table",
+             "section 8.1 holds {} table(s), not exactly the one type table".format(len(tables)))
+    header, body = tables[0]
+    _require(tuple(header) == TABLE_HEADER, "module-table",
+             "the section 8.1 table header is {!r}, not {!r}".format(header, list(TABLE_HEADER)))
+    rows, listed = {}, {}
+    for number, cells in body:
+        _require(len(cells) == 3, "module-table",
+                 "section 8.1 table row {!r} has {} cell(s), not 3".format(section.split("\n")[number],
+                                                                          len(cells)))
+        tier, tname, namespace = cells
+        _require(tier in SPEC_TIERS, "module-table",
+                 "unknown tier {!r} in the section 8.1 table".format(tier))
+        listed[tname] = listed.get(tname, 0) + 1
+        if tier in MODULE_TIERS:
+            _require(tname not in rows, "module-table",
+                     "module type {!r} is listed twice in the section 8.1 table".format(tname))
+            rows[tname] = (namespace, MODULE_TIERS[tier])
+    for tname in sorted(listed):
+        _require(listed[tname] == 1 or (tname not in rows and tname not in _opf_store.MODULE_TYPES),
+                 "module-table", "module type {!r} is listed {} times in the section 8.1 table".format(
+                     tname, listed[tname]))
+    return rows
+
+
+def _module_table_problems(text):
+    """One problem per difference between the spec's module rows and _opf_store.MODULE_TYPES."""
+    rows = _spec_module_rows(text)
+    problems = []
+    for tname in sorted(set(rows) | set(_opf_store.MODULE_TYPES)):
+        if tname not in _opf_store.MODULE_TYPES:
+            problems.append("spec 8.1 lists module type {!r}, absent from _opf_store.MODULE_TYPES".format(tname))
+        elif tname not in rows:
+            problems.append("_opf_store.MODULE_TYPES has {!r}, absent from the spec 8.1 table".format(tname))
+        elif rows[tname] != tuple(_opf_store.MODULE_TYPES[tname]):
+            problems.append("module type {!r} differs: spec 8.1 {}, _opf_store.MODULE_TYPES {}".format(
+                tname, rows[tname], tuple(_opf_store.MODULE_TYPES[tname])))
+    return problems
+
+
+def validate_module_table(text=None):
+    """(status, guard, detail) for the spec's section 8.1 module type table against
+    _opf_store.MODULE_TYPES. Reads the shipped spec when text is None; reads only, writes nothing."""
+    try:
+        if text is None:
+            data = _read_regular(SPEC_PATH, MAX_SPEC_BYTES, "spec")
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _Refusal(CANNOT_EVALUATE, "spec-read", "OPF-SPEC.md is not UTF-8: {}".format(exc))
+        problems = _module_table_problems(text)
+    except _Refusal as refusal:
+        return refusal.status, refusal.guard, str(refusal)
+    if problems:
+        return INVALID, "module-table", "; ".join(problems)
+    return VALID, None, "{} module type row(s) agree with _opf_store.MODULE_TYPES".format(
+        len(_opf_store.MODULE_TYPES))
 
 
 def _is_utc_midnight(value):
@@ -909,6 +1133,160 @@ def _self_test_vectors():
                 print("{} midnight-boundary {!r}: {}".format("PASS" if ok else "FAIL", value, want))
                 if not ok:
                     failures.append("midnight-boundary {!r} (wanted {})".format(value, want))
+            # The spec module type table against _opf_store.MODULE_TYPES: the shipped spec agrees, and
+            # each deliberate flip is red with the module-table guard. A flip whose replacement found
+            # nothing leaves the text unchanged and fails its vector, so a stale mutation never passes.
+            shipped_spec = _read_regular(SPEC_PATH, MAX_SPEC_BYTES, "spec").decode("utf-8")
+            gate_run_row = "| Delivery-assurance module | gate_run | GR |\n"
+            table_end = "| Reserved, unassigned | (none) | LF |\n\nNotes on the roster:\n"
+
+            def extra_row(row):
+                return lambda t: t.replace(gate_run_row, gate_run_row + row + "\n", 1)
+
+            def after_table(block):
+                return lambda t: t.replace(table_end, table_end.replace("\n\n", "\n\n" + block + "\n\n", 1), 1)
+            # Second tables a reader shows after the type table, none of them a pipe-led line.
+            hidden_tables = {
+                "blockquoted":
+                    "> | Tier | Type | Namespace |\n> |---|---|---|\n> | Governance module | extra_action | XA |",
+                "blockquoted-no-outer-pipes":
+                    "> Tier | Type | Namespace\n> ---|---|---\n> Governance module | extra_action | XA",
+                "html": "<table>\n<tr><td>Governance module</td><td>extra_action</td><td>XA</td></tr>\n</table>",
+                "list-nested":
+                    "1.  | Tier | Type | Namespace |\n    |---|---|---|\n    | Governance module | extra_action | XA |",
+            }
+            for name, status, guard, mutate in (
+                    ("module-table-shipped", VALID, None, lambda t: t),
+                    ("module-table-row-deleted", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, "", 1)),
+                    ("module-table-namespace-flipped", INVALID, "module-table",
+                     lambda t: t.replace("| waiver | WV |", "| waiver | WX |", 1)),
+                    ("module-table-tier-flipped", INVALID, "module-table",
+                     lambda t: t.replace("| Operational-policy module | mode |",
+                                         "| Governance module | mode |", 1)),
+                    ("module-table-unknown-tier", INVALID, "module-table",
+                     lambda t: t.replace("| Concurrent-operation module | session_lease |",
+                                         "| Scheduling module | session_lease |", 1)),
+                    # An extra row filed under a pluralized or re-cased family label is refused, never
+                    # skipped as a non-module tier (the docstring's any-row tier check).
+                    ("module-table-extra-row-plural-tier", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row,
+                                         gate_run_row + "| Governance modules | extra_action | XA |\n", 1)),
+                    ("module-table-extra-row-recased-tier", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row,
+                                         gate_run_row + "| Governance Module | extra_action | XA |\n", 1)),
+                    ("module-table-duplicate-row", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, gate_run_row + gate_run_row, 1)),
+                    # Every line of the table is a row, as a reader reads it: a tier that is blank, "-"
+                    # or ":" (a delimiter-shaped row included) is not a label, a row of other than three
+                    # cells is refused even where the reader's display would drop the excess, and an
+                    # extra row indented up to four spaces or without outer pipes is read and refused.
+                    ("module-table-extra-row-blank-tier", INVALID, "module-table",
+                     extra_row("|  | extra_action | XA |")),
+                    ("module-table-extra-row-dash-tier", INVALID, "module-table",
+                     extra_row("| - | extra_action | XA |")),
+                    ("module-table-extra-row-colon-tier", INVALID, "module-table",
+                     extra_row("| : | extra_action | XA |")),
+                    ("module-table-extra-row-delimiter-shaped", INVALID, "module-table", extra_row("|---|---|---|")),
+                    ("module-table-extra-row-four-cells", INVALID, "module-table",
+                     extra_row("| Governance module | extra_action | XA | x |")),
+                    ("module-table-extra-row-two-cells", INVALID, "module-table",
+                     extra_row("| Governance module | extra_action |")),
+                    ("module-table-extra-row-one-cell-no-pipe", INVALID, "module-table",
+                     extra_row("Governance module")),
+                    ("module-table-extra-row-one-space", INVALID, "module-table",
+                     extra_row(" | Governance module | extra_action | XA |")),
+                    ("module-table-extra-row-three-spaces", INVALID, "module-table",
+                     extra_row("   | Governance module | extra_action | XA |")),
+                    ("module-table-extra-row-four-spaces", INVALID, "module-table",
+                     extra_row("    | Governance module | extra_action | XA |")),
+                    ("module-table-extra-row-no-outer-pipes", INVALID, "module-table",
+                     extra_row("Governance module | extra_action | XA")),
+                    # A module type listed under a second tier, module or not, is a double listing.
+                    ("module-table-module-type-under-baseline", INVALID, "module-table",
+                     extra_row("| Baseline | waiver | WV |")),
+                    ("module-table-module-type-under-reserved", INVALID, "module-table",
+                     extra_row("| Reserved, excluded | gate_run | GR |")),
+                    # Outside the table no line may hold a pipe or an HTML table tag, wherever it sits: a
+                    # row-shaped line, a second table, a table in a blockquote (with or without outer
+                    # pipes), nested in a list item or written in HTML (in any letter case) are refused.
+                    ("module-table-stray-row-three-spaces", INVALID, "module-table",
+                     after_table("   | Governance module | extra_action | XA |")),
+                    ("module-table-second-table", INVALID, "module-table",
+                     after_table("| Tier | Type |\n|---|---|\n| Governance module | extra_action |")),
+                    ("module-table-blockquoted-table", INVALID, "module-table",
+                     after_table(hidden_tables["blockquoted"])),
+                    ("module-table-blockquoted-table-no-outer-pipes", INVALID, "module-table",
+                     after_table(hidden_tables["blockquoted-no-outer-pipes"])),
+                    ("module-table-html-table", INVALID, "module-table", after_table(hidden_tables["html"])),
+                    ("module-table-html-table-upper-case", INVALID, "module-table",
+                     after_table(hidden_tables["html"].upper())),
+                    ("module-table-list-nested-table", INVALID, "module-table",
+                     after_table(hidden_tables["list-nested"])),
+                    # An HTML table inside a cell of the type table is refused like one outside it.
+                    ("module-table-html-table-in-row", INVALID, "module-table",
+                     extra_row("| Baseline | <table><tr><td>extra_action</td></tr></table> | ZZ |")),
+                    # The rule's accepted cost: a pipe in code (indented or fenced) or in prose outside
+                    # the table is refused, although a reader shows no table there.
+                    ("module-table-pipe-in-indented-code", INVALID, "module-table",
+                     after_table("    | Governance module | extra_action | XA |")),
+                    ("module-table-pipe-in-fenced-code", INVALID, "module-table", after_table("```\na | b\n```")),
+                    ("module-table-pipe-in-prose", INVALID, "module-table",
+                     after_table("A pipe | in prose.")),
+                    # Accepted costs on the tier: a doubled inner space or an escaped hyphen shows as the
+                    # label but is not exactly a SPEC_TIERS label, so it is refused.
+                    ("module-table-tier-doubled-space", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, gate_run_row.replace("assurance module",
+                                                                          "assurance  module"), 1)),
+                    ("module-table-tier-escaped-hyphen", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, gate_run_row.replace("Delivery-", "Delivery\\-"), 1)),
+                    # A row re-spelled the way a reader shows the same row is never refused; at four
+                    # spaces of indentation a reader may show it as code, so it is refused.
+                    ("module-table-legal-row-three-spaces", VALID, None,
+                     lambda t: t.replace(gate_run_row, "   " + gate_run_row, 1)),
+                    ("module-table-row-four-spaces", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, "    " + gate_run_row, 1)),
+                    ("module-table-legal-row-no-outer-pipes", VALID, None,
+                     lambda t: t.replace(gate_run_row, "Delivery-assurance module | gate_run | GR\n", 1)),
+                    ("module-table-legal-row-unpadded", VALID, None,
+                     lambda t: t.replace(gate_run_row, "|Delivery-assurance module|gate_run|GR|\n", 1)),
+                    ("module-table-heading-missing", CANNOT_EVALUATE, "module-table",
+                     lambda t: t.replace("\n### 8.1 ", "\n### 8x1 ", 1)),
+            ):
+                mutated = mutate(shipped_spec)
+                changed = name == "module-table-shipped" or mutated != shipped_spec
+                got = validate_module_table(mutated)
+                count += 1
+                ok = changed and got[:2] == (status, guard)
+                print("{} {}: {} {}".format("PASS" if ok else "FAIL", name, got[0], got[1] or "").rstrip())
+                if not ok:
+                    failures.append("{} (wanted {} {}, mutation applied {}, got {} {}: {})".format(
+                        name, status, guard, changed, got[0], got[1], got[2]))
+            # An entry past the table: MODULE_TYPES extended without its spec row is red too.
+            from unittest.mock import patch
+            with patch.dict(_opf_store.MODULE_TYPES, {"legacy_fragment": ("LF", "governance")}):
+                got = validate_module_table(shipped_spec)
+            count += 1
+            ok = got[:2] == (INVALID, "module-table") and "legacy_fragment" in got[2]
+            print("{} module-table-extra-entry: {} {}".format(
+                "PASS" if ok else "FAIL", got[0], got[1] or "").rstrip())
+            if not ok:
+                failures.append("module-table-extra-entry: {!r}".format(got))
+            # Flip: under the earlier line rule, which refused only a pipe-led line of at most three columns
+            # of indentation outside the table, every hidden table above grades VALID, so those vectors are
+            # red because of the bounded pipe and HTML table tag rule.
+            def pipe_led(line):
+                return _indent(line) <= 3 and line.lstrip(" ").startswith("|")
+            hidden_texts = [after_table(block)(shipped_spec) for block in hidden_tables.values()]
+            with patch.dict(globals(), {"_refused_outside_table": pipe_led}):
+                flipped = [validate_module_table(text) for text in hidden_texts]
+            count += 1
+            ok = (len(flipped) == 4 and shipped_spec not in hidden_texts
+                  and all(got[:2] == (VALID, None) for got in flipped))
+            print("{} module-table-flip-pipe-led-rule-misses-hidden-tables: {}".format(
+                "PASS" if ok else "FAIL", ", ".join(got[0] for got in flipped)))
+            if not ok:
+                failures.append("module-table-flip-pipe-led-rule-misses-hidden-tables: {!r}".format(flipped))
             # The default run (main with no argument) includes the import examples: the shipped pack reports
             # them, and a pack whose only fault is an example guard's is refused, not VALID.
             import contextlib
@@ -959,7 +1337,8 @@ def _self_test_vectors():
 
             # A manifest tomllib refuses with RecursionError (a deeply nested value, and a 1001-part key under
             # the emulated cap) is the manifest-parse refusal, never the backstop's unexpected error.
-            import _opf_store
+            # _opf_store is the module-level import; a local import here would shadow it for the whole
+            # function, unbinding the module-table vectors above.
             for name, text, capped in (("manifest-deep-nesting", _opf_store._ST_DEEP_TOML, False),
                                        ("manifest-key-1001-parts", _opf_store._ST_LONG_KEY_TOML, True)):
                 pack = Path(tmp) / name / "prompt-pack"
@@ -1071,7 +1450,13 @@ def main(argv=None):
             print("OPF PROMPT PACK: VALID ({})".format(detail))
         else:
             print("OPF PROMPT PACK: {} [{}] {}".format(status, guard, detail), file=sys.stderr)
-        return EXIT_CODES[status]
+        table_status, table_guard, table_detail = validate_module_table()
+        if table_status == VALID:
+            print("OPF MODULE TABLE: VALID ({})".format(table_detail))
+        else:
+            print("OPF MODULE TABLE: {} [{}] {}".format(table_status, table_guard, table_detail),
+                  file=sys.stderr)
+        return max(EXIT_CODES[status], EXIT_CODES[table_status])
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0
         print("check_opf_prompt_pack: cannot evaluate: unexpected error ({!r})".format(exc), file=sys.stderr)
         return 2

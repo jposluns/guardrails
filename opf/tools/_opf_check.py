@@ -88,7 +88,7 @@ from _opf_schema import (  # noqa: E402
     validate_record, validate_counters, check_unique_ids, check_ids_within_counters, check_monotonic,
     validate_transition, parse_status, BASELINE_SPECS, ACTOR_KINDS, LINK_RELS, _valid_id_shape,
     SUPPORTED_SCHEMA, _valid_timestamp, IMPORTED_NAMESPACES, IMPORTED_PREFIX, parse_series_id,
-    validate_imported_record,
+    validate_imported_record, MODULE_NAMESPACES,
 )
 # U3 supplies the ledger validators, the frozen/rotation/partition guards, and the across-time append-only.
 from _opf_release import (  # noqa: E402
@@ -163,13 +163,14 @@ _ROSTER_NAMESPACES.update(IMPORTER_TYPES)
 # word (F6; guard-input-soundness).
 _ROSTER_NS_SET = frozenset(_ROSTER_NAMESPACES.values())
 
-# A record whose schema has not shipped in the baseline validator is a named CANNOT-EVALUATE deferral,
-# never graded INVALID (F4; round-5 F-2). This covers the module tier (schemas land in U2M) AND the
-# importer-only legacy_fragment type (deprecated for new stores, spec 8.1: no record schema ships in the
-# baseline validator, so records in an existing store stay readable as a named deferral).
-_SCHEMA_DEFERRAL = ("record schema not available to the baseline validator; deferred (module-tier schemas "
-                    "land in U2M; legacy_fragment is deprecated for new stores and has no baseline "
-                    "record schema)")
+# A clean record whose type's schema the baseline validator does not implement is a named CANNOT-EVALUATE
+# deferral, never graded INVALID. This covers the module tier (spec 8.5 states those schemas; this
+# validator does not implement them yet) AND the importer-only legacy_fragment type (deprecated for new
+# stores, spec 8.1: no record schema ships in the baseline validator, so records in an existing store stay
+# readable as a named deferral).
+_SCHEMA_DEFERRAL = ("record schema not implemented by the baseline validator; deferred (spec 8.5 states the "
+                    "module-tier schemas, which this validator does not implement yet; legacy_fragment is "
+                    "deprecated for new stores and has no baseline record schema)")
 
 
 def _schema_deferred(tname):
@@ -314,9 +315,11 @@ _RESIDUALS = (
     "store state hides behind it, because every stored byte is graded at steady state.",
     "Declared-but-unsupported profiles (spec 16): named in unevaluated_profiles, enforced only by a "
     "profile-aware tool.",
-    "Module-tier record schema validation (spec 8.5): the baseline record validator knows only the "
-    "baseline specs, so a module-tier record is a named CANNOT-EVALUATE deferral (deferred to U2M) rather "
-    "than graded here; every such record is still surfaced, so none can hide a defect.",
+    "Module-tier record schema validation (spec 8.5): the specification states those schemas and the "
+    "baseline record validator does not implement them yet, so a clean module-tier record is a named "
+    "CANNOT-EVALUATE deferral rather than graded here, and an imported one is a C-IMPORTED-SCHEMA finding "
+    "naming a type the validator holds no schema for; every such record is still surfaced, so none can "
+    "hide a defect.",
     "Byte-level view drift for a per-record store that declares views (spec 5.8/10): U4's view planner "
     "does not yet support the per-record layout, so C-VIEW-DRIFT is a named CANNOT-EVALUATE there, never "
     "a silent pass.",
@@ -2757,9 +2760,10 @@ def _check_imported_worklog_contiguous(numbers, rep, skipped=frozenset()):
 
 
 def _check_imported_no_deletion(rows, unread, high, floor, namespaces, reserved, holdings, no_holdings, rep):
-    """C-NO-DELETION over the imported series (spec 8.2/8.3): for each required imported counter row, the
-    present imported ids must be exactly floor+1 .. high-water on that row own number line, apart from the
-    clean one. Imported records never rotate (spec 12), so the imported leaves are their only location. The
+    """C-NO-DELETION over the imported series (spec 8.2/8.3): for each imported counter row in `namespaces`,
+    a required one or a disabled module's kept one, the present imported ids must be exactly floor+1 ..
+    high-water on that row own number line, apart from the clean one. Imported records never rotate (spec
+    12), so the imported leaves are their only location; a kept row's type has no leaf, so it holds none. The
     same O(present) arithmetic as the clean scan: an overhang COUNT above the max present id, then the first
     gap below it, never a range() expansion of the high-water (F15). A number an id reservation holds under
     the key is skipped exactly as on the clean lines (spec 8.2: recovery treats a reserved number as issued),
@@ -4787,13 +4791,18 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # records for the namespace (B1); staging is excluded because it legitimately mints ids above the
     # committed high-water pending promotion (not durable). Both scans are O(present) arithmetic, never a
     # range() expansion of the high-water (F15).
+    # A disabled module's kept counter row (spec 8.2) is graded here like any other row: validate_counters
+    # accepts it, and disable-module refuses while any record of the module's types exists (spec 8.8), so
+    # a kept row claiming an id no record carries is owed unless a reservation holds that number. For a
+    # namespace other than WL this gap and overhang scan is the contiguity check too.
     present_by_ns = {}
     for r in active_recs + archive_recs:
         if isinstance(r.id, str):
             sh = _valid_id_shape(r.id)
             if sh is not None:
                 present_by_ns.setdefault(sh[0], set()).add(sh[1])
-    for ns in sorted(known_ns):
+    kept_ns = frozenset(ns for ns in high if ns in MODULE_NAMESPACES)
+    for ns in sorted(known_ns | kept_ns):
         if ns == "WL":
             continue
         hw = high.get(ns)
@@ -4825,10 +4834,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             expected += 1
 
     # The imported series owns BOTH sides per imported counter row too, on its own number line (spec 8.2/8.3),
-    # with the reserved-number exemption read per imported key.
+    # with the reserved-number exemption read per imported key. A disabled module's kept imported row is
+    # graded the same way; its type has no imported leaf, so it holds no present id.
     if imported:
+        kept_imported_ns = frozenset(key[len(IMPORTED_PREFIX):] for key in high
+                                     if key.startswith(IMPORTED_PREFIX)
+                                     and key[len(IMPORTED_PREFIX):] in MODULE_NAMESPACES)
         _check_imported_no_deletion(imported_rows, imported_unread, high, floor,
-                                    _imported_counter_namespaces(enabled_types), reserved,
+                                    _imported_counter_namespaces(enabled_types) | kept_imported_ns, reserved,
                                     imp_holdings, imp_no_holdings, imported_tee)
 
     # --- C-IMPORTED-IDS and C-IMPORTED-PROVENANCE (an active imported series only): the per-series id
@@ -5503,9 +5516,18 @@ def self_test():
         d1 = _record_digest(fn(1))
         d2 = _record_digest(fn_date(2))
         pr_machine = clean_machine()
+        # Spec 9: the per-record layout requires the concurrent-operation module, so the clean
+        # per-record fixture enables it and carries its session_lease type (registered, with an empty
+        # index, an empty imported leaf, and both counter rows at zero).
         pr_machine["manifest.toml"] = base_manifest(layout="per-record")
+        pr_machine["manifest.toml"]["modules"] = {"concurrent_operation": True}
+        pr_machine["manifest.toml"]["types"]["session_lease"] = {"namespace": "SL"}
         pr_machine["manifest.toml"]["vendors"] = {"registered": ["x-acme"]}
-        pr_machine["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=0, HO=0)
+        pr_counters = counters(FN=2, BI=0, DN=0, WL=0, HO=0, SL=0)
+        pr_counters["counters"]["imported:SL"] = 0
+        pr_machine["counters.toml"] = pr_counters
+        pr_machine["session_lease.index.toml"] = idx([])
+        pr_machine.update(_opf_init.imported_leaf_documents(pr_machine["manifest.toml"]))
         pr_machine["backlog_item.index.toml"] = idx([])
         pr_machine["done.index.toml"] = idx([])
         pr_machine["handoff.index.toml"] = idx([])
@@ -5521,12 +5543,25 @@ def self_test():
         pr_machine["archive/2026/worklog.toml"] = {"schema": 1, "entry": []}
         pr_product = {"CHANGELOG.md": make_changelog([])}          # no releases: no VERSION, unreleased-only
         pr_obs = {"tracked": "tracked",
-                  "prior": {"releases": [], "counters_high": counters(FN=2, BI=0, DN=0, WL=0, HO=0)["counters"],
+                  "prior": {"releases": [], "counters_high": dict(pr_counters["counters"]),
                             "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")},
                             "imported": {}}}
         prc = run(pr_machine, product=pr_product, obs=pr_obs)
         check("per-record-clean-valid", prc is not None and prc.status == VALID)
         check("per-record-clean-no-cant", prc is not None and not prc.cannot_evaluate)
+        # Spec 9 layout coupling: the same store with the concurrent-operation module flipped off
+        # declares layout = "per-record" without it and must be refused, with the coupling named.
+        _prf_machine = copy.deepcopy(pr_machine)
+        _prf_machine["manifest.toml"]["modules"]["concurrent_operation"] = False
+        _prf = run(_prf_machine, product=pr_product, obs=pr_obs)
+        # The manifest finding fails the store closed: C-MANIFEST carries the finding and the doctor
+        # stops before traversing manifest-dependent sources, so the overall grade is the fail-closed
+        # CANNOT-EVALUATE, never VALID.
+        check("per-record-module-flip-refused",
+              _prf is not None and _prf.status == CANNOT_EVALUATE
+              and _prf.checks.get("C-MANIFEST") == "FINDING")
+        check("per-record-module-flip-named", _prf is not None and any(
+            '"per-record" requires the concurrent-operation module' in f for f in _prf.findings))
         # --- round-5 containment / deferral / sync fixes (F-1..F-5) ---------------------------------
         # F-1/F-4: an [unmanaged] declaration inside a fully-graded container (a per-record type-body dir,
         # the imports subtree, or an archive bucket) must not launder strays beneath it.
@@ -7966,6 +8001,14 @@ def self_test():
             # unchanged (the first imported-series release keeps them inline in either layout).
             m = _i3_machine()
             m["manifest.toml"]["opf"]["layout"] = "per-record"
+            # Spec 9: the per-record layout requires the concurrent-operation module, so the activated
+            # per-record store enables it and carries its session_lease type (registered, empty index
+            # and imported leaf, both counter rows at zero).
+            m["manifest.toml"]["modules"] = {"concurrent_operation": True}
+            m["manifest.toml"]["types"]["session_lease"] = {"namespace": "SL"}
+            m["session_lease.index.toml"] = idx([])
+            m["session_lease.imported.index.toml"] = idx([])
+            m["counters.toml"]["counters"].update({"SL": 0, "imported:SL": 0})
             for _t, _rows in (("backlog_item", [bi(1, "done"), bi(2, "open")]),
                               ("done", [dn(1, "BI-1")]), ("handoff", [ho(1)])):
                 m[_t + ".index.toml"] = {"schema": 1, "record": [
@@ -9959,10 +10002,12 @@ def self_test():
         # duplicate, over a zero-release store so no frozen span / coverage / rotation check co-fires.
         cgf = copy.deepcopy(pr_machine)
         cgf["worklog.toml"] = {"schema": 1, "entry": [wl(1), wl(3)]}
-        cgf["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=3, HO=0)
+        cg_counters = counters(FN=2, BI=0, DN=0, WL=3, HO=0, SL=0)
+        cg_counters["counters"]["imported:SL"] = 0
+        cgf["counters.toml"] = cg_counters
         cg_obs = {"tracked": "tracked",
                   "prior": {"releases": [],
-                            "counters_high": counters(FN=2, BI=0, DN=0, WL=3, HO=0)["counters"],
+                            "counters_high": dict(cg_counters["counters"]),
                             "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")},
                             "imported": {}}}
         cgr = run(cgf, product=pr_product, obs=cg_obs)
@@ -10532,8 +10577,8 @@ def self_test():
               dr is not None and dr.status == CANNOT_EVALUATE
               and any("ceiling" in m for m in dr.cannot_evaluate))
 
-        # --- F4: a module-tier record is a named CANNOT-EVALUATE deferral (deferred to U2M), never a
-        #         false INVALID from the baseline-only record validator -----------------------------
+        # --- A module-tier record is a named CANNOT-EVALUATE deferral (spec 8.5 states the schema), never a
+        #     false INVALID from the baseline-only record validator ---------------------------------
         mm_types = {t: {"namespace": ns} for t, ns in (
             ("backlog_item", "BI"), ("done", "DN"), ("worklog", "WL"), ("finding", "FN"),
             ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
@@ -10550,7 +10595,8 @@ def self_test():
         mmr = run(mm)
         check("f4-module-record-deferred-cannot-eval", mmr is not None and mmr.status == CANNOT_EVALUATE)
         check("f4-module-record-deferral-named",
-              mmr is not None and any("U2M" in m for m in mmr.cannot_evaluate))
+              mmr is not None and any(_SCHEMA_DEFERRAL in m and "spec 8.5 states the module-tier schemas" in m
+                                      for m in mmr.cannot_evaluate))
         check("f4-module-record-not-false-invalid",
               mmr is not None and not any("not a supported record type" in f for f in mmr.findings))
         # The section 8.6 tripwire behind the module-tier residual: every module type the firewall names
@@ -10749,10 +10795,12 @@ def self_test():
         # this branch; deleting it flips the store VALID.
         _f6a = copy.deepcopy(pr_machine)
         _f6a["worklog.toml"] = {"schema": 1, "entry": [wl(2), wl(3)]}
-        _f6a["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=3, HO=0)
+        _f6a_counters = counters(FN=2, BI=0, DN=0, WL=3, HO=0, SL=0)
+        _f6a_counters["counters"]["imported:SL"] = 0
+        _f6a["counters.toml"] = _f6a_counters
         _f6a_obs = {"tracked": "tracked",
                     "prior": {"releases": [],
-                              "counters_high": counters(FN=2, BI=0, DN=0, WL=3, HO=0)["counters"],
+                              "counters_high": dict(_f6a_counters["counters"]),
                               "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")},
                               "imported": {}}}
         _f6ar = run(_f6a, product=pr_product, obs=_f6a_obs)
@@ -10926,6 +10974,65 @@ def self_test():
         check("homes2-reserved-gap-cut-refused", r_gap is not None and r_gap.status == VALID
               and gap_cut.status == INVALID and gap_cut.version_data is None
               and any("tail WL-5..WL-6 is not contiguous" in f for f in gap_cut.findings))
+
+        # A disabled module's kept counter row (spec 8.2) is graded by the no-deletion scan like any other
+        # row: disable-module refuses while any record of the module's types exists (spec 8.8), so a kept
+        # row is legal at zero, and above zero only where reservations hold every number it claims. The
+        # concurrent-operation module is disabled in every store here, so no SL record exists anywhere.
+        def kept(machine, *reservations, obs="clean", **rows):
+            machine = copy.deepcopy(machine)
+            machine["counters.toml"]["counters"].update(rows)
+            return h2(machine, dict(reservations), obs=obs)
+
+        def kept_owed(r, count, key="SL"):
+            return (r is not None and r.status == INVALID and r.checks.get("C-NO-DELETION") == "FINDING"
+                    and nd(r, "C-NO-DELETION: {} allocated {}-<n> id(s) above {}-0".format(count, key, key)))
+
+        r = kept(clean_machine(), SL=0, MA=0, TA=0)
+        check("kept-module-rows-zero-valid", r is not None and r.status == VALID
+              and r.checks.get("C-NO-DELETION") == "PASS")
+        check("kept-module-row-claims-absent-ids-invalid", kept_owed(kept(clean_machine(), SL=5), 5))
+        # The zero end: just outside it (1) is owed, at it (0) is legal (above).
+        check("kept-module-row-one-above-zero-invalid", kept_owed(kept(clean_machine(), SL=1), 1))
+        h2_clean = h2_manifest(clean_machine())
+        r = kept(h2_clean, h2_reservation("record", 1, {"SL": 1}), h2_reservation("record", 2, {"SL": 2}), SL=2)
+        check("kept-module-row-reserved-valid", r is not None and r.status == VALID
+              and r.checks.get("C-NO-DELETION") == "PASS")
+        check("kept-module-row-partly-reserved-invalid",
+              kept_owed(kept(h2_clean, h2_reservation("record", 1, {"SL": 2}), SL=2), 1))
+        # A reservation above the kept high-water reserves nothing below it.
+        check("kept-module-row-reservation-above-high-water-invalid",
+              kept_owed(kept(h2_clean, h2_reservation("record", 1, {"SL": 3}), SL=2), 2))
+        # Reservations never excuse ids the prior committed snapshot held: SL-1 and SL-2 were published
+        # there, so a kept row over a store that now holds neither owes both.
+        held_prior = clean_prior()
+        held_prior["prior"]["counters_high"]["SL"] = 2
+        held_prior["prior"]["held"]["SL"] = [[1, 2]]
+        check("kept-module-row-prior-held-ids-invalid", kept_owed(kept(
+            h2_clean, h2_reservation("record", 1, {"SL": 1}), h2_reservation("record", 2, {"SL": 2}),
+            obs=held_prior, SL=2), 2))
+        # The imported series' kept row on the active store: legal at zero, owed above it unless
+        # reservations hold its numbers, and the C-IMPORTED-IDS replay carries the same finding.
+        def kept_act(*reservations, **rows):
+            machine = act_machine()
+            machine["counters.toml"]["counters"].update(rows)
+            return act_run(machine, working=dict(reservations))
+
+        r = kept_act(**{"SL": 0, "imported:SL": 0})
+        check("kept-module-imported-row-zero-valid", r is not None and r.status == VALID
+              and r.checks.get("C-NO-DELETION") == "PASS")
+        r = kept_act(**{"SL": 0, "imported:SL": 3})
+        check("kept-module-imported-row-claims-absent-ids-invalid", kept_owed(r, 3, "imported:SL")
+              and r.checks.get("C-IMPORTED-IDS") == "FINDING"
+              and nd(r, "C-IMPORTED-IDS: C-NO-DELETION: 3 allocated imported:SL-<n>", "C-IMPORTED-IDS"))
+        r = kept_act(h2_reservation("import", 1, {"imported:SL": 1}), h2_reservation("import", 2, {"imported:SL": 2}),
+                     **{"SL": 0, "imported:SL": 2})
+        check("kept-module-imported-row-reserved-valid", r is not None and r.status == VALID)
+        # Flip: with the kept rows left out of the scan (no module namespace known here), both rows that
+        # claim absent ids grade VALID, so the vectors above are red without the kept-row scan.
+        with _patch.dict(globals(), {"MODULE_NAMESPACES": frozenset()}):
+            flipped = (kept(clean_machine(), SL=5), kept_act(**{"SL": 0, "imported:SL": 3}))
+        check("kept-module-row-flip-unscanned-valid", all(r is not None and r.status == VALID for r in flipped))
 
         # An unreadable or malformed reservation is CANNOT-EVALUATE under C-NO-DELETION, C-CONTIGUITY points
         # to it, and both then grade as though nothing were reserved (never a wider pass).

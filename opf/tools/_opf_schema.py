@@ -178,6 +178,12 @@ IMPORTED_NAMESPACES = (
 # comment, so it is named here for the imported-series refusal message.
 _RESERVED_UNASSIGNED_NAMESPACES = frozenset({"CL"})
 
+# The module-tier namespaces (spec 8.1). A counters.toml row of one stays legal while its module is
+# disabled, in either series: disable-module keeps the rows so the namespace's IDs stay unique across
+# a disable and a later re-enable (spec 8.2 and 8.8), so validate_counters accepts such a row even
+# under a known_namespaces or imported_namespaces restriction that does not list it.
+MODULE_NAMESPACES = frozenset(ns for ns, _module in MODULE_TYPES.values())
+
 
 # The section-8.1 taxonomy as one name -> normative-namespace map (baseline + module-tier + importer). A
 # caller-supplied `specs` roster is reconciled against this before either validator trusts it, so a MISBOUND
@@ -2391,7 +2397,13 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None, imp
     quoted key `"imported:<NS>"` as an independent number line, requires one for each listed namespace
     (completeness per series, as for known_namespaces), and flags an imported key whose namespace is not in
     IMPORTED_NAMESPACES or not listed, or whose value is not a genuine high-water. The returned map then
-    holds both series under their own keys. A malformed control is a finding and treated as empty."""
+    holds both series under their own keys. A malformed control is a finding and treated as empty.
+
+    A MODULE-tier namespace (MODULE_NAMESPACES) is always accepted-if-present, in either series, even
+    under a known_namespaces or imported_namespaces restriction that does not list it: disable-module
+    keeps the module's counter rows so the namespace's IDs stay unique across a disable and a later
+    re-enable (spec 8.2 and 8.8), so a disabled module's kept row is never flagged unknown. The
+    completeness checks are unchanged: a module namespace is required only where the caller lists it."""
     findings = []
     high_water = {}
     # The series-aware path (imported_namespaces given) judges every counter, clean or imported, against
@@ -2454,7 +2466,10 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None, imp
                 findings.append("[counters] key {} is not an imported counter of a type the imported series "
                                 "may carry (spec 8.1/8.2)".format(_safe_display(ns)))
                 continue
-            if ns[len(IMPORTED_PREFIX):] not in imported_namespaces:
+            if ns[len(IMPORTED_PREFIX):] not in imported_namespaces \
+                    and ns[len(IMPORTED_PREFIX):] not in MODULE_NAMESPACES:
+                # A module namespace outside the caller's list is a disabled module's kept row
+                # (spec 8.2/8.8): accepted, never flagged unknown.
                 findings.append("[counters] imported counter {} is not a known imported namespace".format(
                     _safe_display(ns)))
             if not hw_ok(val):
@@ -2476,11 +2491,14 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None, imp
             findings.append("[counters] namespace {!r} is bound to no record type in the section 8.1 "
                             "taxonomy (spec 8.1/8.2)".format(ns))
             continue
-        # A counter namespace is ACCEPTED when it is a known (required) namespace OR an optional
-        # (accepted-if-present) one; only a namespace that is neither, under a known-namespaces
-        # restriction, is flagged unknown. The taxonomy-validity check above still applies to all.
+        # A counter namespace is ACCEPTED when it is a known (required) namespace, an optional
+        # (accepted-if-present) one, or a module-tier namespace, whose kept row stays legal while its
+        # module is disabled (spec 8.2/8.8); only a namespace that is none of these, under a
+        # known-namespaces restriction, is flagged unknown. The taxonomy-validity check above still
+        # applies to all.
         accepted_ns = (known_namespaces is not None and ns in known_namespaces) or \
-                      (optional_namespaces is not None and ns in optional_namespaces)
+                      (optional_namespaces is not None and ns in optional_namespaces) or \
+                      ns in MODULE_NAMESPACES
         if known_namespaces is not None and not accepted_ns:
             findings.append("[counters] namespace {!r} is not a known namespace".format(ns))
         # A bool is an int subclass; a high-water is a genuine non-negative int, never True/False.
@@ -3182,6 +3200,19 @@ def self_test():
                               known_namespaces={"BI"}, optional_namespaces="LF")
     check("counters-optional-ns-malformed-control-flagged",
           any("optional_namespaces must be a collection" in f for f in o5))
+
+    # 20c (disabled-module rows, spec 8.2/8.8): disable-module keeps the module's counters.toml rows,
+    # so a row of a known module namespace is accepted under a known_namespaces or imported_namespaces
+    # restriction that does not list it, in either series, while a baseline namespace outside the
+    # restriction stays flagged unknown.
+    _, dm1 = validate_counters({"schema": 1, "counters": {"BI": 5, "SL": 3}}, known_namespaces={"BI"})
+    check("counters-disabled-module-ns-accepted", not dm1)
+    _, dm2 = validate_counters({"schema": 1, "counters": {"BI": 5, "imported:BI": 0, "imported:SL": 2}},
+                               known_namespaces={"BI"}, imported_namespaces={"BI"})
+    check("counters-disabled-module-imported-ns-accepted", not dm2)
+    _, dm3 = validate_counters({"schema": 1, "counters": {"BI": 5, "FN": 1}}, known_namespaces={"BI"})
+    check("counters-non-module-unknown-ns-still-flagged",
+          any("is not a known namespace" in f for f in dm3))
 
     # 21 (M8): a schema field other than the supported version fails closed, not parsed under v1.
     _, m8a = validate_counters({"schema": 999, "counters": {}})
