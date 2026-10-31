@@ -7946,7 +7946,7 @@ def _fsw_unit_suite():
             self.assertTrue(self.ev("Write", file_path=self.store, content="2026-09-23T23:00+02:00"))
 
         def test_spaced_numeric_zone(self):
-            # finding (r2): a space-separated numeric zone was dropped and the literal read as naive
+            # a space-separated numeric zone is applied; dropping it would read the literal as naive local time
             os.environ["TZ"] = "UTC0"
             time.tzset()
             self.assertEqual(self.ev("Write", file_path=self.store, content="[2026-09-23 22:45 +05]"), [])
@@ -7999,7 +7999,7 @@ def _fsw_unit_suite():
             self.assertTrue(self.ev("Write", file_path=fp, content="hb: 2099-01-01T00:00Z\nhb: 2099-01-01T00:00Z\n"))
 
         def test_edit_fragments_reconstructed_on_whole_lines(self):
-            # finding (r2): Edit checked the replacement fragment, not the changed file line
+            # Edit is judged on the whole changed file line: the replacement fragment alone can lack the literal
             fp = self.store_file("deadline: 2099-01-01T00:00Z\nheartbeat: 2026-09-23T17:45Z\n"
                                  "next_run: 2099-03-01T00:00Z\n")
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="deadline", new_string="heartbeat"),
@@ -8015,7 +8015,7 @@ def _fsw_unit_suite():
                                      replace_all=True), ["2099-02-02T00:00Z"])
 
         def test_edit_old_string_absent_on_whole_file_allowed(self):
-            # finding (r3 M2): a non-applying edit fell back to naked fragments (false deny); on a file
+            # an edit whose old_string does not apply is not checked as bare fragments (a false deny); on a file
             # read whole the tool itself fails, so the call is allowed
             fp = self.store_file("a\n")
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="zzz", new_string="hb 2099-01-01T00:00Z"), [])
@@ -8027,7 +8027,7 @@ def _fsw_unit_suite():
                                      new_string="hb 2099-01-01T00:00Z"), [])
 
         def test_edit_beyond_read_cap_checks_fragment(self):
-            # finding (r3 m): past the cap the hook cannot reconstruct; the fragment is checked on its own
+            # past the read cap the hook cannot reconstruct the file line, so the fragment is checked on its own
             fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2) + "hb: 2026-09-23T17:45Z\n")
             self.assertEqual(read_existing(fp, EXISTING_MAX_BYTES)[1], False)
             self.assertTrue(self.ev("Edit", file_path=fp, old_string="hb: 2026-09-23T17:45Z",
@@ -8117,7 +8117,7 @@ def _fsw_unit_suite():
                 self.assertTrue(self.ev("Bash", command=cmd), cmd)
 
         def test_bash_parse_evasions_now_denied(self):
-            # findings (r2): comment heredoc, wrapper options, and $(echo ...) evaded parsing
+            # a comment heredoc, wrapper options, and $(echo ...) must not hide a store write from the parse
             for cmd in (f"# <<EOF\nprintf '%s\\n' 'hb: 2099-01-01T00:00Z' > {PROJ}/private/s.md",
                         f"printf '%s\\n' '<<EOF'\nprintf 'hb: 2099-01-01T00:00Z' > {PROJ}/private/s.md",
                         f"echo 2099-01-01T00:00Z | env -i tee {PROJ}/private/s.md",
@@ -8138,8 +8138,8 @@ def _fsw_unit_suite():
             # a write-command name as an ARGUMENT is no longer a write (it was a disclosed false positive)
             self.assertEqual(self.ev("Bash", command=f"grep tee {PROJ}/private/s.md 2099-01-01T00:00Z"), [])
 
-        def test_r7_read_only_store_inspection_allowed(self):
-            # finding (MEDIUM): a read-only command naming a store path was denied; the old
+        def test_read_only_store_inspection_allowed(self):
+            # a read-only command naming a store path is allowed, not denied; the old
             # documented false positives for a read (grep, a quoted `>` argument) now pass
             for cmd in (f"rg -n '2099-01-01T00:00Z' {PROJ}/private/pending-decisions.md",
                         f"grep -c 2099-01-01T00:00Z {PROJ}/private/s.md",
@@ -8152,7 +8152,7 @@ def _fsw_unit_suite():
                         f"rg -i 2099-01-01T00:00Z {PROJ}/private/s.md | sed 's/a/b/'"):
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
 
-        def test_r7_write_indicators_still_denied(self):
+        def test_write_indicators_still_denied(self):
             for cmd in (f"echo 2099-01-01T00:00Z >> {PROJ}/private/s.md",
                         f"echo 2099-01-01T00:00Z>{PROJ}/private/s.md",
                         f"echo 2099-01-01T00:00Z 1> {PROJ}/private/s.md",
@@ -8179,7 +8179,7 @@ def _fsw_unit_suite():
             self.assertFalse(bash_writes("echo \\> x"))
             self.assertTrue(bash_writes("cat f >"))
 
-        def test_r7_bash_writes_is_linear(self):
+        def test_bash_writes_is_linear(self):
             # best of 3 in a child under the hang ceiling (one in-process run flaked on a loaded host).
             # The verdict is the growth from n to GROWTH * n (up to the former sizes), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
@@ -8203,7 +8203,7 @@ def _fsw_unit_suite():
 
         def test_bash_without_store_token_allowed(self):
             # `echo <future> > notes.md` with the cwd in the store (formerly a documented miss) is
-            # now resolved against the cwd and denied (test_r31_relative_targets_resolve_against_cwd_and_cd)
+            # now resolved against the cwd and denied (test_relative_targets_resolve_against_cwd_and_cd)
             for cwd, cmd in ((f"{PROJ}/private", "printf '%s' 2099-01-01T00:00Z > /dev/shm/example"),
                              (f"{PROJ}/repo", "echo 2099-01-01T00:00Z > notes.md"),
                              ("/", f"echo 2099-01-01T00:00Z > {PROJ}/private.bak/x"),
@@ -8222,7 +8222,7 @@ def _fsw_unit_suite():
                              [])
 
         def test_bash_scan_is_linear(self):
-            # finding (r2): unmatched $( openers rescanned the suffix quadratically
+            # unmatched $( openers must not rescan the suffix (quadratic time)
             # at this size (1.35 MB) the analysis spends BASH_WORK_BUDGET and fails OPEN (allowed), still
             # within the timeout; a hundredth of it stays inside the budget and is still denied (unparseable).
             # The timeout is the hang guard only; linearity is the growth from n to GROWTH * n (up to that size)
@@ -8275,8 +8275,8 @@ def _fsw_unit_suite():
 
 
         # -- date spans, keyword adjacency, and scan cost --
-        def test_r4_date_span_respects_quoting(self):
-            # finding (r3 M2): a quoted paren inside $(date ...) extended the span over a later literal
+        def test_date_span_respects_quoting(self):
+            # a quoted paren inside $(date ...) must not extend the span over a later literal
             deny = (f"echo \"$(date '+(')\" \"hb: 2099-01-01T00:00Z\" > {PROJ}/private/s.md; echo ')'",
                     f"echo '$(date -d 2099-01-01T00:00Z)' > {PROJ}/private/s.md",
                     f"echo $'$(date \\' 2099-01-01T00:00Z' > {PROJ}/private/s.md",
@@ -8291,8 +8291,8 @@ def _fsw_unit_suite():
             for cmd in allow:
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
 
-        def test_r4_env_prefix_date_span(self):
-            # finding (r3 m1): `env TZ=UTC date` was not a date substitution
+        def test_env_prefix_date_span(self):
+            # `env TZ=UTC date` is a date substitution too
             for cmd in (f"echo \"hb $(env TZ=UTC date -d 2099-01-01T00:00Z)\" > {PROJ}/private/s.md",
                         f"echo \"hb $(/usr/bin/env TZ=UTC date -d 2099-01-01T00:00Z)\" > {PROJ}/private/s.md"):
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
@@ -8305,14 +8305,14 @@ def _fsw_unit_suite():
                 cmd = f"echo $(date{glued} -d 2099-01-01T00:00Z) > {PROJ}/private/s.md"
                 self.assertTrue(self.ev("Bash", command=cmd), ascii(cmd))
 
-        def test_r4_keyword_must_immediately_precede(self):
+        def test_keyword_must_immediately_precede(self):
             for line in ("hb: 2099-01-01T00:00Z next", "target branch pushed, hb: 2099-01-01T00:00Z",
                          "next we did a b c and hb 2099-01-01T00:00Z"):
                 self.assertTrue(self.ev("Write", file_path=self.store, content=line), line)
             for line in ("next run at 2099-01-01T00:00Z", "target date: 2099-01-01T00:00Z", "due: **[2099-01-01T00:00Z]**"):
                 self.assertEqual(self.ev("Write", file_path=self.store, content=line), [], line)
 
-        def test_r4_scan_is_linear(self):
+        def test_scan_is_linear(self):
             # a 1.0 s wall-clock budget flaked on a loaded host (1.094 s observed); the
             # check is now the growth ratio from N to 2N (best of 3 each), which does not depend on host speed.
             # The in-process 30 s ceiling ran only after every timed run had returned, so it
@@ -8334,8 +8334,8 @@ def _fsw_unit_suite():
             for name, (small, large) in run_timed(code, HANG_TIMEOUT).items():
                 self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (name, small, large))
 
-        def test_r5_many_distinct_literals_linear_and_bounded(self):
-            # finding (r4, sibling pattern): the fragment path scanned the growing list per literal
+        def test_many_distinct_literals_linear_and_bounded(self):
+            # the fragment path must not rescan the growing literal list once per literal (quadratic time)
             lits = [f"2099-{1 + i % 12:02d}-{1 + (i // 12) % 28:02d}T{(i // 336) % 24:02d}:{(i // 8064) % 60:02d}Z"
                     for i in range(40000)]
             fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2 + 1))  # over the cap: the fragment path
@@ -8377,26 +8377,26 @@ def _fsw_unit_suite():
         def tw(self, *lines):
             return self.ev("Write", file_path=self.store, content="\n".join(lines) + "\n")
 
-        def test_r6_table_header_keyword_column_allowed(self):
-            # finding (r5 MAJOR): the scheduling keyword lived in the header cell, not on the row's line
+        def test_table_header_keyword_column_allowed(self):
+            # the scheduling keyword may live in the header cell, not on the row's line
             self.assertEqual(self.tw("| Item | Due | Owner |", "|---|---|---|", "| x | 2099-01-01T00:00Z | me |"), [])
             self.assertEqual(self.tw("| Item | Next run |", "| :--- | ---: |", "| x | 2099-01-01T00:00Z |",
                                      "| y | 2099-02-01T00:00Z |"), [])
             self.assertEqual(self.tw("  | Item | Due", "  ---|:---:", "  | x | 2099-01-01T00:00Z"), [])
 
-        def test_r6_table_non_keyword_column_denied(self):
+        def test_table_non_keyword_column_denied(self):
             self.assertEqual(self.tw("| Item | Seen |", "|---|---|", "| x | 2099-01-01T00:00Z |"),
                              ["2099-01-01T00:00Z"])
             self.assertEqual(self.tw("| Due | Seen |", "|---|---|", "| 2099-01-01T00:00Z | 2099-02-01T00:00Z |"),
                              ["2099-02-01T00:00Z"])
 
-        def test_r6_table_ended_row_denied(self):
+        def test_table_ended_row_denied(self):
             self.assertTrue(self.tw("| Item | Due |", "|---|---|", "| x | 2099-01-01T00:00Z |", "",
                                     "| y | 2099-02-01T00:00Z |"))
             # a pipe-free line is a one-cell row (GFM), so it no longer ends the table
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "text", "| y | 2099-02-01T00:00Z |"), [])
 
-        def test_r6_table_without_delimiter_denied(self):
+        def test_table_without_delimiter_denied(self):
             for lines in (("| Item | Due |", "| x | 2099-01-01T00:00Z |"),
                           ("| Item | Due |", "|---|", "| x | 2099-01-01T00:00Z |"),  # cell count mismatch
                           ("| Item | Due |", "", "|---|---|", "| x | 2099-01-01T00:00Z |"),
@@ -8406,12 +8406,12 @@ def _fsw_unit_suite():
                           ("Item \\| Due", "---|---", "x | 2099-01-01T00:00Z")):
                 self.assertTrue(self.tw(*lines), lines)
 
-        def test_r6_table_escaped_pipe_does_not_shift_columns(self):
+        def test_table_escaped_pipe_does_not_shift_columns(self):
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a \\| b | 2099-01-01T00:00Z |"), [])
             self.assertTrue(self.tw("| Item \\| Due | Seen |", "|---|---|", "| x | 2099-01-01T00:00Z |"))
             self.assertTrue(self.tw("| Seen | Due |", "|---|---|", "| a \\| 2099-02-01T00:00Z | c |"))
 
-        def test_r6_table_header_carried_over_edit_allowed(self):
+        def test_table_header_carried_over_edit_allowed(self):
             fp = self.store_file("# log\n| Item | Due |\n|---|---|\n| a | 2026-09-01T00:00Z |\n")
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="| a | 2026-09-01T00:00Z |",
                                      new_string="| a | 2026-09-01T00:00Z |\n| b | 2099-01-01T00:00Z |"), [])
@@ -8419,7 +8419,7 @@ def _fsw_unit_suite():
             self.assertTrue(self.ev("Edit", file_path=fp, old_string="| a | 2026-09-01T00:00Z |",
                                     new_string="| a | 2026-09-01T00:00Z |\n| b | 2099-01-01T00:00Z |"))
 
-        def test_r6_table_context_absent_on_fragment_path_and_bash(self):
+        def test_table_context_absent_on_fragment_path_and_bash(self):
             # disclosed: no table context on the Bash path or the fragment path
             self.assertTrue(self.ev("Bash", command="printf '| Item | Due |\n|---|---|\n| x | 2099-01-01T00:00Z |\n' "
                                                     f">> {PROJ}/private/s.md"))
@@ -8427,7 +8427,7 @@ def _fsw_unit_suite():
             self.assertTrue(self.ev("Edit", file_path=fp, old_string="x",
                                     new_string="| Item | Due |\n|---|---|\n| x | 2099-01-01T00:00Z |"))
 
-        def test_r6_table_scan_is_linear(self):
+        def test_table_scan_is_linear(self):
             rows = ["| x | 2099-01-01T00:00Z |"] * 50000
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", *rows), [])
             self.assertEqual(self.tw(*(["| a | b |"] * 50000)), [])
@@ -8445,8 +8445,8 @@ def _fsw_unit_suite():
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         # -- substitution writes, in-place clusters, table forms, and fd duplication --
-        def test_r7_dq_substitution_write_seen(self):
-            # finding 1 (HIGH): a write inside a double-quoted command substitution was hidden
+        def test_dq_substitution_write_seen(self):
+            # a write inside a double-quoted command substitution must be seen, not hidden
             for cmd in (f"result=\"$(printf '%s\\n' 'heartbeat: 2099-01-01T00:00Z' | tee {PROJ}/private/s.md)\"",
                         f"r=\"`printf 'hb 2099-01-01T00:00Z' | tee {PROJ}/private/s.md`\"",
                         f"r=\"x $(echo \"$(printf 'hb 2099-01-01T00:00Z' > {PROJ}/private/s.md)\") y\"",
@@ -8463,8 +8463,8 @@ def _fsw_unit_suite():
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
             self.assertTrue(bash_writes("sed \"$(echo x)\" -i f"))  # the outer stream continues past a substitution
 
-        def test_r7_perl_digit_clusters_in_place(self):
-            # finding 2 (HIGH): a perl switch cluster with digits hid the in-place i
+        def test_perl_digit_clusters_in_place(self):
+            # a perl switch cluster with digits (such as -0777pi) must not hide the in-place i
             for cmd in (f"perl -0777pi -e 's/old/2099-01-01T00:00Z/' {PROJ}/private/s.md",
                         f"perl -0pi -e 's/old/2099-01-01T00:00Z/' {PROJ}/private/s.md",
                         f"perl -l0pi -e 's/old/2099-01-01T00:00Z/' {PROJ}/private/s.md",
@@ -8476,8 +8476,8 @@ def _fsw_unit_suite():
                         f"sed -n -E '/2099-01-01T00:00Z/p' {PROJ}/private/s.md"):
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
 
-        def test_r7_gfm_table_forms(self):
-            # finding 3 (MED): no outer pipes, and a one-hyphen delimiter, are valid GFM tables
+        def test_gfm_table_forms(self):
+            # no outer pipes, and a one-hyphen delimiter, are valid GFM tables
             self.assertEqual(self.tw("Item | Due", "---|---", "x | 2099-01-01T00:00Z"), [])
             self.assertEqual(self.tw("| Item | Due |", "|-|-|", "| x | 2099-01-01T00:00Z |"), [])
             self.assertEqual(self.tw("| Item | Due |", "|--|--|", "| x | 2099-01-01T00:00Z |"), [])
@@ -8488,8 +8488,8 @@ def _fsw_unit_suite():
             self.assertEqual(self.tw("Item | Due", "---|---", "x | 2099-01-01T00:00Z", "no pipe here",
                                      "y | 2099-02-01T00:00Z"), [])  # a pipeless line is a row (GFM)
 
-        def test_r7_header_repurpose_rechecks_rows(self):
-            # finding 4 (MED): a header or delimiter change must re-check every row of its table
+        def test_header_repurpose_rechecks_rows(self):
+            # a header or delimiter change must re-check every row of its table
             fp = self.store_file("| Item | Due |\n|---|---|\n| x | 2099-01-01T00:00Z |\n")
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="Due", new_string="Observed"),
                              ["2099-01-01T00:00Z"])
@@ -8506,8 +8506,8 @@ def _fsw_unit_suite():
                              ["2099-01-01T00:00Z"])  # the row joins the Seen table
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="| r |", new_string="| s |"), [])
 
-        def test_r7_spaced_and_quoted_fd_duplication(self):
-            # finding 5 (MED): the redirection operand is classified whole, after dequoting
+        def test_spaced_and_quoted_fd_duplication(self):
+            # the redirection operand is classified whole, after dequoting
             for cmd in (f"grep 2099-01-01T00:00Z {PROJ}/private/s.md 1>& 2",
                         f"grep 2099-01-01T00:00Z {PROJ}/private/s.md >&'2'",
                         f"grep 2099-01-01T00:00Z {PROJ}/private/s.md 2>& \"1\"",
@@ -8526,8 +8526,8 @@ def _fsw_unit_suite():
                 self.assertTrue(bash_writes(cmd), cmd)
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
 
-        def test_r7_subagent_store_write_is_checked(self):
-            # finding 6 (refuted, intended): a subagent's store write is checked, never skipped
+        def test_subagent_store_write_is_checked(self):
+            # by design: a subagent's store write is checked, never skipped
             for extra in ({"agent_id": "a1b2"}, {"agent_id": "a1b2", "agent_type": "general-purpose"}):
                 payload = dict({"tool_name": "Write", "cwd": "/",
                                 "tool_input": {"file_path": self.store, "content": "hb 2099-01-01T00:00Z"}}, **extra)
@@ -8537,7 +8537,7 @@ def _fsw_unit_suite():
                 self.assertTrue(evaluate(payload, self.now), extra)
             self.assertIn("DELIBERATELY checked", _FSW_DOC)
 
-        def test_r7_shell_tokens_linear(self):
+        def test_shell_tokens_linear(self):
             # best of 3 in a child under the hang ceiling (2.08 s in-process was observed at load 30,
             # and a 2.0 s ceiling failed at 2.53 s on a slower CI runner). The verdict is the growth from n to
             # GROWTH * n (up to the former sizes), not a wall-clock ceiling
@@ -8550,8 +8550,8 @@ def _fsw_unit_suite():
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         # -- table boundaries and rows, and case patterns in substitutions --
-        def test_r8_new_block_ends_table(self):
-            # finding 1 (HIGH): a list item, heading, blockquote, or fence after a Due table inherited its context
+        def test_new_block_ends_table(self):
+            # a list item, heading, blockquote, or fence after a Due table must not inherit its context
             hdr = ("| Item | Due |", "|---|---|", "| a | 2026-09-01T00:00Z |")
             for tail in (("- heartbeat | 2099-01-02T00:00Z",), ("* hb | 2099-01-02T00:00Z",),
                          ("+ hb | 2099-01-02T00:00Z",), ("1. hb | 2099-01-02T00:00Z",), ("2) hb | 2099-01-02T00:00Z",),
@@ -8570,7 +8570,7 @@ def _fsw_unit_suite():
             self.assertEqual(self.tw(*(hdr + ("# next", "| Item | Due |", "|---|---|",
                                               "| b | 2099-01-02T00:00Z |"))), [])
 
-        def test_r10_bare_row_under_leading_pipe_header(self):
+        def test_bare_row_under_leading_pipe_header(self):
             # GFM leading pipes are optional per line, so a bare row continues a `| ... |` table
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "release | 2099-01-01T00:00Z"), [])
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a | x |", "release | 2099-01-01T00:00Z |"), [])
@@ -8583,11 +8583,11 @@ def _fsw_unit_suite():
                                  ["2099-01-01T00:00Z"], gap)
             self.assertNotIn("stricter than GFM", _FSW_DOC)
 
-        def test_r11_pipe_free_row_continues_table(self):
+        def test_pipe_free_row_continues_table(self):
             # GFM example 202, a pipe-free body row continues the table (one cell, column 0)
             body = "| Item | Due |\n|---|---|\nTBD\nrelease | %s\n"
             self.assertEqual(self.tw(*(body % "2099-01-01T00:00Z").splitlines()), [])
-            fp = os.path.join(self.tmp, "r11.md")
+            fp = os.path.join(self.tmp, "pipe-free-row.md")
             os.environ["AIQT_STORE_ROOT"] = self.tmp  # the Edit must reach a store path to count
             with open(fp, "w") as f:
                 f.write(body % "2026-09-01T00:00Z")
@@ -8604,7 +8604,7 @@ def _fsw_unit_suite():
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "TBD", "", "release | 2099-01-01T00:00Z"),
                              ["2099-01-01T00:00Z"])
 
-        def test_r11_pipe_free_line_is_column_zero(self):
+        def test_pipe_free_line_is_column_zero(self):
             # a pipe-free paragraph line after a table stays in it until a blank line, but it never
             # gets a header exemption: it is checked like an ordinary line, even under a scheduling cell 0
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a | x |", "hb 2099-01-01T00:00Z"),
@@ -8623,12 +8623,12 @@ def _fsw_unit_suite():
             self.assertNotIn("a line with no unescaped pipe, or", _FSW_DOC)
             self.assertNotIn("so it is exempt only when header cell 0 carries a keyword", _FSW_DOC)
 
-        def test_r12_pipe_free_heartbeat_under_due_header_denied(self):
+        def test_pipe_free_heartbeat_under_due_header_denied(self):
             # a pipe-free line under `| Due | Item |` inherited column 0's exemption, so
             # a fabricated future heartbeat was allowed through Write, Edit, and MultiEdit
             fut = "2099-01-01T00:00Z"
             body = "| Due | Item |\n| --- | --- |\n| 2099-02-01T09:00Z | release |\nLast-heartbeat: %s\n"
-            fp = os.path.join(self.tmp, "r12.md")
+            fp = os.path.join(self.tmp, "pipe-free-heartbeat.md")
             os.environ["AIQT_STORE_ROOT"] = self.tmp
             self.assertEqual(self.ev("Write", file_path=fp, content=body % fut), [fut])
             with open(fp, "w") as f:
@@ -8640,8 +8640,8 @@ def _fsw_unit_suite():
             self.assertEqual(self.ev("Write", file_path=fp, content=body % "2026-09-01T00:00Z"), [])
             self.assertIn("A pipe-free row gets no header", _FSW_DOC)
 
-        def test_r8_table_context_carry_over_scales(self):
-            # finding 2 (MED perf): a row key compared the full header text, so time grew with header x rows
+        def test_table_context_carry_over_scales(self):
+            # a row key must not compare the full header text, or time grows with header x rows
             # interleaved best of 3 in a child under the hang ceiling (formerly one in-process run each)
             code = TIMED_PRELUDE + (
                 "def run(hl):\n"
@@ -8653,8 +8653,8 @@ def _fsw_unit_suite():
             # flat in header length (16 times longer): a ratio, with no wall-clock ceiling or absolute slack
             self.assertLess(times[1] / max(times[0], 1e-3), FLAT_LIMIT, times)
 
-        def test_r8_case_pattern_paren_in_substitution(self):
-            # finding 3 (HIGH, exotic): a case pattern `)` closed the $(...) frame early, hiding the write
+        def test_case_pattern_paren_in_substitution(self):
+            # a case pattern `)` must not close the $(...) frame early and hide the write (an exotic form)
             deny = (f'result="$(case ok in ok) printf \'%s\\n\' \'hb 2099-01-02T00:00Z\' > {PROJ}/private/s.md;; esac)"',
                     f'r=$(case ok in (ok) tee {PROJ}/private/s.md <<< "2099-01-02T00:00Z";; esac)',
                     f'r="$(case a in a) case b in b) :;; esac; printf 2099-01-02T00:00Z > {PROJ}/private/s.md;; esac)"')
@@ -8668,7 +8668,7 @@ def _fsw_unit_suite():
                 self.assertFalse(bash_writes(cmd), cmd)
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
 
-        def test_r9_hash_row_continues_pipeless_table(self):
+        def test_hash_row_continues_pipeless_table(self):
             # a false deny: any `#` line ended a table, so an issue-number row lost its
             # Due-column exemption; only an ATX heading (1 to 6 `#` then whitespace or the line end) ends one
             for rows in (("#123 | 2099-12-31T00:00Z",), ("x | 2026-09-01T00:00Z", "#7 | 2099-12-31T00:00Z"),
@@ -8678,7 +8678,7 @@ def _fsw_unit_suite():
                          "## | 2099-12-31T00:00Z"):
                 self.assertEqual(self.tw("Issue | Due", "---|---", head), ["2099-12-31T00:00Z"], head)
 
-        def test_r9_case_counted_only_in_command_position(self):
+        def test_case_counted_only_in_command_position(self):
             # a false deny: a `case` ARGUMENT inside a substitution opened a case
             # construct, left the substitution unterminated, and read as a write
             reads = (f'x="$(rg case {PROJ}/private/s.md | grep 2099-12-31T00:00Z)"',
@@ -8698,7 +8698,7 @@ def _fsw_unit_suite():
                 self.assertTrue(bash_writes(cmd), cmd)
                 self.assertEqual(self.ev("Bash", command=cmd), ["2099-12-31T00:00Z"], cmd)
 
-        def test_r4_threat_model_stated(self):
+        def test_threat_model_stated(self):
             self.assertIn("THREAT MODEL", _FSW_DOC.split("\n\n")[1])
 
         # -- write words only in command position, and quoted text in a store write --
@@ -8713,8 +8713,8 @@ def _fsw_unit_suite():
                 os.environ.clear()
                 os.environ.update(old_env)
 
-        def test_r13_write_word_only_in_command_position(self):
-            # item 3 (false deny): every argument's basename was compared against WRITE_COMMANDS
+        def test_write_word_only_in_command_position(self):
+            # only the command word, not every argument's basename, is compared against WRITE_COMMANDS (no false deny)
             store = f"{PROJ}/private/state.md"
             reads = (f"rg -e tee -e '2099-01-01T00:00Z' {store}", f"grep -n -e cp -e mv 2099-01-01T00:00Z {store}",
                      f"rg 'dd|truncate' {store} | grep 2099-01-01T00:00Z", f"echo install 2099-01-01T00:00Z; cat {store}",
@@ -8748,8 +8748,8 @@ def _fsw_unit_suite():
                         "echo \"$(rg tee S)\" 2099-01-01T00:00Z >> S"):
                 self.assertTrue(self.ev("Bash", command=cmd.replace("S", store)), cmd)
 
-        def test_r13_quoted_text_in_store_write_exempt(self):
-            # item 4 (false deny): a blockquote, inline code span, or fenced block holding a future literal
+        def test_quoted_text_in_store_write_exempt(self):
+            # a blockquote, inline code span, or fenced block holding a future literal is quoted text (no false deny)
             fut = "2099-01-01T00:00Z"
             for content in (f"> quoted: {fut}\n", f"  > nested > {fut}\n", f"example `{fut}` shape\n",
                             f"example ``a ` {fut}`` shape\n", f"```\nhb: {fut}\n```\n", f"~~~~\n{fut}\n~~~~~\n",
@@ -8778,7 +8778,7 @@ def _fsw_unit_suite():
 
 
         # -- command position after redirections, find -exec, in-place options, [[ comparisons, worker env --
-        def r14(self, cmds, want):
+        def assert_writes(self, cmds, want):
             store = f"{PROJ}/private/state.md"
             for cmd in cmds:
                 # F first: the store path comes from the temporary directory, whose name may hold an F
@@ -8786,37 +8786,37 @@ def _fsw_unit_suite():
                 self.assertEqual(bash_writes(cmd), want, cmd)
                 self.assertEqual(self.ev("Bash", command=cmd), ["2099-01-01T00:00Z"] if want else [], cmd)
 
-        def test_r14_leading_input_redirection_keeps_command_position(self):
-            # item 1 (regression from r12): a leading input redirection's operand was read as the command word
-            self.r14(("<<<'Last-heartbeat: F' tee S", "< /dev/shm/in tee S F", "0</dev/shm/in tee S F",
+        def test_leading_input_redirection_keeps_command_position(self):
+            # a leading input redirection's operand must not be read as the command word
+            self.assert_writes(("<<<'Last-heartbeat: F' tee S", "< /dev/shm/in tee S F", "0</dev/shm/in tee S F",
                       "<&0 tee S F", "<<-E tee S\nF\nE", "sudo < /dev/shm/in tee S F", "echo F <> S",
                       "x=$(<<<F tee S)", "cat < /dev/shm/in | tee -a S F"), True)
-            self.r14(("cat < S F", "rg x < S F", "while read l; do echo; done < <(rg x S) F",
+            self.assert_writes(("cat < S F", "rg x < S F", "while read l; do echo; done < <(rg x S) F",
                       "diff <(sort S) /dev/shm/b F", "rg -c x <<< F S"), False)
 
-        def test_r14_exec_only_under_find(self):
-            # item 2 (false deny): any -exec word re-entered command position, even outside find
-            self.r14(("printf '%s\\n' '-exec' tee F S", "echo -ok cp F S", "rg -e -execdir -e mv F S",
+        def test_exec_only_under_find(self):
+            # an -exec word re-enters command position only under find (no false deny elsewhere)
+            self.assert_writes(("printf '%s\\n' '-exec' tee F S", "echo -ok cp F S", "rg -e -execdir -e mv F S",
                       "find . -exec rg x {} + -name tee F S", "find . -exec rg x {} \\; -name cp F S"), False)
-            self.r14(("find . -name x -exec tee S \\; F", "sudo find . -okdir cp x S \\; F",
+            self.assert_writes(("find . -name x -exec tee S \\; F", "sudo find . -okdir cp x S \\; F",
                       "find . -exec rg x {} + -exec tee S \\; F", "find . -execdir sed -i s/a/b/ S + F"), True)
 
-        def test_r14_inplace_only_in_command_position(self):
-            # item 3 (false deny): sed or perl as a mere argument (a search pattern) armed in-place detection
-            self.r14(("rg -e sed -i -e F S", "grep -e perl -i F S", "echo sed -i F; cat S"), False)
-            self.r14(("sed -i s/a/b/ S F", "echo F | sudo sed -i 's/a/b/' S", "perl -pi -e 1 S F",
+        def test_inplace_only_in_command_position(self):
+            # sed or perl as a mere argument (a search pattern) must not arm in-place detection (no false deny)
+            self.assert_writes(("rg -e sed -i -e F S", "grep -e perl -i F S", "echo sed -i F; cat S"), False)
+            self.assert_writes(("sed -i s/a/b/ S F", "echo F | sudo sed -i 's/a/b/' S", "perl -pi -e 1 S F",
                       "ls S | xargs sed -i s/a/F/", "LC_ALL=C sed --in-place s/a/b/ S F"), True)
 
-        def test_r14_conditional_comparison_is_not_redirection(self):
-            # item 5 (false deny): inside [[ ]], `>` and `<` compare strings
-            self.r14(("stamp=$(cat S); [[ \"$stamp\" > 'F' ]]", "stamp=$(cat S); [[ \"$stamp\" < 'F' ]]",
+        def test_conditional_comparison_is_not_redirection(self):
+            # inside [[ ]], `>` and `<` compare strings and are no redirection (no false deny)
+            self.assert_writes(("stamp=$(cat S); [[ \"$stamp\" > 'F' ]]", "stamp=$(cat S); [[ \"$stamp\" < 'F' ]]",
                       "if [[ $(cat S) > F ]]; then echo late; fi", "[[ a > b && ( c < F ) ]] && cat S"), False)
             # [ ] and test are commands: an unquoted `>` there IS an output redirection (real bash creates b)
-            self.r14(("[ \"$(cat F)\" > S ]", "test x > S F", "[[ a < b ]] && echo F > S",
+            self.assert_writes(("[ \"$(cat F)\" > S ]", "test x > S F", "[[ a < b ]] && echo F > S",
                       "[[ $(tee S <<< F) > a ]]", "[[ a > b ]]; echo F >> S", "echo '[[' > S F",
                       "[[ a > b F S"), True)
 
-        def test_r14_real_bash_agrees(self):
+        def test_real_bash_agrees_on_input_redirection_and_comparison(self):
             # the redirection semantics the fixes rest on, observed in real bash
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
@@ -8829,8 +8829,8 @@ def _fsw_unit_suite():
             self.assertTrue({"o1", "o2", "o3", "b1", "b2"} <= made, made)
             self.assertFalse({"c1", "c2"} & made, made)
 
-        def test_r14_worker_env_does_not_skip(self):
-            # item 4, now that no worker bypass exists: a worker marker in the environment does not skip main()
+        def test_worker_env_does_not_skip(self):
+            # no worker bypass exists: a worker marker in the environment does not skip main()
             payload = {"tool_name": "Write", "tool_input": {"file_path": self.store, "content": "2099-01-01T00:00Z"}}
             for k, v in (("AIQT_HOOKS_WORKER", "1"),):
                 old = os.environ.get(k)
@@ -8845,10 +8845,10 @@ def _fsw_unit_suite():
                         os.environ[k] = old
 
         # -- function bodies, and time and ! before a conditional --
-        def test_r15_function_body_is_command_position(self):
-            # item 1 (regression from r12/r13): `function NAME {` consumed command position, so an in-place
-            # write in the body was missed; detected whether or not the function is called (conservative)
-            self.r14(("function update_state { sed -i 's/OLD/F/' S; }; update_state",
+        def test_function_body_is_command_position(self):
+            # `function NAME {` must keep command position for its body, or an in-place
+            # write in the body is missed; detected whether or not the function is called (conservative)
+            self.assert_writes(("function update_state { sed -i 's/OLD/F/' S; }; update_state",
                       "function update_state { perl -pi -e 's/OLD/F/' S; }; update_state",
                       "function update_state { sed -i 's/OLD/F/' S; }", "function u\n{ tee S <<< F; }",
                       "function u () { sed -i s/a/F/ S; }", "function u() ( perl -pi -e 1 S F )",
@@ -8857,23 +8857,23 @@ def _fsw_unit_suite():
                       "x=$(function u { tee S <<< F; }; u)", "if true; then function u { cp F S; }; fi"),
                      True)
             # the header words are never command words, and a conditional in a body still compares
-            self.r14(("rg function S -e F", "function tee { rg x S F; }", "function u { [[ $(cat S) > F ]]; }",
+            self.assert_writes(("rg function S -e F", "function tee { rg x S F; }", "function u { [[ $(cat S) > F ]]; }",
                       "u() { [[ $(cat S) < F ]] && echo late; }", "echo function sed -i F S"), False)
 
-        def test_r15_time_and_negation_keep_conditional(self):
-            # item 2 (false deny): command position was lost at `time`, so `[[` was not a conditional and its
-            # `>` read as a redirection
-            self.r14(("if time [[ $(cat S) > F ]]; then echo corrupt; fi", "time [[ $(cat S) > F ]]",
+        def test_time_and_negation_keep_conditional(self):
+            # command position must survive `time`, or `[[` is not a conditional and its
+            # `>` reads as a redirection (a false deny)
+            self.assert_writes(("if time [[ $(cat S) > F ]]; then echo corrupt; fi", "time [[ $(cat S) > F ]]",
                       "time -p [[ $(cat S) > F ]] && echo corrupt", "time -- [[ $(cat S) > F ]]",
                       "time -p -- [[ $(cat S) > F ]]", "! [[ $(cat S) > F ]] && echo ok",
                       "if ! time [[ $(cat S) > F ]]; then echo corrupt; fi", "time ! [[ $(cat S) > F ]]",
                       "x=$(time [[ $(cat S) > F ]] && echo late)"), False)
             # bash runs a command after `time -p -p`, `time -x`, or `time -- -p`: there `>` IS a redirection;
             # and a write after time or ! is still a write
-            self.r14(("time -p -p [[ a > S F", "time -x [[ a > S F", "time -- -p [[ a > S F",
+            self.assert_writes(("time -p -p [[ a > S F", "time -x [[ a > S F", "time -- -p [[ a > S F",
                       "time echo F > S", "time -p tee S <<< F", "! tee S <<< F", "time ! sed -i s/a/F/ S"), True)
 
-        def test_r15_real_bash_agrees(self):
+        def test_real_bash_agrees_on_time_negation_and_function_bodies(self):
             # the reserved-word and function semantics the fixes rest on, observed in real bash
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
@@ -8888,9 +8888,9 @@ def _fsw_unit_suite():
             self.assertFalse({"c%d" % k for k in range(1, 9)} & made, made)
 
         # -- arithmetic is not redirection --
-        def test_r16_arithmetic_is_not_redirection(self):
+        def test_arithmetic_is_not_redirection(self):
             # a false deny: `>` inside `(( ... ))` and `$(( ... ))` read as a redirection
-            self.r14(("count=$(grep -Fc 'F' S)\nif (( count > 0 )); then printf '%s\\n' \"$count\"; fi",
+            self.assert_writes(("count=$(grep -Fc 'F' S)\nif (( count > 0 )); then printf '%s\\n' \"$count\"; fi",
                       "count=$(grep -Fc 'F' S)\nprintf '%s\\n' \"$(( count > 0 ))\"",
                       "rg -c F S; (( x = 1 << 2 ))", "rg -c F S; echo $(( a >> 1 ))", "rg F S; (( a > b ))",
                       "rg F S; echo $(( (a) > (b) ))", "rg F S; for ((i = 0; i < 2; i++)); do (( i > 0 )); done",
@@ -8901,13 +8901,13 @@ def _fsw_unit_suite():
                      False)
             # a write inside a substitution nested in arithmetic, a real redirect after `))`, a `((` not in
             # command position, and the unemulated `((` fallback all still count as writes
-            self.r14(("(( $(echo F > S; echo 1) > 0 ))", "echo $(( `tee S <<< F` + 1 ))",
+            self.assert_writes(("(( $(echo F > S; echo 1) > 0 ))", "echo $(( `tee S <<< F` + 1 ))",
                       "x=$(( $(sed -i s/a/F/ S) + 1 ))", "echo F | (( 1 > 0 )) > S", "echo $(( 1 )) > S F",
                       "for ((i = 0; i < 1; i++)); do :; done > S F", "if echo F | (( 1 > 0 )) > S; then :; fi",
                       "echo ((x > S)) F", "rg for ((x > S)) F", "((echo F) > S)", "x=$((cat S) > S) F",
                       "$(( 1 > 0 S F"), True)
 
-        def test_r16_real_bash_agrees(self):
+        def test_real_bash_agrees_on_arithmetic(self):
             # the arithmetic semantics the fix rests on, observed in real bash
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
@@ -8921,11 +8921,11 @@ def _fsw_unit_suite():
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5"})
 
         # -- arithmetic headers, and reserved words touching `((` --
-        def test_r17_for_arith_header_restores_command_position(self):
+        def test_for_arith_header_restores_command_position(self):
             # a MISS (a regression): after a `for ((...))` header the body
             # lost command position, so `do tee` and `do sed -i` were missed; bash takes `do` with or without a
             # `;` or newline before it, and `{` in place of `do`
-            self.r14(("for ((i=0;i<1;i++)) do tee S <<< 'Last-heartbeat: F'; done",
+            self.assert_writes(("for ((i=0;i<1;i++)) do tee S <<< 'Last-heartbeat: F'; done",
                       "for ((i=0;i<1;i++)); do tee S <<< 'Last-heartbeat: F'; done",
                       "for ((i=0;i<1;i++))\ndo tee S <<< 'Last-heartbeat: F'; done",
                       "for ((i=0;i<1;i++))do tee S <<< F; done", "for ((i=0;i<1;i++)) ;do tee S <<< F; done",
@@ -8935,17 +8935,17 @@ def _fsw_unit_suite():
                       "for ((i=0;i<1;i++)) { tee S <<< F; }", "for (( ; ; )) do cp /dev/shm/x S; break; done F",
                       "x=$(for ((i=0;i<1;i++)) do tee S <<< F; done)",
                       "for ((i=0;i<1;i++)) do for ((j=0;j<1;j++)) do tee S <<< F; done; done"), True)
-            self.r14(("for ((i=0;i<1;i++)) do rg -c F S; done", "for ((i=0;i<1;i++)) do echo tee S F; done",
+            self.assert_writes(("for ((i=0;i<1;i++)) do rg -c F S; done", "for ((i=0;i<1;i++)) do echo tee S F; done",
                       "for ((i=0;i<1;i++)) { rg F S; }", "rg F S; for ((i=0;i<2;i++)) do (( i > 0 )); done"),
                      False)
             # the tokenizer emits a separator after the closed header, so the stream sees `do` in command position
             toks = _shell_tokens("for ((i=0;i<1;i++)) do tee x; done")[-1]
             self.assertEqual(toks[:4], [("w", "for"), ("w", "$"), ("s",), ("w", "do")], toks)
 
-        def test_r17_keyword_touching_arith_is_arithmetic(self):
+        def test_keyword_touching_arith_is_arithmetic(self):
             # a false deny: the reserved word before `((` was not flushed at the `(`
             # metacharacter, so `if((` read as a subshell and its `>` as a redirection
-            self.r14(("count=$(grep -Fc 'F' S); if(( count > 0 )); then echo found; fi",
+            self.assert_writes(("count=$(grep -Fc 'F' S); if(( count > 0 )); then echo found; fi",
                       "count=$(grep -Fc 'F' S); while(( count > 5 )); do break; done",
                       "count=$(grep -Fc 'F' S); until(( count > -1 )); do break; done",
                       "if false; then :; elif(( $(rg -c F S) > 0 )); then echo found; fi",
@@ -8953,10 +8953,10 @@ def _fsw_unit_suite():
                       "rg F S; for((i=0;i<2;i++)); do (( i > 0 )); done", "x=$(if(( 2 > 1 )); then rg F S; fi)"),
                      False)
             # a non-keyword word touching `((` is still no arithmetic, and a write after `if((` still counts
-            self.r14(("if(( 1 > 0 )); then tee S <<< F; fi", "echo((x > S)) F", "rg((x > S)) F",
+            self.assert_writes(("if(( 1 > 0 )); then tee S <<< F; fi", "echo((x > S)) F", "rg((x > S)) F",
                       "while(( 1 > 0 )); do sed -i s/a/F/ S; break; done"), True)
 
-        def test_r17_real_bash_agrees(self):
+        def test_real_bash_agrees_on_arith_headers_and_touching_keywords(self):
             # the syntax the fixes rest on, observed in real bash: the header body runs without a `;` before
             # `do`, and a keyword touching `((` opens arithmetic (no file named by the `>` operand appears)
             if not shutil.which("bash"):
@@ -8972,15 +8972,15 @@ def _fsw_unit_suite():
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4"})
 
         # -- function compound bodies without `()` --
-        def test_r18_function_compound_body_without_parens(self):
+        def test_function_compound_body_without_parens(self):
             # a false deny: after `function NAME` with no `()` the body word lost command
             # position, so `function NAME (( ... ))` read its `>` as a redirection; a sibling of the same class
             # (a MISS) hid a write in a `function NAME while|until|if` body
-            self.r14(("count=$(grep -c 'F' S); function has_matches (( count > 0 ))", "function g [[ 1 < 2 ]]",
+            self.assert_writes(("count=$(grep -c 'F' S); function has_matches (( count > 0 ))", "function g [[ 1 < 2 ]]",
                       "function g [[ $(rg -c F S) > 0 ]]", "count=$(rg -c F S); function h (( count > 0 )); h",
                       "function h (( $(rg -c F S) >> 1 ))", "function w while rg -q F S; do break; done",
                       "function tee { rg x S F; }", "function u { [[ $(cat S) > F ]]; }"), False)
-            self.r14(("function f { tee S <<< 'F'; }", "function f (( $(tee S <<< F) ))",
+            self.assert_writes(("function f { tee S <<< 'F'; }", "function f (( $(tee S <<< F) ))",
                       "function f (( `tee S <<< F` ))", "function f [[ $(tee S <<< F) ]]",
                       "function f (( 1 > 0 )) > S; echo F", "function f (( 1 > 0 )) >> S F",
                       "function f [[ 1 < 2 ]] > S F", "function f ( tee S <<< F )",
@@ -8995,7 +8995,7 @@ def _fsw_unit_suite():
             self.assertEqual(_shell_tokens("function f (( c > 0 ))")[-1],
                              [("w", "function"), ("w", "f"), ("w", "$"), ("s",)])
 
-        def test_r18_real_bash_agrees(self):
+        def test_real_bash_agrees_on_function_compound_bodies(self):
             # the syntax the fix rests on, observed in real bash: after `function NAME` with no `()`, a `((` or
             # `[[` body is arithmetic or a conditional (no file named by a `>` operand appears), and an if,
             # while, until, for, or subshell body runs its commands; a redirection after the body still applies
@@ -9011,11 +9011,11 @@ def _fsw_unit_suite():
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6"})
 
         # -- command position after closed arithmetic and conditional commands, and conditional operands --
-        def test_r19_arith_and_conditional_command_restore_command_position(self):
+        def test_arith_and_conditional_command_restore_command_position(self):
             # a MISS (a regression): only a `for ((...))` header restored command position
             # at its closing `))`, so a `while`, `until`, or `if` condition that is a plain `((...))` or a
             # `[[ ... ]]`, followed by `do` or `then` with no `;`, hid the body's write
-            self.r14(("until ((a>b)) do tee S <<< 'Last-heartbeat: F'; break; done",
+            self.assert_writes(("until ((a>b)) do tee S <<< 'Last-heartbeat: F'; break; done",
                       "while !((a>0)) do tee S <<< F; break; done", "until ((a>b)) do sed -i s/x/F/ S; done",
                       "if (( 1 > 0 )) then tee S <<< F; fi", "while [[ 1 > 0 ]] do tee S <<< F; break; done",
                       "if [[ 1 > 0 ]] then tee S <<< F; fi", "until [[ a > b ]] do sed -i s/x/F/ S; done",
@@ -9024,7 +9024,7 @@ def _fsw_unit_suite():
                       "if echo F | (( 1 )) > S; then :; fi"), True)
             # pure arithmetic and conditional reads in the same no-separator form stay reads, and a `$((` expansion
             # does not restore command position (its value is a word of the enclosing command)
-            self.r14(("until ((a>b)) do rg F S; break; done", "if (( 1 > 0 )) then rg -c F S; fi",
+            self.assert_writes(("until ((a>b)) do rg F S; break; done", "if (( 1 > 0 )) then rg -c F S; fi",
                       "while [[ 1 > 0 ]] do rg F S; break; done", "if [[ $(cat S) > F ]] then echo later; fi",
                       "while !((a>0)) do echo tee S F; break; done", "if (( $(rg -c F S) > 0 )) then echo y; fi",
                       "(( x )) && rg F S", "[[ x ]] && rg F S", "echo $(( 1 > 0 )) tee F S", "rg $((1)) tee F S",
@@ -9035,22 +9035,22 @@ def _fsw_unit_suite():
             self.assertEqual(toks[:6], [("w", "while"), ("w", "[["), ("w", "a"), ("w", "b"), ("w", "]]"), ("s",)], toks)
             self.assertEqual(_shell_tokens("echo $((1)) tee")[-1], [("w", "echo"), ("w", "$"), ("w", "tee")])
 
-        def test_r19_conditional_operand_text_is_not_a_separator(self):
+        def test_conditional_operand_text_is_not_a_separator(self):
             # a pre-existing false deny: inside [[ ... ]] a regex operand's `(`, `)`, and
             # `|` were separators, so `cp` in `=~ operation=(cp|mv)` read as a command word
-            self.r14(("record=$(grep -c 'F' S)\n[[ \"$record\" =~ operation=(cp|mv) ]]",
+            self.assert_writes(("record=$(grep -c 'F' S)\n[[ \"$record\" =~ operation=(cp|mv) ]]",
                       "record=$(grep -c 'F' S); function check [[ \"$record\" =~ operation=(cp|mv) ]]",
                       "record=$(grep -c 'F' S); function check [[ $record =~ (tee|dd) ]]; check",
                       "rg F S; [[ a && (b || c) ]]", "rg F S; [[ x =~ ^(tee|dd)$ ]] && echo y",
                       "rg F S; [[ ( a > b ) || (cp) ]]", "if [[ $(rg -c F S) =~ (sed|tee) ]] then echo y; fi"), False)
             # a substitution inside the conditional is still its own scanned stream, and a redirection after `]]`
             # still counts; a `>(...)` process substitution is now scanned too (its `>` inside [[ was formerly dropped)
-            self.r14(("[[ x =~ ($(tee S <<< F)|y) ]]", "[[ x =~ (`tee S <<< F`|y) ]]",
+            self.assert_writes(("[[ x =~ ($(tee S <<< F)|y) ]]", "[[ x =~ (`tee S <<< F`|y) ]]",
                       "function check [[ x =~ ($(tee S <<< F)) ]]", "[[ -n <(tee S <<< F) ]]",
                       "[[ -e >(cat > S <<< F) ]]", "[[ x =~ (cp|mv) ]] > S F",
                       "[[ x =~ (cp|mv) ]] && cp F S"), True)
 
-        def test_r19_real_bash_agrees(self):
+        def test_real_bash_agrees_on_conditions_and_regex_operands(self):
             # the syntax the fixes rest on, observed in real bash: a `((...))` or `[[ ... ]]` condition takes `do`
             # or `then` with no `;` and runs the body; a regex operand's `(`, `)`, and `|` are operand text (no
             # file named by a `>` operand appears), and a substitution inside the conditional still runs
@@ -9067,35 +9067,36 @@ def _fsw_unit_suite():
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6", "b7"})
 
         # -- `#` and the closing `]]` inside a conditional --
-        def test_r20_conditional_hash_is_operand_text(self):
+        def test_conditional_hash_is_operand_text(self):
             # a long-standing false deny: inside [[ ... ]] the `#` of a regex
             # operand such as `(#|$)` started a comment that swallowed the closing `]]`, so the command read as
             # an unterminated conditional (a write); a newline inside the conditional is no separator either
-            self.r14(("record=$(grep 'F' S)\n[[ \"$record\" =~ ^[[:space:]]*(#|$) ]]",
+            self.assert_writes(("record=$(grep 'F' S)\n[[ \"$record\" =~ ^[[:space:]]*(#|$) ]]",
                       "record=$(grep 'F' S); [[ \"$record\" =~ ^[[:space:]]*(#|$) ]] && echo skip",
                       "record=$(grep 'F' S); [[ $record =~ ^# ]] && echo comment", "rg F S; [[ x =~ a#b ]] || echo no",
                       "record=$(grep 'F' S); if [[ $record =~ (#|;) ]] then echo y; fi",
                       "rg F S; [[ a &&\n tee ]] && echo ok", "rg F S; if [[ a ||\n cp ]]; then echo y; fi"), False)
-            self.r14(("[[ x =~ (#|$) ]] && tee S <<< F", "[[ x =~ a#b ]]\ntee S <<< F", "[[ x =~ ^# ]] > S F",
+            self.assert_writes(("[[ x =~ (#|$) ]] && tee S <<< F", "[[ x =~ a#b ]]\ntee S <<< F", "[[ x =~ ^# ]] > S F",
                       "[[ x =~ (#|$($(tee S <<< F))) ]]"), True)
 
-        def test_r20_conditional_closes_only_at_a_closing_word(self):
+        def test_conditional_closes_only_at_a_closing_word(self):
             # a miss: a `]]` glued to a regex word's `)` closed the conditional, so the
             # real closing `]]` read as a command word and the `then` body after it lost command position
-            self.r14(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
+            self.assert_writes(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
                       "if [[ 'x]]' =~ (x)]] ]]\nthen tee S <<< 'Last-heartbeat: F'; fi",
                       "[[ x == x]] ]] && tee S <<< F", "[[ a ]]>S F", "while [[ a =~ (b)]] ]] do tee S <<< F; done",
                       "[[ ( a )]] && tee S <<< F"), True)
             # a regex word glued to `]]` before the real `]]` is no false deny (a grouping `)` glued to
-            # `]]` with no later close leaves the command unparseable; see test_r22_*)
-            self.r14(("rg F S; [[ x =~ (a)]] ]] && echo ok",
+            # `]]` with no later close leaves the command unparseable; see
+            # test_conditional_open_at_frame_end_is_unparseable and test_glued_group_close_is_disclosed_false_deny)
+            self.assert_writes(("rg F S; [[ x =~ (a)]] ]] && echo ok",
                       "rg F S; ( [[ x ]])", "if [[ $(rg -c F S) =~ (x)]] ]] then echo y; fi"), False)
             self.assertEqual(_shell_tokens("[[ a =~ (#|x)]] ]] && tee y")[-1],
                              [("w", "[["), ("w", "a"), ("w", "=~"), ("w", "#x]]"), ("w", "]]"), ("s",), ("s",),
                               ("s",), ("w", "tee"), ("w", "y")])
             self.assertIsNone(_shell_tokens("[[ ( a )]] && echo ok"))  # no loose re-read
 
-        def test_r20_real_bash_agrees(self):
+        def test_real_bash_agrees_on_conditional_hash_and_closing_words(self):
             # the syntax the rules above rest on, observed in real bash: a `#` inside a regex word is no comment, a `]]`
             # glued to a regex word's `)` does not close the conditional while one glued to a grouping `)` does, a
             # newline after `&&` stays inside the conditional, and a `>` right after the closing `]]` redirects
@@ -9112,27 +9113,27 @@ def _fsw_unit_suite():
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 10)})
 
         # -- a compact `[[(` opener, and glued closes --
-        def test_r21_touching_conditional_opener_is_no_separator(self):
+        def test_touching_conditional_opener_is_no_separator(self):
             # a false deny (a regression): in a compact `[[(`, flushing `[[` opened the
             # conditional only after its branch was passed, so the `(` became a separator (and, in a substitution,
             # a depth change that left the substitution unterminated)
-            self.r14(("result=$( [[(-f S) ]] && grep -c 'F' S )", "result=$( [[(-f S) ]] &&\n grep -c 'F' S )",
+            self.assert_writes(("result=$( [[(-f S) ]] && grep -c 'F' S )", "result=$( [[(-f S) ]] &&\n grep -c 'F' S )",
                       "record=$(grep 'F' S); [[(tee == \"$record\") ]] && echo same",
                       "rg F S; [[((-n x)) ]] && echo ok", "rg F S; [[<(rg F S) ]] || echo no"), False)
-            self.r14(("[[(-f S) ]] && tee S <<< F", "[[(x) ]]>S F", "x=$( [[(-n y) ]] && tee S <<< F )"), True)
+            self.assert_writes(("[[(-f S) ]] && tee S <<< F", "[[(x) ]]>S F", "x=$( [[(-n y) ]] && tee S <<< F )"), True)
             self.assertEqual(_shell_tokens("[[(tee == x) ]] && y")[-1],
                              [("w", "[["), ("w", "tee"), ("w", "=="), ("w", "x"), ("w", "]]"), ("s",), ("s",),
                               ("s",), ("w", "y")])
 
-        def test_r21_glued_close_never_closes_before_a_later_close(self):
+        def test_glued_close_never_closes_before_a_later_close(self):
             # a false deny: the removed alternate reading closed at the regex word `(x)]]`
             # and invented a redirection out of the string comparison `>` after it; with the single rule a `]]`
             # glued to preceding text never closes while a word-initial `]]` follows
-            self.r14(("record=$(grep 'F' S)\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
+            self.assert_writes(("record=$(grep 'F' S)\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
                       "record=$(grep 'F' S); [[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]] && echo ok"), False)
             # the glued-regex-close miss stays caught, and a lone glued close (now unparseable) still
             # denies a write after it
-            self.r14(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
+            self.assert_writes(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
                       "[[ ( -n x )]] && tee S <<< F", "[[ ( a )]] && [[ ( b )]] && tee S <<< F"), True)
             # a strict parse is kept as is
             self.assertEqual(_shell_tokens("[[ x =~ (a)]] ]] && y")[-1],
@@ -9143,7 +9144,7 @@ def _fsw_unit_suite():
             # word-initial `]]`; pinned so a future fix flips this deliberately
             self.assertFalse(bash_writes(f"[[ ( a )]] && tee {PROJ}/private/state.md <<< 2099-01-01T00:00Z; [[ x ]]"))
 
-        def test_r21_real_bash_agrees(self):
+        def test_real_bash_agrees_on_touching_opener_and_glued_close(self):
             # the syntax the rules above rest on, observed in real bash: a compact `[[(` opens the conditional, a regex
             # word `(x)]]` does not close it before a later `]]` (so the `>` after it compares strings), a comment
             # may follow the opening `[[`, a lone `|` is a legal regex operand, and the disclosed miss is real
@@ -9159,11 +9160,11 @@ def _fsw_unit_suite():
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 9)})
 
         # -- a conditional still open at its frame end --
-        def test_r22_conditional_open_at_frame_end_is_unparseable(self):
+        def test_conditional_open_at_frame_end_is_unparseable(self):
             # a miss (a regression): a backtick frame closed while its conditional was
             # open, so the loose-closing fallback never ran and the write read as conditional operand text; the
             # fallback is removed, and a conditional open when its frame ends makes the command unparseable
-            self.r14(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
+            self.assert_writes(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
                       "result=`[[ ( -n x )]]` && tee S <<< F", "x=$( [[ ( -n y )]] && tee S <<< F )",
                       "r=`[[` && tee S <<< F"), True)
             for c in ("r=`[[ ( -n x )]] && echo ok`", "r=`[[`", "r=$( [[ a )", "[[ ( -n x )]] && echo ok",
@@ -9171,12 +9172,12 @@ def _fsw_unit_suite():
                 self.assertIsNone(_shell_tokens(c), c)
             self.assertEqual(list(inspect.signature(_shell_tokens).parameters), ["cmd"])  # no re-read machinery
 
-        def test_r22_glued_group_close_is_disclosed_false_deny(self):
+        def test_glued_group_close_is_disclosed_false_deny(self):
             # a false deny (from the fallback's loose closing, now removed): the rule leaves
             # the first conditional's glued `)]]` unclosed, so the command is unparseable and denies only
             # because it names a store and holds a future literal (the disclosed exotic false deny); the same
             # holds for the former glued-close allows, pinned here so a future fix flips them deliberately
-            self.r14(("record=$(grep 'F' S)\n[[ ( -n x )]] # it's fine\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
+            self.assert_writes(("record=$(grep 'F' S)\n[[ ( -n x )]] # it's fine\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
                       "rg F S; [[ ( -n x )]] && echo ok", "rg F S; [[ x =~ (a)]] && echo ok",
                       "rg F S; [[ ( a )]] # it's fine"), True)
             # with no store path and no future literal an unparseable command has nothing to deny: allowed
@@ -9196,7 +9197,7 @@ def _fsw_unit_suite():
                     os.environ.update(old_env)
                 self.assertEqual((rc, out), (0, ""), c)
 
-        def test_r22_real_bash_agrees(self):
+        def test_real_bash_agrees_on_glued_group_close_in_frames(self):
             # the syntax the rules above rest on, observed in real bash: a glued grouping `)]]` closes the conditional
             # inside a backtick or `$(...)` frame and at top level (so the backtick counterexample writes), and
             # three-line command writes nothing (the pinned deny above is a genuine false deny)
@@ -9211,18 +9212,18 @@ def _fsw_unit_suite():
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3"})
 
         # -- a word-initial `]]` before the closing backtick --
-        def test_r23_word_initial_close_before_closing_backtick(self):
+        def test_word_initial_close_before_closing_backtick(self):
             # a false deny (a regression): a word-initial `]]` glued to the closing
             # backtick of the backtick frame being scanned was not a close, so the conditional was still open at
             # the frame end and a read was unparseable; that backtick now closes it, as `)` does for `$(...)`
-            self.r14(("record=`grep 'F' S && [[ -s S ]]`", "record=`grep 'F' S && [[ -s S ]] `",
+            self.assert_writes(("record=`grep 'F' S && [[ -s S ]]`", "record=`grep 'F' S && [[ -s S ]] `",
                       "record=`grep 'F' S && [[ -s S ]]\t`", "record=`grep 'F' S && [[ -s S ]]\n`",
                       "record=$(grep 'F' S && [[ -s S ]])", "record=$(grep 'F' S && [[ -s S ]] )",
                       "x=$(echo `rg F S && [[ -s S ]]`)", "r=`[[ -s S ]]`; rg F S"), False)
             self.assertEqual(_shell_tokens("r=`g && [[ -s x ]]`")[0],
                              [("w", "g"), ("s",), ("s",), ("w", "[["), ("w", "-s"), ("w", "x"), ("w", "]]"), ("s",)])
             # the glued-grouping backtick write still denies, and a write after the close is caught
-            self.r14(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
+            self.assert_writes(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
                       "result=`[[ -n x ]]` && tee S <<< F", "result=`[[ -n x ]] && tee S <<< F`"), True)
             # genuinely unclosed conditionals stay unparseable: a glued close, a `]]` glued to a following word,
             # a top-level `]]` before an OPENING backtick (not a frame end), and a backtick that closes a
@@ -9231,7 +9232,7 @@ def _fsw_unit_suite():
                       "r=`[[ -s x ]]\\``", "x=$( [[ -s y ]]` )", "[[ -s x ]]`"):
                 self.assertIsNone(_shell_tokens(c), c)
 
-        def test_r23_real_bash_agrees(self):
+        def test_real_bash_agrees_on_close_before_closing_backtick(self):
             # the syntax the rules above rest on, observed in real bash: a word-initial `]]` glued to the closing
             # backtick closes the conditional (the command runs and its status is the conditional's), while a
             # `]]` glued to a following word inside the backtick does not
@@ -9248,8 +9249,8 @@ def _fsw_unit_suite():
 
 
         # -- field validation: writes bound to their store target, and unreadable targets --
-        def test_r24_item3_write_bound_to_store_target(self):
-            # item 3: a write-indicator word, a store path, and a future literal merely co-occurring denied
+        def test_write_bound_to_store_target(self):
+            # a write-indicator word, a store path, and a future literal merely co-occurring must not deny
             # read-only searches and writes elsewhere; a Bash command is denied only when a write TARGETS the store
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
             allowed = (f"rg {F} {S} > /dev/shm/hits.txt", f"rg {F} {S} | tee /dev/shm/hits.txt",
@@ -9274,8 +9275,8 @@ def _fsw_unit_suite():
             self.assertEqual(_write_targets("install", ["-m", "644", "src", "dst"]), ["dst"])
             self.assertEqual(_write_targets("tee", ["-a", "--", "-x", "f"]), ["-x", "f"])
 
-        def test_r24_item4_unreadable_target_fails_open(self):
-            # item 4: an unreadable target made the Edit path deny a literal the file already held; it fails OPEN
+        def test_unreadable_target_fails_open(self):
+            # an unreadable target must not make the Edit path deny a literal the file already held; it fails OPEN
             # now, except that a future literal the new content itself introduces still counts
             F = "2099-01-01T00:00Z"
             fp = self.store_file(f"Last-heartbeat: {F}\nStatus: ok\n")
@@ -9335,7 +9336,7 @@ def _fsw_unit_suite():
             rc, out = self.run_stream(io.StringIO(p))  # evaluated as a hook
             self.assertEqual((rc, list(json.loads(out))), (0, ["systemMessage"]))
 
-        def test_r24_output_error_fails_open(self):
+        def test_output_error_fails_open(self):
             # a failed stdout write (a full device) is swallowed: the hook still exits 0
             if not os.path.exists("/dev/full"):
                 self.skipTest("/dev/full absent")
@@ -9347,8 +9348,9 @@ def _fsw_unit_suite():
                                    stderr=subprocess.PIPE, text=True, env=env, timeout=30, input=json.dumps(payload))
             self.assertEqual(p.returncode, 0, p.stderr)
 
-        def test_r24b_keywords_match_whole_words(self):
-            # follow-up (B): a keyword was a PREFIX, so a word that merely STARTS with one exempted a future literal
+        def test_keywords_match_whole_words(self):
+            # a keyword matches only as a whole word: as a PREFIX, a word that merely STARTS with one would exempt a
+            # future literal
             S = f"{PROJ}/private/state.md"
             for bad in ("hb validated 2099-01-01T00:00Z", "hb throughput 2099-01-01T00:00Z",
                         "hb duet 2099-01-01T00:00Z", "hb etag 2099-01-01T00:00Z", "hb nextcloud 2099-01-01T00:00Z"):
@@ -9359,15 +9361,15 @@ def _fsw_unit_suite():
             self.assertEqual(self.ev("Write", file_path=S, content="| Item | Validated |\n|---|---|\n| a | "
                                      "2099-01-01T00:00Z |"), ["2099-01-01T00:00Z"])  # the header rule too
 
-        def test_r24_disclosures(self):
+        def test_disclosures_local_time_store_target_and_fail_open(self):
             doc = " ".join(_FSW_DOC.split())
             for s in ("compared as local wall time", "TARGETS a store path", "fails OPEN", "through", "valid"):
                 self.assertIn(s, doc)
 
         # -- the find -exec false-positive example --
-        def test_r25_item2_find_exec_false_positive_example_is_accurate(self):
-            # finding 2 (LOW): the FALSE POSITIVES text named `find <store dir> ... -exec cp {} /elsewhere` as
-            # denied, but it is allowed ({} is cp's source); the example now has {} as the TARGET, and each
+        def test_find_exec_false_positive_example_is_accurate(self):
+            # the FALSE POSITIVES text must not name `find <store dir> ... -exec cp {} /elsewhere` as
+            # denied, since it is allowed ({} is cp's source); the example has {} as the TARGET, and each
             # disclosed form is checked against the hook, not only against the text
             doc = " ".join(_FSW_DOC.split())
             self.assertIn("`find /elsewhere ... -exec cp <store file> {} +`", doc)
@@ -9381,15 +9383,15 @@ def _fsw_unit_suite():
             self.assertEqual(self.ev("Bash", command=f"find {S} -type f -exec tee {{}} \\; <<< {F}"), [F])
 
         # -- option arguments, parsed store targets, literal indexing, the hang guard, a trailing flag --
-        def test_r26_item2_option_arguments_are_not_targets(self):
-            # finding 2 (MED): a command-specific option argument was read as a write target, so a read-only
-            # store file named by sed -f or truncate -r denied a write elsewhere; fixed at class width for every
+        def test_option_arguments_are_not_targets(self):
+            # a command-specific option argument is never a write target; read as one, a read-only store
+            # file named by sed -f or truncate -r would deny a write elsewhere; handled at class width for every
             # modeled command (sed, perl, truncate, ed, ex, cp, mv, install)
             S, F, X = f"{PROJ}/private", "2099-01-01T00:00Z", "/dev/shm/X"
             allowed = (f"sed -i -f {S}/rules.sed -e 's/new/{F}/' {X}", f"sed -i --file={S}/rules.sed {X} <<< {F}",
                        # a sed EXPRESSION or program naming a store path (formerly `--expression
                        # {S}/x` and `'s#{S}/a#b#'` here) is script text that can write it, now an unknown
-                       # target and denied (test_r27_script_text_naming_store_is_unknown_target)
+                       # target and denied (test_script_text_naming_store_is_unknown_target)
                        f"sed -i --file {S}/rules.sed {X} <<< {F}", f"sed -i -e 's/a/b/' --expression 's/c/d/' {X} <<< {F}",
                        f"sed -ni -f{S}/r.sed {X} <<< {F}", f"sed -i -l 80 -f {S}/r.sed {X} <<< {F}",
                        f"truncate -r {S}/reference {X} <<< {F}",
@@ -9433,9 +9435,9 @@ def _fsw_unit_suite():
             self.assertEqual((open(os.path.join(self.tmp, "X")).read(), os.path.getsize(os.path.join(self.tmp, "T")),
                               open(os.path.join(self.tmp, "P")).read()), ("c\n", 3, "y\n"))
 
-        def test_r26_item4_parsed_store_target_needs_no_raw_token(self):
-            # finding 4 (MED): the raw-command prefilter names_store_path(cmd) missed an attached -tDIR, so a parsed
-            # store destination was allowed and the future literal really reached the store
+        def test_parsed_store_target_needs_no_raw_token(self):
+            # the raw-command prefilter names_store_path(cmd) misses an attached -tDIR, so a parsed store
+            # destination must not depend on it, or the future literal reaches the store unflagged
             F = "2099-01-01T00:00Z"
             for root, dest in ((None, f"{PROJ}/private"), (self.tmp, self.tmp)):
                 if root:
@@ -9454,8 +9456,8 @@ def _fsw_unit_suite():
             # and a known non-store target stays allowed beside a named store path
             self.assertEqual(self.ev("Bash", command=f"cp -t/dev/shm {PROJ}/private/s.md <<< {F}"), [])
 
-        def test_r26_item5_unreadable_edit_literal_index_is_linear(self):
-            # finding 5 (MED): each new literal ran `lit in old` over the whole old fragment (quadratic); the old
+        def test_unreadable_edit_literal_index_is_linear(self):
+            # each new literal must not run `lit in old` over the whole old fragment (quadratic); the old
             # fragment's literal-shaped substrings are indexed once, with exactly the substring semantics
             corpus = ("x2099-01-01T00:00Z", "12099-01-01T00:00Z", "2099-01-01 00:00 UTC", "2099-01-01T00:00:00Z",
                       "2099-01-01T00:00:00.123456789 ABCDEF", "2099-01-01T00:00 +05:30", "2099-01-01T00:00Z",
@@ -9484,20 +9486,20 @@ def _fsw_unit_suite():
             # N to GROWTH * N (up to the former 32,000): about 1 when linear, about GROWTH when quadratic
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
-        def test_r26_item6_hang_guard_interrupts(self):
-            # finding 6 (LOW): the growth test's ceiling was asserted only after every run returned, so it could
+        def test_hang_guard_interrupts(self):
+            # a growth test's ceiling asserted only after every run returns could
             # not interrupt a hang; timed runs now go through run_timed, which kills the child at its timeout
             t0 = time.monotonic()
             with self.assertRaises(subprocess.TimeoutExpired):
                 run_timed("import time\ntime.sleep(60)\n", 1)
             self.assertLess(time.monotonic() - t0, 30.0)
-            for test in (T.test_r4_scan_is_linear, T.test_r26_item5_unreadable_edit_literal_index_is_linear):
+            for test in (T.test_scan_is_linear, T.test_unreadable_edit_literal_index_is_linear):
                 src = inspect.getsource(test)
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
                 self.assertNotIn("self.assertLess(large, 30.0)", src)
 
-        def test_r26_item7_trailing_flag_residual_removed(self):
-            # finding 7 (LOW): the residual said `install src <store file> -v` is skipped, but it is denied; only a
+        def test_trailing_flag_residual_removed(self):
+            # no residual may say `install src <store file> -v` is skipped, since it is denied; only a
             # demonstrated unsupported-option case is disclosed now (that case, `--suf`, is closed by the
             # long-option resolution, so it is denied too)
             doc = " ".join(_FSW_DOC.split())
@@ -9519,7 +9521,7 @@ def _fsw_unit_suite():
             # the real tools run with POSIXLY_CORRECT removed, as the model assumes (test hermeticity)
             return {k: v for k, v in os.environ.items() if k != "POSIXLY_CORRECT"}
 
-        def test_r27_perl_stops_parsing_options_at_first_operand(self):
+        def test_perl_stops_parsing_options_at_first_operand(self):
             # a regression: the option parser consumed `-I S` after perl's first
             # operand, but perl parses no option there, so S was a file perl edited in place and the store write
             # was allowed (an earlier version denied it)
@@ -9561,7 +9563,7 @@ def _fsw_unit_suite():
             subprocess.run(["truncate", "T", "-s", "0"], cwd=self.tmp, timeout=10, check=True, env=self.real_env())
             self.assertEqual(os.path.getsize(os.path.join(self.tmp, "T")), 0)
 
-        def test_r27_script_text_naming_store_is_unknown_target(self):
+        def test_script_text_naming_store_is_unknown_target(self):
             # a regression: a sed program or an ex -c argument that itself writes a
             # store file was allowed once option arguments were consumed and the sed program dropped; script
             # text naming a store path now makes the target UNKNOWN, while a FILE-naming argument stays consumed
@@ -9619,7 +9621,7 @@ def _fsw_unit_suite():
             self.assertEqual(open(exw).read(), f"ts: {F}\n")
 
         # -- read-only sed programs that mention a store path --
-        def test_r28_read_only_sed_mentioning_store_is_no_write(self):
+        def test_read_only_sed_mentioning_store_is_no_write(self):
             # a regression: `sed -n '\|S F|p' audit.log` only prints matching lines,
             # but its program MENTIONS a store path, so the script-text rule made its target unknown and denied it
             # (it was allowed before that rule); a sed with no in-place option whose program parses as unable to write is now no write
@@ -9687,7 +9689,7 @@ def _fsw_unit_suite():
             self.assertEqual(open(os.path.join(store, "flag")).read(), f"{F}\n")
 
         # -- long-option abbreviations --
-        def test_r29_long_option_abbreviations_resolved(self):
+        def test_long_option_abbreviations_resolved(self):
             # GNU long-option ABBREVIATIONS were not modelled, so `sed --expr='s/x/F/w S' log`
             # and `sed --in 's/x/F/' S` were allowed while real GNU sed 4.9 wrote the store; a long option is now
             # resolved as the real tool resolves it, and on sed, perl, or ex an ambiguous or unrecognized one makes
@@ -9769,7 +9771,7 @@ def _fsw_unit_suite():
                 self.assertIn("Unrecognized switch", r.stderr)
 
         # -- options that exit at once, every-operand writes, install --context, recorded arities --
-        def test_r30_perl_help_and_version_exit_writing_nothing(self):
+        def test_perl_help_and_version_exit_writing_nothing(self):
             # a regression: perl's option table was empty, so `perl --version` (a
             # read-only diagnostic) made the target UNKNOWN and a later read-only store search in the same command
             # was denied; perl accepts exactly --help and --version and exits at once on either
@@ -9812,8 +9814,8 @@ def _fsw_unit_suite():
                                    stdin=subprocess.DEVNULL, env=self.real_env())
                 self.assertIn("Unrecognized switch", r.stderr, bad)
 
-        def test_r30_every_operand_written_under_exchange_or_directory(self):
-            # finding (MED, pre-existing): `mv -T --exchange S T` swaps S and T, so it WRITES S (the first
+        def test_every_operand_written_under_exchange_or_directory(self):
+            # `mv -T --exchange S T` swaps S and T, so it WRITES S (the first
             # operand), but only the destination was a target; under mv's --exchange, and install's -d or
             # --directory, every operand (and every -t directory) is now a target
             S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
@@ -9854,7 +9856,7 @@ def _fsw_unit_suite():
                                check=True, env=self.real_env())
                 self.assertTrue(os.path.isdir(os.path.join(store, "d1")))
 
-        def test_r30_install_context_arity_union(self):
+        def test_install_context_arity_union(self):
             # uutils install 0.8.0 consumes a SEPARATE word after --context (GNU install takes
             # only an attached value), so `install src <store file> --context foo` wrote the store file while the
             # model read `foo` as the destination; the model now takes the union of both readings
@@ -9902,7 +9904,7 @@ def _fsw_unit_suite():
             self.assertNotEqual(r.returncode, 0)  # the store path was consumed as the context: no destination
             self.assertIn("missing destination", r.stderr)
 
-        def test_r30_recorded_long_option_arity_matches_real_tools(self):
+        def test_recorded_long_option_arity_matches_real_tools(self):
             # the arity sweep, kept as a check: for cp, mv, and install, every recorded long option is run as
             # `TOOL a D OPT WORD` (D an existing directory, WORD a name that does not exist); the tool CONSUMED
             # WORD as the option's argument exactly when it copied or moved a into D and succeeded, and read WORD
@@ -9958,7 +9960,7 @@ def _fsw_unit_suite():
                                   stdin=subprocess.DEVNULL, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                                                                  "HOME": self.tmp, "LC_ALL": "C"})
 
-        def r31_store(self):
+        def make_store(self):
             store = os.path.join(self.tmp, "store")
             os.makedirs(store, exist_ok=True)
             with open(os.path.join(store, "state.md"), "w") as f:
@@ -9966,8 +9968,8 @@ def _fsw_unit_suite():
             os.environ["AIQT_STORE_ROOT"] = store
             return store
 
-        def test_r31_work_budget_bounds_the_bash_analysis(self):
-            # finding (HIGH): a 65,536-byte command of `: > x;` repeats before a future store write took about
+        def test_work_budget_bounds_the_bash_analysis(self):
+            # a 65,536-byte command of `: > x;` repeats before a future store write took about
             # 75 ms of analysis; the analysis now runs under a work budget and fails OPEN when it is spent, with the
             # per-token work cut (store roots read once, regex fast path, lazy per-literal decisions)
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
@@ -10002,10 +10004,10 @@ def _fsw_unit_suite():
             for s in ("WORK BUDGET. The Bash analysis", "is ALLOWED unchecked (fail OPEN", "an EXOTIC, disclosed miss"):
                 self.assertIn(s, doc)
 
-        def test_r31_relative_targets_resolve_against_cwd_and_cd(self):
-            # finding (MED): a relative Bash destination bypassed store detection: `printf ... > store/state.md`
+        def test_relative_targets_resolve_against_cwd_and_cd(self):
+            # a relative Bash destination must not bypass store detection: `printf ... > store/state.md`
             # with the cwd holding store/, and `cd <store> && printf ... > state.md`, wrote the future heartbeat
-            store = self.r31_store()
+            store = self.make_store()
             F = "2099-01-01T00:00Z"
             denied = ((self.tmp, f"printf '%s\\n' 'heartbeat: {F}' > store/state.md"),
                       (self.tmp, f"cd {store} && printf '%s\\n' 'heartbeat: {F}' > state.md"),
@@ -10021,7 +10023,7 @@ def _fsw_unit_suite():
                       (self.tmp, f"cd {self.tmp}/nowhere; echo 'heartbeat: {F}' >> state.md # {store}"))
             for cwd, cmd in denied:
                 self.assertEqual(self.ev("Bash", cwd=cwd, command=cmd), [F], (cwd, cmd))
-            allowed = ((self.tmp, f"cd /dev/shm && echo 'heartbeat: {F}' > r31-not-a-store"),
+            allowed = ((self.tmp, f"cd /dev/shm && echo 'heartbeat: {F}' > not-a-store"),
                        (store, f"cd {self.tmp} && echo 'heartbeat: {F}' >> state.md"),
                        (self.tmp, f"echo 'heartbeat: {F}' >> storex/state.md"),
                        (self.tmp, f"echo 'heartbeat: {F}' >> state.md"),
@@ -10046,10 +10048,10 @@ def _fsw_unit_suite():
                 with open(os.path.join(store, "state.md")) as f:
                     self.assertIn(F, f.read(), cmd)
 
-        def test_r31_literal_shell_c_strings_are_inspected(self):
-            # finding (MED): `bash -c "printf ... > <store file>"` was allowed although real bash wrote the
+        def test_literal_shell_c_strings_are_inspected(self):
+            # `bash -c "printf ... > <store file>"` must not be allowed, since real bash writes the
             # future heartbeat; a statically known -c string is now analysed recursively with the same cwd
-            store = self.r31_store()
+            store = self.make_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             denied = (f"bash -c \"printf '%s\\n' 'heartbeat: {F}' > {S}\"", f"sh -c 'echo heartbeat: {F} >> {S}'",
                       f"dash -c 'echo heartbeat: {F} >> {S}'", f"zsh -c 'echo heartbeat: {F} >> {S}'",
@@ -10081,11 +10083,11 @@ def _fsw_unit_suite():
                 with open(S) as f:
                     self.assertIn(F, f.read(), cmd)
 
-        def test_r31_literal_counts_only_for_the_write_it_feeds(self):
-            # finding (MED): an unrelated literal tainted every store write in the command: a search for the
+        def test_literal_counts_only_for_the_write_it_feeds(self):
+            # an unrelated literal must not taint every store write in the command: a search for the
             # literal, then an audit append, and a literal only in a comment, were denied although bash appended
             # only `checked`; a literal now counts only as DATA of a store write
-            store = self.r31_store()
+            store = self.make_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             allowed = (f"grep -F '{F}' {S}; echo checked >> {S}", f"echo checked >> {S} # {F}",
                        f"rg -c '{F}' {S} | wc -l; date -u >> {S}",
@@ -10123,21 +10125,21 @@ def _fsw_unit_suite():
                 with open(S) as f:
                     self.assertEqual(F in f.read(), want, cmd)
 
-        def test_r31_unexecuted_conditional_write_is_judged_as_written(self):
+        def test_unexecuted_conditional_write_is_judged_as_written(self):
             # by design: a write in a branch that never runs is judged as
             # written, and the docstring says so
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
             for cmd in (f"if false; then printf '%s\\n' 'heartbeat: {F}' > {S}; fi",
-                        f"[ -e /dev/shm/r31-missing-sentinel ] && echo 'heartbeat: {F}' >> {S}"):
+                        f"[ -e /dev/shm/missing-sentinel ] && echo 'heartbeat: {F}' >> {S}"):
                 self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
             doc = " ".join(_FSW_DOC.split())
             self.assertIn("BY DESIGN (not modeled): a write in a branch that never runs is judged as written", doc)
 
-        def test_r31_help_and_version_exit_on_every_modeled_tool(self):
+        def test_help_and_version_exit_on_every_modeled_tool(self):
             # only perl's --help and --version were modeled as exiting, so `cp --version src
             # <store file>` was denied although cp exits at once; GNU cp, mv, sed, and ed and uutils install, tee,
             # and truncate exit on either wherever it stands before `--` (they permute)
-            store = self.r31_store()
+            store = self.make_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             allowed = (f"cp --version src {S} <<< {F}", f"cp src {S} --help <<< {F}", f"mv --help src {S} <<< {F}",
                        f"mv src {S} --vers <<< {F}", f"install --version src {S} <<< {F}",
@@ -10169,7 +10171,7 @@ def _fsw_unit_suite():
                 with open(S) as f:
                     self.assertEqual((r.returncode == 0 or "--version=1" in cmd, f.read()), (True, "old\n"), cmd)
 
-        def test_r31_tokenizer_records_positions_heredocs_and_comments(self):
+        def test_tokenizer_records_positions_heredocs_and_comments(self):
             # the analysis attributes literals by raw offsets: a word's (start, end) spans its text, a quoted
             # here-document body is skipped as bash reads it (its `>` is text), an unquoted one still tokenized, and
             # comments are recorded; the regex fast path and the character loop agree token for token
@@ -10186,16 +10188,16 @@ def _fsw_unit_suite():
             # a substitution in an unquoted body still counts
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
             for delim in ("E", "'E'"):
-                self.assertEqual(self.ev("Bash", command=f"cat <<{delim} > /dev/shm/r31x\nhb > {S} {F} $(date -u)\nE"),
+                self.assertEqual(self.ev("Bash", command=f"cat <<{delim} > /dev/shm/heredoc-out\nhb > {S} {F} $(date -u)\nE"),
                                  [], delim)
-            self.assertEqual(self.ev("Bash", command=f"cat <<E > /dev/shm/r31x\n$(echo hb {F} >> {S})\nE"), [F])
-            self.assertEqual(self.ev("Bash", command=f"cat <<'E' > /dev/shm/r31x\n$(echo hb {F} >> {S})\nE"), [])
+            self.assertEqual(self.ev("Bash", command=f"cat <<E > /dev/shm/heredoc-out\n$(echo hb {F} >> {S})\nE"), [F])
+            self.assertEqual(self.ev("Bash", command=f"cat <<'E' > /dev/shm/heredoc-out\n$(echo hb {F} >> {S})\nE"), [])
             for c in ("a;b|c&&d||e > f >> g < h 2>&1 &", "x=1 y=2 cmd -o --long=v 'q' \"d\" $v `b`",
                       "if a; then b; fi; for i in 1; do :; done; [[ a > b ]] && (( c > d ))"):
                 self.assertEqual(_shell_tokens(c), _tokenize(c).streams)
             self.assertEqual(_shell_tokens("a  b\t;c"), [[("w", "a"), ("w", "b"), ("s",), ("w", "c")]])
 
-        def test_r31_disclosures(self):
+        def test_disclosures_directory_shell_c_literals_and_budget(self):
             doc = " ".join(_FSW_DOC.split())
             for s in ("WHICH DIRECTORY. A relative write target", "SHELL -c. bash, sh, dash, or zsh with -c",
                       "WHICH LITERALS. A future literal counts only", "WORK BUDGET. The Bash analysis",
@@ -10208,7 +10210,7 @@ def _fsw_unit_suite():
                 self.assertNotIn(s, doc)
 
         # -- directory budget, subshell scoping, shell -c output and staging, matching searches, timing --
-        def r32_check_bash(self, cases, store, cwd=None):
+        def assert_bash_agrees(self, cases, store, cwd=None):
             """Real bash agrees with each (command, wants-denied) case: it writes F into the store exactly when the
             hook denies."""
             if not shutil.which("bash"):
@@ -10224,13 +10226,13 @@ def _fsw_unit_suite():
                 with open(S) as f:
                     self.assertEqual("2099-01-01T00:00Z" in f.read(), want, cmd)
 
-        def test_r32_item2_directory_work_is_budgeted(self):
-            # finding (HIGH): directory-set expansion, path resolution, and set union were not charged to the
+        def test_directory_work_is_budgeted(self):
+            # directory-set expansion, path resolution, and set union were not charged to the
             # work budget, so 64 KiB of `(cd <dir>);` over 400 directories took about 200 ms in-process. They are
             # now charged BEFORE they are done, and a set above MAX_CWDS spends the budget (fail open)
-            store = self.r31_store()
+            store = self.make_store()
             F = "2099-01-01T00:00Z"
-            cap, cost = _FSW_GLOBALS.get("MAX_CWDS", 32), _FSW_GLOBALS.get("CWD_COST", 6)  # r31 has neither
+            cap, cost = _FSW_GLOBALS.get("MAX_CWDS", 32), _FSW_GLOBALS.get("CWD_COST", 6)  # defaults if the hook defines neither
             dirs = []
             for i in range(cap + 8):
                 d = os.path.join(self.tmp, f"d{i}")
@@ -10272,11 +10274,11 @@ def _fsw_unit_suite():
             self.assertLess(t / max(ref_t, 1e-3), PEER_LIMIT, (t, ref_t))  # about 1.7 on the development host
             self.assertEqual((_FSW_GLOBALS.get("CWD_COST"), _FSW_GLOBALS.get("MAX_CWDS")), (6, 32))
 
-        def test_r32_item3_subshell_scopes_directory_state(self):
+        def test_subshell_scopes_directory_state(self):
             # a regression: a subshell's cd leaked into the parent, so
             # `(cd <store> && ls >/dev/null); printf ... > state.md` was denied although bash wrote only the cwd's
             # state.md; `( ... )` now scopes the directory set, and `{ ... }` does not, as in bash
-            store = self.r31_store()
+            store = self.make_store()
             F = "2099-01-01T00:00Z"
             w = f"printf '%s\\n' 'heartbeat: {F}' > state.md"
             allowed = (f"(cd {store} && ls >/dev/null); {w}", f"(cd {store}) && {w}", f"( (cd {store}); ls ); {w}",
@@ -10287,12 +10289,12 @@ def _fsw_unit_suite():
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
             for cmd in denied:
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
-            self.r32_check_bash([(c, False) for c in allowed] + [(c, True) for c in denied], store)
+            self.assert_bash_agrees([(c, False) for c in allowed] + [(c, True) for c in denied], store)
 
-        def test_r32_item4_shell_c_output_reaching_the_store_counts(self):
-            # finding (MED MISS): a literal shell -c string whose OUTPUT is redirected or piped into a store
-            # target was allowed; a literal in the string is now also data of the wrapper, as for echo
-            store = self.r31_store()
+        def test_shell_c_output_reaching_the_store_counts(self):
+            # a literal shell -c string whose OUTPUT is redirected or piped into a store
+            # target must not be allowed; a literal in the string is also data of the wrapper, as for echo
+            store = self.make_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             denied = (f"bash -c 'echo heartbeat: {F}' >> {S}", f"sh -c 'echo heartbeat: {F}' | tee {S}",
                       f"bash -c \"printf 'hb {F}\\n'\" > {S}", f"bash -c 'echo hb {F}' | cat >> {S}",
@@ -10305,13 +10307,13 @@ def _fsw_unit_suite():
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
             for cmd in allowed:
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
-            self.r32_check_bash([(c, True) for c in denied] + [(c, False) for c in allowed], store)
+            self.assert_bash_agrees([(c, True) for c in denied] + [(c, False) for c in allowed], store)
 
-        def test_r32_item5_staging_through_shell_c(self):
-            # finding (MED): a file staged by the outer command and copied by a literal shell -c string
+        def test_staging_through_shell_c(self):
+            # a file staged by the outer command and copied by a literal shell -c string
             # (`printf ... > stage; bash -c 'cp stage <store file>'`) was allowed; the string's store write now
             # exposes the words it names, and its own writes, to the enclosing staging walk
-            store = self.r31_store()
+            store = self.make_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             denied = (f"printf '%s\\n' 'heartbeat: {F}' > stage; bash -c 'cp stage {S}'",
                       f"echo 'hb {F}' > stage; sh -c 'cat stage >> {S}'",
@@ -10323,14 +10325,14 @@ def _fsw_unit_suite():
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
             for cmd in allowed:
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
-            self.r32_check_bash([(c, True) for c in denied] + [(c, False) for c in allowed], store)
+            self.assert_bash_agrees([(c, True) for c in denied] + [(c, False) for c in allowed], store)
 
-        def test_r32_matching_search_pattern_counts(self):
+        def test_matching_search_pattern_counts(self):
             # an exotic miss: every grep/rg pattern in a search-only substitution was exempt, "a search
             # prints file text or a count, never its pattern", but a MATCHING search prints file text holding its
             # pattern (with -o, exactly it); only a pipeline ending in wc or a counting/quiet/file-list search is
             # exempt now
-            store = self.r31_store()
+            store = self.make_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             hits = os.path.join(self.tmp, "hits.log")
             with open(hits, "w") as f:
@@ -10350,28 +10352,28 @@ def _fsw_unit_suite():
             self.assertEqual(self.ev("Bash", cwd=self.tmp, command=allowed[5]), [F])
             if not shutil.which("rg"):
                 denied, allowed = denied[:2] + denied[3:], allowed[:3] + allowed[4:]
-            self.r32_check_bash([(c, True) for c in denied] + [(c, False) for c in allowed], store)
+            self.assert_bash_agrees([(c, True) for c in denied] + [(c, False) for c in allowed], store)
             doc = " ".join(_FSW_DOC.split())
             self.assertIn("A MATCHING search that prints lines prints file text holding its pattern", doc)
             self.assertNotIn("a search prints file text or a count, never its pattern", doc)
 
-        def test_r32_timing_tests_are_interleaved_and_hang_guarded(self):
+        def test_timing_tests_are_interleaved_and_hang_guarded(self):
             # the load-sensitive growth-ratio tests (one flaked at load 34) now interleave their sizes, best of N,
             # at larger sizes, in a child under the hang ceiling
             self.assertIn("def interleaved(sizes, run, reps=5)", TIMED_PRELUDE)
             self.assertIn("return interleaved((n, GROWTH * n), same_work, reps)", TIMED_PRELUDE)
             self.assertIn("GROWTH = %d\n" % GROWTH, TIMED_PRELUDE)
-            for test, needle in ((T.test_r4_scan_is_linear, "ratio(n, r)"),
-                                 (T.test_r26_item5_unreadable_edit_literal_index_is_linear, "ratio(4000, run)"),
-                                 (T.test_r31_work_budget_bounds_the_bash_analysis, "ratio(250, run)"),
-                                 (T.test_r8_table_context_carry_over_scales, "interleaved((10000, 160000), run, 3)"),
-                                 (T.test_r7_bash_writes_is_linear, "ratio(12500, run, 3)"),
-                                 (T.test_r7_shell_tokens_linear, "ratio(12500, run, 3)"),
+            for test, needle in ((T.test_scan_is_linear, "ratio(n, r)"),
+                                 (T.test_unreadable_edit_literal_index_is_linear, "ratio(4000, run)"),
+                                 (T.test_work_budget_bounds_the_bash_analysis, "ratio(250, run)"),
+                                 (T.test_table_context_carry_over_scales, "interleaved((10000, 160000), run, 3)"),
+                                 (T.test_bash_writes_is_linear, "ratio(12500, run, 3)"),
+                                 (T.test_shell_tokens_linear, "ratio(12500, run, 3)"),
                                  (T.test_bash_scan_is_linear, "ratio(12500, run, 3)"),
-                                 (T.test_r5_many_distinct_literals_linear_and_bounded, "ratio(5000, run, 3)"),
-                                 (T.test_r6_table_scan_is_linear, "ratio(6250, run, 3)"),
-                                 (T.test_r32_item2_directory_work_is_budgeted, "versus(run, ordinary("),
-                                 (T.test_r33_wrapper_check_is_constant_per_wrapper, "versus(run_adv, ordinary(")):
+                                 (T.test_many_distinct_literals_linear_and_bounded, "ratio(5000, run, 3)"),
+                                 (T.test_table_scan_is_linear, "ratio(6250, run, 3)"),
+                                 (T.test_directory_work_is_budgeted, "versus(run, ordinary("),
+                                 (T.test_wrapper_check_is_constant_per_wrapper, "versus(run_adv, ordinary(")):
                 src = inspect.getsource(test)
                 self.assertIn(needle, src)
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
@@ -10430,7 +10432,7 @@ def _fsw_unit_suite():
                     if v is not None:
                         os.environ[k] = v
 
-        def test_r32_disclosures(self):
+        def test_disclosures_subshell_scope_and_directory_budget(self):
             doc = " ".join(_FSW_DOC.split())
             for s in ("a `( ... )` subshell SCOPES the set", "A `{ ... }` group does not scope, as in bash",
                       "At most MAX_CWDS (32) directories are tracked", "it ALSO counts, as for echo, when the WRAPPER's "
@@ -10438,12 +10440,12 @@ def _fsw_unit_suite():
                       "BEFORE it is done", "(cd <store dir> && ls); printf ... > state.md"):
                 self.assertIn(s, doc)
 
-        def test_r33_wrapper_check_is_constant_per_wrapper(self):
+        def test_wrapper_check_is_constant_per_wrapper(self):
             # a regression: each shell -c wrapper rescanned its whole pipeline and
             # rebuilt its separator text, work of wrappers x pipeline length the budget never saw: 64 KiB of 450
             # piped `sh -c` wrappers and 1,050 `:` took about 107 ms in-process (14.5 ms before the regression) with 1,794
             # budget steps left. Each pipeline's aggregates are now computed once, charged before the pass
-            store = self.r31_store()
+            store = self.make_store()
             F = "2099-01-01T00:00Z"
             tail = f"; echo checked > {store}/state.md"
 
@@ -10493,7 +10495,7 @@ def _fsw_unit_suite():
             self.assertIn("The shell -c WRAPPER check is charged too", doc)
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
-        HANG_GUARD_TESTS = ("test_r26_item6_hang_guard_interrupts",)
+        HANG_GUARD_TESTS = ("test_hang_guard_interrupts",)
 
         def test_no_wall_clock_verdict(self):
             """Residual (disclosed): the scan covers direct calls, imported aliases, and assigned aliases within a
@@ -10618,7 +10620,7 @@ def _clk_unit_suite():
             self.assertEqual(lease_start(self.lease), datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
 
         def test_inactive_lease_never_reads_history(self):
-            # finding: `none` followed by a history line used to resolve to the historical id
+            # `none` followed by a history line must not resolve to the historical id
             with open(self.lease, "w") as f:
                 f.write("Active-session: none\n## History\nActive-session: sess-20200101T000000Z\n")
             self.assertIsNone(lease_start(self.lease))
@@ -10739,7 +10741,7 @@ def _clk_unit_suite():
                     f.write(json.dumps({"type": "user", "timestamp": ts, "message": {"content": "x"}}) + "\n")
             return tp
 
-        def test_r13_lease_field_forms(self):
+        def test_lease_field_forms(self):
             want = datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc)
             for line in ("Active-session: sess-20260923T141710Z", "**Active-session:** sess-20260923T141710Z",
                          "- Active-session: sess-20260923T141710Z", "* Active-session: sess-20260923T141710Z",
@@ -10748,16 +10750,16 @@ def _clk_unit_suite():
             self.assertEqual(lease_start(self.write_lease("+ Active-session: sess-20200101T000000Z\n"
                                                           "Active-session: sess-20260923T141710Z\n")), want)
 
-        def test_r13_date_only_id_with_and_without_session_start(self):
-            ids = "# Lease\n\n**Active-session:** sess-2026-09-23-alpha1-r1\n\n**Status:** active\n"
+        def test_date_only_id_with_and_without_session_start(self):
+            ids = "# Lease\n\n**Active-session:** sess-2026-09-23-alpha1\n\n**Status:** active\n"
             self.assertIsNone(lease_start(self.write_lease(ids)))
             want = datetime.datetime(2026, 9, 23, 14, 18, 0, tzinfo=utc)
             for field in ("**Session-start-UTC:** 2026-09-23T14:18:00Z", "* Session-start-UTC: 20260923T141800Z"):
                 self.assertEqual(lease_start(self.write_lease(ids + field + "\n")), want, field)
             self.assertIsNone(lease_start(self.write_lease(ids + "## History\nSession-start-UTC: 20260920T010000Z\n")))
 
-        def test_r13_transcript_fallback_and_main(self):
-            ids = "**Active-session:** sess-2026-09-23-alpha1-r1\n"
+        def test_transcript_fallback_and_main(self):
+            ids = "**Active-session:** sess-2026-09-23-alpha1\n"
             tp = self.transcript("2026-09-23T14:30:00.000Z", "2026-09-23T14:18:00.000Z", "garbage")
             self.assertEqual(lease_start(self.write_lease(ids), tp), datetime.datetime(2026, 9, 23, 14, 18, tzinfo=utc))
             self.assertIsNone(lease_start(self.lease))  # no transcript given: unknown
@@ -10769,7 +10771,7 @@ def _clk_unit_suite():
             rc, out = run_main(json.dumps({"tool_name": "Bash", "transcript_path": 7}), {"AIQT_LEASE_FILE": self.lease})
             self.assertNotIn("elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"])
 
-        def test_r13_inactive_lease_stays_unknown(self):
+        def test_inactive_lease_stays_unknown(self):
             tp = self.transcript("2026-09-23T14:18:00Z")
             for head in ("Active-session: none", "**Active-session:** none", "- Active-session: None", "Active-session:"):
                 self.write_lease(f"{head}\nSession-start-UTC: 2026-09-23T14:18:00Z\n")
@@ -10779,10 +10781,10 @@ def _clk_unit_suite():
                 self.assertNotIn("elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"], head)
             self.assertIsNone(lease_start(self.write_lease("# no lease field\n"), tp))
 
-        def test_r13_fifo_transcript_does_not_block(self):
+        def test_fifo_transcript_does_not_block(self):
             fifo = os.path.join(self.tmp, "tfifo")
             os.mkfifo(fifo)
-            self.write_lease("**Active-session:** sess-2026-09-23-alpha1-r1\n")
+            self.write_lease("**Active-session:** sess-2026-09-23-alpha1\n")
             code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print(m._clk_lease_start(%r, %r))" % (_HOOK_FILE, self.lease, fifo))
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
@@ -10792,7 +10794,7 @@ def _clk_unit_suite():
 
 
         # -- an output error fails open --
-        def test_r24_output_error_fails_open(self):
+        def test_output_error_fails_open(self):
             # a failed stdout write (a full device) is swallowed: the hook still exits 0
             if not os.path.exists("/dev/full"):
                 self.skipTest("/dev/full absent")
@@ -11162,7 +11164,7 @@ def _test_clock_hooks(failures, tmp):
     inactive = tmp / "clock-lease-inactive.md"
     inactive.write_text("Active-session: none\nSession-start-UTC: 2000-01-01T00:00:00Z\n", encoding="utf-8")
     untimed = tmp / "clock-lease-untimed.md"
-    untimed.write_text("**Active-session:** sess-alpha-r1\n", encoding="utf-8")
+    untimed.write_text("**Active-session:** sess-alpha\n", encoding="utf-8")
     transcript = tmp / "clock-transcript.jsonl"
     transcript.write_text(json.dumps({"type": "user", "timestamp": "2000-01-01T00:00:00.000Z"}) + "\n",
                           encoding="utf-8")

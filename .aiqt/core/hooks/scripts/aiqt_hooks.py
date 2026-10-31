@@ -38783,7 +38783,7 @@ def clock_inject(data):
          `S88-`): the start is that time (an impossible time, such as month 13, is unknown with no fallback).
       b. `none` (any case) or an empty value: the lease is INACTIVE, elapsed is unknown, and neither the
          Session-start-UTC field nor the transcript is consulted, so an inactive lease never shows elapsed.
-      c. Any other value is an active id that carries no time (for example `sess-2026-09-23-alpha1-r1`, or a
+      c. Any other value is an active id that carries no time (for example `sess-2026-09-23-alpha1`, or a
          malformed id): the start is the FIRST Session-start-UTC field of the lease's header section (the file
          up to the first markdown heading after the Active-session field), valued `YYYY-MM-DDTHH:MM:SSZ` or
          `YYYYMMDDTHHMMSSZ`. A malformed value there falls through to d.
