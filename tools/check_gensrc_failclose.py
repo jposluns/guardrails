@@ -4,9 +4,9 @@
 The gensrc-drift gate proves a generator reproduces its target byte-for-byte from clean sources. It does
 NOT prove the generator actually CONSULTS that target when checking: a generator whose `--check` ignores
 its output (deriving a verdict from sources alone, or short-circuiting to exit 0) passes drift while
-silently failing to guard the shipped artefact. That is the F-154 class. This gate closes it: for every
+silently failing to guard the shipped artefact. This gate closes that gap: for every
 entry in the .aiqt/gensrc.json registry it corrupts a throwaway copy of the target and asserts the
-generator's `--check` refuses to pass clean. The uniform invariant, the true anti-F-154 property, is a
+generator's `--check` refuses to pass clean. The uniform invariant, the true fail-closed property, is a
 single assertion for every corruption shape: a corrupted target yields a NON-ZERO `--check`. An exit 0 on
 a corrupt target is the violation; the exact non-zero code (drift, decode-error, crash) is not graded.
 
@@ -43,7 +43,7 @@ TMPDIR pointing INSIDE that call's disposable tempdir (so a generator's writes u
 in the per-call throwaway), and repo_root().parent is that unique disposable tempdir. No generator-written
 state (a marker dropped under the sandbox, $HOME, $TMPDIR, or repo_root().parent on one call) can carry
 into another call, so a stateful generator cannot distinguish a baseline call from a probe call without
-consulting the target (the F-154-via-state trick). Residual (NOT categorical): per-call unique
+consulting the target (a bypass hidden in carried state). Residual (NOT categorical): per-call unique
 HOME/TMPDIR do not stop state shared through a filesystem location OUTSIDE the per-call sandbox that a
 generator can still reach: a COMMON ANCESTOR of the per-call tempdirs (the system temp root), the parent
 of its own $HOME/$TMPDIR, or any fixed path. Fully isolating a deliberately-adversarial generator would
@@ -74,7 +74,7 @@ path, a path becoming a symlink), a sandbox/copy failure, or a cleanup failure i
 
 Exit convention (matches the repo's gates):
   0  every entry's generator returned non-zero on every corrupted target.
-  1  a generator VIOLATED the contract: it returned exit 0 on a corrupt target (the F-154 regression).
+  1  a generator VIOLATED the contract: it returned exit 0 on a corrupt target (it ignores its target).
   2  cannot-evaluate: the registry is unreadable/malformed; a baseline `--check` is not clean; a declared
      target is absent (a file/block that is not a regular file, or a tree that is empty or untraversable);
      a `regenerate` command is not of the grammar `python3 tools/gen_<stem>.py`; a probe times out, cannot
@@ -143,6 +143,7 @@ from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+import _load_bound  # noqa: E402  hang-versus-slowness bounds shared by the self-tests and gates
 import gen_gensrc  # noqa: E402  reuse its validated, fail-closed registry loader (do not re-parse the JSON)
 
 # Directory names never copied into a sandbox and never recorded in the real-tree manifest: version
@@ -156,13 +157,31 @@ INVALID_UTF8 = b"\xff\xfe\x00 not-utf8 \x80\x81"
 VALID_MARKER = b"\n# aiqt-failclose: valid-but-different content marker\n"
 # The regenerate grammar the gate recognizes: exactly `python3 tools/gen_<stem>.py`, validated with shlex.
 REGEN_RE = re.compile(r"^tools/gen_([A-Za-z0-9_]+)\.py$")
-PROBE_TIMEOUT = 120  # seconds per subprocess --check; a hung generator is cannot-evaluate, not a hang
-TOTAL_TIMEOUT = 1800  # seconds backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
+# Both bounds are in LOAD-ADJUSTED seconds (tools/_load_bound.py): they stretch while the host runs more
+# work than it has CPUs, so a loaded host slows the sweep without turning it into cannot-evaluate, and a
+# probe is also stopped early once its process tree makes no CPU or output progress for PROBE_STALL_S
+# wall seconds. That stall test is a heuristic bound (silence is not proof of a hang). A stop with no
+# exit status at all is the bound firing, cannot-evaluate (exit 2), never a verdict on the generator.
+# This gate judges the exit status of a generator run alone (generators print their rejections to
+# stderr, so captured stderr beside a stop is NOT failure evidence here, a tolerance named in the
+# _load_bound module docstring). An exit status the generator reached on its own before a stop stands
+# exactly as a completed run, once the stopped probe has passed the SAME post-probe containment
+# validation a completed one gets (_run_probe): 0 on a corrupt target is the F-154 violation, nonzero
+# is the wanted rejection. The baseline run is different
+# by contract: it needs a clean completed 0 (any other outcome, stop or not, is unattributable).
+PROBE_TIMEOUT = 120  # per --check; an own exit beside the stop stands, else cannot-evaluate
+# Longest silent wait a generator --check legitimately makes: none deliberate. It reads files and runs git
+# and interpreter children, whose CPU counts as its own progress, so only blocked disk I/O leaves it
+# silent; 60 s is far above that on a working host.
+PROBE_STALL_S = 60
+TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
-_now = time.monotonic  # module-level indirection so the self-test can inject a monotonic clock (deadline)
+_load_factor = _load_bound.load_factor  # module-level indirection so the self-test can inject host load
+# The sweep clock: monotonic, load-adjusted; module-level so the self-test can inject a clock (deadline).
+_now = _load_bound.LoadClock(factor=lambda: _load_factor())
 _mkdtemp = tempfile.mkdtemp  # module-level indirection so the self-test can inject a sandbox-setup failure
 # Spliced into EVERY template git command (init/add/commit/ls-files/gc): no detached auto-gc/maintenance
-# may churn template/.git while a per-call copytree reads it (F-367). An explicit `git gc` is foreground,
+# may churn template/.git while a per-call copytree reads it. An explicit `git gc` is foreground,
 # but auto-gc/auto-maintenance that commit/gc trigger detaches by default (gc.autoDetach) and would race
 # the per-call copytree of the template; these overrides neutralize that ambient state (test-hermeticity).
 _TEMPLATE_GIT_NO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false")
@@ -316,12 +335,12 @@ def _materialize_git(template, real_root):
     forced empty so no user hooks load, and the environment is sanitized (ambient GIT_* stripped,
     global/system config sent to os.devnull). Every template git command also carries
     _TEMPLATE_GIT_NO_MAINTENANCE so no detached auto-gc/auto-maintenance run can churn template/.git after
-    this returns and race a per-call copytree of the template (F-367): a hermeticity hardening only, it
+    this returns and race a per-call copytree of the template: a hermeticity hardening only, it
     changes nothing the gate certifies.
 
     The template's PATH SET is EXACTLY real_root's tracked set, so a git-reading generator sees the same
     tracked surface the release-side --check saw (an on-disk but untracked build output stays untracked in
-    the sandbox too). Two hardenings (F-234):
+    the sandbox too). Two hardenings:
     (a) The real_root probe runs `-c core.fsmonitor=false --no-optional-locks` (both top-level options
         PRECEDE the ls-files subcommand, so the -c override beats real_root's own repo-LOCAL config): a
         repo-local core.fsmonitor is an arbitrary program git would otherwise EXECUTE during ls-files, and
@@ -338,7 +357,7 @@ def _materialize_git(template, real_root):
     def git(cwd, *args):
         # _TEMPLATE_GIT_NO_MAINTENANCE keeps EVERY template git command from detaching a background auto-gc
         # or auto-maintenance run that would repack/prune template/.git after this returns and race the
-        # per-call copytree of the template (F-367). It hardens hermeticity only; it changes nothing the
+        # per-call copytree of the template. It hardens hermeticity only; it changes nothing the
         # gate certifies about a generator's --check.
         return subprocess.run(
             ["git", "-C", str(cwd), "-c", "user.name=aiqt-failclose",
@@ -349,7 +368,7 @@ def _materialize_git(template, real_root):
     if git(template, "init", "-q", "--template=").returncode != 0:
         raise OSError("cannot git-init the failclose sandbox template")
     # -c core.fsmonitor=false and --no-optional-locks (top-level, before the subcommand) override any
-    # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh (F-234a).
+    # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh.
     probe = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
                             "--no-optional-locks", "ls-files", "-z"],
                            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
@@ -369,7 +388,7 @@ def _materialize_git(template, real_root):
         raise OSError("cannot git-add the tracked set into the failclose template")
     if git(template, "commit", "-q", "-m", "failclose template", "--no-verify").returncode != 0:
         raise OSError("cannot commit the failclose sandbox template")
-    # The materialized index MUST equal real_root's tracked set (F-234b): any missing member is fail-closed.
+    # The materialized index MUST equal real_root's tracked set: any missing member is fail-closed.
     readback = git(template, "ls-files", "-z")
     if readback.returncode != 0:
         raise OSError("cannot read back the materialized template index (git ls-files exit {})"
@@ -386,7 +405,7 @@ def _materialize_git(template, real_root):
     # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). This
     # gc runs in the FOREGROUND; _TEMPLATE_GIT_NO_MAINTENANCE (carried by git() above) stops both this gc
     # and the earlier commit from detaching a background auto-gc/auto-maintenance run that would keep
-    # repacking/pruning template/.git and race the per-call copytree (F-367). A gc failure is non-fatal:
+    # repacking/pruning template/.git and race the per-call copytree. A gc failure is non-fatal:
     # the repo still works with loose objects, only slower.
     git(template, "gc", "--quiet")
 
@@ -394,12 +413,18 @@ def _materialize_git(template, real_root):
 def _run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
     """Run `python3 <script_path> --check` as a subprocess and return its exit code. shell=False, the
     interpreter pinned to sys.executable, a sanitized env carrying the per-call HOME/TMPDIR overrides, cwd
-    anchored on the sandbox, a bounded timeout. Module-level so the self-test can substitute it. Raises
-    subprocess.TimeoutExpired or OSError on a hung or unlaunchable probe; the caller maps that to
-    cannot-evaluate."""
-    proc = subprocess.run([sys.executable, str(script_path), "--check"], cwd=str(cwd),
-                          env=_sanitized_env(env_overrides), capture_output=True, timeout=timeout,
-                          shell=False)
+    anchored on the sandbox, a load-tolerant bound (timeout load-adjusted seconds, or PROBE_STALL_S wall
+    seconds without progress). Module-level so the self-test can substitute it. Raises
+    subprocess.TimeoutExpired (_load_bound.Hung) or OSError on a hung or unlaunchable probe; a Hung's
+    returncode is the exit status the generator reached on its own before the stop, or None, and an OSError
+    carries none. _process_entry judges the raise by the function it came through: through _run_baseline
+    it is cannot-evaluate whatever that status (the "error: ..." it records is not a clean 0); through
+    _run_probe an own exit of 0 is a violation (exit 0 on a corrupt target, F-154), a nonzero own exit
+    stands as the rejection and nothing is recorded (_run_probe re-raises the stop only after its
+    post-probe containment validation passed), and no own exit is cannot-evaluate."""
+    proc = _load_bound.run([sys.executable, str(script_path), "--check"], budget_s=timeout,
+                           stall_s=PROBE_STALL_S, cwd=str(cwd), env=_sanitized_env(env_overrides),
+                           clock=_load_bound.LoadClock(factor=lambda: _load_factor()))
     return proc.returncode
 
 
@@ -582,9 +607,15 @@ def _run_probe(template, script_rel, rel_path, corrupt_bytes, deadline, cleanup_
     so neither the copytree nor the write can consume the budget while the subprocess still launches with a
     near-full timeout; an already-elapsed deadline at that point raises _DeadlineExceeded rather than
     launching. Re-validates the target is a contained regular file before the write and again after the
-    probe (a generator that swapped it for an escaping symlink raises _ContainmentError). Raises
-    _ContainmentError, subprocess.TimeoutExpired/OSError, or _DeadlineExceeded; the caller maps all to
-    cannot-evaluate."""
+    probe (a generator that swapped it for an escaping symlink raises _ContainmentError). The post-probe
+    validation also runs when the probe was STOPPED (the exception path), while the sandbox still
+    exists: an exit status carried beside the stop is judged by _process_entry exactly as a completed
+    run, so it must pass the same containment check first, and a containment failure outranks the stop
+    (fail-closed). Raises
+    _ContainmentError, subprocess.TimeoutExpired/OSError, or _DeadlineExceeded. _process_entry files a
+    _ContainmentError as cannot-evaluate, judges a TimeoutExpired/OSError by the generator's own exit
+    status as _run_check states (0 a violation, nonzero the rejection, none cannot-evaluate), and lets
+    _DeadlineExceeded propagate to sweep, which files it as cannot-evaluate."""
     holder, sandbox, env_overrides = _new_sandbox(template)
     try:
         sandbox_real = os.path.realpath(str(sandbox))
@@ -592,7 +623,14 @@ def _run_probe(template, script_rel, rel_path, corrupt_bytes, deadline, cleanup_
         where = "{} (in the sandbox)".format(rel_path)
         _write_bytes_safe(tpath, corrupt_bytes, sandbox_real, where)  # re-validate + O_NOFOLLOW write
         timeout = _remaining_timeout(deadline)  # clamp AFTER the copy+write, immediately before the launch
-        rc = _run_check(sandbox / script_rel, sandbox, timeout=timeout, env_overrides=env_overrides)
+        try:
+            rc = _run_check(sandbox / script_rel, sandbox, timeout=timeout, env_overrides=env_overrides)
+        except (subprocess.TimeoutExpired, OSError):
+            # A stopped probe can carry the generator's own exit, which _process_entry judges exactly
+            # as a completed run, so the stopped path runs the SAME post-probe validation first; a
+            # containment failure raised here outranks the stop (fail-closed, _ContainmentError).
+            _validate_contained_regular(tpath, sandbox_real, where)
+            raise
         _validate_contained_regular(tpath, sandbox_real, where)  # post-probe symlink-swap detection
         return rc
     finally:
@@ -673,11 +711,25 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
                               "fail-closed".format(target_rel, rel_path, shape, exc))
                 continue
             except (subprocess.TimeoutExpired, OSError) as exc:
+                own_exit = getattr(exc, "returncode", None)
+                if own_exit == 0:
+                    # The generator exited 0 on the corrupt target before the bound stopped the wait on a
+                    # descendant still holding its output: a wrong result beside a stop is a violation.
+                    violations.append("{}: gen_{} --check exited 0 on {} corrupted with {} before its load-tolerant "
+                                      "bound stopped the wait on a leaked descendant (F-154: the generator does "
+                                      "not consult its target)".format(target_rel, stem, rel_path, shape))
+                    continue
+                if own_exit is not None:
+                    # It exited NONZERO before the stop: the rejection this probe wanted, standing exactly
+                    # as a completed nonzero run does (the _load_bound contract), accepted only because the
+                    # stopped probe already passed the post-probe containment validation (_run_probe);
+                    # nothing is recorded.
+                    continue
                 cannot.append("{}: probe 'gen_{} --check' on {} corrupted with {} failed to complete ({})"
                               .format(target_rel, stem, rel_path, shape, exc))
                 continue
             if actual == 0:
-                violations.append("{}: gen_{} --check returned exit 0 on {} corrupted with {} (F-154: the "
+                violations.append("{}: gen_{} --check returned exit 0 on {} corrupted with {} (the "
                                   "generator does not consult its target)"
                                   .format(target_rel, stem, rel_path, shape))
             # any non-zero actual = the corrupt target was rejected = a pass; nothing recorded
@@ -725,7 +777,7 @@ def sweep(real_root):
                 if _now() > deadline:
                     raise _DeadlineExceeded()
             except _DeadlineExceeded:
-                cannot.append("total-runtime backstop of {}s exceeded; the sweep did not finish "
+                cannot.append("total-runtime backstop of {} load-adjusted s exceeded; the sweep did not finish "
                               "(fail-closed)".format(TOTAL_TIMEOUT))
     except Exception as exc:  # noqa: BLE001  an unexpected error is fail-closed, never a silent pass
         unexpected = exc
@@ -801,7 +853,7 @@ def main() -> int:
 #   (a) a conformant repo (a content-guarding file generator AND a content-guarding tree generator, plus
 #       gen_gensrc's own registry target) passes the sweep (exit 0),
 #   (b) a BYPASS generator that ignores its target is caught (exit 1) via VALID-BUT-DIFFERENT content, not
-#       merely invalid UTF-8 - the F-154 regression, the whole point of the gate,
+#       merely invalid UTF-8 - a generator that ignores its target, the whole point of the gate,
 #   (c) a STATEFUL generator that drops a marker under $HOME on one call and keys off it is CAUGHT
 #       (exit 1), proving the per-call unique HOME/TMPDIR and fresh independent sandbox deny it the
 #       cross-call state it needs to fake a guard,
@@ -829,6 +881,14 @@ def main() -> int:
 #   (m) a BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on invalid
 #       UTF-8 passes the sweep (exit 0): the gate probes a block target with invalid UTF-8 only and the
 #       generator rejects it, exercising the is_block probe path no other fixture covers,
+#   (n) load tolerance: under an injected host load a generator slower than a 1 s per-probe bound passes
+#       while printing progress, a silent sleeper is still stopped by the stall bound (exit 2), and the
+#       same slow generator on an idle host overruns the bound (exit 2), a generator that exits 0 on a
+#       corrupt target while a leaked descendant holds its output is a violation (exit 1), not a stop,
+#       a nonzero rejection beside the same leak stands (exit 0), and a stopped rejection that left the
+#       target as an escaping symlink is cannot-evaluate (exit 2): the post-probe containment validation
+#       runs on the stopped path too; the shared _load_bound vectors also run here, and the leaked-
+#       descendant cleanup's three distinct results are driven through its real caller,
 #   (s) the self-test verdict gives cannot-evaluate exit precedence: a vector that could not be evaluated
 #       beside an assertion failure exits 2 naming both, a cleanup or census error still prints every
 #       cannot line first, a fixture setup raising any Exception (an injected ValueError) or returning None
@@ -858,7 +918,8 @@ def main() -> int:
 # while its name stays in _SELF_TEST_VECTORS fails the self-test; removing the run and its name together
 # passes by design. Only runs through _run_vector are counted: a check run only inside _VectorEvaluation
 # (the verdict precedence check, the assertions the injected setup and evaluation vector wrappers make
-# around their inner runs, and the census meta-check (u) itself) is not, so removing one passes the census.
+# around their inner runs, the leaked-descendant cleanup caller probes of (n), and the census meta-check
+# (u) itself) is not, so removing one passes the census.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -1458,6 +1519,7 @@ _SELF_TEST_VECTORS = (
     "real-tree mode change",
     "decode-only generator",
     "total-runtime deadline overrun",
+    "load tolerance",
     "sandbox-setup mkdtemp failure",
     "block-kind generator",
     "git-reading generator",
@@ -1581,6 +1643,33 @@ def _self_test_verdict(failures, cannot, cleanup_error=None, census_error=None):
     return 1 if failures else 0
 
 
+# Tokens the leaked-descendant cleanup ran for, in call order: the self-test asserts the REAL
+# call site ran for the real leaked token, so deleting that call is loud, never silent.
+_CLEANUP_CALLS = []
+
+
+def _cleanup_leaked_descendant(leaked, failures, cannot_evaluate):
+    """Kill any descendant still carrying the leaked token, reporting the survivor scan's three
+    DISTINCT results (_load_bound._leak_cleanup_outcome): an OBSERVED scan (a pid list or [];
+    anything listed is killed below), a cleanup FAILURE (an UNOBSERVABLE scan, None, on a host
+    WITH /proc: the leak cannot be proven absent, recorded in failures), and an UNAVAILABLE
+    observation (no /proc at all: the disclosed platform limit, recorded in cannot_evaluate by
+    name and reported as exit 2 at suite level, never a silent pass and never a false leak)."""
+    _CLEANUP_CALLS.append(leaked)
+    leaked_pids = _load_bound._alive_with(leaked)
+    outcome = _load_bound._leak_cleanup_outcome(leaked_pids, os.path.isdir("/proc"))
+    if outcome == "failure":
+        failures.append("leaked-descendant cleanup: the survivor check was unobservable "
+                        "(/proc could not be read) on a host with /proc, so the leaked child "
+                        "cannot be proven absent")
+    elif outcome == "cannot-evaluate":
+        cannot_evaluate.append("leaked-descendant cleanup: no /proc on this host, so the "
+                               "survivor scan is unavailable and leak absence was not "
+                               "evaluated (the disclosed platform limit)")
+    for pid in (leaked_pids or ()):
+        _load_bound._kill_pid(pid)
+
+
 def self_test_main():
     # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
     # scrub before it would make it save, and so restore, the already scrubbed values.
@@ -1611,15 +1700,25 @@ def _self_test_main_isolated():
                 failures.append(message)
         return evaluate
 
+    def sweep_captured_streams(root):
+        # The two streams apart, so a line can be asserted on the stream that must carry it.
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = _gate_sweep(root)
+        return rc, out.getvalue(), err.getvalue()
+
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-selftest-"))
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
-    cannot = []  # vectors whose setup or evaluation failed: named cannot-evaluate, never a pass or traceback
+    # Vectors whose setup or evaluation failed, and named unavailable observations (the leaked-descendant
+    # cleanup on a host with no /proc): each a named cannot-evaluate, never a pass or traceback.
+    cannot = []
     _VECTORS_RUN.clear()  # this run's vector census starts empty
-    global _run_check, _now, _mkdtemp, _materialize_git, sweep
+    global _run_check, _now, _mkdtemp, _materialize_git, sweep, _load_factor, PROBE_TIMEOUT, PROBE_STALL_S
+    saved_bounds = (_load_factor, PROBE_TIMEOUT, PROBE_STALL_S)
     saved_run_check = _run_check
     saved_now = _now
     saved_mkdtemp = _mkdtemp
@@ -1685,7 +1784,7 @@ def _self_test_main_isolated():
                     expect_sweep(2, "malformed registry: expected fail-closed exit 2"))
 
         # (g) A declared target absent on disk fails closed (exit 2). Untrack it too, so real_root's
-        #     tracked set still mirrors its on-disk files (the F-234 materialization equality stays clean)
+        #     tracked set still mirrors its on-disk files (the tracked-versus-materialized equality stays clean)
         #     and the ABSENT-DECLARED-TARGET leg of _process_entry is what fails closed, not the new
         #     tracked-set guard (which the dedicated case below covers). The baseline --check of gen_goodfile
         #     would also exit non-zero on the absent target, so exit 2 alone cannot tell the two legs apart:
@@ -1797,6 +1896,152 @@ def _self_test_main_isolated():
         _run_vector(cannot, failures, "total-runtime deadline overrun", lambda: _build_repo(
             tmp / "deadline", {"goodfile": _GOODFILE}), _evaluate_deadline)
 
+        # (n) Load tolerance. With the per-probe bound cut to 1 s and the host load injected at the cap, a
+        #     generator that takes about 2 s while printing progress passes every probe (a 1 s wall-clock
+        #     bound would have made it cannot-evaluate); a generator that sleeps silently is still stopped
+        #     by the stall bound (exit 2; a spy on _run_check requires the stop to be the stall bound's,
+        #     not the 16 s budget's); and on an idle host the same slow generator overruns the 1 s budget
+        #     (exit 2), so the pass is owed to the load adjustment; a generator exiting 0 on a corrupt target
+        #     beside a leaked descendant is a violation (exit 1), and a generator REJECTING the corrupt
+        #     target (nonzero) beside the same leak passes (exit 0): the own exit stands either way, never
+        #     filed as cannot-evaluate, but only once the stopped probe passed the same post-probe
+        #     containment validation a completed one gets: the same rejection that ALSO swapped the target
+        #     for an escaping symlink is cannot-evaluate (exit 2), never an accepted rejection. The shared
+        #     vectors follow, then the cleanup caller probes.
+        leaked = "gensrc-leaked-descendant-{}".format(os.getpid())
+
+        def _load_fixtures():
+            slow_main = ("def main():\n    import time\n    for _ in range(8):\n"
+                         "        print(\"working\", flush=True)\n        time.sleep(0.25)\n")
+            slow = _build_repo(tmp / "slow", {"goodfile": _GOODFILE.replace("def main():\n", slow_main)})
+            hang = _build_repo(tmp / "hang", {"goodfile": _GOODFILE.replace(
+                "def main():\n", "def main():\n    import time\n    if \"--check\" in sys.argv[1:]:\n"
+                "        time.sleep(3600)\n")})  # hangs on --check only, so the fixture build still writes
+            # Exits 0 on a corrupt target (it does not reject it) while leaving a descendant on its
+            # output: the wrong result stands beside the stop, so the sweep is a violation (exit 1), not 2.
+            leaky = _build_repo(tmp / "leaky", {"goodfile": _GOODFILE.replace(
+                "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+                ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+                 "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+                 "        return 0\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+            # Rejects the corrupt target (exit 2) while leaving a descendant on its output: the nonzero own
+            # exit stands as the rejection beside the stop, so the sweep is exit 0, never cannot-evaluate.
+            leaky_reject = _build_repo(tmp / "leaky-reject", {"goodfile": _GOODFILE.replace(
+                "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+                ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+                 "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+                 "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+            # Rejects the corrupt target (exit 2) beside the same leak, but FIRST swaps the target for a
+            # symlink escaping the sandbox: the stopped rejection must still run the post-probe containment
+            # validation, so the sweep is cannot-evaluate (exit 2), never an accepted rejection (exit 0).
+            leaky_reject_escape = _build_repo(tmp / "leaky-reject-escape", {"goodfile": _GOODFILE.replace(
+                "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+                ("def main():\n    import os, subprocess\n"
+                 "    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+                 "        target = repo_root() / \"out\" / \"goodfile.txt\"\n"
+                 "        os.unlink(target)\n        os.symlink(sys.executable, target)\n"
+                 "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+                 "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+            return slow, hang, leaky, leaky_reject, leaky_reject_escape
+
+        def _evaluate_load_tolerance(fixtures):
+            global _run_check, _now, _load_factor, PROBE_TIMEOUT, PROBE_STALL_S
+            slow, hang, leaky, leaky_reject, leaky_reject_escape = fixtures
+            stops = []
+
+            def _spy_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+                try:
+                    return saved_run_check(script_path, cwd, timeout, env_overrides)
+                except _load_bound.Hung as exc:
+                    stops.append(exc.kind)
+                    raise
+
+            PROBE_TIMEOUT, PROBE_STALL_S = 1, 1
+            try:
+                _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
+                _now = _load_bound.LoadClock(factor=lambda: _load_factor())
+                rc_slow = sweep_quiet(slow)
+                _run_check = _spy_run_check
+                rc_hang = sweep_quiet(hang)
+                _run_check = saved_run_check
+                _load_factor = lambda: 1.0  # noqa: E731
+                _now = _load_bound.LoadClock(factor=lambda: _load_factor())
+                rc_idle = sweep_quiet(slow)
+                rc_leaky = sweep_quiet(leaky)
+                rc_leaky_reject = sweep_quiet(leaky_reject)
+                rc_leaky_reject_escape, escape_out, escape_err = sweep_captured_streams(leaky_reject_escape)
+            finally:
+                _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
+                _now = saved_now
+                _run_check = saved_run_check
+                # The survivor scan's three distinct results: None on a host WITH /proc is a
+                # self-test failure, a host with NO /proc is a named cannot-evaluate (exit 2),
+                # and an observed list is killed; never a silent pass, never a false leak
+                # (_cleanup_leaked_descendant).
+                _cleanup_leaked_descendant(leaked, failures, cannot)
+            if (rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky, rc_leaky_reject,
+                    rc_leaky_reject_escape) != (0, 2, 2, ["stall"], 1, 0, 2):
+                failures.append("load tolerance: expected (slow under load, silent hang, slow on an idle host, "
+                                "the bound that stopped the hang, exit 0 on a corrupt target beside a leaked "
+                                "descendant, a nonzero rejection beside the same leak, a stopped rejection "
+                                "that left the target escaping) = "
+                                "(0, 2, 2, ['stall'], 1, 0, 2), got {!r}"
+                                .format((rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky,
+                                         rc_leaky_reject, rc_leaky_reject_escape)))
+            # The escaping fixture's exit 2 must come from the stopped-path CONTAINMENT validation, not
+            # from any other cannot-evaluate condition that shares the exit code: require the
+            # containment diagnostic itself (printed in the sweep's CANNOT-EVALUATE report).
+            if "left the target uncontained" not in escape_out:
+                failures.append("escaping stopped rejection (leaky_reject_escape): expected the "
+                                "containment diagnostic ('left the target uncontained') in the sweep "
+                                "output, got stdout {!r} stderr {!r}".format(escape_out, escape_err))
+            failures.extend(_load_bound.vector_failures(sys.executable))
+
+            # The REAL cleanup call site above must have run for the real leaked token: deleting
+            # the _cleanup_leaked_descendant call in the load-tolerance finally would otherwise
+            # leave the injected probes below green while the lane's own leak went unchecked.
+            # Checked once the evaluation runs: a failed setup is already a named cannot-evaluate.
+            if leaked not in _CLEANUP_CALLS:
+                failures.append("leaked-descendant cleanup: the load-tolerance lane never ran its "
+                                "cleanup call site for the leaked token {!r}".format(leaked))
+
+        _run_vector(cannot, failures, "load tolerance", _load_fixtures, _evaluate_load_tolerance)
+
+        # Caller-level coverage: the cleanup's three distinct results are driven through the
+        # REAL caller with an injected survivor scan and an injected /proc presence (no host
+        # gate: these legs run on every platform). An UNOBSERVABLE scan (None) with /proc
+        # present records exactly one failure; an observed empty scan records nothing; an
+        # UNAVAILABLE observation (no /proc) records exactly one named cannot-evaluate entry
+        # (exit 2 at suite level), never a silent pass. Removing the guard here or in
+        # _load_bound._leak_cleanup_outcome turns a leg red. An exception here is a named
+        # cannot-evaluate (_VectorEvaluation), not a traceback.
+        def _probe_cleanup(scan_result, proc_present):
+            recorded_failures, recorded_cannot = [], []
+            saved_alive_probe = _load_bound._alive_with
+            saved_isdir_probe = os.path.isdir
+            _load_bound._alive_with = lambda tok, opener=None: scan_result
+            os.path.isdir = (lambda path, saved_isdir_probe=saved_isdir_probe:
+                             proc_present if path == "/proc" else saved_isdir_probe(path))
+            try:
+                _cleanup_leaked_descendant("gensrc-cleanup-probe", recorded_failures,
+                                           recorded_cannot)
+            finally:
+                os.path.isdir = saved_isdir_probe
+                _load_bound._alive_with = saved_alive_probe
+            return recorded_failures, recorded_cannot
+        with _VectorEvaluation(cannot, failures, "leaked-cleanup caller probes"):
+            probe_none = _probe_cleanup(None, True)
+            probe_empty = _probe_cleanup([], True)
+            probe_unavailable = _probe_cleanup(None, False)
+            probe_shape = (len(probe_none[0]), probe_none[1], probe_empty[0], probe_empty[1],
+                           probe_unavailable[0], len(probe_unavailable[1]),
+                           all("no /proc" in entry for entry in probe_unavailable[1]))
+            if probe_shape != (1, [], [], [], [], 1, True):
+                failures.append("leaked-cleanup caller probes: expected one failure for an "
+                                "unobservable scan with /proc, nothing for an observed empty scan, "
+                                "and one named cannot-evaluate for a host with no /proc; got {!r}"
+                                .format(probe_shape))
+
         # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an
         #     escaping raise (the work-dir mkdtemp now lives inside the try).
         def _evaluate_mkdtemp_failure(setupfail):
@@ -1834,7 +2079,7 @@ def _self_test_main_isolated():
             expect_sweep(0, "git-reading generator: expected the sweep to pass (exit 0; the template "
                             "materializes a real git repo so the baseline git ls-files succeeds)"))
 
-        # (o) F-234a: a real_root whose repo-LOCAL core.fsmonitor points at a hook that writes an outside
+        # (o) a real_root whose repo-LOCAL core.fsmonitor points at a hook that writes an outside
         #     marker. The probe runs `-c core.fsmonitor=false --no-optional-locks`, so git NEVER executes
         #     the hook and the marker is never written; the sweep still completes (the goodfile fixture is
         #     otherwise clean). Without the override git would run the hook (arbitrary code out of scope).
@@ -1859,7 +2104,7 @@ def _self_test_main_isolated():
 
         _run_vector(cannot, failures, "fsmonitor probe", _fsmonitor, _evaluate_fsmonitor)
 
-        # (p) F-234b: a FORCED probe failure (real_root's .git replaced by a bare marker, so `git ls-files`
+        # (p) a FORCED probe failure (real_root's .git replaced by a bare marker, so `git ls-files`
         #     exits nonzero) is cannot-evaluate (exit 2), NEVER a silent `git add -A` fallback that would
         #     certify a bogus baseline. Without the fix the old fallback would materialize a repo and the
         #     goodfile fixture would sweep to exit 0.
@@ -1873,7 +2118,7 @@ def _self_test_main_isolated():
                     expect_sweep(2, "forced probe failure: expected cannot-evaluate exit 2 (no git add -A "
                                     "fallback), a nonzero real_root ls-files must fail closed"))
 
-        # (q) F-234b: a TRACKED-SET MISMATCH (a file tracked in real_root's index but absent from the
+        # (q) a TRACKED-SET MISMATCH (a file tracked in real_root's index but absent from the
         #     template) is detected as cannot-evaluate (exit 2). extra.txt is committed then deleted from
         #     disk, so copytree never copies it and the materialized template index lacks it. Without the
         #     equality guard the mismatch is unnoticed and the goodfile fixture sweeps to exit 0.
@@ -1889,7 +2134,7 @@ def _self_test_main_isolated():
                     expect_sweep(2, "tracked-set mismatch: expected cannot-evaluate exit 2 (the materialized "
                                     "template index must equal real_root's tracked set)"))
 
-        # (r) F-367: every TEMPLATE git command carries the no-maintenance hardening flags (gc.auto=0,
+        # (r) Every TEMPLATE git command carries the no-maintenance hardening flags (gc.auto=0,
         #     gc.autoDetach=false, maintenance.auto=false), so no detached auto-gc / auto-maintenance run can
         #     churn template/.git while a per-call copytree reads it (the intermittent hermeticity race). The
         #     template git invocations are CAPTURED during a REAL _materialize_git run over a small fixture
@@ -2270,6 +2515,7 @@ def _self_test_main_isolated():
         _run_check = saved_run_check
         _now = saved_now
         _mkdtemp = saved_mkdtemp
+        _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
         _materialize_git = saved_materialize_git
         sweep = saved_sweep
         try:
@@ -2314,7 +2560,14 @@ def _self_test_main_isolated():
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
-          "2; a sandbox-setup mkdtemp failure returns exit 2; a block-kind generator that fail-closes "
+          "2; a generator slower than the per-probe bound passes under host load while a silently sleeping "
+          "generator (stopped by the heuristic stall bound, not the budget) and the same slow generator on an "
+          "idle host each return exit 2, while one exiting 0 on a corrupt target beside a leaked descendant "
+          "(the leaky fixture) returns exit 1, one rejecting the corrupt target beside the same leak (the "
+          "leaky_reject fixture) returns exit 0, and a stopped rejection that swapped its target for an "
+          "escaping symlink (the leaky_reject_escape fixture) returns exit 2 with the containment "
+          "diagnostic asserted (load-tolerant bounds, shared vectors included); a sandbox-setup mkdtemp failure "
+          "returns exit 2; a block-kind generator that fail-closes "
           "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; a "
           "git-reading generator passes (exit 0) because the sandbox template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
@@ -2323,7 +2576,9 @@ def _self_test_main_isolated():
           "every template git command carries the no-maintenance flags (gc.auto=0, gc.autoDetach="
           "false, maintenance.auto=false) so no detached auto-gc / auto-maintenance can race the per-call "
           "copytree of the template; and the {} #378 close-vector runs pass, each flip leg red by its own "
-          "assertion".format(census_matched, close_runs))
+          "assertion; and the leaked-descendant cleanup caller probes drive its three distinct results "
+          "(an observed scan, an unobservable-scan failure, and the no-/proc named cannot-evaluate, "
+          "exit 2) through the real caller".format(census_matched, close_runs))
     return 0
 
 
