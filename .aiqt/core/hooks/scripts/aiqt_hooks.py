@@ -22418,7 +22418,7 @@ _SECSEC_PREFIX_SOURCES = [
     ('https://hooks\\.slack\\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{24,}', 'Slack webhook URL'),
 ]
 _SECSEC_ASSIGN_SOURCE = '(?ix)\n    (?:^|[^A-Za-z0-9])                       # start, or a non-alphanumeric\n    [A-Za-z0-9]*[_-]?                        # optional prefix such as aws_ or my-\n    (passwd|password|secret|token|api[_-]?key|access[_-]?key|\n       client[_-]?secret|auth[_-]?token|private[_-]?key|credential)\n    \\s*[:=]\\s*\n    (?:\n        (?P<q>[\'"])(?P<qvalue>(?:(?!(?P=q))[^\\n]){12,})(?P=q)  # quoted; qvalue excludes only the OPENING\n                                                     # delimiter (not both quotes), so a value that embeds\n                                                     # the other quote, e.g. "ab\'cd...", is not truncated\n      | (?P<value>[A-Za-z0-9+/=_.\\-]{16,})              # or unquoted; charset excludes {$<( so\n                                                     # templates and f-string holes cannot match\n    )\n    '
-_SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
+_SECSEC_PLACEHOLDER_SOURCE = '(?ai)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
 _SECSEC_ENTROPY_ASSIGN_SOURCE = '(?x)\n    (?:^|[^A-Za-z0-9])\n    (?P<name>[A-Za-z][A-Za-z0-9_.\\-]*)\n    \\s*[:=]\\s*\n    (?:\n        # QUOTED: the WHOLE inter-quote value must be alphabet (closing quote required), so a value that\n        # embeds a non-alphabet char (an email\'s @, a URL\'s :) does NOT partially match on its prefix; no\n        # upper cap here because the closing quote bounds it, so a >150-char quoted secret still fires.\n        (?P<q>[\'"])(?P<qvalue>[A-Za-z0-9_./+=\\-]{40,})(?P=q)\n        # UNQUOTED: a possessive run (no backtracking) of 40 OR MORE alphabet chars that is NOT followed by @ or\n        # : (which would make it a prefix of a larger structured value such as an email or a URL); a longer\n        # all-alphabet unquoted value still fires on its 150-char prefix (char 151 is alphabet, not @/:).\n      | (?P<value>[A-Za-z0-9_./+=\\-]{40,}+)(?![@:])\n    )\n    '
 _SECSEC_ENTROPY_MIN_LEN = 40
 _SECSEC_ENTROPY_MAX_LEN = 150
@@ -32764,7 +32764,7 @@ _RWH_READ_ONLY_OPTS = {
 }
 # The history-walking verbs also take a bare -<n> count shorthand (git log -1).
 _RWH_COUNT_VERBS = frozenset(("log", "show", "whatchanged", "shortlog", "rev-list", "stash"))
-_RWH_COUNT_RE = re.compile(r"-\d+")
+_RWH_COUNT_RE = re.compile(r"-\d+", re.ASCII)
 # The program-running git forms the hold rule refuses while any hold it can see is live, beyond the
 # curated model _rwh_program_word reads (every global option other than a literal -C, -c and
 # --config-env included, and _rdp_git_runs_program's options, words and subcommands). Each runs a
