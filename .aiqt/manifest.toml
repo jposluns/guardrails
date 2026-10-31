@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0d65f2f91d51c0389045c5da5d0d63eef721c7c9b7182acd206e02b7686fe807"
+tree-sha256 = "b1c5279731f85b681c91dffa1cce72cae66e48999b198e33a20857f1d9952410"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3586,8 +3586,8 @@ sha256 = "355fa85c86b2d132f70ec0e131fbd66437292f22149ae90b55b7a8a2972f63f6"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
-bytes = 315340
-sha256 = "683c103b1f942fc7e524a064ae3e85e18b8da6c2531d7ceea553c6211da5d608"
+bytes = 343966
+sha256 = "dc4eb4054acf441915ff723037e49499c8552f53ee5a0f72b66b9b1599bd609e"
 
 [[sources]]
 path = "tools/check_record_drift.py"
