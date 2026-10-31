@@ -5,6 +5,27 @@
 # opts in: copy it to .aiqt/toolchain-pins.toml, replace the examples below with the toolchains and CI
 # files of your project, and add the gate with --require-config to your local runner and your CI, so a
 # removed configuration fails (exit 2) instead of reading as NOT APPLICABLE. Unknown keys are refused.
+# A minimal single-pin configuration, one Python patch in one CI file, is the marked section after the
+# full example below.
+#
+# Before you adopt it:
+# - Python 3.14 or newer runs the gate. Below 3.14 it refuses (exit 2) before it reads any configuration,
+#   so even an absent configuration is cannot-evaluate there, never NOT APPLICABLE. So a python-interpreter
+#   toolchain cannot hold a pin below 3.14 at run time: the gate does not run on that interpreter, and run
+#   on 3.14 or newer it observes the newer one (a finding). The declarations leg alone, with
+#   --declarations-only, can still hold a pre-3.14 version in CI text.
+# - The gate finds the project root from its own location: the parent of the directory holding the script
+#   (symlinks followed), with no override. Keep it one directory below the project root, as
+#   tools/check_toolchain_pins.py; placed anywhere else it reads .aiqt/toolchain-pins.toml under another
+#   directory and, without --require-config, can report NOT APPLICABLE.
+# - If you also run tools/check_python_floor.py over your workflows, it requires every python-version: pin
+#   there to equal the floor's MAJOR.MINOR ('3.14') and reports a patch pin such as '3.14.4' as a finding
+#   (its patch exception covers only the pack repository's own host-patch jobs), while a python-interpreter
+#   declaration needs the full patch: no python-version: line satisfies both. To run both, keep the
+#   python-version: pins at '3.14', declare the python-interpreter toolchain with no
+#   [[toolchain.declaration]] (the runtime leg alone holds the interpreter running the gate to the patch),
+#   and update its version when the interpreter '3.14' installs moves to another patch; until then the
+#   runtime leg reports the difference as a finding.
 #
 # format-version            the integer 1 exactly (true and 1.0 are refused).
 #
@@ -96,3 +117,44 @@ count = 2
 path = ".github/workflows/canary.yml"
 line = "run: python3 -I -B tools/check_toolchain_pins.py --require-config --lane canary --only python"
 count = 1
+
+# ======== Minimal single-pin configuration: one Python patch in one CI file ========
+# The whole live configuration for a project whose only pin is one Python patch, stated on one line of one
+# workflow, with the gate's own step wired in. Copy the lines between the begin and end markers to
+# .aiqt/toolchain-pins.toml and remove the leading "# " from each. The workflow after it is the CI file the
+# configuration reads; the gate's step runs after the step that installs the pinned interpreter, so the
+# runtime leg observes it, and before the suites. If you also run tools/check_python_floor.py, see "Before
+# you adopt it" above: this patch pin is a finding there.
+# -------- begin minimal .aiqt/toolchain-pins.toml
+# format-version = 1
+#
+# [[toolchain]]
+# id = "python"
+# adapter = "python-interpreter"
+# version = "3.14.4"
+#
+# [[toolchain.declaration]]
+# path = ".github/workflows/ci.yml"
+# mention = "python-version"
+# pattern = "python-version: '(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)'"
+# count = 1
+#
+# [[wiring]]
+# path = ".github/workflows/ci.yml"
+# line = "run: python3 -I -B tools/check_toolchain_pins.py --require-config"
+# count = 1
+# -------- end minimal .aiqt/toolchain-pins.toml
+# -------- begin minimal .github/workflows/ci.yml
+# jobs:
+#   test:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.14.4'
+#       - name: Toolchain pins
+#         run: python3 -I -B tools/check_toolchain_pins.py --require-config
+#       - name: Tests
+#         run: make test
+# -------- end minimal .github/workflows/ci.yml

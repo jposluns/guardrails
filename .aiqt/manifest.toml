@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "90e2105c9a83f4b59f5f536472d6f64805e6eb4a4ba0ccfeb093b4371ef97b38"
+tree-sha256 = "55225db007a928b9c8f0bc5533dc32884962efbd0e80a56bf626d07b1c332fa0"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 526013
-sha256 = "0a5c617c619f035ef32ac114905f345e6b93059c5c78778d802a81e6e8771b2c"
+bytes = 528462
+sha256 = "fd25dbb40a73f1790b988f45a4dfebe708571a63810f46e94e0950dcbd9471ac"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -936,8 +936,8 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 
 [[sources]]
 path = ".aiqt/toolchain-pins.toml.example"
-bytes = 4988
-sha256 = "bdec0961a9b1f34d70b42b549b9389ac8442ae95c0434fa952b5433b62b888ee"
+bytes = 8404
+sha256 = "e2f81cb0270b016a689699dc14e9864e1835e44700ba00d4fe862808c83bcd90"
 
 [[sources]]
 path = ".aiqt/tracker-label-baseline.toml"
@@ -3671,8 +3671,8 @@ sha256 = "7422a69b4ce6513111622aa77115546fa1b82883c1dee2e3fdc7d9a52e9c9579"
 
 [[sources]]
 path = "tools/check_toolchain_pins.py"
-bytes = 58027
-sha256 = "e025e13bb1f671c69399f8a50964872ddb7d257e7380bc5969f8511f9bd497e1"
+bytes = 65784
+sha256 = "bc5ae6d242d8823fad4efb23581274689fd85867aa53e3d035f7230493c7044b"
 
 [[sources]]
 path = "tools/check_verifier_delivery.py"

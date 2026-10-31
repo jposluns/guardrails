@@ -4,13 +4,35 @@ declares, and the CI files state those same versions. Offline, stdlib only, fail
 
 The gate is ADOPTER-CONFIGURED: it ships no toolchain, version, CI path or job name of its own. The adopter
 authors .aiqt/toolchain-pins.toml (the schema is documented in .aiqt/toolchain-pins.toml.example, which is
-deliberately not the live path). With NO configuration the gate prints NOT APPLICABLE and exits 0, but only
-when an lstat of the live path reports it absent; a configuration that is present but unusable never does,
-and with --require-config an absent one is cannot-evaluate (exit 2), so an adopter who has opted in cannot
-lose the gate by deleting the file.
+deliberately not the live path). On Python 3.14 or newer, with NO configuration the gate prints NOT
+APPLICABLE and exits 0, but only when an lstat of the live path reports it absent; a configuration that is
+present but unusable never does, and with --require-config an absent one is cannot-evaluate (exit 2), so an
+adopter who has opted in cannot lose the gate by deleting the file.
 
   check_toolchain_pins.py [--require-config] [--declarations-only] [--only ID[,ID...]] [--lane ID]
   check_toolchain_pins.py --self-test
+
+Prerequisites:
+  Python 3.14 or newer runs the gate. Below 3.14 its prelude writes a refusal and exits 2 before it reads
+  any configuration, so on such an interpreter even an absent configuration is cannot-evaluate, never NOT
+  APPLICABLE. It follows that the python-interpreter runtime leg cannot hold a pin below 3.14: the gate
+  does not run on that interpreter, and run on 3.14 or newer it observes that newer interpreter (a
+  finding). A pre-3.14 version in CI text can still be held by the declarations leg with
+  --declarations-only.
+  Placement: the project root is the parent of the directory holding this script (its own resolved path,
+  symlinks followed, parents[1]), and there is no root or configuration-path override, so the script must
+  sit one directory below the project root, as tools/check_toolchain_pins.py. Placed anywhere else it reads
+  .aiqt/toolchain-pins.toml under another directory and, without --require-config, can report NOT
+  APPLICABLE.
+  With tools/check_python_floor.py: that gate, where an adopter runs it over its own workflows, requires
+  every python-version: pin there to equal the floor's MAJOR.MINOR ('3.14') and reports a patch pin
+  ('3.14.4') as a finding; its patch exception covers only this repository's own host-patch jobs. The
+  python-interpreter adapter takes only MAJOR.MINOR.PATCH, and a declaration's captured version must equal
+  it, so no python-version: line satisfies both gates. An adopter running both declares the
+  python-interpreter toolchain with no [[toolchain.declaration]], so the runtime leg alone holds the
+  interpreter running the gate to the patch, keeps each python-version: pin at the floor's MAJOR.MINOR, and
+  updates the declared patch when the interpreter that pin installs moves to another patch (until then the
+  runtime leg reports the difference as a finding).
 
 Legs, each over the selected toolchains (every [[toolchain]], or only those --only names):
   declarations  each [[toolchain.declaration]] file is read as LF lines, one trailing CR removed from each; a
@@ -30,9 +52,12 @@ Legs, each over the selected toolchains (every [[toolchain]], or only those --on
                 baseline is the entry's own version). python-interpreter reads the interpreter running this
                 gate (sys.version_info, which must also be a final release) and reports sys.executable.
                 command resolves argv[0] on PATH and runs that file with the rest of argv, with no shell,
-                in a session of its own (killed whole at its timeout); it must exit 0, and its standard
-                output, decoded as UTF-8 and stripped, must match pattern whole. A command that is not on
-                PATH is a finding.
+                in a new session whose process group is killed at its timeout (a descendant that moved
+                to another process group or session is not killed); its output is then collected for at
+                most COLLECT_SECONDS (1) more, after which the pipes are closed, so a surviving descendant
+                that holds them cannot keep the gate waiting, and the timeout is cannot-evaluate either
+                way. The command must exit 0, and its standard output, decoded as UTF-8 and stripped, must
+                match pattern whole. A command that is not on PATH is a finding.
 
 The report names, for each toolchain, its lane, the lane's role, the expected and the observed version and
 the executable, and which legs ran.
@@ -43,15 +68,16 @@ Exit convention (matches the repo's gates):
   1  a finding: a runtime version that differs from the declared one (or a python-interpreter that is not a
      final release), a pinned command not on PATH, a declared version that differs from its lane's version,
      a declaration, indirect or wiring count that differs from the configured count
-  2  cannot evaluate: the configuration is absent under --require-config, cannot be inspected (an
-     unreadable parent directory, say), is a symlink (a dangling one included), is not a regular file, is
-     not UTF-8 or does not parse (tomllib's ValueError, RecursionError and MemoryError are each mapped
-     here), or breaks the schema (an unknown or missing key, a format-version other than the integer 1, a
-     duplicate id, an unknown adapter, lane or role, a version outside its adapter's grammar, a regex that
-     does not compile or whose named groups are not exactly version, a bad count or timeout, a path that is
-     absolute, climbs or holds an empty part); a declaration or wiring file that is missing, reached through a symlink, not
-     regular, unreadable or not UTF-8, a line-break character in it, a mentioned line outside the pattern,
-     an unlisted ${{ expression; a command that times out, exits non-zero, dies by a signal, cannot be
+  2  cannot evaluate: the interpreter is older than Python 3.14 (whatever the configuration); the
+     configuration is absent under --require-config, cannot be inspected (an unreadable parent directory,
+     say), is a symlink (a dangling one included), is not a regular file, is not UTF-8 or does not parse
+     (tomllib's ValueError, RecursionError and MemoryError are each mapped here), or breaks the schema (an
+     unknown or missing key, a format-version other than the integer 1, a duplicate id, an unknown adapter,
+     lane or role, a version outside its adapter's grammar, a regex that does not compile or whose named
+     groups are not exactly version, one with no named group included, a bad count or timeout, a path that
+     is absolute, climbs or holds an empty part); a declaration or wiring file that is missing, reached
+     through a symlink, not regular, unreadable or not UTF-8, a line-break character in it, a mentioned line
+     outside the pattern, an unlisted ${{ expression; a command that times out, exits non-zero, dies by a signal, cannot be
      started or prints output outside the pattern; --only or --lane naming an id the configuration does not
      hold; an unobservable child status (the entry guard below); or arguments it does not recognize.
 
@@ -61,7 +87,10 @@ distribution's downstream patches, the linked system libraries, the architecture
 can all differ); a binary that misreports its version passes; the declarations and wiring legs read text,
 not a CI grammar, so whether a CI job runs, is required, comes before the suites or is skipped (an if:, a
 continue-on-error:) is not seen, nor a version built at run time or set through the environment, and the
-adopter's mention bounds what is read; a lane's role is a label only; without --require-config, deleting
+adopter's mention bounds what is read; a YAML block scalar's text is read as lines like any other, so a pin
+or wiring line moved into a run: | script, where it is shell text and no longer a setting or a step,
+still counts and passes; a descendant of a timed-out command that left its process group is not killed
+and may outlive the gate; a lane's role is a label only; without --require-config, deleting
 the configuration brings NOT APPLICABLE back; an adopter regex that backtracks badly runs as written; and
 whether the declared version is what a developer's host runs rests on a human updating the configuration
 when the host changes.
@@ -90,6 +119,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import time
 import tomllib
 import types
 from pathlib import Path
@@ -117,6 +147,8 @@ DECLARATION_KEYS = ({"path", "mention", "pattern", "count"}, {"lane", "indirect"
 WIRING_KEYS = ({"path", "line", "count"}, set())
 TIMEOUT_DEFAULT = 10
 TIMEOUT_MAX = 120
+# How long the output of a timed-out command is still collected once its process group is killed.
+COLLECT_SECONDS = 1
 # Characters a YAML reader may take as a line break where this reader splits on LF alone; each is refused
 # once a line's one trailing CR is removed.
 LINE_BREAKS = ("\r", "\x85", "\u2028", "\u2029")
@@ -383,12 +415,21 @@ def _row(toolchain, lane, role, expected, observed, executable):
 
 
 def _stop_group(proc):
-    """Kill the session the command runs in (start_new_session), then reap it."""
+    """Kill the process group of the new session the command runs in (start_new_session makes the command
+    that group's leader), then collect its output for at most COLLECT_SECONDS. A descendant that moved to
+    another process group or session survives the kill and can hold the pipes open, so the pipes are then
+    closed rather than waited on. True when the collection ended at its bound."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except OSError:
         pass
-    proc.communicate()
+    try:
+        proc.communicate(timeout=COLLECT_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.stdout.close()
+        proc.stderr.close()
+        return True
+    return False
 
 
 def _command_version(toolchain, expected, path):
@@ -405,8 +446,11 @@ def _command_version(toolchain, expected, path):
             try:
                 output, _errors = proc.communicate(timeout=toolchain["timeout"])
             except subprocess.TimeoutExpired:
-                _stop_group(proc)
-                raise CannotEvaluate("{} did not finish within {} seconds".format(binary, toolchain["timeout"]))
+                held = _stop_group(proc)
+                raise CannotEvaluate("{} did not finish within {} seconds{}".format(
+                    binary, toolchain["timeout"], "; its output was still held open {} seconds after its process "
+                    "group was killed (a descendant outside that group), so the pipes were closed".format(
+                        COLLECT_SECONDS) if held else ""))
     except OSError as exc:
         raise CannotEvaluate("{} could not be run ({})".format(binary, exc))
     if proc.returncode != 0:
@@ -554,6 +598,20 @@ MAIN_YML = ("jobs:\n  test:\n    steps:\n      - uses: x/setup@v1\n        with:
 CANARY_YML = "jobs:\n  canary:\n    steps:\n      - with:\n          python-version: '3.14.9'\n"
 FILES = {"ci/main.yml": MAIN_YML, "ci/canary.yml": CANARY_YML}
 VERSION_PATTERN = "v?(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)"
+# The escaped-descendant case: the stub's helper starts a child in a process group of its own, which inherits
+# the stub's stdout and stderr and lives until a stop file appears or HELD_LIFETIME seconds pass, then the
+# stub hangs. The gate must return within HELD_TIMEOUT, COLLECT_SECONDS and HELD_MARGIN seconds.
+HELD_TIMEOUT = 2
+HELD_MARGIN = 3
+HELD_LIFETIME = 10
+HELD_CHILD = ("import pathlib, sys, time\n"
+              "deadline = time.monotonic() + {}\n"
+              "while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:\n"
+              "    time.sleep(0.05)\n").format(HELD_LIFETIME)
+HELD_HELPER = ("import pathlib, subprocess, sys\n"
+               "subprocess.Popen([sys.executable, '-I', '-c', " + repr(HELD_CHILD) + ", sys.argv[2]], "
+               "process_group=0)\n"
+               "pathlib.Path(sys.argv[1]).write_text('started')\n")
 
 
 def check(name, got, want):
@@ -578,6 +636,20 @@ def _copy(base, name, source):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _section(text, rel):
+    """The lines of text between its "# -------- begin minimal REL" and "# -------- end minimal REL" lines,
+    each with its leading "# " (or a bare "#") removed, or None when the markers are not there once each or
+    a line between them is neither."""
+    lines = text.split("\n")
+    begin, end = "# -------- begin minimal " + rel, "# -------- end minimal " + rel
+    if lines.count(begin) != 1 or lines.count(end) != 1 or lines.index(begin) > lines.index(end):
+        return None
+    body = lines[lines.index(begin) + 1:lines.index(end)]
+    if any(line != "#" and not line.startswith("# ") for line in body):
+        return None
+    return "".join(line[2:] + "\n" for line in body)
 
 
 def _mutant(base, name, edits):
@@ -768,8 +840,31 @@ def _cases(base):
     check("command/flip-return-code-ignored", _code(_mutant(base, "rc_ignored", (
         ("    if proc.returncode != 0:\n", "    if False:\n"),)), command, path=fails), 0)
     check("command/flip-timeout-passes", _code(_mutant(base, "timeout_passes", (
-        ('raise CannotEvaluate("{} did not finish within {} seconds".format(binary, toolchain["timeout"]))',
-         'return expected, binary, ""'),)), timed, path=loop), 0)
+        ('                raise CannotEvaluate("{} did not finish within {} seconds{}".format(\n',
+         '                return expected, binary, ""\n'
+         '                raise CannotEvaluate("{} did not finish within {} seconds{}".format(\n'),)), timed, path=loop), 0)
+
+    # A descendant in a process group of its own survives the kill and holds stdout open: the gate still
+    # returns within the timeout, the collection bound and HELD_MARGIN seconds, as cannot-evaluate naming
+    # the held pipes. Flipped to collect with no bound, it waits until the descendant ends.
+    held_tree = _tree(base, "command-held", config=_command_config(timeout=HELD_TIMEOUT), files={})
+    _write(base, "held_helper.py", HELD_HELPER)
+
+    def held(module, label):
+        started, stop = base / ("held-" + label + ".started"), base / ("held-" + label + ".stop")
+        path = _stub(base, "held-" + label, '"{}" -I "{}" "{}" "{}"\nwhile :; do :; done\n'.format(
+            sys.executable, base / "held_helper.py", started, stop))
+        begun = time.monotonic()
+        try:
+            code, lines = module.evaluate(held_tree, HOST, path, EXE)
+        finally:
+            elapsed = time.monotonic() - begun
+            _write(base, "held-" + label + ".stop", "")
+        return (code, started.exists(), elapsed <= HELD_TIMEOUT + COLLECT_SECONDS + HELD_MARGIN,
+                any("still held open" in line for line in lines))
+    check("command/escaped-descendant-bounded", held(this, "bounded"), (2, True, True, True))
+    check("command/flip-collection-unbounded", held(_mutant(base, "unbounded", (
+        ("proc.communicate(timeout=COLLECT_SECONDS)", "proc.communicate()"),)), "unbounded")[:3], (2, True, False))
 
     # argv is passed with no shell: a shell metacharacter in an argument stays literal. Flipped to a shell
     # over the joined command, the marker appears (a redirection, which needs no command on the stub PATH).
@@ -930,6 +1025,21 @@ def _cases(base):
     except CannotEvaluate:
         refused = True
     check("example/unknown-key-refused", refused, True)
+
+    # The example's marked minimal configuration, its "# " prefixes removed, validates as one python
+    # toolchain with one declaration of count 1, and passes over its own marked workflow; that workflow at
+    # another patch is a finding.
+    minimal, minimal_ci = (_section(example, rel) for rel in (CONFIG_REL, ".github/workflows/ci.yml"))
+    try:
+        loaded = load_config(minimal or "")
+        check("example/minimal-validates", [(toolchain["id"], [d["count"] for d in toolchain["declarations"]])
+                                            for toolchain in loaded["toolchains"]], [("python", [1])])
+    except CannotEvaluate as exc:
+        check("example/minimal-validates", str(exc), "no refusal")
+    for name, text, want in (("minimal-passes", minimal_ci or "", 0),
+                             ("minimal-other-patch-finds", (minimal_ci or "").replace("'3.14.4'", "'3.14.5'"), 1)):
+        check("example/" + name, _code(this, _tree(base, "example-" + name, config=minimal or "",
+                                                   files={".github/workflows/ci.yml": text})), want)
 
     # An unknown argument is cannot-evaluate; flipped to fall through to a default scan, it is NOT APPLICABLE.
     check("arguments/unknown", _main(this, ["--bogus"], empty)[0], 2)
