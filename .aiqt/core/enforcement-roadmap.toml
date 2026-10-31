@@ -60,7 +60,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "brnrot"
 status = "partial"
-mechanisms = ["gate:branch-root", "hook:branch-root-guard"]
+mechanisms = ["gate:branch-root", "hook:branch-root-guard", "hook:git-discard"]
 
 [[rule]]
 corpus-id = "chgchk"

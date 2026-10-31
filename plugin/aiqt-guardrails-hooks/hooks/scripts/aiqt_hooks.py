@@ -371,7 +371,8 @@ DENY_CONSTRUCTORS = (
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny", "_wrtscp_deny")
+    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
+    "_reset_ancestry_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -9146,6 +9147,137 @@ def _reset_role(args):
     return ("scoped", "git reset (an index or worktree reset that can drop staged or unstaged changes)")
 
 
+# git reset modes, for the ancestry check below. A soft reset keeps the older tree in the index and a mixed
+# reset (also the default) keeps it in the worktree, where a later 'git add -A' stages it again, so the next
+# commit records that tree. --hard, --keep and --merge rewrite tracked content to the target's tree, so they
+# leave no older tree to commit and are not judged by the ancestry check.
+_RESET_MODES = ("soft", "mixed", "hard", "keep", "merge")
+_RESET_ANCESTRY_MODES = frozenset(("soft", "mixed"))
+
+
+def _reset_commit_operand(args):
+    """(mode, operand) when a git reset moves HEAD to ONE commit operand under --soft, --mixed or no mode
+    (mode is "soft" or "mixed"); None otherwise: no operand, more than one operand (a path reset), any path
+    after '--', a path-scoped form (-p/--patch, --pathspec-from-file), or an effective --hard, --keep or
+    --merge. The last mode given wins and a mode is matched by unambiguous prefix, as git does; the ambiguous
+    '--m' (mixed or merge) is read as mixed, so it is judged. Options may follow operands, as git accepts;
+    '--end-of-options' ends the option region and '--' starts the paths. A lone '-' is git's shorthand for the
+    previous branch and is read as '@{-1}'. Pure: it runs nothing."""
+    mode = "mixed"
+    operands = []
+    end_of_options = False
+    for idx, a in enumerate(args):
+        if a == "--":
+            if args[idx + 1:]:
+                return None  # 'git reset <tree-ish> -- <paths>' resets paths and leaves HEAD where it is
+            break
+        if end_of_options or not a.startswith("-"):
+            operands.append(a)
+            continue
+        if a == "--end-of-options":
+            end_of_options = True
+            continue
+        if a == "-":
+            operands.append("@{-1}")
+            continue
+        if not a.startswith("--"):
+            if "p" in a[1:]:
+                return None  # a clustered -p: interactive patch mode is path-scoped
+            continue
+        name = a[2:].split("=", 1)[0]
+        if not name:
+            continue
+        if "patch".startswith(name) or "pathspec-from-file".startswith(name):
+            return None  # a path-scoped reset
+        if "=" in a:
+            continue  # no mode takes a value
+        matches = [m for m in _RESET_MODES if m.startswith(name)]
+        if len(matches) == 1:
+            mode = matches[0]
+        elif matches and set(matches) <= {"mixed", "merge"}:
+            mode = "mixed"  # an ambiguous '--m': judged, the safe direction
+    if mode not in _RESET_ANCESTRY_MODES or len(operands) != 1:
+        return None
+    return (mode, operands[0])
+
+
+def _reset_ancestry(repo, operand):
+    """Ask git, read-only and offline, whether a reset target is an ancestor of HEAD in `repo`. Returns
+    ('ancestor'|'not-ancestor'|'not-a-commit'|'unknown', detail), read only from unmasked git exit statuses,
+    with the scrubbed environment of _branch_root_git. 'not-a-commit': the operand resolves to no commit
+    (git then reads a single operand as a path). 'unknown': no repository directory is known, git cannot be
+    launched or does not finish, HEAD resolves to no commit (an unborn branch or an unreadable repository),
+    the ancestry walk exits with anything but 0 or 1, or a repository that is shallow (or whose shallowness
+    cannot be read) answers 'not an ancestor' over history it may not hold."""
+    if not isinstance(repo, str) or not repo:
+        return ("unknown", "no repository directory could be resolved for it")
+    target = _branch_root_git(
+        repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "{}^{{commit}}".format(operand))
+    if target is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if target.returncode == 1 and not target.stdout.strip():
+        return ("not-a-commit", "{!r} resolves to no commit".format(operand))
+    if target.returncode != 0 or not target.stdout.strip():
+        return ("unknown", "git rev-parse exited {} resolving {!r}".format(target.returncode, operand))
+    target_sha = target.stdout.strip()
+    head = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}")
+    if head is None or head.returncode != 0 or not head.stdout.strip():
+        return ("unknown", "HEAD resolves to no commit (an unborn branch or an unreadable repository)")
+    walk = _branch_root_git(repo, "merge-base", "--is-ancestor", target_sha, head.stdout.strip())
+    if walk is None:
+        return ("unknown", "git merge-base could not be launched or did not finish")
+    if walk.returncode == 0:
+        return ("ancestor", target_sha)
+    if walk.returncode != 1:
+        return ("unknown", "git merge-base --is-ancestor exited {}".format(walk.returncode))
+    shallow = _branch_root_git(repo, "rev-parse", "--is-shallow-repository")
+    if shallow is None or shallow.returncode != 0 or shallow.stdout.strip() != "false":
+        return ("unknown", "the repository is shallow, or its shallowness cannot be read, so a missing "
+                           "ancestry may only be missing history")
+    return ("not-ancestor", target_sha)
+
+
+def _reset_ancestry_refusal(args, repo, cannot):
+    """(mode, operand, what) for a git reset that moves HEAD to one commit (_reset_commit_operand) which is
+    not an ancestor of HEAD, or None when the reset is outside this check or its target is an ancestor. Such a
+    reset keeps the older tree in the index or worktree, so the next commit records it on top of the newer
+    history and reverts every change made since (a fold onto a newer main reverts that main). A probe that
+    cannot evaluate denies: `cannot` is a reason the repository the reset acts on cannot be established from
+    the command (the probe is then not run), and an 'unknown' probe denies as well. A soft reset whose operand
+    is no commit denies; a mixed reset whose single operand is no commit is a path reset, and the caller's
+    decision stands. A target that equals HEAD or lies behind it is an ancestor and passes. The undo-amend
+    form 'HEAD@{1}' names the pre-amend commit, which is not an ancestor of the amended one, so it denies.
+    The caller returns _reset_ancestry_deny of a refusal."""
+    found = _reset_commit_operand(args)
+    if found is None:
+        return None
+    mode, operand = found
+    verdict, detail = ("unknown", cannot) if cannot is not None else _reset_ancestry(repo, operand)
+    if verdict == "ancestor" or (verdict == "not-a-commit" and mode == "mixed"):
+        return None
+    if verdict == "not-ancestor":
+        what = "moves HEAD to {}, which is not an ancestor of HEAD".format(detail)
+    elif verdict == "not-a-commit":
+        what = "names {!r}, which resolves to no commit".format(operand)
+    else:
+        what = "could not be checked against HEAD's ancestry ({})".format(detail)
+    return (mode, operand, what)
+
+
+def _reset_ancestry_deny(refusal, alts):
+    """The deny for a refusal from _reset_ancestry_refusal; it gives the portable fold recipe and names no
+    repository-local tool."""
+    mode, operand, what = refusal
+    return _deny(
+        "AIQT rule brnrot (branch-rooted-on-live-main): this {} reset to {!r} {}. A reset that moves HEAD to a "
+        "commit that is not an ancestor of HEAD keeps the older tree in the index or worktree, so the next "
+        "commit records that tree on top of the newer history and reverts every change made there since; "
+        "denied rather than run. To fold a branch's commits onto its base, run git merge-base HEAD <ref> "
+        "and then git reset --soft <printed sha>, which this guard allows. {}".format(mode, operand, what, alts),
+        "AIQT guardrail: denied a git reset to a commit that is not an ancestor of HEAD (rule brnrot); "
+        "reset to the merge base instead.")
+
+
 # git clean options that CONSUME the following token (so its value must not be read as a flag): '-e'/
 # '--exclude PAT'. The '--exclude=PAT' inline shape carries its value in the same token, consuming none.
 _CLEAN_ARG_OPTS = frozenset(("-e", "--exclude"))
@@ -11272,6 +11404,20 @@ def _discard_cd_target(operands):
     return _discard_literal_abs_path(path)
 
 
+def _discard_grammar_git_target(words, eff):
+    """(directory, subcommand, args) of a git segment the grammar ACCEPTED (_discard_git_segment_grammar):
+    its only global options are '-C <absolute literal path>' pairs, the last of which names the directory;
+    otherwise the directory is `eff` (None when unprovable)."""
+    seg_dir = eff
+    i = 1
+    while i + 1 < len(words) and words[i][0] == "-C":
+        seg_dir = _discard_literal_abs_path(words[i + 1][0])
+        i += 2
+    if i >= len(words):
+        return (seg_dir, None, [])
+    return (seg_dir, words[i][0], [t for t, _q in words[i + 1:]])
+
+
 def _discard_git_segment_grammar(words, eff):
     """Validate ONE segment whose bare command word is 'git' against the positive grammar. `words` is
     the full (text, quoted) token list (words[0] is 'git'); `eff` is the tracked effective directory,
@@ -11398,8 +11544,11 @@ def _discard_positive_grammar(command, cwd):
       deny            - None, or (kind, what) naming the first grammar violation
       snapshot_bases  - the resolved repo dir of every accepted worktree-discard segment
       stash_ops       - (repo dir, op word) of every accepted stash drop/clear segment
-      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)"""
-    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set()}
+      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)
+      reset_checks    - (directory or None, args, moved) of every accepted git reset that moves HEAD to one
+                        commit (_reset_commit_operand); moved says an earlier segment is a recognized lossy
+                        verb, which may already have moved HEAD before the reset runs"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": []}
     items, bad = _discard_grammar_lex(command)
     if bad is None:
         segments, bad = _discard_grammar_segments(items)
@@ -11439,6 +11588,9 @@ def _discard_positive_grammar(command, cwd):
                 out["deny"] = (res[1], res[2])
                 return out
             _act, _base, _label = res[1], res[2], res[3]
+            r_dir, r_sub, r_args = _discard_grammar_git_target(words, eff)
+            if r_sub == "reset" and _reset_commit_operand(r_args) is not None:
+                out["reset_checks"].append((r_dir, r_args, lossy_segs > 0))
             if _act is not None:
                 lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
             if _act == "snapshot":
@@ -11735,7 +11887,8 @@ def git_discard(data):
     non-pristine path and the unparseable fallback never read the name, so there the prefixed command gets
     exactly what FOO=<the same value> gets); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
-    reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
+    reflog-recoverable; a reset that moves HEAD to one commit that is not an ancestor of HEAD, or whose
+    ancestry cannot be evaluated, DENIES under brnrot, see _reset_ancestry_refusal) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a present non-Bash tool, a non-git command, or no recognized lossy
     verb); a payload with NO tool_name is malformed, not another tool, and DENIES under the shared
     missing-tool_name contract, and a tool_input whose command is MISSING or NOT A STRING is a
@@ -11966,6 +12119,19 @@ def git_discard(data):
             g_kind, g_what = walk["deny"]
             g_reason, g_banner = _DISCARD_GRAMMAR_DENY_TEXTS[g_kind]
             return _deny(g_reason.format(g_what, _DISCARD_ALTS), g_banner)
+        # Every accepted reset that moves HEAD to one commit is judged against HEAD's ancestry in the
+        # directory the grammar resolved for it, before any preservation or snapshot. An earlier lossy
+        # segment may move HEAD before the reset runs, and an unprovable directory names no repository, so
+        # either cannot be evaluated here and denies.
+        for r_dir, r_args, r_moved in walk["reset_checks"]:
+            r_cannot = None
+            if r_moved:
+                r_cannot = "an earlier segment of this command may move HEAD before the reset runs"
+            elif r_dir is None:
+                r_cannot = "the directory it runs in cannot be established"
+            r_refusal = _reset_ancestry_refusal(r_args, r_dir, r_cannot)
+            if r_refusal is not None:
+                return _reset_ancestry_deny(r_refusal, _DISCARD_ALTS)
         np_verb = next(iter(sorted(walk["subs"])), "discard")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
         # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
@@ -12061,6 +12227,26 @@ def git_discard(data):
     # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
     # target a DESTRUCTIVE form DENIES below (fail closed): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
+    # A reset that moves HEAD to one commit is judged against HEAD's ancestry before any snapshot or role
+    # decision (_reset_ancestry_refusal); a reset with no commit operand is untouched. The probe reads the
+    # repository the reset acts on: the session directory, or the -C target. Under an ambient GIT_* override,
+    # a --git-dir/--work-tree/--bare redirect, a leading GIT_DIR/GIT_WORK_TREE assignment or an unresolvable
+    # -C, that repository cannot be established from the command, so the reset denies.
+    if sub == "reset":
+        r_cwd = data.get("cwd")
+        r_cwd = r_cwd if isinstance(r_cwd, str) and r_cwd else None
+        r_cannot = None
+        if ambient_override:
+            r_cannot = "a non-cosmetic ambient GIT_* variable shapes the repository it acts on"
+        elif _segment_has_path_redirect(pristine):
+            r_cannot = ("a --git-dir, --work-tree or --bare redirect, or a leading GIT_DIR or GIT_WORK_TREE "
+                        "assignment, shapes the repository it acts on")
+        r_repo = None if r_cannot is not None else _segment_repo_dir(pristine, r_cwd)
+        if r_repo == "opaque":
+            r_cannot = "its -C target cannot be resolved"
+        r_refusal = _reset_ancestry_refusal(args, r_cwd if r_repo is None else r_repo, r_cannot)
+        if r_refusal is not None:
+            return _reset_ancestry_deny(r_refusal, alts)
     if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
         cwd_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
