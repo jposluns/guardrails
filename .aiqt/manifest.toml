@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "02c09019cbe3a18334e3b22e3aa8fee0a3332d3f204deecada29057bb9553689"
+tree-sha256 = "0a576052116391ba385daf53af70c46442d029bd1d8ae960f5e3b118d0c1d3da"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2491,8 +2491,8 @@ sha256 = "1654c4d42af032b218d37f38aca4f3dce924288e44e27ddbddb4239da65281fe"
 
 [[sources]]
 path = "opf/enforcement/claude/pretooluse_deny.py"
-bytes = 181081
-sha256 = "841da3daeadaa14cb63220c67f073c431c230a8ceb676d2fc6054a66a6422713"
+bytes = 181631
+sha256 = "3b1fd111ae16c26e5ee8d562ad916a5af66369acb93354814b2cd52ca11c7b53"
 
 [[sources]]
 path = "opf/enforcement/claude/settings.opf.json"
@@ -2516,8 +2516,8 @@ sha256 = "fc2cf56a4c48dfae4d6ba7d04e1de03040ed9fccf09bc54838d707d8b1340d4c"
 
 [[sources]]
 path = "opf/enforcement/platforms.toml"
-bytes = 7080
-sha256 = "c67c0f2ef516c6afdabd1949fc5cfa76b77d79a7f5cb3c6bef1515c24caf3172"
+bytes = 7305
+sha256 = "2e1e7f661126706abe81e3d72d8d6f531d3b1e133d5b6f75f25bdadf7de17341"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
@@ -2531,8 +2531,8 @@ sha256 = "55a0fdf5f4ba22edf5c6c05a368ec3d92d9a7e7c2461a4077dc5e07dd41a0ed2"
 
 [[sources]]
 path = "opf/enforcement/residuals.toml"
-bytes = 6294
-sha256 = "82e32132462982a53e14b197004693abca6366f0ea0c3f222b2f74cfcfc0a82e"
+bytes = 7077
+sha256 = "825693d5437613fa84cffa47fcbd4aa2d1c8824addcc4da280dded861878c30f"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/SKILL.md"
