@@ -82,8 +82,25 @@ forced off for the transport call: core.hooksPath to the null device (no reposit
 other hook runs), core.fsmonitor off, protocol.allow=never with only file, https and ssh
 re-allowed, and core.sshCommand pinned to the adopter's own global-or-system value (or plain `ssh`
 where none is set), so a repository-local core.sshCommand never executes while a global one is
-honoured as the adopter's own setting. Two enumerations then gate every fetch and push, both
-fail-closed. First, the repository scopes (--local and --worktree) are listed by name, and a
+honoured as the adopter's own setting. Two gates then protect every fetch and push, both
+fail-closed. First, the repository scopes (--local and --worktree) are listed by name and every
+listed key must sit on a CLOSED ALLOWLIST of data-only keys that can neither name a program nor
+redirect the transport: core.repositoryformatversion, core.filemode, core.bare,
+core.logallrefupdates, core.ignorecase, core.precomposeunicode and core.symlinks (the keys
+`git init` itself writes), remote.<name>.url, remote.<name>.fetch and remote.<name>.pushurl (the
+one recorded remote the spec 5.6 destination agreement verifies, the push URL included because the
+agreement reads `git remote get-url --push`), branch.<name>.remote and branch.<name>.merge
+(upstream records), user.name and user.email (identity data), and extensions.worktreeConfig and
+extensions.objectFormat (repository-format records; worktreeConfig is what gives the --worktree
+scope enumerated here its own file). ANY key outside that allowlist refuses sync before the fetch
+and before any local step that could reach a repository-chosen program, naming the key: the key
+belongs in the adopter's own global configuration. Neither this module nor `opf init` writes a
+repository-scope key at source (this module injects its transport overrides only as command-scope
+GIT_CONFIG_* pairs, `opf init` runs no git config write, and the self-test fixtures write only what
+`git init` and `git remote add` write, plus the hostile keys each vector plants deliberately), so
+an ordinary store passes. The per-key refusals below are therefore DOCUMENTATION of why such a key
+is dangerous, named in the refusal where one matches, while the allowlist is the gate, so the
+property holds by construction. Among the documented keys: a
 credential helper, core.askpass, core.gitProxy, core.alternateRefsCommand, gc.recentObjectsHook,
 a push.gpgSign /
 gpg.program / gpg.<format>.program / gpg.ssh.defaultKeyCommand push-signing key, a remote.<name>.receivepack /
@@ -132,6 +149,18 @@ pair appends to a multi-valued key rather than resetting it (an empty insteadOf 
 match-everything rewrite), while an unrelated rewrite of the adopter's own matches nothing here
 and keeps working.
 
+SUBMODULES: a store that carries any git submodule machinery refuses before any step: a
+.gitmodules file at the store root, a gitlink entry anywhere in HEAD's tree, or any entry under
+the repository's modules directory (.git/modules). A submodule's own repository (its config under
+.git/modules/<name>/) is a configuration scope the repository-scope allowlist cannot enumerate,
+and git's worktree operations (the clean-check status probe, a checkout) descend into a populated
+submodule and can run a program that config names (a clean, smudge or process filter the
+submodule's own .gitattributes assigns), so the whole class is refused rather than enumerated.
+The shared status probe (_opf_write_guard.probe_dirty) is deliberately left unchanged: passing
+--ignore-submodules=all there would also change the record verb's clean gate on a
+submodule-bearing store (dirt inside a submodule would stop being surfaced), which is not shown
+unaffected, while under sync the refusal here means the probe never sees a submodule.
+
 DISCLOSED RESIDUALS: the lease is NOT made observable at the sync target in this build; the planned
 mechanism for the writes sync itself makes is a lock ref at the target (for example refs/opf/lease)
 written with an atomic compare-and-swap push, and until it ships the lease is local to this host, so
@@ -145,26 +174,22 @@ store that is its repository's toplevel (`rev-parse --show-prefix` empty): a fas
 moves the WHOLE repository, so a store nested below the toplevel of a shared repository refuses with
 exit 2 rather than moving content outside the store. The push runs the TARGET repository's own
 receive-side hooks, as any git push does: the target is the adopter's recorded companion repository
-and its receive side is its own trust domain. Repository-scope configuration that stays effective
-on the transport after the refusals above never replaces the verified destination, and is one of
-the following. Routing: http.proxy (and http.<url>.proxy) and http.curloptResolve (which remaps the
-host and port a connection reaches) can route the https connection, but the server is still
-authenticated against the adopter's own trust roots (the repository-scope trust overrides are
-refused), so the verified destination cannot be silently replaced and a wrong proxy or mapping
-fails the transport closed. Shaping: http.extraHeader and the tuning keys (http.postBuffer, the
-pack and fetch sizing family, protocol.version) shape an already-authenticated connection to the
-verified URL and can at worst fail it; ssh.variant shapes the arguments of the pinned ssh and names
-no program; and remote.<name>.* is consulted only where a configured remote's NAME is itself the
-URL the transport is given (fetch and push go by explicit URL, never by a remote name the operator
-chose): a second remote section already refuses under the destination agreement's single-remote
-rule, the one recorded remote's push URL must agree with the recorded target, so a url or pushurl
-that differs from the verified URL refuses before any transport, and the program-naming remote
-keys (receivepack, uploadpack, vcs) are refused by name above. File reads: http.sslCert / sslKey,
-the proxy TLS paths (http.proxySSLCert / proxySSLKey / proxySSLCAInfo) and
-http.pinnedPubkey make the transport READ a
-file the repository names, to present a client certificate to the verified server or its proxy, to
-trust the proxy's own TLS, or to narrow the server's trust; they write nothing and leave the
-server's authentication to the adopter's trust roots. The destination agreement compares by exact
+and its receive side is its own trust domain. THE ALLOWLIST RULE AND ITS ACCEPTED COST: the
+repository scopes (--local and --worktree) must hold ONLY the allowlisted keys named in the
+transport paragraph above; a store whose repository configuration holds ANY other key is refused
+until that key is moved to the adopter's global configuration. That refuses even keys that only
+route, shape or make the transport read a file and were shown to name no program here (http.proxy,
+http.curloptResolve, http.extraHeader, http.postBuffer and the sizing family, protocol.version,
+ssh.variant, http.sslCert / sslKey, the proxy TLS paths and http.pinnedPubkey): at repository
+scope each is refused by construction, and each keeps working from the adopter's global
+configuration, which the transport honours. core.autocrlf is refused at repository scope too:
+this module does not otherwise handle content rewriting, so it is not shown safe here.
+remote.<name>.url and pushurl stay data under the destination agreement (a second remote section
+refuses under its single-remote rule, and the one recorded remote's push URL must agree with the
+recorded target before any transport), while the program-naming remote keys (receivepack,
+uploadpack, vcs) are outside the allowlist like everything else. A store carrying any submodule
+machinery is refused outright (above): a store with submodules is out of sync's scope until the
+submodule is removed. The destination agreement compares by exact
 string where a form (a file path, a file:// URL) has no canonical host+path, so two spellings of one
 filesystem target (a path and its symlink) read as disagreement and over-refuse, never under-refuse.
 A branch at the target is assumed to carry the store's current branch name (the spec names no
@@ -209,7 +234,9 @@ _USAGE = "usage: opf sync [--pull | --push] [--root DIR] (bare sync is the read-
 _ALLOWED_SCHEMES = ("file", "https", "ssh")
 # A remote-helper transport (`<helper>::<address>`, ext:: included) names a program for git to run.
 _HELPER_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9+.]*::")
-# Repository-SCOPE config keys the transport refuses by name, over both the --local and --worktree
+# DOCUMENTATION LISTS: repository-scope config keys whose danger is named, kept so the refusal can
+# say WHY where one matches. The gate itself is the allowlist further below: a key on none of these
+# lists still refuses when it is outside the allowlist. Over both the --local and --worktree
 # listings (section/key folded, the subsection kept): a URL rewrite silently redirects the verified
 # destination; a repository-planted credential helper, askpass or git proxy is a program launch on
 # fetch or push, a repository-scope core.alternateRefsCommand names a program the fetch itself
@@ -235,8 +262,8 @@ _HELPER_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9+.]*::")
 # that key with or without a subsection between the two (http.sslVerify and http.<url>.sslVerify,
 # url.<base>.insteadOf, includeIf.<condition>.path, gpg.program and gpg.<format>.program,
 # gpg.defaultkeycommand and gpg.ssh.defaultKeyCommand, protocol.allow and protocol.<name>.allow);
-# _refuse_local_redirect_config reads these lists and nothing else, so the stated and the enforced
-# lists are one.
+# _refuse_local_redirect_config matches these lists only to word its refusal, and the gate it
+# enforces is the allowlist below, so a key outside every named list still refuses.
 _LOCAL_REDIRECT_KEYS = (b"url.insteadof", b"url.pushinsteadof")
 _LOCAL_EXEC_KEYS = (b"credential.helper", b"core.askpass", b"core.gitproxy",
                     b"core.alternaterefscommand", b"gc.recentobjectshook")
@@ -265,6 +292,43 @@ _LOCAL_INCLUDE_KEYS = (b"include.path", b"includeif.path")
 # program belongs in the adopter's own global configuration (spec 5.6), like the exec keys above.
 _LOCAL_FILTER_KEYS = (b"filter.clean", b"filter.smudge", b"filter.process")
 _LOCAL_CONTENT_DRIVER_KEYS = (b"diff.command", b"diff.textconv", b"merge.driver")
+# THE GATE: the closed allowlist of repository-scope keys sync accepts, each chosen because it is
+# data that can neither name a program nor redirect the transport. Everything else refuses by
+# construction (_refuse_local_redirect_config), so a newly learned dangerous key never needs a new
+# list entry. Provenance of each entry:
+# - core.repositoryformatversion, core.filemode, core.bare and core.logallrefupdates: `git init`
+#   writes these into every repository it creates (the stores this module's own self-test builds,
+#   _self_test_units _store and _paired, carry exactly these); core.ignorecase,
+#   core.precomposeunicode and core.symlinks are the same `git init` probe results on other
+#   platforms and filesystems.
+# - remote.<name>.url and remote.<name>.fetch: `git remote add` writes both (the _paired fixture
+#   does); remote.<name>.pushurl is allowed because the spec 5.6 destination agreement reads the
+#   push URL (`git remote get-url --push`, _opf_observe._observe_remote) and refuses one that
+#   disagrees with the recorded sync_target before any transport.
+# - branch.<name>.remote and branch.<name>.merge: upstream records (`git push -u` and
+#   `git branch --set-upstream-to` write them); names of refs and remotes, not programs.
+# - user.name and user.email: identity data.
+# - extensions.worktreeconfig: the extension that gives the --worktree scope its own file, a scope
+#   this gate already enumerates; extensions.objectformat: the repository's recorded hash
+#   algorithm.
+# Deliberately NOT listed: core.autocrlf (this module does not otherwise handle content rewriting,
+# so it is not shown safe here and stays refused at repository scope); every http.*, protocol.*
+# and ssh.* routing or shaping key (data-only cannot be shown for the class, so they belong in the
+# adopter's global configuration); and submodule.* (a store with submodule machinery refuses
+# outright, _refuse_submodules). No opf tool writes a repository-scope key in production code:
+# `opf init` runs no git config write, and this module injects its transport overrides only as
+# command-scope GIT_CONFIG_* pairs that never touch .git/config.
+# Matching (_local_key_allowlisted): the exact folded name for _ALLOWED_EXACT_KEYS, or section.key
+# with a NON-EMPTY subsection between them for _ALLOWED_SUBSECTION_KEYS (remote.<name>.url; plain
+# remote.url, an empty subsection, or an extra subsection such as core.<x>.bare is outside the
+# allowlist and refuses).
+_ALLOWED_EXACT_KEYS = (
+    b"core.repositoryformatversion", b"core.filemode", b"core.bare", b"core.logallrefupdates",
+    b"core.ignorecase", b"core.precomposeunicode", b"core.symlinks",
+    b"user.name", b"user.email",
+    b"extensions.worktreeconfig", b"extensions.objectformat")
+_ALLOWED_SUBSECTION_KEYS = (b"remote.url", b"remote.fetch", b"remote.pushurl",
+                            b"branch.remote", b"branch.merge")
 _TRANSPORT_TIMEOUT_S = 120
 _TRANSPORT_MAX_OUTPUT = 8 << 20
 # The one fast-forward command; --ff-only is load-bearing (a divergence must never merge).
@@ -630,9 +694,30 @@ def _local_key_listed(low, keys):
     return False
 
 
+def _local_key_allowlisted(low):
+    """Whether one folded repository-scope config name is on the closed sync allowlist: an exact
+    listed name (_ALLOWED_EXACT_KEYS), or a listed section.key with a NON-EMPTY subsection between
+    the section and the key (_ALLOWED_SUBSECTION_KEYS; the subsection itself may contain dots, as a
+    remote named `a.b` does). Plain remote.url, an empty subsection (remote..url) and an extra
+    subsection on an exact key (core.<x>.bare) all fall outside the allowlist and refuse."""
+    if low in _ALLOWED_EXACT_KEYS:
+        return True
+    for listed in _ALLOWED_SUBSECTION_KEYS:
+        section, _dot, key = listed.partition(b".")
+        if (low.startswith(section + b".") and low.endswith(b"." + key)
+                and len(low) > len(section) + len(key) + 2):
+            return True
+    return False
+
+
 def _refuse_local_redirect_config(git, store_root):
-    """Refuse, by name, a repository-scope config key that would redirect, exec, weaken the trust
-    decision or reach a repository-chosen path on the transport call: url.*.insteadOf /
+    """THE REPOSITORY-CONFIG ALLOWLIST GATE: enumerate both repository scopes (--local and
+    --worktree) by name and refuse the first key that is not allowlisted (_local_key_allowlisted),
+    so a key that could name a program or redirect the transport is refused BY CONSTRUCTION rather
+    than recognized one by one. The refusal names the key and, where the key sits on one of the
+    documentation lists below, says why that family is dangerous; otherwise it says the key is
+    outside the allowlist and belongs in the adopter's own global configuration. The documented
+    families, each refused for a named reason: url.*.insteadOf /
     pushInsteadOf (a silent rewrite of the verified URL), a credential helper, core.askpass,
     core.gitProxy, core.alternateRefsCommand (a program the fetch itself runs with each alternate
     recorded under .git/objects/info/alternates while it advertises the alternates' tips),
@@ -658,8 +743,9 @@ def _refuse_local_redirect_config(git, store_root):
     or merge.<name>.driver driver (git runs the program such a key names while it compares or merges
     working-tree content; no step of the reference pull path is shown to reach those drivers, so
     they stay refused as fail-closed defence in depth, at the cost that an adopter with a
-    repository-scope textconv must move it to global configuration). The names are matched from the _LOCAL_* lists alone
-    (_local_key_listed).
+    repository-scope textconv must move it to global configuration). The family texts are matched
+    from the _LOCAL_* lists alone (_local_key_listed) and only word the refusal; the gate is the
+    allowlist.
     Both repository scopes are enumerated, --local and --worktree (without the worktreeConfig
     extension the latter reads the same .git/config), through the scrubbed read-only boundary
     (--name-only: no value, so a malicious command body is never read); an unreadable scope is a
@@ -721,6 +807,10 @@ def _refuse_local_redirect_config(git, store_root):
          "cost is that an adopter with a repository-scope textconv (or external diff or merge "
          "driver) must move it to the adopter's own global configuration (spec 5.6); remove it "
          "and re-run (fail-closed)"))
+    generic_why = (", a repository-scope key outside sync's closed allowlist of data-only keys "
+                   "(only a key that can neither name a program nor redirect the transport is "
+                   "allowlisted); the key belongs in the adopter's own global configuration "
+                   "(spec 5.6); move it there and re-run (fail-closed)")
     for scope in ("--local", "--worktree"):
         listing = _opf_observe._run_git(git, store_root,
                                         ["config", scope, "-z", "--name-only", "--list"])
@@ -740,10 +830,64 @@ def _refuse_local_redirect_config(git, store_root):
             if not kb:
                 continue
             low = kb.lower()
-            for keys, why in refusals:
+            if _local_key_allowlisted(low):
+                continue
+            why = generic_why
+            for keys, family_why in refusals:
                 if _local_key_listed(low, keys):
-                    raise SyncError("the store repository's git configuration carries {!r}{}".format(
-                        kb.decode("utf-8", "replace"), why))
+                    why = family_why
+                    break
+            raise SyncError("the store repository's git configuration carries {!r}{}".format(
+                kb.decode("utf-8", "replace"), why))
+
+
+def _refuse_submodules(git, store_root):
+    """Refuse a store that carries any git submodule machinery, before any fetch and before any
+    local step that could reach a program: a .gitmodules file at the store root, a gitlink entry in
+    HEAD's tree, or any entry under the repository's modules directory (.git/modules). A
+    submodule's own repository config (under .git/modules/<name>/) is a configuration scope the
+    repository-config allowlist cannot enumerate, and git's worktree operations (the clean-check
+    status probe, a checkout) descend into a populated submodule and can run a program that config
+    names (a clean, smudge or process filter the submodule's own .gitattributes assigns), so the
+    class is refused rather than enumerated. An unreadable probe is a cannot-evaluate, never read
+    as no-submodules; a tree whose full ls-tree listing exceeds the read bound is likewise a
+    cannot-evaluate (fail-closed, disclosed)."""
+    why = (" (a submodule's own repository configuration is a scope the repository-config "
+           "allowlist cannot enumerate, and a worktree step can run a program it names); sync "
+           "refuses a store with any submodule machinery; remove the submodule and re-run "
+           "(fail-closed)")
+    if os.path.lexists(os.path.join(str(store_root), ".gitmodules")):
+        raise SyncError("the store carries a .gitmodules file" + why)
+    tree = _opf_observe._run_git(git, store_root, ["ls-tree", "-r", "-z", "HEAD"],
+                                 max_output_bytes=64 << 20)
+    if not tree.completed or tree.rc != 0:
+        raise SyncError("could not enumerate HEAD's tree for gitlink (submodule) entries ({}); the "
+                        "store cannot be shown submodule-free (fail-closed)".format(
+                            tree.err.strip() if not tree.completed
+                            else "rc {}: {}".format(tree.rc, tree.err.strip())))
+    raw = tree.out
+    if raw and not raw.endswith(b"\x00"):
+        raise SyncError("git ls-tree returned a payload that is not NUL-terminated; the store "
+                        "cannot be shown submodule-free (fail-closed)")
+    for record in raw.split(b"\x00"):
+        if record.startswith(b"160000 "):
+            entry = record.partition(b"\t")[2].decode("utf-8", "replace")
+            raise SyncError("HEAD's tree carries a gitlink (submodule) entry at {!r}".format(entry)
+                            + why)
+    gd = _read_git(git, store_root, ["rev-parse", "--absolute-git-dir"],
+                   "locate the repository's git directory")
+    modules = os.path.join(os.fsdecode(gd.out.removesuffix(b"\n")), "modules")
+    try:
+        entries = os.listdir(modules)
+    except FileNotFoundError:
+        entries = []
+    except OSError as exc:
+        raise SyncError("the repository's modules directory (.git/modules) cannot be read ({}); "
+                        "the store cannot be shown submodule-free (fail-closed)".format(exc))
+    if entries:
+        raise SyncError("the repository carries {} entr{} under its modules directory "
+                        "(.git/modules)".format(len(entries), "y" if len(entries) == 1 else "ies")
+                        + why)
 
 
 def _refuse_effective_url_rewrite(git, store_root, env, url):
@@ -1071,6 +1215,12 @@ def _run_sync(mode, root):
     tgt, url = validate_target(sync_target)
     git = _git_or_refuse()
     branch = _current_branch(git, res.store_root)
+    # Both gates run here, before the destination agreement, the fetch and every local step that
+    # could reach a repository-chosen program; _run_transport re-runs the allowlist gate before
+    # each fetch and push. The submodule gate runs first, so a populated submodule is named as the
+    # reason even where its submodule.* bookkeeping keys would refuse on the allowlist too.
+    _refuse_submodules(git, res.store_root)
+    _refuse_local_redirect_config(git, res.store_root)
     _require_destination_agreement(sync_target, tgt, url, res.target,
                                    _actual_remote(git, res.store_root))
     fetch_target(git, res.store_root, url, branch)
@@ -1135,15 +1285,20 @@ def self_test():
     network): the argument grammar, the no-dedicated-target refusals, the spec 9.2 admission of the
     local and the fetched manifest, the equal/behind/ahead/divergent classification, the read-only
     bare report, the fast-forward pull with its doctor gate, the authorized push with its
-    destination agreement, the held-lease refusal (never seized), the hostile-repository-config
-    neutralization, the effective URL-rewrite refusal over every config scope, the repository-scope
-    include/helper/signing/remote-program/protocol/trust/cookie/bundle refusals (every listed key
-    in its plain and its subsection form), the core.alternateRefsCommand refusal over a store with
-    alternates (the fetch shown running the program once the refusal is dropped), the
-    repository-scope working-tree driver refusals
+    destination agreement, the held-lease refusal (never seized), the repository-config ALLOWLIST
+    gate (an ordinary store carrying every allowlisted key still syncs; every documented family key
+    and every unlisted key, core.sshCommand and core.hooksPath included, refuses before any fetch
+    with FETCH_HEAD shown absent; dropping the allowlist is shown running a repository-chosen
+    program), the SUBMODULE refusals (a .gitmodules file, a gitlink in HEAD's tree and a
+    .git/modules entry each alone, plus a populated submodule whose own config names a filter
+    program, refused with the program never running and shown running once the gates are dropped),
+    the transport neutralization kept as defence in depth behind the gate, the effective
+    URL-rewrite refusal over every config scope, the core.alternateRefsCommand refusal over a store
+    with alternates (the fetch shown running the program once the allowlist is dropped), the
+    gc.recentObjectsHook refusal, the repository-scope working-tree driver refusals
     (filter clean/smudge/process and the diff/textconv/merge drivers, with the fast-forward checkout
-    shown running the smudge program once the refusal is dropped), the pre-git target validation, and
-    the fetch/detached/unborn refusals. The
+    shown running the smudge program once the allowlist is dropped), the pre-git target validation,
+    and the fetch/detached/unborn refusals. The
     load-bearing guards are each also run with the guard dropped (an attribute-patched flip), so the
     vector that watches it is shown to go red. Judged on exit codes, repository state and lease
     bytes, never by output grepping alone. Returns 0 clean, 1 on a failure, 2 on a harness error."""
@@ -1170,9 +1325,10 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return 1
     print("opf-sync self-test: PASS ({} checks: grammar, pattern refusals, admission, "
-          "classification, pull, push, destination agreement, lease, transport neutralization, "
-          "URL-rewrite and repository-config refusals, working-tree driver refusals, target "
-          "validation, fetch and HEAD refusals, dropped-guard flips)".format(checked[0]))
+          "classification, pull, push, destination agreement, lease, repository-config allowlist, "
+          "submodule refusals, transport neutralization, URL-rewrite refusals, working-tree driver "
+          "refusals, target validation, fetch and HEAD refusals, dropped-guard flips)".format(
+              checked[0]))
     return EXIT_OK
 
 
@@ -1283,6 +1439,10 @@ def _self_test_units(check):
 
     def _status(root):
         return _git(root, "status", "--porcelain")
+
+    def _no_fetch_head(root):
+        # A refusal that fires before any fetch leaves no FETCH_HEAD behind.
+        return not os.path.exists(os.path.join(root, ".git", "FETCH_HEAD"))
 
     def _lease_path(root):
         return os.path.join(root, _opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR,
@@ -1550,7 +1710,11 @@ def _self_test_units(check):
             check("a seizing acquisition writes over the held lease (shown red)",
                   not lease.exists() or lease.read_text(encoding="utf-8") != payload)
 
-            # -- hostile repository configuration is neutralized on the transport ----------------
+            # -- hostile repository configuration refuses on the allowlist gate ------------------
+            # core.hooksPath, core.fsmonitor and core.sshCommand sit at repository scope on no
+            # named list, so each refuses through the allowlist alone, before any fetch
+            # (FETCH_HEAD never appears); the transport overrides that also neutralize them stay
+            # as defence in depth, shown below with the allowlist dropped.
             x_root, x_bare = _paired("hostile")
             hooks = os.path.join(base, "hostile-hooks")
             os.makedirs(hooks)
@@ -1558,20 +1722,38 @@ def _self_test_units(check):
             hook = Path(hooks) / "pre-push"
             hook.write_text("#!/bin/sh\n: > {}\nexit 0\n".format(sentinel), encoding="utf-8")
             os.chmod(str(hook), 0o755)
+            _local_commit(x_root, "data.txt", "seven\n")
+            x_tip = _tip(x_bare)
+            for hx_key, hx_value in (("core.hooksPath", hooks),
+                                     ("core.fsmonitor", os.path.join(hooks, "fsmon")),
+                                     ("core.sshCommand", os.path.join(hooks, "ssh"))):
+                _git(x_root, "config", "--local", hx_key, hx_value)
+                rc, out = run(["--push", "--root", x_root])
+                _git(x_root, "config", "--local", "--unset", hx_key)
+                check("a repository-scope {} is outside the allowlist and refuses before any "
+                      "fetch".format(hx_key),
+                      rc == EXIT_MALFORMED and "allowlist" in out and hx_key.lower() in out
+                      and _no_fetch_head(x_root) and _tip(x_bare) == x_tip
+                      and not os.path.exists(sentinel))
+            # defence in depth behind the gate: with the allowlist dropped, the transport
+            # overrides still neutralize all three keys (the push completes, no hook runs)
             _git(x_root, "config", "core.hooksPath", hooks)
             _git(x_root, "config", "core.fsmonitor", os.path.join(hooks, "fsmon"))
             _git(x_root, "config", "core.sshCommand", os.path.join(hooks, "ssh"))
-            _local_commit(x_root, "data.txt", "seven\n")
-            rc, _out = run(["--push", "--root", x_root])
-            check("the hostile-config push completes with the exec surfaces neutralized",
+            with patch.object(module, "_local_key_allowlisted", lambda low: True):
+                rc, _out = run(["--push", "--root", x_root])
+            check("with the allowlist dropped, the hostile-config push completes with the exec "
+                  "surfaces neutralized",
                   rc == EXIT_OK and _tip(x_bare) == _head(x_root))
             check("the repository pre-push hook never ran (no sentinel)",
                   not os.path.exists(sentinel))
-            # the named flip: without the transport neutralization the repository hook runs
+            # the named flip: without the allowlist AND the transport neutralization the
+            # repository hook runs
             _local_commit(x_root, "data.txt", "eight\n")
-            with patch.object(module, "_transport_overrides", lambda g: []):
+            with patch.object(module, "_local_key_allowlisted", lambda low: True), \
+                    patch.object(module, "_transport_overrides", lambda g: []):
                 run(["--push", "--root", x_root])
-            check("dropping the transport neutralization runs the repository hook (shown red)",
+            check("dropping the transport neutralization too runs the repository hook (shown red)",
                   os.path.exists(sentinel))
 
             # -- a URL rewrite anywhere in the transport's effective config refuses (spec 5.6) ----
@@ -1590,7 +1772,8 @@ def _self_test_units(check):
                 check("a global insteadOf matching the verified URL refuses ({})".format(
                     " ".join(argv) or "bare"),
                     rc == EXIT_MALFORMED and "rewrite" in out and _head(ins_root) == ins_head
-                    and _tip(ins_bare) == ins_tip and _tip_or_none(ins_other) == ins_tip)
+                    and _tip(ins_bare) == ins_tip and _tip_or_none(ins_other) == ins_tip
+                    and _no_fetch_head(ins_root))
             # the named flip: with the rewrite gate dropped, the push reports success while it
             # lands at the REWRITTEN repository and the verified target never moves
             with patch.object(module, "_refuse_effective_url_rewrite", lambda *a, **k: None):
@@ -1643,14 +1826,15 @@ def _self_test_units(check):
             check("a repository-local include carrying a credential helper refuses before any "
                   "transport",
                   rc == EXIT_MALFORMED and "include" in out and not os.path.exists(inc_sentinel)
-                  and _head(inc_root) == inc_head)
+                  and _head(inc_root) == inc_head and _no_fetch_head(inc_root))
             ap_root, _ap_bare = _paired("askpass")
             ap_inc = Path(base) / "include-askpass"
             ap_inc.write_text("[core]\n\taskpass = {}\n".format(planted_helper), encoding="utf-8")
             _git(ap_root, "config", "--local", "include.path", str(ap_inc))
             rc, out = run(["--root", ap_root])
             check("a repository-local include carrying core.askpass refuses before any transport",
-                  rc == EXIT_MALFORMED and "include" in out and not os.path.exists(inc_sentinel))
+                  rc == EXIT_MALFORMED and "include" in out and not os.path.exists(inc_sentinel)
+                  and _no_fetch_head(ap_root))
             # the named flip: with the repository-config refusal dropped the runs report clean and
             # the planted keys are live in the exact configuration the transport reads (the file
             # transport never prompts for credentials, so liveness is judged on that effective
@@ -1674,15 +1858,15 @@ def _self_test_units(check):
                  str(ap_inc))
             rc, out = run(["--root", ii_root])
             check("a repository-local includeIf refuses before any transport",
-                  rc == EXIT_MALFORMED and "include" in out)
+                  rc == EXIT_MALFORMED and "include" in out and _no_fetch_head(ii_root))
             sv_root, _sv_bare = _paired("trust")
             _git(sv_root, "config", "--local", "http.sslVerify", "false")
             rc, out = run(["--root", sv_root])
             check("a repository-scope https trust override refuses before any transport",
-                  rc == EXIT_MALFORMED and "trust" in out)
+                  rc == EXIT_MALFORMED and "trust" in out and _no_fetch_head(sv_root))
             # a repository-scope cookie path refuses, both keys in both forms (each set alone on an
             # equal store, so the refusal is the only thing between it and exit 0); a name just past
-            # a listed key matches nothing and the run reports EQUAL
+            # a listed key still refuses, through the allowlist
             ck_root, _ck_bare = _paired("cookie")
             ck_head = _head(ck_root)
             ck_jar = os.path.join(base, "cookie-jar")
@@ -1694,20 +1878,21 @@ def _self_test_units(check):
                 _git(ck_root, "config", "--local", "--unset", ck_key)
                 check("a repository-scope {} refuses before any transport".format(ck_key),
                       rc == EXIT_MALFORMED and "cookie" in out and _head(ck_root) == ck_head
-                      and not os.path.exists(ck_jar))
+                      and not os.path.exists(ck_jar) and _no_fetch_head(ck_root))
             for ck_key in ("http.cookieFileX", "http.xcookieFile"):
                 _git(ck_root, "config", "--local", ck_key, ck_jar)
                 rc, out = run(["--root", ck_root])
                 _git(ck_root, "config", "--local", "--unset", ck_key)
-                check("{}, a name just past a listed key, matches nothing and sync runs".format(ck_key),
-                      rc == EXIT_OK and "EQUAL" in out)
-            # the named flip: with the cookie list emptied the refusal no longer fires, so the
-            # refusal reads the list, not a copy of it
+                check("{}, a name just past a listed key, still refuses through the "
+                      "allowlist".format(ck_key),
+                      rc == EXIT_MALFORMED and "allowlist" in out and _no_fetch_head(ck_root))
+            # the named flip: with the allowlist dropped the repository cookie path passes, so the
+            # allowlist itself is the gate
             _git(ck_root, "config", "--local", "http.cookieFile", ck_jar)
-            with patch.object(module, "_LOCAL_COOKIE_KEYS", ()):
+            with patch.object(module, "_local_key_allowlisted", lambda low: True):
                 rc, _out = run(["--root", ck_root])
             _git(ck_root, "config", "--local", "--unset", "http.cookieFile")
-            check("emptying the cookie list lets the repository cookie path through (shown red)",
+            check("dropping the allowlist lets the repository cookie path through (shown red)",
                   rc == EXIT_OK)
             # a repository-scope bundle URI refuses, plain and under a subsection (each set alone on
             # an equal store, naming a real bundle of another history); a name just past the key
@@ -1727,20 +1912,22 @@ def _self_test_units(check):
                 _git(bu_root, "config", "--local", "--unset", bu_key)
                 check("a repository-scope {} refuses before any transport".format(bu_key),
                       rc == EXIT_MALFORMED and "bundle" in out and _head(bu_root) == bu_head
-                      and not _bundle_refs())
+                      and not _bundle_refs() and _no_fetch_head(bu_root))
             for bu_key in ("fetch.bundleURIx", "fetch.xbundleURI"):
                 _git(bu_root, "config", "--local", bu_key, bu_file)
                 rc, out = run(["--root", bu_root])
                 _git(bu_root, "config", "--local", "--unset", bu_key)
-                check("{}, a name just past a listed key, matches nothing and sync runs".format(bu_key),
-                      rc == EXIT_OK and "EQUAL" in out and not _bundle_refs())
-            # the named flip: with the bundle list emptied the fetch downloads the planted bundle
-            # and writes its refs/bundles/* refs, so the refusal reads the list, not a copy of it
+                check("{}, a name just past a listed key, still refuses through the "
+                      "allowlist".format(bu_key),
+                      rc == EXIT_MALFORMED and "allowlist" in out and not _bundle_refs()
+                      and _no_fetch_head(bu_root))
+            # the named flip: with the allowlist dropped the fetch downloads the planted bundle
+            # and writes its refs/bundles/* refs, so the allowlist is what stops it
             _git(bu_root, "config", "--local", "fetch.bundleURI", bu_file)
-            with patch.object(module, "_LOCAL_BUNDLE_KEYS", ()):
+            with patch.object(module, "_local_key_allowlisted", lambda low: True):
                 rc, _out = run(["--root", bu_root])
             _git(bu_root, "config", "--local", "--unset", "fetch.bundleURI")
-            check("emptying the bundle list lets the repository bundle source write refs/bundles/* "
+            check("dropping the allowlist lets the repository bundle source write refs/bundles/* "
                   "(shown red)",
                   rc == EXIT_OK and _bundle_refs() != "")
             # a repository-scope push-signing key refuses, each listed key plain and under a
@@ -1767,54 +1954,60 @@ def _self_test_units(check):
                 _git(sg_root, "config", "--local", "--unset", sg_key)
                 check("a repository-scope {} refuses before any transport".format(sg_key),
                       rc == EXIT_MALFORMED and "signing" in out
-                      and not os.path.exists(sg_marker) and _tip(sg_bare) == sg_tip)
+                      and not os.path.exists(sg_marker) and _tip(sg_bare) == sg_tip
+                      and _no_fetch_head(sg_root))
             for sg_key in ("push.gpgSignx", "gpg.xprogram"):
                 _git(sg_root, "config", "--local", sg_key, "if-asked")
                 rc, out = run(["--root", sg_root])
                 _git(sg_root, "config", "--local", "--unset", sg_key)
-                check("{}, a name just past a listed key, matches nothing and sync runs".format(
-                    sg_key), rc == EXIT_MALFORMED and "AHEAD" in out and "signing" not in out)
-            # the named flip: with the signing list emptied, the push signs its certificate against
+                check("{}, a name just past a listed key, still refuses through the "
+                      "allowlist".format(sg_key),
+                      rc == EXIT_MALFORMED and "allowlist" in out and "signing" not in out
+                      and _no_fetch_head(sg_root))
+            # the named flip: with the allowlist dropped, the push signs its certificate against
             # the target's advertised nonce and the repository-chosen signing program RUNS (the
-            # marker appears) before the push fails at signing, so the refusal reads the list, not
-            # a copy of it (the signing identity comes from the fixture's own global config)
+            # marker appears) before the push fails at signing, so the allowlist is what stops it
+            # (the signing identity comes from the fixture's own global config)
             (Path(home) / ".gitconfig").write_text(
                 "[user]\n\tname = OPF Self Test\n\temail = opf@example.invalid\n", encoding="utf-8")
             _git(sg_root, "config", "--local", "push.gpgSign", "if-asked")
             _git(sg_root, "config", "--local", "gpg.program", str(sg_prog))
-            with patch.object(module, "_LOCAL_SIGN_KEYS", ()):
+            with patch.object(module, "_local_key_allowlisted", lambda low: True):
                 rc, _out = run(["--push", "--root", sg_root])
             _git(sg_root, "config", "--local", "--unset", "push.gpgSign")
             _git(sg_root, "config", "--local", "--unset", "gpg.program")
             (Path(home) / ".gitconfig").unlink()
-            check("emptying the signing list runs the repository-chosen signing program (shown red)",
+            check("dropping the allowlist runs the repository-chosen signing program (shown red)",
                   rc == EXIT_MALFORMED and os.path.exists(sg_marker) and _tip(sg_bare) == sg_tip)
             # a repository-scope protocol allow refuses, plain and per-protocol (each set alone on
-            # an equal store); protocol.version, a shaping key of the same section, passes, and so
-            # does a name just past the listed key
+            # an equal store); protocol.version, a shaping key on no named list, refuses through
+            # the allowlist (the accepted cost: it belongs in global configuration), and so does a
+            # name just past the listed key
             pw_root, _pw_bare = _paired("protowiden")
             for pw_key in ("protocol.allow", "protocol.ext.allow"):
                 _git(pw_root, "config", "--local", pw_key, "always")
                 rc, out = run(["--root", pw_root])
                 _git(pw_root, "config", "--local", "--unset", pw_key)
                 check("a repository-scope {} refuses before any transport".format(pw_key),
-                      rc == EXIT_MALFORMED and "re-widen" in out)
+                      rc == EXIT_MALFORMED and "re-widen" in out and _no_fetch_head(pw_root))
             for pw_key in ("protocol.version", "protocol.allowx"):
                 _git(pw_root, "config", "--local", pw_key, "2")
                 rc, out = run(["--root", pw_root])
                 _git(pw_root, "config", "--local", "--unset", pw_key)
-                check("{}, a name just past the listed key, matches nothing and sync runs".format(
-                    pw_key), rc == EXIT_OK and "EQUAL" in out)
+                check("{}, outside the allowlist and on no named list, refuses through the "
+                      "allowlist".format(pw_key),
+                      rc == EXIT_MALFORMED and "allowlist" in out and _no_fetch_head(pw_root))
             _git(pw_root, "config", "--local", "protocol.ext.allow", "always")
-            with patch.object(module, "_LOCAL_PROTOCOL_KEYS", ()):
+            with patch.object(module, "_local_key_allowlisted", lambda low: True):
                 rc, _out = run(["--root", pw_root])
             _git(pw_root, "config", "--local", "--unset", "protocol.ext.allow")
-            check("emptying the protocol list lets the repository protocol allow through (shown red)",
+            check("dropping the allowlist lets the repository protocol allow through (shown red)",
                   rc == EXIT_OK)
             # a repository-scope remote program name refuses, plain and under a subsection (each
             # set alone on an equal store, whose remote.origin.url and remote.origin.fetch sit at
-            # repository scope throughout, so the unlisted remote keys are shown passing live); a
-            # name just past a listed key matches nothing and the run reports EQUAL
+            # repository scope throughout, so the ALLOWLISTED remote keys are shown passing live
+            # on every green run of this suite); a name just past a listed key still refuses,
+            # through the allowlist
             rp_root, _rp_bare = _paired("remoteprog")
             for rp_key in ("remote.receivepack", "remote.origin.receivepack",
                            "remote.origin.uploadpack", "remote.origin.vcs"):
@@ -1822,18 +2015,19 @@ def _self_test_units(check):
                 rc, out = run(["--root", rp_root])
                 _git(rp_root, "config", "--local", "--unset", rp_key)
                 check("a repository-scope {} refuses before any transport".format(rp_key),
-                      rc == EXIT_MALFORMED and "pack program" in out)
+                      rc == EXIT_MALFORMED and "pack program" in out and _no_fetch_head(rp_root))
             for rp_key in ("remote.origin.receivepackx", "remote.origin.xvcs"):
                 _git(rp_root, "config", "--local", rp_key, "x")
                 rc, out = run(["--root", rp_root])
                 _git(rp_root, "config", "--local", "--unset", rp_key)
-                check("{}, a name just past a listed key, matches nothing and sync runs".format(
-                    rp_key), rc == EXIT_OK and "EQUAL" in out)
+                check("{}, a name just past a listed key, still refuses through the "
+                      "allowlist".format(rp_key),
+                      rc == EXIT_MALFORMED and "allowlist" in out and _no_fetch_head(rp_root))
             _git(rp_root, "config", "--local", "remote.origin.vcs", "hg")
-            with patch.object(module, "_LOCAL_REMOTE_PROGRAM_KEYS", ()):
+            with patch.object(module, "_local_key_allowlisted", lambda low: True):
                 rc, _out = run(["--root", rp_root])
             _git(rp_root, "config", "--local", "--unset", "remote.origin.vcs")
-            check("emptying the remote-program list lets the repository remote program through "
+            check("dropping the allowlist lets the repository remote program through "
                   "(shown red)", rc == EXIT_OK)
             # a repository-scope core.alternateRefsCommand refuses before any fetch: with
             # .git/objects/info/alternates present (a store made with clone --reference or
@@ -1860,17 +2054,74 @@ def _self_test_units(check):
                       "refuses before any fetch ({})".format(" ".join(argv) or "bare"),
                       rc == EXIT_MALFORMED and "program launch" in out
                       and not os.path.exists(ar_marker) and _head(ar_root) == ar_head
-                      and not _status(ar_root))
-            # the named flip: with the exec list emptied, the fetch itself runs the
-            # repository-chosen program (the marker appears) while the report stays read-only,
-            # so the refusal reads the list, not a copy of it, and the fetch is the transport
-            # step this refusal protects
-            with patch.object(module, "_LOCAL_EXEC_KEYS", ()):
+                      and not _status(ar_root) and _no_fetch_head(ar_root))
+            # the named flip the allowlist redesign is judged on: with the allowlist dropped, the
+            # fetch itself runs the repository-chosen program (the marker appears) while the
+            # report stays read-only, so the allowlist is what keeps a store-chosen program from
+            # running, and the fetch is the transport step it protects
+            with patch.object(module, "_local_key_allowlisted", lambda low: True):
                 rc, out = run(["--root", ar_root])
-            check("emptying the exec list lets the fetch run the alternate-refs program "
+            check("dropping the allowlist lets the fetch run the alternate-refs program "
                   "(shown red)",
                   rc == EXIT_MALFORMED and "BEHIND" in out and os.path.exists(ar_marker)
                   and _head(ar_root) == ar_head)
+            # a repository-scope gc.recentObjectsHook refuses before any fetch, in the read-only
+            # report and on --pull alike: the program the auto-maintenance a fetch can spawn
+            # would run never runs, and FETCH_HEAD never appears
+            gh_root, _gh_bare = _paired("gchook")
+            gh_marker = os.path.join(base, "gchook-marker")
+            gh_prog = Path(base) / "gchook-prog"
+            gh_prog.write_text("#!/bin/sh\n: > {}\nexit 0\n".format(gh_marker), encoding="utf-8")
+            os.chmod(str(gh_prog), 0o755)
+            _git(gh_root, "config", "--local", "gc.recentObjectsHook", str(gh_prog))
+            for argv in ([], ["--pull"]):
+                rc, out = run(argv + ["--root", gh_root])
+                check("a repository-scope gc.recentObjectsHook refuses before any fetch "
+                      "({})".format(" ".join(argv) or "bare"),
+                      rc == EXIT_MALFORMED and "program launch" in out
+                      and not os.path.exists(gh_marker) and _no_fetch_head(gh_root))
+            # -- every allowlisted repository-scope key still syncs (the gate's other edge) -------
+            # One concrete instance per allowlist entry, all set together at --local scope on an
+            # equal store; the coverage check pins the instance map to the allowlist, so a key
+            # added to the allowlist without a passing vector fails here.
+            al_root, al_bare = _paired("allowlisted")
+            # repositoryformatversion 1, set first: objectFormat is a v1-only extension, and git
+            # refuses to read a repository that declares it at version 0
+            al_instances = {
+                b"core.repositoryformatversion": ("core.repositoryformatversion", "1"),
+                b"core.filemode": ("core.filemode", "true"),
+                b"core.bare": ("core.bare", "false"),
+                b"core.logallrefupdates": ("core.logallrefupdates", "true"),
+                b"core.ignorecase": ("core.ignorecase", "false"),
+                b"core.precomposeunicode": ("core.precomposeunicode", "false"),
+                b"core.symlinks": ("core.symlinks", "true"),
+                b"user.name": ("user.name", "OPF Self Test"),
+                b"user.email": ("user.email", "opf@example.invalid"),
+                b"extensions.worktreeconfig": ("extensions.worktreeConfig", "true"),
+                b"extensions.objectformat": ("extensions.objectFormat", "sha1"),
+                b"remote.url": ("remote.origin.url", al_bare),
+                b"remote.fetch": ("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
+                b"remote.pushurl": ("remote.origin.pushurl", al_bare),
+                b"branch.remote": ("branch.main.remote", "origin"),
+                b"branch.merge": ("branch.main.merge", "refs/heads/main"),
+            }
+            check("the allowlist pass vector instantiates every allowlisted key (none untested)",
+                  set(al_instances) == set(_ALLOWED_EXACT_KEYS) | set(_ALLOWED_SUBSECTION_KEYS))
+            for al_name, al_value in al_instances.values():
+                _git(al_root, "config", "--local", al_name, al_value)
+            # the worktreeConfig extension is on, so give the --worktree scope its own file with
+            # an allowlisted key in it (with the extension on and the file missing, git cannot
+            # read the scope and the gate refuses as an unreadable scope, fail-closed)
+            _git(al_root, "config", "--worktree", "user.name", "OPF Self Test")
+            rc, out = run(["--root", al_root])
+            check("an ordinary store carrying every allowlisted key still syncs (EQUAL)",
+                  rc == EXIT_OK and "EQUAL" in out)
+            # an unlisted key set from the --worktree scope refuses through the same gate
+            _git(al_root, "config", "--worktree", "core.sshCommand", "/bin/false")
+            rc, out = run(["--root", al_root])
+            _git(al_root, "config", "--worktree", "--unset", "core.sshCommand")
+            check("an unlisted key in the --worktree scope refuses through the allowlist",
+                  rc == EXIT_MALFORMED and "allowlist" in out)
             # -- a repository-scope working-tree driver program is refused before any fetch or
             # checkout: a filter.<name>.clean / smudge / process driver runs on the --pull
             # fast-forward's CHECKOUT (the first local step that writes the worktree), and a
@@ -1904,55 +2155,155 @@ def _self_test_units(check):
                 check("a repository-scope {} refuses the pull before any fetch or checkout".format(
                     dv_key),
                     rc == EXIT_MALFORMED and "driver" in out and not os.path.exists(drv_marker)
-                    and _head(dv_root) == dv_head and not _status(dv_root))
+                    and _head(dv_root) == dv_head and not _status(dv_root)
+                    and _no_fetch_head(dv_root))
             for dv_key in ("filter.pwn.cleanx", "diff.pwn.commandx", "merge.pwn.driverx"):
                 dv_root, _dv_bare = _driver_paired("driver-miss-{}".format(dv_key.replace(".", "-")))
                 _git(dv_root, "config", "--local", dv_key, str(drv_prog))
                 rc, out = run(["--pull", "--root", dv_root])
-                refused_as_driver = (rc == EXIT_MALFORMED
-                                     and "the store repository's git configuration carries" in out
-                                     and "working-tree content" in out)
-                check("{}, a name just past a listed key, is not refused as a driver [{}]".format(
-                    dv_key, "" if not refused_as_driver else out[out.find("carries"):][:120]),
-                      not refused_as_driver)
-            # the named flip: with the filter list emptied the fast-forward's CHECKOUT runs the
-            # repository-chosen smudge program (the marker appears) before the post-pull doctor runs,
-            # so the refusal reads the list (not a copy of it) and the fast-forward is the local step
-            # this refusal protects
+                check("{}, a name just past a listed key, refuses through the allowlist, not as a "
+                      "driver".format(dv_key),
+                      rc == EXIT_MALFORMED and "allowlist" in out
+                      and "working-tree content" not in out and _no_fetch_head(dv_root))
+            # the named flip: with the allowlist dropped the fast-forward's CHECKOUT runs the
+            # repository-chosen smudge program (the marker appears) before the post-pull doctor
+            # runs, so the allowlist is what stops it and the fast-forward is the local step it
+            # protects
             fl_root, fl_bare = _driver_paired("driver-flip")
             _git(fl_root, "config", "--local", "filter.pwn.smudge", str(drv_prog))
             if os.path.exists(drv_marker):
                 os.unlink(drv_marker)
-            with patch.object(module, "_LOCAL_FILTER_KEYS", ()), \
+            with patch.object(module, "_local_key_allowlisted", lambda low: True), \
                     patch.object(module, "_doctor", lambda root: valid_doctor):
                 rc, _out = run(["--pull", "--root", fl_root])
-            check("emptying the filter list lets the fast-forward checkout run the smudge program "
+            check("dropping the allowlist lets the fast-forward checkout run the smudge program "
                   "(shown red)",
                   rc == EXIT_OK and os.path.exists(drv_marker) and _head(fl_root) == _tip(fl_bare))
-            # every entry of every _LOCAL_* list refuses, plain, under a subsection and in any case,
-            # through the same enumeration (its listing stubbed), while a name one character past
-            # the entry does not: a list entry the refusal stopped enforcing shows here
-            listed_misses = []
+            # -- a store with git submodule machinery refuses before any step ---------------------
+            # A submodule's own repository config (.git/modules/<name>/config) is a scope the
+            # repository-config allowlist cannot enumerate, and the clean-check status probe
+            # descends into a populated submodule and runs a clean filter that config names, so
+            # the class refuses: the populated case first (the filter program shown never
+            # running), then each trigger alone.
+            sm_prog = Path(base) / "submodule-prog"
+            sm_marker = os.path.join(base, "submodule-marker")
+            sm_prog.write_text("#!/bin/sh\n: > {}\ncat\n".format(sm_marker), encoding="utf-8")
+            os.chmod(str(sm_prog), 0o755)
+            sm_inner = os.path.join(base, "submodule-inner")
+            os.makedirs(sm_inner)
+            (Path(sm_inner) / "inner.txt").write_text("inner\n", encoding="utf-8")
+            (Path(sm_inner) / ".gitattributes").write_text("* filter=pwn\n", encoding="utf-8")
+            _git(sm_inner, "init")
+            _git(sm_inner, "add", "-A")
+            _git(sm_inner, "commit", "-m", "inner seed")
+            sm_root, sm_bare = _paired("submodule")
+            _git(sm_root, "-c", "protocol.file.allow=always", "submodule", "add", sm_inner, "sub")
+            _git(sm_root, "commit", "-m", "add submodule")
+            _git(sm_root, "push", "origin", "main")
+            # the target bumps the submodule pointer (the other system moves the gitlink)
+            (Path(sm_inner) / "inner.txt").write_text("inner two\n", encoding="utf-8")
+            _git(sm_inner, "add", "-A")
+            _git(sm_inner, "commit", "-m", "inner advance")
+            sm_new = _head(sm_inner)
+            smw = os.path.join(base, "submodule-writer")
+            _git(base, "clone", sm_bare, smw)
+            _git(smw, "update-index", "--add", "--cacheinfo", "160000,{},sub".format(sm_new))
+            _git(smw, "commit", "-m", "bump submodule")
+            _git(smw, "push", "origin", "main")
+            # the submodule's own config names the filter program and its worktree is dirty, the
+            # exact shape under which a status probe over the changed gitlink path would run it
+            sm_sub = os.path.join(sm_root, "sub")
+            _git(sm_sub, "config", "filter.pwn.clean", str(sm_prog))
+            (Path(sm_sub) / "inner.txt").write_text("locally edited\n", encoding="utf-8")
+            sm_head = _head(sm_root)
+            for argv in ([], ["--pull"]):
+                rc, out = run(argv + ["--root", sm_root])
+                check("a store with a populated submodule refuses before any step, the filter "
+                      "program never running ({})".format(" ".join(argv) or "bare"),
+                      rc == EXIT_MALFORMED and "submodule" in out
+                      and not os.path.exists(sm_marker) and _head(sm_root) == sm_head
+                      and _no_fetch_head(sm_root))
+            # the named flip: with the submodule gate and the allowlist dropped (the submodule's
+            # bookkeeping keys would refuse on the allowlist too), the pull's clean probe descends
+            # into the submodule and RUNS the program its own config names, before the dirty-tree
+            # refusal and with the parent HEAD unmoved: the vector above watches a real exec path
+            with patch.object(module, "_refuse_submodules", lambda g, r: None), \
+                    patch.object(module, "_local_key_allowlisted", lambda low: True):
+                run(["--pull", "--root", sm_root])
+            check("dropping the submodule gate runs the submodule-configured program (shown red)",
+                  os.path.exists(sm_marker) and _head(sm_root) == sm_head)
+            # each trigger alone refuses: a .gitmodules file, a gitlink in HEAD's tree, an entry
+            # under .git/modules
+            gm_root, _gm_bare = _paired("gitmodules-file")
+            (Path(gm_root) / ".gitmodules").write_text("", encoding="utf-8")
+            rc, out = run(["--root", gm_root])
+            check("a .gitmodules file alone refuses before any step",
+                  rc == EXIT_MALFORMED and ".gitmodules" in out and _no_fetch_head(gm_root))
+            gl_root, _gl_bare = _paired("gitlink")
+            _git(gl_root, "update-index", "--add",
+                 "--cacheinfo", "160000,{},linked".format(_head(gl_root)))
+            _git(gl_root, "commit", "-m", "gitlink only")
+            rc, out = run(["--root", gl_root])
+            check("a gitlink in HEAD's tree alone refuses before any step",
+                  rc == EXIT_MALFORMED and "gitlink" in out and _no_fetch_head(gl_root))
+            md_root, _md_bare = _paired("modules-dir")
+            os.makedirs(os.path.join(md_root, ".git", "modules", "ghost"))
+            rc, out = run(["--root", md_root])
+            check("an entry under .git/modules alone refuses before any step",
+                  rc == EXIT_MALFORMED and "modules" in out and _no_fetch_head(md_root))
+
+            # every entry of every documentation list refuses, plain, under a subsection and in
+            # any case, through the same enumeration (its listing stubbed); a name one character
+            # past an entry refuses TOO, through the allowlist (the generic refusal that names the
+            # adopter's global configuration), never silently passing; every allowlisted name
+            # passes in lower and upper case, and the boundary spellings just outside the
+            # allowlist (no subsection, an empty subsection, an extra subsection, one character
+            # past the key) refuse
+            sweep_misses = []
+
+            def _sweep(name, want_refused, want_needle=None):
+                listing = _opf_observe._GitOutcome(True, 0, name + b"\x00", "")
+                with patch.object(_opf_observe, "_run_git", lambda *a, **k: listing):
+                    try:
+                        _refuse_local_redirect_config(git, base)
+                        refused, msg = False, ""
+                    except SyncError as exc:
+                        refused, msg = True, str(exc)
+                if refused != want_refused or (want_needle is not None and refused
+                                               and want_needle not in msg):
+                    sweep_misses.append(name)
+
             for family in (_LOCAL_REDIRECT_KEYS, _LOCAL_EXEC_KEYS, _LOCAL_SIGN_KEYS,
                            _LOCAL_REMOTE_PROGRAM_KEYS, _LOCAL_PROTOCOL_KEYS, _LOCAL_TRUST_KEYS,
                            _LOCAL_COOKIE_KEYS, _LOCAL_BUNDLE_KEYS, _LOCAL_INCLUDE_KEYS,
                            _LOCAL_FILTER_KEYS, _LOCAL_CONTENT_DRIVER_KEYS):
                 for listed in family:
                     section, _dot, key = listed.partition(b".")
-                    for name, refuses in ((listed, True), (listed.upper(), True),
-                                          (section + b".https://example.invalid/." + key, True),
-                                          (listed + b"x", False), (section + b".x" + key, False)):
-                        listing = _opf_observe._GitOutcome(True, 0, name + b"\x00", "")
-                        with patch.object(_opf_observe, "_run_git", lambda *a, **k: listing):
-                            try:
-                                _refuse_local_redirect_config(git, base)
-                                refused = False
-                            except SyncError:
-                                refused = True
-                        if refused != refuses:
-                            listed_misses.append(name)
-            check("every listed repository-scope key refuses in each form and a name just past it "
-                  "does not ({})".format(listed_misses), not listed_misses)
+                    _sweep(listed, True)
+                    _sweep(listed.upper(), True)
+                    _sweep(section + b".https://example.invalid/." + key, True)
+                    _sweep(listed + b"x", True, want_needle="allowlist")
+                    _sweep(section + b".x" + key, True, want_needle="allowlist")
+            for allowed in _ALLOWED_EXACT_KEYS:
+                section, _dot, key = allowed.partition(b".")
+                _sweep(allowed, False)
+                _sweep(allowed.upper(), False)
+                _sweep(section + b".x." + key, True, want_needle="allowlist")
+                _sweep(allowed + b"x", True, want_needle="allowlist")
+            for allowed in _ALLOWED_SUBSECTION_KEYS:
+                section, _dot, key = allowed.partition(b".")
+                _sweep(section + b".origin." + key, False)
+                _sweep((section + b".origin." + key).upper(), False)
+                # a subsection may itself contain dots (a remote named a.b)
+                _sweep(section + b".a.b." + key, False)
+                _sweep(allowed, True, want_needle="allowlist")
+                _sweep(section + b".." + key, True, want_needle="allowlist")
+                _sweep(section + b".origin." + key + b"x", True, want_needle="allowlist")
+                _sweep(section + b".origin.x" + key, True, want_needle="allowlist")
+            check("the stubbed sweep holds at every edge: documented keys refuse in each form, "
+                  "near-miss names refuse through the allowlist, allowlisted names pass, and the "
+                  "spellings just outside the allowlist refuse ({})".format(sweep_misses[:8]),
+                  not sweep_misses)
 
             # -- a dangerous or typed sync_target refuses before any git launch ------------------
             bad_targets = (("git:--upload-pack=/bin/false", "begins with"),
