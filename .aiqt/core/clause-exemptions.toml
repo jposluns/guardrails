@@ -373,11 +373,6 @@ text = "When asked to assess, advise, consider, evaluate, review, compare, or we
 reason = "Defines the request class that asadv1.1 governs; the obligation (assess and stop) is asadv1.1."
 
 [[exempt]]
-corpus-id = "asadv1"
-text = "This is a specific instance of\nrequiring express authorization before execution."
-reason = "Cross-reference to the express-authorization rule (exauth); no obligation of its own."
-
-[[exempt]]
 corpus-id = "atmclm"
 text = "The mechanism can be a transaction, a conditional write, a compare-and-set, or a lock; the\natomicity is what matters, not the primitive."
 reason = "Scope note: any atomic primitive satisfies atmclm.1; it adds no obligation."
@@ -401,3 +396,23 @@ reason = "Lead-in to humovs.1 to humovs.4; no obligation of its own."
 corpus-id = "recncl"
 text = "Records-first establishes the record; this keeps it true."
 reason = "Cross-reference to the records-first discipline; no obligation of its own."
+
+[[exempt]]
+corpus-id = "cnsprd"
+text = "Calls issued together have no ordering."
+reason = "Rationale for cnsprd.1 and cnsprd.2; no obligation of its own."
+
+[[exempt]]
+corpus-id = "cnsprd"
+text = "Independent calls stay free to run together."
+reason = "Scope carve-out bounding cnsprd.1; a permission, not an obligation."
+
+[[exempt]]
+corpus-id = "cnsprd"
+text = "an unreadable required input fails\nunder check-fails-closed-on-unreadable."
+reason = "Cross-reference to the check-fails-closed-on-unreadable (chkfcl) rule, which owns failure on an absent or unusable required input; no obligation of its own."
+
+[[exempt]]
+corpus-id = "cnsprd"
+text = "A per-call hook cannot see sibling calls, so this ordering rests\non the caller."
+reason = "Scope note on enforcement: states why a per-call hook cannot enforce cnsprd.1; no obligation of its own."
