@@ -9,11 +9,11 @@ section heading. Listing a rule there keeps it ahead of every unlisted rule, so 
 outside the list never moves a listed one toward the cap tools/check_must_deliver.py enforces. The layout
 (legacy, or composed with reviewed blocks around the rules) comes from the block registry
 .aiqt/core/adapter-blocks.toml through tools/_adapter_compose.py, the engine this generator shares with
-gen_adapters.py; gen_adapters.py keeps the plain AIQT priority order. --check drift-gates AGENTS.md byte for byte; exit 2 on a malformed source or
-registry, a symlinked target, an absent rule corpus (nothing is deleted), or a write that would erase a
-hand edit in a composed-layout target. A legacy-layout target is refused only when it holds a pasted
-marker-like line; any other hand edit in it is lost on regeneration, though --check still reports it as
-drift.
+gen_adapters.py; gen_adapters.py keeps the plain AIQT priority order. --check drift-gates AGENTS.md byte
+for byte; exit 2 on a malformed source or registry, a symlinked target, an absent rule corpus (nothing is
+deleted), or a write that would erase a hand edit in a composed-layout target. A legacy-layout target is
+refused only when it holds a pasted marker-like line; any other hand edit in it is lost on regeneration,
+though --check still reports it as drift.
 
   gen_agents.py              regenerate AGENTS.md
   gen_agents.py --check      exit 1 if AGENTS.md differs from a fresh composition; write nothing
@@ -83,6 +83,12 @@ def body_of(path):
     return body
 
 
+def _read_list_bytes(path):
+    """The one read of the must-deliver list's bytes, a module attribute so a self-test can inject an
+    OSError here on every runner, including one where a mode-000 file stays readable."""
+    return path.read_bytes()
+
+
 def must_deliver_ids(core_dir):
     """The rule ids the must-deliver list (must-deliver.toml under core_dir, the .aiqt/core/ directory)
     names, as a frozenset. An absent list names none, so a tree without that policy (an adopter install, a
@@ -99,7 +105,7 @@ def must_deliver_ids(core_dir):
         raise ValueError("{} is not a regular file (a symlink, directory or special entry)".format(
             MUST_DELIVER_REL))
     try:
-        data = tomllib.loads(path.read_bytes().decode("utf-8"))
+        data = tomllib.loads(_read_list_bytes(path).decode("utf-8"))
     # UnicodeDecodeError and TOMLDecodeError are ValueErrors; deep nesting is a RecursionError.
     except (ValueError, RecursionError, MemoryError) as exc:
         raise ValueError("{} does not parse ({})".format(MUST_DELIVER_REL, exc))

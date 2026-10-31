@@ -235,6 +235,9 @@ def main():
 #   T15 the generator's own read of the list (gen_agents.must_deliver_ids): an absent list names no rule,
 #       a valid one names exactly its ids, and a symlink, a directory, invalid UTF-8, bad TOML and a row
 #       with an integer id are each refused (a mutant falling back to the plain order on a bad list passes).
+#       An empty rule list names no rule (a mutant refusing it fails; the gate's own refusal is T8), and
+#       an unreadable list raises OSError, injected at gen_agents._read_list_bytes on every runner and as
+#       a mode-000 file where the mode binds the runner (a mutant mapping a read error to no rule fails).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 import gen_agents  # noqa: E402  the AGENTS.md order (ordered_pairs) and its read of the list
@@ -607,6 +610,46 @@ def self_test_main():
                     failures.append("T15 {}: the refusal must name the list, got {}".format(label, exc))
             else:
                 failures.append("T15 {}: must be refused, got {}".format(label, got))
+        # An empty rule list names no rule, so the generator keeps the plain order (the gate refuses that
+        # list, T8). An unreadable list is an OSError, never a fallback to the plain order: injected at the
+        # reader's one read on every runner, and a mode-000 list where the mode binds this runner.
+        decl.write_bytes(b"format-version = 1\nwarn-margin-bytes = 512\nrule = []\n")
+        try:
+            got = gen_agents.must_deliver_ids(core)
+        except ValueError as exc:
+            got = exc
+        if got != frozenset():
+            failures.append("T15 an empty rule list: must name no rule, got {!r}".format(got))
+        _decl(t15, both)
+        real_list_read = gen_agents._read_list_bytes
+
+        def list_denied(path):
+            raise PermissionError(13, "Permission denied (injected by the self-test)", str(path))
+
+        gen_agents._read_list_bytes = list_denied
+        try:
+            got = gen_agents.must_deliver_ids(core)
+        except OSError as exc:
+            got = exc
+        finally:
+            gen_agents._read_list_bytes = real_list_read
+        if not isinstance(got, OSError) or "injected by the self-test" not in str(got):
+            failures.append("T15 an injected read error: must raise OSError, got {!r}".format(got))
+        os.chmod(decl, 0)
+        try:
+            if os.access(decl, os.R_OK):  # root or a DAC bypass: mode 000 is still readable
+                print("SELF-TEST NOTE: T15 mode-000 vector not applicable (file still readable)")
+                skipped.append("the generator's mode-000 list read (the injected OSError covered the "
+                               "unreadable case)")
+            else:
+                try:
+                    got = gen_agents.must_deliver_ids(core)
+                except OSError as exc:
+                    got = exc
+                if not isinstance(got, OSError):
+                    failures.append("T15 a mode-000 list: must raise OSError, got {!r}".format(got))
+        finally:
+            os.chmod(decl, 0o644)
     finally:
         for dirpath, _dirnames, filenames in os.walk(tmp):
             for fn in filenames:
@@ -630,7 +673,7 @@ def self_test_main():
           "spans it measures; the margin report, the unlisted-rule line and the warn-margin WARNING "
           "(still exit 0) are printed exactly; a listed rule keeps its margin when an unlisted rule sorted "
           "ahead of it grows (and loses it under the plain sort_key order); and the generator's read of "
-          "the list refuses every bad list. {}".format(
+          "the list refuses every bad or unreadable list and reads an empty one as naming no rule. {}".format(
               "SKIPPED on this runner: {}.".format("; ".join(skipped)) if skipped
               else "No case was skipped (the mode-000 list ran too)."))
     return 0
