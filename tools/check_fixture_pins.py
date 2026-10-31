@@ -169,7 +169,11 @@ def _manifest_rows(root, index):
     raw = _read_regular(os.path.join(root, MANIFEST_REL), MANIFEST_REL)
     try:
         data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    # A ValueError covers invalid UTF-8, invalid TOML and an over-long integer literal. tomllib raises
+    # RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline table and, from
+    # CPython 3.14.8, on a key of more than 1000 dotted parts, and MemoryError on a many-part key under a
+    # memory limit; each is a manifest the gate cannot evaluate, never a traceback.
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("{}: malformed ({})".format(MANIFEST_REL, type(exc).__name__))
     unknown = sorted(set(data) - MANIFEST_KEYS)
     if unknown:
@@ -560,6 +564,15 @@ def _v_manifest_absent(root):
     return root
 
 
+def _v_manifest_nested(root):
+    depth = 2000
+    return _repo(root, manifest=_manifest("PINNED") + "deep = " + "[" * depth + "]" * depth + "\n")
+
+
+def _v_manifest_invalid(root):
+    return _repo(root, manifest=_manifest("PINNED") + "this is not toml\n")
+
+
 def _v_manifest_unknown_key(root):
     return _repo(root, manifest="extra = 1\n" + _manifest("PINNED"))
 
@@ -660,6 +673,13 @@ def _self_test_cases(base, git):
              "if len(set(keys)) != len(keys):", "if False:"),
             ("vector/manifest-empty", "flip/zero-tables-pass", "control/manifest-empty", _v_manifest_empty, git, 2,
              "declares no tables", "if not tables:", "if False:"),
+            ("vector/manifest-nested", "flip/manifest-recursion-unhandled", "control/manifest-nested",
+             _v_manifest_nested, git, 2, "tools/fixture-pins.toml: malformed (RecursionError)",
+             "except (ValueError, RecursionError, MemoryError) as exc:", "except (ValueError, MemoryError) as exc:"),
+            ("vector/manifest-invalid-toml", "flip/manifest-valueerror-unhandled", "control/manifest-invalid-toml",
+             _v_manifest_invalid, git, 2, "tools/fixture-pins.toml: malformed (TOMLDecodeError)",
+             "except (ValueError, RecursionError, MemoryError) as exc:",
+             "except (RecursionError, MemoryError) as exc:"),
             ("vector/git-unavailable", "flip/git-launch-error-swallowed", "control/git-unavailable", _v_clean,
              missing_git, 2, "git ls-files could not run",
              'raise CannotEvaluate("git {} could not run ({})".format(args[0], type(exc).__name__))',
