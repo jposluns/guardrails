@@ -30,13 +30,14 @@ jobs:
       # history, so a shallow clone would already satisfy them. The full history is kept so a later
       # history-reading check need not change the template. persist-credentials false keeps the job
       # token out of the checkout's git config, so no later step can read it from there; nothing after
-      # the checkout fetches or pushes.
-      - uses: actions/checkout@v4
+      # the checkout fetches or pushes. Each action is pinned to a full commit SHA, because a tag is a
+      # label its owner can move; the trailing comment names the tag the SHA was resolved from.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.14'
 
