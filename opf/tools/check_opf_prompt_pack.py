@@ -42,30 +42,44 @@ the tooling's single source-of-truth copy of it. The guard:
   module-table      the module-tier rows of the OPF-SPEC.md section 8.1 table (type, namespace and the
                     module family its tier names) equal _opf_store.MODULE_TYPES exactly: every row has
                     its entry, every entry has its row, and each (namespace, module) pair matches. The
-                    section is read the way a GitHub-flavoured Markdown reader reads a table: it opens
-                    at a line of at most three columns of indentation over a delimiter row with the
-                    same cell count, and every line after the delimiter row up to the first blank line
-                    is a row, whatever its cell count (a reader's display drops cells past the
-                    header's count; this guard counts them). The section must hold exactly that one
-                    table, headed Tier | Type | Namespace. Any row whose tier is not exactly a
-                    SPEC_TIERS label (a blank, "-" or ":" cell and a misspelled, pluralized or re-cased
-                    family included), any row of other than three cells, any row indented four or more
-                    columns (which a reader may show as code), a module type listed more than once
-                    under any tier, a missing section 8.1 heading or an unreadable spec never passes.
-                    Outside the one table the rule is bounded rather than a list of table spellings:
-                    no line of the section outside the table may hold a pipe character, and no line of
-                    the section, the table's rows included, may hold an HTML table tag (<table, in any
-                    letter case),
-                    wherever the line sits (a blockquote, a list item, an HTML block, a code fence or
-                    an HTML comment included). A table a GitHub-flavoured Markdown reader opens holds a
-                    pipe in its header row (the vendored marko reader opens none without one; GitHub's
-                    own reader is not consulted here) and an HTML table opens with that tag, so no
-                    second table hides in the section.
-                    Accepted costs, each refused although a reader shows no second table or the same
-                    tier: prose or code holding a pipe anywhere in the section outside the table, and a
-                    tier cell spelled with a doubled inner space ("Delivery-assurance  module") or an
-                    escaped hyphen ("Delivery\\-assurance module"), which a reader shows as the label
-                    but which is not exactly a SPEC_TIERS label
+                    spec is read BY CONSTRUCTION with the vendored CommonMark/GFM reader (the pinned
+                    marko 2.2.4 behind opf/tools/_commonmark_headings.py, parse-only, with marko's own
+                    GFM table elements added and origin-checked the same way): section 8.1 is the
+                    parsed heading whose first word is 8.1, together with the content up to the next
+                    heading of the same or higher level, so a heading-shaped line inside a code fence,
+                    an HTML comment or any other block never opens or closes the section. The spec
+                    must hold exactly one such heading, at top level; a missing, duplicated or nested
+                    section 8.1 heading, an unreadable spec or an unavailable vendored reader never
+                    passes. CRLF is normalized to LF exactly as the reader normalizes it; a BARE
+                    carriage return anywhere in the spec, which the reader would also treat as a line
+                    ending but a line scan would not, is refused outright rather than normalized. The
+                    section must hold exactly one parsed table, wherever it nests, headed
+                    Tier | Type | Namespace, and the rows are read from the parsed cells. Around that
+                    table the rule stays bounded: no raw HTML the reader does not parse as a table,
+                    block or inline (an HTML table, in any letter case or inside a row, is exactly
+                    such HTML), may sit anywhere in the section, and no pipe may sit in the section
+                    outside the one table's source span (the vendored reader opens no table inside a
+                    list item where GitHub's own reader does, so a pipe-bearing nested row never hides
+                    behind that conformance boundary). Every body row must hold exactly three SOURCE
+                    cells, counted by the reader's own row grammar over the row's recorded span (the
+                    reader's display pads a short row and drops cells past the header's count; this
+                    guard refuses the difference), each cell must be plain text (a backslash escape
+                    resolves; any other inline markup in a cell is refused), each tier must be exactly
+                    a SPEC_TIERS label (a blank, "-" or ":" cell and a misspelled, pluralized or
+                    re-cased family included), and no module type may be listed more than once under
+                    any tier.
+                    Accepted costs, each refused although a reader shows no second table or shows the
+                    same label: a pipe in prose or code anywhere in the section outside the table; any
+                    raw HTML in the section, an HTML comment or a non-table tag included; inline
+                    markup (a code span, emphasis, a link) inside a table cell even where it shows the
+                    same characters; a row whose source holds other than three cells even where a
+                    reader pads or drops the difference; a tier or type cell whose plain text is not
+                    exactly the label even where a rendering shows the label (a doubled inner space, a
+                    tab between words, an HTML entity spelling such as "Delivery&#45;assurance
+                    module"); and a bare carriage return anywhere in the spec. Two earlier costs are
+                    gone: a backslash-escaped spelling ("Delivery\\-assurance module", "gate\\_run")
+                    resolves to its plain text and is accepted, and "<table" as mere text in inline
+                    code or a fenced example is no longer refused (raw HTML outside code still is)
 
   check_opf_prompt_pack.py              verify the shipped pack beside this tool (../prompt-pack), its
                                         import examples included, and the spec module type table against
@@ -80,17 +94,25 @@ the tooling's single source-of-truth copy of it. The guard:
                                         with _opf_store.MODULE_TYPES while each deliberate flip (a
                                         deleted row, a changed namespace or tier, an extra row under a
                                         pluralized, re-cased, blank, "-" or ":" tier, a row of other
-                                        than three cells, an extra row indented or without outer
-                                        pipes, a row indented four spaces, a module type also listed
-                                        under another tier, a row-shaped line or a second table outside
-                                        the type table, a table in a blockquote with or without outer
-                                        pipes, nested in a list item or written in HTML, an HTML table
-                                        tag in a row, a pipe in prose or code outside the table, a tier
-                                        with a doubled inner space or an escaped hyphen, an extra
-                                        MODULE_TYPES entry) is red with the module-table guard, the
-                                        hidden tables grade VALID under the earlier pipe-led line rule,
-                                        and a row re-spelled the way a reader shows the same (indented
-                                        up to three spaces, without outer pipes, unpadded) stays VALID
+                                        than three source cells, a hidden fourth cell, a module type
+                                        also listed under another tier, a second table plain, in a
+                                        blockquote with or without outer pipes, behind a fake heading
+                                        in a code fence or an HTML comment, nested in a list item or
+                                        written in HTML, an HTML table tag in a row, a decoy section
+                                        8.1 in a code fence with the real namespace changed, a bare
+                                        carriage return, a duplicated or blockquote-nested 8.1
+                                        heading, an HTML comment or other raw HTML in the section, a
+                                        pipe in prose or code outside the table, inline markup in a
+                                        cell, a tier with a doubled inner space, an extra MODULE_TYPES
+                                        entry) is red with the module-table guard; a line-scan reading
+                                        put back by the flip grades the fenced and commented fake
+                                        headings, the decoy section and the bare carriage return
+                                        VALID, and a reading without the raw-HTML and plain-cell rules
+                                        grades the tag inside a row VALID, so the parsed reading is
+                                        load-bearing; and a row re-spelled the way a reader shows the
+                                        same (indented up to three spaces, without outer pipes,
+                                        unpadded, padded or aligned, a backslash-escaped spelling, a
+                                        moved row, a Baseline row added, a CRLF spec) stays VALID
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as digest drift),
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
@@ -137,6 +159,7 @@ from _opf_adopt import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, MISSINGNESS_REASONS, _DIGEST_RE, _is_contained_filepath,
 )
 from _semver import _parse as _parse_version  # noqa: E402
+import _commonmark_headings as _headings  # noqa: E402
 import _opf_import_batch as batch  # noqa: E402
 import _opf_schema as schema  # noqa: E402
 import _opf_store  # noqa: E402
@@ -169,12 +192,8 @@ MODULE_TIERS = {
 SPEC_TIERS = frozenset(MODULE_TIERS) | {"Baseline", "Reserved, excluded", "Reserved, unassigned"}
 # The header of the section 8.1 type table, the only table its section may hold.
 TABLE_HEADER = ("Tier", "Type", "Namespace")
-# A GitHub-flavoured Markdown delimiter-row cell: hyphens with an optional colon at either end.
-_DELIMITER_CELL_RE = re.compile(r":?-+:?\Z")
-# The whitespace a GitHub-flavoured Markdown reader trims from a cell (never a no-break space).
-_CELL_SPACE = " \t\v\f\r"
-# The opening of an HTML table tag, matched against a lower-cased line (HTML tag names ignore case).
-_HTML_TABLE_TAG = "<table"
+# The first word of the section 8.1 heading: the parsed heading this gate reads the section from.
+SECTION_WORD = "8.1"
 
 
 class _Refusal(Exception):
@@ -330,113 +349,217 @@ def validate_pack(pack_dir):
     return VALID, None, "version {}, digest {}, {} member(s)".format(version, digest, count)
 
 
-def _gfm_cells(line):
-    """The cells of one table line as a GitHub-flavoured Markdown reader splits them, every cell kept
-    (the reader's own display drops cells past the header's count; the caller judges the count): the
-    line's surrounding whitespace and then one leading and one trailing unescaped pipe are dropped, the
-    rest is split at each pipe no backslash escapes, and each cell is trimmed of _CELL_SPACE, with an
-    escaped pipe read as a pipe."""
-    text = line.strip(_CELL_SPACE)
-    cells, cell, i = [], "", 0
-    while i < len(text):
-        if text[i] == "\\" and i + 1 < len(text):
-            cell += text[i:i + 2]
-            i += 2
-            continue
-        if text[i] == "|":
-            cells.append(cell)
-            cell = ""
-        else:
-            cell += text[i]
-        i += 1
-    cells.append(cell)
-    if text.startswith("|"):
-        cells = cells[1:]
-    if text.endswith("|") and cells and cells[-1] == "":
-        cells = cells[:-1]
-    return [c.strip(_CELL_SPACE).replace("\\|", "|") for c in cells]
+# The vendored GFM table elements module (marko.ext.gfm.elements), origin-checked, cached at first load.
+_GFM_ELEMENTS = None
 
 
-def _indent(line):
-    """The leading columns of a line, a tab counted as four, as a Markdown reader counts indentation."""
-    return len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip(" "))
+def _load_table_reader():
+    """The verified vendored marko with its GFM table elements. The pinned, containment-checked loader is
+    _commonmark_headings._load_marko (version exactly 2.2.4, imported only from opf/tools/_vendor, never
+    an ambient install, fail-closed), and the two further modules this gate uses (marko.inline for the
+    cell element classes, marko.ext.gfm.elements for the table classes) are origin-checked the same way.
+    Coverage stays bounded as that loader documents: a submodule neither check names resolves from the
+    verified package's own __path__. An unavailable, drifted or unverifiable vendored reader is a
+    CANNOT-EVALUATE refusal, never a silent pass (check-fails-closed-on-unreadable)."""
+    global _GFM_ELEMENTS
+    try:
+        marko = _headings._load_marko()
+        if _GFM_ELEMENTS is None:
+            import marko.inline            # noqa: F401,F811  vendored; origin-checked below
+            import marko.ext.gfm.elements  # noqa: F401  vendored; origin-checked below
+            _headings._verify_module_origin(marko.inline, _headings._VENDOR_DIR)
+            _headings._verify_module_origin(marko.ext.gfm.elements, _headings._VENDOR_DIR)
+            _GFM_ELEMENTS = marko.ext.gfm.elements
+    except _Refusal:
+        raise
+    except _headings.HeadingScanError as exc:
+        raise _Refusal(CANNOT_EVALUATE, "module-table",
+                       "the vendored GFM reader is unavailable ({}): {}".format(exc.reason, exc))
+    except Exception as exc:
+        raise _Refusal(CANNOT_EVALUATE, "module-table",
+                       "the vendored GFM table elements cannot be imported: {}".format(exc))
+    return marko, _GFM_ELEMENTS
 
 
-def _is_delimiter_row(line):
-    """A GitHub-flavoured Markdown delimiter row: at most three columns of indentation, a pipe, and only
-    delimiter cells."""
-    cells = _gfm_cells(line)
-    return (_indent(line) <= 3 and "|" in line and bool(cells)
-            and all(_DELIMITER_CELL_RE.match(c) for c in cells))
+def _new_table_parser(marko, gfm_elements):
+    """A FRESH parser per parse, the parse-only pattern of _commonmark_headings (never marko's Markdown
+    object, renderer, convert or named-extension loading), with exactly the three GFM table element
+    classes added, so the reader opens the pipe tables a GitHub-flavoured Markdown reader opens and no
+    other new construct."""
+    parser = marko.parser.Parser()
+    for element in (gfm_elements.Table, gfm_elements.TableRow, gfm_elements.TableCell):
+        parser.add_element(element)
+    return parser
 
 
-def _refused_outside_table(line):
-    """True for a section 8.1 line outside every table that holds a pipe or an HTML table tag, wherever it
-    sits: the bounded rule that leaves no second table, blockquoted, list-nested or in HTML, unread. Prose
-    or code (indented or fenced) holding a pipe in the section is refused too, the rule's accepted cost."""
-    return "|" in line or _HTML_TABLE_TAG in line.lower()
+def _walk_nodes(node, found):
+    """Every AST node under node, node included, in document order, appended to found. A children LIST is
+    the only recursion; an inline element whose children is its matched string is a leaf."""
+    found.append(node)
+    children = getattr(node, "children", None)
+    if isinstance(children, list):
+        for child in children:
+            _walk_nodes(child, found)
+    return found
 
 
-def _spec_tables(section):
-    """The tables of a spec section, each a (header cells, [(line number, body cells)]) pair, read the
-    way a GitHub-flavoured Markdown reader reads them: a table opens at a non-blank line of at most three
-    columns of indentation whose cell count equals that of the delimiter row under it, and every line
-    after the delimiter row up to the first blank line is a body row, whatever its cell count. A body
-    row indented four or more columns, which a reader may show as code rather than as a row, is refused,
-    and so is a body row holding an HTML table tag, which would show a table inside a cell.
-    A reader ends a table early at a line that opens another block, such as a heading or a list item;
-    such a line is read as a row here and graded by the row rules (no tier label begins with a block
-    marker), never skipped. A line outside every table that holds a pipe or an HTML table tag
-    (_refused_outside_table), at any indentation and inside any block, is refused too, so no table or
-    row-shaped line in the section escapes the guard."""
-    lines = section.split("\n")
-    tables, i = [], 0
-    while i < len(lines):
-        line = lines[i]
-        if (line.strip(_CELL_SPACE) and _indent(line) <= 3 and i + 1 < len(lines)
-                and _is_delimiter_row(lines[i + 1])
-                and len(_gfm_cells(line)) == len(_gfm_cells(lines[i + 1]))):
-            body, i = [], i + 2
-            while i < len(lines) and lines[i].strip(_CELL_SPACE):
-                _require(_indent(lines[i]) <= 3, "module-table",
-                         "section 8.1 table row {!r} is indented four or more columns".format(lines[i]))
-                _require(_HTML_TABLE_TAG not in lines[i].lower(), "module-table",
-                         "section 8.1 table row {!r} holds an HTML table tag".format(lines[i]))
-                body.append((i, _gfm_cells(lines[i])))
-                i += 1
-            tables.append((_gfm_cells(line), body))
-            continue
-        _require(not _refused_outside_table(line), "module-table",
-                 "section 8.1 line {!r} holds a pipe or an HTML table tag but sits in no table".format(line))
-        i += 1
-    return tables
+def _plain_text(node):
+    """Every string the node's subtree carries, concatenated: the text a reader shows for a heading.
+    Used only to recognize the section 8.1 heading; table cells are read by the stricter _cell_text."""
+    children = getattr(node, "children", None)
+    if isinstance(children, str):
+        return children
+    if isinstance(children, list):
+        return "".join(_plain_text(child) for child in children)
+    return ""
+
+
+def _usable_span(span, limit):
+    """True when span is a usable (start, end) offset pair: ints with 0 <= start <= end <= limit."""
+    return (isinstance(span, tuple) and len(span) == 2
+            and all(type(bound) is int for bound in span) and 0 <= span[0] <= span[1] <= limit)
+
+
+def _cell_text(marko, cell, line):
+    """A parsed table cell's text, admitting only plain text and backslash escapes (RawText and Literal,
+    whose text is exactly what a reader shows, so an escaped spelling resolves to its label). Any other
+    inline element in a cell (a code span, emphasis, a link, inline HTML, an autolink, an image) is
+    refused, so no cell carries markup the label comparison cannot see through; the accepted cost is a
+    styled cell a reader shows as the same characters. `line` is the row's source, for the detail only."""
+    parts = []
+    for child in getattr(cell, "children", None) or []:
+        plain = isinstance(child, (marko.inline.RawText, marko.inline.Literal))
+        _require(plain and isinstance(child.children, str), "module-table",
+                 "section 8.1 table row {!r} holds inline markup ({}) in a cell".format(
+                     line, type(child).__name__))
+        parts.append(child.children)
+    return "".join(parts)
+
+
+def _row_source_cells(norm, row, gfm_elements):
+    """The SOURCE cells of a parsed table row, split exactly as the reader's own row grammar splits them
+    (the vendored TableRow splitter over the row's recorded source line: surrounding whitespace, then one
+    leading and one trailing empty cell from outer pipes, dropped; an escaped pipe splits nothing). The
+    reader's display pads a short row and drops the cells past the header's count; this guard counts the
+    source cells, so a hidden or dropped cell is refused rather than silently evened out."""
+    span = getattr(row, "source_span", None)
+    _require(_usable_span(span, len(norm)), "module-table",
+             "a section 8.1 table row carries no usable source span", CANNOT_EVALUATE)
+    line = norm[span[0]:span[1]].strip()
+    parts, last = [], 0
+    for match in gfm_elements.TableRow.splitter.finditer(line):
+        parts.append(line[last:match.start()])
+        last = match.end()
+    parts.append(line[last:])
+    if parts and not parts[0]:
+        parts.pop(0)
+    if parts and not parts[-1]:
+        parts.pop()
+    return parts, line
+
+
+def _section_html_nodes(marko, nodes):
+    """The raw-HTML nodes among nodes: every HTML block and every inline HTML element, wherever it sits
+    (a table cell included). The vendored reader parses NO raw HTML as a table, so every such node in the
+    section is refused; an HTML table, in any letter case, outside or inside a row, is exactly such a
+    node, and so is an HTML comment, the accepted cost."""
+    return [node for node in nodes
+            if isinstance(node, (marko.block.HTMLBlock, marko.inline.InlineHTML))]
+
+
+def _spec_section(marko, document, norm):
+    """Section 8.1 of the parsed spec, as (section block nodes, content start, content end): the parsed
+    heading whose first word is SECTION_WORD, and the top-level content up to the next heading of the
+    same or higher level. A heading-shaped line inside a code fence, an HTML comment or any other block
+    is not a parsed heading, so it never opens or closes the section; a spec with no such heading or more
+    than one (a nested decoy included), or whose only such heading is nested inside another block, is
+    refused CANNOT-EVALUATE."""
+    heading_types = (marko.block.Heading, marko.block.SetextHeading)
+    named = [node for node in _walk_nodes(document, [])
+             if isinstance(node, heading_types) and _plain_text(node).split()[:1] == [SECTION_WORD]]
+    _require(named != [], "module-table", "OPF-SPEC.md has no section 8.1 heading", CANNOT_EVALUATE)
+    _require(len(named) == 1, "module-table",
+             "OPF-SPEC.md holds {} parsed headings named 8.1, not exactly one".format(len(named)),
+             CANNOT_EVALUATE)
+    heading = named[0]
+    children = document.children
+    _require(heading in children, "module-table",
+             "the section 8.1 heading is nested inside another block, not a top-level heading",
+             CANNOT_EVALUATE)
+    level = getattr(heading, "level", None)
+    span = getattr(heading, "source_span", None)
+    _require(isinstance(level, int) and _usable_span(span, len(norm)), "module-table",
+             "the section 8.1 heading has no usable level or source span", CANNOT_EVALUATE)
+    section, end = [], len(norm)
+    for node in children[children.index(heading) + 1:]:
+        if (isinstance(node, heading_types)
+                and isinstance(getattr(node, "level", None), int) and node.level <= level):
+            next_span = getattr(node, "source_span", None)
+            _require(_usable_span(next_span, len(norm)), "module-table",
+                     "the heading ending section 8.1 has no usable source span", CANNOT_EVALUATE)
+            end = next_span[0]
+            break
+        section.append(node)
+    return section, span[1], end
 
 
 def _spec_module_rows(text):
-    """The module-tier rows of the spec's section 8.1 type table, as {type: (namespace, module)}. The
-    section is read by _spec_tables. It must hold exactly one table, headed exactly TABLE_HEADER, and
-    every body row of it must have exactly three cells and a tier that is exactly a SPEC_TIERS label;
-    a module type, one listed under a module tier or one _opf_store.MODULE_TYPES holds, must sit in one
-    row only, whatever the tier of each. Anything else is refused, so a blank, "-" or ":" tier, a
-    misspelled, pluralized or re-cased family, a row of other than three cells, an extra row however it
-    is indented or piped, a double row or a module type also listed under another tier never reads as
-    agreement."""
-    start = text.find("\n### 8.1 ")
-    _require(start >= 0, "module-table", "OPF-SPEC.md has no section 8.1 heading", CANNOT_EVALUATE)
-    end = text.find("\n### ", start + 1)
-    section = text[start:] if end < 0 else text[start:end]
-    tables = _spec_tables(section)
+    """The module-tier rows of the spec's section 8.1 type table, as {type: (namespace, module)}, read BY
+    CONSTRUCTION from the parsed document (the module-table guard above): exactly one top-level parsed
+    heading named 8.1 bounds the section; the section holds exactly one parsed table, headed exactly
+    TABLE_HEADER, and no raw HTML; no pipe sits in the section outside that table's source span; and
+    every body row holds exactly three plain-text source cells whose tier is exactly a SPEC_TIERS label,
+    no module type listed twice. CRLF is normalized to LF exactly as the vendored reader itself
+    normalizes line endings; a BARE carriage return anywhere in the spec is refused outright, never
+    normalized, so no content rides an ending a line-oriented diff or review shows as one line."""
+    norm = text.replace("\r\n", "\n")
+    _require("\r" not in norm, "module-table",
+             "OPF-SPEC.md holds a bare carriage return, which a reader treats as a line ending")
+    marko, gfm_elements = _load_table_reader()
+    try:
+        document = _new_table_parser(marko, gfm_elements).parse(norm)
+    except Exception as exc:
+        raise _Refusal(CANNOT_EVALUATE, "module-table",
+                       "the vendored GFM reader failed to parse OPF-SPEC.md: {}".format(exc))
+    # The parser records offsets into its own preprocessed buffer; its substitutions beyond LF
+    # normalization are length-preserving, so requiring the document span to cover the LF-normalized
+    # string keeps every span a valid index into `norm` (the guard _commonmark_headings documents).
+    _require(getattr(document, "source_span", None) == (0, len(norm)), "module-table",
+             "the parsed document span does not cover the spec", CANNOT_EVALUATE)
+    _require(isinstance(getattr(document, "children", None), list), "module-table",
+             "the parsed document exposes no children list", CANNOT_EVALUATE)
+    section, start, end = _spec_section(marko, document, norm)
+    nodes = []
+    for node in section:
+        _walk_nodes(node, nodes)
+    tables = [node for node in nodes if isinstance(node, gfm_elements.Table)]
     _require(len(tables) == 1, "module-table",
-             "section 8.1 holds {} table(s), not exactly the one type table".format(len(tables)))
-    header, body = tables[0]
-    _require(tuple(header) == TABLE_HEADER, "module-table",
-             "the section 8.1 table header is {!r}, not {!r}".format(header, list(TABLE_HEADER)))
+             "section 8.1 holds {} parsed table(s), not exactly the one type table".format(len(tables)))
+    html = _section_html_nodes(marko, nodes)
+    _require(not html, "module-table",
+             "section 8.1 holds raw HTML the reader does not parse as a table ({})".format(
+                 ", ".join(sorted({type(node).__name__ for node in html}))))
+    table = tables[0]
+    table_span = getattr(table, "source_span", None)
+    _require(_usable_span(table_span, len(norm)) and start <= table_span[0] and table_span[1] <= end,
+             "module-table", "the section 8.1 table carries no usable source span", CANNOT_EVALUATE)
+    outside = norm[start:table_span[0]] + norm[table_span[1]:end]
+    _require("|" not in outside, "module-table",
+             "section 8.1 holds a pipe outside the type table (the vendored reader opens no table "
+             "inside a list item, so a pipe-bearing line there could be a row a GitHub reader shows)")
+    row_nodes = getattr(table, "children", None)
+    _require(isinstance(row_nodes, list) and bool(row_nodes), "module-table",
+             "the section 8.1 table exposes no rows", CANNOT_EVALUATE)
+    head_line = _row_source_cells(norm, row_nodes[0], gfm_elements)[1]
+    header = tuple(_cell_text(marko, cell, head_line) for cell in row_nodes[0].children)
+    _require(header == TABLE_HEADER, "module-table",
+             "the section 8.1 table header is {!r}, not {!r}".format(list(header), list(TABLE_HEADER)))
     rows, listed = {}, {}
-    for number, cells in body:
-        _require(len(cells) == 3, "module-table",
-                 "section 8.1 table row {!r} has {} cell(s), not 3".format(section.split("\n")[number],
-                                                                          len(cells)))
-        tier, tname, namespace = cells
+    for row in row_nodes[1:]:
+        source_cells, line = _row_source_cells(norm, row, gfm_elements)
+        _require(len(source_cells) == 3, "module-table",
+                 "section 8.1 table row {!r} has {} source cell(s), not 3".format(line, len(source_cells)))
+        tier, tname, namespace = [_cell_text(marko, cell, line) for cell in row.children]
         _require(tier in SPEC_TIERS, "module-table",
                  "unknown tier {!r} in the section 8.1 table".format(tier))
         listed[tname] = listed.get(tname, 0) + 1
@@ -1145,7 +1268,9 @@ def _self_test_vectors():
 
             def after_table(block):
                 return lambda t: t.replace(table_end, table_end.replace("\n\n", "\n\n" + block + "\n\n", 1), 1)
-            # Second tables a reader shows after the type table, none of them a pipe-led line.
+            # Second tables a reader shows after the type table, and a second table hidden behind a
+            # heading-shaped line inside a code fence or an HTML comment, which ends no parsed section.
+            second_table = "| Tier | Type | Namespace |\n|---|---|---|\n| Governance module | extra_action | XA |"
             hidden_tables = {
                 "blockquoted":
                     "> | Tier | Type | Namespace |\n> |---|---|---|\n> | Governance module | extra_action | XA |",
@@ -1155,7 +1280,26 @@ def _self_test_vectors():
                 "list-nested":
                     "1.  | Tier | Type | Namespace |\n    |---|---|---|\n    | Governance module | extra_action | XA |",
             }
-            for name, status, guard, mutate in (
+            # A decoy section 8.1 inside a code fence placed long before the real one, holding the whole
+            # correct module roster, while the REAL table's maintainer_action namespace is changed: a
+            # scan that keys on heading-shaped text reads the decoy and grades the spec VALID; the
+            # parsed reading never sees a heading inside a fence, reads the real table and refuses.
+            decoy_section = ("```\n### 8.1 Type taxonomy and placement\n\n"
+                             "| Tier | Type | Namespace |\n|---|---|---|\n"
+                             "| Governance module | maintainer_action | MA |\n"
+                             "| Delivery-assurance module | artifact | AR |\n"
+                             + gate_run_row +
+                             "| Delivery-assurance module | release | RL |\n"
+                             "| Delivery-assurance module | waiver | WV |\n"
+                             "| Operational-policy module | mode | MO |\n"
+                             "| Operational-policy module | tier_assessment | TA |\n"
+                             "| Concurrent-operation module | session_lease | SL |\n\n```\n")
+
+            def decoy(t):
+                return t.replace("| Governance module | maintainer_action | MA |\n",
+                                 "| Governance module | maintainer_action | XX |\n", 1).replace(
+                    "\n### 4.3 ", "\n" + decoy_section + "\n### 4.3 ", 1)
+            table_vectors = [
                     ("module-table-shipped", VALID, None, lambda t: t),
                     ("module-table-row-deleted", INVALID, "module-table",
                      lambda t: t.replace(gate_run_row, "", 1)),
@@ -1177,10 +1321,12 @@ def _self_test_vectors():
                                          gate_run_row + "| Governance Module | extra_action | XA |\n", 1)),
                     ("module-table-duplicate-row", INVALID, "module-table",
                      lambda t: t.replace(gate_run_row, gate_run_row + gate_run_row, 1)),
-                    # Every line of the table is a row, as a reader reads it: a tier that is blank, "-"
-                    # or ":" (a delimiter-shaped row included) is not a label, a row of other than three
-                    # cells is refused even where the reader's display would drop the excess, and an
-                    # extra row indented up to four spaces or without outer pipes is read and refused.
+                    # Every row is judged by its SOURCE cells, as the reader's own row grammar splits
+                    # them: a tier that is blank, "-" or ":" (a delimiter-shaped row included) is not a
+                    # label, a row of other than three source cells is refused even where the reader's
+                    # display would pad or drop the difference (a hidden fourth cell on a correct row
+                    # included), and an extra row indented up to four spaces or without outer pipes is
+                    # read and refused.
                     ("module-table-extra-row-blank-tier", INVALID, "module-table",
                      extra_row("|  | extra_action | XA |")),
                     ("module-table-extra-row-dash-tier", INVALID, "module-table",
@@ -1190,6 +1336,9 @@ def _self_test_vectors():
                     ("module-table-extra-row-delimiter-shaped", INVALID, "module-table", extra_row("|---|---|---|")),
                     ("module-table-extra-row-four-cells", INVALID, "module-table",
                      extra_row("| Governance module | extra_action | XA | x |")),
+                    ("module-table-hidden-fourth-cell", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row,
+                                         "| Delivery-assurance module | gate_run | GR | hidden |\n", 1)),
                     ("module-table-extra-row-two-cells", INVALID, "module-table",
                      extra_row("| Governance module | extra_action |")),
                     ("module-table-extra-row-one-cell-no-pipe", INVALID, "module-table",
@@ -1207,41 +1356,87 @@ def _self_test_vectors():
                      extra_row("| Baseline | waiver | WV |")),
                     ("module-table-module-type-under-reserved", INVALID, "module-table",
                      extra_row("| Reserved, excluded | gate_run | GR |")),
-                    # Outside the table no line may hold a pipe or an HTML table tag, wherever it sits: a
-                    # row-shaped line, a second table, a table in a blockquote (with or without outer
-                    # pipes), nested in a list item or written in HTML (in any letter case) are refused.
-                    ("module-table-stray-row-three-spaces", INVALID, "module-table",
-                     after_table("   | Governance module | extra_action | XA |")),
+                    # A second table is a second PARSED table wherever it nests: plain, blockquoted
+                    # (with or without outer pipes), or behind a fake heading inside a code fence or an
+                    # HTML comment, which ends no parsed section, so the table after it is still read.
                     ("module-table-second-table", INVALID, "module-table",
                      after_table("| Tier | Type |\n|---|---|\n| Governance module | extra_action |")),
                     ("module-table-blockquoted-table", INVALID, "module-table",
                      after_table(hidden_tables["blockquoted"])),
                     ("module-table-blockquoted-table-no-outer-pipes", INVALID, "module-table",
                      after_table(hidden_tables["blockquoted-no-outer-pipes"])),
+                    ("module-table-fenced-fake-heading-second-table", INVALID, "module-table",
+                     after_table("```\n### not a heading\n```\n\n" + second_table)),
+                    ("module-table-comment-fake-heading-second-table", INVALID, "module-table",
+                     after_table("<!--\n### not a heading\n-->\n\n" + second_table)),
+                    # Raw HTML the reader does not parse as a table is refused wherever it sits: an HTML
+                    # table (in any letter case), one inside a row's cell, an HTML comment or a harmless
+                    # non-table tag (the last two the rule's accepted cost).
                     ("module-table-html-table", INVALID, "module-table", after_table(hidden_tables["html"])),
                     ("module-table-html-table-upper-case", INVALID, "module-table",
                      after_table(hidden_tables["html"].upper())),
-                    ("module-table-list-nested-table", INVALID, "module-table",
-                     after_table(hidden_tables["list-nested"])),
-                    # An HTML table inside a cell of the type table is refused like one outside it.
                     ("module-table-html-table-in-row", INVALID, "module-table",
                      extra_row("| Baseline | <table><tr><td>extra_action</td></tr></table> | ZZ |")),
-                    # The rule's accepted cost: a pipe in code (indented or fenced) or in prose outside
-                    # the table is refused, although a reader shows no table there.
+                    ("module-table-html-comment", INVALID, "module-table",
+                     after_table("<!-- an aside -->")),
+                    ("module-table-inline-html-non-table-tag", INVALID, "module-table",
+                     after_table("A <tablet> tag in prose.")),
+                    # No pipe may sit in the section outside the one table's span: the vendored reader
+                    # opens no table inside a list item where GitHub's reader does, so this bounded rule
+                    # is what refuses a list-nested table; a stray row-shaped line and a pipe in code or
+                    # prose (the rule's accepted cost) are refused by the same bound.
+                    ("module-table-list-nested-table", INVALID, "module-table",
+                     after_table(hidden_tables["list-nested"])),
+                    ("module-table-stray-row-three-spaces", INVALID, "module-table",
+                     after_table("   | Governance module | extra_action | XA |")),
                     ("module-table-pipe-in-indented-code", INVALID, "module-table",
                      after_table("    | Governance module | extra_action | XA |")),
                     ("module-table-pipe-in-fenced-code", INVALID, "module-table", after_table("```\na | b\n```")),
                     ("module-table-pipe-in-prose", INVALID, "module-table",
                      after_table("A pipe | in prose.")),
-                    # Accepted costs on the tier: a doubled inner space or an escaped hyphen shows as the
-                    # label but is not exactly a SPEC_TIERS label, so it is refused.
+                    # Line endings: CRLF is normalized exactly as the reader normalizes it, and a BARE
+                    # carriage return, mid-file (where it can hide a row a reader opens as a new line) or
+                    # as the last byte, is refused outright.
+                    ("module-table-bare-carriage-return", INVALID, "module-table",
+                     lambda t: t.replace("| Reserved, unassigned | (none) | LF |\n",
+                                         "| Reserved, unassigned | (none) | LF |\n"
+                                         "Baseline\r\r| Governance module\r|-\rextra_action XA\n", 1)),
+                    ("module-table-bare-carriage-return-at-eof", INVALID, "module-table",
+                     lambda t: t + "\r"),
+                    ("module-table-crlf-spec", VALID, None, lambda t: t.replace("\n", "\r\n")),
+                    # The section is the PARSED heading named 8.1: a decoy heading inside a code fence
+                    # never takes the section over, a duplicate or blockquote-nested heading named 8.1
+                    # is ambiguous, and a missing or nested-only heading cannot bound the section.
+                    ("module-table-fenced-decoy-section", INVALID, "module-table", decoy),
+                    ("module-table-duplicate-heading", CANNOT_EVALUATE, "module-table",
+                     lambda t: t.replace("\n### 8.2 ", "\n### 8.1 duplicate\n\n### 8.2 ", 1)),
+                    ("module-table-blockquoted-decoy-heading", CANNOT_EVALUATE, "module-table",
+                     after_table("> ### 8.1 decoy")),
+                    ("module-table-heading-nested", CANNOT_EVALUATE, "module-table",
+                     lambda t: t.replace("\n### 8.1 ", "\n> ### 8.1 ", 1)),
+                    ("module-table-heading-missing", CANNOT_EVALUATE, "module-table",
+                     lambda t: t.replace("\n### 8.1 ", "\n### 8x1 ", 1)),
+                    # Cells are plain parsed text: a doubled inner space or an entity spelling is not
+                    # exactly the label (an accepted cost), inline markup in a cell is refused (the same
+                    # cost), while a backslash-escaped spelling resolves to the label and is accepted.
                     ("module-table-tier-doubled-space", INVALID, "module-table",
                      lambda t: t.replace(gate_run_row, gate_run_row.replace("assurance module",
                                                                           "assurance  module"), 1)),
-                    ("module-table-tier-escaped-hyphen", INVALID, "module-table",
+                    ("module-table-tier-entity-hyphen", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, gate_run_row.replace("Delivery-", "Delivery&#45;"), 1)),
+                    ("module-table-cell-code-span", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, gate_run_row.replace(" gate_run ", " `gate_run` "), 1)),
+                    ("module-table-legal-tier-escaped-hyphen", VALID, None,
                      lambda t: t.replace(gate_run_row, gate_run_row.replace("Delivery-", "Delivery\\-"), 1)),
-                    # A row re-spelled the way a reader shows the same row is never refused; at four
-                    # spaces of indentation a reader may show it as code, so it is refused.
+                    ("module-table-legal-type-escaped-underscore", VALID, None,
+                     lambda t: t.replace(gate_run_row, gate_run_row.replace("gate_run", "gate\\_run"), 1)),
+                    ("module-table-legal-table-tag-in-inline-code", VALID, None,
+                     after_table("The `<table>` tag in code is text, not HTML.")),
+                    # A row or table re-spelled the way a reader shows the same content is never
+                    # refused: indentation up to three spaces, no outer pipes, unpadded or padded cells,
+                    # an aligned delimiter row, a moved row, a row added under a non-module tier it
+                    # legitimately extends, a CRLF spec. At four spaces of indentation a reader shows
+                    # code, so that row is refused.
                     ("module-table-legal-row-three-spaces", VALID, None,
                      lambda t: t.replace(gate_run_row, "   " + gate_run_row, 1)),
                     ("module-table-row-four-spaces", INVALID, "module-table",
@@ -1250,9 +1445,18 @@ def _self_test_vectors():
                      lambda t: t.replace(gate_run_row, "Delivery-assurance module | gate_run | GR\n", 1)),
                     ("module-table-legal-row-unpadded", VALID, None,
                      lambda t: t.replace(gate_run_row, "|Delivery-assurance module|gate_run|GR|\n", 1)),
-                    ("module-table-heading-missing", CANNOT_EVALUATE, "module-table",
-                     lambda t: t.replace("\n### 8.1 ", "\n### 8x1 ", 1)),
-            ):
+                    ("module-table-legal-row-padded-aligned", VALID, None,
+                     lambda t: t.replace("| Tier | Type | Namespace |\n|---|---|---|\n",
+                                         "| Tier | Type | Namespace |\n| :--- | :---: | ---: |\n", 1).replace(
+                         gate_run_row, "|  Delivery-assurance module\t|  gate_run  |  GR  |\n", 1)),
+                    ("module-table-legal-row-moved", VALID, None,
+                     lambda t: t.replace(gate_run_row, "", 1).replace(
+                         "| Tier | Type | Namespace |\n|---|---|---|\n",
+                         "| Tier | Type | Namespace |\n|---|---|---|\n" + gate_run_row, 1)),
+                    ("module-table-legal-baseline-row-added", VALID, None,
+                     extra_row("| Baseline | new_thing | NT |")),
+            ]
+            for name, status, guard, mutate in table_vectors:
                 mutated = mutate(shipped_spec)
                 changed = name == "module-table-shipped" or mutated != shipped_spec
                 got = validate_module_table(mutated)
@@ -1272,21 +1476,118 @@ def _self_test_vectors():
                 "PASS" if ok else "FAIL", got[0], got[1] or "").rstrip())
             if not ok:
                 failures.append("module-table-extra-entry: {!r}".format(got))
-            # Flip: under the earlier line rule, which refused only a pipe-led line of at most three columns
-            # of indentation outside the table, every hidden table above grades VALID, so those vectors are
-            # red because of the bounded pipe and HTML table tag rule.
-            def pipe_led(line):
-                return _indent(line) <= 3 and line.lstrip(" ").startswith("|")
-            hidden_texts = [after_table(block)(shipped_spec) for block in hidden_tables.values()]
-            with patch.dict(globals(), {"_refused_outside_table": pipe_led}):
-                flipped = [validate_module_table(text) for text in hidden_texts]
+            # Flip 1: the earlier line-scan reading put back in place of the parsed one (the section cut
+            # at heading-shaped TEXT, lines split at LF only, tables read by a pipe-and-delimiter scan
+            # with the bounded pipe and HTML-tag rule) grades the fenced and commented fake headings,
+            # the fenced decoy section and the bare carriage return VALID: each hides from a scan over
+            # raw lines but not from the parsed document, so the reading by construction is load-bearing.
+            def line_scan_rows(text):
+                cell_space = " \t\v\f\r"
+                delimiter_cell = re.compile(r":?-+:?\Z")
+
+                def scan_cells(line):
+                    flat = line.strip(cell_space)
+                    cells, cell, i = [], "", 0
+                    while i < len(flat):
+                        if flat[i] == "\\" and i + 1 < len(flat):
+                            cell += flat[i:i + 2]
+                            i += 2
+                            continue
+                        if flat[i] == "|":
+                            cells.append(cell)
+                            cell = ""
+                        else:
+                            cell += flat[i]
+                        i += 1
+                    cells.append(cell)
+                    if flat.startswith("|"):
+                        cells = cells[1:]
+                    if flat.endswith("|") and cells and cells[-1] == "":
+                        cells = cells[:-1]
+                    return [c.strip(cell_space).replace("\\|", "|") for c in cells]
+
+                def scan_indent(line):
+                    return len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip(" "))
+
+                def scan_delimiter(line):
+                    cells = scan_cells(line)
+                    return (scan_indent(line) <= 3 and "|" in line and bool(cells)
+                            and all(delimiter_cell.match(c) for c in cells))
+
+                start = text.find("\n### 8.1 ")
+                _require(start >= 0, "module-table", "no section 8.1 heading text", CANNOT_EVALUATE)
+                stop = text.find("\n### ", start + 1)
+                section = text[start:] if stop < 0 else text[start:stop]
+                lines = section.split("\n")
+                tables, i = [], 0
+                while i < len(lines):
+                    line = lines[i]
+                    if (line.strip(cell_space) and scan_indent(line) <= 3 and i + 1 < len(lines)
+                            and scan_delimiter(lines[i + 1])
+                            and len(scan_cells(line)) == len(scan_cells(lines[i + 1]))):
+                        body, i = [], i + 2
+                        while i < len(lines) and lines[i].strip(cell_space):
+                            _require(scan_indent(lines[i]) <= 3, "module-table", "row shown as code")
+                            _require("<table" not in lines[i].lower(), "module-table", "HTML table tag")
+                            body.append(scan_cells(lines[i]))
+                            i += 1
+                        tables.append((scan_cells(line), body))
+                        continue
+                    _require("|" not in line and "<table" not in line.lower(), "module-table",
+                             "pipe or HTML table tag outside a table")
+                    i += 1
+                _require(len(tables) == 1, "module-table", "not exactly one scanned table")
+                header, body = tables[0]
+                _require(tuple(header) == TABLE_HEADER, "module-table", "scanned header differs")
+                rows, listed = {}, {}
+                for cells in body:
+                    _require(len(cells) == 3, "module-table", "not three scanned cells")
+                    tier, tname, namespace = cells
+                    _require(tier in SPEC_TIERS, "module-table", "unknown scanned tier")
+                    listed[tname] = listed.get(tname, 0) + 1
+                    if tier in MODULE_TIERS:
+                        _require(tname not in rows, "module-table", "scanned module type listed twice")
+                        rows[tname] = (namespace, MODULE_TIERS[tier])
+                for tname in sorted(listed):
+                    _require(listed[tname] == 1
+                             or (tname not in rows and tname not in _opf_store.MODULE_TYPES),
+                             "module-table", "scanned module type listed more than once")
+                return rows
+
+            by_name = dict((vector[0], vector[3]) for vector in table_vectors)
+            scan_blind = ("module-table-fenced-fake-heading-second-table",
+                          "module-table-comment-fake-heading-second-table",
+                          "module-table-fenced-decoy-section",
+                          "module-table-bare-carriage-return")
+            flip_texts = [by_name[name](shipped_spec) for name in scan_blind]
+            with patch.dict(globals(), {"_spec_module_rows": line_scan_rows}):
+                flipped = [validate_module_table(text) for text in flip_texts]
             count += 1
-            ok = (len(flipped) == 4 and shipped_spec not in hidden_texts
+            ok = (shipped_spec not in flip_texts
                   and all(got[:2] == (VALID, None) for got in flipped))
-            print("{} module-table-flip-pipe-led-rule-misses-hidden-tables: {}".format(
+            print("{} module-table-flip-line-scan-misses-parsed-vectors: {}".format(
                 "PASS" if ok else "FAIL", ", ".join(got[0] for got in flipped)))
             if not ok:
-                failures.append("module-table-flip-pipe-led-rule-misses-hidden-tables: {!r}".format(flipped))
+                failures.append("module-table-flip-line-scan-misses-parsed-vectors: {!r}".format(flipped))
+            # Flip 2: without the raw-HTML rule's inline half and the plain-cell rule, the HTML table
+            # tag INSIDE a row grades VALID (three source cells under a Baseline tier), while an HTML
+            # table BLOCK stays red and the shipped spec stays green: exactly those two rules carry the
+            # tag-inside-a-row refusal.
+            def html_blocks_only(marko, nodes):
+                return [node for node in nodes if isinstance(node, marko.block.HTMLBlock)]
+            with patch.dict(globals(), {"_section_html_nodes": html_blocks_only,
+                                        "_cell_text": lambda marko, cell, line: _plain_text(cell)}):
+                in_row = validate_module_table(by_name["module-table-html-table-in-row"](shipped_spec))
+                html_block = validate_module_table(by_name["module-table-html-table"](shipped_spec))
+                still_green = validate_module_table(shipped_spec)
+            count += 1
+            ok = (in_row[:2] == (VALID, None) and html_block[:2] == (INVALID, "module-table")
+                  and still_green[:2] == (VALID, None))
+            print("{} module-table-flip-in-row-tag-rules: in-row {}, block {}, shipped {}".format(
+                "PASS" if ok else "FAIL", in_row[0], html_block[0], still_green[0]))
+            if not ok:
+                failures.append("module-table-flip-in-row-tag-rules: {!r} {!r} {!r}".format(
+                    in_row, html_block, still_green))
             # The default run (main with no argument) includes the import examples: the shipped pack reports
             # them, and a pack whose only fault is an example guard's is refused, not VALID.
             import contextlib
