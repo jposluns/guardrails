@@ -72,7 +72,14 @@ the tooling's single source-of-truth copy of it. The guard:
                     keeps; a zero-padded ordered list marker anywhere (the vendored reader lets an
                     ordered list interrupt a paragraph only when the marker's digits are exactly
                     "1", CommonMark when its start number is 1, so "01." starts an item, a decoy 8.1
-                    heading included, for a CommonMark reader alone); an entity-reference spelling
+                    heading included, for a CommonMark reader alone); an ordered list marker whose
+                    digits include one outside ASCII 0-9 anywhere (the vendored marker grammar
+                    spells its digits \\d, which matches every Unicode decimal digit, CommonMark
+                    admits only ASCII digits, so "\\u0661." ends a paragraph on a lazy continuation
+                    line or starts an ordered list item for the vendored reader alone, and the
+                    setext underline after it shows a CommonMark reader alone a decoy 8.1 heading;
+                    no other \\d or \\w sits in the vendored block or inline grammar this gate
+                    parses with); an entity-reference spelling
                     inside any parsed heading's text (the vendored reader never resolves entities,
                     so a heading spelled "&#56;.1" opens no section here while a reader shows
                     "8.1"); a section table delimiter-row cell that is not exactly an optionally
@@ -89,8 +96,9 @@ the tooling's single source-of-truth copy of it. The guard:
                     examples where the vendored reader departs from the CommonMark 0.31.2 examples).
                     The list grammar is covered only as far as the code shows: the vendored marker
                     must be followed by a space, a tab or a line ending once the refused characters
-                    are gone, and its paragraph-interrupt test differs from CommonMark's only for a
-                    zero-padded marker, which is refused. The
+                    are gone, and its paragraph-interrupt and item-start tests differ from
+                    CommonMark's only for a zero-padded marker and for a marker whose digits
+                    include one outside ASCII 0-9, both refused. The
                     section must hold exactly one parsed table, wherever it nests, headed
                     Tier | Type | Namespace, and the rows are read from the parsed cells. Around that
                     table the rule stays bounded: the raw-HTML refusal above covers an HTML table, in
@@ -122,7 +130,7 @@ the tooling's single source-of-truth copy of it. The guard:
                     then holds no parsed table and is refused); a multi-line link reference
                     definition; and the refusals above that scan the spec as text (a form feed, a
                     NUL, non-space-or-tab whitespace, an HTML block opener line, a zero-padded
-                    ordered list marker), which refuse such input even inside a code fence or an
+                    ordered list marker, a list marker with a non-ASCII digit), which refuse such input even inside a code fence or an
                     indented code block where both readers show it inertly. Two earlier costs are
                     gone: a backslash-escaped spelling ("Delivery\\-assurance module", "gate\\_run")
                     resolves to its plain text and is accepted, and "<table" as mere text in inline
@@ -165,15 +173,20 @@ the tooling's single source-of-truth copy of it. The guard:
                                         span closed on a later line; an opener in a fence or at
                                         eight columns; each opener only one reader opens a block on),
                                         a zero-padded ordered list marker in a paragraph or a
-                                        blockquote, a multi-line link reference definition, an
+                                        blockquote, a list marker with a non-ASCII digit ending a
+                                        blockquote's, list item's or ordered item's paragraph
+                                        before a setext underline, an email autolink holding a
+                                        backtick before a tag, a multi-line link reference
+                                        definition, an
                                         entity-spelled decoy heading) is red with the module-table
                                         guard; a line-scan
                                         reading put back by the flip grades the fenced and commented
                                         fake headings, the decoy section and the bare carriage return
                                         VALID, a reading without the raw-HTML and plain-cell rules
                                         grades the tag inside a row VALID, and a reading without each
-                                        divergence refusal (the raw-HTML rule whole, its two text
-                                        scans, its inline scan and its line rule each) grades that
+                                        divergence refusal (the raw-HTML rule whole, its node part,
+                                        its two text scans, its inline scan and its line rule each,
+                                        the zero-padded and non-ASCII-digit marker rules) grades that
                                         refusal's vectors VALID again, so the parsed reading and each
                                         refusal are load-bearing; the parsed reading's module rows
                                         equal a plain line scan's rows on the shipped table, and with
@@ -183,8 +196,8 @@ the tooling's single source-of-truth copy of it. The guard:
                                         the same (indented up to three spaces, without outer pipes,
                                         unpadded, padded or aligned, a backslash-escaped spelling, a
                                         moved row, a Baseline row added, a CRLF spec), a "<" before a
-                                        space or a digit, an escaped "<", and a "0." or "10." list
-                                        marker stay VALID
+                                        space or a digit, an escaped "<", and a "1." or "0." list
+                                        marker after a blank line or a "10." one stay VALID
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as digest drift),
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
@@ -637,6 +650,16 @@ def _raw_html_text_hits(text):
     return hits
 
 
+def _raw_html_nodes(marko, nodes):
+    """The type names of the HTML block and inline HTML nodes the vendored parse yields. This node
+    part is load-bearing beside the text scans: an email autolink holding a backtick ("<1`@x.y>", a
+    legal local-part character) pairs, for the inline scan, with a later backtick as a code span
+    that masks the tags after it, while both readers end the autolink at its ">" and read those
+    tags as raw HTML, which only this part then catches."""
+    return [type(node).__name__ for node in nodes
+            if isinstance(node, (marko.block.HTMLBlock, marko.inline.InlineHTML))]
+
+
 def _refuse_raw_html(marko, nodes, norm):
     """Refuse any raw HTML anywhere in the spec, block or inline, for either reader: every HTML block
     and inline HTML node the vendored parse yields; every line on which either reader can open an
@@ -652,8 +675,7 @@ def _refuse_raw_html(marko, nodes, norm):
     line hides in no fence the readers might bound differently. The accepted costs: an HTML
     comment or any other harmless tag, an autolink, and an HTML block opener line inside a fenced
     or indented code block, all refused though a reader shows no different block or row."""
-    found = [type(node).__name__ for node in nodes
-             if isinstance(node, (marko.block.HTMLBlock, marko.inline.InlineHTML))]
+    found = _raw_html_nodes(marko, nodes)
     _require(not found, "module-table",
              "OPF-SPEC.md holds raw HTML the vendored reader parses as such ({}); the spec admits no "
              "raw HTML".format(", ".join(sorted(set(found)))))
@@ -692,6 +714,29 @@ def _refuse_zero_padded_markers(norm):
     _require(match is None, "module-table",
              "OPF-SPEC.md holds the zero-padded ordered list marker {!r}, which only a CommonMark "
              "reader lets interrupt a paragraph".format(match.group().strip() if match else ""))
+
+
+# An ordered list marker whose digit run holds a digit outside ASCII 0-9 ("\u0661." or "1\uff11)"),
+# at any indentation or container depth. The vendored list grammar spells its marker digits \d
+# (List.pattern and ListItem.pattern), which Python matches for every Unicode decimal digit, where
+# CommonMark 0.31.2 admits only ASCII digits: on a lazy continuation line, or as a new item of an
+# ordered list, such a marker ends a paragraph for the vendored reader alone, so the setext
+# underline after it (a decoy 8.1 heading for a CommonMark reader) is a thematic break or another
+# item's heading for the vendored one. The marker is matched at any length, beyond the nine digits
+# either reader admits. No other \d or \w sits in the vendored block or inline grammar this gate
+# parses with.
+_NON_ASCII_DIGIT_MARKER_RE = re.compile(
+    r"(?m)^[ \t>]*(?:(?:[-+*]|\d+[.)])[ \t>]*)*?\d*(?![0-9])\d\d*[.)](?=[ \t]|$)")
+
+
+def _refuse_non_ascii_digit_markers(norm):
+    """Refuse, anywhere in the LF-normalized spec, an ordered list marker whose digits include one
+    outside ASCII 0-9 (_NON_ASCII_DIGIT_MARKER_RE), inside a code block included (the accepted cost:
+    such a line refused although both readers show it as code or as paragraph text)."""
+    match = _NON_ASCII_DIGIT_MARKER_RE.search(norm)
+    _require(match is None, "module-table",
+             "OPF-SPEC.md holds the list marker {!r}, whose non-ASCII digits only the vendored reader "
+             "reads as a list marker".format(match.group().strip() if match else ""))
 
 
 def _refuse_heading_markers(marko, nodes, norm):
@@ -827,6 +872,7 @@ def _spec_module_rows(text):
              "OPF-SPEC.md holds a bare carriage return, which a reader treats as a line ending")
     _refuse_divergent_characters(norm)
     _refuse_zero_padded_markers(norm)
+    _refuse_non_ascii_digit_markers(norm)
     marko, gfm_elements = _load_table_reader()
     try:
         document = _new_table_parser(marko, gfm_elements).parse(norm)
@@ -1828,6 +1874,11 @@ def _self_test_vectors():
                      before_43("A roster `remark\n` <span>hidden</span> `.\n")),
                     ("module-table-html-after-backtick-in-link-title", INVALID, "module-table",
                      before_43("See [the roster](/roster \"`\") <span>hidden</span> `.\n")),
+                    # An email autolink may hold a backtick, which the inline scan pairs with a
+                    # later one as a code span masking the tag between them; both readers end the
+                    # autolink at its ">" and read the tag as raw HTML, so the node part refuses it.
+                    ("module-table-html-after-backtick-in-email-autolink", INVALID, "module-table",
+                     before_43("A roster <1`@x.y> <span>hidden</span> `.\n")),
                     # The accepted cost: an HTML opener line is refused even where both readers show
                     # it as code, at any indentation and inside a fence.
                     ("module-table-html-opener-in-fenced-code", INVALID, "module-table",
@@ -1852,6 +1903,25 @@ def _self_test_vectors():
                      before_43("A roster remark.\n\n0. A roster step.\n")),
                     ("module-table-legal-ten-marker", VALID, None,
                      before_43("A roster remark.\n10. A roster step.\n")),
+                    ("module-table-legal-one-marker", VALID, None,
+                     before_43("A roster remark.\n\n1. A roster step.\n")),
+                    # A list marker whose digits include one outside ASCII 0-9 is a marker for the
+                    # vendored reader alone: on a lazy continuation line it ends the paragraph, and
+                    # in an ordered list it starts a new item, so the underline after it is a
+                    # thematic break or another item's heading there, while a CommonMark reader
+                    # keeps the paragraph going and shows a decoy 8.1 heading.
+                    ("module-table-non-ascii-digit-marker-in-blockquote", INVALID, "module-table",
+                     before_43("> 8.1 Decoy placement\n\u0661. x\n> ---\n")),
+                    ("module-table-fullwidth-digit-marker-in-blockquote", INVALID, "module-table",
+                     before_43("> 8.1 Decoy placement\n\uff11. x\n> ---\n")),
+                    ("module-table-non-ascii-digit-marker-in-list-item", INVALID, "module-table",
+                     before_43("- 8.1 Decoy placement\n\u0661. x\n  ---\n")),
+                    ("module-table-non-ascii-digit-marker-equals-underline", INVALID, "module-table",
+                     before_43("> 8.1 Decoy placement\n\u0661. x\n> ===\n")),
+                    ("module-table-non-ascii-digit-marker-ordered-item", INVALID, "module-table",
+                     before_43("1. 8.1 Decoy placement\n\u0661. x\n   ---\n")),
+                    ("module-table-mixed-digit-marker-ordered-item", INVALID, "module-table",
+                     before_43("1. 8.1 Decoy placement\n1\u0661) x\n   ---\n")),
                     # The openers the per-construct rules named before, still refused.
                     ("module-table-html-declaration-opener", INVALID, "module-table",
                      lambda t: t.replace("\n### 4.3 ", "\n<!1\n### 8.1 Decoy placement\n\n"
@@ -2119,11 +2189,12 @@ def _self_test_vectors():
             # load-bearing on its own. The raw-HTML rule is flipped whole and then part by part:
             # without its two text scans, the HTML the vendored reader does not parse as HTML
             # grades VALID; without the inline scan alone, the inline HTML no line rule reaches
-            # does; without the line rule alone, the opener inside a fence does. Its node part
-            # has no vector of its own: outside fenced code the text scans are a superset of it,
-            # so it stands as defence in depth.
+            # does; without the line rule alone, the opener inside a fence does; without its node
+            # part alone, the tag after an email autolink holding a backtick does, since the
+            # inline scan pairs that backtick as a code span and masks the tag.
             never = re.compile(r"(?!)")
             no_hits = lambda text: []  # noqa: E731
+            no_nodes = lambda marko, nodes: []  # noqa: E731
             single_flips = (
                 ("module-table-flip-delimiter-rule", {"_refuse_delimiter_cells": lambda table: None},
                  ("module-table-delimiter-prefix-cells",)),
@@ -2144,6 +2215,7 @@ def _self_test_vectors():
                   "module-table-html-declaration-tab-in-heading",
                   "module-table-html-after-multiline-code-span",
                   "module-table-html-after-backtick-in-link-title",
+                  "module-table-html-after-backtick-in-email-autolink",
                   "module-table-html-opener-in-fenced-code",
                   "module-table-html-opener-eight-columns",
                   "module-table-html-declaration-opener",
@@ -2166,10 +2238,20 @@ def _self_test_vectors():
                   "module-table-html-after-backtick-in-link-title")),
                 ("module-table-flip-raw-html-line-rule", {"_HTML_BLOCK_LINE_RE": never},
                  ("module-table-html-opener-in-fenced-code",)),
+                ("module-table-flip-raw-html-node-part", {"_raw_html_nodes": no_nodes},
+                 ("module-table-html-after-backtick-in-email-autolink",)),
                 ("module-table-flip-zero-padded-marker-rule",
                  {"_refuse_zero_padded_markers": lambda norm: None},
                  ("module-table-zero-padded-marker-interrupts-paragraph",
                   "module-table-zero-padded-marker-in-blockquote")),
+                ("module-table-flip-non-ascii-digit-marker-rule",
+                 {"_refuse_non_ascii_digit_markers": lambda norm: None},
+                 ("module-table-non-ascii-digit-marker-in-blockquote",
+                  "module-table-fullwidth-digit-marker-in-blockquote",
+                  "module-table-non-ascii-digit-marker-in-list-item",
+                  "module-table-non-ascii-digit-marker-equals-underline",
+                  "module-table-non-ascii-digit-marker-ordered-item",
+                  "module-table-mixed-digit-marker-ordered-item")),
                 ("module-table-flip-link-ref-def-rule",
                  {"_refuse_multiline_link_defs": lambda marko, nodes, norm: None},
                  ("module-table-multiline-link-ref-def",)),
