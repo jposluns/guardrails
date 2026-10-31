@@ -10577,8 +10577,8 @@ def self_test():
               dr is not None and dr.status == CANNOT_EVALUATE
               and any("ceiling" in m for m in dr.cannot_evaluate))
 
-        # --- F4: a module-tier record is a named CANNOT-EVALUATE deferral (spec 8.5 states the schema), never a
-        #         false INVALID from the baseline-only record validator -----------------------------
+        # --- A module-tier record is a named CANNOT-EVALUATE deferral (spec 8.5 states the schema), never a
+        #     false INVALID from the baseline-only record validator ---------------------------------
         mm_types = {t: {"namespace": ns} for t, ns in (
             ("backlog_item", "BI"), ("done", "DN"), ("worklog", "WL"), ("finding", "FN"),
             ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),

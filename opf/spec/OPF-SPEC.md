@@ -944,7 +944,8 @@ either series: the kept row is what keeps that namespace's IDs unique across a d
 later re-enable (sections 8.1 and 8.8). The contiguity and no-deletion checks MUST still
 evaluate a kept row exactly as they evaluate any other row of its series: `disable-module` refuses
 while any record of the module's types exists (section 8.8), so a kept row whose high-water claims
-an ID that no record carries, in the active indexes or the archive, is a finding unless an ID
+an ID that no record carries, in the active indexes or the archive for a clean row and in the
+imported leaves (section 4.2) for an `imported:<NS>` row, is a finding unless an ID
 reservation holds that number (below). Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
 prior ancestry. Only a genuinely first adoption MAY start its counters at zero, apart from the

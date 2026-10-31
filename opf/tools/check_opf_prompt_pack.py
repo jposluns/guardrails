@@ -51,9 +51,21 @@ the tooling's single source-of-truth copy of it. The guard:
                     SPEC_TIERS label (a blank, "-" or ":" cell and a misspelled, pluralized or re-cased
                     family included), any row of other than three cells, any row indented four or more
                     columns (which a reader may show as code), a module type listed more than once
-                    under any tier, a line outside the table that begins with a pipe after at most
-                    three columns of indentation, a missing section 8.1 heading or an unreadable spec
-                    never passes
+                    under any tier, a missing section 8.1 heading or an unreadable spec never passes.
+                    Outside the one table the rule is bounded rather than a list of table spellings:
+                    no line of the section outside the table may hold a pipe character, and no line of
+                    the section, the table's rows included, may hold an HTML table tag (<table, in any
+                    letter case),
+                    wherever the line sits (a blockquote, a list item, an HTML block, a code fence or
+                    an HTML comment included). A table a GitHub-flavoured Markdown reader opens holds a
+                    pipe in its header row (the vendored marko reader opens none without one; GitHub's
+                    own reader is not consulted here) and an HTML table opens with that tag, so no
+                    second table hides in the section.
+                    Accepted costs, each refused although a reader shows no second table or the same
+                    tier: prose or code holding a pipe anywhere in the section outside the table, and a
+                    tier cell spelled with a doubled inner space ("Delivery-assurance  module") or an
+                    escaped hyphen ("Delivery\\-assurance module"), which a reader shows as the label
+                    but which is not exactly a SPEC_TIERS label
 
   check_opf_prompt_pack.py              verify the shipped pack beside this tool (../prompt-pack), its
                                         import examples included, and the spec module type table against
@@ -71,10 +83,14 @@ the tooling's single source-of-truth copy of it. The guard:
                                         than three cells, an extra row indented or without outer
                                         pipes, a row indented four spaces, a module type also listed
                                         under another tier, a row-shaped line or a second table outside
-                                        the type table, an extra MODULE_TYPES entry) is red with the
-                                        module-table guard, and a row re-spelled the way a reader shows
-                                        the same (indented up to three spaces, without outer pipes,
-                                        unpadded) stays VALID
+                                        the type table, a table in a blockquote with or without outer
+                                        pipes, nested in a list item or written in HTML, an HTML table
+                                        tag in a row, a pipe in prose or code outside the table, a tier
+                                        with a doubled inner space or an escaped hyphen, an extra
+                                        MODULE_TYPES entry) is red with the module-table guard, the
+                                        hidden tables grade VALID under the earlier pipe-led line rule,
+                                        and a row re-spelled the way a reader shows the same (indented
+                                        up to three spaces, without outer pipes, unpadded) stays VALID
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as digest drift),
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
@@ -157,6 +173,8 @@ TABLE_HEADER = ("Tier", "Type", "Namespace")
 _DELIMITER_CELL_RE = re.compile(r":?-+:?\Z")
 # The whitespace a GitHub-flavoured Markdown reader trims from a cell (never a no-break space).
 _CELL_SPACE = " \t\v\f\r"
+# The opening of an HTML table tag, matched against a lower-cased line (HTML tag names ignore case).
+_HTML_TABLE_TAG = "<table"
 
 
 class _Refusal(Exception):
@@ -352,16 +370,24 @@ def _is_delimiter_row(line):
             and all(_DELIMITER_CELL_RE.match(c) for c in cells))
 
 
+def _refused_outside_table(line):
+    """True for a section 8.1 line outside every table that holds a pipe or an HTML table tag, wherever it
+    sits: the bounded rule that leaves no second table, blockquoted, list-nested or in HTML, unread. Prose
+    or code (indented or fenced) holding a pipe in the section is refused too, the rule's accepted cost."""
+    return "|" in line or _HTML_TABLE_TAG in line.lower()
+
+
 def _spec_tables(section):
     """The tables of a spec section, each a (header cells, [(line number, body cells)]) pair, read the
     way a GitHub-flavoured Markdown reader reads them: a table opens at a non-blank line of at most three
     columns of indentation whose cell count equals that of the delimiter row under it, and every line
     after the delimiter row up to the first blank line is a body row, whatever its cell count. A body
-    row indented four or more columns, which a reader may show as code rather than as a row, is refused.
+    row indented four or more columns, which a reader may show as code rather than as a row, is refused,
+    and so is a body row holding an HTML table tag, which would show a table inside a cell.
     A reader ends a table early at a line that opens another block, such as a heading or a list item;
     such a line is read as a row here and graded by the row rules (no tier label begins with a block
-    marker), never skipped. A line outside every table that begins with a pipe after at most three
-    columns of indentation, which a reader shows as text rather than as a row, is refused too, so no
+    marker), never skipped. A line outside every table that holds a pipe or an HTML table tag
+    (_refused_outside_table), at any indentation and inside any block, is refused too, so no table or
     row-shaped line in the section escapes the guard."""
     lines = section.split("\n")
     tables, i = [], 0
@@ -374,12 +400,14 @@ def _spec_tables(section):
             while i < len(lines) and lines[i].strip(_CELL_SPACE):
                 _require(_indent(lines[i]) <= 3, "module-table",
                          "section 8.1 table row {!r} is indented four or more columns".format(lines[i]))
+                _require(_HTML_TABLE_TAG not in lines[i].lower(), "module-table",
+                         "section 8.1 table row {!r} holds an HTML table tag".format(lines[i]))
                 body.append((i, _gfm_cells(lines[i])))
                 i += 1
             tables.append((_gfm_cells(line), body))
             continue
-        _require(not (_indent(line) <= 3 and line.lstrip(" ").startswith("|")), "module-table",
-                 "section 8.1 line {!r} is shaped like a table row but sits in no table".format(line))
+        _require(not _refused_outside_table(line), "module-table",
+                 "section 8.1 line {!r} holds a pipe or an HTML table tag but sits in no table".format(line))
         i += 1
     return tables
 
@@ -1117,6 +1145,16 @@ def _self_test_vectors():
 
             def after_table(block):
                 return lambda t: t.replace(table_end, table_end.replace("\n\n", "\n\n" + block + "\n\n", 1), 1)
+            # Second tables a reader shows after the type table, none of them a pipe-led line.
+            hidden_tables = {
+                "blockquoted":
+                    "> | Tier | Type | Namespace |\n> |---|---|---|\n> | Governance module | extra_action | XA |",
+                "blockquoted-no-outer-pipes":
+                    "> Tier | Type | Namespace\n> ---|---|---\n> Governance module | extra_action | XA",
+                "html": "<table>\n<tr><td>Governance module</td><td>extra_action</td><td>XA</td></tr>\n</table>",
+                "list-nested":
+                    "1.  | Tier | Type | Namespace |\n    |---|---|---|\n    | Governance module | extra_action | XA |",
+            }
             for name, status, guard, mutate in (
                     ("module-table-shipped", VALID, None, lambda t: t),
                     ("module-table-row-deleted", INVALID, "module-table",
@@ -1169,14 +1207,39 @@ def _self_test_vectors():
                      extra_row("| Baseline | waiver | WV |")),
                     ("module-table-module-type-under-reserved", INVALID, "module-table",
                      extra_row("| Reserved, excluded | gate_run | GR |")),
-                    # Outside the table: a row-shaped line at three spaces and a second table are
-                    # refused, while at four spaces after a blank line the line is code, not a row.
+                    # Outside the table no line may hold a pipe or an HTML table tag, wherever it sits: a
+                    # row-shaped line, a second table, a table in a blockquote (with or without outer
+                    # pipes), nested in a list item or written in HTML (in any letter case) are refused.
                     ("module-table-stray-row-three-spaces", INVALID, "module-table",
                      after_table("   | Governance module | extra_action | XA |")),
-                    ("module-table-stray-row-four-spaces-code", VALID, None,
-                     after_table("    | Governance module | extra_action | XA |")),
                     ("module-table-second-table", INVALID, "module-table",
                      after_table("| Tier | Type |\n|---|---|\n| Governance module | extra_action |")),
+                    ("module-table-blockquoted-table", INVALID, "module-table",
+                     after_table(hidden_tables["blockquoted"])),
+                    ("module-table-blockquoted-table-no-outer-pipes", INVALID, "module-table",
+                     after_table(hidden_tables["blockquoted-no-outer-pipes"])),
+                    ("module-table-html-table", INVALID, "module-table", after_table(hidden_tables["html"])),
+                    ("module-table-html-table-upper-case", INVALID, "module-table",
+                     after_table(hidden_tables["html"].upper())),
+                    ("module-table-list-nested-table", INVALID, "module-table",
+                     after_table(hidden_tables["list-nested"])),
+                    # An HTML table inside a cell of the type table is refused like one outside it.
+                    ("module-table-html-table-in-row", INVALID, "module-table",
+                     extra_row("| Baseline | <table><tr><td>extra_action</td></tr></table> | ZZ |")),
+                    # The rule's accepted cost: a pipe in code (indented or fenced) or in prose outside
+                    # the table is refused, although a reader shows no table there.
+                    ("module-table-pipe-in-indented-code", INVALID, "module-table",
+                     after_table("    | Governance module | extra_action | XA |")),
+                    ("module-table-pipe-in-fenced-code", INVALID, "module-table", after_table("```\na | b\n```")),
+                    ("module-table-pipe-in-prose", INVALID, "module-table",
+                     after_table("A pipe | in prose.")),
+                    # Accepted costs on the tier: a doubled inner space or an escaped hyphen shows as the
+                    # label but is not exactly a SPEC_TIERS label, so it is refused.
+                    ("module-table-tier-doubled-space", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, gate_run_row.replace("assurance module",
+                                                                          "assurance  module"), 1)),
+                    ("module-table-tier-escaped-hyphen", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, gate_run_row.replace("Delivery-", "Delivery\\-"), 1)),
                     # A row re-spelled the way a reader shows the same row is never refused; at four
                     # spaces of indentation a reader may show it as code, so it is refused.
                     ("module-table-legal-row-three-spaces", VALID, None,
@@ -1209,6 +1272,21 @@ def _self_test_vectors():
                 "PASS" if ok else "FAIL", got[0], got[1] or "").rstrip())
             if not ok:
                 failures.append("module-table-extra-entry: {!r}".format(got))
+            # Flip: under the earlier line rule, which refused only a pipe-led line of at most three columns
+            # of indentation outside the table, every hidden table above grades VALID, so those vectors are
+            # red because of the bounded pipe and HTML table tag rule.
+            def pipe_led(line):
+                return _indent(line) <= 3 and line.lstrip(" ").startswith("|")
+            hidden_texts = [after_table(block)(shipped_spec) for block in hidden_tables.values()]
+            with patch.dict(globals(), {"_refused_outside_table": pipe_led}):
+                flipped = [validate_module_table(text) for text in hidden_texts]
+            count += 1
+            ok = (len(flipped) == 4 and shipped_spec not in hidden_texts
+                  and all(got[:2] == (VALID, None) for got in flipped))
+            print("{} module-table-flip-pipe-led-rule-misses-hidden-tables: {}".format(
+                "PASS" if ok else "FAIL", ", ".join(got[0] for got in flipped)))
+            if not ok:
+                failures.append("module-table-flip-pipe-led-rule-misses-hidden-tables: {!r}".format(flipped))
             # The default run (main with no argument) includes the import examples: the shipped pack reports
             # them, and a pack whose only fault is an example guard's is refused, not VALID.
             import contextlib
