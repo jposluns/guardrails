@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "aa1f9a13a1de13742534baaf08d8247f597f6ad65000abbb4385830c9a23688b"
+tree-sha256 = "daea3df5773f447dee0c97ccb75bd8719f1bfe3da0276d87d05db9ea06fca831"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3521,8 +3521,8 @@ sha256 = "07ae345c9a00855f6f2ad3cfef14e1bece69ed0852a53d2d9656cf8abaa8942e"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 190157
-sha256 = "f79f8c76fc26ddaa457167021d0b682c0fda2b08021ee1663594ff13b11418ca"
+bytes = 190449
+sha256 = "c037b90cb54a78a9ce4883e052393ab91dc1158425480e07881fdd9c23203d99"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -3791,8 +3791,8 @@ sha256 = "686bd14a80481d924639c34e2350c654395ab3ad24aecaa03763b3a8a701a38d"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 102020
-sha256 = "4f507211e5fa3e31f25e012072f6a834d433137bf66a164a5963d5f071b901c2"
+bytes = 125723
+sha256 = "353a0685c6549b00607b919a5cd00588fee9d1740f04eb0620921a70a3afe33e"
 
 [[sources]]
 path = "tools/gen_mappings.py"

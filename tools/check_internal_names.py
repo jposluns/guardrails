@@ -716,8 +716,11 @@ def tracked_files(root):
     """The sorted tracked relpaths under `root` from `git ls-files -z --cached`, the role rule's input set.
     Pinned like gen_manifest's index read: the GIT_* environment is dropped (a repository-selecting variable
     cannot redirect the read), core.fsmonitor=false (a repository-configured hook never runs under a gate
-    read), protocol.allow=never and GIT_NO_LAZY_FETCH=1. Like that read, a real-checkout scan keeps the
-    caller's on-disk git configuration (where safe.directory trust for the checkout lives). A self-test
+    read), protocol.allow=never and GIT_NO_LAZY_FETCH=1. Unlike that read, which also pins the caller's
+    system, home and XDG git configuration away, a real-checkout scan here keeps the caller's on-disk git
+    configuration (where safe.directory trust for the checkout lives), so a malformed file there fails the
+    scan closed (exit 2); self-test case 21 relies on this read honouring that configuration to prove the
+    self-test's lifecycle isolation (case 23 builds on case 21). A self-test
     entered through self_test_main (the --self-test entry point) runs every call here inside the fixture git
     lifecycle, so it reads no caller home, XDG or system configuration; a direct _self_test() call bypasses
     that isolation. No git, a nonzero exit, a timeout, an empty listing
