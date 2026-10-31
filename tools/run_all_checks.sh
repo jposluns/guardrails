@@ -85,6 +85,7 @@ run_gate "gitleaks-pin" python3 -I -B tools/check_gitleaks_pin.py
 run_gate "leaks"     python3 -I -B tools/check_leaks.py
 run_gate "leaks-selftest" python3 -I -B tools/check_leaks.py --self-test
 run_gate "msg-leaks-selftest" python3 -I -B tools/check_msg_leaks.py --self-test  # real scan needs CI event context
+run_gate "push-branch-selftest" python3 -I -B tools/push_branch.py --self-test  # the live run is a maintainer's push, never a CI step
 run_gate "portability-selftest" python3 -I -B tools/check_portability.py --self-test
 run_gate "portability" python3 -I -B tools/check_portability.py
 run_gate "derived-command-parameters-selftest" python3 -I -B tools/check_derived_command_parameters.py --self-test

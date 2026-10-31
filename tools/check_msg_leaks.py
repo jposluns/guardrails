@@ -15,17 +15,112 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
   - push (to main): scan the messages of the newly landed commits (before..after). The post-merge tripwire,
     the authoritative check on the text that actually landed (a title/body edit after the PR check, or a
     merge-dialog edit of the squash message, is caught only here). Fires after publication -> drives removal.
-  - --self-test: run embedded fail-cases in memory (CI invokes this alongside the real run).
+  - --pre-push --repo <abs> --body-file <abs> --base <40-hex sha> [--title <text>] [--head <40-hex sha>]
+    [--branch <name>] [--remote <name-or-url>]: the LOCAL, pre-publication mode, run by
+    tools/push_branch.py BEFORE a first push leaves the machine (the one mode that is prevention rather
+    than detection). Every input is explicit (no ambient default): the repository root (and it must BE
+    the root: a subdirectory would read the changelog as absent), the drafted PR body file (composed
+    with --title when one is given, the same one-blob rule as the CI mode), and the base SHA. The
+    SCANNED SET is bound to what the push would actually publish: every commit reachable from the
+    scanned commit and not reachable from any object the remote advertises, read with git ls-remote at
+    check time (local remote-tracking refs can be stale, and a path or URL remote has none, so neither
+    is consulted); when that set cannot be computed, or it is empty, the run fails closed. That binding
+    holds only when the advertisement read and the push destination are one repository, so --remote is
+    resolved ONCE to a single literal URL and accepted only when every condition of a CLOSED SET
+    holds, refusing otherwise with a named reason: the --remote value is printable with no
+    whitespace; a configured remote has exactly one push URL, byte-identical to its one fetch URL
+    (a remote.<name>.pushurl, an added URL or a pushInsteadOf rewrite fails closed), and resolves
+    to that URL, while any other --remote is itself the URL; the resolved destination is an
+    absolute local path, a file://, https:// or ssh:// URL, or an scp-like ssh destination
+    ([user@]host:path with no slash before the first colon, as git reads it; the scp-like
+    test checks shape only, and every rewrite and same-repository rule runs on the literal
+    destination text, as git matches it; a destination with a '::' before its first '/' (an
+    ext:: or other helper transport, whatever the helper's name), another scheme's URL, a
+    relative path and a bare name each fail closed, and so does an scp-like form whose user,
+    host or path part cannot be established), does not name a
+    configured remote, and is not empty, does not begin with '-' and carries no line break; no
+    legacy remotes or branches file exists under the git path at all (git reads such a file as a
+    remote definition, whatever name it carries); no url.<base>.insteadOf or url.<base>.pushInsteadOf
+    value is a prefix of the remote's raw configured URL or of the resolved URL (a rewrite that
+    applied, or would apply again to the resolved URL, fails closed, while an unrelated rewrite
+    for another URL stays allowed); no core.sshCommand, ssh.variant, remote.<name>.uploadpack or
+    remote.<name>.receivepack key is configured; and neither GIT_SSH nor GIT_SSH_COMMAND is set in
+    the environment. The advertisement is read from that literal URL, and a clean run prints it on
+    a `push destination:` line for tools/push_branch.py to push to, so a setting that rewrites or
+    routes the destination can never point the advertisement read and the push at different
+    repositories. Two residuals no local check can see: a server that routes its upload-pack and
+    receive-pack services to different repositories behind one URL splits the two sides anyway,
+    and the trusted toolchain itself (the git, ssh and transport-helper programs that PATH or
+    GIT_EXEC_PATH resolve) can route either service to another repository.
+    Every git read here ignores replace refs and a grafts file: a replace
+    ref could otherwise substitute a clean message, parent list or changelog for the ones the push
+    sends (the push transports the original objects), and a grafts file would cut parents out of the
+    scanned ancestry (a graft left in force also breaks the push itself, which the remote refuses
+    for missing objects, so ignoring it here is defence in depth). --base does
+    not define the set (it could not: commits below it that the remote lacks are published too); it is
+    kept as a CROSS-CHECK of the caller's intent and must still be a proper ancestor of the scanned
+    commit; when the default branch has advanced past the branch point, pass the merge-base
+    (git merge-base <default-branch> HEAD), not the advanced tip. --remote defaults to origin. --head
+    and --branch, when given, bind the scan to the exact commit and branch name the helper resolved
+    once and will push; without them HEAD and the current branch are resolved here. Channels: the body
+    file, the message of every commit in the scanned set, every string each of those commits adds to
+    the parsed changelog.toml against its parent or parents (keys and values alike, a multiset
+    difference per commit, so a string added and removed again inside the range is still scanned at the
+    intermediate state that carried it), and the branch name. On a clean run it prints `body sha256:`,
+    the digest of the exact body bytes it scanned, for the helper to reprint, and `push destination:`,
+    the one resolved URL the helper must push to.
+  - --self-test (honoured only as the SOLE argument): run embedded fail-cases in memory (CI invokes this
+    alongside the real run). Mixed with anything else it is an unknown argument and the run fails closed,
+    so it can never stand in for a requested production scan.
+
+ATTRIBUTION LAYER (pre-merge and pre-push phases; the post-merge push scan keeps its landed-message
+denylist scope). Three narrow patterns, nothing broader: a trailer-shaped `*-by:` line at line start
+whose value names an AI identity, a generated/written/drafted with/by/using phrase followed within a
+bounded window by an AI identity (matched against the original line, and the identity must BEGIN inside
+the window; its match may run past the edge, because a longer gpt- form such as a dated model id is
+itself an AI identity), and an AI vendor address bounded so a longer domain is not read as the vendor's. The
+identity set is defined in TWO PLACES kept byte-identical by a test: this gate's AI_IDENTITY_PATTERN and
+AI_IDENTITY_RE in the commit-identity hook (.aiqt/core/hooks/scripts/aiqt_hooks.py); the self-test
+extracts the hook's pattern from its source and fails on any drift, including a changed compile-call
+shape, so divergence is caught whenever the self-test runs. A bare product mention ("fix the Claude
+adapter's matcher") is NOT attribution and stays silent by design.
 
 HONEST SCOPE. Like check_leaks, this catches ACCIDENTAL reintroduction of internal terms/host specifics; it
 is not an exfiltration control, and deliberate obfuscation (mid-word splits, zero-width, homoglyphs) can
-evade the hash layer. It never echoes the matching text, token, codename, or a malformed field value (it
-reports the channel and, for a commit, the short SHA).
+evade the hash layer. The attribution layer is the same honesty: paraphrased attribution ("drafted with an
+assistant"), AI names outside the shared identity set, and attribution split across lines ("Generated
+with" ending one line, the name opening the next) are a disclosed residual; and the layer has a disclosed
+false-positive cost, because a bounded textual window cannot read intent: an authorship phrase followed
+within the window by an unrelated AI name, or a `*-by:` trailer whose value merely mentions one, fires
+(the self-test documents these). A push made without tools/push_branch.py never runs the pre-push mode at
+all. It never echoes the matching text, token, codename, or a malformed field value (it reports the
+channel and, for a commit, the short SHA).
 
 FAIL-CLOSED. A missing/unreadable/malformed/empty denylist, missing/unreadable/malformed event JSON, a PR
 event missing or mistyping a required field, a revision field that is not a canonical 40-hex SHA, a
 branch-creation push whose complete range cannot be established, an unresolvable commit range, or an event
-kind whose channel set cannot be established -> exit 2. A finding -> exit 1. Clean -> exit 0. Missing input
+kind whose channel set cannot be established -> exit 2. In --pre-push mode, additionally: an unknown,
+repeated or valueless argument, a missing required argument, a relative --repo or --body-file, a --repo
+that is not the repository root, a body file that is missing, a symlink, not a regular file, over
+MAX_BODY_BYTES or not UTF-8, an empty --title, --branch or --remote, a --base or --head that is not a
+canonical non-zero 40-hex SHA, a --head that does not name a commit in the repository, a --base that is
+not a proper ancestor of the scanned commit (base equal to it included; pass the merge-base when the
+default branch has advanced past the branch point), a --remote value that is empty or carries
+whitespace or an unprintable character, a configured remote whose push URL set is not exactly its
+one fetch URL (its configuration names more than one destination), a resolved push destination
+that is empty, begins with '-', carries a line break, names a configured remote, or is neither an
+absolute local path, a file://, https:// or ssh:// URL, nor an scp-like ssh destination with an
+establishable user, host and path, a legacy remotes or branches file
+existing under the git path at all, a url.<base>.insteadOf or pushInsteadOf value that is a
+prefix of the remote's raw configured URL or of the resolved URL, a core.sshCommand, ssh.variant,
+remote.<name>.uploadpack or remote.<name>.receivepack key, a GIT_SSH or GIT_SSH_COMMAND
+environment variable, a remote listing or configuration read that fails, a destination whose advertised refs cannot be read
+with git ls-remote (without them the published set cannot be established), unexpected ls-remote or git log
+output, a published set that is EMPTY (the remote already has every commit reachable from the scanned
+commit: scanning nothing is never read as clean), a changelog.toml that does not parse or has an
+unexpected shape at any published commit or any of its parents, a changelog.toml deleted at any
+published commit relative to a parent, a detached HEAD, or any git failure -> exit 2, and
+tools/push_branch.py refuses the push on it. A finding -> exit 1. Clean -> exit 0. Missing input
 is never read as clean. A confidentiality gate that cannot load its codename denylist does not run:
 absent/empty is exit 2, stricter than the file gate, because here there is no compensating repo-wide file
 scan behind it.
@@ -44,10 +139,13 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import hashlib
 import json
 import os
 import re
 import subprocess
+import tomllib
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -57,27 +155,85 @@ ROOT = Path(__file__).resolve().parents[1]
 _ZERO_SHA = "0" * 40
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")   # a canonical git object id (the zero-SHA also matches)
 
+# --- the AI-attribution layer (pre-merge and pre-push phases) -------------------------------------
+# AI_IDENTITY_PATTERN is kept byte-identical to AI_IDENTITY_RE in the commit-identity hook
+# (.aiqt/core/hooks/scripts/aiqt_hooks.py). These are TWO COPIES under a parity test, not one shared
+# runtime definition: the self-test extracts the hook's pattern from its source (AST, never an
+# import of that module) and fails on any drift, a changed compile-call shape included, so the gate
+# and the hook cannot diverge silently past a self-test run.
+AI_IDENTITY_PATTERN = (
+    r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
+    r"|@anthropic\.com|@openai\.com")
+AI_IDENTITY_RE = re.compile(AI_IDENTITY_PATTERN)
+# A trailer-shaped line: a `*-by:` key at line start (any leading blanks), so prose that merely
+# QUOTES a trailer key mid-sentence never matches; the finding needs an AI identity in the value.
+# A value that merely MENTIONS an AI name also fires: a documented false-positive cost.
+_AI_TRAILER_RE = re.compile(r"^[ \t]*[A-Za-z][A-Za-z0-9-]*-by[ \t]*:[ \t]*(?P<value>.*)$",
+                            re.IGNORECASE)
+# An authorship verb bound to with/by/using; the AI identity must then BEGIN inside the bounded
+# window right after the phrase, matched against the ORIGINAL line, never a slice of it: a longer
+# word that merely begins with an identity ("claudette") never matches at all, because the
+# pattern's word boundary decides that, not the window; an identity beginning inside the window
+# whose match runs past the edge still fires, because a longer gpt- form (a dated model id such
+# as gpt-4o-2024-08-06) is itself an AI identity; and a mention beginning past the window is not
+# bound to the phrase. A nearer mention that is unrelated ("generated by the protobuf compiler,
+# used by the Claude adapter") still fires: a bounded textual window cannot read intent, a
+# documented false-positive cost.
+_AI_PHRASE_RE = re.compile(r"(?i)\b(?:generated|written|drafted)[ \t]+(?:with|by|using)\b")
+_AI_PHRASE_WINDOW = 60
+# An AI vendor address names the vendor as a party wherever it appears (its usual carrier is a
+# generated Co-authored-by trailer, but the address alone is already attribution). The lookahead
+# requires the domain to END at .com, so a longer domain that merely begins with the vendor's
+# (@anthropic.community) is not read as the vendor's. The shared identity pattern above keeps its
+# boundary-free address alternatives to stay byte-identical with the hook, so through the trailer
+# and phrase layers such a longer domain can still fire: a documented false-positive cost.
+_AI_ADDRESS_RE = re.compile(r"(?i)@(?:anthropic|openai)\.com(?![a-z0-9-])")
+# The pre-push phase runs locally before anything is published; pre-merge is the CI backstop for a
+# body edited after the push. The post-merge scan deliberately keeps its landed-message scope.
+_ATTRIBUTION_PHASES = ("pre-merge", "pre-push")
+
+MAX_BODY_BYTES = 1024 * 1024   # a drafted PR body; anything larger is not one (fail closed)
+
 
 class FailClosed(Exception):
     """A condition under which the gate must exit 2 rather than risk a false clean."""
 
 
-def _run_git(args):
-    """Run git with an argv array (never a shell); fail closed on any error, without echoing git's stderr or
-    the revision values (which may reflect a leaked string)."""
+def _git_status(args, root=None, stdin_text=None):
+    """Launch git with an argv array (never a shell) and return (returncode, stdout), for the few
+    probes whose non-zero exit is an answer rather than an error; _run_git wraps this for every
+    read that must fail closed. Every launch reads the TRUE object graph: --no-replace-objects
+    keeps a refs/replace rewrite from substituting another commit's message, parents or changelog
+    for the ones the push sends (the push transports the original objects), and GIT_GRAFT_FILE
+    pinned to the null device keeps an info/grafts file from cutting parents out of the ancestry
+    walk, so neither mechanism can skew what the scan reads (a graft left in force also breaks
+    the push itself, which the remote refuses for missing objects, so the graft pin is defence
+    in depth rather than the only barrier)."""
+    env = dict(os.environ)
+    env["GIT_GRAFT_FILE"] = os.devnull
     try:
-        proc = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, encoding="utf-8")
+        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root or ROOT), *args],
+                              capture_output=True, encoding="utf-8", input=stdin_text, env=env)
     except (OSError, ValueError) as exc:                       # git missing, or undecodable output
         raise FailClosed("git invocation failed ({})".format(type(exc).__name__))
-    if proc.returncode != 0:
-        raise FailClosed("git {} exited non-zero ({})".format(args[0] if args else "?", proc.returncode))
-    return proc.stdout
+    return proc.returncode, proc.stdout
 
 
-def commit_messages(base, head):
+def _run_git(args, root=None, stdin_text=None):
+    """Run git through _git_status; fail closed on any error, without echoing git's stderr or
+    the revision values (which may reflect a leaked string). root (pre-push mode) defaults to ROOT (CI).
+    stdin_text, when given, is fed to git's standard input (used with --stdin so a large revision set is
+    never spliced into the argument vector)."""
+    returncode, stdout = _git_status(args, root, stdin_text)
+    if returncode != 0:
+        raise FailClosed("git {} exited non-zero ({})".format(args[0] if args else "?", returncode))
+    return stdout
+
+
+def commit_messages(base, head, root=None):
     """Return [(short_sha, message)] for base..head, parsed with unambiguous separators (not a shell).
     base and head are canonical SHAs validated by the caller before they reach git."""
-    out = _run_git(["log", "--no-color", "-z", "--format=%h%x1f%B", "{}..{}".format(base, head)])
+    out = _run_git(["log", "--no-color", "-z", "--format=%h%x1f%B", "{}..{}".format(base, head)], root)
     parsed = []
     for rec in (r for r in out.split("\0") if r):
         sha, _, body = rec.partition("\x1f")
@@ -85,11 +241,11 @@ def commit_messages(base, head):
     return parsed
 
 
-def require_denylist():
+def require_denylist(root=None):
     """Load the hashed denylist, failing closed on absent/empty/unreadable/malformed (a codename gate must
-    not run without its denylist). Returns (hashes, maxn)."""
+    not run without its denylist). Returns (hashes, maxn). root (pre-push mode) defaults to ROOT (CI)."""
     try:
-        hashes, maxn, bad = load_denylist(ROOT)
+        hashes, maxn, bad = load_denylist(root or ROOT)
     except (OSError, UnicodeError) as exc:                      # unreadable / non-UTF-8 denylist
         raise FailClosed("cannot read the leak denylist: {}".format(type(exc).__name__))
     if bad:
@@ -106,6 +262,47 @@ def scan_channels(channels, hashes, maxn):
     for label, text in channels:
         for _number, kind in scan_text(text, hashes, maxn, honor_leak_allow=False):
             findings.append("{}: {}".format(label, kind))
+    return findings
+
+
+def scan_attribution(channels):
+    """channels = [(label, text)]. The narrow AI-attribution layer (see the module docstring): a
+    `*-by:` trailer line whose value names an AI identity, a generated/written/drafted with/by/using
+    phrase with an AI identity inside the window right after it, and an AI vendor address. Returns
+    finding strings, never echoing the matched text. The identity is matched against the ORIGINAL
+    line, never a slice of it, and the match must BEGIN inside the window: a longer word that
+    merely begins with an identity ("claudette") never matches at all (the pattern's word boundary
+    decides), while a match that begins inside and runs past the edge still fires, because a
+    longer gpt- form (a dated model id) is itself an AI identity (tested at both edges)."""
+    findings = []
+    for label, text in channels:
+        for line in text.splitlines():
+            trailer = _AI_TRAILER_RE.match(line)
+            if trailer and AI_IDENTITY_RE.search(trailer.group("value")):
+                findings.append("{}: AI attribution (trailer)".format(label))
+            for phrase in _AI_PHRASE_RE.finditer(line):
+                identity = AI_IDENTITY_RE.search(line, phrase.end())
+                # The leftmost identity match at or after the phrase decides: any other match
+                # begins no earlier, so when this one begins at or past the window's end no
+                # identity begins inside it. (An end-inside rule would be unsound twice over: a
+                # long match beginning inside the window is dropped although a longer gpt- form
+                # is itself a model id, and an overlapped shorter identity ending inside the
+                # window is skipped because the search only ever returns the leftmost match.)
+                if identity and identity.start() < phrase.end() + _AI_PHRASE_WINDOW:
+                    findings.append("{}: AI attribution (generated-with phrase)".format(label))
+                    break
+            if _AI_ADDRESS_RE.search(line):
+                findings.append("{}: AI attribution (vendor address)".format(label))
+    return findings
+
+
+def all_findings(channels, phase, hashes, maxn):
+    """Every finding for one run: the denylist/STRUCTURAL scan on every phase, plus the attribution
+    layer on the _ATTRIBUTION_PHASES (commit-time attribution on the post-merge path is the
+    commit-identity hook's surface, and this keeps the post-merge tripwire's scope unchanged)."""
+    findings = scan_channels(channels, hashes, maxn)
+    if phase in _ATTRIBUTION_PHASES:
+        findings += scan_attribution(channels)
     return findings
 
 
@@ -184,20 +381,607 @@ def gather_channels(event_name, event):
     raise FailClosed("cannot establish the channel set for event kind: {}".format(event_name))
 
 
+def read_body_file(path_text):
+    """The drafted PR body for --pre-push: an absolute, non-symlink, regular file of at most
+    MAX_BODY_BYTES, strict UTF-8. Anything else fails closed; a missing or unreadable body is never
+    read as an empty (clean) one. An empty FILE is a valid empty body, matching how the CI mode
+    treats a JSON-null body. Returns (text, sha256 hex of the exact bytes read), so the digest the
+    helper prints can only describe the bytes this gate scanned."""
+    if not isinstance(path_text, str) or not os.path.isabs(path_text):
+        raise FailClosed("--body-file must be an absolute path")
+    if os.path.islink(path_text):
+        raise FailClosed("--body-file must not be a symlink")
+    path = Path(path_text)
+    if not path.is_file():
+        raise FailClosed("--body-file is missing or not a regular file")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise FailClosed("cannot read --body-file ({})".format(type(exc).__name__))
+    if len(data) > MAX_BODY_BYTES:
+        raise FailClosed("--body-file is over MAX_BODY_BYTES ({} bytes)".format(MAX_BODY_BYTES))
+    try:
+        return data.decode("utf-8"), hashlib.sha256(data).hexdigest()
+    except UnicodeError:
+        raise FailClosed("--body-file is not valid UTF-8")
+
+
+def _require_changelog_shape(doc, which):
+    """The shape guard for one parsed changelog.toml document, kept as strict as it was when only
+    release items were collected: the document is a table, release (when present) is an array of
+    tables, and items (when present in a release) is an array of strings."""
+    if not isinstance(doc, dict):
+        raise FailClosed("changelog.toml at {} is not a table".format(which))
+    releases = doc.get("release", [])
+    if not isinstance(releases, list):
+        raise FailClosed("changelog.toml at {}: release is not an array of tables".format(which))
+    for release in releases:
+        if not isinstance(release, dict):
+            raise FailClosed("changelog.toml at {}: a release entry is not a table".format(which))
+        entry_items = release.get("items", [])
+        if not isinstance(entry_items, list) or not all(isinstance(i, str) for i in entry_items):
+            raise FailClosed("changelog.toml at {}: items is not an array of strings".format(which))
+
+
+def _document_strings(doc):
+    """Every string in one parsed document: keys and values, nested tables and arrays included,
+    walked iteratively so document depth cannot raise RecursionError here. A non-string scalar (an
+    integer, float, boolean or date) carries no text to scan."""
+    strings, stack = [], [doc]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            strings.append(node)
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                strings.append(key)
+                stack.append(value)
+    return strings
+
+
+def _changelog_counter(text, which):
+    """The multiset of EVERY string in one parsed changelog.toml revision, keys and values alike;
+    None (a tree without the file) counts as empty. A parse or shape failure fails closed, naming
+    which revision (never its content)."""
+    if text is None:
+        return Counter()
+    try:
+        doc = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # tomllib raises a bare ValueError on an over-long integer literal, RecursionError on deep
+        # nesting, and parsing a pathological document can exhaust memory; each is the same verdict
+        # here: the changelog revision cannot be evaluated, so the gate fails closed.
+        raise FailClosed("changelog.toml at {} does not parse ({})".format(which, type(exc).__name__))
+    _require_changelog_shape(doc, which)
+    return Counter(_document_strings(doc))
+
+
+def changelog_added_items(base_text, head_text, base_name="base", head_name="head"):
+    """The strings present in changelog.toml at head but not at base, as a MULTISET difference over
+    EVERY string in each parsed document, keys and values alike (a string added a second time is an
+    addition), sorted for stable output. Scanning every string rather than a named subset means a
+    leak in any parsed field, a misspelled or unexpected one included, is scanned, never silently
+    ignored; only TOML comments are outside the parse. None stands for a revision whose tree has no
+    changelog.toml, with each absence defined explicitly: absent at both revisions, nothing was
+    added between them; absent only at base means the file is new and every string at head is an
+    addition; present at base but deleted at head fails closed (a deletion is never read as
+    clean). A parse error fails closed. The pre-push mode applies this per PUBLISHED COMMIT against
+    its parent (base_name and head_name label the refusals), never only at the endpoints, where a
+    string added and removed again inside the range would cancel out of the difference while its
+    intermediate blob is still published."""
+    if base_text is None and head_text is None:
+        return []
+    if head_text is None:
+        raise FailClosed("changelog.toml exists at {} but not at {}: a deleted changelog is "
+                         "never read as clean".format(base_name, head_name))
+    return sorted((_changelog_counter(head_text, head_name)
+                   - _changelog_counter(base_text, base_name)).elements())
+
+
+def _changelog_added_at(short, text, parent_texts):
+    """The changelog strings ONE published commit adds: present in its changelog.toml and carried
+    in from NO parent (for a merge, the multiset intersection of the per-parent differences, so a
+    string one parent already carried is that parent's, not an addition here). A root commit adds
+    every string. A changelog present at any parent but absent at the commit is a deletion and
+    fails closed, so no intermediate deletion is skipped."""
+    if not parent_texts:
+        parent_texts = [None]
+    if text is None:
+        if all(parent is None for parent in parent_texts):
+            return []
+        raise FailClosed("changelog.toml exists at a parent of commit {} but not at the commit: a "
+                         "deleted changelog is never read as clean".format(short))
+    added = None
+    commit_counter = _changelog_counter(text, "commit {}".format(short))
+    for number, parent_text in enumerate(parent_texts, 1):
+        step = commit_counter - _changelog_counter(
+            parent_text, "parent {} of commit {}".format(number, short))
+        added = step if added is None else (added & step)
+    return sorted(added.elements())
+
+
+def _rev_file_text(rev, rel, root):
+    """rel's text at revision rev, or None when rev's tree has no rel. Presence is decided by
+    ls-tree (exit 0 with empty output means absent), so absence is never conflated with another git
+    failure, which stays fail-closed through _run_git. The caller guarantees root is the repository
+    root (run_pre_push enforces it), so ls-tree's working-directory-relative path reading cannot
+    silently drop the file."""
+    listing = _run_git(["ls-tree", "-z", rev, "--", rel], root)
+    if not listing.strip("\0").strip():
+        return None
+    return _run_git(["show", "{}:{}".format(rev, rel)], root)
+
+
+# The only destination shapes the pre-push gate accepts: an absolute local path, one of these
+# scheme prefixes, or an scp-like ssh destination ([user@]host:path with no slash before the
+# first colon, as git reads it). The scp-like test checks shape only: no ssh:// form is derived
+# from it, and every later rule runs on the literal destination text, which is what git matches
+# a rewrite against. Anything else (a '::' before the first '/', which is how an ext:: or other
+# <helper>:: transport command is spelled, another scheme's URL, a relative path, a bare name)
+# runs a transport this gate does not vet or is read against the local filesystem or remote
+# definitions, so it fails closed rather than being handled case by case.
+_ALLOWED_URL_PREFIXES = ("file://", "https://", "ssh://")
+
+
+def _scp_like_split(destination):
+    """The ([user@]host, path) parts of a destination git reads as scp-like ssh, or None when
+    it is not one: a '://' anywhere makes it a scheme URL, and no ':' at all or a '/' before
+    the first ':' makes it a local path or a bare name. A '::' before the first '/' also gives
+    None, whatever precedes it: git hands everything after a leading helper name and '::' to
+    that helper program, and an scp host cannot contain '::' (a bracketed IPv6 host is refused
+    either way), so the form is refused rather than its helper-name grammar modelled here.
+    What remains splits at the first ':' into the [user@]host git connects to over ssh and the
+    path it hands to the remote service."""
+    if "://" in destination or "::" in destination.partition("/")[0]:
+        return None
+    head, sep, path = destination.partition(":")
+    if not sep or "/" in head:
+        return None
+    return head, path
+
+
+def _scp_like_unestablished_part(head, path):
+    """Which part of an scp-like destination cannot be established ("user", "host" or
+    "path"), or None when every part can; a shape test only. The user (everything before the
+    last '@', when one is present) and the host must each be non-empty and carry no bracket,
+    whitespace or unprintable character (a bracketed IPv6 host or an irregular name is refused
+    rather than guessed at), the host must not begin with '-' (ssh could read it as an
+    option), and the path must be non-empty. A user beginning with '-' is not tested here: it
+    begins the destination itself, which the resolver refuses before this test runs."""
+    user, at, host = head.rpartition("@")
+    for name, part in (("user", user), ("host", host)) if at else (("host", host),):
+        if (not part or (name == "host" and part.startswith("-"))
+                or any(ch.isspace() or not ch.isprintable() or ch in "[]" for ch in part)):
+            return name
+    if not path:
+        return "path"
+    return None
+
+
+# Configuration that routes or rewrites where a git service connects: any of these set at all
+# fails the resolution closed (the service split it can introduce is not observable afterwards).
+_SERVICE_KEY_PATTERN = r"^(core\.sshcommand|ssh\.variant|remote\..*\.(uploadpack|receivepack))$"
+_SSH_ENVIRONMENT_VARIABLES = ("GIT_SSH", "GIT_SSH_COMMAND")
+
+
+def _config_records(out):
+    """Split NUL-terminated git config -z output into records, keeping an empty record that is
+    a genuine (empty) value and dropping only the terminator artefact."""
+    if out == "":
+        return []
+    records = out.split("\0")
+    if records and records[-1] == "":
+        records.pop()
+    return records
+
+
+def _config_values(key, root):
+    """Every configured value of one key (git config -z --get-all), exact bytes with no
+    stripping (-z terminates each value with NUL, so a value's own line breaks survive). No
+    match is an empty list; any other failure fails closed."""
+    rc, out = _git_status(["config", "-z", "--get-all", key], root)
+    if rc == 1:
+        return []
+    if rc != 0:
+        raise FailClosed("cannot read the git configuration: the push destination cannot be "
+                         "established")
+    return _config_records(out)
+
+
+def _config_regexp(pattern, root):
+    """Every (key, value) pair whose key matches pattern (git config -z --get-regexp): each -z
+    record is the key, one newline, the value, and a key cannot carry a newline, so splitting at
+    the first newline is exact even for a value with line breaks. No match is an empty list; any
+    other failure fails closed."""
+    rc, out = _git_status(["config", "-z", "--get-regexp", pattern], root)
+    if rc == 1:
+        return []
+    if rc != 0:
+        raise FailClosed("cannot read the git configuration: the push destination cannot be "
+                         "established")
+    pairs = []
+    for record in _config_records(out):
+        key, _sep, value = record.partition("\n")
+        pairs.append((key, value))
+    return pairs
+
+
+def _legacy_file_refusal(legacy, destination):
+    """The refusal for a populated legacy remotes or branches directory, worded for the
+    destination it refuses: git reads a file there as the remote definition of a destination
+    with no '/' that it is named after, so for such a destination the push destination cannot
+    be established, while a destination with a '/' is never read that way and is refused as
+    defence in depth."""
+    if "/" not in destination:
+        return ("a legacy {} file exists under the git path: git reads such a file as the "
+                "remote definition of a destination with no '/' that it is named after, and "
+                "this destination has no '/', so the push destination cannot be "
+                "established".format(legacy))
+    return ("a legacy {} file exists under the git path: git reads such a file as a remote "
+            "definition only for a destination with no '/', so this destination is not read "
+            "that way, but any such file is refused whatever the destination's shape (defence "
+            "in depth) and the push destination is not accepted".format(legacy))
+
+
+def _resolve_push_destination(remote, root):
+    """git ls-remote reads the advertisement of a FETCH URL, while git push writes to a PUSH
+    URL, so a scanned set derived from that advertisement describes the push only when both name
+    one repository; otherwise a commit the fetch repository already holds is excluded from the
+    scan yet still sent to the push repository. --remote is therefore resolved ONCE, here, to a
+    single literal URL, and the push is accepted only when EVERY condition of a closed set
+    holds; each refusal names its reason. The set: the --remote value is printable with no
+    whitespace (git's own name and path handling can otherwise read a different remote
+    definition than the one checked, e.g. a legacy file whose name ends in a space); a
+    configured remote has exactly one fetch URL and one byte-identical push URL (git remote
+    get-url expands remote.<name>.url, remote.<name>.pushurl and the insteadOf/pushInsteadOf
+    rewrites, so an extra URL, a differing pushurl or a push-side rewrite shows up here) and
+    resolves to that URL, while any other --remote is itself the URL; the destination is not
+    empty, does not begin with '-' and carries no line break (it could not be handed to git or
+    printed as the one destination line), does not name a configured remote, and is an absolute
+    local path, a file://, https:// or ssh:// URL, or an scp-like ssh destination
+    ([user@]host:path with no slash before the first colon, as git reads it, tested for shape
+    only, so every rule below runs on its literal text, as on any other destination's, and
+    refused when its user, host or path part cannot be established; the legacy-file and
+    configured-remote rules keep a name git could also read as a remote definition from being
+    read as one; any other shape, a '::' before the first '/' (an ext:: or other helper
+    transport, whatever the helper's name), another scheme's URL, a relative path or a bare
+    name, runs a transport this gate does not vet or is read against the local filesystem or
+    remote definitions); no legacy remotes or branches file exists under the git path at all
+    (git reads such a file as the remote definition of a destination with no '/' that it is
+    named after, and presence alone fails closed rather than matching names, defence in depth
+    for a destination with a '/', which git never reads that way); no url.<base>.insteadOf
+    or pushInsteadOf value is a prefix of the remote's raw configured URL or of the resolved URL
+    (git applies a rewrite by longest prefix match against the literal URL text, the scp-like
+    text included, so a matching value means a rewrite applied
+    on the way to this URL or would apply again to it, redirecting ls-remote or the push past
+    the resolved destination; an unrelated rewrite for another URL matches nothing and stays
+    allowed); no core.sshCommand, ssh.variant, remote.<name>.uploadpack or
+    remote.<name>.receivepack key is configured and neither GIT_SSH nor GIT_SSH_COMMAND is set
+    (each routes the transport or program a git service uses, so one service can be served from
+    another repository; each is refused whatever the destination's shape, defence in depth
+    where this destination would never consult it). Two residuals stay outside any local check:
+    a server that routes its upload-pack and receive-pack services to different repositories
+    behind one URL, and the trusted toolchain itself, the git, ssh and transport-helper
+    programs that PATH or GIT_EXEC_PATH resolve."""
+    if not remote or any(ch.isspace() or not ch.isprintable() for ch in remote):
+        raise FailClosed("the --remote value is empty or carries whitespace or an unprintable "
+                         "character: git's name and path handling could read a different "
+                         "remote definition than the one checked, so the push destination "
+                         "cannot be established")
+    rc, names = _git_status(["remote"], root)
+    if rc != 0:
+        raise FailClosed("cannot list the configured remotes: the push destination cannot be "
+                         "established")
+    remote_names = names.splitlines()
+    destination = remote
+    raw_urls = [remote]
+    if remote in remote_names:
+        fetch_urls = _run_git(["remote", "get-url", "--all", remote], root).splitlines()
+        push_urls = _run_git(["remote", "get-url", "--push", "--all", remote], root).splitlines()
+        if len(fetch_urls) != 1 or push_urls != fetch_urls:
+            raise FailClosed("the remote's push URL set is not exactly its one fetch URL (a "
+                             "pushurl, an added URL or a pushInsteadOf rewrite): the remote's "
+                             "configuration names more than one destination, so one literal "
+                             "push destination cannot be established (the push itself goes "
+                             "only to the resolved URL, so this rule is defence in depth "
+                             "beside the rewrite rules below)")
+        destination = fetch_urls[0]
+        raw_urls = (_config_values("remote.{}.url".format(remote), root)
+                    + _config_values("remote.{}.pushurl".format(remote), root))
+    if (not destination or destination.startswith("-")
+            or "\n" in destination or "\r" in destination):
+        raise FailClosed("the resolved push destination is empty, begins with '-' or carries a "
+                         "line break: it cannot be handed to git ls-remote and git push as one "
+                         "URL, so the push destination cannot be established")
+    if destination in remote_names:
+        raise FailClosed("the resolved push destination names a configured remote: that "
+                         "remote's own URL set and settings, not the resolved URL, would "
+                         "decide where the push writes, so the push destination cannot be "
+                         "established")
+    for legacy in ("remotes", "branches"):
+        listed = _run_git(["rev-parse", "--git-path", legacy], root)
+        if listed.endswith("\n"):
+            listed = listed[:-1]
+        if not listed:
+            raise FailClosed("cannot locate the legacy {} path under the git directory: the "
+                             "push destination cannot be established".format(legacy))
+        legacy_path = os.path.join(str(root or ROOT), listed)
+        if os.path.lexists(legacy_path):
+            if not os.path.isdir(legacy_path):
+                raise FailClosed("a legacy {} entry exists under the git path and is not a "
+                                 "directory: the remote definitions git could read through it "
+                                 "cannot be inspected, so it is refused whatever the "
+                                 "destination's shape (defence in depth) and the push "
+                                 "destination is not accepted".format(legacy))
+            try:
+                entries = os.listdir(legacy_path)
+            except OSError:
+                raise FailClosed("cannot read the legacy {} directory under the git path: the "
+                                 "push destination cannot be established".format(legacy))
+            if entries:
+                raise FailClosed(_legacy_file_refusal(legacy, destination))
+    if not (destination.startswith("/") or destination.startswith(_ALLOWED_URL_PREFIXES)):
+        parts = _scp_like_split(destination)
+        if parts is None:
+            raise FailClosed("the resolved push destination is not an absolute local path, a "
+                             "file://, https:// or ssh:// URL, or an scp-like ssh destination "
+                             "([user@]host:path with no slash before the first colon and no "
+                             "'::' before the first '/'): a bare name or a relative path is "
+                             "read against the local filesystem or the repository's own remote "
+                             "definitions, and an ext:: or other helper transport or another "
+                             "scheme's URL runs a transport this gate does not vet, so the push "
+                             "destination cannot be established")
+        part = _scp_like_unestablished_part(*parts)
+        if part == "path":
+            raise FailClosed("the resolved push destination is scp-like, but its path part is "
+                             "empty, so the push destination cannot be established")
+        if part is not None:
+            raise FailClosed("the resolved push destination is scp-like, but its {} part "
+                             "cannot be established (it is empty{}, or carries a bracket, "
+                             "whitespace or an unprintable character), so the push destination "
+                             "cannot be established".format(
+                                 part, ", begins with '-'" if part == "host" else ""))
+    candidates = set(raw_urls)
+    candidates.add(destination)
+    for key, value in _config_regexp(r"^url\..*\.(insteadof|pushinsteadof)$", root):
+        kind = "pushInsteadOf" if key.endswith(".pushinsteadof") else "insteadOf"
+        if value == "" or any(candidate.startswith(value) for candidate in candidates):
+            raise FailClosed("a url.<base>.{} rewrite matches the remote's configured or "
+                             "resolved URL as a prefix: the advertisement read or the push "
+                             "would be redirected past the resolved destination, so the push "
+                             "destination cannot be established".format(kind))
+    for key, _value in _config_regexp(_SERVICE_KEY_PATTERN, root):
+        if key == "core.sshcommand":
+            which = "core.sshCommand"
+        elif key == "ssh.variant":
+            which = "ssh.variant"
+        else:
+            which = "remote uploadpack or receivepack"
+        raise FailClosed("a {} setting is configured: it routes the transport or program a git "
+                         "service uses, so one service could be served from another repository; "
+                         "any such setting is refused whatever the destination's shape (defence "
+                         "in depth where this destination would never consult it), so the push "
+                         "destination cannot be established".format(which))
+    for variable in _SSH_ENVIRONMENT_VARIABLES:
+        if variable in os.environ:
+            raise FailClosed("the {} environment variable is set: it routes the transport an "
+                             "ssh push uses, so one service could be served from another "
+                             "repository; it is refused whatever the destination's shape "
+                             "(defence in depth where the destination is not ssh), so the push "
+                             "destination cannot be established".format(variable))
+    return destination
+
+
+def _remote_advertised_shas(destination, root):
+    """Every object id the push destination advertises RIGHT NOW, read with git ls-remote over
+    the resolved destination URL at check time: local remote-tracking refs can be stale, and a
+    path or URL remote has none at all, so neither is consulted. A failure to read the
+    advertisement fails closed (without it the set of commits the push would publish cannot be
+    established), and so does an output line without a canonical object id."""
+    try:
+        out = _run_git(["ls-remote", "--quiet", destination], root)
+    except FailClosed:
+        raise FailClosed("cannot read the refs the remote advertises (git ls-remote failed): the "
+                         "set of commits the push would publish cannot be established")
+    shas = set()
+    for line in out.splitlines():
+        sha = line.split("\t", 1)[0].strip()
+        if not _SHA_RE.match(sha):
+            raise FailClosed("unexpected git ls-remote output: the advertised refs cannot be "
+                             "established")
+        shas.add(sha)
+    return shas
+
+
+def _published_commits(head, advertised, root):
+    """The commits the push would PUBLISH: every commit reachable from head and not reachable from
+    any object the remote advertises, as [(sha, short_sha, [parent shas], message)] in rev-list
+    order. The revision set is fed to git on stdin (never spliced into the argument vector), and
+    --ignore-missing drops an advertised object this repository does not have: an object we do not
+    have cannot be in head's ancestry, so dropping it excludes nothing. Unexpected output fails
+    closed; an empty result (the remote already has head) is the caller's to refuse."""
+    feed = "\n".join([head, "--not"] + sorted(advertised)) + "\n"
+    out = _run_git(["log", "--no-color", "-z", "--format=%H%x1f%h%x1f%P%x1f%B",
+                    "--ignore-missing", "--stdin"], root, stdin_text=feed)
+    rows = []
+    for rec in (r for r in out.split("\0") if r):
+        parts = rec.split("\x1f", 3)
+        if len(parts) != 4:
+            raise FailClosed("unexpected git log output: the published commit set cannot be "
+                             "established")
+        full, short, parent_field, message = parts
+        parents = parent_field.split()
+        if not _SHA_RE.match(full) or not short or not all(_SHA_RE.match(p) for p in parents):
+            raise FailClosed("unexpected git log output: the published commit set cannot be "
+                             "established")
+        rows.append((full, short, parents, message))
+    return rows
+
+
+def pre_push_channels(repo, base, body, title, head=None, branch=None, remote="origin"):
+    """Build the pre-push channel list over the repository at repo: the composed title+body (one
+    blob, the CI rule), the message of every commit the push would publish, every changelog.toml
+    string each of those commits adds against its parent or parents, and the branch name. head and
+    branch, when given, come from tools/push_branch.py, which resolves both ONCE and pushes exactly
+    that commit to exactly that branch, so the scan and the push are bound to the same commit even
+    if HEAD moves in between; without them HEAD and the current branch are resolved here (a
+    detached HEAD fails closed: the push targets a branch, so without one there is nothing to bind
+    the scan to). The SCANNED SET is every commit reachable from the scanned commit and not
+    reachable from any object the push destination advertises at check time (git ls-remote over
+    the one URL _resolve_push_destination resolved, never local remote-tracking refs), which is
+    what the push sends to that same literal URL; an empty set fails closed
+    rather than scanning nothing and reading it as clean. base does NOT define the set (a commit below it
+    the remote lacks is published and scanned all the same); it stays as a cross-check and must be
+    a proper ancestor of the scanned commit. The changelog delta is taken PER COMMIT in the set, so
+    every intermediate state the push publishes is scanned, including one later removed again.
+    Returns (channels, destination): the resolved destination URL is printed on a clean run for
+    the helper to push to."""
+    if head is None:
+        head = _run_git(["rev-parse", "--verify", "HEAD^{commit}"], repo).strip()
+        if not _SHA_RE.match(head):
+            raise FailClosed("cannot resolve HEAD to a canonical 40-hex SHA")
+    else:
+        resolved = _run_git(["rev-parse", "--verify", head + "^{commit}"], repo).strip()
+        if resolved != head:
+            raise FailClosed("--head does not name a commit in this repository")
+    if branch is None:
+        branch = _run_git(["symbolic-ref", "--short", "HEAD"], repo).strip()
+        if not branch:
+            raise FailClosed("cannot establish the current branch (detached HEAD)")
+    if base == head:
+        raise FailClosed("--base equals the scanned commit: the push would add no commits, and an "
+                         "empty range is never read as clean")
+    try:
+        _run_git(["merge-base", "--is-ancestor", base, head], repo)
+    except FailClosed:
+        raise FailClosed("--base is not a proper ancestor of the scanned commit (a cross-check of "
+                         "the caller's intent; when the default branch has advanced past the "
+                         "branch point, pass the merge-base, from git merge-base <default-branch> "
+                         "HEAD, not the advanced tip)")
+    destination = _resolve_push_destination(remote, repo)
+    rows = _published_commits(head, _remote_advertised_shas(destination, repo), repo)
+    if not rows:
+        raise FailClosed("the remote already has every commit reachable from the scanned commit: "
+                         "the push would publish no new commits, and scanning nothing is never "
+                         "read as clean")
+    channels = [("commit {}".format(short), message) for _full, short, _parents, message in rows]
+    channels.append(("PR body file", (title + "\n\n" + body) if title is not None else body))
+    texts = {}
+
+    def changelog_at(sha):
+        if sha not in texts:
+            texts[sha] = _rev_file_text(sha, "changelog.toml", repo)
+        return texts[sha]
+
+    for full, short, parents, _message in rows:
+        added = _changelog_added_at(short, changelog_at(full),
+                                    [changelog_at(parent) for parent in parents])
+        for number, item in enumerate(added, 1):
+            channels.append(("commit {} changelog string added #{}".format(short, number), item))
+    channels.append(("branch name", branch))
+    return channels, destination
+
+
+def parse_pre_push_argv(argv):
+    """Strict flag parsing for --pre-push: exactly --repo, --body-file, --base and optionally
+    --title, --head, --branch and --remote, each with one value, each at most once. Anything else
+    fails closed (an unknown flag silently skipped could drop a channel)."""
+    opts = {"repo": None, "body-file": None, "base": None, "title": None, "head": None,
+            "branch": None, "remote": None}
+    arguments = list(argv)
+    while arguments:
+        flag = arguments.pop(0)
+        name = flag[2:] if flag.startswith("--") else None
+        if name not in opts:
+            raise FailClosed("unknown --pre-push argument")
+        if opts[name] is not None:
+            raise FailClosed("repeated --pre-push argument: --{}".format(name))
+        if not arguments:
+            raise FailClosed("--{} requires a value".format(name))
+        opts[name] = arguments.pop(0)
+    if any(opts[required] is None for required in ("repo", "body-file", "base")):
+        raise FailClosed("--pre-push requires --repo, --body-file and --base")
+    return opts
+
+
+def require_base(value):
+    """The explicit --base: a canonical, non-zero, lower-case 40-hex SHA (so a branch name, HEAD, an
+    abbreviation or the zero SHA can never be interpolated into git revision syntax)."""
+    if not isinstance(value, str) or not _SHA_RE.match(value) or value == _ZERO_SHA:
+        raise FailClosed("--base is not a canonical non-zero 40-hex SHA")
+    return value
+
+
+def require_head(value):
+    """The explicit --head, the exact commit the helper will push: the same canonical rule as
+    --base, for the same reason."""
+    if not isinstance(value, str) or not _SHA_RE.match(value) or value == _ZERO_SHA:
+        raise FailClosed("--head is not a canonical non-zero 40-hex SHA")
+    return value
+
+
+def run_pre_push(argv):
+    opts = parse_pre_push_argv(argv)
+    if not os.path.isabs(opts["repo"]) or not os.path.isdir(opts["repo"]):
+        raise FailClosed("--repo must be an absolute path to an existing directory")
+    repo = Path(opts["repo"])
+    toplevel = _run_git(["rev-parse", "--show-toplevel"], repo).strip()
+    if not toplevel or os.path.realpath(toplevel) != os.path.realpath(str(repo)):
+        raise FailClosed("--repo must be the repository root: from a subdirectory the changelog "
+                         "would read as absent (and therefore clean) under ls-tree's "
+                         "working-directory-relative paths")
+    base = require_base(opts["base"])
+    head = require_head(opts["head"]) if opts["head"] is not None else None
+    branch = opts["branch"]
+    if branch is not None and not branch.strip():
+        raise FailClosed("--branch, when given, must be non-empty")
+    title = opts["title"]
+    if title is not None and not title.strip():
+        raise FailClosed("--title, when given, must be non-empty")
+    if opts["remote"] is not None and not opts["remote"].strip():
+        raise FailClosed("--remote, when given, must be non-empty")
+    remote = opts["remote"] if opts["remote"] is not None else "origin"
+    body, body_digest = read_body_file(opts["body-file"])
+    hashes, maxn = require_denylist(repo)
+    channels, destination = pre_push_channels(repo, base, body, title, head, branch, remote)
+    findings = all_findings(channels, "pre-push", hashes, maxn)
+    if findings:
+        print("FAIL: {} possible finding(s) in pre-push channels".format(len(findings)))
+        for finding in sorted(set(findings)):
+            print("  " + finding)
+        return 1
+    print("body sha256: {}".format(body_digest))
+    print("push destination: {}".format(destination))
+    print(_SCOPE.format(phase="pre-push", scanned=_SCANNED["pre-push"]))
+    return 0
+
+
 _SCANNED = {
     "pre-merge": "the commit messages in base..head, the composed PR title+body, and the PR head ref",
     "post-merge": "the messages of the newly landed commits (before..after)",
+    "pre-push": "the PR body file (composed with any --title), the message of every commit the "
+                "push would publish (reachable from the pushed commit, absent from every ref the "
+                "remote advertises at check time), every string each published commit adds to the "
+                "parsed changelog.toml against its parent or parents (keys and values; TOML "
+                "comments are not parsed, so not scanned), and the branch name",
 }
-_SCOPE = ("PASS ({phase}): scanned STRUCTURAL patterns and the hashed codename denylist across {scanned}. "
-          "NOT CHECKED here: file contents (check_leaks + gitleaks own those), reviews/comments/issues, "
-          "author identity, other branches/tags. This detects accidental reintroduction in text push has "
-          "already made public; it is not an exfiltration control and cannot un-expose pushed text.")
+_SCOPE = ("PASS ({phase}): scanned STRUCTURAL patterns and the hashed codename denylist, plus (pre-merge "
+          "and pre-push only) the narrow AI-attribution patterns (a *-by: trailer naming an AI, a "
+          "generated/written/drafted with/by/using phrase naming an AI, an AI vendor address), across "
+          "{scanned}. NOT CHECKED here: file contents (check_leaks + gitleaks own those), "
+          "reviews/comments/issues, paraphrased attribution, AI names outside the shared identity set, "
+          "attribution split across lines, other branches/tags. The CI phases detect accidental "
+          "reintroduction in text push has already made public (not an exfiltration control; they cannot "
+          "un-expose pushed text); only the pre-push mode runs before publication, and only over the "
+          "channels it is handed.")
 
 
 def run(event_name, event):
     hashes, maxn = require_denylist()
     channels, phase = gather_channels(event_name, event)
-    findings = scan_channels(channels, hashes, maxn)
+    findings = all_findings(channels, phase, hashes, maxn)
     if findings:
         print("FAIL: {} possible leak(s) in commit-message / PR-metadata channels".format(len(findings)))
         for finding in sorted(set(findings)):
@@ -208,9 +992,11 @@ def run(event_name, event):
 
 
 def main(argv):
-    if "--self-test" in argv:
+    if argv == ["--self-test"]:        # honoured only as the sole argument, never mixed into a real run
         return self_test()
     try:
+        if argv and argv[0] == "--pre-push":
+            return run_pre_push(argv[1:])
         event_name = os.environ.get("GITHUB_EVENT_NAME", "")
         if not event_name:
             raise FailClosed("GITHUB_EVENT_NAME is not set (this gate runs in CI on a pull_request/push event)")
@@ -218,6 +1004,31 @@ def main(argv):
     except FailClosed as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
+
+
+def _hook_identity_pattern():
+    """AI_IDENTITY_RE's pattern string as the commit-identity hook defines it, extracted from the
+    AST of .aiqt/core/hooks/scripts/aiqt_hooks.py (never imported: it is a large event-hook module,
+    and the gate must not execute it). Self-test only; a hook source without the assignment is a
+    self-test failure, never a silent pass. The call must be exactly one positional string constant
+    with no other arguments: a flags argument would change matching while leaving the pattern
+    strings equal, so any other call shape on the HOOK's side fails the parity test instead of
+    passing it. This inspects the hook only; the GATE's own compile call is checked at run time in
+    the self-test, which compares the compiled regex's pattern and flags against a bare compile of
+    that pattern, so a flags argument on either side fails the parity test."""
+    import ast
+    source = (ROOT / ".aiqt" / "core" / "hooks" / "scripts" / "aiqt_hooks.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "AI_IDENTITY_RE"
+                and isinstance(node.value, ast.Call)):
+            if (len(node.value.args) != 1 or node.value.keywords
+                    or not isinstance(node.value.args[0], ast.Constant)
+                    or not isinstance(node.value.args[0].value, str)):
+                raise AssertionError("the hook's AI_IDENTITY_RE is no longer a single-string compile "
+                                     "call; pattern-string parity alone cannot prove equal matching")
+            return node.value.args[0].value
+    raise AssertionError("AI_IDENTITY_RE assignment not found in the hooks source")
 
 
 def _expect(condition, message=None):
@@ -313,11 +1124,487 @@ def self_test():
         raise AssertionError("a non-JSON constant (NaN) must be rejected by strict event parsing")
     except ValueError:
         pass
+    # 11. attribution layer: each finding shape fires and reports only the channel + class label
+    for text, kind in (("t\n\nCo-authored-by: Claude <c@example.org>", "trailer"),
+                       ("CO-AUTHORED-BY: Codex\r\nmore text", "trailer"),            # case + CRLF
+                       ("  Generated-by: gemini", "trailer"),                        # indented trailer
+                       ("This change was generated with Claude Code.", "generated-with phrase"),
+                       ("Docs drafted using ChatGPT.", "generated-with phrase"),
+                       ("written by claude", "generated-with phrase"),
+                       ("Contact noreply@anthropic.com for details.", "vendor address")):
+        f = scan_attribution([("ch", text)])
+        _expect(f == ["ch: AI attribution ({})".format(kind)], (text, f))
+        _expect("claude" not in " ".join(f).lower() and "codex" not in " ".join(f).lower()
+                and "gemini" not in " ".join(f).lower() and "chatgpt" not in " ".join(f).lower(),
+                "attribution findings must not echo the matched identity")
+    # a generated trailer usually carries the vendor address too: both classes are reported
+    both = scan_attribution([("ch", "Co-authored-by: Claude <noreply@anthropic.com>")])
+    _expect(sorted(both) == ["ch: AI attribution (trailer)", "ch: AI attribution (vendor address)"], both)
+    # 12. attribution narrowness: product mentions, quoted keys, human or lookalike values, longer
+    # domains that merely begin with a vendor's, and line-split attribution all stay silent
+    for quiet in ("as a Skill you upload to Claude or a portable instruction file for other "
+                  "assistants (ChatGPT, Copilot, Gemini)",
+                  "fix the Claude adapter's matcher",
+                  "`Co-authored-by:` trailers naming an AI are refused",
+                  "Docs: the line Co-authored-by: Claude is refused at commit time",  # key not at start
+                  "Co-authored-by: Jane Doe <jane@example.org>",
+                  "Co-authored-by: Claudette <c@example.org>",                        # word boundary
+                  "benchmarks against gpt-4o show parity",
+                  "Write to ops@anthropic.community for access",     # the domain must END at .com
+                  "Generated with\nClaude Code",     # line-split attribution: a disclosed residual
+                  ""):
+        _expect(scan_attribution([("ch", quiet)]) == [], quiet)
+    # 12b. documented precision residuals: a bounded textual window and a trailer value scan cannot
+    # read intent, so an authorship phrase followed inside the window by an unrelated AI name, and a
+    # trailer whose value merely mentions an AI name, fire as findings. Each is a disclosed false
+    # positive, asserted here so a change to this behavior is a deliberate one.
+    for text, kind in (
+            ("Code generated by the protobuf compiler, used by the Claude adapter.",
+             "generated-with phrase"),
+            ("Fixtures generated using the OpenAI-compatible endpoint of our own server.",
+             "generated-with phrase"),
+            ("The checklist was written by a copilot of the flight crew.",
+             "generated-with phrase"),
+            ("Reported-by: Jane Doe, who maintains the Gemini adapter", "trailer")):
+        _expect(scan_attribution([("ch", text)]) == ["ch: AI attribution ({})".format(kind)], text)
+    # 13. phrase-window boundaries: the identity is matched against the ORIGINAL line and the match
+    # must BEGIN inside the window (the window's last position is tested just inside, exactly at,
+    # and just outside); a match beginning inside may run past the edge and still fires, because a
+    # longer gpt- form (a dated model id) is itself an AI identity; and a longer word that merely
+    # begins with an identity ("claudette") never matches at all: the pattern's word boundary
+    # decides, not a slice. The filler is non-word so only the window decides.
+    fires = ["ch: AI attribution (generated-with phrase)"]
+    inside = "generated with" + "." * (_AI_PHRASE_WINDOW - 6) + "claude"    # begins well inside
+    _expect(len(inside) - len("generated with") == _AI_PHRASE_WINDOW, "fixture arithmetic")
+    _expect(scan_attribution([("ch", inside)]) == fires, inside)
+    last_in = "generated with" + "." * (_AI_PHRASE_WINDOW - 1) + "claude"   # begins at the last
+    _expect(scan_attribution([("ch", last_in)]) == fires, last_in)          # position inside
+    straddle = "generated with" + "." * (_AI_PHRASE_WINDOW - 5) + "claude"  # begins inside, runs
+    _expect(scan_attribution([("ch", straddle)]) == fires, straddle)        # one past the edge
+    outside = "generated with" + "." * _AI_PHRASE_WINDOW + "claude"         # begins at the first
+    _expect(scan_attribution([("ch", outside)]) == [], outside)             # position outside
+    past = "generated with" + "." * (_AI_PHRASE_WINDOW + 1) + "claude"      # begins further out
+    _expect(scan_attribution([("ch", past)]) == [], past)
+    cut = "generated with" + "." * (_AI_PHRASE_WINDOW - 6) + "claudette"    # no word boundary:
+    _expect(scan_attribution([("ch", cut)]) == [], cut)                     # never an identity
+    dated = "generated with" + "." * (_AI_PHRASE_WINDOW - 5) + "gpt-4o-2024-08-06"
+    _expect(scan_attribution([("ch", dated)]) == fires, dated)   # a dated model id begins inside
+    _expect(scan_attribution([("ch", "Generated using the in-house summarisation wrapper around "
+                                     "the gpt-4o-2024-08-06 model")]) == fires,
+            "a dated gpt- model id past an end-inside window must still fire")
+    # overlapping candidates: the leftmost match (a long gpt- form) begins inside the window and
+    # fires even though it ends far outside; an end-inside rule read this line as silent while the
+    # shorter identity ending inside was unreachable, because a search returns only the leftmost
+    # of overlapping matches
+    overlap = "generated with " + "." * 40 + "gpt-4.claude-" + "a" * 30
+    _expect(scan_attribution([("ch", overlap)]) == fires, overlap)
+    # 14. the phase wiring: attribution runs pre-merge and pre-push, never post-merge
+    ch = [("commit abc1234", "Co-authored-by: Claude <c@example.org>")]
+    _expect(all_findings(ch, "pre-merge", hashes, maxn) == ["commit abc1234: AI attribution (trailer)"])
+    _expect(all_findings(ch, "pre-push", hashes, maxn) == ["commit abc1234: AI attribution (trailer)"])
+    _expect(all_findings(ch, "post-merge", hashes, maxn) == [])
+    # 15. the identity set: two copies kept byte-identical by this parity test (the gate's pattern
+    # against the hook's, extracted from the hook's source), checked on BOTH sides: the extractor
+    # constrains the hook's compile-call shape, and the gate's own compiled regex must carry the
+    # published pattern and the flags a bare compile of it yields, so a flags argument added on
+    # either side fails here instead of changing matching while the pattern strings stay equal
+    _expect(_hook_identity_pattern() == AI_IDENTITY_PATTERN,
+            "AI_IDENTITY_PATTERN drifted from the commit-identity hook's AI_IDENTITY_RE")
+    _expect(AI_IDENTITY_RE.pattern == AI_IDENTITY_PATTERN,
+            "the gate's compiled AI_IDENTITY_RE no longer carries AI_IDENTITY_PATTERN")
+    _expect(AI_IDENTITY_RE.flags == re.compile(AI_IDENTITY_PATTERN).flags,
+            "a flags argument on the gate's own compile call changes matching while the pattern "
+            "strings stay equal")
+    # 16. changelog delta: a multiset difference over EVERY string in the parsed document (keys and
+    # values), fail-closed on parse/shape and on a changelog deleted at head
+    base_toml = 'title = "t"\n[[release]]\nitems = ["kept item"]\n'
+    head_toml = 'title = "t"\n[[release]]\nitems = ["kept item", "new: drafted using ChatGPT"]\n'
+    added = changelog_added_items(base_toml, head_toml)
+    _expect(added == ["new: drafted using ChatGPT"], added)
+    _expect(scan_attribution([("changelog string added #1", added[0])])
+            == ["changelog string added #1: AI attribution (generated-with phrase)"])
+    _expect(changelog_added_items(head_toml, base_toml) == [])      # a removal adds nothing
+    # a misspelled items key is still scanned: the key and its string value are both additions
+    mis_head = base_toml + 'item = "notes drafted using ChatGPT"\n'
+    _expect(changelog_added_items(base_toml, mis_head) == ["item", "notes drafted using ChatGPT"])
+    # a release field other than items (a second release's title here) is scanned too
+    title_head = base_toml + '[[release]]\ntitle = "alpha bravo drafted using ChatGPT"\n'
+    added = changelog_added_items(base_toml, title_head)
+    _expect(added == ["alpha bravo drafted using ChatGPT", "title"], added)
+    _expect(scan_channels([("changelog string added #1", added[0])], hashes, maxn)
+            == ["changelog string added #1: internal codename (hash match)"])
+    _expect(changelog_added_items(None, base_toml)                  # file new at head: all strings added
+            == ["items", "kept item", "release", "t", "title"])
+    _expect(changelog_added_items(None, None) == [])                # a repository without a changelog
+    try:
+        changelog_added_items(base_toml, None)                      # deleted at head: never clean
+        raise AssertionError("expected FailClosed for a changelog deleted at head")
+    except FailClosed:
+        pass
+    dup_head = 'title = "t"\n[[release]]\nitems = ["kept item", "kept item"]\n'
+    _expect(changelog_added_items(base_toml, dup_head) == ["kept item"], "multiset, not set")
+    # 16b. the per-commit walk the pre-push mode uses over every published commit: an addition at
+    # any intermediate state is that commit's, a merge adds only what NO parent carried, a root
+    # commit adds its whole document, a commit with no changelog below parents without one adds
+    # nothing, and a changelog deleted at any commit (a merge included) fails closed
+    added = _changelog_added_at("abc1234", head_toml, [base_toml])
+    _expect(added == ["new: drafted using ChatGPT"], added)
+    _expect(_changelog_added_at("abc1234", base_toml, [base_toml, None]) == [],
+            "a merge carrying one parent's changelog unchanged adds nothing")
+    merged = 'title = "t"\n[[release]]\nitems = ["kept item", "merge only"]\n'
+    _expect(_changelog_added_at("abc1234", merged, [base_toml, head_toml]) == ["merge only"],
+            "a merge adds only the strings no parent carried")
+    _expect(_changelog_added_at("abc1234", base_toml, [])
+            == ["items", "kept item", "release", "t", "title"],
+            "a root commit's whole changelog is an addition")
+    _expect(_changelog_added_at("abc1234", None, []) == [], "no changelog anywhere: nothing added")
+    for text, parent_texts in ((None, [base_toml]), (None, [None, base_toml]),
+                               ("not toml [", [base_toml]), (base_toml, ["not toml ["])):
+        try:
+            _changelog_added_at("abc1234", text, parent_texts)
+            raise AssertionError("expected FailClosed for per-commit changelog {!r}/{!r}"
+                                 .format(text, parent_texts))
+        except FailClosed:
+            pass
+    for bad_base, bad_head in ((base_toml, "not toml ["), ("= bad", head_toml),
+                               (base_toml, 'release = 5\n'),
+                               (base_toml, '[[release]]\nitems = "str"\n'),
+                               (base_toml, '[[release]]\nitems = [5]\n')):
+        try:
+            changelog_added_items(bad_base, bad_head)
+            raise AssertionError("expected FailClosed for changelog {!r}/{!r}".format(bad_base, bad_head))
+        except FailClosed:
+            pass
+    # 17. the body file: fail-closed set, the size bound just inside / at / just over, and the
+    # digest of the exact bytes read returned beside the text
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        good = root / "body.md"
+        good.write_text("hello", encoding="utf-8")
+        text, digest = read_body_file(str(good))
+        _expect(text == "hello" and digest == hashlib.sha256(b"hello").hexdigest(), digest)
+        (root / "empty.md").write_bytes(b"")
+        text, digest = read_body_file(str(root / "empty.md"))      # empty body is a valid empty text
+        _expect(text == "" and digest == hashlib.sha256(b"").hexdigest(), digest)
+        (root / "inside.md").write_bytes(b"a" * (MAX_BODY_BYTES - 1))
+        (root / "at.md").write_bytes(b"a" * MAX_BODY_BYTES)
+        _expect(len(read_body_file(str(root / "inside.md"))[0]) == MAX_BODY_BYTES - 1)
+        _expect(len(read_body_file(str(root / "at.md"))[0]) == MAX_BODY_BYTES)
+        (root / "over.md").write_bytes(b"a" * (MAX_BODY_BYTES + 1))
+        (root / "binary.md").write_bytes(b"\xff\xfe\x00")
+        (root / "link.md").symlink_to(good)
+        for bad in ("body.md",                                      # relative
+                    str(root / "missing.md"),                       # absent
+                    str(root),                                      # a directory
+                    str(root / "over.md"),                          # over the bound
+                    str(root / "binary.md"),                        # not UTF-8
+                    str(root / "link.md")):                         # a symlink
+            try:
+                read_body_file(bad)
+                raise AssertionError("expected FailClosed for body file {!r}".format(bad))
+            except FailClosed:
+                pass
+    # 18. --pre-push argv and --base/--head validation fail closed on every malformed shape
+    parsed = parse_pre_push_argv(["--repo", "/r", "--body-file", "/b", "--base", forty])
+    _expect(parsed == {"repo": "/r", "body-file": "/b", "base": forty, "title": None,
+                       "head": None, "branch": None, "remote": None}, parsed)
+    parsed = parse_pre_push_argv(["--repo", "/r", "--body-file", "/b", "--base", forty,
+                                  "--head", forty, "--branch", "feat/x", "--remote", "upstream"])
+    _expect(parsed["head"] == forty and parsed["branch"] == "feat/x"
+            and parsed["remote"] == "upstream", parsed)
+    for argv in (["--repo", "/r"],                                   # missing required flags
+                 ["--repo", "/r", "--body-file", "/b", "--base", forty, "--bogus", "x"],
+                 ["--repo", "/r", "--repo", "/r2", "--body-file", "/b", "--base", forty],
+                 ["--repo", "/r", "--body-file", "/b", "--base", forty,
+                  "--head", forty, "--head", forty],                 # repeated optional flag
+                 ["--repo", "/r", "--body-file", "/b", "--base"],    # valueless flag
+                 ["positional"]):
+        try:
+            parse_pre_push_argv(argv)
+            raise AssertionError("expected FailClosed for argv {!r}".format(argv))
+        except FailClosed:
+            pass
+    _expect(require_base(forty) == forty)
+    _expect(require_head(forty) == forty)
+    for bad in ("HEAD", "a" * 39, "a" * 41, "A" * 40, _ZERO_SHA, 5, None, ""):
+        try:
+            require_base(bad)
+            raise AssertionError("expected FailClosed for base {!r}".format(bad))
+        except FailClosed:
+            pass
+        try:
+            require_head(bad)
+            raise AssertionError("expected FailClosed for head {!r}".format(bad))
+        except FailClosed:
+            pass
+    # 18b. the push-destination resolver, driven through a stubbed _git_status so every rule of
+    # the closed set and the fail-closed branches no git fixture reaches (a failing remote
+    # listing, a configuration read exiting neither 0 nor 1) are exercised; the resolved URL is
+    # returned only when every rule holds, with one accepted-shape control per allowed form and
+    # one refusal vector per rule. The live end-to-end shapes (a real legacy file, real rewrite
+    # and service-routing settings, a real second URL) run in push_branch.py --self-test over
+    # real repositories; the https://, ssh:// and scp-like accepted shapes are exercised only
+    # here, since a hermetic fixture has no such server to push to.
+    real_git_status = _git_status
+
+    def pairs_z(*pairs):
+        return (0, "".join(key + "\n" + value + "\0" for key, value in pairs))
+
+    def resolve_with_stub(remote_arg, listing=(0, ""), fetch="", push="", raw=None,
+                          git_path="/nonexistent", rewrite=(1, ""), services=(1, "")):
+        def stub(args, root=None, stdin_text=None):
+            if args == ["remote"]:
+                return listing
+            if args[:2] == ["remote", "get-url"]:
+                return (0, push if "--push" in args else fetch)
+            if args[:2] == ["rev-parse", "--git-path"]:
+                return (0, git_path + "\n")
+            if args[:3] == ["config", "-z", "--get-all"]:
+                values = raw if raw is not None else ()
+                if not values:
+                    return (1, "")
+                return (0, "".join(value + "\0" for value in values))
+            if args[:3] == ["config", "-z", "--get-regexp"]:
+                return rewrite if "insteadof" in args[3] else services
+            raise AssertionError("unexpected git read in the resolver: {!r}".format(args))
+        globals()["_git_status"] = stub
+        try:
+            return _resolve_push_destination(remote_arg, Path("/"))
+        finally:
+            globals()["_git_status"] = real_git_status
+
+    # the resolver reads GIT_SSH / GIT_SSH_COMMAND from the live environment: hold both unset
+    # across these vectors, restoring the caller's values afterwards
+    ssh_saved = {v: os.environ.pop(v) for v in ("GIT_SSH", "GIT_SSH_COMMAND")
+                 if v in os.environ}
+    try:
+        # accepted shapes: one control per allowed destination form, plus a configured remote
+        # and an unrelated rewrite that matches neither the raw nor the resolved URL
+        _expect(resolve_with_stub("origin", listing=(0, "origin\n"), fetch="/one\n",
+                                  push="/one\n", raw=("/one",)) == "/one",
+                "a configured remote resolves to its one byte-identical URL")
+        for allowed in ("/direct/url.git", "file://host/path.git",
+                        "https://example.org/repo.git", "ssh://example.org/repo.git",
+                        # the scp-like ssh forms, tested for shape only: with and without a
+                        # user, with a '-' inside (not leading) the host, with a slash only
+                        # after the first colon (the boundary: a slash before it is a local
+                        # path and refuses below), and with a '::' only after the first '/'
+                        # (the boundary: a '::' before it refuses below)
+                        "git@example.org:owner/repo.git", "example.org:repo.git",
+                        "x-host.example.org:repo.git", "example.org:sub/dir/repo.git",
+                        "example.org:dir/a::b"):
+            _expect(resolve_with_stub(allowed) == allowed,
+                    ("an allowed destination shape must resolve", allowed))
+        # the rewrite rule applies to an scp-like destination exactly as to any URL: git
+        # matches a rewrite base against the literal URL text, so one for an unrelated
+        # prefix stays allowed (the matching-prefix refusal is in the vector table below),
+        # and so does one for the ssh:// spelling of the same host, which that text does
+        # not start with
+        for unrelated in ("ssh://unrelated.example/", "ssh://git@example.org/"):
+            _expect(resolve_with_stub("git@example.org:owner/repo.git",
+                                      rewrite=pairs_z(("url.ssh://other.example/.insteadof",
+                                                       unrelated)))
+                    == "git@example.org:owner/repo.git",
+                    ("a rewrite the literal text does not start with must not block an "
+                     "scp-like destination", unrelated))
+        _expect(resolve_with_stub("origin", listing=(0, "origin\n"), fetch="/one\n",
+                                  push="/one\n", raw=("/one",),
+                                  rewrite=pairs_z(("url.https://u.example/.insteadof",
+                                                   "https://n.example/a"),
+                                                  ("url.https://u.example/.pushinsteadof",
+                                                   "https://n.example/b"))) == "/one",
+                "a rewrite for an unrelated URL prefix must stay allowed")
+        # refusal vectors: one per rule of the closed set, each asserting its named reason
+        for label, remote_arg, kwargs, fragment in (
+                ("remote listing fails", "origin", {"listing": (1, "")},
+                 "cannot list the configured remotes"),
+                ("rewrite read exits oddly", "/u", {"rewrite": (2, "")},
+                 "cannot read the git configuration"),
+                ("service-key read exits oddly", "/u", {"services": (2, "")},
+                 "cannot read the git configuration"),
+                ("trailing-whitespace name", "lg ", {}, "whitespace"),
+                ("inner-whitespace name", "a b", {}, "whitespace"),
+                ("tab in name", "a\tb", {}, "whitespace"),
+                ("line break in name", "a\nb", {}, "whitespace"),
+                ("unprintable name", "a\x01b", {}, "whitespace or an unprintable"),
+                ("empty destination", "", {}, "empty or carries whitespace"),
+                ("rewrite applying to the resolved URL", "/direct/b",
+                 {"rewrite": pairs_z(("url./other/.insteadof", "/direct"))}, "insteadOf"),
+                ("rewrite applying to the raw configured URL", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "/expanded\n", "push": "/expanded\n",
+                  "raw": ("/rawurl",),
+                  "rewrite": pairs_z(("url./expanded/.insteadof", "/raw"))},
+                 "url.<base>.insteadOf rewrite matches"),
+                ("pushInsteadOf applying to the resolved URL", "/u",
+                 {"rewrite": pairs_z(("url.x.pushinsteadof", "/u"))},
+                 "url.<base>.pushInsteadOf rewrite matches"),
+                ("empty rewrite value", "/u",
+                 {"rewrite": pairs_z(("url.x.insteadof", ""))}, "insteadOf"),
+                ("core.sshCommand configured", "/u",
+                 {"services": pairs_z(("core.sshcommand", "ssh -F /cfg"))},
+                 "core.sshCommand"),
+                ("ssh.variant configured", "/u",
+                 {"services": pairs_z(("ssh.variant", "simple"))}, "ssh.variant"),
+                ("remote uploadpack configured", "/u",
+                 {"services": pairs_z(("remote.x.uploadpack", "prog"))},
+                 "uploadpack or receivepack"),
+                ("remote receivepack configured", "/u",
+                 {"services": pairs_z(("remote.x.receivepack", "prog"))},
+                 "uploadpack or receivepack"),
+                ("two fetch URLs", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "/one\n/two\n", "push": "/one\n/two\n"},
+                 "push URL"),
+                ("push set differs", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "/one\n", "push": "/two\n"}, "push URL"),
+                ("destination names a configured remote", "origin",
+                 {"listing": (0, "origin\nalias\n"), "fetch": "alias\n", "push": "alias\n",
+                  "raw": ("alias",)}, "names a configured remote"),
+                ("empty configured URL", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "\n", "push": "\n", "raw": ("",)},
+                 "cannot be handed"),
+                ("dash destination", "--upload-pack=x", {}, "cannot be handed"),
+                ("bare name", "plainname", {}, "not an absolute local path"),
+                ("relative path", "../seeded.git", {}, "not an absolute local path"),
+                # the scp-like boundary: a slash BEFORE the first colon is a local path to
+                # git, never scp-like (the just-inside accepts are in the controls above)
+                ("slash before the first colon", "example/org:repo.git", {},
+                 "or an scp-like ssh destination"),
+                ("ext:: transport", "ext::prog", {}, "not an absolute local path"),
+                # a '::' before the first '/' refuses whatever precedes it, so a helper name
+                # beginning with a digit (which git also dispatches to a helper) refuses
+                # like the letter-led one; a bracketed IPv6 host refuses the same way
+                ("digit-led helper transport", "1helper::x", {}, "not an absolute local path"),
+                ("digit-led helper transport, split", "9mirror::split", {},
+                 "not an absolute local path"),
+                ("letter-led helper transport", "zmirror::split", {},
+                 "not an absolute local path"),
+                ("bracketed IPv6 host", "[::1]:repo.git", {}, "not an absolute local path"),
+                ("other scheme", "git://example.org/repo.git", {},
+                 "not an absolute local path"),
+                # scp-like forms whose user, host or path cannot be established are refused
+                # rather than guessed at, each naming the part (a leading '-' could be read
+                # as an option by ssh; a bracketed or irregular part and an empty part are
+                # not plain [user@]host:path); a part carrying whitespace or an unprintable
+                # character can only arrive through a configured URL, since such a --remote
+                # value is refused first
+                ("scp-like '-'-leading host", "git@-example.org:repo.git", {},
+                 "is scp-like, but its host part"),
+                ("scp-like empty user", "@example.org:repo.git", {},
+                 "is scp-like, but its user part"),
+                ("scp-like empty host", ":repo.git", {}, "is scp-like, but its host part"),
+                ("scp-like empty host after a user", "git@:repo.git", {},
+                 "is scp-like, but its host part"),
+                ("scp-like bracketed host", "[example.org]:repo.git", {},
+                 "is scp-like, but its host part"),
+                ("scp-like bracketed user", "[u]@host:repo.git", {},
+                 "is scp-like, but its user part"),
+                ("scp-like whitespace in the host", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "git@exa mple.org:repo.git\n",
+                  "push": "git@exa mple.org:repo.git\n", "raw": ("git@exa mple.org:repo.git",)},
+                 "is scp-like, but its host part"),
+                ("scp-like unprintable character in the user", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "g\x01it@example.org:repo.git\n",
+                  "push": "g\x01it@example.org:repo.git\n",
+                  "raw": ("g\x01it@example.org:repo.git",)},
+                 "is scp-like, but its user part"),
+                ("scp-like empty path", "example.org:", {},
+                 "is scp-like, but its path part is empty"),
+                # the rewrite rule applies to an accepted scp-like destination exactly as to
+                # any URL: a value prefixing its literal text refuses
+                ("rewrite applying to the scp-like destination",
+                 "git@example.org:owner/repo.git",
+                 {"rewrite": pairs_z(("url.https://mirror.example/.insteadof",
+                                      "git@example.org:"))},
+                 "url.<base>.insteadOf rewrite matches")):
+            try:
+                resolve_with_stub(remote_arg, **kwargs)
+                raise AssertionError("expected FailClosed for {}".format(label))
+            except FailClosed as exc:
+                _expect(fragment in str(exc), (label, str(exc)))
+        # the ssh environment rule, both variables, with the accepted control just above as the
+        # unset case
+        for variable in ("GIT_SSH", "GIT_SSH_COMMAND"):
+            os.environ[variable] = "/bin/false"
+            try:
+                resolve_with_stub("/direct/url.git")
+                raise AssertionError("expected FailClosed for {}".format(variable))
+            except FailClosed as exc:
+                _expect("the {} environment variable is set".format(variable) in str(exc),
+                        (variable, str(exc)))
+            finally:
+                del os.environ[variable]
+        # a legacy remotes or branches file refuses by EXISTENCE, whatever its name, so a name
+        # git reads (one with a trailing space included) cannot slip past a name-keyed probe;
+        # the reason fits the destination: one with no '/' could be read through such a file,
+        # one with a '/' never is and is refused as defence in depth; a legacy entry that is
+        # not a directory refuses too; an empty legacy directory defines no remote and stays
+        # allowed
+        with tempfile.TemporaryDirectory() as d:
+            legacy_dir = Path(d)
+            (legacy_dir / "anyname ").write_text("URL: /x\n", encoding="utf-8")
+            for destination, fragment in (
+                    ("/direct/url.git", "this destination is not read that way"),
+                    ("https://example.org/r.git", "this destination is not read that way"),
+                    ("example.org:repo.git", "this destination has no '/'")):
+                try:
+                    resolve_with_stub(destination, git_path=str(legacy_dir))
+                    raise AssertionError("expected FailClosed for a populated legacy "
+                                         "directory ({})".format(destination))
+                except FailClosed as exc:
+                    _expect("legacy" in str(exc) and fragment in str(exc),
+                            (destination, str(exc)))
+            try:
+                resolve_with_stub("/direct/url.git", git_path=str(legacy_dir / "anyname "))
+                raise AssertionError("expected FailClosed for a legacy entry that is not a "
+                                     "directory")
+            except FailClosed as exc:
+                _expect("is not a directory" in str(exc), str(exc))
+        with tempfile.TemporaryDirectory() as d:
+            _expect(resolve_with_stub("/direct/url.git", git_path=str(d))
+                    == "/direct/url.git", "an empty legacy directory must stay allowed")
+    finally:
+        os.environ.update(ssh_saved)
+    _expect(_git_status is real_git_status, "the resolver stub must be unwound")
+    # 19. --self-test is honoured only as the sole argument: mixed into a --pre-push invocation it
+    # is an unknown argument and the run fails closed (its stderr line is captured and asserted)
+    import contextlib
+    import io
+    sink = io.StringIO()
+    with contextlib.redirect_stderr(sink):
+        mixed = main(["--pre-push", "--self-test"])
+    _expect(mixed == 2,
+            "--self-test mixed into a production invocation must fail closed, never run fixtures")
+    _expect("fail-closed" in sink.getvalue(), "the mixed invocation must report fail-closed")
     print("SELF-TEST PASS: scanner reuse, composed title/body boundary catch, no-echo, and leak-allow "
           "ignored; the fail-closed paths hold (malformed PR fields, empty title/ref, a non-40-hex "
           "base/head/before/after, a branch-creation push, an unknown event kind); a branch-deletion push "
           "yields no channels; malformed denylist metadata (maxn 0, duplicate, over-cap, oversized, "
-          "trailing tokens) is rejected; and a non-JSON NaN constant fails closed")
+          "trailing tokens) is rejected; a non-JSON NaN constant fails closed; the attribution layer "
+          "fires on trailers, bounded generated-with phrases (a dated model id beginning inside the "
+          "window included, however far its match runs) and vendor addresses, stays silent on bare "
+          "mentions, longer vendor-lookalike domains, words without an identity boundary and "
+          "identities beginning past the window, carries its documented false-positive cases, runs "
+          "pre-merge and pre-push only, and matches the hook's identity set (two copies under a parity "
+          "test, with the compiled pattern and flags checked on the gate's side too); the changelog "
+          "delta covers every parsed string, per published commit against each of its parents, and "
+          "fails closed on any deletion; the pre-push inputs (argv, --base, --head, --remote, body "
+          "file, changelog delta) each fail closed when malformed; the push-destination resolver "
+          "returns the one literal URL only when every condition of its closed set holds (each "
+          "allowed shape has a passing control, the scp-like ssh forms and an unrelated URL "
+          "rewrite included, a rewrite for the ssh:// spelling of an scp-like destination among "
+          "them) and fails "
+          "closed, naming the rule, on a remote name carrying whitespace or an unprintable "
+          "character, a split URL set, a destination naming a configured remote, a destination "
+          "unusable as one URL or outside the allowed shapes (a bare name, a relative path, a "
+          "slash before the first colon, a '::' before the first '/' whether the helper name "
+          "begins with a letter or a digit, another scheme, an scp-like form whose user, host or "
+          "path cannot be established, naming that part, an empty host, whitespace and an "
+          "unprintable character included), any legacy remotes or branches file existing "
+          "at all, with a reason fitted to the destination's form, or a legacy entry that is not "
+          "a directory, an insteadOf or pushInsteadOf value prefixing the raw or resolved URL, a "
+          "core.sshCommand, ssh.variant or remote uploadpack/receivepack key, a GIT_SSH or "
+          "GIT_SSH_COMMAND variable, and a remote listing or configuration read that fails; and "
+          "--self-test mixed into a production invocation is rejected")
     return 0
 
 
