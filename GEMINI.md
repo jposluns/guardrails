@@ -147,8 +147,6 @@ re-reading the resulting source and confirming the intended change is present in
 own stdout, exit code, or narration of what it did. A successful process, a narrated or reported
 replacement, a zero-match conditional skip, or an exception raised before the write can each report success
 while leaving the file unchanged, so an applier's account of itself is not the evidence this rule requires.
-This is claims-rest-on-observation applied to an edit the author did not directly make: the changed source,
-not the applier's report, is the observation completion rests on.
 
 Where another tool parses the edited file, completion also rests on that tool's own parser, or the validator
 it names as authoritative, accepting the file as written, not on its self-test fixtures; else the edit is
@@ -361,6 +359,18 @@ record, never silent absence.
 A recorded change carries the human maintainer's own identity as its author, with no AI listed as author,
 committer, or co-author. This holds anywhere the record names a party, including commit metadata,
 co-author trailers, and change-log entries.
+
+## A consumer follows its producer
+
+A call that consumes another operation's output is issued only after the production it needs, including
+asynchronous work needed for that output, is observed complete, within one message and across
+messages. Calls issued together have no ordering. A delay or a presence test is not the ordering.
+Independent calls stay free to run together.
+
+Where the output has a content digest, the consumer binds to it under
+explicit-binding-over-ambient-context, with size only supplementary; an unreadable required input fails
+under check-fails-closed-on-unreadable. A per-call hook cannot see sibling calls, so this ordering rests
+on the caller.
 
 ## Bind to the explicit target, not the ambient context
 
@@ -878,8 +888,7 @@ against what is actually in use, not assumed current from when it was last check
 
 When asked to assess, advise, consider, evaluate, review, compare, or weigh something, the request is for
 analysis, not execution. Produce the assessment and stop; do not implement, create, or change anything until
-an explicit instruction to act, even when the recommendation is clear. This is a specific instance of
-requiring express authorization before execution.
+an explicit instruction to act, even when the recommendation is clear.
 
 ## Claim a pooled item atomically
 
