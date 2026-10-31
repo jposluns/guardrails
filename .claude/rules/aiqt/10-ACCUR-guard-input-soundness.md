@@ -30,9 +30,7 @@ A command or control parameter that names the repository, target, or other conte
 on is itself such an input. A value hardcoded into a reusable command, or carried over from the source the
 command was copied or templated from, is not evidence of the target the command now runs against: it is
 derived from the authoritative source at the point of use, or validated against it, before the guard
-relies on it. A guard whose own logic is correct still answers about the wrong target when the parameter
-it was handed cannot answer for the current one, so a parameter that cannot be derived or confirmed is a
-cannot-evaluate, not a clean pass.
+relies on it.
 
 A document's own wording is itself such an input when a check verifies a fact by matching it. The wording
 establishes only that the text is present, never that what it asserts is true, so a suite of such presence or

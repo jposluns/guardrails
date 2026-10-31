@@ -12,9 +12,9 @@ slug: observe-before-asserting-behaviour
 
 Do not assert what a system shows, renders, prints, outputs, or does in its live state unless you observed
 that behaviour directly. Reading a configuration, a setting, or source tells you what a system is configured
-to do, not what it actually produces: precedence, environment, inputs, and runtime state sit between the
-configuration and the result. This differs from reading a file for its static contents, where the reading is
-itself the observation; here the observation is the rendered output. A claim that a system is launch-ready,
+to do, not what it produces: precedence, environment, inputs, and runtime state sit between configuration
+and result. Reading a file for its static contents is itself the observation; here the observation is the
+rendered output. A claim that a system is launch-ready,
 live, or working is such a behavioural claim: it rests on having exercised the relevant runtime path and
 observed the expected result, not on a static check that the configuration or registration looks correct.
 Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the
@@ -30,3 +30,9 @@ self-caused local condition such as your own footprint or a malformed request. Y
 resource's own state, the host's available capacity, and your own footprint directly before asserting
 such a failure or reporting it onward; absent that reading the condition resolves to a local error to
 investigate while work continues, never a stop or a resource-wide alarm.
+
+An external-interface observation establishes behaviour only for the effective principal whose authority
+its request used, named in each citing brief or record by identity, non-secret credential reference
+(anonymous access recorded as such, or one the observer could not obtain, recorded with the reason) and
+effective scope; a control using another principal remains unverified until its relevant runtime path is
+observed to produce the expected result under that principal.
