@@ -4148,14 +4148,22 @@ def _gw_lin_usage_failures():
 _COST_REFERENCE_PASSES = 4
 # The budgets, in reference passes: a call fails when the least of its timings is at least this many times the
 # least reference pass (_cost_budget_ratio). _COST_BUDGET holds lex-cost and ci-wr-rebase-cpu: on the host above,
-# as the least of three timed ratios, the costliest row (gate_weakening on retry-deep-nesting) took 4.9 passes alone
-# and 6.2 beside the sixteen processes, and with the nesting stack's membership test put back to a plain list's
-# scan it took about 1,400. _COST_LONG_BUDGET holds the commit-identity rows past the read limit, whose 1 MiB
-# commands the reader does not read: at most 0.68 passes there in any single timing, alone or beside the sixteen
-# processes, where reading such a command in full took about 7 s of CPU on an earlier host (by estimate 8 to 13
-# passes).
+# over three single timings each, the costliest row (gate_weakening on retry-deep-nesting) took 4.9 to 8.7 passes
+# alone and 6.2 to 9.95 beside the sixteen processes, and with the nesting stack's membership test put back to a
+# plain list's scan it took 79.7 s of CPU, about 1,560 passes, in one run (the least of three timings) and about
+# 1,290 passes in another (one timing, beside two other CPU-bound processes). _COST_LONG_BUDGET holds the
+# commit-identity rows past the read limit, whose 1 MiB commands the reader does not read: at most 0.68 passes
+# there in any single timing, alone or beside the sixteen processes, where reading such a command in full took
+# about 7 s of CPU on an earlier host (by estimate 8 to 13 passes).
 _COST_BUDGET = 20
 _COST_LONG_BUDGET = 2
+# A first ratio at or over this many times a row's budget is final (_cost_budget_ratio): a call that far over
+# cannot come back under the budget on a retiming, so it reports after one timing, not _GW_TIMINGS of them.
+_COST_FAR_OVER = 5
+# The reference pass held to work outside itself (_cost_budget_anchor_failures): the least reference pass over
+# the retry-deep-nesting input must take under this many seconds of CPU, a generous backstop (see that function
+# for what one host measured), so only a pass grown many times slower trips it.
+_COST_REFERENCE_BACKSTOP = 2.0
 
 
 def _cost_reference_pass(command):
@@ -4183,17 +4191,23 @@ def _cost_reference_pass(command):
 
 def _cost_budget_ratio(command, scan, budget, once=_gw_scan_once):
     """One cost row's timing: (ratio, t_reference, t_scan, timings, decisions), ratio being the CPU time of
-    scan(command) over that of _cost_reference_pass(command), each timed by once in this process, the pass right
-    before the call. While the ratio is at or over budget both are timed again (at most _GW_TIMINGS timings of
-    each) and the least time of each is compared, so one call or pass charged for stray work cannot decide the
-    row, while a call over its budget in every timing still fails; decisions lists every timed call's decision, in
+    scan(command) over that of _cost_reference_pass(command), each timed by once in this process. The reference
+    pass is always timed at least twice, right before and right after the first call, and the least of its
+    timings is the one compared, so a pass charged for stray work cannot lower the ratio and pass a call on one
+    timing. While the ratio is at or over budget both are timed again (at most _GW_TIMINGS timings of the call,
+    each with one more of the reference) and the least time of each is compared, so one call charged for stray
+    work cannot decide the row, while a call over its budget in every timing still fails; a first ratio at or
+    over _COST_FAR_OVER times the budget is final, so a call that far over reports after one timing. timings
+    counts the call's timings (the reference's are one more); decisions lists every timed call's decision, in
     order. A reference pass that measured no time gives an infinite ratio, so the row fails rather than pass
-    unmeasured."""
+    unmeasured; that ratio is retimed, not final."""
     t_ref = once(command, _cost_reference_pass)[0]
     t_scan, decision, _use = once(command, scan)
+    t_ref = min(t_ref, once(command, _cost_reference_pass)[0])
     decisions = [decision]
     timings = 1
-    while (t_ref <= 0 or t_scan >= budget * t_ref) and timings < _GW_TIMINGS:
+    final = t_ref > 0 and t_scan >= _COST_FAR_OVER * budget * t_ref
+    while not final and (t_ref <= 0 or t_scan >= budget * t_ref) and timings < _GW_TIMINGS:
         timings += 1
         again_ref = once(command, _cost_reference_pass)[0]
         again_scan, decision, _use = once(command, scan)
@@ -4205,27 +4219,37 @@ def _cost_budget_ratio(command, scan, budget, once=_gw_scan_once):
 def _cost_budget_text(ratio, t_ref, t_scan, timings, budget):
     """The clause a failed cost row reports for one _cost_budget_ratio result."""
     return ("{:.2f} s of CPU, {:.1f} times a reference pass over the same command ({:.3f} s), the least of {} "
-            "timing(s) of each; the budget is under {} reference passes".format(t_scan, ratio, t_ref, timings,
-                                                                                budget))
+            "timing(s) of the call and {} of the reference; the budget is under {} reference passes".format(
+                t_scan, ratio, t_ref, timings, timings + 1, budget))
 
 
 def _cost_budget_edge_failures():
-    """(cost-budget-edge) _cost_budget_ratio over scripted times (no pass or call runs): each pair is
-    (t_reference, t_scan) for one timing of both. A first ratio just under the budget is final with one timing;
-    one exactly at it or just over it retimes, and stays at or over it through _GW_TIMINGS timings of each; one
-    over it and then under it passes on the least times; a slow retimed reference never replaces a faster one
-    (a call that would pass against the slow one fails), and a reference that measured no time retimes and stays
-    infinite."""
+    """(cost-budget-edge) _cost_budget_ratio over scripted times (no pass or call runs): the first timing is
+    (t_reference, t_scan, t_reference again) and each retiming (t_reference, t_scan). A first ratio just under
+    the budget is final with one timing; one exactly at it or just over it retimes, and stays at or over it
+    through _GW_TIMINGS timings of each; one over it and then under it passes on the least times; a slow retimed
+    reference never replaces a faster one (a call that would pass against the slow one fails), and a reference
+    that measured no time retimes and stays infinite. A slow reference timing before or after the first call
+    does not pass it: the faster of the two is compared. A first ratio just under _COST_FAR_OVER times the
+    budget retimes; one exactly at it or just over it is final after one timing."""
     out = []
     budget = 20
-    for name, pairs, want_ratio, want_timings in (
-            ("under", [(0.25, 4.99)], 4.99 / 0.25, 1),
-            ("at", [(0.25, 5.0), (0.25, 5.0), (0.25, 5.0)], 20.0, _GW_TIMINGS),
-            ("over", [(0.25, 5.01), (0.25, 5.01), (0.25, 5.01)], 5.01 / 0.25, _GW_TIMINGS),
-            ("over-then-under", [(0.25, 5.5), (0.3, 4.9)], 4.9 / 0.25, 2),
-            ("slow-reference", [(0.2, 4.5), (0.4, 4.4), (0.5, 4.3)], 4.3 / 0.2, _GW_TIMINGS),
-            ("unmeasured", [(0.0, 0.1), (0.0, 0.1), (0.0, 0.1)], float("inf"), _GW_TIMINGS)):
-        times = [t for pair in pairs for t in pair]
+    far = _COST_FAR_OVER * budget * 0.25
+    for name, scripted, want_ratio, want_timings in (
+            ("under", [(0.25, 4.99, 0.25), (0.25, 4.99), (0.25, 4.99)], 4.99 / 0.25, 1),
+            ("at", [(0.25, 5.0, 0.25), (0.25, 5.0), (0.25, 5.0)], 20.0, _GW_TIMINGS),
+            ("over", [(0.25, 5.01, 0.25), (0.25, 5.01), (0.25, 5.01)], 5.01 / 0.25, _GW_TIMINGS),
+            ("over-then-under", [(0.25, 5.5, 0.25), (0.3, 4.9)], 4.9 / 0.25, 2),
+            ("slow-reference", [(0.2, 4.5, 0.2), (0.4, 4.4), (0.5, 4.3)], 4.3 / 0.2, _GW_TIMINGS),
+            ("unmeasured", [(0.0, 0.1, 0.0), (0.0, 0.1), (0.0, 0.1)], float("inf"), _GW_TIMINGS),
+            ("slow-reference-before", [(0.5, 6.0, 0.25), (0.25, 6.0), (0.25, 6.0)], 6.0 / 0.25, _GW_TIMINGS),
+            ("slow-reference-after", [(0.25, 6.0, 0.5), (0.25, 6.0), (0.25, 6.0)], 6.0 / 0.25, _GW_TIMINGS),
+            ("far-under", [(0.25, far - 0.0025, 0.25), (0.25, far - 0.0025), (0.25, far - 0.0025)],
+             (far - 0.0025) / 0.25, _GW_TIMINGS),
+            ("far-at", [(0.25, far, 0.25), (0.25, far), (0.25, far)], far / 0.25, 1),
+            ("far-over", [(0.25, far + 0.0025, 0.25), (0.25, far + 0.0025), (0.25, far + 0.0025)],
+             (far + 0.0025) / 0.25, 1)):
+        times = [t for timing in scripted for t in timing]
         taken = []
 
         def once(cmd, scan):
@@ -4235,9 +4259,11 @@ def _cost_budget_edge_failures():
         ratio, _t_ref, _t_scan, timings, decisions = _cost_budget_ratio("x", None, budget, once)
         within = ratio < budget
         if (ratio != want_ratio or timings != want_timings or within != (want_ratio < budget)
-                or taken != [_cost_reference_pass, None] * timings or decisions != ["allow"] * timings):
+                or taken != [_cost_reference_pass, None, _cost_reference_pass] + [_cost_reference_pass, None] * (
+                    timings - 1)
+                or decisions != ["allow"] * timings):
             out.append("(cost-budget-edge) {}: the scripted times {} gave ratio {!r} over {} timing(s), want {!r} "
-                       "over {}".format(name, pairs, ratio, timings, want_ratio, want_timings))
+                       "over {}".format(name, scripted, ratio, timings, want_ratio, want_timings))
     return out
 
 
@@ -4263,6 +4289,84 @@ def _cost_budget_cpu_failures():
             out.append("({}) a stand-in of {} reference passes took {}, want {} the budget".format(
                 label, count, _cost_budget_text(ratio, t_ref, t_scan, timings, _COST_BUDGET),
                 "under" if within else "at or over"))
+    return out
+
+
+def _cost_nest_scan(command):
+    """The red pin's stand-in (cost-budget-pin): one pass over command keeping its parentheses and backquotes on a
+    plain list, which at every fourth '(' it opens tests for a backquote entry by reading the whole list, so its
+    work grows with the square of the nesting depth, the shape of the nesting stack's membership test before it
+    counted its entries (a plain list's test reads every entry). It calls nothing in aiqt_hooks and shares no
+    code with _cost_reference_pass, so a slower reference pass does not slow it."""
+    nest, quoted = [], 0
+    for c in command:
+        if c == "(":
+            nest.append(c)
+            if len(nest) % 4 == 0 and "`" in nest:
+                quoted += 1
+        elif c == ")":
+            if nest:
+                nest.pop()
+        elif c == "`":
+            if nest and nest[-1] == "`":
+                nest.pop()
+            else:
+                nest.append(c)
+    return quoted
+
+
+def _cost_budget_anchor_failures(command, once=_gw_scan_once):
+    """(cost-budget-pin, cost-budget-backstop) The reference pass held to work outside itself, on a real cost
+    input (the caller passes retry-deep-nesting): _cost_nest_scan, a stand-in quadratic in the nesting depth,
+    stays at or over _COST_BUDGET reference passes (_cost_budget_ratio), and the least reference pass takes
+    under _COST_REFERENCE_BACKSTOP s of CPU. The stand-ins of cost-budget-cpu-green and -red run the reference
+    pass themselves, so a reference made slower slows them alike and they cannot see it, while every row's ratio
+    falls and a real regression can pass: before these checks, with _COST_REFERENCE_PASSES at 400, those two
+    checks passed and the nesting stack's membership test put back to a plain list's scan took 14.2 passes on
+    this input in gate_weakening, inside the budget. On an 80-core host with Python 3.14.4 at a load average of
+    about 40, the stand-in took 107 to 117 passes over five runs of one timing each (the least reference pass
+    0.054 to 0.061 s), so the pin fails a reference pass about five and a half times slower or more, and the
+    least reference pass on this input took at most 0.108 s there, about a twentieth of the backstop. once
+    times one pass or call (a check stands in scripted times through it)."""
+    out = []
+    ratio, t_ref, t_scan, timings, _decisions = _cost_budget_ratio(command, _cost_nest_scan, _COST_BUDGET, once)
+    if ratio < _COST_BUDGET:
+        out.append("(cost-budget-pin) a stand-in quadratic in the nesting depth took {} on a {}-character "
+                   "command, want at or over the budget: the reference pass has grown slower".format(
+                       _cost_budget_text(ratio, t_ref, t_scan, timings, _COST_BUDGET), len(command)))
+    if t_ref >= _COST_REFERENCE_BACKSTOP:
+        out.append("(cost-budget-backstop) the least reference pass over a {}-character command took {:.3f} s of "
+                   "CPU, want under {} s".format(len(command), t_ref, _COST_REFERENCE_BACKSTOP))
+    return out
+
+
+def _cost_budget_anchor_edge_failures():
+    """(cost-budget-anchor-edge) _cost_budget_anchor_failures over scripted times (no pass or call runs), each
+    timing given as in cost-budget-edge: a stand-in ratio just under the budget fails the pin and one exactly at
+    it or just over it passes; a least reference pass just under _COST_REFERENCE_BACKSTOP passes the backstop
+    and one exactly at it or just over it fails."""
+    out = []
+    b = _COST_REFERENCE_BACKSTOP
+    for name, scripted, want in (
+            ("pin-under", [(0.25, 4.9975, 0.25)], ["cost-budget-pin"]),
+            ("pin-at", [(0.25, 5.0, 0.25)], []),
+            ("pin-over", [(0.25, 5.0025, 0.25)], []),
+            ("backstop-under", [(b - 0.001, 200 * b, b - 0.001)], []),
+            ("backstop-at", [(b, 200 * b, b)], ["cost-budget-backstop"]),
+            ("backstop-over", [(b + 0.001, 200 * b, b + 0.001)], ["cost-budget-backstop"])):
+        # Every retiming repeats the first timing's times, so the verdict rests on the comparison alone.
+        scripted = scripted + [scripted[0][:2]] * (_GW_TIMINGS - 1)
+        times = [t for timing in scripted for t in timing]
+        taken = []
+
+        def once(cmd, scan):
+            taken.append(scan)
+            return times[len(taken) - 1], None, None
+
+        got = [line[1:line.index(")")] for line in _cost_budget_anchor_failures("x", once)]
+        if got != want:
+            out.append("(cost-budget-anchor-edge) {}: the scripted times {} failed {}, want {}".format(
+                name, scripted, got, want))
     return out
 
 
@@ -16487,10 +16591,13 @@ def _main_isolated(monitor):
         # 3.14.4, as the max of five runs, gate_weakening took 0.77 s on doubt-comment-pipes, 0.66 s on
         # floor-long-words and 0.54 s on retry-deep-nesting, so a load that slowed the call by half again failed
         # the 1 s bound. Each guard on each input is now held to _COST_BUDGET reference passes over the same
-        # command (_lex_cost_failures, _cost_budget_ratio). On that host, as the least of three timed ratios, the
-        # costliest took 4.9 passes (gate_weakening on retry-deep-nesting) alone and 6.2 beside sixteen CPU-bound
-        # processes, and with the nesting stack's membership test put back to a plain list's scan the same call
-        # took 82.7 s, about 1,400 passes, so the row still fails such a stack. The other regressions recorded
+        # command (_lex_cost_failures, _cost_budget_ratio). On that host, over three single timings each, the
+        # costliest took 4.9 to 8.7 passes (gate_weakening on retry-deep-nesting) alone and 6.2 to 9.95 beside
+        # sixteen CPU-bound processes, and with the nesting stack's membership test put back to a plain list's scan
+        # the same call took about 1,290 to 1,560 passes (the comment above _COST_BUDGET), so the row still fails
+        # such a stack, after one timing (_COST_FAR_OVER). The reference pass itself is held by a red pin and a CPU
+        # backstop (_cost_budget_anchor_failures), so a reference grown several times slower fails the self-test
+        # rather than lowering every ratio. The other regressions recorded
         # above were timed on other hosts and code, so how many passes each would take here is not measured.
         _cost_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\n"
         _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
@@ -16503,6 +16610,8 @@ def _main_isolated(monitor):
                         ("doubt-comment-pipes", "(true #'\n)\npytest |\n" + "# |\n" * (64 * 1024) + "wc"))
         failures.extend(_cost_budget_edge_failures())
         failures.extend(_cost_budget_cpu_failures())
+        failures.extend(_cost_budget_anchor_edge_failures())
+        failures.extend(_cost_budget_anchor_failures(dict(_cost_inputs)["retry-deep-nesting"]))
         _cost_problems, _cost_decisions = _lex_cost_failures(
             _cost_inputs, (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line))
         failures.extend(_cost_problems)
