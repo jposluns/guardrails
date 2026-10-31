@@ -16,3 +16,7 @@ map-iso-23894-tight: [6.7]
 
 Every ruling and decision is recorded to the durable store the session it is made. The record, not the
 conversation, is the source of truth: a decision that is not recorded did not happen.
+
+A brief or record stating review or fix rounds used or allowed cites durable round records for usage and
+the recorded governing rule or authorized decision for the limit, reporting a missing or conflicting
+basis as unresolved rather than substituting memory.

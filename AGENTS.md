@@ -253,6 +253,11 @@ resource's own state, the host's available capacity, and your own footprint dire
 such a failure or reporting it onward; absent that reading the condition resolves to a local error to
 investigate while work continues, never a stop or a resource-wide alarm.
 
+An external-interface observation establishes behaviour only for its observing principal, named in each
+citing brief or record by identity, non-secret credential reference and effective scope; a control using
+another principal remains unverified until its relevant runtime path is observed to produce the expected
+result under that principal.
+
 ## A partial read is not the whole
 
 A read that returns only a bounded slice of a file or of a command's output, a head, a tail, a line or
@@ -562,6 +567,11 @@ not needed, detaching it is a deliberate, recorded choice, not a reflex.
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
 source. Trust is never a substitute for the gate.
+
+Before a worker-proposed field change is applied, its proposed value is compared with the field's prior
+values on the branch; restoration after an intervening different value awaits one adjudication, with the
+ruling durably registered, carried in later triage briefs and consulted before reopening the same
+conflict.
 
 ## Workers produce inert data
 
@@ -1068,6 +1078,10 @@ or explicitly marks a supersession.
 
 Every ruling and decision is recorded to the durable store the session it is made. The record, not the
 conversation, is the source of truth: a decision that is not recorded did not happen.
+
+A brief or record stating review or fix rounds used or allowed cites durable round records for usage and
+the recorded governing rule or authorized decision for the limit, reporting a missing or conflicting
+basis as unresolved rather than substituting memory.
 
 ## Close each session on green
 
