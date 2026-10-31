@@ -14,5 +14,4 @@ map-iso-23894-broad: [A.2, B.4]
 
 When asked to assess, advise, consider, evaluate, review, compare, or weigh something, the request is for
 analysis, not execution. Produce the assessment and stop; do not implement, create, or change anything until
-an explicit instruction to act, even when the recommendation is clear. This is a specific instance of
-requiring express authorization before execution.
+an explicit instruction to act, even when the recommendation is clear.
