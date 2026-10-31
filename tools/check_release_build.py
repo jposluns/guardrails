@@ -1240,8 +1240,9 @@ _ARCHIVE_FAILCLOSED_REENTRANT = False
 
 
 def self_test_main():
-    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
-    scrub_git_environment()
+    # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
+    # scrub before it would make it save, and so restore, the already scrubbed values.
+    from _git_fixture_env import fixture_git_lifecycle
     with fixture_git_lifecycle():
         return _self_test_main_isolated()
 
@@ -2708,6 +2709,14 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             failures.append("(finding 6) with `git archive HEAD` forced to fail, the self-test must be "
                             "CANNOT-EVALUATE exit 2 (no PASS line) instead of exit 1 or a silent skip of "
                             "the archive-backed cases; got rc={}".format(_nested_rc))
+
+    # An in-process call of self_test_main() hands the caller's environment back exactly (HOME,
+    # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
+    # fixture scrub in effect inside: the entry point is run in a child around a stand-in main.
+    # The nested archive fail-closed run above skips it; the outer run covers it once.
+    if not _ARCHIVE_FAILCLOSED_REENTRANT:
+        from _entry_restore_selftest import entry_restore_failures
+        failures.extend(entry_restore_failures(__file__, "self_test_main", "_self_test_main_isolated"))
 
     if errors or failures:
         print("SELF-TEST FAIL:")

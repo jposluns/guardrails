@@ -318,7 +318,9 @@ FENCE_OPEN_RE = re.compile(r"(`{3,})[^`]*$|(~{3,})")
 FENCE_ANY_RE = re.compile(r"[ \t]*(?:`{3,}|~{3,})")
 _CONTAINER = r"[ \t>]*(?:(?:[*+-]|\d{1,9}[.)])[ \t>]*)*"
 # A line the comment scan cannot place: a fence opener that is not at column 0, or any line opening with
-# `<` (an HTML block may run past blank lines), at any indent or container depth.
+# `<` (an HTML block may run past blank lines), at any indent or container depth. The list-marker \d in
+# _CONTAINER is Unicode on purpose: a renderer that reads a non-ASCII digit as a list number nests there,
+# and the wider read only stops the scan sooner, so more comments are counted.
 UNPLACED_RE = re.compile(_CONTAINER + r"(?:```|~~~|<)")
 ESCAPED_SPACE = "\x5c\x20"
 # An import candidate: the run of non-whitespace characters after an `@` (a backslash-escaped space stays
@@ -340,7 +342,7 @@ PLAIN_GLOB_RE = re.compile(r"(?=.*(?:[/*?\[{]|[A-Za-z]\.[A-Za-z]))[A-Za-z0-9_./*
 KEY_RE = re.compile(r"([A-Za-z0-9_-]+):(?: +(.*))?")
 ITEM_RE = re.compile(r" *- +(.*)")
 QUOTED_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
-VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+VERSION_RE = re.compile(r"\d+\.\d+\.\d+", re.ASCII)
 # A Windows 8.3 short name component (`PAYLOA~1.MD`, `A~VERY~1.MD`): one to six characters other than `.`,
 # a `~` and a number, and an optional extension of one to three characters; on NTFS it can open a long-named
 # file. Prose such as `git diff @~1` or `npm i lodash@~4.17.21` holds no such component.
