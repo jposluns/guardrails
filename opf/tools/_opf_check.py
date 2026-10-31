@@ -2344,11 +2344,10 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
 
 def _check_handoff(recs, rep, unread=frozenset()):
     """C-HANDOFF (R2): at most one `current` handoff among clean records authored by non-importer actors
-    (OPF-SPEC 8.5). Section 8.6 keys the importer firewall "on provenance rather than on series alone": it
-    "covers every record whose `actor.kind` is `importer`, in the imported series or written into the
-    clean series by the pre-1.3.0 legacy importer", and "every current-state join, including the section
-    8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer
-    actors". OPF has never been released, so no store predates that firewall, and it applies on every
+    (OPF-SPEC 8.5). Section 8.6 keys the importer firewall "on provenance rather than on series alone: it
+    covers every record whose `actor.kind` is `importer`", and "every current-state join, including the
+    section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by
+    non-importer actors". OPF has never been released, so no store predates that firewall, and it applies on every
     store: this check applies the exemption keyed on provenance alone, in agreement with the record
     writer's current-handoff join (_opf_record._current_handoffs) and the HANDOFF view
     (_opf_views.render_handoff), which apply it the same way. An imported-series row never counts either
@@ -8861,8 +8860,8 @@ def self_test():
             return res.by_check.get("C-HANDOFF", []) if res is not None else []
 
         # C-HANDOFF with the imported series INACTIVE: the section 8.6 firewall is keyed on provenance,
-        # never on activation (it names the clean series written by the pre-1.3.0 legacy importer, a
-        # store whose imported series is inactive), so an importer-authored clean current handoff beside
+        # never on activation ("it covers every record whose `actor.kind` is `importer`"), so an
+        # importer-authored clean current handoff beside
         # the maintainer's is exempt history and the store stays VALID (red if the exemption is ever
         # gated on the activation flag).
         f = clean_machine()

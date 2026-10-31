@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""OPF import completion: the read-only per-source evaluator (OPF-SPEC 1.3.0 section 14.1).
+"""OPF import completion: the read-only per-source evaluator (OPF-SPEC base 2.0.0 section 14.1, "One
+approval and completion").
 
 Spec sections implemented: 14.1's per-source import completion ("For each migrate-disposed source, import
 completion MUST verify the preserved original's digest (the archived copy under section 14.2 for a source
 that occupied a managed destination, the frozen live file and its apply-archived retirement preimage
 otherwise), at least one imported record referencing that source or a recorded skip under the approved
 policy, and doctor VALID over both the strict store and the imported series, evaluated on the live
-tree"); 14.1's homes-1 clause (the completion checks re-read inventories and payload digests themselves,
-because C-EVIDENCE-ENUM is inactive until homes 2), whose re-reads this evaluator keeps on homes 2 as well,
-as defence in depth; and 8.8's correction chain ("Such a corrected import is a fresh run ... and source
+tree"); 14.1's evidence coverage ("their completion checks MUST re-read inventories and payload digests
+themselves, as defence in depth beside C-EVIDENCE-ENUM rather than relying on it"); and 8.8's correction chain ("Such a corrected import is a fresh run ... and source
 completion (section 14.1) evaluates the correcting run"). Recording the result in the receipt's
 outcome-event chain, the retirement transaction, `import_status` and the `opf import` modes are later units;
 this module decides and records nothing.
@@ -31,7 +31,7 @@ adoption run `run_id`, in four legs, each reporting under one SourceResult:
     inventory; and a non-occupying source's frozen live file still holds its plan digest (an occupying
     source left the live tree at apply);
   imports: the imported records referencing the source are those, in the imported managed leaves
-    (<type>.imported.index.toml per type except legacy_fragment, and worklog.imported.toml, inline in the
+    (<type>.imported.index.toml per type other than worklog, and worklog.imported.toml, inline in the
     machine store), whose import.source is exactly the source's preserved original
     .working/imported/import/<import-run>/originals/<source-path> of their own import.run. Every import run
     holding such a record re-reads its bundle inventory (the doctor's own row validator, kind import) and
@@ -51,9 +51,12 @@ adoption run `run_id`, in four legs, each reporting under one SourceResult:
     series is active (_doctor_roster, _opf_check.required_checks(2, True): the strict checks, the homes-2
     evidence enumeration, and the four section 8.3 imported-series checks), every entry PASS. An INVALID
     doctor keeps its own findings; another result type, an absent roster check, a check id outside that
-    roster, or an entry other than PASS is CANNOT-EVALUATE naming it. Green needs a doctor result that
-    grades that full active-imported roster, which no doctor run over a store this tooling validates today
-    produces (the imported series is inactive for every such store). The
+    roster, or an entry other than PASS is CANNOT-EVALUATE naming it. Green needs a VALID doctor result
+    that grades that full active-imported roster, which no doctor run over a store holding an adoption
+    produces today: every import runs under an adoption, and the doctor grades a store holding the adoption
+    home .working/imported/adoption/ as cannot-evaluate (spec 4.2: "At homes 2 the doctor does not yet
+    grade that adoption home: it reports a store holding it as cannot-evaluate until adoption grading lands
+    there."). The
     evaluator trusts the caller-supplied doctor run it is given: the exact type and the roster are a shape
     bar on that run's result, not an authentication of the run.
 
@@ -130,7 +133,8 @@ from _opf_emit import emit_checked   # noqa: E402
 
 VALID, INVALID, CANNOT_EVALUATE = store.VALID, store.INVALID, store.CANNOT_EVALUATE
 # The imported managed leaves (spec 4.2, 8.3), inline in the machine store in either layout: one index per
-# enabled type except the importer-only legacy_fragment, and the imported worklog on its own number line.
+# enabled type other than worklog (spec 4.2: the same enabled-type roster as the clean series), and the
+# imported worklog on its own number line.
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
 IMPORTED_TYPES = tuple(sorted(
@@ -239,8 +243,8 @@ def _bind(ev):
 
 def _bundle(ev):
     """(verification, {inventory path: parsed inventory or None}) of the run's adoption bundle, verified ONCE
-    per evaluation by _opf_adopt_apply.verify_bundle (spec 14.1's homes-1 re-read: every inventory and every
-    payload it lists). Each bundle-root inventory is parsed from the exact bytes that verification read,
+    per evaluation by _opf_adopt_apply.verify_bundle (the re-read spec 14.1 requires beside C-EVIDENCE-ENUM:
+    every inventory and every payload it lists). Each bundle-root inventory is parsed from the exact bytes that verification read,
     never a second read, admitted canonical and held to the apply shell's own inventory validator; one it
     grades INVALID (the legacy ingest format) maps to None and claims nothing. A verification or an
     inventory that cannot evaluate raises Unevaluable to every leg that asks."""
@@ -390,7 +394,7 @@ def _check_preserved(ev, rep):
     """Spec 14.1: 'the preserved original's digest (the archived copy under section 14.2 for a source that
     occupied a managed destination, the frozen live file and its apply-archived retirement preimage
     otherwise)'. The run's evidence bundle verifies from disk first, every inventory and every payload it
-    lists (the homes-1 re-read of spec 14.1, kept on homes 2), and the preserved copy must be one the
+    lists (the re-read spec 14.1 requires beside C-EVIDENCE-ENUM), and the preserved copy must be one the
     bundle inventory claims, read from the bytes that verification read (_bundle)."""
     row = ev.row
     verified, docs = _bundle(ev)
@@ -862,8 +866,9 @@ def _fixture(root, skip_policy="no-skip", imports=None, events=()):
         _put(root, _LEAF, _emit(dict(schema=records.SUPPORTED_SCHEMA, record=leaf)))
 
 
-# Rosters read from the whole-store validator's own constants: the shipped strict (homes-1) roster and the
-# four section 8.3 imported-series check ids; _doctor_roster above is the full roster the doctor leg requires.
+# Rosters read from the whole-store validator's own constants: the strict roster (REQUIRED_CHECKS, before the
+# homes-2 evidence enumeration and the imported-series checks are added) and the four section 8.3
+# imported-series check ids; _doctor_roster above is the full roster the doctor leg requires.
 def _roster():
     import _opf_check
     return tuple(_opf_check.REQUIRED_CHECKS)

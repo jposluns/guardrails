@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """OPF adoption completion evaluator: the read-only deterministic checks 1 to 4 and 6 (slice 1) and the
-wiring probe frame of check 5 (slice 2) (OPF-SPEC 1.3.0).
+wiring probe frame of check 5 (slice 2) (OPF-SPEC base 2.0.0).
 
 Spec sections implemented: 14.1 (the clean-start completion-check roster: checks 1 authority and freshness,
 2 discovery accounting, 3 preservation and restore, 4 operational readiness and 6 retirement readiness; a
-completion-check failure or cannot-evaluate reports incomplete and retires nothing), 14.1's homes-1 clause
-(the completion checks re-read inventories and payload digests themselves, because C-EVIDENCE-ENUM is
-inactive until homes 2) and 4.2 (C-EVIDENCE-ENUM MUST NOT run or read anything on homes 1; the section 14.1
-completion checks carry the evidence digest verification). Check 5 (wiring) verifies the deny-capable
+completion-check failure or cannot-evaluate reports incomplete and retires nothing), 14.1's evidence
+coverage ("their completion checks MUST re-read inventories and payload digests themselves, as defence in
+depth beside C-EVIDENCE-ENUM rather than relying on it") and 4.2 ("The section 14.1 completion checks MUST
+still carry their own evidence digest verification beside C-EVIDENCE-ENUM."). Check 5 (wiring) verifies the deny-capable
 enforcement surface is installed as planned and runs its four probes through a caller-supplied prober, but
 it is never VALID in this release: the shipped pack carries no deny program and no live probe adapter (the
 deferred enforcement pack, PR6), so with every other condition met it is CANNOT-EVALUATE naming PR6, and the
@@ -72,7 +72,8 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     CANNOT-EVALUATE naming it, never a pass, and nothing here re-models the planner; every plan
     source is an observed file whose digest equals its plan digest.
   3 preservation-restore: the run's evidence bundle verifies from disk (_opf_adopt_apply.verify_bundle, the
-    homes-1 evidence digest verification: every inventory and every payload it lists), and the bundle
+    evidence digest verification the completion checks carry beside C-EVIDENCE-ENUM: every inventory and
+    every payload it lists), and the bundle
     inventory this check re-reads must again pass the apply shell's own inventory validator
     (_opf_adopt_apply.validate_inventory), else CANNOT-EVALUATE; every
     archive-preserved source (retire, migrate and occupying, spec 14.2) sits at its run archive path,

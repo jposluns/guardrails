@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""OPF adoption apply engine: the apply SHELL (slice 1), the three file ops (slice 2), init-store (slice 3), the two registration ops (slice 4), the three finish ops (slice 5) and the enable-hook op (OPF-SPEC 1.3.0).
+"""OPF adoption apply engine: the apply SHELL (slice 1), the three file ops (slice 2), init-store (slice 3), the two registration ops (slice 4), the three finish ops (slice 5) and the enable-hook op (OPF-SPEC base 2.0.0).
 
 Slice 1 (the clean-start adoption track's first apply unit) supplies the engine SKELETON, shaped by spec
-1.3.0 sections 4.2, 5.7 and 14: run identity; the evidence-bundle, archive and Move homes, all
+sections 4.2, 5.7 and 14: run identity; the evidence-bundle, archive and Move homes, all
 derived from the `_opf_store` homes constructors (never re-spelled here); the `opf.evidence.inventory/v1`
 inventory DERIVED from the run's own transaction op list and published in that SAME transaction as the
 retained bytes it lists (spec 4.2), a base `inventory.toml` then one `inventory-<phase>.toml` per later
-phase, never rewritten; the homes-1 bundle verification the completion checks carry themselves while
-C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payload digests from disk;
+phase, never rewritten; the bundle verification the completion checks carry themselves beside
+C-EVIDENCE-ENUM (spec 14.1: "their completion checks MUST re-read inventories and payload digests
+themselves, as defence in depth beside C-EVIDENCE-ENUM rather than relying on it"), which RE-READS the
+inventories and payload digests from disk;
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
 transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed ten-op
 ADOPT_OPS vocabulary. Slice 2 makes the three pure file ops executable (EXECUTABLE_OPS: create-file,
@@ -208,8 +210,11 @@ against the operation's validated recorded plan instead; the context plan's appr
 against the captured approval) and full plan-schema validation are the stage driver's, not init-store's,
 which validates exactly the fields it consumes; bundle MEMBERSHIP (an off-inventory file inside a bundle)
 is not reconciled by the shell's verifier, only listed payloads — init-store's admitted-inventory
-derivation DOES refuse an unlisted file beneath the bundle home; containment registration of the archive,
-Move and evidence homes on homes 1 is part of the 1.3.0 activation, not this slice; investigation does
+derivation DOES refuse an unlisted file beneath the bundle home; containment registers the archive, Move
+and evidence homes at homes 2 through their roots .working/imported and .working/archive, but the doctor
+does not yet grade the adoption home there (spec 4.2: "At homes 2 the doctor does not yet grade that
+adoption home: it reports a store holding it as cannot-evaluate until adoption grading lands there."),
+and that grading is not this slice's; investigation does
 not read this journal (detection never surfaces the reserved `journals/` child as adopter content, spec
 14.2), so the stage driver refuses plan, approve and apply over a
 non-clean adoption journal (require_clean_journal); journal state a foreign tree plants at the reserved
@@ -225,7 +230,7 @@ binding too, and a planted lock alone carries no binding, so a dead owner's lock
 is); before init renders the store `.gitignore`, the journal is trackable
 by git (benign: journals are machine-local, and a clone without them cannot recover those transactions,
 spec 4.2); the shipped `retire-file` vocabulary row declares a
-single `remove`, while spec 1.3.0 preserves the retirement preimage at apply and removes only after the green check, so the file ops
+single `remove`, while spec 14.1 and 14.2 preserve the retirement preimage at apply and remove only after the green check, so the file ops
 split each retire and move row across the two stages, and the base transaction's create of the archive
 copy is the declared row's unlisted first half; the RETIREMENT_PHASE transaction refuses on a resolved
 store exactly as every transaction here does (no lease join yet), so once init-store executes, a real
@@ -764,7 +769,7 @@ def _open_product_root(product_root):
 
 
 def verify_bundle(product_root, run_id, *, inventory_bytes=None):
-    """Homes-1 evidence verification carried by the completion checks (spec 14.1, 4.2): RE-READ every
+    """The evidence verification the completion checks carry beside C-EVIDENCE-ENUM (spec 14.1, 4.2): RE-READ every
     bundle-root inventory of this adoption run from disk, then every payload those inventories list,
     contained and single-linked. Read-only. A missing bundle, a bundle with no inventory, a missing listed
     file, a listed entry that is not a regular file, and a size or digest mismatch are findings (INVALID),

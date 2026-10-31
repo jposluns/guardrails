@@ -2553,9 +2553,10 @@ def next_id(high, ns, known_complete=False, imported_series=False):
     With `imported_series=True` (a genuine bool), `ns` may also be an imported counter key
     `imported:<NS>`, which allocates `imported:<NS>-<n>` from that key's own high-water and never reads the
     clean `<NS>` line (spec 8.2); the map may then hold both series. Without it, an imported key is refused
-    exactly as before. An absent imported key is refused whatever `known_complete` says: spec 8.2
-    requires every imported counter row once the store declares 1.3.0 and lets only a genuinely first
-    adoption start at zero, written as an explicit zero row, and a clean-only known_namespaces proof says
+    exactly as before. An absent imported key is refused whatever `known_complete` says: spec 8.2 requires
+    every imported counter row of a base 2.0.0 store ("The doctor MUST require the imported counter rows,
+    whether `opf init` wrote them at zero or a re-adoption seeded them from its ancestral snapshot.") and
+    lets only a genuinely first adoption start at zero, written as an explicit zero row, and a clean-only known_namespaces proof says
     nothing about the imported line, so reading an absent row as high-water 0 would zero-seed prior
     ancestry and could reuse an imported id. On this series-aware path the
     map's values and the allocated number share parse_series_id's fixed ceiling (_MAX_ID_NUMBER): an
@@ -2585,7 +2586,7 @@ def next_id(high, ns, known_complete=False, imported_series=False):
     _validated_counter_map(high, "next_id", imported_series)
     if imported_series and ns.startswith(IMPORTED_PREFIX) and ns not in high:
         # The imported line accepts NO completeness proof for an absent key, known_complete=True included:
-        # spec 8.2 requires every imported counter row once the store declares 1.3.0 and lets only a
+        # spec 8.2 requires every imported counter row of a base 2.0.0 store and lets only a
         # genuinely first adoption start at zero, written as an explicit zero row, so reading an absent
         # row as high-water 0 would zero-seed prior ancestry and could reuse an imported id. Fail closed;
         # the remedy is recording the counter row, never a proof flag.
