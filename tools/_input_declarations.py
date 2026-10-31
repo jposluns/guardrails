@@ -5,19 +5,45 @@ two can never disagree on what a brief declares.
 
 THE PARSED DOCUMENT. A brief is Markdown, and the worker reads it through a Markdown reader, so the
 declarations are judged on the document the vendored CommonMark parser builds (opf/tools/_vendor/marko,
-pinned 2.2.4 with its provenance file and byte manifest, loaded exactly as opf/tools/_commonmark_headings.py
+pinned 2.2.4 with its provenance file and byte manifest, loaded as opf/tools/_commonmark_headings.py
 loads it: the vendor directory derived from this file's own location, the version pinned, and the imported
-modules origin-checked against the vendored tree, never an ambient install), with the vendored GFM elements
-(tables, task-list items, strikethrough, autolinked URLs and alerts) registered on a fresh extension-free
-parser per parse, so the reading matches what a GFM reader shows. Conformance is exactly Marko 2.2.4's
-(about 97.5% of the CommonMark 0.31.2 example suite; see opf/tools/selftest_commonmark_conformance.py), so
-on rare edge inputs the reading diverges from a strict spec reading exactly where Marko does (a no-break
-space accepted after a closing fence, for one). A parse failure, a vendored tree that cannot be imported or
-fails its provenance pin, a text over MAX_TEXT_BYTES, or a document span that does not cover the text is
-DeclarationError, which both callers turn into their cannot-evaluate refusal, never a silent empty reading.
-The parse is worst-case superlinear on crafted pathological input under the byte ceiling; the residual is
-availability (a slow lint), never a wrong verdict, and a brief that is pure ASCII with no "nput" substring
-is answered without parsing (nothing in it can declare, look alike, or hold a format character).
+modules origin-checked against the vendored tree, never an ambient install; with ONE stated difference
+from that loader: importing the vendored GFM elements runs the gfm package's __init__, which builds a
+module-level Markdown object and imports the GFM renderer at import time, where _commonmark_headings never
+touches the extension path; marko 2.2.4 gives no import of the elements that skips its package __init__,
+and loading the file directly would take an importlib exec_module call the dangerous-API lint refuses, so
+the package and renderer modules the import pulls in are origin-checked here too and neither the Markdown
+object nor the renderer is used), with the vendored GFM elements (tables, task-list
+items, strikethrough, autolinked URLs and alerts) registered on a fresh extension-free parser per parse,
+so the reading matches what a GFM reader shows. Conformance is exactly Marko 2.2.4's (about 97.5% of the
+CommonMark 0.31.2 example suite; see opf/tools/selftest_commonmark_conformance.py), so on rare edge inputs
+the reading diverges from a strict spec reading exactly where Marko does (a no-break space accepted after
+a closing fence, for one). A parse failure, a vendored tree that cannot be imported or fails its
+provenance pin, a text over MAX_TEXT_BYTES, a parse that misses PARSE_DEADLINE_SECONDS, or a document span
+that does not cover the text is DeclarationError, which both callers turn into their cannot-evaluate
+refusal, never a silent empty reading.
+
+BOUNDS. The evaluation is bounded by construction, each bound decided on the text alone so no outcome
+depends on unrelated content elsewhere in the brief: a text over MAX_TEXT_BYTES (512 KiB; every file in
+the real-brief corpus measures under 224 KiB and every real brief under 64 KiB, so the ceiling holds each
+with wide margin) is refused up front in forbidden(), whatever it holds; a text that can nest blocks more
+than MAX_NESTING_DEPTH levels deep (judged by _nesting_refused, a conservative prescan over marker runs
+and indentation) is refused up front too, because the parser reads a run of quote markers in time that
+grows about fourfold per level and a single long regex match holds the interpreter where no in-process
+deadline can stop it; a line holding a run of more than MAX_WHITESPACE_RUN consecutive spaces or tabs is
+refused the same way, because the parser reads such a run in time that grows with the square of the run,
+also inside matches a deadline cannot interrupt; both prescans run on every text, so neither refusal
+depends on whether the rest of the brief forces a parse. The parse itself runs in a fresh daemon thread
+(a full recursion stack, whatever the caller's depth) joined under PARSE_DEADLINE_SECONDS, so a
+pathological shape the parser reads superlinearly in many steps costs at most about the deadline and is
+then refused, never trusted partial. Named residuals: a thread a missed deadline abandons may keep
+consuming CPU until the process exits, and the deadline fires only when the parser is between matches, so
+a single match that runs long under the bounds above would stretch it; both are availability, never a
+wrong verdict. A brief that is pure ASCII, holds no "nput" substring in any case and none of the characters that
+can make rendered text differ from source text (RENDERING_MARK_RE: a character reference's &, emphasis or
+strikethrough or code marks, a link bracket, inline HTML's <, a backslash escape) is answered without
+parsing: nothing in such a text can render, spell or disguise the label, and ASCII holds no format
+character. Any other text takes the parse.
 
 TEXT GATE (forbidden). Only LF ends a line here. A brief holding any other line separator anywhere (a
 carriage return, bare or in CRLF, U+000C FORM FEED, which the parser reads as a line ending, U+0085 NEXT
@@ -76,14 +102,38 @@ access is importing that parser. Callers: check_brief_capability (decode_brief r
 finds, PreflightText reads read()), check_verifier_delivery (_declared_inputs refuses both and takes
 read()'s declarations); both call forbidden() first, so read() may assume LF-only line ends.
 """
+import bisect
 import html
 import os
 import re
 import sys
+import threading
 import unicodedata
 
 MARKO_VERSION = "2.2.4"           # the exact vendored pin; any other resolved version fails closed
-MAX_TEXT_BYTES = 1 << 20          # the brief lint's own brief ceiling; a larger text is DeclarationError
+# the brief ceiling, enforced on every text before any other rule: 512 KiB holds every file of the
+# real-brief corpus (largest file under 224 KiB, largest real brief under 64 KiB) with wide margin
+MAX_TEXT_BYTES = 1 << 19
+# the parse must finish within this wall-clock bound or the text is refused (DeclarationError): an
+# ordinary text at the ceiling parses in well under a second, so the margin is wide
+PARSE_DEADLINE_SECONDS = 10.0
+# the nesting ceiling, judged by the prescan in forbidden() before any parse: the parser reads a run of
+# quote markers on one line in time that grows about fourfold per level (measured on the vendored pin:
+# 0.06 s at 20, 3.6 s at 26), and a single long regex match holds the interpreter so no deadline can stop
+# it mid-match, so the depth is capped where the worst parse stays well under a tenth of a second; a real
+# brief nests far shallower
+MAX_NESTING_DEPTH = 20
+# the longest run of consecutive spaces and tabs a line may hold, judged in forbidden() before any parse:
+# the parser reads a whitespace run in time that grows with the square of the run, inside single regex
+# matches the deadline cannot interrupt (measured on the vendored pin: 93.5 s at a 64 KiB run), while a
+# run at this bound costs well under a tenth of a second; a real brief's longest run (alignment padding,
+# indented code) is far shorter
+MAX_WHITESPACE_RUN = 2000
+WHITESPACE_RUN_RE = re.compile(r"[ \t]{%d}" % (MAX_WHITESPACE_RUN + 1))
+# the characters that can make rendered text differ from source text: a character reference (&#78;),
+# emphasis, strikethrough or code marks, a link bracket, inline HTML and a backslash escape; a pure-ASCII
+# text with none of them and no "nput" substring cannot render or disguise the label and skips the parse
+RENDERING_MARK_RE = re.compile(r"[&*_~\[<\\`]")
 INPUT_LABEL = "INPUT:"
 # a table cell that is exactly this token (upper case, after the fold) is a look-alike header cell
 CELL_TOKENS = ("INPUT", "INPUTS")
@@ -157,9 +207,14 @@ def _verify_module_origin(module):
 
 def _load_marko():
     """Import the vendored marko once, verify version and origin, and cache it. Coverage is BOUNDED to the
-    modules imported here (marko, marko.block, marko.parser, marko.inline, marko.ext.gfm.elements); the
-    other parse-path submodules resolve from the verified package's own __path__. Never an ambient
-    install: a mismatch is DeclarationError, not a fallback."""
+    modules imported here (marko, marko.block, marko.parser, marko.inline, marko.ext.gfm.elements, and the
+    gfm package and renderer modules that import pulls in); the other parse-path submodules resolve from
+    the verified package's own __path__. Importing marko.ext.gfm.elements necessarily runs the gfm
+    package's __init__, which builds a module-level Markdown object and imports the GFM renderer (the one
+    stated difference from opf/tools/_commonmark_headings.py, whose load never touches the extension
+    path): both resolve from the vendored tree and are origin-checked below, and neither the Markdown
+    object nor the renderer is ever used here. Never an ambient install: a mismatch is DeclarationError,
+    not a fallback."""
     global _LOADED
     if _LOADED is not None:
         return _LOADED
@@ -180,7 +235,9 @@ def _load_marko():
     if version != MARKO_VERSION:
         raise DeclarationError("vendored marko version is {!r}, expected {!r}".format(
             version, MARKO_VERSION))
-    for module in (marko, marko.block, marko.inline, marko.parser, gfm_elements):
+    pulled_in = tuple(sys.modules[name] for name in ("marko.ext.gfm", "marko.ext.gfm.renderer")
+                      if name in sys.modules)
+    for module in (marko, marko.block, marko.inline, marko.parser, gfm_elements) + pulled_in:
         _verify_module_origin(module)
     _LOADED = (marko, gfm_elements)
     return _LOADED
@@ -189,22 +246,49 @@ def _load_marko():
 def _parse(text):
     """The marko Document for `text`: a FRESH extension-free Parser per call with the vendored GFM
     elements registered (never marko's Markdown object, which is documented not thread-safe). The byte
-    ceiling is enforced before parsing; a parse exception and a document span that does not cover `text`
-    (the parser's buffer rewrites are length-preserving only over LF-only text, which forbidden()
-    guarantees first) are DeclarationError."""
+    ceiling is enforced before parsing. The parse runs in its own daemon thread, which starts with a full
+    recursion stack whatever the caller's depth, and must finish within PARSE_DEADLINE_SECONDS: a parse
+    that misses the deadline, a parse exception (a recursion error included) and a document span that does
+    not cover `text` (the parser's buffer rewrites are length-preserving only over LF-only text, which
+    forbidden() guarantees first) are DeclarationError, fail closed. A thread a missed deadline abandons
+    may keep consuming CPU until the process exits; the refusal itself is prompt and the residual is
+    availability, never a wrong verdict."""
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
         raise DeclarationError("the brief is larger than {} bytes, over this reading's ceiling".format(
             MAX_TEXT_BYTES))
+    # the same prescans forbidden() runs, kept here too so no caller can reach an unbounded parse: these
+    # shapes cost the parser time single matches hold, which the deadline below cannot interrupt
+    if WHITESPACE_RUN_RE.search(text) is not None:
+        raise DeclarationError("the brief holds a run of more than {} consecutive spaces or tabs, over "
+                               "this reading's bound".format(MAX_WHITESPACE_RUN))
+    if _nesting_refused(text) is not None:
+        raise DeclarationError("the brief nests lists or quotes more than {} levels deep, over this "
+                               "reading's bound".format(MAX_NESTING_DEPTH))
     marko, gfm_elements = _load_marko()
-    try:
-        parser = marko.parser.Parser()
-        for name in GFM_ELEMENT_NAMES:
-            parser.add_element(getattr(gfm_elements, name))
-        document = parser.parse(text)
-    except DeclarationError:
-        raise
-    except Exception as exc:
-        raise DeclarationError("the CommonMark parser failed over the brief: {}".format(exc)) from exc
+    outcome = []
+
+    def parse_text():
+        try:
+            parser = marko.parser.Parser()
+            for name in GFM_ELEMENT_NAMES:
+                parser.add_element(getattr(gfm_elements, name))
+            outcome.append(("document", parser.parse(text)))
+        except BaseException as exc:    # held for the joining thread; a worker thread must not die silent
+            outcome.append(("error", exc))
+
+    worker = threading.Thread(target=parse_text, daemon=True, name="input-declarations-parse")
+    worker.start()
+    worker.join(PARSE_DEADLINE_SECONDS)
+    if worker.is_alive() or not outcome:
+        raise DeclarationError("the CommonMark parser did not finish over the brief within {} s, this "
+                               "reading's deadline; the brief is refused, never read partially".format(
+                                   PARSE_DEADLINE_SECONDS))
+    kind, value = outcome[0]
+    if kind == "error":
+        if isinstance(value, DeclarationError):
+            raise value
+        raise DeclarationError("the CommonMark parser failed over the brief: {}".format(value)) from value
+    document = value
     if getattr(document, "source_span", None) != (0, len(text)):
         raise DeclarationError("the parsed document span does not cover the brief's text")
     return document
@@ -466,27 +550,116 @@ def _code_regions(classes, element):
     return regions
 
 
+def _line_starts(text):
+    """The offset of each line's first character, line 1 first, computed once per text:
+    bisect.bisect_right over the list is the one-based line number of any offset."""
+    starts = [0]
+    position = text.find("\n")
+    while position != -1:
+        starts.append(position + 1)
+        position = text.find("\n", position + 1)
+    return starts
+
+
+def _lead_shape(line):
+    """(markers, columns) of one line's lead: the count of its leading marker tokens (a quote mark; a
+    bullet or an ordered mark of at most nine digits, each followed by whitespace or the line's end, as
+    the parser requires) and of the whitespace columns between and before them (a tab counts four). The
+    scan stops at the first character that is neither; it never reads the rest of the line."""
+    markers = columns = position = 0
+    length = len(line)
+    while position < length:
+        character = line[position]
+        if character == " ":
+            columns += 1
+            position += 1
+        elif character == "\t":
+            columns += 4
+            position += 1
+        elif character == ">":
+            markers += 1
+            position += 1
+        elif character in "-*+" and (position + 1 == length or line[position + 1] in " \t"):
+            markers += 1
+            position += 1
+        elif character.isdigit():
+            first = position
+            while position < length and line[position].isdigit() and position - first < 9:
+                position += 1
+            if position < length and line[position] in ".)" and (
+                    position + 1 == length or line[position + 1] in " \t"):
+                markers += 1
+                position += 1
+            else:
+                break
+        else:
+            break
+    return markers, columns
+
+
+def _nesting_refused(text):
+    """The number of the first line whose lead can take the document past MAX_NESTING_DEPTH nested
+    levels, or None. A conservative upper bound, never a parse: a line's marker tokens each open at most
+    one level, and its leading whitespace continues at most the levels already opened (every two columns
+    one level, and never more than any earlier line opened), so a deeply indented fence body or
+    continuation line alone opens nothing, while a run of markers on one line, or marker lines that march
+    deeper line by line, is counted in full. Over-counting only refuses more (a fenced example shaped like
+    a deeper-than-the-ceiling list is refused with the real thing), never less."""
+    running = 0
+    for number, line in enumerate(text.split("\n"), 1):
+        markers, columns = _lead_shape(line)
+        depth = min(running, columns // 2) + markers
+        if depth > MAX_NESTING_DEPTH:
+            return number
+        if depth > running:
+            running = depth
+    return None
+
+
 def forbidden(text):
-    """(line number, reason) for the first line separator other than LF anywhere in `text`, or the first
-    format character (category Cf) outside the parsed document's code blocks and code spans; None when
-    there is neither. DeclarationError when a Cf stands in text the vendored parser cannot read."""
+    """(line number, reason) for the first line separator other than LF anywhere in `text`, for the first
+    line holding a whitespace run over MAX_WHITESPACE_RUN, for the first line whose lead opens more than
+    MAX_NESTING_DEPTH nested levels (_nesting_refused), or for the first format character (category Cf)
+    outside the parsed document's code blocks and code spans; None when there is none. The run and nesting
+    prescans are judged on every text whatever else it holds, so those refusals never depend on unrelated
+    content. DeclarationError for a text over MAX_TEXT_BYTES (refused here up front, parse path or not)
+    and when a Cf stands in text the vendored parser cannot read. The Cf region check is one sorted sweep:
+    positions ascend, so one pointer over the sorted regions visits each region once."""
+    if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
+        raise DeclarationError("the brief is larger than {} bytes, over this reading's ceiling".format(
+            MAX_TEXT_BYTES))
     found = SEPARATOR_RE.search(text)
     if found:
         line = text.count("\n", 0, found.start()) + 1
         return line, "the brief holds a line separator other than LF ({}); only LF ends a line".format(
             SEPARATORS[found.group(0)])
+    run = WHITESPACE_RUN_RE.search(text)
+    if run:
+        return text.count("\n", 0, run.start()) + 1, (
+            "the line holds a run of more than {} consecutive spaces or tabs, which the parser reads in "
+            "time that grows with the square of the run; break the run".format(MAX_WHITESPACE_RUN))
+    deep = _nesting_refused(text)
+    if deep is not None:
+        return deep, ("the line's leading list or quote markers and indentation open more than {} nested "
+                      "levels, deeper than this reading evaluates; flatten the nesting".format(
+                          MAX_NESTING_DEPTH))
     if text.isascii():   # ASCII holds no format character
         return None
     positions = [index for index, character in enumerate(text)
                  if unicodedata.category(character) == "Cf"]
     if not positions:
         return None
-    regions = _code_regions(_classes(), _parse(text))
+    regions = sorted(_code_regions(_classes(), _parse(text)))
+    starts = _line_starts(text)
+    pointer = 0
     for index in positions:
-        if not any(start <= index < end for start, end in regions):
-            return text.count("\n", 0, index) + 1, (
-                "the brief holds a format character (U+{:04X}) outside a code block or code span; format "
-                "characters are invisible and are refused, never removed silently".format(ord(text[index])))
+        while pointer < len(regions) and regions[pointer][1] <= index:
+            pointer += 1
+        if pointer < len(regions) and regions[pointer][0] <= index:
+            continue
+        return bisect.bisect_right(starts, index), (
+            "the brief holds a format character (U+{:04X}) outside a code block or code span; format "
+            "characters are invisible and are refused, never removed silently".format(ord(text[index])))
     return None
 
 
@@ -495,11 +668,14 @@ def read(text):
     [(line number, reason)] for every malformed declaration or look-alike. Inside code nothing is read.
     The caller refuses forbidden() first, so `text` ends its lines with LF alone here. DeclarationError
     when the vendored parser cannot read the text."""
-    if text.isascii() and "nput" not in text.lower():
-        return [], []   # nothing in it can spell the token INPUT, even folded
+    if text.isascii() and "nput" not in text.lower() and RENDERING_MARK_RE.search(text) is None:
+        # nothing in it can spell the token INPUT, even folded, and no character reference, markup,
+        # escape or inline HTML can make the rendered text differ from this source text
+        return [], []
     classes = _classes()
     document = _parse(text)
-    line_of = lambda position: text.count("\n", 0, position) + 1  # noqa: E731
+    starts = _line_starts(text)
+    line_of = lambda position: bisect.bisect_right(starts, position)  # noqa: E731
     inputs, bad = [], []
     for kind, line, element in _units(classes, document, True, line_of):
         if kind in ("html", "code"):

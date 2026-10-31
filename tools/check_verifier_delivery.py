@@ -167,8 +167,9 @@ Rules:
      label (a rendered paragraph line, heading or table cell opening with the token INPUT or INPUTS and a
      colon in any case, or a table cell that is exactly INPUT or INPUTS) is
      CANNOT_EVALUATE, exactly what the brief lint refuses before a brief is sent, so the two readings
-     cannot disagree, and a text the vendored parser cannot read is CANNOT_EVALUATE, never read another
-     way. The path is compared as text and never opened. A BLOCKERS FOUND or any other verdict
+     cannot disagree, and a text the vendored parser cannot read, or one over the shared reading's own
+     bounds (its text ceiling, whitespace-run and nesting prescans, and parse deadline), is
+     CANNOT_EVALUATE, never read another way. The path is compared as text and never opened. A BLOCKERS FOUND or any other verdict
      is unchanged, and an UNVERIFIABLE answer that names no declared input is legitimate as above.
      Coverage n/m is reported: n answered answers, m the brief's numbered questions.
   C2 verbatim. Every fenced code block, every blockquote run and every inline double-quoted span must
@@ -2462,6 +2463,13 @@ def _self_test_cases(fx):
         "~~INPUT:~~ /abs/in.md",
         "INPUT: `/abs/in.md`")],
         ["NO_VOTE"] * 13)
+    # ASCII-only rendered labels: a character reference or intraword emphasis spells INPUT: with no
+    # literal "nput" substring in the line and no non-ASCII character anywhere, read from the parsed
+    # document exactly as the brief lint's P6 reads them
+    check("c1/ascii-rendered-forms-no-vote", [verdict(fx.run(unread, BRIEF_INPUT.replace(
+        "BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n" + line + "\n"))) for line in (
+        "I&#78;PUT: /abs/in.md", "IN**PUT**: /abs/in.md", "IN*PUT*: /abs/in.md")],
+        ["NO_VOTE"] * 3)
     # a declaration after a list item's fence or after an indented code block is read (the parsed
     # document hides nothing there); asserted on the declaration reading itself, since this suite's
     # question parser separately refuses such a brief's fence shape
@@ -2509,8 +2517,15 @@ def _self_test_cases(fx):
         BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n",
                                      "INPUT: /abs/in.md\n\n| INPUT | x |\n|---|---|\n| a | b |\n"),
         BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: <scratch>/in.md"),
-        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: relative/in.md"))],
-        ["CANNOT_EVALUATE"] * 9)
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: relative/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "Inp&#117;t: /abs/in.md"))],
+        ["CANNOT_EVALUATE"] * 10)
+    # the shared reading's own bounds refuse a brief up front, whatever else it holds: a marker run that
+    # nests past the nesting ceiling, and a whitespace run past the run ceiling
+    check("c1/brief-bounds-cannot-evaluate", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "1) " * 150 + "x"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "a" + " " * 2001 + "b"))],
+        ["CANNOT_EVALUATE"] * 2)
     # the declarations come from the shared parser seam: with it patched to declare nothing, the en-dash
     # look-alike is read past (the legacy per-tool reading) and the clean verdict stands
     endash = BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2013) + " INPUT: /abs/in.md")

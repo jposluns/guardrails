@@ -279,8 +279,10 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        line is an indented code block and declares nothing. A
                        path in prose is never judged by P6: only a
                        declared input is, and an output the brief asks the worker to create is not declared, so
-                       it is not judged. A brief the vendored parser cannot read, or one over its 1 MiB
-                       ceiling, is CANNOT_EVALUATE, never read another way; conformance is exactly Marko
+                       it is not judged. A brief the vendored parser cannot read, or one over the shared
+                       reading's bounds (its 512 KiB text ceiling, its whitespace-run and nesting
+                       prescans, its parse deadline), is CANNOT_EVALUATE, never read another way;
+                       conformance is exactly Marko
                        2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
                        CommonMark reading (a no-break space accepted after a closing fence, for one).
 
@@ -586,17 +588,18 @@ command line is split on whitespace once and its tokens classified by a plain pr
 command line end; per opener, R6 measures its subject's length before reading it; and every word-run, command and
 file-name pattern is anchored at a token start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address
 space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print two finite, nonnegative times,
-each shape at 1 MiB must take at most LINEAR_FACTOR times as long as at 128 KiB plus LINEAR_SLACK seconds
+each shape at 512 KiB must take at most LINEAR_FACTOR times as long as at 64 KiB plus LINEAR_SLACK seconds
 (the input is eight times larger; a pass whose time grows with the square of the input takes about 64 times as
-long). A shape is evidence only for the text it repeats. Measured on 2026-10-08 on one shared host, each in such a
-child under nice 10, in two runs of these shapes: every shape took at most 0.29 s at 128 KiB and 2.13 s at 1 MiB,
-at most 9.4 times its 128 KiB time. On the previous revision, with the same harness and a 60-second timeout
-(measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix (" -x.y" repeated then
-"!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not finish within 60 s; the fence-contents shape
-took at most 0.06 s there and guards the new reading of fence contents, not the change. Of the older shapes,
-closed-args-linear repeats a token with one parse and did not catch that argument tail; the whitespace-run shapes
-(whitespace-run-linear and item-list-whitespace-linear) were added when an earlier revision did not finish 128 KiB
-within 60 s, and some others when an earlier revision exceeded the bound, each measured only to a 60-second timeout.
+long). Every shape carries a lead that holds "nput", so each runs through the shared parsed-document reading, never
+the ASCII fast path, and the larger size sits exactly at that reading's text ceiling; a shape the reading's own
+bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the nesting prescan)
+is timed through its refusal, which is the bounded behaviour an oversized or pathological brief gets. A shape is
+evidence only for the text it repeats. On the previous revision, with a 1 MiB size, a 60-second timeout and the
+parse-free fast path (measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix
+(" -x.y" repeated then "!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not finish within 60 s;
+the whitespace-run shapes (whitespace-run-linear and item-list-whitespace-linear) were added when an earlier
+revision did not finish 128 KiB within 60 s, and some others when an earlier revision exceeded the bound, each
+measured only to a 60-second timeout.
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)
@@ -787,7 +790,7 @@ def decode_brief(data):
     if found is not None:
         raise CannotEvaluate("brief: line {}: {}".format(*found))
     # A byte order mark, a zero-width or a bidirectional control is invisible and can split a word; only
-    # a fenced block's body can still hold one here.
+    # code of the parsed document (a fenced or indented block's body, a code span) can still hold one here.
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
     if all(_blank_character(ch) for ch in text):
         raise CannotEvaluate("brief: blank")
@@ -3936,8 +3939,10 @@ def _child_commit(repo, commit):
                            "maintenance.auto=false", "commit-tree", commit + "^{tree}", "-p", commit, "-m", "child"],
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
-# The child caps its address space at 1 GiB, then times evaluate() on 128 KiB and 1 MiB briefs, each a prefix,
-# one unit repeated, and a suffix.
+# The child caps its address space at 1 GiB, then times evaluate() on 64 KiB and 512 KiB briefs (the
+# larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
+# (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
+# A refusal (a prescan or deadline cannot-evaluate) is still a bounded evaluation and is timed as one.
 LINEAR_CHILD = (
     "import resource, sys, time\n"
     "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
@@ -3947,19 +3952,23 @@ LINEAR_CHILD = (
     "import check_brief_capability as m\n"
     "table = m.parse_table(m.TABLE_FIXTURE.encode('utf-8'))\n"
     "prefix, unit, suffix = sys.argv[2:5]\n"
-    "for size in (1 << 17, 1 << 20):\n"
-    "    body = size - len(prefix) - len(suffix)\n"
-    "    data = (prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
+    "lead = 'Input notes.\\n\\n'\n"
+    "for size in (1 << 16, 1 << 19):\n"
+    "    body = size - len(lead) - len(prefix) - len(suffix)\n"
+    "    data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
     "    began = time.perf_counter()\n"
-    "    m.evaluate(data, 'gamma', table)\n"
+    "    try:\n"
+    "        m.evaluate(data, 'gamma', table)\n"
+    "    except m.CannotEvaluate:\n"
+    "        pass\n"
     "    print(time.perf_counter() - began)\n")
 
 
 def _linear(unit, prefix="", suffix=""):
-    """True when evaluate() on a 1 MiB brief (`prefix`, `unit` repeated, `suffix`) takes at most LINEAR_FACTOR
-    times as long as on the 128 KiB one plus LINEAR_SLACK seconds, both timed in a child capped at 1 GiB
-    (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went wrong. The child must exit 0
-    and print exactly two finite, nonnegative times."""
+    """True when evaluate() on a 512 KiB brief (a parse-forcing lead, `prefix`, `unit` repeated, `suffix`)
+    takes at most LINEAR_FACTOR times as long as on the 64 KiB one plus LINEAR_SLACK seconds, both timed
+    in a child capped at 1 GiB (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went
+    wrong. The child must exit 0 and print exactly two finite, nonnegative times."""
     try:
         done = subprocess.run([sys.executable, "-I", "-B", "-c", LINEAR_CHILD, str(Path(__file__).resolve().parent),
                                prefix, unit, suffix], capture_output=True, text=True, timeout=LINEAR_TIMEOUT)
@@ -3972,7 +3981,7 @@ def _linear(unit, prefix="", suffix=""):
     if done.returncode != 0 or not all(0.0 <= value < float("inf") for value in (small, large)):
         return "child exit {}, output {!r}: {}".format(done.returncode, done.stdout.strip()[-80:],
                                                       done.stderr.strip()[-200:])
-    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "1 MiB took {:.3f} s, 128 KiB {:.3f} s".format(
+    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "512 KiB took {:.3f} s, 64 KiB {:.3f} s".format(
         large, small)
 
 
@@ -4756,6 +4765,31 @@ def self_test(report_path=None):
     check("cannot/blank-2", _outcome(" \n\n"), "CannotEvaluate")
     check("cannot/nul-blank-2", _outcome(b"\x00\x00\n"), "CannotEvaluate")
     check("cannot/zero-width-blank-2", _outcome(chr(0x200B) + chr(0xFEFF) + "\n"), "CannotEvaluate")
+    # the shared reading's text ceiling, judged up front on every brief: at the ceiling the brief is
+    # evaluated, one byte over it is refused whatever the brief holds, a parse-free pure-ASCII text and a
+    # parse-forcing one alike
+    at_ceiling = "a" * _input_declarations.MAX_TEXT_BYTES
+    check("cannot/text-ceiling-boundary",
+          (_outcome(at_ceiling)[0], _outcome(at_ceiling + "a"),
+           _outcome("Input notes.\n\n" + at_ceiling)),
+          (0, "CannotEvaluate", "CannotEvaluate"))
+    # the nesting prescan refuses up front, whatever else the brief holds: the same deep lead in a
+    # parse-free ASCII brief and beside a non-ASCII character, a marker run on one line, and marker lines
+    # that march deeper line by line
+    deep_line = "1) " * 150 + "x\n"
+    check("cannot/nesting-depth-2", [_outcome(text) for text in (
+        deep_line, "Café.\n\n" + deep_line, "> " * 21 + "x\n",
+        "".join("  " * level + "- a\n" for level in range(21)))], ["CannotEvaluate"] * 4)
+    # the whitespace-run prescan refuses the same way on both paths
+    check("cannot/whitespace-run-2", [_outcome(text) for text in (
+        "a" + " " * 2001 + "b\n", "Input notes.\n\na" + " " * 2001 + "b\n")], ["CannotEvaluate"] * 2)
+    # each bound's just-inside value is read through the full parsed document (the lead forces the parse,
+    # the shared reading answers), asserted on the reading itself so the structure rules take no part
+    check("structure/parse-bounds-boundary",
+          (read_inputs("Input notes.\n\n" + "> " * 20 + "ok\n"),
+           read_inputs("Input notes.\n\n" + "".join("  " * level + "- a\n" for level in range(20))),
+           read_inputs("Input notes.\n\na" + " " * 2000 + "b\n")),
+          (([], []), ([], []), ([], [])))
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-selftest-"))
     try:
         table_path = str(tmp / "table.toml")
@@ -5933,6 +5967,17 @@ def self_test(report_path=None):
             "Intro.\n\n    ```\n\nINPUT: {T}/missing.md\n",
             "Intro.\n\n\t```\n\nINPUT: {T}/missing.md\n",
             "INPUT: {T}/missing.md")], [p6_missing] * 12)
+        # ASCII-only rendered labels: a character reference or intraword emphasis spells INPUT: with no
+        # literal "nput" substring and no non-ASCII character anywhere in the brief, so the reading must
+        # answer them from the parsed document, never from a text shortcut; the reference-spelt look-alike
+        # (it renders Input:) is refused the same way
+        check("preflight/p6-ascii-rendered-present-quiet", [p6(text) for text in (
+            "I&#78;PUT: {T}/in.md\n", "IN**PUT**: {T}/in.md\n", "IN*PUT*: {T}/in.md\n")], [(0, [])] * 3)
+        check("preflight/p6-ascii-rendered-missing-hard", [p6(text) for text in (
+            "I&#78;PUT: {T}/missing.md\n", "IN**PUT**: {T}/missing.md\n", "IN*PUT*: {T}/missing.md\n")],
+            [p6_missing] * 3)
+        check("preflight/p6-ascii-look-alike-cannot-evaluate", p6("Inp&#117;t: {T}/in.md\n"),
+              "CannotEvaluate")
         # inside code nothing is a declaration and nothing is a look-alike: a fenced or tab-indented INPUT
         # line, a quoted workflow's indented inputs: key, the label in a code span, a shell snippet, an
         # unclosed fence (whose four-space closer closes nothing, so the rest stays code) and a format
@@ -5945,7 +5990,8 @@ def self_test(report_path=None):
             "\tINPUT: {T}/missing.md\n", "Intro.\n\n    INPUT: {T}/missing.md\n",
             "Intro.\n\n    inputs:\n      target: x\n", "`INPUT: {T}/missing.md`\n",
             "`cat input | wc -l`\n", "```\ncode\n    ```\nINPUT: {T}/missing.md\n",
-            "a `co" + chr(0x200B) + "de` span\n")], [(0, [])] * 7)
+            "a `co" + chr(0x200B) + "de` span\n",
+            "`x` " * 50 + "`y" + chr(0x200B) + "z`\n")], [(0, [])] * 8)
         table = parse_table(TABLE_FIXTURE.encode("utf-8"))
         second = evaluate("INPUT: {T}/in.md\nINPUT: {T}/missing.md\n".replace("{T}", str(inputs)).encode("utf-8"),
                           "alpha", table)
@@ -5994,8 +6040,9 @@ def self_test(report_path=None):
         # the label, a byte order mark at the brief's start and one in plain prose
         check("preflight/p6-format-cannot-evaluate", [p6(text) for text in (
             "INPUT: {T}/i" + chr(0x200B) + "n.md\n", "INPUT:" + chr(0xAD) + " {T}/in.md\n",
-            chr(0xFEFF) + "INPUT: {T}/in.md\n", "Read the notes" + chr(0x200B) + " first.\n")],
-            ["CannotEvaluate"] * 4)
+            chr(0xFEFF) + "INPUT: {T}/in.md\n", "Read the notes" + chr(0x200B) + " first.\n",
+            "`x` " * 50 + "a" + chr(0x200B) + "b\n")],
+            ["CannotEvaluate"] * 5)
         check("preflight/p6-not-file-or-directory-cannot-evaluate",
               [p6(text) for text in ("INPUT: {T}/fifo\n", "INPUT: /dev/null\n")], ["CannotEvaluate"] * 2)
         # a uid that reads a mode-000 file (root, or a capability) cannot show the permission refusal: recorded
@@ -6056,11 +6103,28 @@ def self_test(report_path=None):
         # with the confusable table emptied, a Cyrillic I hides the label (and its missing path) again
         check("revert/p6-confusable-red", *parser_flip(
             [lambda: p6_code(chr(0x0406) + "NPUT: {T}/missing.md\n")], [0], CONFUSABLES={}))
+        # with the rendering-mark scan patched out, a pure-ASCII brief whose character reference renders
+        # the label is answered by the fast path and its missing input goes unseen (the declared path must
+        # not spell "nput" itself, which alone forces the parse)
+        check("revert/p6-fast-path-red", *parser_flip(
+            [lambda: p6_code("I&#78;PUT: /absent-fixture-path/missing.md\n")], [0],
+            RENDERING_MARK_RE=never))
+        # with the deadline patched to zero, a brief the parse answers well inside it is refused instead
+        check("revert/parse-deadline-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + "word word word\n" * 3000)], ["CannotEvaluate"],
+            PARSE_DEADLINE_SECONDS=0.0))
+        # with the nesting ceiling lifted, the over-deep quote run is read (its text never forces a
+        # parse, so the lifted ceiling meets no other bound)
+        check("revert/nesting-prescan-red", *parser_flip(
+            [lambda: p6_code("> " * 21 + "x\n")], [0], MAX_NESTING_DEPTH=1 << 30))
+        # with the whitespace-run scan patched out, the over-long run is read the same way
+        check("revert/whitespace-run-red", *parser_flip(
+            [lambda: p6_code("a" + " " * 2001 + "b\n")], [0], WHITESPACE_RUN_RE=never))
     finally:
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 200)
+    check("revert/every-flip-ran", len(flipped), 204)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -6123,7 +6187,9 @@ def self_test(report_path=None):
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
-          "each evaluate in linear time at 1 MiB in a capped child that must exit 0; scope keeps and drops "
+          "each evaluate within the linear growth bound at 512 KiB, through the parsed-document reading "
+          "with its size, whitespace-run, nesting and deadline bounds, in a capped child that must exit 0; "
+          "scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
           "missing, non-regular, backwards-range and unknown-family input exits 2); execution set reconciled "
           "against tools/selftest_checks.toml".format(
