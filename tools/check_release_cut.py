@@ -2488,57 +2488,122 @@ _CENSUS_MAPPINGS = (
 # largest completed time plus a 30 s launch margin is 247.6 s, rounded up here. The former allowance, TIMEOUT * 4
 # (120 s of wall time), stopped that child on a busy host although the same tree passed later. A child still
 # running at the allowance is stopped and reported as cannot evaluate, never as a pass or a wrong result.
+# DELIBERATE SHORTER DEADLINE: the allowance is sized from those measured runs, not from the budgets the slowest
+# child grants itself. READ FROM SOURCE in tools/check_gensrc_failclose.py, on the same load-adjusted clock:
+# PROBE_TIMEOUT = 120 for each of its probes and TOTAL_TIMEOUT = 1800 for its whole sweep. 300 s is above one
+# probe's limit but below the sweep's, so it can stop that self-test while the self-test's own budget still runs.
+# Reaching it is attributed to this allowance (the stop report names it), reported as cannot evaluate, and never
+# read as a failure or a pass of the child.
 CENSUS_CHILD_TIMEOUT = 300
 CENSUS_COLLECT_S = 5   # seconds to collect a finished child's remaining output once its group is killed
+# The census step's whole deadline, in wall seconds (time.monotonic, not load-adjusted). Without it the step's
+# wall time would be bounded only by its seven allowances, each stretched up to _load_bound.MAX_LOAD_FACTOR
+# (16.0) times: 7 x 300 x 16 = 33,600 s. The member that runs this step, tools/check_release_cut.py --self-test
+# --red-on-revert, has no CONFIG_MEMBER_BOUNDS entry in tools/selftest_git_fixture_env.py, so the config lanes
+# give it CONFIG_MEMBER_BOUND_DEFAULT = 1200 s for its whole run. The step now ends within this deadline plus one
+# 0.5 s poll, one kill and CENSUS_COLLECT_S, at most about 486 s. The measured census step took 92.3 s in total
+# (1-minute load 38.6 on 80 CPUs), so the deadline is about 5 times that. The rest of the member's run is not
+# bounded here. Its measured time is recorded in the commit that set this value, and it must stay under
+# 1200 - 486 = 714 s for the member to fit. This is also a DELIBERATE SHORTER DEADLINE relative to the children's
+# own budgets (above). A child still running at it is stopped, and each child not yet started is not run. Both
+# are reported as cannot evaluate and attributed to this deadline, never to the child.
+CENSUS_STEP_WALL_S = 480
 
 
-def _census_child(root, rel, target, argv, allowance):
-    """One _CENSUS_MAPPINGS self-test run under CENSUS_DRIVER in a session of its own: (exit, stderr text). Once
-    allowance load-adjusted seconds have passed, the child's whole process group is killed (a descendant that left
-    the group is not reached). A child that had already exited by then (a descendant still held its output open)
-    is judged as the completed run it is: its exit and the rest of its stderr are returned. A child still running
-    raises subprocess.TimeoutExpired carrying the allowance applied."""
+class CensusStartError(Exception):
+    """A census-mapping child that could not be started: its Popen raised the OSError this carries."""
+
+
+class CensusStepDeadline(Exception):
+    """A census-mapping child still running when the census step's CENSUS_STEP_WALL_S deadline passed."""
+
+
+def _census_exited(pid):
+    """Whether the child pid has exited, read without reaping it, so the group id a kill names is still its own."""
+    return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+
+
+def _census_child(root, rel, target, argv, allowance, deadline):
+    """One _CENSUS_MAPPINGS self-test run under CENSUS_DRIVER in a session of its own: (exit, stderr text). The run
+    ends at the first of: the child's own exit, allowance load-adjusted seconds, and deadline (a time.monotonic()
+    instant, the census step's wall deadline). At each, the child's whole process group is killed (a descendant
+    that left the group is not reached). A child that has exited (a descendant may still hold its output open)
+    is judged at once as the completed run it is: its exit and the rest of its stderr are returned. A child still
+    running raises CensusStepDeadline at the deadline, else subprocess.TimeoutExpired carrying the allowance
+    applied. A start failure raises CensusStartError. An OSError while reading the exit or killing the group never
+    discards an exit already read."""
     import signal
+    import time
     from _load_bound import LoadClock
     clock = LoadClock()
-    with subprocess.Popen([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True) as proc:
+    try:
+        proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    except OSError as exc:
+        raise CensusStartError(exc) from exc
+    with proc:
         while True:
             try:
                 _, err = proc.communicate(timeout=0.5)
                 break
             except subprocess.TimeoutExpired:
-                if clock() < allowance:
-                    continue
-            # Read the exit without reaping the child, so the group id the kill names is still its own.
-            exited = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
-            os.killpg(proc.pid, signal.SIGKILL)
+                pass
+            # Should the non-reaping exit read fail, poll() (which reaps) still gives the exit; the group id stays
+            # reserved while the group has a member.
+            try:
+                exited = _census_exited(proc.pid)
+            except OSError:
+                exited = proc.poll() is not None
+            late = time.monotonic() >= deadline
+            if not (exited or late or clock() >= allowance):
+                continue
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:   # the group is gone or cannot be signalled: stop the child itself
+                proc.kill()
             if not exited:
-                raise subprocess.TimeoutExpired(proc.args, allowance)
+                raise CensusStepDeadline() if late else subprocess.TimeoutExpired(proc.args, allowance)
             try:
                 _, err = proc.communicate(timeout=CENSUS_COLLECT_S)
-            except subprocess.TimeoutExpired as late:   # a descendant that left the group still holds a pipe
-                err = late.stderr or b""
+            except subprocess.TimeoutExpired as held:   # a descendant that left the group still holds a pipe
+                err = held.stderr or b""
             break
     return proc.returncode, err.decode("utf-8", "replace")
 
 
-def _census_mapping_check(root, mappings=_CENSUS_MAPPINGS, run=_census_child):
+def _census_mapping_check(root, mappings=_CENSUS_MAPPINGS, run=_census_child, clock=None):
     """Each self-test in mappings, run under CENSUS_DRIVER, must end exit 2 with its cannot-evaluate report naming
     the held descriptor ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor N:"), never a traceback
-    (exit 1) or a pass. A child the CENSUS_CHILD_TIMEOUT allowance stops, or one that cannot be started, gave no
-    result: it is listed as cannot evaluate (stopped), never as a failure, and the children after it still run.
-    Returns (failures, stopped, runs)."""
+    (exit 1) or a pass. The whole step is held to CENSUS_STEP_WALL_S on clock (time.monotonic unless given): a
+    child running at that deadline is stopped, and a child not started by then is not run. Some children give no
+    result: one the CENSUS_CHILD_TIMEOUT allowance or the step deadline stops, one that cannot be started, and one
+    whose run failed before its exit was read. Each is listed as cannot evaluate (stopped), attributed to what
+    ended it, never as a failure, and the children after it still run until the deadline. Returns (failures,
+    stopped, runs)."""
+    import time
+    clock = clock or time.monotonic
+    deadline = clock() + CENSUS_STEP_WALL_S
     failures, stopped = [], []
     for rel, target, argv in mappings:
+        if clock() >= deadline:
+            stopped.append("%s (census under %s): not run, the census step's %s s wall deadline had passed"
+                           % (rel, target, CENSUS_STEP_WALL_S))
+            continue
         try:
-            code, err = run(root, rel, target, argv, CENSUS_CHILD_TIMEOUT)
+            code, err = run(root, rel, target, argv, CENSUS_CHILD_TIMEOUT, deadline)
         except subprocess.TimeoutExpired as exc:
             stopped.append("%s (census under %s): stopped by its %s s load-adjusted allowance before it reported"
                            % (rel, target, exc.timeout))
             continue
-        except OSError as exc:
-            stopped.append("%s (census under %s): could not be started: %r" % (rel, target, exc))
+        except CensusStepDeadline:
+            stopped.append("%s (census under %s): stopped at the census step's %s s wall deadline before it"
+                           " reported" % (rel, target, CENSUS_STEP_WALL_S))
+            continue
+        except CensusStartError as exc:
+            stopped.append("%s (census under %s): could not be started: %r" % (rel, target, exc.args[0]))
+            continue
+        except OSError as exc:   # after the start and before any exit was read: no result
+            stopped.append("%s (census under %s): its run failed before its exit was read: %r" % (rel, target, exc))
             continue
         held = re.match(r"census-held (\d+)\n", err)
         want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
@@ -2569,30 +2634,58 @@ _CENSUS_REPORT = ("census-held 7\nSELF-TEST ERROR: descriptor census cannot eval
                   "OSError(5, 'injected census read failure')\n")
 
 
+# The real stand-ins the census outcome vectors run through _census_child: name -> (allowance in load-adjusted
+# seconds, wall seconds from its start to the step deadline it is given, whether its exit read (_census_exited)
+# fails with OSError, whether it must return within half its allowance). hang.py and over.py run 10 s, held.py and
+# unwaited.py exit 1 at once; each first starts a grandchild that holds its output.
+_CENSUS_STAND_INS = {
+    "hang.py": (2, float("inf"), False, False),
+    "held.py": (20, float("inf"), False, True),
+    "over.py": (60, 2, False, False),
+    "unwaited.py": (20, float("inf"), True, True),
+}
+
+
 def _census_outcome_cases():
     """The census outcome vectors: (label, children in run order as (name, seconds it takes, exit, stderr),
-    expected self-test exit, names reported FAIL, names reported CANNOT EVALUATE). A scripted child that takes
-    longer than its allowance is stopped, as _census_child stops one, and seconds given as an OSError is a child
-    that cannot be started. Seconds None is a real stand-in run through _census_child under an allowance of 2 s,
-    each leaving a grandchild that holds its output: hang.py is still running at the allowance, held.py exits 1 at
-    once. "delayed" takes longer than the former allowance (TIMEOUT * 4) but less than CENSUS_CHILD_TIMEOUT."""
-    old, new = TIMEOUT * 4, CENSUS_CHILD_TIMEOUT
+    expected self-test exit, names reported FAIL, (name, what stopped it) for each name reported CANNOT EVALUATE:
+    "allowance", "deadline" (the census step's wall deadline) or "unrun" (not run, that deadline had passed)).
+    Scripted children run on a virtual clock: a child that takes longer than its allowance or than the time left to
+    the step deadline is stopped there, as _census_child stops one, and seconds given as a CensusStartError is a
+    child that cannot be started. Seconds None is a real stand-in (_CENSUS_STAND_INS) run through _census_child.
+    "delayed" takes longer than the former allowance (TIMEOUT * 4) but less than CENSUS_CHILD_TIMEOUT. The step
+    vectors finish their second child just inside, exactly at, and just past the step deadline."""
+    old, new, wall = TIMEOUT * 4, CENSUS_CHILD_TIMEOUT, CENSUS_STEP_WALL_S
     require(new > old + 2, "census outcome vectors: CENSUS_CHILD_TIMEOUT must exceed the former TIMEOUT * 4")
+    first = new - 1
+    rest = wall - first
+    require(1 < rest < new - 1, "census outcome vectors: the step deadline must fall inside a second allowance")
     report, never = _CENSUS_REPORT, float("inf")
     traceback = "census-held 7\nTraceback (most recent call last):\nOSError: [Errno 5] injected census read failure\n"
+    unstartable = CensusStartError(OSError(2, "injected start failure"))
     return (
         ("census-delayed-pass", (("delayed", (old + new) / 2, 2, report),), 0, (), ()),
         ("census-inside-allowance", (("inside", new - 1, 2, report),), 0, (), ()),
-        ("census-past-allowance", (("past", new + 1, 2, report),), 2, (), ("past",)),
-        ("census-stopped", (("never", never, 2, report), ("prompt", 1, 2, report)), 2, (), ("never",)),
+        ("census-past-allowance", (("past", new + 1, 2, report),), 2, (), (("past", "allowance"),)),
+        ("census-stopped", (("never", never, 2, report), ("prompt", 1, 2, report)), 2, (),
+         (("never", "allowance"),)),
         ("census-wrong-beside-stopped", (("never", never, 2, report), ("traceback", 1, 1, traceback),
-                                         ("silent", 1, 2, "census-held 7\n")), 1, ("traceback", "silent"), ("never",)),
+                                         ("silent", 1, 2, "census-held 7\n")), 1, ("traceback", "silent"),
+         (("never", "allowance"),)),
         ("census-wrong-before-stopped", (("exit-zero", 1, 0, report), ("never", never, 2, report)), 1,
-         ("exit-zero",), ("never",)),
-        ("census-start-failure", (("unstartable", OSError(2, "injected start failure"), None, None),
-                                  ("exit-one", 1, 1, report)), 1, ("exit-one",), ("unstartable",)),
-        ("census-stop-real", (("hang.py", None, None, None),), 2, (), ("hang.py",)),
+         ("exit-zero",), (("never", "allowance"),)),
+        ("census-start-failure", (("unstartable", unstartable, None, None), ("exit-one", 1, 1, report)), 1,
+         ("exit-one",), (("unstartable", "start"),)),
+        ("census-step-inside", (("first", first, 2, report), ("second", rest - 1, 2, report),
+                                ("third", 1, 2, report)), 0, (), ()),
+        ("census-step-at-deadline", (("first", first, 2, report), ("second", rest, 2, report),
+                                     ("third", 1, 2, report)), 2, (), (("third", "unrun"),)),
+        ("census-step-past", (("first", first, 2, report), ("second", rest + 1, 2, report),
+                              ("third", 1, 2, report)), 2, (), (("second", "deadline"), ("third", "unrun"))),
+        ("census-stop-real", (("hang.py", None, None, None),), 2, (), (("hang.py", "allowance"),)),
         ("census-exited-real", (("held.py", None, None, None),), 1, ("held.py",), ()),
+        ("census-deadline-real", (("over.py", None, None, None),), 2, (), (("over.py", "deadline"),)),
+        ("census-unread-exit-real", (("unwaited.py", None, None, None),), 1, ("unwaited.py",), ()),
     )
 
 
@@ -2601,78 +2694,145 @@ def _census_outcome_cases():
 # copies, its replacement, globals it overrides, the vectors it must turn red). The first two restore the handling the check
 # had before: the 120 s allowance, and a stop that escaped the check, ending the run as cannot evaluate before the
 # other children were judged; the next two read a stop as a failure and as a pass. Then: a start failure that
-# escapes the check, a child that had already exited read as stopped, a stop without the group kill, a stop that
-# kills only the child itself, and a self-test whose end no longer raises the stopped children.
+# escapes the check, a child that had already exited read as stopped, an exited child judged only once its
+# allowance ran out, a failed exit read that discards the exit, a stop without the group kill, a stop that kills
+# only the child itself, a census step with no wall deadline, a child that ignores that deadline, a self-test
+# whose end no longer raises the stopped children, and a survivor check that reads a missing pid file as gone.
 _CENSUS_STOP_REDS = ("census-past-allowance", "census-stopped", "census-wrong-beside-stopped",
                      "census-wrong-before-stopped", "census-stop-real", "census-wiring-all-stopped")
-_CENSUS_KILL_REDS = ("census-stop-real", "census-exited-real")
+_CENSUS_EXITED_REDS = ("census-exited-real", "census-unread-exit-real")
+_CENSUS_KILL_REDS = ("census-stop-real", "census-exited-real", "census-deadline-real", "census-unread-exit-real")
 _CENSUS_STOP_TEXT = 'stopped.append("%s (census under %s): stopped by'
 _CENSUS_KILL_TEXT = "os.killpg(proc.pid, signal.SIGKILL)"
 _CENSUS_FLIPS = (
     ("census-old-allowance", "", "", {"CENSUS_CHILD_TIMEOUT": TIMEOUT * 4},
-     ("census-delayed-pass", "census-inside-allowance")),
+     ("census-delayed-pass", "census-inside-allowance", "census-step-inside", "census-step-at-deadline",
+      "census-step-past")),
     ("census-stop-escapes", "except subprocess.TimeoutExpired as exc:", "except ():", {}, _CENSUS_STOP_REDS),
     ("census-stop-as-failure", _CENSUS_STOP_TEXT, _CENSUS_STOP_TEXT.replace("stopped.", "failures.", 1), {},
      _CENSUS_STOP_REDS),
     ("census-stop-as-pass", _CENSUS_STOP_TEXT, _CENSUS_STOP_TEXT.replace("stopped.append", "str", 1), {},
      _CENSUS_STOP_REDS),
-    ("census-start-escapes", "except OSError as exc:", "except ():", {}, ("census-start-failure",)),
-    ("census-exited-as-stopped", "if not exited:", "if True:", {}, ("census-exited-real",)),
+    ("census-start-escapes", "except CensusStartError as exc:", "except ():", {}, ("census-start-failure",)),
+    ("census-exited-as-stopped", "if not exited:", "if True:", {}, _CENSUS_EXITED_REDS),
+    ("census-exited-waits", "exited or late or clock() >= allowance", "late or clock() >= allowance", {},
+     _CENSUS_EXITED_REDS),
+    ("census-unread-exit-lost", "exited = proc.poll() is not None", "raise", {}, ("census-unread-exit-real",)),
     ("census-no-group-kill", _CENSUS_KILL_TEXT, "None", {}, _CENSUS_KILL_REDS),
     ("census-leader-kill", _CENSUS_KILL_TEXT, "proc.kill()", {}, _CENSUS_KILL_REDS),
+    ("census-step-unbounded", "deadline = clock() + CENSUS_STEP_WALL_S", 'deadline = clock() + float("inf")', {},
+     ("census-step-at-deadline", "census-step-past")),
+    ("census-deadline-ignored", "late = time.monotonic() >= deadline", "late = False", {},
+     ("census-deadline-real",)),
     ("census-stop-unraised", "require(not census_stopped, census_stopped)", "None", {},
      ("census-wiring-all-stopped",)),
+    ("census-survivor-missing-as-gone", 'pid = ""', "return False", {}, ("census-survivor-late-pid",)),
 )
 
 
-def _census_survivor(pidfile):
-    """True when the grandchild whose pid pidfile holds still runs (not a zombie) 3 s after its child's run ended:
-    a stop that does not reach the child's whole process group leaves it running."""
+def _census_survivor(pidfile, window=3):
+    """True when the grandchild whose pid pidfile holds still runs (not a zombie) window seconds after its child's
+    run ended: a stop that does not reach the child's whole process group leaves it running. A pid file not yet
+    written is waited for until the window ends, so a grandchild slow to start is still seen; one not written by
+    then counts as not running."""
     import time
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + window
     while True:
         try:
             pid = pidfile.read_text(encoding="utf-8").strip()
-            stat_line = Path("/proc/" + pid + "/stat").read_bytes() if pid.isdigit() else b""
+        except FileNotFoundError:   # not written yet: keep waiting for it
+            pid = ""
+        running = False
+        if pid.isdigit():
+            try:
+                stat_line = Path("/proc/" + pid + "/stat").read_bytes()
+            except OSError:
+                stat_line = b""
             running = stat_line.rpartition(b") ")[2][:1] not in (b"", b"Z", b"X")
-        except OSError:
-            running = False
-        if not running or time.monotonic() >= deadline:
+            if not running:
+                return False
+        if time.monotonic() >= deadline:
             return running
         time.sleep(0.1)
 
 
-def _census_reds(ns, cases, stage):
+def _census_survivor_reds(ns, stage):
+    """(label, what differed) for the late pid file vector: a grandchild that writes its pid file 1 s after it
+    starts must be seen as running by ns._census_survivor. The process this starts is released through its stop
+    file and reaped."""
+    pidfile = stage / "late.pid"
+    hold = ("import os, pathlib, sys, time\ntime.sleep(1)\np = pathlib.Path(sys.argv[1])\np.write_text(str(os.getpid()))"
+            "\nstop, end = p.with_suffix('.stop'), time.monotonic() + 30\n"
+            "while not stop.exists() and time.monotonic() < end:\n    time.sleep(0.1)\n")
+    pidfile.unlink(missing_ok=True)
+    pidfile.with_suffix(".stop").unlink(missing_ok=True)
+    with subprocess.Popen([sys.executable, "-I", "-c", hold, str(pidfile)]) as proc:
+        try:
+            seen = ns._census_survivor(pidfile, 10)
+        finally:
+            pidfile.with_suffix(".stop").write_text("", encoding="utf-8")
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    return [] if seen else [("census-survivor-late-pid", "the late grandchild was not seen running")]
+
+
+def _census_reds(ns, cases, stage, release=True):
     """(label, what differed) for each case whose self-test exit or report does not hold when main(["--self-test"])
     runs a self-test cut to ns._census_mapping_check over the case's children, then _census_mapping_verdict,
     raising its cannot-evaluate detail last as _self_test_isolated does. A real stand-in runs through
-    ns._census_child and must leave no grandchild running."""
+    ns._census_child and must leave no grandchild running; one that had exited must be judged within half its
+    allowance. Each grandchild is then released through its stop file (unless release is false) and must be gone
+    after that, so a flip whose stop misses the grandchild leaves nothing running."""
+    import errno
     import io
+    import time
     this = sys.modules[__name__]
     reds = []
     for label, children, want_code, want_fail, want_stop in cases:
         script = {name: (seconds, code, err) for name, seconds, code, err in children}
-        survivors = []
+        survivors, leftovers, slow, now = [], [], [], [0.0]
 
-        def run(root, rel, target, argv, allowance, script=script, survivors=survivors):
+        def failing(*args, **kwargs):
+            raise OSError(errno.ECHILD, "injected exit read failure")
+
+        def run(root, rel, target, argv, allowance, deadline, script=script, survivors=survivors,
+                leftovers=leftovers, slow=slow, now=now):
             seconds, code, err = script[rel]
-            if isinstance(seconds, OSError):
+            if isinstance(seconds, Exception):
                 raise seconds
             if seconds is None:
-                pidfile = root / (rel + ".pid")
+                allowance, wall, fails, prompt = _CENSUS_STAND_INS[rel]
+                pidfile, stopfile = root / (rel + ".pid"), root / (rel + ".stop")
                 pidfile.unlink(missing_ok=True)
+                stopfile.unlink(missing_ok=True)
+                real_exited, started = ns._census_exited, time.monotonic()
+                if fails:
+                    ns._census_exited = failing
                 try:
-                    return ns._census_child(root, rel, target, argv, 2)
+                    return ns._census_child(root, rel, target, argv, allowance, started + wall)
                 finally:
+                    ns._census_exited = real_exited
+                    took = time.monotonic() - started
+                    if prompt and took >= allowance / 2:
+                        slow.append("%s returned %.1f s after its start, not within half its %s s allowance"
+                                    % (rel, took, allowance))
                     if _census_survivor(pidfile):
                         survivors.append(rel)
-            if seconds > allowance:
-                raise subprocess.TimeoutExpired(rel, allowance)
+                    if release:
+                        stopfile.write_text("", encoding="utf-8")
+                    if rel in survivors and _census_survivor(pidfile):
+                        leftovers.append(rel)
+            spent = min(seconds, allowance, deadline - now[0])
+            now[0] += spent
+            if spent < seconds:
+                raise CensusStepDeadline() if now[0] >= deadline else subprocess.TimeoutExpired(rel, allowance)
             return code, err
 
-        def cut(red_on_revert, children=children, run=run):
+        def cut(red_on_revert, children=children, run=run, now=now):
             mappings = [(name, "*", ()) for name, *_ in children]
-            detail = _census_mapping_verdict(*ns._census_mapping_check(stage, mappings, run))
+            detail = _census_mapping_verdict(*ns._census_mapping_check(stage, mappings, run, lambda: now[0]))
             require(not detail, detail)
             return 0
         out, err = io.StringIO(), io.StringIO()
@@ -2687,18 +2847,26 @@ def _census_reds(ns, cases, stage):
         stream, lines = err.getvalue(), out.getvalue().splitlines()
         detail = json.loads(lines[-1]).get("detail", "") if code == 2 and lines else ""
         problems = [] if code == want_code else ["exit %r, expected %d" % (code, want_code)]
+        stop_reasons = dict(want_stop)
         for name, seconds, *_ in children:
             failed = "FAIL %s (census under *)" % name in stream
             stopped = "CANNOT EVALUATE %s (census under *)" % name in stream
-            if (failed, stopped) != (name in want_fail, name in want_stop):
+            if (failed, stopped) != (name in want_fail, name in stop_reasons):
                 problems.append("%s reported failed=%s stopped=%s" % (name, failed, stopped))
-            allowance = 2 if seconds is None else ns.CENSUS_CHILD_TIMEOUT
-            if (want_code == 2 and name in want_stop
-                    and "%s (census under *): stopped by its %s s " % (name, allowance) not in detail):
-                problems.append(name + " is not named as stopped at its applied allowance in the cannot-evaluate"
-                                " report")
+            allowance = _CENSUS_STAND_INS[name][0] if seconds is None else ns.CENSUS_CHILD_TIMEOUT
+            reasons = {"allowance": "stopped by its %s s load-adjusted allowance" % allowance,
+                       "deadline": "stopped at the census step's %s s wall deadline" % ns.CENSUS_STEP_WALL_S,
+                       "unrun": "not run, the census step's %s s wall deadline had passed" % ns.CENSUS_STEP_WALL_S,
+                       "start": "could not be started"}
+            if (want_code == 2 and name in stop_reasons
+                    and "%s (census under *): %s" % (name, reasons[stop_reasons[name]]) not in detail):
+                problems.append("%s is not named as %s in the cannot-evaluate report"
+                                % (name, reasons[stop_reasons[name]]))
             if name in survivors:
                 problems.append(name + " left its grandchild running")
+            if name in leftovers:
+                problems.append(name + " left its grandchild running after its cleanup")
+        problems += slow
         if problems:
             reds.append((label, "; ".join(problems)))
     return reds
@@ -2712,7 +2880,7 @@ def _census_wiring_reds(ns, stage):
     this = sys.modules[__name__]
     names, mapping_check = ("first", "second"), ns._census_mapping_check
 
-    def stopping(root, rel, target, argv, allowance):
+    def stopping(root, rel, target, argv, allowance, deadline):
         raise subprocess.TimeoutExpired(rel, allowance)
     stubs = {"test_cases": dict, "_close_stage": lambda parent, script: None,
              "_close_stage_mapping_check": lambda parent, script: [],
@@ -2743,20 +2911,28 @@ def _census_wiring_reds(ns, stage):
 def _census_outcome_vectors(parent):
     """The census outcome vectors and the wiring vector over a scratch module holding the census functions' source
     as it stands, which must all hold, then over each _CENSUS_FLIPS flip of that source, which must turn exactly its
-    listed vectors red. Each scratch module is loaded over a copy of this module's globals. Returns (failures, the
-    RED lines, vectors run)."""
+    listed vectors red. Each scratch module is loaded over a copy of this module's globals. The grandchild release
+    is flipped too: under the leader-only kill with no release, the stop vector must report a grandchild still
+    running after its cleanup (that grandchild is then released). The late pid file vector runs over each module
+    too. Returns (failures, the RED lines, vectors run)."""
     import importlib.util
     import inspect
     stage = parent / "census-outcomes"
     stage.mkdir()
-    hold = "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+    # Each grandchild holds its output until its stop file appears (written after each run), for at most 30 s.
+    hold = ("import os, pathlib, sys, time\np = pathlib.Path(sys.argv[1])\np.write_text(str(os.getpid()))\n"
+            "stop, end = p.with_suffix('.stop'), time.monotonic() + 30\n"
+            "while not stop.exists() and time.monotonic() < end:\n    time.sleep(0.1)\n")
     spawn = ("import subprocess, sys, time\nsubprocess.Popen([sys.executable, '-I', '-c', %r, sys.argv[0] + '.pid'])\n"
              % hold)
-    (stage / "hang.py").write_text(spawn + "time.sleep(10)\n", encoding="utf-8")
-    (stage / "held.py").write_text(spawn + "sys.exit(1)\n", encoding="utf-8")
+    for name, tail in (("hang.py", "time.sleep(10)\n"), ("over.py", "time.sleep(10)\n"),
+                       ("held.py", "sys.exit(1)\n"), ("unwaited.py", "sys.exit(1)\n")):
+        (stage / name).write_text(spawn + tail, encoding="utf-8")
     cases = _census_outcome_cases()
+    stop_case = [case for case in cases if case[0] == "census-stop-real"]
     source = "\n\n".join(inspect.getsource(function)
-                         for function in (_census_child, _census_mapping_check, _self_test_isolated))
+                         for function in (_census_child, _census_mapping_check, _self_test_isolated,
+                                          _census_survivor))
     failures, lines = [], []
     for name, old, new, overrides, labels in (("", "", "", {}, ()),) + _CENSUS_FLIPS:
         require(not old or source.count(old) == 1, name + ": census flip must match exactly once")
@@ -2768,7 +2944,8 @@ def _census_outcome_vectors(parent):
         flipped.__dict__.update((k, v) for k, v in globals().items() if not k.startswith("__"))
         flipped.__dict__.update(overrides)
         spec.loader.exec_module(flipped)
-        reds = _census_reds(flipped, cases, stage) + _census_wiring_reds(flipped, stage)
+        reds = (_census_reds(flipped, cases, stage) + _census_wiring_reds(flipped, stage)
+                + _census_survivor_reds(flipped, stage))
         if not name:
             failures += ["census outcome %s: %s" % red for red in reds]
             continue
@@ -2776,7 +2953,17 @@ def _census_outcome_vectors(parent):
         if sorted(red) != sorted(labels):
             failures.append("census flip %s: expected red at %s, got %s" % (name, sorted(labels), sorted(red)))
         lines.append("RED " + name + " at " + "; ".join(red))
-    return failures, lines, len(cases) + 1
+        if name == "census-leader-kill":
+            try:
+                kept = [label for label, what in _census_reds(flipped, stop_case, stage, release=False)
+                        if "after its cleanup" in what]
+            finally:
+                (stage / "hang.py.stop").write_text("", encoding="utf-8")
+            if kept != ["census-stop-real"]:
+                failures.append("census flip census-cleanup-unreleased: expected red at ['census-stop-real'], got "
+                                + repr(kept))
+            lines.append("RED census-cleanup-unreleased at " + "; ".join(kept))
+    return failures, lines, len(cases) + 2
 
 
 def _close_harness_checks(parent, script):
