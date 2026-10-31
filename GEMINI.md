@@ -358,6 +358,18 @@ A recorded change carries the human maintainer's own identity as its author, wit
 committer, or co-author. This holds anywhere the record names a party, including commit metadata,
 co-author trailers, and change-log entries.
 
+## A consumer follows its producer
+
+A call that consumes another operation's output is issued only after the production it needs, including
+asynchronous work that production started, is observed complete, within one message and across
+messages. Calls issued together have no ordering. A delay or a presence test is not the ordering.
+Independent calls stay free to run together.
+
+Where the output has a content digest, the consumer binds to it under
+explicit-binding-over-ambient-context, with size only supplementary; an unreadable required input fails
+under check-fails-closed-on-unreadable. A per-call hook cannot see sibling calls, so this ordering rests
+on the author.
+
 ## Bind to the explicit target, not the ambient context
 
 An action that has an authoritative, explicit way to name what it acts on, its identity, its target,

@@ -5974,3 +5974,21 @@ start-line = 15
 end-line = 16
 canonical-text = "The only\nstatus lines the assistant emits are the verdict and completion marker its brief names."
 source-digest = "dd3eab3381071080c059d31e998280fb3b29d5b07af6b3ea54a9ddbc7c8fa9b4"
+
+[[clause]]
+clause-id = "cnsprd.1"
+corpus-id = "cnsprd"
+source-path = ".aiqt/core/rules/integ-consumer-follows-its-producer.md"
+start-line = 13
+end-line = 15
+canonical-text = "A call that consumes another operation's output is issued only after the production it needs, including\nasynchronous work that production started, is observed complete, within one message and across\nmessages."
+source-digest = "2d1371247ade237c2c8f7c3d8c4e6ddc388edf9d786358a09fbfd9dabb9cf5d2"
+
+[[clause]]
+clause-id = "cnsprd.2"
+corpus-id = "cnsprd"
+source-path = ".aiqt/core/rules/integ-consumer-follows-its-producer.md"
+start-line = 15
+end-line = 15
+canonical-text = "A delay or a presence test is not the ordering."
+source-digest = "2d1371247ade237c2c8f7c3d8c4e6ddc388edf9d786358a09fbfd9dabb9cf5d2"
