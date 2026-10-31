@@ -632,6 +632,7 @@ import io
 import json
 import os
 import posixpath
+import random
 import re
 import shlex
 import shutil
@@ -4579,6 +4580,90 @@ class _NoFormatRemoval:
         return "Cc" if ch in "\x00" else ("Zs" if ch.isspace() else "Ll")
 
 
+def _running_nesting_refused(text):
+    """The self-test's oracle: a frozen copy of _input_declarations._nesting_refused before it kept a held
+    depth (the running depth alone, which every fence and placement decision reads), so the self-test
+    can show the held depth only adds refusals. Its statements are that revision's, with the module
+    prefix added, the comments dropped and a short reason; never edited to follow the prescan. It reads
+    the module's helpers and seams, so the self-test calls it with none of them patched."""
+    module = _input_declarations
+    running = 0
+    after_blank = True
+    placed = module.NESTING_FENCES
+    fence = None
+    opaque = set()
+    for number, line in enumerate(text.split("\n"), 1):
+        closing = False
+        if placed and fence is not None:
+            held = module._fence_holds(fence, line)
+            if held == "content":
+                continue
+            fence = None
+            placed = held is not False
+            closing = held == "closed"
+        if not line.strip():
+            after_blank = True
+            opaque = {kind for kind in opaque if not isinstance(kind, str)
+                      or (kind == "label" and module.NESTING_LABELS) or (kind in ("label", "link") and line)}
+            continue
+        markers, columns, position = module._lead_shape(line)
+        if placed and not closing:
+            if module.FENCE_SHAPE_RE.match(line, position):
+                fence = False if opaque else module._fence_opening(line, position, markers, running, after_blank)
+                placed = fence is not False
+                fence = fence or None
+            else:
+                opaque = {kind for kind in opaque if isinstance(kind, str) or not kind.search(line)}
+                if "label" in opaque:
+                    ended = module.LABEL_END_RE.match(line)
+                    if ended is not None:
+                        opaque.discard("label")
+                        if ended.group(1) == "]":
+                            opaque.add("link")
+                started = module._opaque_start(line[position:])
+                if started is not None and (isinstance(started, str) or not started.search(line)):
+                    opaque.add(started)
+        if module.NESTING_RESETS and markers == 0 and columns < 2 \
+                and (after_blank or module.BLOCK_START_RE.match(line)):
+            running = 0
+        after_blank = False
+        depth = min(running, columns // 2) + markers
+        if depth > module.MAX_NESTING_DEPTH:
+            return number, "nesting"
+        if depth > running:
+            running = depth
+    return None
+
+
+def _nesting_sample(seed, count):
+    """`count` texts for the nesting prescan's property checks, drawn by a random.Random(seed): six
+    optional parts in order (a list with a link reference definition held on its last level, a blank
+    line, fence lines, a list, an item fence or a margin line, a list from the margin or from the middle
+    list's depth), each followed at random by a stray line from a fixed set, so the same texts come back
+    on every run."""
+    rungs = lambda start, stop: "".join("  " * level + "- a\n" for level in range(start, stop))  # noqa: E731
+    stray = ("\n", "  \n", "x\n", "'\n", "]: /u\n", "```\n", "  ```\n", "   ~~~\n", "- ```\n", "~~~\n", "> ```\n",
+             "[x\n", "<div>\n", "# h\n", "\t```\n", "    ```\n", "\n  ```\n```\n", "\n    ```\n", "- ```\n\nx\n",
+             "- ~~~\n  \n~~~\n")
+    definitions = ("- [x\n\ny\n]: /u\n", "- [x]: /u 't\n  \ny\n'\n", "- [x]: /u\n\ny\n", "- [x\n")
+    fences = ("", "  ```\n```\n", "    ```\n", "   ~~~\n~~~\n", "  ```\n", "- ```\n", "```\n", "> ```\n")
+    items = ("", "- ```\n\nx\n", "- ~~~\n  \nx\n", "1. ```\n\nx\n", "- ```\n", "x\n")
+    chooser = random.Random(seed)
+    texts = []
+    for _ in range(count):
+        held, middle = chooser.randint(0, 20), chooser.randint(0, 20)
+        slots = (rungs(0, held) + chooser.choice(("", "  " * held + chooser.choice(definitions))),
+                 chooser.choice(("", "\n", "  \n")), chooser.choice(fences), rungs(0, middle),
+                 chooser.choice(items), rungs(chooser.choice((0, middle)), chooser.randint(0, 26)))
+        parts = []
+        for slot in slots:
+            parts.append(slot)
+            if chooser.random() < 0.3:
+                parts.append(chooser.choice(stray))
+        texts.append("".join(parts))
+    return texts
+
+
 def self_test(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -5070,6 +5155,24 @@ def self_test(report_path=None):
         held_label + rungs(15, 26), rungs(0, 14) + "  " * 14 + "- [x]\n\ny\n" + rungs(15, 26),
         rungs(0, 14) + "  " * 14 + "- [x]: /u 't\n\ny\n'\n" + rungs(15, 26),
         rungs(0, 14) + "  " * 14 + "- [x]: /u\n\ny\n" + rungs(15, 26))], [False, True, True, True])
+    # the held depth is read by the ceiling comparison alone, never by fence placement: after a held
+    # title, a two-column fence where the running depth is zero opens at the top level and its column-0
+    # run closes it, so the item fence after the next list is placed and its empty line is fence content,
+    # the line after it resets nothing and the list marching on past the ceiling is refused
+    held_fence = (held_title + "\n  ```\n```\n" + rungs(0, 14) + "- ```\n\nx\n" + rungs(14, 22),)
+    check("cannot/nesting-held-fence-placed", [_outcome(text) for text in held_fence],
+          ["CannotEvaluate"] * len(held_fence))
+    # the held depth only adds refusals: over a fixed seeded sample of generated texts (a held definition,
+    # fence lines and lists around an item fence, each part optional, with stray lines between), every
+    # text the prescan without the held depth refuses (_running_nesting_refused) is refused still
+    superset_sample = _nesting_sample(2, 5000)
+    running_refused = [text for text in superset_sample if _running_nesting_refused(text) is not None]
+
+    def superset_holds():
+        return all(_input_declarations._nesting_refused(text) is not None for text in running_refused)
+
+    check("structure/nesting-held-superset", [len(superset_sample), bool(running_refused), superset_holds()],
+          [5000, True, True])
     # each fence bound just inside, exactly at and just outside it: an opening run indented three columns
     # opens, four does not; a closing run indented three columns closes, four does not (the deep list
     # after it stays fence content); a closing run one shorter than the opening run does not close, as
@@ -6574,6 +6677,20 @@ def self_test(report_path=None):
         check("revert/nesting-definitions-red", *parser_flip(
             [lambda text=text: p6_code("Input notes.\n\n" + text) for text in held_definitions],
             [0] * len(held_definitions), NESTING_DEFINITIONS=False))
+        fence_opening = _input_declarations._fence_opening
+
+        def fences_read_held(line, position, markers, running, after_blank):
+            """_fence_opening fed the calling prescan's held depth in place of its running depth."""
+            return fence_opening(line, position, markers, sys._getframe(1).f_locals["holding"], after_blank)
+
+        # with the held depth fed into fence placement again, the fence after the held title is read as one
+        # in a list item or at the top level, its column-0 run cannot be placed, fence skipping stops, the
+        # item fence's empty line then sets up a reset,
+        # the brief is read clean, and texts of the seeded sample that the running depth alone refuses
+        # pass (each is refused with fence placement reading the running depth)
+        check("revert/nesting-held-fences-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + held_fence[0]), superset_holds], [0, False],
+            _fence_opening=fences_read_held))
         # with the nesting ceiling lifted, the no-break-space quote lead is read too, so the ceiling is
         # load-bearing for the quote-prefix vectors (their text never forces a parse)
         check("revert/nesting-quote-prefix-red", *parser_flip(
@@ -6664,7 +6781,7 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 216)
+    check("revert/every-flip-ran", len(flipped), 217)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))

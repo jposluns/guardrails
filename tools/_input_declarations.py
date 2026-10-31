@@ -961,9 +961,7 @@ def _nesting_refused(text):
     no lead markers and under two lead columns that either follows a blank line (nothing open can read it
     as item content, which needs two columns, or as a lazy continuation, which needs an open paragraph)
     or opens an ATX heading or code fence (BLOCK_START_RE, which breaks a paragraph too), so a block's
-    outcome never depends on content before its block; it never resets while a link reference
-    definition's label or title may be open (_opaque_start), which the parser reads on in the
-    definition's container, at its full depth after it; blank is what the parser's BlankLine reads as
+    outcome never depends on content before its block; blank is what the parser's BlankLine reads as
     blank (str.strip, every whitespace character). A fenced code block's content lines are skipped, since
     the parser reads them as code that opens nothing: a fence opens and closes where the parser's
     FencedCode does (_fence_opening, _fence_holds: backtick and tilde runs of three or more, indented zero
@@ -971,9 +969,16 @@ def _nesting_refused(text):
     level and in a list item. From the first fence-shaped line it cannot place exactly (a fence in a
     quote, a tab in a fence line's lead, a fence-shaped line where an HTML block or link reference
     definition may be open, which the parser reads on as that block, a link label across any number of
-    empty lines until its "]") it skips no line, so a misplaced
-    fence can only count more. Over-counting only refuses more, never less."""
+    empty lines until its "]") it skips no line; that bounds nothing in either direction, since a line the
+    parser reads as fence content may then set up a reset. A second count, the held depth, follows the
+    running depth but keeps its count at a reset while a link reference definition's label or title may
+    be open (_opaque_start), which the parser reads on in the definition's container, at its full depth
+    after it; a line is refused when either count passes the ceiling. The held depth is read by that
+    comparison alone: the running depth and every fence and placement decision, which read the running
+    depth, are computed exactly as without it, so the held depth only adds refusals, never removes one.
+    Over-counting only refuses more, never less."""
     running = 0
+    holding = 0               # the held depth: running, with no reset inside an open label or title
     after_blank = True
     placed = NESTING_FENCES   # False from the first fence-shaped line the prescan cannot place
     fence = None              # the open fence (_fence_opening), whose content lines are skipped
@@ -1002,7 +1007,7 @@ def _nesting_refused(text):
             placed = fence is not False
             fence = fence or None
         elif not closing:
-            # followed past the first unplaced fence line too, since the reset below reads it
+            # followed past the first unplaced fence line too, since the held depth below reads it
             opaque = {kind for kind in opaque if isinstance(kind, str) or not kind.search(line)}
             if "label" in opaque:
                 ended = LABEL_END_RE.match(line)
@@ -1013,21 +1018,26 @@ def _nesting_refused(text):
             started = _opaque_start(line[position:])
             if started is not None and (isinstance(started, str) or not started.search(line)):
                 opaque.add(started)
-        # an open label or title reads the line as part of its definition, and the parser stays in the
-        # definition's container and resumes at its full depth after it, so the depth holds there
         if NESTING_RESETS and markers == 0 and columns < 2 \
-                and (after_blank or BLOCK_START_RE.match(line)) \
-                and not (NESTING_DEFINITIONS and ("label" in opaque or "link" in opaque)):
+                and (after_blank or BLOCK_START_RE.match(line)):
             running = 0
+            # an open label or title reads the line as part of its definition, and the parser stays in
+            # the definition's container and resumes at its full depth after it, so the held depth
+            # keeps its count there
+            if not (NESTING_DEFINITIONS and ("label" in opaque or "link" in opaque)):
+                holding = 0
         after_blank = False
         depth = min(running, columns // 2) + markers
-        if depth > MAX_NESTING_DEPTH:
+        held_depth = min(holding, columns // 2) + markers
+        if depth > MAX_NESTING_DEPTH or held_depth > MAX_NESTING_DEPTH:
             return number, (
                 "the line's leading list or quote markers and indentation open more than {} nested "
                 "levels, deeper than this reading evaluates; flatten the nesting".format(
                     MAX_NESTING_DEPTH))
         if depth > running:
             running = depth
+        if held_depth > holding:
+            holding = held_depth
     return None
 
 
