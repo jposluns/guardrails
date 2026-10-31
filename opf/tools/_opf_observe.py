@@ -10,7 +10,8 @@ that supplier for the `opf doctor` verb (and, later, `render --write` and `init`
   self_test()        -> 0/1/2
 
 `gather` returns an `observations` dict carrying ONLY the keys it could HONESTLY determine (a subset of
-`{"tracked", "actual_remote", "prior"}`, the exact `_opf_check._OBSERVATION_KEYS`) and a `notes` list of
+`{"tracked", "actual_remote", "prior", "merge_parents"}`, the exact `_opf_check._OBSERVATION_KEYS`) and a
+`notes` list of
 human-readable strings explaining every omission. It NEVER forges a value: when git cannot answer, the key
 is OMITTED and a note is added, and the engine then routes the affected check to a named cannot-evaluate,
 which is the honest outcome. A partial `prior` is never forged either: any parse failure, absent object, or
@@ -818,29 +819,31 @@ def _observe_remote(git, store_root, notes):
     return url.out.decode("utf-8", "replace").strip()
 
 
-def _show_toml(git, store_root, prefix, relpath, disp, notes, omitted="the prior committed snapshot is omitted"):
-    """Read and parse one committed TOML file from HEAD via `git show HEAD:<prefix><relpath>`. `prefix` is
+def _show_toml(git, store_root, prefix, relpath, disp, notes, omitted="the prior committed snapshot is omitted",
+               rev="HEAD"):
+    """Read and parse one committed TOML file from `rev` (HEAD, or a merge parent's commit id) via
+    `git show <rev>:<prefix><relpath>`. `prefix` is
     the store root's path from the repository toplevel (from `git rev-parse --show-prefix`), so the object
     path is unambiguous whether or not the store sits at the toplevel. Returns the parsed dict, or None (omit
     prior + note) on any git error, absent object, or parse failure. A bare ValueError from tomllib (an
     oversized base-10 integer literal, which is not a TOMLDecodeError) is caught too, so a hostile committed
     file fails SAFE rather than escaping (guard-input-soundness). `omitted` names what the caller omits."""
-    out = _run_git(git, store_root, ["show", "HEAD:{}{}".format(prefix, relpath)])
+    out = _run_git(git, store_root, ["show", "{}:{}{}".format(rev, prefix, relpath)])
     if not out.completed:
-        notes.append("prior: could not read {} at HEAD ({}); {}".format(disp, out.err.strip(), omitted))
+        notes.append("prior: could not read {} at {} ({}); {}".format(disp, rev, out.err.strip(), omitted))
         return None
     if out.rc != 0:
-        notes.append("prior: {} is absent or unreadable at HEAD (git show rc {}); {}".format(disp, out.rc, omitted))
+        notes.append("prior: {} is absent or unreadable at {} (git show rc {}); {}".format(disp, rev, out.rc, omitted))
         return None
     try:
         data = tomllib.loads(out.out.decode("utf-8"))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
     # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
     except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
-        notes.append("prior: {} at HEAD is not valid TOML ({}); {}".format(disp, exc, omitted))
+        notes.append("prior: {} at {} is not valid TOML ({}); {}".format(disp, rev, exc, omitted))
         return None
     if not isinstance(data, dict):
-        notes.append("prior: {} at HEAD is not a table; {}".format(disp, omitted))
+        notes.append("prior: {} at {} is not a table; {}".format(disp, rev, omitted))
         return None
     return data
 
@@ -872,7 +875,7 @@ def _ls_tree(git, store_root, treeish, notes, recursive=False):
     return entries
 
 
-def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
+def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes, rev="HEAD"):
     """`held`: every clean-series id the prior commit held, active or archived, worklog included, as
     {namespace: [[lo, hi], ...]} sorted, merged inclusive intervals, for the reserved-number exemption (a
     reserved number is skipped as an orphaned reservation's only where the prior commit held no record with
@@ -906,13 +909,13 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
     def rows(data, key, disp):
         value = data.get(key, [])
         if not isinstance(value, list):
-            notes.append("prior: HEAD {} [[{}]] is not an array; {}".format(disp, key, _HELD_OMITTED))
+            notes.append("prior: {} {} [[{}]] is not an array; {}".format(rev, disp, key, _HELD_OMITTED))
             return None
         return [row for row in value if isinstance(row, dict)]
 
     for rid in records:
         add_id(rid)
-    base = "HEAD:{}{}".format(prefix, machine_rel)
+    base = "{}:{}{}".format(rev, prefix, machine_rel)
     top = _ls_tree(git, store_root, base, notes)
     if top is None:
         return None
@@ -922,15 +925,15 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
     def mistyped(name, expected):
         found = sorted({otype for otype, entry in top if entry == name and otype != expected})
         if found:
-            notes.append("prior: HEAD {} is a {}, not a {}; {}".format(
-                name, " and a ".join(found), expected, _HELD_OMITTED))
+            notes.append("prior: {} {} is a {}, not a {}; {}".format(
+                rev, name, " and a ".join(found), expected, _HELD_OMITTED))
         return bool(found)
 
     try:
         generation = _opf_worklog.generation(manifest)
     except _opf_worklog.WorklogError as exc:
-        notes.append("prior: the HEAD manifest's worklog generation is unreadable ({}); {}".format(
-            exc, _HELD_OMITTED))
+        notes.append("prior: the {} manifest's worklog generation is unreadable ({}); {}".format(
+            rev, exc, _HELD_OMITTED))
         return None
     if generation == 2:
         if mistyped(_opf_worklog.DIRECTORY_NAME, "tree"):
@@ -942,15 +945,15 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
             for otype, name in listing:
                 ref = _opf_worklog.parse_worklog_filename(name)
                 if otype != "blob" or ref is None:
-                    notes.append("prior: HEAD worklog/ holds {!r}, not a worklog entry; {}".format(
-                        name, _HELD_OMITTED))
+                    notes.append("prior: {} worklog/ holds {!r}, not a worklog entry; {}".format(
+                        rev, name, _HELD_OMITTED))
                     return None
                 add("WL", ref[0], ref[0])
     elif mistyped(_WORKLOG_NAME, "blob"):
         return None
     elif ("blob", _WORKLOG_NAME) in top:
         data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _WORKLOG_NAME), _WORKLOG_NAME,
-                          notes, _HELD_OMITTED)
+                          notes, _HELD_OMITTED, rev=rev)
         entries = None if data is None else rows(data, "entry", _WORKLOG_NAME)
         if entries is None:
             return None
@@ -968,9 +971,10 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
             disp = "{}/{}".format(_opf_check.ARCHIVE_DIRNAME, path)
             if otype != "blob" or len(parts) != 2 or not (
                     parts[1] in bucket_files or parts[1].endswith(_INDEX_SUFFIX)):
-                notes.append("prior: HEAD {} is not an archive bucket file; {}".format(disp, _HELD_OMITTED))
+                notes.append("prior: {} {} is not an archive bucket file; {}".format(rev, disp, _HELD_OMITTED))
                 return None
-            data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, disp), disp, notes, _HELD_OMITTED)
+            data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, disp), disp, notes,
+                              _HELD_OMITTED, rev=rev)
             if data is None:
                 return None
             if parts[1] == _opf_check.ARCHIVE_MANIFEST_NAME:
@@ -1002,8 +1006,9 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
     return {ns: [[lo, hi] for lo, hi in _opf_check._merge_spans(rows_)] for ns, rows_ in sorted(held.items())}
 
 
-def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
-    """Reconstruct the prior committed snapshot from HEAD, shaped exactly as _opf_check._normalize_prior
+def _reconstruct_prior(git, store_root, machine_rel, prefix, notes, rev="HEAD"):
+    """Reconstruct the committed snapshot of `rev` (HEAD, the prior committed snapshot; or a merge
+    parent's commit id), shaped exactly as _opf_check._normalize_prior
     accepts: {releases, counters_high, records, digests, held} plus, only where the HEAD manifest activates
     the imported series, the `imported` baseline member. Reads the HEAD manifest to learn the layout and the
     declared types, then the version and counters ledgers and each declared non-worklog type index. Records
@@ -1015,38 +1020,39 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
     omitted (+ note), which makes that exemption cannot-evaluate and leaves the rest of the prior whole.
     Returns the dict or None."""
     manifest = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _MANIFEST_NAME),
-                         _MANIFEST_NAME, notes)
+                         _MANIFEST_NAME, notes, rev=rev)
     if manifest is None:
         return None
     base = manifest.get(_opf_store.STANDARD_TOKEN)
     layout = base.get("layout") if isinstance(base, dict) else None
     if layout not in _LAYOUTS:
-        notes.append("prior: HEAD manifest declares layout {!r}, which is not a recognized store layout; "
-                     "the prior committed snapshot is omitted".format(layout))
+        notes.append("prior: {} manifest declares layout {!r}, which is not a recognized store layout; "
+                     "the prior committed snapshot is omitted".format(rev, layout))
         return None
     types_tbl = manifest.get("types")
     if not isinstance(types_tbl, dict):
-        notes.append("prior: HEAD manifest carries no [types] table; the prior committed snapshot is omitted")
+        notes.append("prior: {} manifest carries no [types] table; the prior committed snapshot is "
+                     "omitted".format(rev))
         return None
 
     version = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _VERSION_NAME),
-                        _VERSION_NAME, notes)
+                        _VERSION_NAME, notes, rev=rev)
     if version is None:
         return None
     releases = version.get("release", [])
     if not isinstance(releases, list):
-        notes.append("prior: HEAD version.toml [[release]] is not an array; the prior committed snapshot is "
-                     "omitted")
+        notes.append("prior: {} version.toml [[release]] is not an array; the prior committed snapshot is "
+                     "omitted".format(rev))
         return None
 
     counters = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _COUNTERS_NAME),
-                         _COUNTERS_NAME, notes)
+                         _COUNTERS_NAME, notes, rev=rev)
     if counters is None:
         return None
     counters_high = counters.get("counters", {})
     if not isinstance(counters_high, dict):
-        notes.append("prior: HEAD counters.toml [counters] is not a table; the prior committed snapshot is "
-                     "omitted")
+        notes.append("prior: {} counters.toml [counters] is not a table; the prior committed snapshot is "
+                     "omitted".format(rev))
         return None
 
     records = {}
@@ -1055,25 +1061,26 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
         if tname == "worklog":
             continue      # the worklog is a ledger (worklog.toml), never a type index; it carries no records
         idx_name = "{}{}".format(tname, _INDEX_SUFFIX)
-        idx = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, idx_name), idx_name, notes)
+        idx = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, idx_name), idx_name, notes,
+                         rev=rev)
         if idx is None:
             return None
         rows = idx.get("record", [])
         if not isinstance(rows, list):
-            notes.append("prior: HEAD {} [[record]] is not an array; the prior committed snapshot is "
-                         "omitted".format(idx_name))
+            notes.append("prior: {} {} [[record]] is not an array; the prior committed snapshot is "
+                         "omitted".format(rev, idx_name))
             return None
         for row in rows:
             if not isinstance(row, dict):
-                notes.append("prior: HEAD {} carries a non-table record row; the prior committed snapshot "
-                             "is omitted".format(idx_name))
+                notes.append("prior: {} {} carries a non-table record row; the prior committed snapshot "
+                             "is omitted".format(rev, idx_name))
                 return None
             if layout == "inline":
                 rid = row.get("id")
                 status = row.get("status")
                 if not (isinstance(rid, str) and isinstance(status, str)):
-                    notes.append("prior: HEAD {} carries an inline record with no string id/status; the "
-                                 "prior committed snapshot is omitted".format(idx_name))
+                    notes.append("prior: {} {} carries an inline record with no string id/status; the "
+                                 "prior committed snapshot is omitted".format(rev, idx_name))
                     return None
                 try:
                     digest = _opf_check._record_digest(row)
@@ -1088,13 +1095,13 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
                 state = row.get("state")
                 digest = row.get("digest")
                 if not (isinstance(rid, str) and isinstance(state, str) and isinstance(digest, str)):
-                    notes.append("prior: HEAD {} carries a per-record row with no string id/state/digest; "
-                                 "the prior committed snapshot is omitted".format(idx_name))
+                    notes.append("prior: {} {} carries a per-record row with no string id/state/digest; "
+                                 "the prior committed snapshot is omitted".format(rev, idx_name))
                     return None
                 records[rid] = (tname, state)
                 digests[rid] = digest
     prior = {"releases": releases, "counters_high": counters_high, "records": records, "digests": digests}
-    held = _held_ids(git, store_root, machine_rel, prefix, {"opf": base}, records, notes)
+    held = _held_ids(git, store_root, machine_rel, prefix, {"opf": base}, records, notes, rev=rev)
     if held is not None:
         prior["held"] = held
     # The imported baseline joins the prior only where the HEAD manifest ACTIVATES the series
@@ -1106,14 +1113,15 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
     # no-baseline CANNOT-EVALUATE instead. (An unborn HEAD keeps the empty-prior {} member: nothing
     # was committed at all, so the empty baseline is exact.)
     if _opf_check.imported_series_active(manifest):
-        imported = _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes)
+        imported = _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes,
+                                         rev=rev)
         if imported is None:
             return None
         prior["imported"] = imported
     return prior
 
 
-def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes):
+def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes, rev="HEAD"):
     """The prior imported baseline {imported id: canonical body digest} for the across-time immutability of
     the imported leaves (spec 8.3). The caller gates it on the HEAD manifest's activation flag. The leaf
     roster derives from the SAME authoritative type set the doctor grades (_opf_check._authoritative_types
@@ -1122,10 +1130,10 @@ def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_
     from the HEAD machine-store tree contributes no
     rows; a listed leaf that cannot be read or parsed, a non-array row list, or a row with no string id omits
     the WHOLE prior, as for the clean files. Returns the dict, or None (omit + note)."""
-    listing = _run_git(git, store_root, ["ls-tree", "--name-only", "HEAD:{}{}".format(prefix, machine_rel)])
+    listing = _run_git(git, store_root, ["ls-tree", "--name-only", "{}:{}{}".format(rev, prefix, machine_rel)])
     if not listing.completed or listing.rc != 0:
-        notes.append("prior: the machine store tree {} cannot be listed at HEAD; the prior committed snapshot "
-                     "is omitted".format(machine_rel))
+        notes.append("prior: the machine store tree {} cannot be listed at {}; the prior committed snapshot "
+                     "is omitted".format(machine_rel, rev))
         return None
     present = set(listing.out.decode("utf-8", "replace").splitlines())
     enabled = _opf_check._authoritative_types(_opf_check._enabled_modules(manifest), types_tbl)
@@ -1133,20 +1141,20 @@ def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_
     for name in sorted(_opf_store.imported_leaf_names(enabled)):
         if name not in present:
             continue
-        data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, name), name, notes)
+        data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, name), name, notes, rev=rev)
         if data is None:
             return None
         member = "entry" if name == _opf_store.IMPORTED_WORKLOG_NAME else "record"
         rows = data.get(member, [])
         if not isinstance(rows, list):
-            notes.append("prior: HEAD {} [[{}]] is not an array; the prior committed snapshot is "
-                         "omitted".format(name, member))
+            notes.append("prior: {} {} [[{}]] is not an array; the prior committed snapshot is "
+                         "omitted".format(rev, name, member))
             return None
         for row in rows:
             rid = row.get("id") if isinstance(row, dict) else None
             if not isinstance(rid, str):
-                notes.append("prior: HEAD {} carries a row with no string id; the prior committed snapshot "
-                             "is omitted".format(name))
+                notes.append("prior: {} {} carries a row with no string id; the prior committed snapshot "
+                             "is omitted".format(rev, name))
                 return None
             try:
                 imported[rid] = _opf_check._record_digest(row)
@@ -1190,10 +1198,72 @@ def _observe_prior(git, store_root, machine_rel, notes):
     return _reconstruct_prior(git, store_root, machine_rel, prefix, notes)
 
 
+# MERGE_HEAD is a bounded pseudo-ref file (one commit id per line; more than one for an octopus merge).
+# A larger one is no merge state git wrote, and reading it unbounded would let a hostile file exhaust
+# memory, so the read is capped and anything at or past the cap is a malformed merge observation.
+_MERGE_HEAD_CAP = 65536
+
+
+def _observe_merge_parents(git, store_root, machine_rel, notes):
+    """`merge_parents`: the merged commits of a merge being concluded (MERGE_HEAD present), each with its
+    committed snapshot reconstructed exactly as the HEAD prior is, as
+    [{"commit": id, "prior": snapshot}, ...]. Returns (value, present): (None, False) when no merge is in
+    progress (or there is no repository to hold one; the prior observation notes that cause), and
+    (None, True) with a note when MERGE_HEAD exists but cannot be read back to usable snapshots, which the
+    engine records as a malformed merge observation and fails closed to named CANNOT-EVALUATEs, never an
+    unchecked merge. Each MERGE_HEAD line must be a plain lowercase-hex commit id (the shape git writes),
+    verified against the repository before any reconstruction reads it."""
+    cannot = (None, True)
+    out = _run_git(git, store_root, ["rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"])
+    if not out.completed or out.rc != 0:
+        return None, False
+    mh_path = out.out.decode("utf-8", "replace").strip()
+    if not mh_path or not os.path.lexists(mh_path):
+        return None, False
+    try:
+        with open(mh_path, "r", encoding="utf-8") as fh:
+            text = fh.read(_MERGE_HEAD_CAP)
+    except (OSError, UnicodeDecodeError) as exc:
+        notes.append("merge: MERGE_HEAD exists but cannot be read ({}); the merged-commit comparison "
+                     "cannot be evaluated".format(exc))
+        return cannot
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines or len(text) >= _MERGE_HEAD_CAP:
+        notes.append("merge: MERGE_HEAD exists but names no commit (or is oversized); the merged-commit "
+                     "comparison cannot be evaluated")
+        return cannot
+    pfx = _run_git(git, store_root, ["rev-parse", "--show-prefix"])
+    if not pfx.completed or pfx.rc != 0:
+        notes.append("merge: could not determine the store's path within the repository; the "
+                     "merged-commit comparison cannot be evaluated")
+        return cannot
+    prefix = pfx.out.decode("utf-8", "replace").strip()
+    parents = []
+    for line in lines:
+        if len(line) not in (40, 64) or any(c not in "0123456789abcdef" for c in line):
+            notes.append("merge: MERGE_HEAD holds {!r}, which is not a commit id; the merged-commit "
+                         "comparison cannot be evaluated".format(line))
+            return cannot
+        head = _run_git(git, store_root, ["rev-parse", "--verify", "--quiet", "{}^{{commit}}".format(line)])
+        if not head.completed or head.rc != 0:
+            notes.append("merge: MERGE_HEAD names {}, which does not resolve to a commit of this "
+                         "repository; the merged-commit comparison cannot be evaluated".format(line))
+            return cannot
+        commit = head.out.decode("utf-8", "replace").strip()
+        prior = _reconstruct_prior(git, store_root, machine_rel, prefix, notes, rev=commit)
+        if prior is None:
+            notes.append("merge: the committed snapshot of merge parent {} could not be reconstructed; "
+                         "the merged-commit comparison cannot be evaluated".format(commit))
+            return cannot
+        parents.append({"commit": commit, "prior": prior})
+    return parents, True
+
+
 def gather(resolution):
     """Gather the inert, git-derived observations for a RESOLVED store. Returns `(observations, notes)`:
     `observations` is a dict carrying ONLY the keys honestly determined (a subset of
-    _opf_check._OBSERVATION_KEYS: "tracked", "actual_remote", "prior"), suitable to pass straight to
+    _opf_check._OBSERVATION_KEYS: "tracked", "actual_remote", "prior", "merge_parents"), suitable to pass
+    straight to
     `_opf_check.validate_store(..., observations=...)`; `notes` explains every omission. Never forges a value:
     when git cannot answer, the key is omitted and a note is added, and the engine routes the affected check
     to a named cannot-evaluate."""
@@ -1220,6 +1290,13 @@ def gather(resolution):
     prior = _observe_prior(git, store_root, machine_rel, notes)
     if prior is not None:
         observations["prior"] = prior
+    # Concluding a merge (MERGE_HEAD present), the merged commits join the observations so the engine
+    # compares the store with EVERY parent. The key is present whenever a merge is in progress: a merge
+    # whose parents cannot be read back carries the honest None, which the engine reads as a malformed
+    # merge observation and fails closed, never as "no merge".
+    merge_parents, merge_present = _observe_merge_parents(git, store_root, machine_rel, notes)
+    if merge_present:
+        observations["merge_parents"] = merge_parents
     return observations, notes
 
 

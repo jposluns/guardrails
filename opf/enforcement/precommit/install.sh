@@ -84,9 +84,13 @@
 #
 # Residuals (spec 14.1, disclosed; pre-commit lists them in full): the stubs are local to this clone. They
 # are not cloned or pushed, so every clone must run this installer; git commit --no-verify and git merge
-# --no-verify skip them; git runs no pre-commit hook for cherry-pick, revert, rebase or am; a merge
-# concluded with git commit is checked against its first parent alone, so a merge commit's status
-# changes are not graded; a core.hooksPath set later, in any scope, stops the stubs silently; the
+# --no-verify skip them; git runs no pre-commit hook for cherry-pick, revert, rebase or am, nor for a
+# fast-forward git merge or git pull, which brings in commits with no hook run; a merge
+# concluded with git commit is compared with every parent (HEAD and each MERGE_HEAD commit) for dropped
+# records and lowered counters, but a merge commit's status changes are not graded; the pre-merge-commit
+# stop makes a scripted git merge or git pull (merge mode) exit 1 and leaves MERGE_HEAD and the staged
+# merge result behind, so a later git pull exits 128 until the merge is concluded with git commit or
+# abandoned with git merge --abort; a core.hooksPath set later, in any scope, stops the stubs silently; the
 # core.hooksPath check reads the configuration this run sees, so one a later commit reads instead
 # (another GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM file, or an includeIf onbranch: for a branch checked out
 # later) is not seen and stops the stubs silently too; and the stubs run the checked-out pre-commit and
@@ -510,5 +514,5 @@ trap - HUP INT TERM
 # must not turn the status into a failure or a signal death.
 trap '' PIPE
 printf '%s\n' "opf-pre-commit install: installed for this clone and its linked worktrees ($pc_stub runs ./$rel/pre-commit, and $pmc_stub runs it as pre-merge-commit, which refuses a merge commit git merge would record so that git commit concludes the merge through the check)."
-echo "opf-pre-commit install: other clones must run this installer too; git commit --no-verify, git merge --no-verify, cherry-pick, revert, rebase and am commit without the hook, a merge commit's status changes are not graded, and CI does not catch a history violation committed that way (see pre-commit)."
+echo "opf-pre-commit install: other clones must run this installer too; git commit --no-verify, git merge --no-verify, cherry-pick, revert, rebase, am and a fast-forward merge or pull commit or bring in commits without the hook, a merge commit's status changes are not graded, a scripted git merge or git pull (merge mode) now exits 1 at the stop and leaves MERGE_HEAD behind (the next pull exits 128 until git commit or git merge --abort), and CI does not catch a history violation committed that way (see pre-commit)."
 exit 0

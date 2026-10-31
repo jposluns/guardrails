@@ -15,7 +15,8 @@
 #      about to commit, so `git commit -a` and `git commit PATH` are checked against that index.
 #   2. A throwaway repository in a temporary directory borrows this repository's objects
 #      (objects/info/alternates), points HEAD at the current commit (none on an unborn branch), carries
-#      each remote's push URL, and checks the staged tree out as its index and working tree.
+#      each remote's push URL and, while a merge is being concluded, the commit ids MERGE_HEAD names (see
+#      Merge commits below), and checks the staged tree out as its index and working tree.
 #   3. The CI floor's two checks run over that snapshot, in order, stopping at the first failure:
 #      opf doctor --require-store, then opf render --check (see ../ci/opf-ci.sh).
 # Exit status is 0/1/2 only (0 clean, 1 finding, 2 cannot-evaluate), normalized as in opf-ci.sh; git
@@ -51,6 +52,14 @@
 # MERGE_HEAD naming the merged commit, so git commit concludes the merge through this hook. A git that
 # leaves no MERGE_HEAD there has stopped the merge altogether, so the message also tells the operator, in
 # that case, to rerun it as git merge --no-commit and conclude it with git commit.
+# Concluding a merge (MERGE_HEAD present), the commit records the staged result with HEAD and each commit
+# MERGE_HEAD names as its parents, and comparing with HEAD alone would let a merge such as
+# git merge -s ours drop every record the merged branch added. So this hook carries every MERGE_HEAD
+# commit id into the snapshot as its MERGE_HEAD, and the doctor then compares the staged result with
+# EVERY parent: each record a parent holds must survive and no counter may fall below its value in any
+# parent, refusing on any dropped record or lowered counter, while a merge commit's status changes are
+# not graded (see Residuals). A MERGE_HEAD that cannot be read, or holds anything but commit ids of this
+# repository, exits 2 before any check, never an unchecked merge.
 #
 # Residuals this hook does not close (spec 14.1):
 #   - Per-clone installation: the stub is local to the clone. It is not cloned or pushed, so a clone that
@@ -60,12 +69,20 @@
 #     can remove either stub or edit this file. A core.hooksPath set later, in any configuration scope,
 #     makes git stop running the stubs, silently.
 #   - Operations git commits without running any pre-commit hook: cherry-pick, revert, rebase (and
-#     pull --rebase) and am. Each records a commit this hook never checks. A merge that git merge or
-#     git pull would commit without stopping is stopped by the pre-merge-commit stub (above), and a merge
-#     concluded with git commit is checked.
-#   - Merge commits: the history checks compare with HEAD alone, which in a merge commit is its first
-#     parent, so the merged branch's committed changes are graded as this commit's and no comparison
-#     with the merged commit is made; a merge commit's status changes are not graded.
+#     pull --rebase), am, and a fast-forward git merge or git pull, which moves HEAD to commits recorded
+#     elsewhere with no hook run here. Each records or brings in commits this hook never checks. A merge
+#     that git merge or git pull would commit without stopping is stopped by the pre-merge-commit stub
+#     (above), and a merge concluded with git commit is checked.
+#   - Scripted merges: that stop makes a scripted (non-interactive) git merge or git pull in merge mode
+#     exit 1 and leave MERGE_HEAD and the staged merge result behind, so a later git pull exits 128
+#     ("You have not concluded your merge") until the merge is concluded with git commit or abandoned
+#     with git merge --abort. A pipeline that assumes git pull always exits 0 breaks at the first
+#     non-fast-forward merge.
+#   - Merge commits: concluding one (MERGE_HEAD present), the staged result is compared with every
+#     parent for dropped records and lowered counters (see Merge commits above), but a merge commit's
+#     status changes are not graded: transition legality is skipped for a merge commit, so a status a
+#     parent holds may change in the result unchecked (each branch's own transitions were graded when
+#     that branch committed them through this hook; one committed past it is not re-graded here).
 #   - The hook runs checked-out code: the stub runs the working-tree copy of this file, and this file
 #     runs the working-tree opf.py (OPF_TOOL), not the staged ones. Checking out a branch, merge or pull
 #     request that changes them runs the changed code, with the user's privileges, at the next git
@@ -155,6 +172,25 @@ else
 fi
 objects=$(git rev-parse --path-format=absolute --git-path objects) || fail "could not locate the object store"
 remotes=$(git remote) || fail "git remote could not list the remotes"
+# Concluding a merge, MERGE_HEAD names the merged commit(s), one lowercase-hex id per line (several for an
+# octopus merge). Its ids are validated and carried into the snapshot as its MERGE_HEAD, so the doctor
+# compares the staged result with every parent (see Merge commits above). Reading MERGE_HEAD as a file
+# (git rev-parse MERGE_HEAD resolves only its first line) keeps every merged commit; one that cannot be
+# read or does not hold commit ids of this repository exits 2 before any check.
+mh_lines=
+mh_path=$(git rev-parse --path-format=absolute --git-path MERGE_HEAD) || fail "could not locate MERGE_HEAD"
+if [ -e "$mh_path" ] || [ -L "$mh_path" ]; then
+    [ -n "$head" ] || fail "MERGE_HEAD is present but HEAD names no commit"
+    mh_lines=$(cat -- "$mh_path") || fail "could not read $mh_path"
+    [ -n "$mh_lines" ] || fail "$mh_path names no commit"
+    for mh in $mh_lines; do
+        case "$mh" in
+            *[!0-9a-f]*|'') fail "$mh_path holds $mh, which is not a commit id" ;;
+        esac
+        git rev-parse -q --verify "$mh^{commit}" > /dev/null || \
+            fail "$mh_path names $mh, which is not a commit of this repository"
+    done
+fi
 
 snap=$(mktemp -d "${TMPDIR:-/tmp}/opf-pre-commit.XXXXXX") || fail "could not create a temporary directory"
 # A removal that fails, or leaves the directory in place, exits 2 whatever the checks returned.
@@ -185,6 +221,11 @@ done
     printf '%s\n' "$objects" > "$snap/tree/.git/objects/info/alternates" || exit 2
     if [ -n "$head" ]; then
         git -C "$snap/tree" update-ref HEAD "$head" || exit 2
+    fi
+    if [ -n "$mh_lines" ]; then
+        # The snapshot's own MERGE_HEAD (validated above; the ids resolve through the borrowed objects),
+        # written one id per line as git writes it, so the doctor sees the merge being concluded.
+        printf '%s\n' $mh_lines > "$snap/tree/.git/MERGE_HEAD" || exit 2
     fi
     while IFS= read -r name && IFS= read -r url; do
         git -C "$snap/tree" config "remote.$name.url" "$url" || exit 2

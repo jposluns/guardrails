@@ -149,9 +149,16 @@ installed and no hook run, and the shipped files name the operations git commits
 Through real `git merge` runs: a merge git merge would commit without stopping is stopped by the
 pre-merge-commit stub with HEAD unmoved, MERGE_HEAD naming the merged commit and the merge result staged;
 git commit then concludes it as a two-parent merge through the pre-commit check, and refuses one whose
-result carries a tamper by doctor's finding; the same merge without the stubs commits. Run as
+result carries a tamper by doctor's finding; concluding a merge, the staged result is compared with every
+parent: a git merge -s ours of a branch that added a record and raised its counters is refused at the
+concluding git commit by doctor's per-parent findings (the dropped record and the lowered counters, each
+named against the merged parent) with HEAD unmoved, a clean merge whose result keeps both sides' added
+records concludes as a two-parent merge, and an octopus git merge -s ours of two branches (MERGE_HEAD
+naming two commits) is refused the same way; the same merges without the stubs commit. Run as
 pre-merge-commit, the hook runs no step and exits 2. The shipped files disclose that git merge --no-verify
-skips the stubs and that a merge commit's status changes are not graded.
+skips the stubs, that a merge commit's status changes are not graded, that a fast-forward merge or pull
+brings in commits with no hook run, and that the pre-merge-commit stop makes a scripted merge or pull
+exit 1 with MERGE_HEAD left behind.
 A SECOND, git-independent self-test leg verifies the enforcement pack's Claude Code deny hook
 (OPF-ENFORCE-PACK slice (b)): the shipped opf/enforcement/claude/pretooluse_deny.py is launched as a
 child (python -I, the doc-confirmed PreToolUse stdin/stdout contract) over throwaway store fixtures,
@@ -2280,15 +2287,16 @@ def _self_test_isolated():
             # stays in the index and MERGE_HEAD names the merged commit, so git commit concludes the merge
             # through the pre-commit check: a clean merge commits with both parents, and a merge whose result
             # tampers with a record is refused by doctor's finding. Without the stubs the same merge commits.
-            def _merge(root):
-                # A real `git merge --no-edit side`, so git itself runs the installed pre-merge-commit hook.
-                # Returns (exit status, combined output).
+            def _merge(root, *args):
+                # A real `git merge --no-edit ...` (default: `side`), so git itself runs the installed
+                # pre-merge-commit hook. Returns (exit status, combined output).
+                merge_args = list(args) if args else ["side"]
                 try:
                     proc = subprocess.run([git, "--no-replace-objects", "-C", str(root),
                                            "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
                                            "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
                                            "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
-                                           "merge", "--no-edit", "side"],
+                                           "merge", "--no-edit"] + merge_args,
                                           cwd=str(root), env=_env(), stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT, timeout=300)
                 except (OSError, subprocess.TimeoutExpired) as exc:
@@ -2355,6 +2363,113 @@ def _self_test_isolated():
             expect("merge-without-hook-commits",
                    (rc, _git_out(merge_bare, "rev-parse", "HEAD^2") == _git_out(merge_bare, "rev-parse", "side")),
                    (EXIT_OK, True))
+
+            # Concluding a merge compares the staged result with EVERY parent (spec: never HEAD, the first
+            # parent, alone): a `git merge -s ours` of a branch that added records and raised its counters
+            # concludes without a conflict yet drops everything the branch added, so the concluding
+            # git commit must be refused by doctor's per-parent findings, HEAD unmoved.
+            def _grown(bi3=False, wl5=False):
+                # The clean fixture machine plus an added backlog_item BI-3 and/or worklog WL-5, each with
+                # its counter raised, so a branch that commits it ADDS records a merge result must keep.
+                m = clean_machine()
+                if bi3:
+                    m["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"), bi(3, "open")])
+                    m["counters.toml"]["counters"]["BI"] = 3
+                if wl5:
+                    m["worklog.toml"]["entry"].append(wl(5))
+                    m["counters.toml"]["counters"]["WL"] = 5
+                return m
+
+            def _record_branch(root, branch, machine):
+                # A branch (from main) whose one commit writes `machine` into the store, past the hooks.
+                _git(root, home, "checkout", "-q", "-b", branch)
+                _write_machine(root, machine)
+                _git(root, home, "add", "-A")
+                _git(root, home, "commit", "-q", "--no-verify", "-m", branch)
+                _git(root, home, "checkout", "-q", "main")
+
+            def _advance_main(root, name):
+                (root / name).write_text("main\n", encoding="utf-8")
+                _git(root, home, "add", name)
+                _git(root, home, "commit", "-q", "--no-verify", "-m", "main")
+
+            machine_dir = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+            ours = _fixture("merge-ours-drop")
+            expect("merge-ours-install", _install(ours), EXIT_OK)
+            _record_branch(ours, "side", _grown(bi3=True, wl5=True))
+            _advance_main(ours, "MAIN.md")
+            ours_side = _git_out(ours, "rev-parse", "side")
+            before = _head(ours)
+            rc, text = _merge(ours, "-s", "ours", "side")
+            expect("merge-ours-stopped-by-pre-merge-commit",
+                   (rc != EXIT_OK, _head(ours) == before,
+                    _git_out(ours, "rev-parse", "-q", "--verify", "MERGE_HEAD") == ours_side),
+                   (True, True, True))
+            rc, text = _commit(ours)
+            expect("merge-ours-drop-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(ours) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: record 'BI-3', held by merge parent " + ours_side
+                    in text,
+                    "FINDING: C-HISTORY-COUNTERS: against merge parent " + ours_side in text,
+                    _git_out(ours, "rev-parse", "-q", "--verify", "MERGE_HEAD") == ours_side),
+                   (True, True, True, True, True))
+            # The same -s ours merge without the stubs commits (and records the drop), so it is the hook
+            # that refuses it.
+            ours_bare = _fixture("merge-ours-no-hook")
+            _record_branch(ours_bare, "side", _grown(bi3=True, wl5=True))
+            _advance_main(ours_bare, "MAIN.md")
+            rc, text = _merge(ours_bare, "-s", "ours", "side")
+            expect("merge-ours-without-hook-commits",
+                   (rc, _git_out(ours_bare, "rev-parse", "HEAD^2")
+                    == _git_out(ours_bare, "rev-parse", "side"),
+                    "BI-3" in (ours_bare / machine_dir / "backlog_item.index.toml").read_text(
+                        encoding="utf-8")),
+                   (EXIT_OK, True, False))
+            # A clean merge whose result keeps BOTH sides' added records concludes through the per-parent
+            # comparison: the check must not over-refuse a merge that drops nothing.
+            keep = _fixture("merge-records-clean")
+            expect("merge-records-install", _install(keep), EXIT_OK)
+            _record_branch(keep, "side", _grown(wl5=True))
+            _write_machine(keep, _grown(bi3=True))
+            _git(keep, home, "add", "-A")
+            _git(keep, home, "commit", "-q", "--no-verify", "-m", "main records")
+            keep_side = _git_out(keep, "rev-parse", "side")
+            before = _head(keep)
+            rc, text = _merge(keep)
+            expect("merge-records-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(keep) == before),
+                   (True, True))
+            rc, moved = _committed(keep)
+            expect("merge-records-clean-concluded",
+                   (rc, moved, _git_out(keep, "rev-parse", "HEAD^1") == before,
+                    _git_out(keep, "rev-parse", "HEAD^2") == keep_side,
+                    "BI-3" in (keep / machine_dir / "backlog_item.index.toml").read_text(encoding="utf-8"),
+                    "WL-5" in (keep / machine_dir / "worklog.toml").read_text(encoding="utf-8")),
+                   (EXIT_OK, True, True, True, True, True))
+            # An octopus merge (MERGE_HEAD naming two commits): every merged parent is compared, so an
+            # -s ours octopus that drops what either branch added is refused against each parent.
+            octo = _fixture("merge-octopus-drop")
+            expect("merge-octopus-install", _install(octo), EXIT_OK)
+            _record_branch(octo, "side1", _grown(bi3=True))
+            _record_branch(octo, "side2", _grown(wl5=True))
+            _advance_main(octo, "MAIN.md")
+            octo_side1 = _git_out(octo, "rev-parse", "side1")
+            octo_side2 = _git_out(octo, "rev-parse", "side2")
+            before = _head(octo)
+            rc, text = _merge(octo, "-s", "ours", "side1", "side2")
+            octo_mh = _git_out(octo, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD")
+            octo_heads = (Path(octo_mh).read_text(encoding="utf-8").split()
+                          if octo_mh and Path(octo_mh).is_file() else [])
+            expect("merge-octopus-stopped-by-pre-merge-commit",
+                   (rc != EXIT_OK, _head(octo) == before, octo_heads == [octo_side1, octo_side2]),
+                   (True, True, True))
+            rc, text = _commit(octo)
+            expect("merge-octopus-drop-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(octo) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: record 'BI-3', held by merge parent " + octo_side1
+                    in text,
+                    "FINDING: C-HISTORY-COUNTERS: against merge parent " + octo_side1 in text,
+                    "FINDING: C-HISTORY-COUNTERS: against merge parent " + octo_side2 in text),
+                   (True, True, True, True, True))
             hook_text = " ".join((pack / "pre-commit").read_text(encoding="utf-8").replace("#", " ").split())
             inst_text = " ".join((pack / "install.sh").read_text(encoding="utf-8").replace("#", " ").split())
             expect("residuals-disclosed", (
@@ -2380,8 +2495,14 @@ def _self_test_isolated():
                 "CI is the shared floor" in inst_text,
                 "or an includeIf onbranch: for a branch checked out later) is not seen" in inst_text,
                 "can leave that empty directory, and the hooks directory holding it when this run made that one"
-                in inst_text),
-                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True, True))
+                in inst_text,
+                "a fast-forward git merge or git pull" in hook_text
+                and "a fast-forward git merge or git pull" in inst_text,
+                "compared with every parent" in hook_text and "compared with every parent" in inst_text,
+                "exits 128" in hook_text and "exits 128" in inst_text
+                and "exit 1 and leave MERGE_HEAD" in hook_text and "exit 1 and leaves MERGE_HEAD" in inst_text),
+                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True,
+                 True, True, True, True))
 
             # --- The hook's contract, run by hand under a recording stub tool. ---
             serial = [0]

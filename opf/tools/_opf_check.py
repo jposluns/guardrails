@@ -149,7 +149,7 @@ LEASE_TOP_KEYS = frozenset(("schema", "holder", "operation", "acquired_at"))
 _LEDGER_TYPES = frozenset(("worklog",))
 # The recognized keys of the inert observations object (git-derived facts); an unknown key is a malformed
 # injection surfaced fail-closed, never silently dropped (F12).
-_OBSERVATION_KEYS = frozenset({"tracked", "actual_remote", "prior"})
+_OBSERVATION_KEYS = frozenset({"tracked", "actual_remote", "prior", "merge_parents"})
 
 # The single-source type -> normative-namespace roster (baseline + every module-tier + importer type), used
 # to grade a moved-row `type` against its id namespace (F12) and to bound counters completeness.
@@ -3445,7 +3445,8 @@ def _verify_immutable_body(rid, cur, prior_digests, rep):
                     "snapshot (a created-terminal record does not change; spec 8.5)".format(rid))
 
 
-def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, source_unread=frozenset()):
+def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, source_unread=frozenset(),
+                        grade_transitions=True):
     """C-HISTORY-RESURRECTION: for every id in the prior committed snapshot, confirm it did not resurrect
     across time (OPF-SPEC 8.4/13). A prior unqualified-terminal state now in any other state is a definite
     finding (actor-independent). A created-terminal record's BODY is additionally checked for preservation
@@ -3460,7 +3461,11 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, sourc
     type whose sources were all read is graded even where a rotation left it unconfirmed, since an id absent
     from every source read is absent. Reachability: `opf doctor` builds its prior from git, and that prior
     never carries a worklog id (the worklog is a ledger, not a type index), so the worklog half of this
-    gate is reached only by a caller that supplies the observations itself."""
+    gate is reached only by a caller that supplies the observations itself. With `grade_transitions`
+    False (a merge commit: either branch's committed status changes would be graded as this commit's,
+    so a merge commit's status changes are not graded, the disclosed residual, and the mid-change
+    pending cannot-evaluate does not arise), a prior record whose status differs is not graded at all,
+    while id survival and the unchanged-status immutable-body comparison still run."""
     unknown = set()
     for rid in sorted(prior_records):
         ptype, pstatus = prior_records[rid]
@@ -3488,6 +3493,8 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, sourc
         terminal_unqual = p_state in spec.terminal and p_qual is None
         cur_status = _status_string(cur.state, cur.qual)
         status_changed = cur_status is not None and cur_status != pstatus
+        if status_changed and not grade_transitions:
+            continue
         if terminal_unqual and status_changed:
             rep.finding("C-HISTORY-RESURRECTION: prior record {!r} was at unqualified terminal {!r} but is "
                         "now {!r}; a terminal record does not change (no resurrection; spec 8.4)".format(
@@ -3518,6 +3525,31 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, sourc
         rep.cant("C-HISTORY-RESURRECTION: the records of {} could not all be read (see C-RECORDS and "
                  "C-ARCHIVE-ENUM); prior record presence is not evaluated over a partial set (spec "
                  "12/13)".format(", ".join(repr(t) for t in sorted(unknown))))
+
+
+def _check_merge_parent_survival(commit, prior, all_ids, rep, source_unread=frozenset()):
+    """C-HISTORY-RESURRECTION over ONE merged commit (a merge parent beyond HEAD): every record id that
+    parent holds must survive into the merge result, active or archived, since a merge such as
+    `git merge -s ours` concludes without a conflict and would drop every record the merged branch added
+    (spec 12/13). Only id survival is graded here: a merge commit's status changes are not graded (the
+    disclosed residual), and the per-parent counter comparison runs under C-HISTORY-COUNTERS. A prior id
+    absent from a type whose record source could not be read is a named CANNOT-EVALUATE for that type,
+    never a false finding."""
+    unknown = set()
+    for rid in sorted(prior["records"]):
+        if rid in all_ids:
+            continue
+        ptype = prior["records"][rid][0]
+        if ptype in source_unread:
+            unknown.add(ptype)
+            continue
+        rep.finding("C-HISTORY-RESURRECTION: record {!r}, held by merge parent {}, is absent from both "
+                    "the active store and the archive (a merge result must keep every record each parent "
+                    "holds; spec 12/13)".format(rid, commit))
+    if unknown:
+        rep.cant("C-HISTORY-RESURRECTION: the records of {} could not all be read (see C-RECORDS and "
+                 "C-ARCHIVE-ENUM); record survival from merge parent {} is not evaluated over a partial "
+                 "set (spec 12/13)".format(", ".join(repr(t) for t in sorted(unknown)), commit))
 
 
 # Homes-2 durable evidence (C-EVIDENCE-ENUM, spec 4.2). Each imported/<kind>/<run-id>/ bundle carries
@@ -4669,6 +4701,27 @@ def _normalize_observations(observations):
             obs["prior"] = norm
         else:
             obs["prior_malformed"] = True    # supplied but rejected; the history checks say "malformed"
+    # `merge_parents` (optional): the caller is concluding a merge (MERGE_HEAD present), and each entry is
+    # one merged commit, {"commit": its id, "prior": its committed snapshot, prior-shaped}. The key's very
+    # PRESENCE asserts a merge in progress, so a value that does not normalize (None included: the observer
+    # supplies None when MERGE_HEAD exists but cannot be read back to snapshots) is recorded malformed and
+    # the merge comparisons fail closed to named CANNOT-EVALUATEs, never an unchecked merge.
+    if "merge_parents" in observations:
+        mp = observations["merge_parents"]
+        parents = []
+        ok = isinstance(mp, (list, tuple)) and len(mp) > 0
+        if ok:
+            for entry in mp:
+                commit = entry.get("commit") if isinstance(entry, dict) else None
+                nprior = _normalize_prior(entry.get("prior")) if isinstance(entry, dict) else None
+                if not isinstance(commit, str) or not commit or nprior is None:
+                    ok = False
+                    break
+                parents.append({"commit": commit, "prior": nprior})
+        if ok:
+            obs["merge_parents"] = parents
+        else:
+            obs["merge_parents_malformed"] = True
     return obs, None
 
 
@@ -5520,6 +5573,21 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         prior, prior_malformed = None, True
     prior_reason = ("the prior committed snapshot observation was supplied but malformed"
                     if prior_malformed else "no prior committed snapshot was supplied")
+    # Concluding a merge (MERGE_HEAD present), the result is compared with EVERY parent: each record a
+    # parent holds must survive and no counter may fall below its value in any parent, while a merge
+    # commit's status changes are not graded (transition legality is skipped above, so either branch's
+    # committed changes are not misgraded as this commit's and the mid-change pending cannot-evaluate
+    # does not arise). A merge whose parents were observed but could not be normalized, or whose parent
+    # snapshots fail the same imported-member gate as the HEAD prior, fails closed to named
+    # CANNOT-EVALUATEs, never an unchecked merge.
+    merge_parents = obs.get("merge_parents")
+    merging = merge_parents is not None or bool(obs.get("merge_parents_malformed"))
+    if merge_parents is not None:
+        for parent in merge_parents:
+            if parent["prior"]["imported_malformed"] if imported else parent["prior"]["imported_high"]:
+                merge_parents = None
+                break
+    merge_malformed = merging and merge_parents is None
     rep.ran("C-HISTORY-APPEND-ONLY")
     if prior is None:
         rep.cant("C-HISTORY-APPEND-ONLY: {}; across-time release immutability (spec 6.1/13) is not "
@@ -5552,13 +5620,36 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         for f in check_monotonic({**prior["counters_high"], **prior["imported_high"]}, high,
                                  imported_series=imported):
             rep.finding("C-HISTORY-COUNTERS: {}".format(f))
+    if merge_malformed:
+        rep.cant("C-HISTORY-COUNTERS: a merge is in progress but its merged parents could not be "
+                 "observed (the merge-parents observation is malformed or missing a usable snapshot); "
+                 "counter non-regression against the merged commit(s) is not evaluated (spec 8.2)")
+    elif merge_parents is not None:
+        if not counters_ok:
+            rep.cant("C-HISTORY-COUNTERS: the current counters did not evaluate; counter non-regression "
+                     "against the merged commit(s) is not checkable")
+        else:
+            for parent in merge_parents:
+                for f in check_monotonic({**parent["prior"]["counters_high"],
+                                          **parent["prior"]["imported_high"]}, high,
+                                         imported_series=imported):
+                    rep.finding("C-HISTORY-COUNTERS: against merge parent {}: {}".format(
+                        parent["commit"], f))
 
     rep.ran("C-HISTORY-RESURRECTION")
     if prior is None:
         rep.cant("C-HISTORY-RESURRECTION: {}; no-resurrection across time (spec 8.4) is not "
                  "evaluated".format(prior_reason))
     else:
-        _check_resurrection(prior["records"], prior.get("digests") or {}, by_id, all_ids, rep, source_unread)
+        _check_resurrection(prior["records"], prior.get("digests") or {}, by_id, all_ids, rep, source_unread,
+                            grade_transitions=not merging)
+    if merge_malformed:
+        rep.cant("C-HISTORY-RESURRECTION: a merge is in progress but its merged parents could not be "
+                 "observed (the merge-parents observation is malformed or missing a usable snapshot); "
+                 "record survival against the merged commit(s) is not evaluated (spec 12/13)")
+    elif merge_parents is not None:
+        for parent in merge_parents:
+            _check_merge_parent_survival(parent["commit"], parent["prior"], all_ids, rep, source_unread)
 
     return evaluated_profiles, unevaluated_profiles
 
