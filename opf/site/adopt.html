@@ -127,7 +127,8 @@
             one exception: when a kept file registers into a store the plan creates, the digest
             planned for its manifest must be the default manifest's real digest.</li>
           <li><code>opf adopt approve</code> re-derives the frozen plan over the live tree and prints
-            the approval that binds its digests, and records nothing.</li>
+            the approval that binds its digests. It writes nothing, so the approval it prints is not
+            recorded anywhere.</li>
           <li><code>opf adopt status</code> reports adoption runs and writes nothing.</li>
         </ul>
         <p>At base 2.0.0, <code>opf adopt plan</code>, <code>approve</code> and <code>status</code>
@@ -136,9 +137,11 @@
       </div>
       <div class="card">
         <h3>What it does not run yet</h3>
-        <p><code>opf adopt apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0,
-          and <code>complete</code> refuses
-          with exit 2, so no approval is recorded, nothing is applied, and nothing is retired. Installing the enforcement pack through adoption, and
+        <p><code>opf adopt apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0
+          once their arguments parse, before anything is read or written, and <code>complete</code>
+          refuses with exit 2 before it parses any argument. Approval runs, but apply, the stage that
+          would record the approval in the run's evidence bundle, refuses, so no approval is recorded,
+          nothing is applied, and nothing is retired. Installing the enforcement pack through adoption, and
           post-adoption import, are not available either. An assistant following the pack stops at
           the approval step and reports, rather than doing the missing stages by hand.</p>
         <p>Recovery after a refused or reversed run: when an adoption transaction is refused after

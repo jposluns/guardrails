@@ -38,17 +38,18 @@ Three rules govern everything else:
 |---|---|---|
 | Discover sources | the read-only `discover_sources` entry (section 3) | runs; writes nothing |
 | Investigate | the planner's read-only `investigate` entry (section 3) | runs; writes nothing |
-| Plan | `opf adopt plan --inputs FILE [--root DIR]` | runs; prints the frozen plan; writes nothing |
-| Status | `opf adopt status [--root DIR]` | runs; says the adoption journal is not read; writes nothing |
-| Approve | `opf adopt approve` | runs; re-checks the frozen plan against the live tree and prints the approval; writes nothing |
-| Apply | `opf adopt apply` | not yet executable: refuses with exit 2 |
-| Complete | `opf adopt complete` | not yet executable: refuses with exit 2 |
-| Reconcile | `opf adopt reconcile [--root DIR]` | not yet executable: not enabled at base 2.0.0, so it refuses with exit 2, reading and writing nothing (section 2) |
+| Plan | `opf adopt plan --inputs FILE [--root DIR]` | runs; exit 0 with the frozen plan TOML on stdout; writes nothing |
+| Status | `opf adopt status [--root DIR]` | runs; exit 0, its first line saying the adoption journal state on base 2.0.0 is unknown because this build does not read it; writes nothing |
+| Approve | `opf adopt approve --inputs FILE --plan FILE --actor NAME [--root DIR]` | runs; re-checks the frozen plan against the live tree; exit 0 with the approval TOML on stdout; writes nothing, so the approval is not recorded |
+| Apply | `opf adopt apply --inputs FILE --plan FILE --approval FILE [--root DIR]` | not yet executable: not enabled at base 2.0.0, so once its arguments parse it refuses with exit 2, reading and writing nothing |
+| Complete | `opf adopt complete` | not yet executable: refuses with exit 2 before it parses any argument, saying it is not yet available in this build |
+| Reconcile | `opf adopt reconcile [--root DIR]` | not yet executable: not enabled at base 2.0.0, so once its arguments parse it refuses with exit 2, reading and writing nothing (section 2) |
 | Import | `opf record import --batch`; `opf import --prompt`, `--status`, `--verify` (procedure: `import/SKILL.md`) | not yet executable: `opf record` has no `import` subcommand, and `opf import` refuses every argument with exit 2 |
 
 Inside the apply engine, each of the ten plan operations has an executor, but `opf adopt apply`
-still refuses every plan with exit 2 before it writes anything: the apply stage's receipt step is
-not yet executable, and apply cannot yet obtain the release pack that `plant-governance` rows plant
+still refuses every plan with exit 2 before it reads or writes anything, because apply is not
+enabled at base 2.0.0. Behind that refusal, the apply stage's receipt step is not yet executable
+either, and apply cannot yet obtain the release pack that `plant-governance` rows plant
 from, sequence `init-store`, or gather what `render-views` reads. A plan can name all ten; naming
 one does not make it runnable.
 
@@ -696,7 +697,7 @@ byte-identical in place (preserving a copy of each such retire or migrate source
 archive), renders every declared view, and writes the adoption receipt with its outcome events
 (sections 14 and 14.2).
 
-In this build, `opf adopt apply` refuses with exit 2. Stop here and report the plan, its status
+In this build, `opf adopt apply` refuses with exit 2, reading and writing nothing. Stop here and report the plan, its status
 and the stages still pending. Do not create store files, render views, install enforcement
 members, or move or delete old files as a stand-in. For a project whose investigation lists no
 candidate, `clean-start.md` describes the one interim route this build supports, and what it
