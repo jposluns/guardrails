@@ -49,11 +49,13 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     refuses by), it records the approval itself, each receipt file row names a plan source with its
     disposition and before_digest, the live preimages of the sources the plan leaves live and no other
     check owns (keep, and non-occupying migrate) still equal their plan digests, and every planned
-    destination apply has already written and no other check owns (init-store members, non-CI create-file
-    and plant-governance paths, enable-hook registrations, and the registration
+    destination apply has already written and no other check owns (init-store members, create-file and
+    plant-governance paths other than the CI-only members, enable-hook registrations, and the registration
     chain's final manifest) holds exactly its planned bytes. The retire-disposed live files are check 6's,
     so an edited retire source flips check 6 only; the non-occupying move sources are check 3's; the
-    rendered views, CI members and consumer repointings are check 4's; a move-file destination is written
+    rendered views, the CI-only members (those no non-CI row also names) and consumer repointings are
+    check 4's, while a CI member a non-CI row also names (the tool tree both launcher rows bind) stays a
+    planned destination here too; a move-file destination is written
     only by the post-green relocation, so before green it is no live destination; and the receipt is
     compared by content in the receipt leg, because outcome events append to its file.
   2 discovery-accounting: the planning inventory (`opf.adoption.planning-inventory/v1`, the bytes the
@@ -244,16 +246,26 @@ def _sources(ev):
 
 # --- check 1: authority and freshness -----------------------------------------------------------------
 
+def _ci_only(plan):
+    """The CI members check 1's destination sweep leaves to check 4: each path a CI row names that no non-CI
+    row also names. A member a non-CI row names too (the tool entry point and tool tree, which both the CI and
+    the pre-commit launcher rows bind) is that row's installed surface as well, so it stays a check 1 planned
+    destination and its drift moves check 1 with checks 4 and 5."""
+    rows = plan["enforcement"]
+    shared = {m["path"] for row in rows if row["platform"] != "ci" for m in row["members"]}
+    return {m["path"] for row in rows if row["platform"] == "ci" for m in row["members"]} - shared
+
+
 def _planned_destinations(ev):
     """Check 1's destination sweep: the {path: digest} of every planned destination apply has already
-    written and no other roster check owns. Render-views members, CI enforcement members and consumer
-    repointings are check 4's; the record-adoption receipt is compared by content in the receipt leg
+    written and no other roster check owns. Render-views members, CI-only enforcement members (_ci_only) and
+    consumer repointings are check 4's; the record-adoption receipt is compared by content in the receipt leg
     (outcome events append to its file); a move-file destination is written only by the post-green
     relocation (spec 14.2), so before green it is not a live destination. A register-unmanaged chain
     rewrites the frozen store manifest, so the chain's last new_digest replaces any scaffolded member
     digest there (_opf_adopt's registration-chain validation pins the chain to program order)."""
     plan = ev.plan
-    ci = {m["path"] for row in plan["enforcement"] if row["platform"] == "ci" for m in row["members"]}
+    ci = _ci_only(plan)
     wanted = {}
     for op in plan["ops"]:
         if op["op"] in ("create-file", "plant-governance"):
@@ -979,7 +991,8 @@ _CONSUMER_OLD, _CONSUMER_NEW = b"old consumer\n", b"new consumer\n"
 # The enforcement members the plant rows plant beside the CI floor: the pre-commit launchers and the tool entry
 # point with the rest of its tool tree, which both launcher rows bind under the opf/ mirror
 # (_opf_adopt.canonical_plan_bindings), the registration file and the deny hook it runs, and the instruction
-# files. Check 1's destination sweep owns each but the tool tree, whose files are CI members too.
+# files. Check 1's destination sweep owns each, the tool tree included: its files are CI members too, but the
+# pre-commit row names them as well, so they are not CI-only (_ci_only).
 _PACK = {"opf/enforcement/precommit/pre-commit": b"#!/bin/sh\nexit 0\n",
          "opf/enforcement/precommit/install.sh": b"#!/bin/sh\nexit 0\n",
          "opf/tools/opf.py": b"tool entry point\n", ".claude/settings.json": b"{}\n",
@@ -1765,6 +1778,30 @@ def self_test():
                       and _says(got, WIRING, "member {!r} is absent".format(member) if label.endswith("absent")
                                 else "member {!r} does not hold its planned bytes".format(member))
                       and sorted(set(p for p, _probe in watched.calls)) == ["claude-code"])
+            # A member both the CI row and the pre-commit row name (the tool entry point both launcher rows
+            # bind) is not CI-only, so it stays a check 1 planned destination: absent or drifted, it reds check
+            # 1 beside check 4's CI leg and check 5's pre-commit surface. Dropping every CI member from the
+            # sweep, the plain CI set difference, leaves check 1 VALID here, which the flip shows.
+            shared = schema.TOOL_ENTRY
+            shared_rows = sorted(row["platform"] for row in schema.canonical_plan_bindings()["enforcement"]
+                                 if shared in [m["path"] for m in row["members"]])
+            trio = dict([(AUTHORITY, INVALID), (OPERATIONAL, CANNOT_EVALUATE), (WIRING, INVALID)])
+            for label, mutate, text in (
+                    ("absent", lambda r: _remove(r, shared), "planned destination {!r} is absent"),
+                    ("drifted", lambda r: _put(r, shared, b"tampered bytes\n"),
+                     "planned destination {!r} no longer holds its planned bytes")):
+                got = _case(lambda r, i, m=mutate: m(r))
+                check("check-1-shared-ci-member-" + label + "-red", shared_rows == ["ci", "pre-commit"]
+                      and _only(got, trio) and _says(got, AUTHORITY, text.format(shared))
+                      and _says(got, WIRING, "member {!r}".format(shared)))
+
+            def _ci_set_difference(plan):
+                return {m["path"] for row in plan["enforcement"] if row["platform"] == "ci" for m in row["members"]}
+
+            with mock.patch.object(here, "_ci_only", _ci_set_difference):
+                flipped = _case(lambda r, i: _remove(r, shared))
+            check("flip-1-shared-ci-member-set-difference-misses", flipped[AUTHORITY].status == VALID
+                  and not _only(flipped, trio))
             # Instruction members are not the probed surface: their drift moves check 1 only, never check 5.
             check("check-5-instructions-member-not-probed", _only(_case(lambda r, i: _put(
                 r, "AGENTS.md", b"tampered\n")), _red(AUTHORITY)))
