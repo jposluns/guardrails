@@ -1145,9 +1145,9 @@ CONFIG_MEMBER_BOUNDS = {
     # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case, READ FROM
     # SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
     # member's legs' bounds, one 10 s cleanup deadline per leg, the flip and its cleanup where it
-    # runs, and the 350 s vector allowance), 12732 s (opf-closure-a), 8775 s (b), 7780 s (c),
-    # 8570 s (d) and 9526 s (e), and below each CI job's worst case (20793 s, 17800 s, 15810 s,
-    # 17390 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
+    # runs, and the 350 s vector allowance), 13322 s (opf-closure-a), 10585 s (b), 7780 s (c),
+    # 9840 s (d) and 9526 s (e), and below each CI job's worst case (21193 s, 21420 s, 15810 s,
+    # 19930 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
     # as the default's comment above sanctions: this lane owns no member's
     # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
     # member. The member's OWN inner bounds are read differently: when one of its legs is killed at
@@ -4904,10 +4904,6 @@ _SCAN_ALLOWED_UNPINNED = (
     ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", ("dynamic",),
      "exec of _read_regular's own source with its closefd=False fdopen put back as the pre-fix"
      " fdopen ownership (red-leg mutant); the exec only defines the mutant function",
-     1),
-    ("tools/check_footer.py", "_close_vectors", ("dynamic",),
-     "exec of _read_regular_page's own source with its closefd=False fdopen put back as the"
-     " pre-fix fdopen ownership (red-leg mutant); the exec only defines the mutant function",
      1),
     ("tools/check_release_cut.py", "_close_vectors", ("dynamic",),
      "exec of working_blob's own source with its closefd=False fdopen put back as the pre-fix"
