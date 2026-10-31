@@ -6070,6 +6070,30 @@ _CAB_GIT_HOOKED_VERBS = frozenset(("commit", "merge", "am", "cherry-pick", "reba
 _CAB_GIT_REPLAY_VERBS = frozenset(("commit", "cherry-pick", "rebase", "revert"))
 # The git verbs that read a '-' operand as the previous branch (@{-1}), not as standard input.
 _CAB_GIT_DASH_VERBS = frozenset(("merge", "cherry-pick", "rebase", "revert"))
+# The options git cherry-pick and git revert read themselves. Their option reader takes no abbreviation and
+# hands every other option word to git's revision reader, where one can name commits (--all, --branches), so
+# a word that is none of these refuses the stage. Short letters: a flag, one taking a value (the rest of the
+# word, or the next word), or -S, whose value is only the rest of the word. Long names map to whether they
+# take a value as the next word; --gpg-sign takes one only after '='.
+_CAB_PICK_FLAGS = {"cherry-pick": frozenset("nersx"), "revert": frozenset("ners")}
+_CAB_PICK_VALUE_FLAGS = frozenset("mX")
+_CAB_PICK_MODES = frozenset(("quit", "continue", "abort", "skip"))
+_CAB_PICK_COMMON = {name: False for name in (
+    "no-commit", "commit", "edit", "no-edit", "signoff", "no-signoff", "no-mainline", "rerere-autoupdate",
+    "no-rerere-autoupdate", "no-strategy", "no-strategy-option", "gpg-sign", "no-gpg-sign", "no-cleanup",
+    "stdin")}
+_CAB_PICK_COMMON.update(dict.fromkeys(("cleanup", "mainline", "strategy", "strategy-option"), True))
+_CAB_PICK_LONG = {
+    "cherry-pick": dict(_CAB_PICK_COMMON, empty=True, **dict.fromkeys((
+        "ff", "no-ff", "allow-empty", "no-allow-empty", "allow-empty-message", "no-allow-empty-message",
+        "keep-redundant-commits", "no-keep-redundant-commits"), False)),
+    "revert": dict(_CAB_PICK_COMMON, **dict.fromkeys(("reference", "no-reference"), False))}
+# The git rebase options that take a value as the next word (git's option reader takes a unique abbreviation
+# of a long name), the short letters that take one as the rest of the word or the next word, and those whose
+# value is only the rest of the word.
+_CAB_REBASE_VALUE_LONG = ("onto", "strategy", "strategy-option", "exec", "whitespace", "empty")
+_CAB_REBASE_VALUE_FLAGS = frozenset("sXxC")
+_CAB_REBASE_STUCK_FLAGS = frozenset("Sr")
 # The editors git edits a rebase todo list with: the settings, and the environment variables, in git's order.
 _CAB_TODO_EDITOR_KEYS = ("sequence.editor", "core.editor")
 _CAB_TODO_EDITOR_VARS = ("GIT_SEQUENCE_EDITOR", "GIT_EDITOR", "VISUAL", "EDITOR")
@@ -6122,6 +6146,12 @@ _CAB_MAX_PATHS = 65_536
 _CAB_MAX_READ = 268_435_456
 _CAB_MAX_REPLAY = 1000
 _CAB_MAX_REPLAY_CALLS = 8
+# The bounds on the revisions one replay read passes to git log: their number, the length of each (a longer
+# one is refused, never dropped, since git still replays it), and how many are read one at a time when their
+# joint read fails (git log stops at one revision it cannot resolve, such as @{upstream} with none set).
+_CAB_MAX_REPLAY_REVS = 1000
+_CAB_MAX_REV_LEN = 1024
+_CAB_MAX_REPLAY_SPLIT = 32
 _CAB_GIT_TIMEOUT = 3.0
 # A command past _CAB_MAX_COMMAND is refused when any of its readings (raw, de-quoted, ANSI-C decoded, brace
 # expanded) holds one of these (its references cannot be read), so a quoted command word (c''p) counts. A
@@ -6788,13 +6818,74 @@ def _cab_commit_option(word):
     return None, None, None
 
 
+def _cab_pick_revs(verb, args):
+    """(revs, why) for the words after git cherry-pick or revert: every word their own option reader does not
+    take (_CAB_PICK_FLAGS, _CAB_PICK_LONG) goes to git's revision reader, so each word but such an option and
+    its value is a revision, and after --end-of-options every word is. A '--' is dropped (the option reader
+    drops it and the revision reader still reads the words after it). An option word of neither reader that
+    this layer knows may name commits, so it refuses the stage (why). A '-' operand is the previous branch
+    (@{-1}); with --quit, --continue, --abort or --skip git takes no revision."""
+    flags, long_names = _CAB_PICK_FLAGS[verb], _CAB_PICK_LONG[verb]
+    revs, j, ended = [], 0, False
+    while j < len(args):
+        word = args[j]
+        j += 1
+        if ended or not word.startswith("-"):
+            revs.append(word)
+        elif word == "-":
+            revs.append("@{-1}")
+        elif word == "--end-of-options":
+            ended = True
+        elif word.startswith("--") and word != "--":
+            name, eq, _value = word[2:].partition("=")
+            if name in _CAB_PICK_MODES:
+                return [], None
+            if name not in long_names:
+                return [], ("git {} takes the option {!r}, which git's revision reader may read as naming the "
+                            "commits it replays (--all, --branches), so they cannot be read".format(verb, word[:80]))
+            if long_names[name] and not eq:
+                j += 1
+        elif word != "--":
+            for k, letter in enumerate(word[1:], 1):
+                if letter in _CAB_PICK_VALUE_FLAGS:
+                    j += k == len(word) - 1
+                    break
+                if letter == "S":
+                    break
+                if letter not in flags:
+                    return [], ("git {} takes the option {!r}, which git's revision reader may read as naming "
+                                "the commits it replays, so they cannot be read".format(verb, word[:80]))
+    return revs, None
+
+
+def _cab_stdin_lines(texts):
+    """(revs, why) for the text git cherry-pick or revert --stdin reads: git takes each line as one revision,
+    blanks included (a trailing carriage return dropped), and a line starting with '-' as a revision only after
+    an --end-of-options line, as an option otherwise (--all, --branches, which name commits). Where that line
+    falls in what git reads cannot be told here, so such a line refuses the stage (why); an empty line and a
+    '--' line, where git stops reading, are passed over and the lines after them still read (an over-read)."""
+    revs = []
+    for text in texts:
+        for line in text.split("\n"):
+            line = line[:-1] if line.endswith("\r") else line
+            if not line or line == "--":
+                continue
+            if line.startswith("-"):
+                return [], ("git cherry-pick or revert --stdin reads the line {!r}, which git reads as an option "
+                            "that may name the commits it replays (or as a revision after an --end-of-options "
+                            "line), so they cannot be read".format(line[:80]))
+            revs.append(line)
+    return revs, None
+
+
 def _cab_replay_revs(verb, args, extra=()):
-    """(revs, walk) naming the commits whose recorded message a git verb replays, read from the words
+    """(revs, walk, why) naming the commits whose recorded message a git verb replays, read from the words
     after it: git commit's -C, -c, --reuse-message, --reedit-message, --fixup and --squash values (--amend
-    with no message option reuses HEAD's); every non-option word of git cherry-pick and git revert, with
-    the words of their --stdin (extra); and the range git rebase replays (<upstream>..<branch>, the
-    configured upstream when none is named; with --root all of the branch). A '-' operand is the previous
-    branch (@{-1}). walk is False where each rev names one commit (--no-walk)."""
+    with no message option reuses HEAD's); the revisions of git cherry-pick and git revert (_cab_pick_revs),
+    with the lines of their --stdin (extra); and the range git rebase replays (the commits of <branch> not in
+    <upstream>, the configured upstream when none is named; with --root all of the branch). A '-' operand is
+    the previous branch (@{-1}). walk is False where each rev names one commit (--no-walk). why, when not
+    None, is why the commits cannot be read, which refuses the stage."""
     revs = []
     if verb == "commit":
         message, amend, j = False, False, 0
@@ -6816,31 +6907,41 @@ def _cab_replay_revs(verb, args, extra=()):
             amend = amend or name == "amend"
         if amend and not message and not revs:
             revs.append("HEAD")
-        return revs, False
-    picks = verb in ("cherry-pick", "revert")
-    takes = (("-m", "--mainline", "-X", "--strategy-option", "--strategy", "--cleanup", "--empty") if picks else
-             ("--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec", "-C", "--whitespace",
-              "--empty"))
-    words, j, root = [], 0, False
+        return revs, False, None
+    if verb != "rebase":
+        revs, why = _cab_pick_revs(verb, args)
+        return revs + list(extra), False, why
+    # git rebase: a long option abbreviated (--exe for --exec) or a short cluster ending in a letter that
+    # takes a value (-fs ort) takes the next word, as git's option reader does; the words after '--' are
+    # operands. The range is passed as two revisions, so a '..' inside <upstream> is not read as its end.
+    words, j, root, ended = [], 0, False, False
     while j < len(args):
         word = args[j]
         j += 1
-        if word in takes:
-            j += 1
-        elif word in ("--continue", "--skip", "--abort", "--quit", "--edit-todo", "--show-current-patch"):
-            return [], False
-        elif word == "--root":
-            root = True
+        if ended or not word.startswith("-"):
+            words.append(word)
         elif word == "-":
             words.append("@{-1}")
-        elif not word.startswith("-"):
-            words.append(word)
-    if picks:
-        return words + list(extra), False
-    branch = words[1] if len(words) > 1 else "HEAD"
-    if root:
-        return [branch], True
-    return ["{}..{}".format(words[0] if words else "@{upstream}", branch)], True
+        elif word == "--":
+            ended = True
+        elif word in ("--continue", "--skip", "--abort", "--quit", "--edit-todo", "--show-current-patch"):
+            return [], False, None
+        elif word.startswith("--"):
+            name, eq, _value = word[2:].partition("=")
+            root = root or "root".startswith(name)
+            if not eq and not name.startswith("no-") and any(
+                    opt.startswith(name) for opt in _CAB_REBASE_VALUE_LONG):
+                j += 1
+        else:
+            for k, letter in enumerate(word[1:], 1):
+                if letter in _CAB_REBASE_VALUE_FLAGS:
+                    j += k == len(word) - 1
+                    break
+                if letter in _CAB_REBASE_STUCK_FLAGS:
+                    break
+    if root:  # git rebase --root [<branch>]
+        return [words[0] if words else "HEAD"], True, None
+    return ["^" + (words[0] if words else "@{upstream}"), words[1] if len(words) > 1 else "HEAD"], True, None
 
 
 def _cab_git_env():
@@ -6853,17 +6954,33 @@ def _cab_git_env():
 
 
 def _cab_replay_names(stage, args, extra=()):
-    """(revs, walk) a replaying git stage names (_cab_replay_revs), each rev a word git log can take as one."""
-    revs, walk = _cab_replay_revs(stage.verb, args, extra)
-    return [rev for rev in revs if rev and len(rev) <= 1024 and not rev.startswith("-")
-            and not _CAB_BLANK_RE.search(rev)], walk
+    """(revs, walk, why) a replaying git stage names (_cab_replay_revs), each rev passed to git log as one
+    argument, blanks included, and each distinct rev once. An empty word names nothing git replays (git
+    refuses it) and is passed over. A rev holding a NUL (no argument can carry it) or longer than
+    _CAB_MAX_REV_LEN, or more than _CAB_MAX_REPLAY_REVS revs, cannot be read, so the stage is refused (why)
+    rather than the rev dropped."""
+    revs, walk, why = _cab_replay_revs(stage.verb, args, extra)
+    revs = list(dict.fromkeys(rev for rev in revs if rev))
+    for rev in revs:
+        if why is None and ("\0" in rev or len(rev) > _CAB_MAX_REV_LEN):
+            why = ("git {} names the revision {!r}, which {}, so the commits it replays cannot be read".format(
+                stage.verb, rev[:80], "holds a NUL" if "\0" in rev else
+                "is longer than the {}-character bound".format(_CAB_MAX_REV_LEN)))
+    if why is None and len(revs) > _CAB_MAX_REPLAY_REVS:
+        why = ("git {} names more than {} revisions, past the bound on the reads of the commits it replays"
+               .format(stage.verb, _CAB_MAX_REPLAY_REVS))
+    return revs, walk, why
 
 
 def _cab_replay_hit(stage, revs, walk):
     """Why the commits revs name block a replaying git stage, or None: their messages are read with git log in
     each directory the stage runs in (git revert records only the subject of each, so only that is read for
-    it), and one holding the token refuses it. A message the hook cannot read (no repository, an unknown
-    revision, a git failure or timeout) is passed over (disclosed)."""
+    it), each rev one argument after --end-of-options, and one holding the token refuses it. A read that does
+    not finish (a timeout, git not started) refuses it too. Where the joint read of revs that each name one
+    commit fails (git log stops at one it cannot resolve, such as @{upstream} with none set, which may be an
+    over-read word git itself never takes), each is read on its own, at most _CAB_MAX_REPLAY_SPLIT of them,
+    past which the stage is refused. A message the hook still cannot read (no repository, a revision git
+    cannot resolve) is passed over (disclosed): git cannot replay it there either."""
     env = _cab_git_env()
     for d in sorted(x for x in stage.dirs if x is not None):
         argv = ["git", "-C", d, "-c", "core.fsmonitor=false", "log",
@@ -6871,14 +6988,25 @@ def _cab_replay_hit(stage, revs, walk):
                 "--ignore-missing", "--max-count={}".format(_CAB_MAX_REPLAY)]
         if not walk:
             argv.append("--no-walk=unsorted")
-        try:
-            proc = subprocess.run(argv + ["--end-of-options"] + revs + ["--"], capture_output=True,
-                                  stdin=subprocess.DEVNULL, timeout=_CAB_GIT_TIMEOUT, env=env)
-        except (subprocess.SubprocessError, OSError, ValueError):
-            continue
-        if proc.returncode == 0 and _cab_count(proc.stdout.decode("utf-8", "surrogateescape")):
-            return ("git {} replays the recorded message of {} in {!r}, and a message it replays holds the "
-                    "trailer token".format(stage.verb, " ".join(revs)[:200], d))
+        sets = [revs]
+        while sets:
+            part = sets.pop(0)
+            try:
+                proc = subprocess.run(argv + ["--end-of-options"] + part + ["--"], capture_output=True,
+                                      stdin=subprocess.DEVNULL, timeout=_CAB_GIT_TIMEOUT, env=env)
+            except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                return ("the read of the commits git {} replays in {!r} did not finish ({}), so they cannot be "
+                        "read".format(stage.verb, d, type(exc).__name__))
+            if proc.returncode == 0:
+                if _cab_count(proc.stdout.decode("utf-8", "surrogateescape")):
+                    return ("git {} replays the recorded message of {} in {!r}, and a message it replays holds "
+                            "the trailer token".format(stage.verb, " ".join(part)[:200], d))
+            elif not walk and len(part) > 1:
+                if len(part) > _CAB_MAX_REPLAY_SPLIT:
+                    return ("git {} names {} revisions in {!r} whose joint read fails, more than the {} read one "
+                            "at a time, so the commits it replays cannot be read".format(
+                                stage.verb, len(part), d, _CAB_MAX_REPLAY_SPLIT))
+                sets.extend([rev] for rev in part)
     return None
 
 
@@ -7130,11 +7258,13 @@ def _cab_previous_branch(stage):
 
 def _cab_stdin_revs(stage):
     """Whether stage is a git cherry-pick or revert that reads the commits it replays from standard input
-    (--stdin before any '--')."""
+    (--stdin before any --end-of-options; their option reader drops a '--' and git's revision reader still
+    takes a --stdin after it)."""
     if stage.verb not in ("cherry-pick", "revert"):
         return False
     rest = _cab_git_rest(stage)
-    return "--stdin" in (rest[:rest.index("--")] if "--" in rest else rest)
+    end = "--end-of-options"
+    return "--stdin" in (rest[:rest.index(end)] if end in rest else rest)
 
 
 def _cab_stage_problem(stage, active, what):
@@ -7164,9 +7294,10 @@ def _cab_stage_problem(stage, active, what):
     return None
 
 
-def _cab_reference_problem(joined, cwd):
-    """Why the file references of a command (its joined text, backslash-newlines removed) block it, or
-    None. Read twice: by shlex (_cab_lex, an ANSI-C quote decoded and a locale quote read as a double-quoted
+def _cab_reference_problem(joined, cwd, raw=None):
+    """Why the file references of a command (its joined text, backslash-newlines removed; raw, when given, its
+    text as written, whose lines a here-document feeding git cherry-pick or revert --stdin is read from) block
+    it, or None. Read twice: by shlex (_cab_lex, an ANSI-C quote decoded and a locale quote read as a double-quoted
     string first), the exact reading, and by the fallback reading (_cab_crude), an over-read that refuses
     standard input ('-') or a non-regular file on its own only when the exact reading fails. A
     commit-creating git command in a command one of whose stages, in either reading, sets core.hooksPath
@@ -7218,8 +7349,8 @@ def _cab_reference_problem(joined, cwd):
                 "add commits whose recorded messages this layer does not read")
     reader, replayed = _CabReader(), {}
     try:
-        for exact, tokens, units, grouped in parsed:
-            sinks = [unit for unit in units if any(_cab_stage_sink(stage) for stage in unit)]
+        for exact, _tokens, units, grouped in parsed:
+            sinks =[unit for unit in units if any(_cab_stage_sink(stage) for stage in unit)]
             if not sinks:
                 continue
             reader.writes, reader.dir_writes, reader.loose, reader.patch_writes = _cab_writes(units)
@@ -7249,11 +7380,16 @@ def _cab_reference_problem(joined, cwd):
                         continue
                     extra = []
                     if stage.text and _cab_stdin_revs(stage):
-                        extra = [word for text in stage.texts for word in _CAB_BLANK_RE.split(text) if word]
-                        if stage.doc is not None:  # every word after the here-document opens: its body and more
-                            extra += [tok for tok in tokens[stage.doc + 1:] if tok and tok != _CAB_HEAD
-                                      and not all(ch in _CAB_PUNCT for ch in tok)]
-                    revs, walk = _cab_replay_names(stage, _cab_git_rest(stage), extra)
+                        texts = list(stage.texts)
+                        if stage.doc is not None:  # every line of the command text: the body and more
+                            texts += [text for base in dict.fromkeys((raw or joined, joined)) for text in (
+                                base, "\n".join(line.lstrip("\t") for line in base.split("\n")))]
+                        extra, why = _cab_stdin_lines(texts)
+                        if why is not None:
+                            return why
+                    revs, walk, why = _cab_replay_names(stage, _cab_git_rest(stage), extra)
+                    if why is not None:
+                        return why
                     key = (stage.verb, tuple(revs), walk, stage.dirs)
                     if not revs or key in replayed and replayed[key] is None:
                         continue
@@ -7335,7 +7471,7 @@ def coauthor_bash(data):
                "holds a word that could redirect, write or commit (read raw, de-quoted, with ANSI-C escapes "
                "decoded and with brace expansions expanded)".format(_CAB_MAX_COMMAND))
     else:
-        why = _cab_reference_problem(bases[0], data.get("cwd"))
+        why = _cab_reference_problem(bases[0], data.get("cwd"), command)
     if why is None:
         return _allow()
     return _deny(

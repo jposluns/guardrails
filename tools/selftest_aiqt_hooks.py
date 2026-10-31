@@ -2402,6 +2402,7 @@ def _test_coauthor_guards(failures, tmp):
     if not os.access(script, os.X_OK):
         failures.append("(cab-g8) the shipped commit-msg hook is not executable")
     _test_coauthor_ascii(failures, base)
+    _test_coauthor_replay(failures, base)
     _test_coauthor_children(failures, base, script)
     _test_coauthor_oracle(failures, base, script)
 
@@ -2422,18 +2423,6 @@ def _test_coauthor_ascii(failures, base):
     (root / "٣-x.patch").write_text(clean_mbox, encoding="utf-8")
     for name in ("１", "1"):
         (root / name).write_text("fix\n", encoding="utf-8")
-    replay = root / "replay"
-    replay.mkdir(exist_ok=True)
-    _git(replay, "init", "-q", "-b", "main")
-    (replay / "a.txt").write_text("a\n", encoding="utf-8")
-    _git(replay, "add", "a.txt")
-    _git(replay, "commit", "-q", "-m", "init", env_identity=True)
-    _git(replay, "checkout", "-q", "-b", "nb dirty")
-    (replay / "d.txt").write_text("d\n", encoding="utf-8")
-    _git(replay, "add", "d.txt")
-    _git(replay, "commit", "-q", "-m", "add d\n\n" + _CAB_UC + ": Claude <c@x>", env_identity=True)
-    _git(replay, "branch", "-q", "plain-dirty")
-    _git(replay, "checkout", "-q", "main")
 
     def decided(command, want, cwd=root):
         return lambda: _decision(aiqt_hooks.coauthor_bash, command, cwd=str(cwd)) == want
@@ -2474,14 +2463,6 @@ def _test_coauthor_ascii(failures, base):
         ("cab-ascii-fd-source", "_CAB_DIGITS_RE", "a U+0663 word before <<< is no descriptor, so the here-string "
          "feeds git commit -F - (allows); 3<<< feeds descriptor 3, not standard input, and denies",
          decided("git commit -F - ٣<<< fix", "allow"), decided("git commit -F - 3<<< fix", "deny")),
-        ("cab-ascii-replay-word", "_CAB_BLANK_RE", "a revision whose name holds U+00A0 is one word git replays, so "
-         "its token message denies; the ASCII-named branch denies too",
-         decided("git cherry-pick nb dirty", "deny", replay),
-         decided("git cherry-pick plain-dirty", "deny", replay)),
-        ("cab-ascii-replay-stdin", "_CAB_BLANK_RE", "git cherry-pick --stdin reads a here-string line holding "
-         "U+00A0 as one revision, so its token message denies; the ASCII-named branch denies too",
-         decided("git cherry-pick --stdin <<< nb dirty", "deny", replay),
-         decided("git cherry-pick --stdin <<< plain-dirty", "deny", replay)),
         ("cab-ascii-crude", "_CAB_CRUDE_RE", "the fallback reading keeps U+00A0 inside a word; \\x1c, an ASCII "
          "character \\s matches, still splits as before",
          tokens("_CAB_CRUDE_RE", "a b", ["a b"]), tokens("_CAB_CRUDE_RE", "a b\tc\x1cd", ["a", "b", "c", "d"])),
@@ -2521,6 +2502,177 @@ def _test_coauthor_ascii(failures, base):
     if got != "deny":
         failures.append("(cab-ascii-mime-decoded) a base64 token body under a U+00A0 header blank: expected deny "
                         "(git mailinfo decodes it), got {}".format(got))
+
+
+def _test_coauthor_replay(failures, base):
+    """(cab-replay-*) The Bash layer reads every revision a replaying git stage takes, each as one argument
+    to its git log read (blanks included), and refuses the stage where one cannot be read; it drops none.
+    Each row holds a command real git runs to land the trailer token from a recorded message, run here
+    UNGATED in a fresh repository (the vector is real), which the layer must deny, and a twin one change
+    away that lands nothing and must allow. Each row is decided again under a flip that restores the drop
+    or misreading it pins (a revision holding a blank dropped, one past the length bound or starting with '-'
+    dropped, the --stdin text split at blanks or its '-' lines dropped, an unknown git cherry-pick option word
+    skipped, a git rebase option read with no value, --root read as <upstream>), where the deny vector must
+    allow and the twin still allow."""
+    root = base / "replay"
+    root.mkdir(parents=True, exist_ok=True)
+    land_env = git_fixture_env(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                               GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid",
+                               GIT_EDITOR="true", GIT_SEQUENCE_EDITOR="true")
+    seq = [0]
+
+    def fixture():
+        """A fresh repository on main (init, add m), whose branches and refs (none with an upstream) hold
+        the token message (plain-dirty, -dirty, nb<U+00A0>dirty: 'add d') or a clean one (plain-clean,
+        -clean, nb<U+00A0>clean: 'add c'), each branched from init."""
+        seq[0] += 1
+        repo = root / "r{}".format(seq[0])
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        (repo / "a.txt").write_text("a\n", encoding="utf-8")
+        _git(repo, "add", "a.txt")
+        _git(repo, "commit", "-q", "-m", "init", env_identity=True)
+        for kind, message in (("dirty", "add d\n\n" + _CAB_UC + ": Claude <c@x>"), ("clean", "add c")):
+            _git(repo, "checkout", "-q", "-b", "plain-" + kind, "main")
+            (repo / (kind + ".txt")).write_text(kind + "\n", encoding="utf-8")
+            _git(repo, "add", kind + ".txt")
+            _git(repo, "commit", "-q", "-m", message, env_identity=True)
+            _git(repo, "branch", "-q", "nb " + kind)
+            _git(repo, "update-ref", "refs/heads/-" + kind, "plain-" + kind)
+        _git(repo, "checkout", "-q", "main")
+        (repo / "m.txt").write_text("m\n", encoding="utf-8")
+        _git(repo, "add", "m.txt")
+        _git(repo, "commit", "-q", "-m", "add m", env_identity=True)
+        return repo
+
+    def lands(command):
+        repo = fixture()
+        before = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True,
+                                timeout=30, env=land_env).stdout.strip()
+        subprocess.run(["bash", "-c", command], cwd=str(repo), env=land_env, capture_output=True,
+                       stdin=subprocess.DEVNULL, timeout=120)
+        proc = subprocess.run(["git", "-C", str(repo), "log", "--format=%B", before + "..HEAD"],
+                              capture_output=True, timeout=60, env=land_env)
+        return aiqt_hooks._cab_count(proc.stdout.decode("utf-8", "surrogateescape")) > 0
+
+    decide_repo = fixture()
+
+    def decision(command):
+        return _decision(aiqt_hooks.coauthor_bash, command, cwd=str(decide_repo))
+
+    revs_of, names_of, stdin_of = (aiqt_hooks._cab_replay_revs, aiqt_hooks._cab_replay_names,
+                                   aiqt_hooks._cab_stdin_lines)
+    stdin_rule, pick_of = aiqt_hooks._cab_stdin_revs, aiqt_hooks._cab_pick_revs
+
+    def dropping(test):
+        """_cab_replay_names dropping each rev test holds (a rebase range, read once as one word, whole)."""
+        def names(stage, args, extra=()):
+            revs, walk, why = revs_of(stage.verb, args, extra)
+            if walk and any(test(rev) for rev in revs):
+                return [], walk, why
+            return [rev for rev in revs if rev and not test(rev)], walk, why
+        return {"_cab_replay_names": names}
+
+    def split_stdin(texts):
+        return [word for text in texts for word in re.split(r"\s+", text) if word], None
+
+    def dashless_stdin(texts):
+        return [line for text in texts for line in text.split("\n") if line and not line.startswith("-")], None
+
+    def stdin_before_dashdash(stage):
+        rest = aiqt_hooks._cab_git_rest(stage)
+        return stdin_rule(stage) and "--stdin" in (rest[:rest.index("--")] if "--" in rest else rest)
+
+    def skipping_options(verb, args):
+        known = set(aiqt_hooks._CAB_PICK_LONG[verb]) | aiqt_hooks._CAB_PICK_MODES | {"", "end-of-options"}
+        return pick_of(verb, [word for word in args if not word.startswith("--")
+                              or word[2:].partition("=")[0] in known])
+
+    def root_as_upstream(verb, args, extra=()):
+        revs, walk, why = revs_of(verb, args, extra)
+        if verb == "rebase" and len(revs) == 1:
+            return ["HEAD"], walk, why
+        return revs, walk, why
+
+    blank = dropping(lambda rev: re.search(r"\s", rev))
+    stdin_split = {"_cab_stdin_lines": split_stdin}
+    long_rev = "~0" * 520
+    rows = (
+        ("cab-replay-brace-word", "git cherry-pick 'plain-dirty^{/add d}'",
+         "git cherry-pick 'plain-clean^{/add c}'", blank),
+        ("cab-replay-brace-stdin", "git cherry-pick --stdin <<< 'plain-dirty^{/add d}'",
+         "git cherry-pick --stdin <<< 'plain-clean^{/add c}'", stdin_split),
+        ("cab-replay-brace-heredoc", "git cherry-pick --stdin <<'EOF'\nplain-dirty^{/add d}\nEOF\necho done now",
+         "git cherry-pick --stdin <<'EOF'\nplain-clean^{/add c}\nEOF\necho done now", stdin_split),
+        ("cab-replay-colon-word", "git cherry-pick ':/add d'", "git cherry-pick ':/add c'", blank),
+        ("cab-replay-colon-stdin", "git cherry-pick --stdin <<< ':/add d'", "git cherry-pick --stdin <<< ':/add c'",
+         stdin_split),
+        ("cab-replay-tab-word", "git cherry-pick 'plain-dirty^{/add[^\t]d}'",
+         "git cherry-pick 'plain-clean^{/add[^\t]c}'", blank),
+        ("cab-replay-tab-stdin", "git cherry-pick --stdin <<-EOF\n\tplain-dirty^{/add[^\t]d}\n\tEOF",
+         "git cherry-pick --stdin <<-EOF\n\tplain-clean^{/add[^\t]c}\n\tEOF", stdin_split),
+        ("cab-replay-nbsp-word", "git cherry-pick nb dirty", "git cherry-pick nb clean", blank),
+        ("cab-replay-nbsp-stdin", "git cherry-pick --stdin <<< nb dirty", "git cherry-pick --stdin <<< nb clean",
+         stdin_split),
+        ("cab-replay-commit-reuse", "git commit --allow-empty -C 'plain-dirty^{/add d}'",
+         "git commit --allow-empty -C 'plain-clean^{/add c}'", blank),
+        ("cab-replay-commit-dash", "git commit --allow-empty -C -dirty", "git commit --allow-empty -C -clean",
+         dropping(lambda rev: rev.startswith("-"))),
+        ("cab-replay-end-of-options", "git cherry-pick --end-of-options -dirty",
+         "git cherry-pick --end-of-options -clean", dropping(lambda rev: rev.startswith("-"))),
+        ("cab-replay-long", "git cherry-pick plain-dirty" + long_rev, "git cherry-pick plain-clean~0~0",
+         dropping(lambda rev: len(rev) > 1024)),
+        ("cab-replay-pick-option", "git cherry-pick --all", "git cherry-pick -x plain-clean",
+         {"_cab_pick_revs": skipping_options}),
+        ("cab-replay-stdin-option", "git cherry-pick --stdin <<< --branches",
+         "git cherry-pick --stdin <<< plain-clean", {"_cab_stdin_lines": dashless_stdin}),
+        ("cab-replay-stdin-dashdash", "git cherry-pick -- --stdin <<< plain-dirty",
+         "git cherry-pick -- --stdin <<< plain-clean", {"_cab_stdin_revs": stdin_before_dashdash}),
+        ("cab-replay-rebase-brace", "git rebase 'main^{/add m}' plain-dirty", "git rebase 'main^{/add m}' plain-clean",
+         blank),
+        ("cab-replay-rebase-abbrev", "git rebase --ont main main plain-dirty", "git rebase --ont main main plain-clean",
+         {"_CAB_REBASE_VALUE_LONG": (), "_CAB_REBASE_VALUE_FLAGS": frozenset()}),
+        ("cab-replay-rebase-cluster", "git rebase -fs ort main plain-dirty", "git rebase -fs ort main plain-clean",
+         {"_CAB_REBASE_VALUE_LONG": (), "_CAB_REBASE_VALUE_FLAGS": frozenset()}),
+        ("cab-replay-rebase-root", "git rebase -f --root plain-dirty", "git rebase -f --root plain-clean",
+         {"_cab_replay_revs": root_as_upstream}),
+    )
+    for label, deny, twin, flip in rows:
+        if not lands(deny):
+            failures.append("({}) {!r} lands no trailer when run ungated, so the vector is not real".format(label, deny))
+        if lands(twin):
+            failures.append("({}) the twin {!r} lands the trailer when run ungated".format(label, twin))
+        got = (decision(deny), decision(twin))
+        if got != ("deny", "allow"):
+            failures.append("({}) expected deny for {!r} and allow for {!r}, got {}".format(label, deny, twin, got))
+        saved = {name: getattr(aiqt_hooks, name) for name in flip}
+        try:
+            for name, value in flip.items():
+                setattr(aiqt_hooks, name, value)
+            flipped = (decision(deny), decision(twin))
+        finally:
+            for name, value in saved.items():
+                setattr(aiqt_hooks, name, value)
+        if flipped != ("allow", "allow"):
+            failures.append("({}-flip) with {} restored the deny vector must allow and the twin allow, got {}"
+                            .format(label, sorted(flip), flipped))
+    # A word git log stops at (@{upstream} with none set) beside a revision git replays: the joint read fails,
+    # so each is read on its own and the token message still denies; a read past the time bound refuses.
+    split = "git cherry-pick --stdin <<EOF\nplain-dirty\nEOF\n@{upstream}"
+    joint = subprocess.run(["git", "-C", str(decide_repo), "log", "--no-walk=unsorted", "--ignore-missing",
+                            "--end-of-options", "plain-dirty", "@{upstream}", "--"], capture_output=True,
+                           timeout=60, env=land_env)
+    if joint.returncode == 0 or not lands(split) or decision(split) != "deny":
+        failures.append("(cab-replay-split) {!r}: expected a real vector whose joint read fails and that denies, "
+                        "got joint exit {}".format(split, joint.returncode))
+    saved = aiqt_hooks._CAB_GIT_TIMEOUT
+    aiqt_hooks._CAB_GIT_TIMEOUT = 1e-9
+    try:
+        got = decision("git cherry-pick plain-clean")
+    finally:
+        aiqt_hooks._CAB_GIT_TIMEOUT = saved
+    if got != "deny":
+        failures.append("(cab-replay-timeout) a replay read that does not finish must deny, got {}".format(got))
 
 
 def _test_coauthor_children(failures, base, script):
