@@ -15211,14 +15211,39 @@ def _main_isolated(report_path=None):
         (nd_staging / "b.txt").write_text("b\n", encoding="utf-8")
         # a worker-supplied registry the cp-destination vector tries to overwrite the live one with
         (nd_staging / "reg.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+        # a worker-supplied file whose basename matches the live registry, for the directory-destination
+        # vector (cp into an existing directory lands at destination/basename)
+        (nd_staging / "orchestration.local.json").write_text(
+            json.dumps({"version": 1}), encoding="utf-8")
+        # a hooks directory (source for cp -r merging into an existing .git) and a gitdir pointer file
+        (nd_staging / "hooks").mkdir()
+        (nd_staging / "hooks" / "post-checkout").write_text(_nrd_sh_mark, encoding="utf-8")
+        (nd_staging / "hooks" / "post-checkout").chmod(0o755)
+        (nd_staging / "dotgit").write_text(
+            "gitdir: {}\n".format(nd_staging / ".git"), encoding="utf-8")
         # an existing copy OUTSIDE the declared directories (the sanctioned 'run the copy' target) and
-        # the directories into which the registry/hook destination vectors would write
+        # the directories into which the registry/hook/gitdir destination vectors would write
         (nd_outside / "copy.py").write_text(_nrd_py_mark, encoding="utf-8")
         (nd_outside / "copy.sh").write_text(_nrd_sh_mark, encoding="utf-8")
         (nd_outside / "copy.sh").chmod(0o755)
+        # copies that run a deliverable by a RELATIVE path, for the working-directory-inside vectors
+        (nd_outside / "copy-rel.sh").write_text("#!/bin/sh\n. ./x.sh\n", encoding="utf-8")
+        (nd_outside / "copy-rel.sh").chmod(0o755)
+        (nd_outside / "copy-exec-rel.py").write_text(
+            'exec(open("x.py").read())\n', encoding="utf-8")
+        # destination directories that really exist, so each deny is non-trivial (the real cp/redirect
+        # would succeed): a live-registry tree, a .git/hooks tree, a .git holding directory, and two
+        # bare directories a gitdir-pointer or a .git copy would populate
+        (nd_outside / "live" / ".aiqt").mkdir(parents=True)
+        (nd_outside / "hookrepo" / ".git" / "hooks").mkdir(parents=True)
+        (nd_outside / "gd3" / ".git").mkdir(parents=True)
+        (nd_outside / "gd").mkdir()
+        (nd_outside / "gd2").mkdir()
+        (nd_outside / "cdp.txt").write_text(str(tmp) + "\n", encoding="utf-8")
         (nd.root / ".git" / "hooks").mkdir(parents=True, exist_ok=True)
         import cProfile as _nrd_cprofile
         _nrd_cprof = _nrd_cprofile.__file__
+        _nrd_stdlib = os.path.dirname(os.__file__)
         st, hb, outd = str(nd_staging), str(nd_handback), str(nd_outside)
 
         def nrd(cmd, cwd=None, project=None):
@@ -15498,6 +15523,73 @@ def _main_isolated(report_path=None):
         check("nrd/cp-then-py-new-copy-denies",
               nrd_got("cp {}/x.py {}/new.py; python3 -I {}/new.py".format(st, outd, outd)), DENY_RAN)
 
+        # --- a cp whose REAL written path is computed: a directory destination lands at
+        # destination/basename, a cp -r merge lands inside the existing directory. The destination
+        # directories exist, so the real cp would succeed, yet the path lands at a registry file or
+        # under .git/hooks and the guard denies (the single call writes no deliverable marker) ---
+        check("nrd/cp-dir-dest-registry-denies",
+              nrd_got("cp {}/orchestration.local.json {}/live/.aiqt/".format(st, outd)), DENY_INERT)
+        check("nrd/cp-r-merge-git-hooks-denies",
+              nrd_got("cp -r {}/hooks {}/hookrepo/.git".format(st, outd)), DENY_INERT)
+        # --- git whose working directory, or -C target, was created or written in this SAME call, or
+        # holds a .git copied in it: git reads a repository the command just built, running its
+        # diff.external marker writer. The gitdir-pointer and the cp -r .git chains, with -C and cd ---
+        check("nrd/git-C-dotgit-chain-denies",
+              nrd_got("cp {}/dotgit {}/gd2/.git; git -C {}/gd2 diff --no-index {}/a.txt {}/b.txt"
+                      .format(st, outd, outd, st, st)), DENY_RAN)
+        check("nrd/cd-dotgit-chain-denies",
+              nrd_got("cp {}/dotgit {}/gd2/.git; cd {}/gd2; git diff --no-index {}/a.txt {}/b.txt"
+                      .format(st, outd, outd, st, st)), DENY_RAN)
+        check("nrd/git-C-cp-r-git-chain-denies",
+              nrd_got("cp -r {}/.git {}/gd/; git -C {}/gd diff --no-index {}/a.txt {}/b.txt"
+                      .format(st, outd, outd, st, st)), DENY_RAN)
+        check("nrd/cd-cp-r-git-chain-denies",
+              nrd_got("cp -r {}/.git {}/gd/; cd {}/gd; git diff --no-index {}/a.txt {}/b.txt"
+                      .format(st, outd, outd, st, st)), DENY_RAN)
+        # --- the run-an-existing-copy forms (shell and python) with the working directory inside a
+        # declared directory: the copy sources or imports a deliverable by a relative path ---
+        check("nrd/shell-copy-run-cwd-inside-denies",
+              nrd_got("bash {}/copy-rel.sh".format(outd), run_cwd=st, cwd=st, project=str(nd.root)),
+              DENY_RAN)
+        check("nrd/py-copy-run-cwd-inside-denies",
+              nrd_got("python3 -I {}/copy-exec-rel.py".format(outd), run_cwd=st, cwd=st,
+                      project=str(nd.root)), DENY_RAN)
+        # --- a python reader whose script resolves INSIDE the standard library runs the deliverable it
+        # is handed, or reads one from stdin: refused by stdlib-directory containment, not by a list ---
+        check("nrd/py-stdlib-pydoc-denies",
+              nrd_got("python3 -I {}/pydoc.py {}/x.py".format(_nrd_stdlib, st)), DENY_RAN)
+        check("nrd/py-stdlib-timeit-denies",
+              nrd_got("python3 -I {}/timeit.py -n1 -r1 \"exec(open('{}/x.py').read())\""
+                      .format(_nrd_stdlib, st)), DENY_RAN)
+        check("nrd/py-stdlib-code-stdin-denies",
+              nrd_got("python3 -I {}/code.py < {}/x.py".format(_nrd_stdlib, st)), DENY_RAN)
+        # runpy ships a file under the standard library (it is frozen, so it ran nothing as a named
+        # script before, which is why the old enumeration missed it); the guard now denies it, so the
+        # refusal matches the documentation. Verdict only (the named-script form writes no marker)
+        check("nrd/py-stdlib-runpy-denies",
+              _verdict(nrd("python3 -I {}/runpy.py {}/x.py".format(_nrd_stdlib, st))), "deny")
+        # --- nested -c wrappers beyond a bare shell word: a path-qualified shell, an env prefix, shell
+        # options before -c, and eval, each hiding a declared directory behind a quote splice ---
+        check("nrd/c-path-shell-denies",
+              nrd_got("/bin/bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd),
+              DENY_RAN)
+        check("nrd/c-env-shell-denies",
+              nrd_got("env bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd),
+              DENY_RAN)
+        check("nrd/c-shopt-shell-denies",
+              nrd_got("bash -O extglob -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd),
+              DENY_RAN)
+        check("nrd/c-eval-denies",
+              nrd_got("eval 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd), DENY_RAN)
+        # --- CDPATH set by printf -v or read (not a NAME=value token) with a later relative cd: the
+        # relative cd may resolve through a CDPATH entry into a declared directory ---
+        check("nrd/cdpath-printf-denies",
+              nrd_got("printf -v CDPATH %s {}; cd nrd-stage; bash x.sh".format(tmp), run_cwd=outd),
+              DENY_RAN)
+        check("nrd/cdpath-read-denies",
+              nrd_got("read -r CDPATH < {}/cdp.txt; cd nrd-stage; bash x.sh".format(outd),
+                      run_cwd=outd), DENY_RAN)
+
         # --- the out-of-repository working-directory layout ---
         # The staging directory sits outside the repository and the session cwd is inside it; the guard
         # arms through the project-directory env anchor, so sitting in a declared directory cannot
@@ -15544,7 +15636,7 @@ def _main_isolated(report_path=None):
         # from inside a declared directory
         check("nrd/flip-git-cwd-allows",
               _flip_verdict("_nrd_git_allowed",
-                            lambda args, eff, dirs: bool(args) and (
+                            lambda args, eff, dirs, written: bool(args) and (
                                 (args[0] == "apply")
                                 or (args[0] == "diff" and "--no-index" in args[1:])),
                             "git diff --no-index a.txt b.txt", cwd=st, project=str(nd.root)), "allow")
@@ -15576,6 +15668,104 @@ def _main_isolated(report_path=None):
                 os.environ.pop("CDPATH", None)
             else:
                 os.environ["CDPATH"] = _nrd_prev_cdpath2
+
+        # the pre-fix helper bodies the new flips restore (each shows its fix is load-bearing)
+        def _nrd_old_cp_targets(operands, eff_cwd):
+            # the old cp destination: the last operand as written, not the real written path
+            return [aiqt_hooks._nrd_abs_join(operands[-1], eff_cwd)]
+
+        def _nrd_old_py_reader(args, eff_cwd, dirs):
+            # the old python reader: no working-directory check
+            isolated = False
+            i = 0
+            n = len(args)
+            while i < n:
+                tok = args[i]
+                if tok.startswith("-") and len(tok) > 1 and all(ch in "IBE" for ch in tok[1:]):
+                    isolated = isolated or "I" in tok
+                    i += 1
+                    continue
+                break
+            if not isolated or i >= n:
+                return False
+            script = args[i]
+            if not script or script.startswith("-"):
+                return False
+            return aiqt_hooks._nrd_outside_regular_file(script, eff_cwd, dirs)
+
+        def _nrd_old_shell_c_body(seg):
+            # the old nested -c extraction: a BARE shell word only
+            argv = seg.argv
+            if not argv or "/" in argv[0] or argv[0] not in aiqt_hooks._NRD_SHELL_WORDS:
+                return None
+            oq = seg.argv_opaque
+            has_c = False
+            i = 1
+            while i < len(argv):
+                if oq[i]:
+                    return None
+                tok = argv[i]
+                if tok == "--":
+                    i += 1
+                    break
+                if tok.startswith("-") and tok != "-":
+                    if "c" in tok[1:]:
+                        has_c = True
+                    i += 1
+                    continue
+                break
+            if not has_c or i >= len(argv) or oq[i]:
+                return None
+            return argv[i]
+
+        def _nrd_old_cdpath_set(segments):
+            # the old CDPATH detection: a NAME=value token only
+            for seg in segments:
+                for tok in seg.argv:
+                    name, sep, _val = tok.partition("=")
+                    if sep and name.rstrip("+") == "CDPATH":
+                        return True
+            return False
+
+        # restoring the old cp destination test (the last operand as written) lets a directory
+        # destination land at a registry file, and a cp -r merge land under .git/hooks
+        check("nrd/flip-cp-dir-dest-registry-allows",
+              _flip_verdict("_nrd_cp_targets", _nrd_old_cp_targets,
+                            "cp {}/orchestration.local.json {}/live/.aiqt/".format(st, outd)), "allow")
+        check("nrd/flip-cp-r-merge-git-hooks-allows",
+              _flip_verdict("_nrd_cp_targets", _nrd_old_cp_targets,
+                            "cp -r {}/hooks {}/hookrepo/.git".format(st, outd)), "allow")
+        # restoring the old git shape (no same-call written-directory check) lets git run the repository
+        # a cp in the same call just built
+        check("nrd/flip-git-written-allows",
+              _flip_verdict("_nrd_git_dir_written", lambda git_cwd, written: False,
+                            "cp {}/dotgit {}/gd2/.git; git -C {}/gd2 diff --no-index {}/a.txt {}/b.txt"
+                            .format(st, outd, outd, st, st)), "allow")
+        # restoring the old shell/python copy-run shapes (no working-directory check) runs a copy that
+        # sources or imports a deliverable by a relative path from inside a declared directory
+        check("nrd/flip-shell-cwd-inside-allows",
+              _flip_verdict("_nrd_shell_allowed",
+                            lambda rest, eff, dirs: len(rest) == 1 and not rest[0].startswith("-")
+                            and not rest[0].startswith("+")
+                            and aiqt_hooks._nrd_outside_regular_file(rest[0], eff, dirs),
+                            "bash {}/copy-rel.sh".format(outd), cwd=st, project=str(nd.root)), "allow")
+        check("nrd/flip-py-cwd-inside-allows",
+              _flip_verdict("_nrd_py_reader_ok", _nrd_old_py_reader,
+                            "python3 -I {}/copy-exec-rel.py".format(outd), cwd=st,
+                            project=str(nd.root)), "allow")
+        # restoring the old reader test (no standard-library containment) lets a stdlib program used as
+        # the reader run the deliverable
+        check("nrd/flip-stdlib-reader-allows",
+              _flip_verdict("_NRD_STDLIB_DIRS", frozenset(),
+                            "python3 -I {}/pydoc.py {}/x.py".format(_nrd_stdlib, st)), "allow")
+        # restoring the old nested -c extraction (a bare shell word only) lets a wrapped -c through
+        check("nrd/flip-c-wrapper-allows",
+              _flip_verdict("_nrd_shell_c_body", _nrd_old_shell_c_body,
+                            "env bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)), "allow")
+        # restoring the old CDPATH detection (a NAME=value token only) lets printf -v CDPATH through
+        check("nrd/flip-cdpath-printf-allows",
+              _flip_verdict("_nrd_cdpath_set_in_command", _nrd_old_cdpath_set,
+                            "printf -v CDPATH %s {}; cd nrd-stage; bash x.sh".format(tmp)), "allow")
 
         # --- scope and fail-closed postures (unchanged contracts) ---
         check("nrd/failopen-nonbash", _verdict(aiqt_hooks.orch_deliverable_exec_guard(

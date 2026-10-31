@@ -23814,34 +23814,44 @@ _NRD_GIT_APPLY_VALUE_PREFIXES = ("--whitespace=", "--directory=", "--exclude=", 
 _NRD_GIT_DIFF_OPTS = frozenset(("--no-index", "--stat", "--numstat", "--shortstat", "--summary",
                                 "--name-only", "--name-status", "--patch", "-p", "-u", "--quiet",
                                 "--exit-code", "--no-color", "--text", "-a", "--raw"))
-# The standard library modules whose command line RUNS a file argument, resolved to their installed
-# file paths at import. A reader invoked as `python3 -I <that file> <deliverable>` would run the
-# deliverable, so the resolved paths are refused as reader scripts. Recorded list (enumerated against
-# the installed library): cProfile, profile, trace, pdb, runpy, doctest.
-_NRD_PY_RUNNER_MODULES = ("cProfile", "profile", "trace", "pdb", "runpy", "doctest")
-
-
-def _nrd_build_runner_files():
-    """The realpath set of the installed stdlib program-running module files (_NRD_PY_RUNNER_MODULES),
-    enumerated from the running interpreter's library. Built once at import; a module that cannot be
-    resolved or is built in / frozen contributes nothing (it has no file a reader could name)."""
-    import importlib.util
+# The Python standard library directories, resolved from the running interpreter. A python reader
+# script that resolves INSIDE one of these is not a user-authored reader: the standard library carries
+# programs that RUN a file or a stdin program handed to them (cProfile, profile, trace, pdb, doctest,
+# pydoc, timeit, code, pickle and more; runpy is frozen and ships no file at all), so no enumeration of
+# them stays complete or true across versions. A command reaches the reader shape only when it is
+# already in scope of a declared directory, so refusing every stdlib script as the reader denies, by
+# construction, the `python3 -I <stdlib program> <deliverable>` and stdin-fed forms that would run the
+# deliverable, without listing the programs. Residual: a reader OUTSIDE the standard library that the
+# call hands a deliverable path still runs it (the disclosed reader residual).
+def _nrd_build_stdlib_dirs():
+    """The realpath set of the running interpreter's standard-library directories (sysconfig's stdlib
+    and platstdlib, plus the directory os itself lives in). Built once at import; an unresolvable or
+    non-absolute entry contributes nothing."""
+    import sysconfig
     out = set()
-    for name in _NRD_PY_RUNNER_MODULES:
+    candidates = []
+    try:
+        paths = sysconfig.get_paths()
+    except (KeyError, OSError, ValueError):
+        paths = {}
+    for key in ("stdlib", "platstdlib"):
+        value = paths.get(key)
+        if isinstance(value, str) and value:
+            candidates.append(value)
+    osfile = getattr(os, "__file__", None)
+    if isinstance(osfile, str) and osfile:
+        candidates.append(os.path.dirname(osfile))
+    for value in candidates:
         try:
-            spec = importlib.util.find_spec(name)
-        except (ImportError, ValueError, AttributeError, ModuleNotFoundError):
-            spec = None
-        origin = getattr(spec, "origin", None) if spec is not None else None
-        if isinstance(origin, str) and origin and origin not in ("built-in", "frozen"):
-            try:
-                out.add(os.path.realpath(origin))
-            except (OSError, ValueError):
-                pass
+            real = os.path.realpath(value)
+        except (OSError, ValueError):
+            continue
+        if os.path.isabs(real):
+            out.add(real)
     return frozenset(out)
 
 
-_NRD_PY_RUNNER_FILES = _nrd_build_runner_files()
+_NRD_STDLIB_DIRS = _nrd_build_stdlib_dirs()
 _NRD_MAX_C_DEPTH = 6  # recursion bound for classifying nested shell -c bodies
 # ANSI-C quoting: the lexer does not reproduce bash's spelling of $'...' (it drops escapes rather than
 # decoding \x, \0NN, \u and \c), so a declared directory hidden inside one is read for SCOPE from a
@@ -23998,9 +24008,10 @@ def _nrd_options_ok(tokens, spec):
 def _nrd_outside_regular_file(script, eff_cwd, dirs):
     """True when script PROVABLY resolves to an existing regular file OUTSIDE every declared directory
     and outside /dev and /proc (so /dev/stdin, /dev/fd/N and /proc/self/fd/N, and anything resolving
-    under them, are refused), and is not one of the stdlib program-running module files
-    (_NRD_PY_RUNNER_FILES) that would run a file argument. Both the lexical and the realpath spelling
-    must stay outside /dev and /proc. An unresolvable, declared, device or missing script fails. The
+    under them, are refused), and does not resolve INSIDE a Python standard-library directory
+    (_NRD_STDLIB_DIRS): a stdlib program used as the reader (cProfile, pydoc, timeit, code, pickle and
+    the rest) would run the file or stdin handed to it. Both the lexical and the realpath spelling must
+    stay outside /dev and /proc. An unresolvable, declared, device, stdlib or missing script fails. The
     file it names may still itself import or run a path it is handed as data (disclosed residual)."""
     if not isinstance(script, str) or not script or "\x00" in script:
         return False
@@ -24014,8 +24025,9 @@ def _nrd_outside_regular_file(script, eff_cwd, dirs):
             if f == base or f.startswith(base + "/"):
                 return False
     real = forms[-1]
-    if real in _NRD_PY_RUNNER_FILES:
-        return False
+    for d in _NRD_STDLIB_DIRS:
+        if real == d or real.startswith(d + "/"):
+            return False
     try:
         return os.path.isfile(real)
     except OSError:
@@ -24023,11 +24035,18 @@ def _nrd_outside_regular_file(script, eff_cwd, dirs):
 
 
 def _nrd_py_reader_ok(args, eff_cwd, dirs):
-    """True when the tokens after a python-family word are the allowlisted reader shape: -I present
-    (only -B and -E may stand beside it), then a script that is an existing regular file resolving
-    OUTSIDE every declared directory and outside /dev and /proc and that is not a stdlib program-
-    running module file (_nrd_outside_regular_file), then operands. No -c, -m, '-' or bare interpreter
-    passes: a program on stdin, in argument text or named as /dev/stdin is not such a reader script."""
+    """True when the tokens after a python-family word are the allowlisted reader shape, AND the
+    effective working directory is itself outside every declared directory (a reader run from inside a
+    declared directory can import or read a deliverable by a relative path, as the git and shell forms
+    guard against): -I present (only -B and -E may stand beside it), then a script that is an existing
+    regular file resolving OUTSIDE every declared directory and outside /dev and /proc and not inside a
+    Python standard-library directory (_nrd_outside_regular_file), then operands. No -c, -m, '-' or
+    bare interpreter passes: a program on stdin, in argument text or named as /dev/stdin is not such a
+    reader script."""
+    if _nrd_match(eff_cwd, None, dirs) is True:
+        # the working directory is inside a declared directory, so a copy run here can source or import
+        # a deliverable by a relative path (symmetric with the git working-directory check)
+        return False
     isolated = False
     i = 0
     n = len(args)
@@ -24050,13 +24069,15 @@ def _nrd_shell_allowed(rest, eff_cwd, dirs):
     """True for the two allowlisted shell shapes. (1) A pure syntax check: exactly one script operand
     after a single `-n`, with no other option and no `+`-prefixed token (a `+n`, `+o noexec` or a
     second option turns bash's noexec back off, so the script would run). (2) Running ONE script that
-    is an existing regular file resolving outside every declared directory (the sanctioned 'copy out
-    and run the copy' step, symmetric with the python reader). No `-c`, no stdin program, no other
-    option passes."""
+    is an existing regular file resolving outside every declared directory, FROM a working directory
+    that is itself outside every declared directory (the sanctioned 'copy out and run the copy' step,
+    symmetric with the python reader and the git form; a copy run from inside a declared directory can
+    source a deliverable by a relative path). No `-c`, no stdin program, no other option passes."""
     if len(rest) == 2 and rest[0] == "-n" \
             and not rest[1].startswith("-") and not rest[1].startswith("+"):
         return True
     if len(rest) == 1 and not rest[0].startswith("-") and not rest[0].startswith("+") \
+            and _nrd_match(eff_cwd, None, dirs) is not True \
             and _nrd_outside_regular_file(rest[0], eff_cwd, dirs):
         return True
     return False
@@ -24081,7 +24102,22 @@ def _nrd_git_diff_opt_ok(tok):
     return tok.startswith("-U") and len(tok) > 2 and tok[2:].isdigit()
 
 
-def _nrd_git_allowed(args, eff_cwd, dirs):
+def _nrd_git_dir_written(git_cwd, written):
+    """True when a git working directory or -C target was itself created or written in this same call,
+    or holds a .git file or directory written in it in this call: git reads that directory's repository
+    config and attributes (diff.external, a smudge filter) before any operand, so a repository the same
+    command just built is worker-controlled. `written` holds the absolute paths the command's earlier
+    cp, redirect and mkdir segments create."""
+    if not isinstance(git_cwd, str) or not git_cwd:
+        return False
+    dotgit = git_cwd + "/.git"
+    for w in written:
+        if w == git_cwd or w == dotgit or w.startswith(dotgit + "/"):
+            return True
+    return False
+
+
+def _nrd_git_allowed(args, eff_cwd, dirs, written):
     """True for the two allowlisted git shapes with their effective working directory and every -C
     target OUTSIDE every declared directory: `git apply` (the sanctioned apply step) and
     `git diff --no-index`. The ONLY global option accepted before the subcommand is a literal `-C`
@@ -24089,8 +24125,13 @@ def _nrd_git_allowed(args, eff_cwd, dirs):
     --git-dir or --work-tree into a declared directory re-points git at worker-controlled config and
     denies); any other global option denies. The git process's effective working directory, moved by
     each -C, must itself resolve outside every declared directory, since git reads that directory's
-    repository config and attributes (diff.external, a smudge filter) before any operand."""
+    repository config and attributes (diff.external, a smudge filter) before any operand; and neither
+    the working directory nor any -C target may have been created or written, or had a .git copied into
+    it, in this same call (_nrd_git_dir_written), which would hand git a repository this command just
+    built."""
     git_cwd = eff_cwd
+    if _nrd_git_dir_written(git_cwd, written):
+        return False
     i = 0
     n = len(args)
     while i < n:
@@ -24101,12 +24142,16 @@ def _nrd_git_allowed(args, eff_cwd, dirs):
             if i + 1 >= n or _nrd_match(args[i + 1], git_cwd, dirs) is not False:
                 return False
             git_cwd = _nrd_abs_join(args[i + 1], git_cwd)
+            if _nrd_git_dir_written(git_cwd, written):
+                return False
             i += 2
             continue
         if tok.startswith("-C") and len(tok) > 2:
             if _nrd_match(tok[2:], git_cwd, dirs) is not False:
                 return False
             git_cwd = _nrd_abs_join(tok[2:], git_cwd)
+            if _nrd_git_dir_written(git_cwd, written):
+                return False
             i += 1
             continue
         return False
@@ -24151,12 +24196,42 @@ def _nrd_abs_join(target, base):
     return os.path.normpath(os.path.join(base, target))
 
 
+def _nrd_cp_targets(operands, eff_cwd):
+    """The absolute normalized paths a cp command would WRITE, so the write-destination rules judge
+    where the file actually lands, not the operand as written. A directory destination (the last
+    operand ends in '/', OR there is more than one source, OR it resolves to an existing directory)
+    places each source at destination/basename(source); otherwise the single destination operand is
+    the written path. An operand that cannot be resolved to an absolute path yields None in its place
+    (the caller deny-biases on it)."""
+    dest = operands[-1]
+    sources = operands[:-1]
+    dest_abs = _nrd_abs_join(dest, eff_cwd)
+    is_dir = dest.endswith("/") or len(sources) > 1
+    if not is_dir and dest_abs is not None:
+        try:
+            is_dir = os.path.isdir(dest_abs)
+        except OSError:
+            is_dir = False
+    if not is_dir:
+        return [dest_abs]
+    if dest_abs is None:
+        return [None]
+    targets = []
+    for src in sources:
+        base = os.path.basename(src.rstrip("/"))
+        targets.append(os.path.normpath(os.path.join(dest_abs, base)) if base else dest_abs)
+    return targets
+
+
 def _nrd_write_forbidden(path, eff_cwd):
-    """True when a write destination (a cp target or a write-shaped redirect) lands under a .git/hooks
-    directory or at an orchestration registry file this guard reads (_ORCH_REGISTRY_FILES), whatever
-    directory it sits in and even outside the declared directories: writing a .git hook re-points what
-    a later git command runs, and overwriting the registry disarms this guard. Both the lexical and the
-    realpath spelling are judged; an unresolvable destination is left to the caller's own check."""
+    """True when a write destination (a computed cp target or a write-shaped redirect) lands under a
+    .git/hooks directory or at an orchestration registry file this guard reads (_ORCH_REGISTRY_FILES),
+    whatever directory it sits in and even outside the declared directories: writing a .git hook
+    re-points what a later git command runs, and overwriting the registry disarms this guard. The
+    destination is the path cp actually writes (a directory destination resolves to destination/
+    basename, a cp -r merge lands inside the existing directory), computed by the caller via
+    _nrd_cp_targets. Both the lexical and the realpath spelling are judged; an unresolvable destination
+    is left to the caller's own check."""
     forms = _nrd_forms(path, eff_cwd)
     if forms is None:
         return False
@@ -24244,42 +24319,102 @@ def _nrd_ansi_c_spelling(command):
     return _NRD_ANSI_C_RE.sub(lambda m: _nrd_ansi_c_decode(m.group(1)), command)
 
 
+_NRD_SHELL_OPT_VALUE = frozenset(("-O", "+O", "-o", "+o"))
+
+
 def _nrd_shell_c_body(seg):
-    """The decoded -c command string of a shell segment, when the segment is a BARE shell word
-    carrying -c (alone or in an option cluster) with a literal command-string operand; else None.
-    The returned string is the raw inner body for recursive classification. An opaque option or body
-    yields None (nothing to read)."""
+    """The decoded -c command string of a shell-invoking segment, for recursive classification; else
+    None. Covers a BARE or PATH-QUALIFIED shell word carrying -c (alone or in an option cluster), the
+    same behind an `env` prefix (its options and NAME=value assignments peeled), shell options that
+    take a value before -c (-O/+O shopt, -o/+o optname), and `eval` (its operands joined as the body),
+    so a declared directory a quote splice hides from the raw text is reached through any of these
+    wrapper spellings. The returned string is the inner body. An opaque option or body, or a shape this
+    cannot read, yields None."""
     argv = seg.argv
-    if not argv or "/" in argv[0] or argv[0] not in _NRD_SHELL_WORDS:
+    if not argv or seg.argv_opaque[0]:
         return None
     oq = seg.argv_opaque
-    has_c = False
-    i = 1
-    while i < len(argv):
-        if oq[i]:
+    i = 0
+    word = argv[0].rsplit("/", 1)[-1]
+    if word == "env":
+        i = 1
+        while i < len(argv):
+            if oq[i]:
+                return None
+            tok = argv[i]
+            if tok == "--":
+                i += 1
+                break
+            if tok in ("-u", "-C"):
+                i += 2
+                continue
+            if (tok.startswith("-") and tok != "-") or _ENV_ASSIGN_RE.match(tok):
+                i += 1
+                continue
+            break
+        if i >= len(argv) or oq[i]:
             return None
-        tok = argv[i]
+        word = argv[i].rsplit("/", 1)[-1]
+    if word == "eval":
+        if i + 1 >= len(argv) or any(oq[k] for k in range(i + 1, len(argv))):
+            return None
+        return " ".join(argv[i + 1:])
+    if word not in _NRD_SHELL_WORDS:
+        return None
+    j = i + 1
+    has_c = False
+    while j < len(argv):
+        if oq[j]:
+            return None
+        tok = argv[j]
         if tok == "--":
-            i += 1
+            j += 1
             break
         if tok.startswith("-") and tok != "-":
             if "c" in tok[1:]:
                 has_c = True
-            i += 1
+                j += 1
+                break
+            if tok in _NRD_SHELL_OPT_VALUE:
+                j += 2
+                continue
+            j += 1
             continue
         break
-    if not has_c or i >= len(argv) or oq[i]:
+    if not has_c or j >= len(argv) or oq[j]:
         return None
-    return argv[i]
+    return argv[j]
 
 
 def _nrd_cdpath_set_in_command(segments):
-    """True when any segment assigns CDPATH (a `CDPATH=...` command prefix or an `export CDPATH=...`
-    token), so a later relative cd may resolve through a CDPATH entry rather than the current dir."""
+    """True when any segment assigns CDPATH, so a later relative cd may resolve through a CDPATH entry
+    rather than the current directory: a `CDPATH=...` command prefix or an `export CDPATH=...` token, a
+    `printf -v CDPATH ...` (the -v target names the variable), or a `read ... CDPATH ...` (a bare
+    CDPATH among read's variable names). The printf and read builtins are matched by their bare command
+    word (basenamed)."""
     for seg in segments:
-        for tok in seg.argv:
+        argv = seg.argv
+        for tok in argv:
             name, sep, _val = tok.partition("=")
             if sep and name.rstrip("+") == "CDPATH":
+                return True
+        if not argv:
+            continue
+        word = argv[0].rsplit("/", 1)[-1]
+        if word == "printf":
+            k = 1
+            while k < len(argv):
+                tok = argv[k]
+                if tok == "-v" and k + 1 < len(argv):
+                    if argv[k + 1] == "CDPATH":
+                        return True
+                    k += 2
+                    continue
+                if tok.startswith("-v") and len(tok) > 2 and tok[2:] == "CDPATH":
+                    return True
+                k += 1
+        elif word == "read":
+            if any(tok == "CDPATH" for tok in argv[1:]):
                 return True
     return False
 
@@ -24293,7 +24428,7 @@ def _nrd_cdpath_active(segments):
     return _nrd_cdpath_set_in_command(segments)
 
 
-def _nrd_segment_allowed(seg, eff_cwd, dirs):
+def _nrd_segment_allowed(seg, eff_cwd, dirs, written):
     """Judge one lexed segment against the closed read-only allowlist: (True, next effective working
     directory) when it matches a listed form, (False, eff_cwd) otherwise. BY CONSTRUCTION, not by
     exclusion: a segment carrying any unquoted expansion, substitution, glob, brace or tilde fails
@@ -24301,10 +24436,11 @@ def _nrd_segment_allowed(seg, eff_cwd, dirs):
     directory (reads, quoted heredocs and fd duplications pass: feeding a declared file TO a listed
     reader is the point); the command word must be a BARE listed name (no slash, so a file named like
     a reader inside a declared directory can never match; no assignment prefix, wrapper, builtin or
-    reserved word, which are simply not listed); and the per-tool shape must hold. The one segment
-    that moves the effective working directory is the listed cd: exactly one literal absolute operand
-    resolving outside every declared directory (the session's exit from a declared cwd; entering one
-    with cd is not listed)."""
+    reserved word, which are simply not listed); and the per-tool shape must hold. `written` holds the
+    absolute paths this command's earlier segments create (cp targets, write redirects, mkdir), so a git
+    segment can refuse a repository the same call just built. The one segment that moves the effective
+    working directory is the listed cd: exactly one literal absolute operand resolving outside every
+    declared directory (the session's exit from a declared cwd; entering one with cd is not listed)."""
     if seg.opaque_shell or any(seg.argv_opaque):
         return (False, eff_cwd)
     if "$'" in seg.raw:
@@ -24337,17 +24473,56 @@ def _nrd_segment_allowed(seg, eff_cwd, dirs):
         return (ok, eff_cwd)
     if head == "cp":
         ok, operands = _nrd_options_ok(argv[1:], _NRD_CP_FORM)
-        if ok and len(operands) >= 2 and _nrd_match(operands[-1], eff_cwd, dirs) is False \
-                and not _nrd_write_forbidden(operands[-1], eff_cwd):
-            return (True, eff_cwd)
+        if ok and len(operands) >= 2:
+            targets = _nrd_cp_targets(operands, eff_cwd)
+            if targets and all(t is not None and _nrd_match(t, None, dirs) is False
+                               and not _nrd_write_forbidden(t, None) for t in targets):
+                return (True, eff_cwd)
         return (False, eff_cwd)
     if head == "git":
-        return (_nrd_git_allowed(argv[1:], eff_cwd, dirs), eff_cwd)
+        return (_nrd_git_allowed(argv[1:], eff_cwd, dirs, written), eff_cwd)
     if head in _NRD_SHELL_WORDS:
         return (_nrd_shell_allowed(argv[1:], eff_cwd, dirs), eff_cwd)
     if _NRD_PY_WORD_RE.match(head):
         return (_nrd_py_reader_ok(argv[1:], eff_cwd, dirs), eff_cwd)
     return (False, eff_cwd)
+
+
+def _nrd_segment_writes(seg, eff_cwd, dirs):
+    """The absolute normalized paths one segment CREATES or WRITES: write-shaped redirect targets, cp
+    destinations (the real written paths, _nrd_cp_targets) and mkdir operands. For the cross-segment
+    check that a later git command does not run from a directory, or a repository, this same call just
+    built. Best-effort and deny-biased only through its caller: an opaque segment or an unresolvable
+    target contributes nothing."""
+    out = set()
+    if seg.opaque_shell or any(seg.argv_opaque):
+        return out
+    for r in seg.redirects:
+        if r.target_class in ("opaque", "descriptor"):
+            continue
+        if r.op == "<" or r.op.startswith("<<"):
+            continue
+        t = _nrd_abs_join(r.target, eff_cwd)
+        if t is not None:
+            out.add(t)
+    argv = seg.argv
+    if not argv:
+        return out
+    head = argv[0]
+    if head == "cp":
+        ok, operands = _nrd_options_ok(argv[1:], _NRD_CP_FORM)
+        if ok and len(operands) >= 2:
+            for t in _nrd_cp_targets(operands, eff_cwd):
+                if t is not None:
+                    out.add(t)
+    elif head == "mkdir":
+        for tok in argv[1:]:
+            if tok.startswith("-"):
+                continue
+            t = _nrd_abs_join(tok, eff_cwd)
+            if t is not None:
+                out.add(t)
+    return out
 
 
 def _nrd_next_cwd(seg, eff_cwd):
@@ -24422,14 +24597,16 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     if segments is None:
         return ("this command", "cannot be read by this guard's lexer, so no segment of it can be "
                                 "matched against the closed read-only allowlist")
+    written = set()
     for seg in segments:
         if not seg.argv and not seg.redirects:
             continue
-        ok, eff_cwd = _nrd_segment_allowed(seg, eff_cwd, dirs)
+        ok, eff_cwd = _nrd_segment_allowed(seg, eff_cwd, dirs, written)
         if not ok:
             return (seg.argv[0] if seg.argv else "a redirect with no command",
                     "is not a closed-allowlist read-only form (or carries an option, operand shape, "
                     "expansion or redirect outside the registered grammar)")
+        written |= _nrd_segment_writes(seg, eff_cwd, dirs)
     return None
 
 
@@ -24483,7 +24660,8 @@ def _nrd_deny_text(subject, why):
         "inside one. A worker-delivered file there is data until it is applied, so in that scope ONLY "
         "a closed allowlist of read-only forms runs, each with its registered options: cat, wc, head, "
         "tail, ls, file, grep, diff, the coreutils hash tools, cp with the declared file only as a "
-        "source (not into a .git/hooks directory or an orchestration registry file), git apply and "
+        "source and only where cp actually writes outside the declared directories, not under a "
+        ".git/hooks directory or at an orchestration registry file), git apply and "
         "git diff --no-index from a working directory outside the declared directories, bash -n on one "
         "script operand, python3 -I (or a shell) running one script that is an existing regular file "
         "outside the declared directories, and cd to one literal absolute directory outside them. Take "
