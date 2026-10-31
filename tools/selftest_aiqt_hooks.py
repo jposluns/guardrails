@@ -2655,7 +2655,9 @@ _PTS_TICKED = "x=" + _PTS_BQ + "true" + _PTS_BQ + "; "  # a backquote, so the bo
 # "expandword", "anchor"), its word that may expand to git ("patternword"), its $' read as where a push may
 # stand ("ansianchor"; "ansipair" restores the earlier reading that paired one $' with a later quote and
 # decoded it instead), its plain-text test after the push ("after") with only bash blanks dropped from its end
-# ("blankset"), and the exact reading's expandable subcommand ("expandsub").
+# ("blankset"), and the exact reading's expandable subcommand ("expandsub"). "heredoc" removes the '<<' entry
+# with the unreadable route for a command holding a '<<' (_pts_revert): a lexer that refuses a body whose end
+# it cannot place sends such a command to the bounded rule as well, so neither layer alone decides it.
 _PTS_BASH_ROWS = (
     ("(pts-b1) quoted substitution argument, unquoted here-document",
      'step "$(git push origin br)" <<EOF\nbody\nEOF', "deny", None),
@@ -3024,8 +3026,17 @@ _PTS_CLOSED = {"heredoc": "a '<<'", "backquote": "a backquote", "funsub": "a '${
 def _pts_revert(element):
     """{attribute: value} that removes one rule element from aiqt_hooks (_PTS_BASH_ROWS guards)."""
     if element in _PTS_CLOSED:
-        return {"_PUSH_STEP_UNMODELLED": tuple(entry for entry in aiqt_hooks._PUSH_STEP_UNMODELLED
-                                                 if not entry[0].startswith(_PTS_CLOSED[element]))}
+        attrs = {"_PUSH_STEP_UNMODELLED": tuple(entry for entry in aiqt_hooks._PUSH_STEP_UNMODELLED
+                                                  if not entry[0].startswith(_PTS_CLOSED[element]))}
+        if element == "heredoc":
+            # A shared lexer that refuses a here-document body whose end it cannot place also sends such a
+            # command to the bounded rule, as one it cannot read; the '<<' element is then that route and the
+            # '<<' entry together, so a command holding a '<<' loses both here (an unreadable one is read as no
+            # command), and a row bash ends a body early in shows the wrong allow left when neither catches it.
+            readings = aiqt_hooks._push_step_readings
+            attrs["_push_step_readings"] = lambda command: (
+                (readings(command) or []) if "<<" in command else readings(command))
+        return attrs
     if element == "unreadable":
         readings = aiqt_hooks._push_step_readings
         return {"_push_step_readings": lambda command: readings(command) or []}
