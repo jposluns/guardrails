@@ -702,8 +702,8 @@ def _counter_state(ctx, counters_model):
     next_id(..., known_complete=True): an absent counter can then never read as high-water 0 and reuse an
     existing id (spec 8.2). Where the manifest activates the imported series (_opf_check.imported_series_active,
     the flag the doctor's C-COUNTERS reads), the proof is that C-COUNTERS rule too: one "imported:<NS>" row
-    per enabled type except legacy_fragment is required and preserved, and this verb never claims or
-    rewrites one."""
+    per enabled type (spec 8.2) is required and preserved, this tooling's legacy_fragment owing none, and
+    this verb never claims or rewrites one."""
     return _opf_schema.validate_counters(
         counters_model, known_namespaces=frozenset(ctx.types.values()),
         optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()),

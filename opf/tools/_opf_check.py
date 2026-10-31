@@ -164,8 +164,8 @@ _ROSTER_NS_SET = frozenset(_ROSTER_NAMESPACES.values())
 
 # A record whose schema has not shipped in the baseline validator is a named CANNOT-EVALUATE deferral,
 # never graded INVALID (F4; round-5 F-2). This covers the module tier (schemas land in U2M) AND the
-# importer-only legacy_fragment type (deprecated for new stores, spec 8.1: no record schema ships in the
-# baseline validator, so records in an existing store stay readable as a named deferral).
+# importer-only legacy_fragment type (deprecated for new stores: no record schema ships in the baseline
+# validator, so records in an existing store stay readable as a named deferral).
 _SCHEMA_DEFERRAL = ("record schema not available to the baseline validator; deferred (module-tier schemas "
                     "land in U2M; legacy_fragment is deprecated for new stores and has no baseline "
                     "record schema)")
@@ -1546,7 +1546,7 @@ def _gather_imported_records(root_fd, machine_rel, enabled_types, registered_ven
             continue
         if st == "absent":
             rep.finding("enabled type {!r} has no imported leaf {} (an imported-series store holds one for "
-                        "every enabled type except legacy_fragment; spec 4.2)".format(tname, leaf))
+                        "every enabled type; spec 4.2)".format(tname, leaf))
             complete = False
             continue
         rows = _imported_leaf_rows(data, leaf_rel, "entry" if tname in _LEDGER_TYPES else "record", rep)
@@ -2442,9 +2442,8 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
 def _check_handoff(recs, rep, unread=frozenset()):
     """C-HANDOFF (R2): at most one `current` handoff among clean records authored by non-importer actors
     (OPF-SPEC 8.5). Section 8.6 keys the importer firewall "on provenance rather than on series alone": it
-    "covers every record whose `actor.kind` is `importer`, in the imported series or written into the
-    clean series by the pre-1.3.0 legacy importer", and "every current-state join, including the section
-    8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer
+    "covers every record whose `actor.kind` is `importer`", and "every current-state join, including the
+    section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer
     actors". OPF has never been released, so no store predates that firewall, and it applies on every
     store: this check applies the exemption keyed on provenance alone, in agreement with the record
     writer's current-handoff join (_opf_record._current_handoffs) and the HANDOFF view
@@ -2953,8 +2952,9 @@ def _check_worklog_contiguous(numbers, rep, skipped=frozenset()):
 
 def _imported_counter_namespaces(enabled_types):
     """The namespaces whose imported counter row the doctor requires once the imported series is active
-    (spec 8.2): one per enabled type except legacy_fragment, i.e. every enabled normative namespace the
-    imported series may carry (IMPORTED_NAMESPACES refuses LF, the reserved TX and the unassigned CL)."""
+    (spec 8.2: one for each enabled type), i.e. every enabled normative namespace the imported series may
+    carry, so this tooling's legacy_fragment owes none (IMPORTED_NAMESPACES refuses LF, the reserved TX and
+    the unassigned CL)."""
     return frozenset(ns for ns in enabled_types.values() if ns in IMPORTED_NAMESPACES)
 
 
@@ -6917,7 +6917,7 @@ def self_test():
         # SUPPORTED_HOMES to 2 and SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION (the per-vector patch
         # idiom check_opf_homes uses for SUPPORTED_HOMES), and the store declares the 2.0.0 pair, so the
         # driver-derived flag is True end to end. act_machine() is that store with every imported leaf
-        # present and empty: one per enabled type except legacy_fragment (spec 4.2), the worklog's as
+        # present and empty: one per enabled type (spec 4.2), none for legacy_fragment, the worklog's as
         # worklog.imported.toml, plus the zero high-water every imported counter needs once active
         # (spec 8.2). _is2_prior() is the prior with the empty imported baseline the across-time
         # checks need on an active store.
@@ -7243,7 +7243,7 @@ def self_test():
                   and any(m.startswith("cannot read .working/toml/backlog_item.imported.index.toml")
                           for m in imp_msgs(_up_run)))
             # An absent leaf of an enabled type is an INVALID finding (spec 4.2: every enabled type
-            # but legacy_fragment holds one); a declared legacy_fragment owes none (red when the
+            # holds one); a declared legacy_fragment owes none in this tooling (red when the
             # absence passes, or when LF is not excluded).
             _ab = act_machine()
             del _ab["finding.imported.index.toml"]
@@ -9425,8 +9425,8 @@ def self_test():
             return res.by_check.get("C-HANDOFF", []) if res is not None else []
 
         # C-HANDOFF with the imported series INACTIVE: the section 8.6 firewall is keyed on provenance,
-        # never on activation (it names the clean series written by the pre-1.3.0 legacy importer, a
-        # store whose imported series is inactive), so an importer-authored clean current handoff beside
+        # never on activation (it covers every record whose actor.kind is importer, whatever the
+        # imported series' activation state), so an importer-authored clean current handoff beside
         # the maintainer's is exempt history and the store stays VALID (red if the exemption is ever
         # gated on the activation flag).
         f = clean_machine()
