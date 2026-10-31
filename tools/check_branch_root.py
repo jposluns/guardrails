@@ -5,9 +5,10 @@ The protected ref is supplied explicitly or derived from origin/HEAD. The candid
 supplied explicitly or defaults to HEAD. A merge-base exit status of 0 means rooted, 1 means
 ORPHANED, and every other status is cannot-evaluate. A rooted candidate that restores, at a path it
 changes from any merge base, the exact blob a first-parent commit of the protected line replaced
-within the REVERT_WINDOW commits ending at that merge base is REVERTS, unless its image there equals
-the protected tip's or a commit in base..head carries a "Reverts: <full sha>" trailer naming every
-such commit. First-parent lag is always reported
+within the REVERT_WINDOW commits ending at that merge base is REVERTS, unless merging it into the
+protected tip (git merge-tree --write-tree) leaves that path's blob as the tip has it without a
+conflict, or a commit in base..head carries a "Reverts: <full sha>" trailer naming every such commit.
+First-parent lag is always reported
 and becomes a blocking STALE verdict only when --max-lag is configured.
 
   check_branch_root.py [--root DIR] [--protected REF] [--head REV] [--max-lag N]
@@ -49,8 +50,8 @@ REVERT_WINDOW = 200
 Result = namedtuple(
     "Result",
     ("code", "verdict", "protected_ref", "protected_sha", "head_ref", "head_sha",
-     "bases", "lag", "max_lag", "detail", "findings"),
-    defaults=((),),
+     "bases", "lag", "max_lag", "detail", "findings", "conflicts"),
+    defaults=((), ()),
 )
 # The window walk. --diff-merges=first-parent is named even though a current git (2.53 checked) implies
 # it from --first-parent, so a git that does not still diffs a merge on the protected line against its
@@ -297,26 +298,57 @@ def _revert_findings(root, base, head_sha, window):
 
 
 def _union_findings(root, bases, _protected_sha, head_sha, window):
-    """The revert findings judged from every merge base, deduplicated, and the bases that produced any.
-    A revert can be visible from one base only, so no single base stands in for the others."""
-    findings, anchors = [], []
+    """The revert findings judged from every merge base, one per path, and the bases that produced any.
+    A revert can be visible from one base only, so no single base stands in for the others. A path found
+    from several bases is reported and counted once, with the undone commits of each base in the order
+    found."""
+    undone_at, anchors = {}, []
     for base in bases:
         found = _revert_findings(root, base, head_sha, window)
         if found:
             anchors.append(base)
-        findings.extend(finding for finding in found if finding not in findings)
-    return sorted(findings), anchors
+        for path, undone in found:
+            merged = undone_at.setdefault(path, [])
+            for commit in undone:
+                if commit not in merged:
+                    merged.append(commit)
+    return sorted((path, tuple(undone)) for path, undone in undone_at.items()), anchors
+
+
+def _merge_result(root, protected_sha, head_sha):
+    """(tree, conflicted): the tree git merge-tree --write-tree writes for merging the head into the
+    protected tip, and the paths that merge reports conflicting. Status 0 is a clean merge and 1 a
+    conflicted one. Any other status, output that is not a tree id followed by NUL-terminated nonempty
+    paths, a clean merge that lists a path, or a conflicted one that lists none is cannot-evaluate."""
+    probe = _git(root, "merge-tree", "--write-tree", "-z", "--name-only", "--no-messages",
+                 protected_sha, head_sha, binary=True)
+    if probe.returncode not in (0, 1):
+        raise CannotEvaluate("git merge-tree returned unexpected status {} ({})".format(
+            probe.returncode, probe.stderr.decode("utf-8", "replace").strip() or "no diagnostic"))
+    tokens = probe.stdout.split(b"\0")
+    tree, paths = tokens[0], tokens[1:-1]
+    if (len(tokens) < 2 or tokens[-1] or not _object_id(tree) or not all(paths)
+            or bool(paths) != (probe.returncode == 1)):
+        raise CannotEvaluate("git merge-tree printed output that does not parse (status {})".format(
+            probe.returncode))
+    return tree.decode("ascii"), frozenset(paths)
 
 
 def _settled(root, protected_sha, head_sha, findings):
-    """Drop the findings at paths where the head's image equals the protected tip's: merging the head
-    leaves such a path exactly as the protected line has it, so it undoes nothing there (for example a
-    stale branch that carries a revert the protected line already made)."""
+    """Judge the findings by the merge of the head into the protected tip. A finding stands where that
+    merge conflicts or leaves the path's blob different from the tip's; elsewhere merging the head
+    leaves the path's content as the protected line has it, so it undoes nothing there (a stale branch
+    carrying a revert the line already made, a path changed from one merge base only by what the head
+    picked up through another, a mode-only change). Returns the findings that stand and the paths among
+    them where the merge conflicts."""
     if not findings:
-        return findings
-    differs = {path for _c, path, _pre, _post in _raw_records(
-        root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", protected_sha, head_sha, "--")}
-    return [(path, undone) for path, undone in findings if path in differs]
+        return findings, ()
+    tree, conflicted = _merge_result(root, protected_sha, head_sha)
+    moved = {path for _c, path, pre, post in _raw_records(
+        root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", protected_sha, tree, "--")
+        if _blob(pre) != _blob(post)}
+    kept = [(path, undone) for path, undone in findings if path in conflicted or path in moved]
+    return kept, tuple(path for path, _undone in kept if path in conflicted)
 
 
 def evaluate(root, protected=None, head=None, max_lag=None, revert_window=None):
@@ -362,13 +394,13 @@ def evaluate(root, protected=None, head=None, max_lag=None, revert_window=None):
     # The reported lag is the least across bases; the revert check is judged from every base.
     lag = min(_count_lag(root, base, protected_sha) for base in bases)
     findings, anchors = _union_findings(root, bases, protected_sha, head_sha, revert_window)
-    findings = _settled(root, protected_sha, head_sha, findings)
+    findings, conflicts = _settled(root, protected_sha, head_sha, findings)
     if findings:
         return Result(
             1, "REVERTS", protected_ref, protected_sha, head_ref, head_sha,
             bases, lag, max_lag, "restores content the protected line replaced by merge base(s) {}".format(
                 ", ".join(anchors)),
-            tuple(findings),
+            tuple(findings), tuple(conflicts),
         )
     if max_lag is not None and lag > max_lag:
         return Result(
@@ -406,12 +438,16 @@ def _print_result(result):
         else "configured maximum {}".format(result.max_lag)
     )
     if result.verdict == "REVERTS":
-        lines = ["  {!r} undoes {}".format(path.decode("utf-8", "surrogateescape"), ", ".join(undone))
-                 for path, undone in result.findings]
+        lines = ["  {!r} undoes {}{}".format(
+            path.decode("utf-8", "surrogateescape"), ", ".join(undone),
+            " (merging it into {} conflicts at this path)".format(result.protected_ref)
+            if path in result.conflicts else "")
+            for path, undone in result.findings]
         print(
             "VIOLATION: branch-root: {} {}: at {} path(s) it holds the exact content that a first-parent "
-            "commit of {} within the {} commits ending at that base replaced, so merging it reverts "
-            "that change:\n{}\nRebuild the branch from its own changes on top of the merge base, or, when "
+            "commit of {} within the {} commits ending at that base replaced, and merging it into the "
+            "protected tip changes that path away from the tip's content or conflicts there, so it "
+            "reverts that change:\n{}\nRebuild the branch from its own changes on top of the merge base, or, when "
             "the restoration is deliberate, add a trailer `Reverts: <full sha>` naming each listed commit "
             "to a commit in <merge base>..<head>. This gate never rewrites a branch itself.".format(
                 result.head_sha, result.detail, len(result.findings), result.protected_ref,
@@ -513,7 +549,7 @@ def _plumb_commit(root, files, parents, message, modes=None):
 
 
 def _revert_vectors(temp, failures, case):
-    """R1-R19: the revert check. One repository holds every history; each case names its own refs."""
+    """R1-R24: the revert check. One repository holds every history; each case names its own refs."""
     def ref(name, sha):
         _fixture_git(repo, "update-ref", "refs/heads/" + name, sha)
         return "refs/heads/" + name
@@ -569,14 +605,17 @@ def _revert_vectors(temp, failures, case):
 
     # R5: the protected line advances again after the fold: it drops b.txt, changes c.txt once more and
     # adds n.txt. Anchored on the merge base c.txt is still found; b.txt is not, because the protected
-    # tip dropped it too, so merging the fold leaves it as the tip has it. Anchored on the tip, n.txt
-    # (which the fold never had) would be reported as well.
+    # tip dropped it too, so merging the fold leaves it as the tip has it. c.txt conflicts in that merge,
+    # and the report says so.
     drop = _plumb_commit(repo, {**old, b"c.txt": b"c2\n"}, (c2,), "main drops b")
     again = _plumb_commit(repo, {**old, b"c.txt": b"c3\n"}, (drop,), "main changes c again")
     later = _plumb_commit(repo, {**old, b"c.txt": b"c3\n", b"n.txt": b"n\n"}, (again,), "main adds n")
     advanced = ref("protected", later)
     case("R5 main advanced", 1, repo, advanced, "refs/heads/r1")
-    found("R5 main advanced", advanced, "refs/heads/r1", {b"c.txt"})
+    r5 = found("R5 main advanced", advanced, "refs/heads/r1", {b"c.txt"})
+    if r5 is not None and r5.conflicts != (b"c.txt",):
+        failures.append("R5 main advanced: expected c.txt named as conflicting, got {!r}".format(
+            r5.conflicts))
     # R6: the branch rebased onto the tip.
     case("R6 rebased", 0, repo, main, ref("r6", _plumb_commit(
         repo, {**main_files, b"f.txt": b"feature\n"}, (c2,), "rebased")))
@@ -610,6 +649,12 @@ def _revert_vectors(temp, failures, case):
     w_head = ref("r10", _plumb_commit(repo, {b"w.txt": b"w1\n"}, (tip,), "w revert"))
     for label, window, want in (("inside", 5, {b"w.txt"}), ("at", 4, {b"w.txt"}), ("outside", 3, set())):
         found("R10 window {} K={}".format(label, window), w_main, w_head, want, window)
+    # The window ends at the merge base, not at the protected tip: two more protected commits put the
+    # change sixth from the tip, yet it is still fourth from the base, so a window of 4 still finds it.
+    w_later = tip
+    for i in range(2):
+        w_later = _plumb_commit(repo, {b"w.txt": b"w2\n"}, (w_later,), "w later {}".format(i))
+    found("R10 window anchored at the base K=4", ref("r10-later", w_later), w_head, {b"w.txt"}, 4)
     if REVERT_WINDOW != 200:
         failures.append("R10 window: REVERT_WINDOW must stay 200 to match the pinned --max-lag 200")
 
@@ -670,6 +715,57 @@ def _revert_vectors(temp, failures, case):
     case("R17 carried protected revert", 0, repo, k_main, k_head)
     found("R17 carried protected revert", k_main, k_head, set())
 
+    # R20: two merge bases, neither a revert. The line turns flag.cfg on, a side branch forks, the line
+    # turns it off and the feature is cut after that; the feature and the line both merge the side, then
+    # the line turns the flag on again. Judged from the side base the head's flag.cfg matches a window
+    # pre-image, but only through the line's own change the head picked up from the other base; the
+    # feature never touches flag.cfg and merging it leaves the tip's blob there.
+    g0 = _plumb_commit(repo, {b"flag.cfg": b"off\n"}, (), "flag root")
+    g1 = _plumb_commit(repo, {b"flag.cfg": b"on\n"}, (g0,), "main turns the flag on")
+    g_side = _plumb_commit(repo, {b"flag.cfg": b"on\n", b"side.txt": b"side\n"}, (g1,), "side work")
+    g2 = _plumb_commit(repo, {b"flag.cfg": b"off\n"}, (g1,), "main turns the flag off")
+    g_feature = _plumb_commit(repo, {b"flag.cfg": b"off\n", b"feat.txt": b"f\n"}, (g2,), "feature")
+    g_head = ref("r20", _plumb_commit(
+        repo, {b"flag.cfg": b"off\n", b"feat.txt": b"f\n", b"side.txt": b"side\n"}, (g_feature, g_side),
+        "feature merges the side"))
+    g_merged = _plumb_commit(repo, {b"flag.cfg": b"off\n", b"side.txt": b"side\n"}, (g2, g_side),
+                             "main merges the side")
+    g_main = ref("r20-main", _plumb_commit(repo, {b"flag.cfg": b"on\n", b"side.txt": b"side\n"},
+                                           (g_merged,), "main turns the flag on again"))
+    case("R20 side-base pickup", 0, repo, g_main, g_head)
+    r20 = found("R20 side-base pickup", g_main, g_head, set())
+    if r20 is not None and len(r20.bases) != 2:
+        failures.append("R20 side-base pickup: expected two merge bases, got {}".format(len(r20.bases)))
+
+    # R21: the line changes tool.sh and then reverts that change; a branch cut from the tip only makes
+    # it executable. The head's blob equals an older pre-image, yet merging it leaves the tip's blob.
+    h0 = _plumb_commit(repo, {b"tool.sh": b"a\n"}, (), "tool root")
+    h1 = _plumb_commit(repo, {b"tool.sh": b"b\n"}, (h0,), "main changes tool")
+    h2 = _plumb_commit(repo, {b"tool.sh": b"a\n"}, (h1,), "main reverts the tool change")
+    h_head = ref("r21", _plumb_commit(repo, {b"tool.sh": b"a\n"}, (h2,), "chmod +x tool.sh",
+                                      {b"tool.sh": b"100755"}))
+    case("R21 mode-only change", 0, repo, ref("r21-main", h2), h_head)
+    found("R21 mode-only change", "refs/heads/r21-main", h_head, set())
+
+    # R22: a stale branch deletes d.txt, which the line added and then edited. The merge conflicts
+    # (modify/delete) and keeps the tip's blob in its tree, so only the conflict keeps the finding; the
+    # report names the conflict.
+    e0 = _plumb_commit(repo, {b"z.txt": b"z\n"}, (), "d root")
+    e1 = _plumb_commit(repo, {b"z.txt": b"z\n", b"d.txt": b"d1\n"}, (e0,), "main adds d")
+    e_main = ref("r22-main", _plumb_commit(repo, {b"z.txt": b"z\n", b"d.txt": b"d2\n"}, (e1,),
+                                           "main edits d"))
+    e_head = ref("r22", _plumb_commit(repo, {b"z.txt": b"z\n"}, (e1,), "branch drops d"))
+    case("R22 merge conflict at the path", 1, repo, e_main, e_head)
+    r22 = found("R22 merge conflict at the path", e_main, e_head, {b"d.txt"})
+    if r22 is not None:
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown):
+            _print_result(r22)
+        if r22.conflicts != (b"d.txt",) or "'d.txt' undoes {} (merging it into {} conflicts".format(
+                e1, e_main) not in shown.getvalue():
+            failures.append("R22 merge conflict at the path: expected d.txt kept and named as "
+                            "conflicting, got conflicts={!r}".format(r22.conflicts))
+
     # R18 and R19 stand in for git with a wrapper around _git that rewrites one command's output.
     real_git = _git
 
@@ -708,6 +804,50 @@ def _revert_vectors(temp, failures, case):
                              ("non-hex oid", b"100644", b"g" * 40)):
         judged("R19 " + label, faked("diff-tree", lambda _out, m=mode, o=oid: record(m, o)), 2)
 
+    # R23: a merge-tree that cannot run, exits with a status other than 0 or 1, or prints output that
+    # does not parse leaves the findings unjudged: cannot-evaluate, never a pass or a plain finding.
+    def merge_tree(status, rewrite):
+        def fake(root, *args, **kwargs):
+            if args[0] != "merge-tree":
+                return real_git(root, *args, **kwargs)
+            if status is None:
+                raise CannotEvaluate("git invocation failed: injected")
+            probe = real_git(root, *args, **kwargs)
+            return subprocess.CompletedProcess(probe.args, status, rewrite(probe.stdout), b"")
+        return fake
+
+    def tree_only(out):
+        return out.split(b"\0")[0] + b"\0"
+
+    for label, status, rewrite in (("cannot run", None, None),
+                                   ("unexpected status", 128, lambda out: out),
+                                   ("empty output", 0, lambda _out: b""),
+                                   ("not a tree id", 0, lambda out: b"x" + out),
+                                   ("unterminated", 0, lambda out: out.rstrip(b"\0")),
+                                   ("empty path", 1, lambda out: tree_only(out) + b"\0"),
+                                   ("clean merge listing a path", 0, lambda out: tree_only(out) + b"c.txt\0"),
+                                   ("conflict listing no path", 1, tree_only)):
+        judged("R23 merge-tree " + label, merge_tree(status, rewrite), 2)
+
+    # R24: one path found from two merge bases with different undone lists is reported and counted once.
+    # The R16 history has two bases; a stand-in finds p.txt from each, naming that base as undone.
+    real_findings = _revert_findings
+    globals()["_revert_findings"] = lambda _root, base, _head_sha, _window: [(b"p.txt", (base,))]
+    try:
+        r24 = evaluate(repo, p_main, p_head)
+    except CannotEvaluate as exc:
+        r24 = None
+        failures.append("R24 one path from two bases: got cannot-evaluate ({})".format(exc))
+    finally:
+        globals()["_revert_findings"] = real_findings
+    if r24 is not None:
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown):
+            _print_result(r24)
+        if r24.findings != ((b"p.txt", r24.bases),) or "at 1 path(s)" not in shown.getvalue():
+            failures.append("R24 one path from two bases: expected p.txt reported once undoing both "
+                            "bases, got {!r}".format(r24.findings))
+
     # R12: a shallow clone whose history ends inside the window is cannot-evaluate.
     shallow = temp / "r12-shallow"
     try:
@@ -725,9 +865,10 @@ def _revert_vectors(temp, failures, case):
 
 
 def _mutant_vector(failures):
-    """Each mutant of the revert check, applied by replacing module attributes, must turn the named
+    """Each mutant of the revert check, applied by replacing module attributes, must turn every named
     R vector red in a nested self-test run."""
     real_findings, real_touches, real_records = _revert_findings, _window_touches, _raw_records
+    real_merge = _merge_result
 
     def tip_anchored(root, _base, head_sha, window):
         return real_findings(root, _resolve_commit(root, "refs/heads/protected", "protected"),
@@ -763,9 +904,27 @@ def _mutant_vector(failures):
     def decoded_unchecked(mode, oid, _command):
         return None if mode == b"000000" else (mode.decode("ascii"), oid.decode("ascii"))
 
+    def conflicts_ignored(root, protected_sha, head_sha):
+        return real_merge(root, protected_sha, head_sha)[0], frozenset()
+
+    def failure_as_clean(root, protected_sha, head_sha):
+        try:
+            return real_merge(root, protected_sha, head_sha)
+        except CannotEvaluate:
+            return protected_sha, frozenset()
+
+    def per_base_entries(root, bases, _protected_sha, head_sha, window):
+        findings, anchors = [], []
+        for base in bases:
+            found = real_findings(root, base, head_sha, window)
+            if found:
+                anchors.append(base)
+            findings.extend(finding for finding in found if finding not in findings)
+        return sorted(findings), anchors
+
     for label, injected, vector in (
             ("check removed", {"_revert_findings": lambda *_a: []}, "R1 "),
-            ("anchored on the protected tip", {"_revert_findings": tip_anchored}, "R5 "),
+            ("anchored on the protected tip", {"_revert_findings": tip_anchored}, "R10 window anchored"),
             ("post-images compared", {"_window_touches": post_images}, "R1 "),
             ("absence ignored", {"_window_touches": absence_ignored}, "R1 "),
             ("any trailer accepted", {"_allowed": lambda _undone, named: bool(named)}, "R9 "),
@@ -776,7 +935,13 @@ def _mutant_vector(failures):
                 arg for arg in _WINDOW_LOG_ARGS if arg != "--diff-merges=first-parent")}, "R13 "),
             ("file mode compared with the blob", {"_blob": lambda image: image}, "R15 "),
             ("least-lag merge base only", {"_union_findings": least_lag_only}, "R16 "),
-            ("protected tip image ignored", {"_settled": lambda _r, _p, _h, findings: findings}, "R17 "),
+            ("merge-result filter skipped", {"_settled": lambda _r, _p, _h, findings: (findings, ())},
+             ("R17 ", "R20 ", "R21 ")),
+            ("head image in place of the merge result",
+             {"_merge_result": lambda _r, _p, head_sha: (head_sha, frozenset())}, "R20 "),
+            ("merge conflicts ignored", {"_merge_result": conflicts_ignored}, "R22 "),
+            ("merge-tree failure read as a clean merge", {"_merge_result": failure_as_clean}, "R23 "),
+            ("findings kept per base, not per path", {"_union_findings": per_base_entries}, "R24 "),
             ("window listing unchecked", {"_window_listed": lambda _commits, _base: None}, "R18 "),
             ("record bytes decoded unchecked", {"_image": decoded_unchecked}, "R19 ")):
         saved = {name: value for name, value in globals().items() if name in injected}
@@ -790,9 +955,10 @@ def _mutant_vector(failures):
                 rc = self_test(_vectors=False)
         finally:
             globals().update(saved)
-        if rc == 0 or not _recorded(out.getvalue(), vector):
-            failures.append("(mutant vector, {}) the mutant must turn {}red, got exit {}".format(
-                label, vector, rc))
+        for wanted in (vector,) if isinstance(vector, str) else vector:
+            if rc == 0 or not _recorded(out.getvalue(), wanted):
+                failures.append("(mutant vector, {}) the mutant must turn {}red, got exit {}".format(
+                    label, wanted, rc))
 
 
 def _non_utf8_dir(parent):
@@ -1078,8 +1244,8 @@ def self_test(_vectors=True):
                "default-root/cwd-unavailable")
     print("SELF-TEST PASS: V1-V13 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
           "(both cannot-evaluate) outcomes; verdicts are asserted by exit code; an unbuildable V10 or V11 "
-          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R19 cover the revert "
-          "check and each listed mutant of it turns its named R vector red")
+          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R24 cover the revert "
+          "check and each listed mutant of it turns every R vector it names red")
     return 0
 
 
