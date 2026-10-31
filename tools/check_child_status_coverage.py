@@ -72,8 +72,9 @@ with exit 2). This gate holds where it runs:
      launcher walk cannot list is cannot-evaluate, and a declared launcher that is absent is a finding.
   5. completeness: every entry point, enumerated from (a) every tracked .py with a module-level __main__ guard
      (git ls-files at the root, through tracked_entrypoints, never a walk of the tree, so an ignored or untracked
-     script is none; tools/check_python_floor.py's EXCLUDED_TREES and SKIPPED_DIR_NAMES; git that cannot answer
-     is cannot-evaluate), (b) both runners' rosters, (c) every workflow's
+     script is none; the read takes no system, home or XDG git configuration; tools/check_python_floor.py's
+     EXCLUDED_TREES and SKIPPED_DIR_NAMES; git that cannot answer is cannot-evaluate), (b) both runners' rosters,
+     (c) every workflow's
      python3 launch targets, (d) every registry runner (tools/selftest_checks.toml, through the execution gate's
      schema validator) and (e) the hook registrations, is classified SELF (it carries the pinned guard),
      NOT-APPLICABLE (a static scan of it and its local import closure finds no spawn or wait API), LAUNCHER (it
@@ -152,7 +153,9 @@ through an attribute store such as _main_exit.__code__, is not counted and not s
 come from git's tracked list, but the shell launchers (tools/*.sh and the walk under opf/), the workflow
 directory listing, a declared launch target's existence and the scan's local imports are still read from the
 working tree, so an untracked file there is read as if tracked, and a tracked .py deleted from the working tree
-is cannot-evaluate. Whether a real launcher
+is cannot-evaluate; R18 the tracked-list read takes no system or global git configuration, so a safe.directory
+entry there does not apply to it: a checkout owned by another user is cannot-evaluate (git's dubious-ownership
+refusal), never read as trusted. Whether a real launcher
 starts these tools with SIGCHLD ignored, and whether the steps of one CI job share one disposition, are not
 established: each job's probe step reads the disposition of its own step only, so it cannot show what the job's
 other steps inherit.
@@ -1263,12 +1266,16 @@ def _shell_launchers(root, listdir=os.listdir, walk=os.walk, lexists=os.path.lex
     return [rel for rel in out if rel not in (LOCAL_RUNNER, OPF_RUNNER)], findings
 
 
-def _git_ls_files(root):
+def _git_ls_files(root, environ=os.environ):
     """(exit status, stdout, stderr) of git ls-files -z --cached at root, pinned as gen_manifest.git_tracked pins
-    its index read: every GIT_* variable scrubbed, then GIT_NO_LAZY_FETCH=1, core.fsmonitor=false and
-    protocol.allow=never. A git that cannot be started raises OSError or SubprocessError."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    its index read: every GIT_* variable of environ scrubbed, then GIT_NO_LAZY_FETCH=1, core.fsmonitor=false and
+    protocol.allow=never. Unlike that read, it also reads no git configuration outside the repository, pinned
+    after the scrub as tools/_git_fixture_env.py pins fixture git: GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL, HOME
+    and XDG_CONFIG_HOME at os.devnull, so the caller's system, home and XDG configuration (a malformed file
+    included) cannot fail or steer it. A git that cannot be started raises OSError or SubprocessError."""
+    env = {key: value for key, value in environ.items() if not key.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, HOME=os.devnull, XDG_CONFIG_HOME=os.devnull)
     proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
                            "ls-files", "-z", "--cached"], capture_output=True, timeout=CHILD_TIMEOUT, env=env)
     return proc.returncode, proc.stdout, proc.stderr
@@ -1732,11 +1739,14 @@ def _tracked_fixture(base):
     """(root, shape ok) for a git repository under base whose index holds .gitignore and tools/tracked_reader.py
     only, beside ignored/ignored_reader.py (ignored) and tools/untracked_reader.py (untracked, not ignored). No
     system or global git configuration is read, so no excludes file outside the fixture decides what is ignored;
-    shape ok is whether git reports exactly TRACKED_STATUS."""
+    shape ok is whether git reports exactly TRACKED_STATUS. Beside it, malformed-home holds a home and an XDG git
+    configuration git cannot parse, for the malformed-config vector."""
     root = Path(base) / "tracked"
     for rel, text in TRACKED_FIXTURE:
         _copy(rel, root, text)
     (Path(base) / "not-a-repository").mkdir()
+    for rel in (".gitconfig", ".config/git/config"):
+        _copy(rel, Path(base) / "malformed-home", "[invalid\n")
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
     subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "init", "-q"], capture_output=True,
@@ -1806,6 +1816,19 @@ def _vectors(module, trees, texts, canonical_tree):
 
     def git_reply(code, out, err=b""):
         return lambda root: (code, out, err)
+
+    def malformed_config_files():
+        """The fixture's tracked list read through _git_ls_files with HOME and XDG_CONFIG_HOME at malformed-home, or
+        None unless the fixture has its shape and a read there without the configuration pins fails (the control:
+        git does read that configuration)."""
+        home = tracked_root.parent / "malformed-home"
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"))
+        control = subprocess.run(["git", "-C", str(tracked_root), "-c", "core.fsmonitor=false", "ls-files", "-z",
+                                  "--cached"], capture_output=True, timeout=CHILD_TIMEOUT, env=env)
+        if not tracked_shape or control.returncode == 0:
+            return None
+        return m.tracked_files(tracked_root, lambda root: m._git_ls_files(root, env))
 
     def git_missing(root):
         raise FileNotFoundError(2, "No such file or directory", "git")
@@ -2054,6 +2077,10 @@ def _vectors(module, trees, texts, canonical_tree):
          and all(raises(lambda: m.tracked_files(FAKE_ROOT, ls_files)) for ls_files in (
              git_missing, git_reply(128, b"a.py\0", b"fatal: not a git repository"), git_reply(0, b""),
              git_reply(0, b"a.py"), git_reply(0, b"\xff.py\0"), git_reply(0, b"a.py\0\0b.py\0")))),
+        # The tracked-list read takes no configuration outside the repository: a home and XDG git configuration that
+        # fails an unpinned read leaves the list whole.
+        ("completeness/malformed-global-config-ignored",
+         lambda: malformed_config_files() == {".gitignore", "tools/tracked_reader.py"}),
     )
     out = {}
     for vector, thunk in vectors:
@@ -2251,6 +2278,9 @@ MUTANTS = (
      "completeness/git-failure-cannot-evaluate"),
     ("tracked-git-empty-path", "    if \"\" in paths:\n", "    if False:\n",
      "completeness/git-failure-cannot-evaluate"),
+    ("tracked-git-config", "    env.update(GIT_CONFIG_NOSYSTEM=\"1\", GIT_CONFIG_GLOBAL=os.devnull, HOME=os.devnull, "
+     "XDG_CONFIG_HOME=os.devnull)\n", "",
+     "completeness/malformed-global-config-ignored"),
 )
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "launchers/real-launchers-pass",
              "launchers/real-workflows-in-grammar", "launchers/workflow-host-probe-ahead-of-pin",
@@ -2531,7 +2561,8 @@ def self_test(lane, report_path=None):
                                 ("completeness/ignored-script-not-entry", 0),
                                 ("completeness/untracked-script-not-entry", 0),
                                 ("completeness/tracked-unguarded-script-is-finding", 0),
-                                ("completeness/git-failure-cannot-evaluate", 0)):
+                                ("completeness/git-failure-cannot-evaluate", 0),
+                                ("completeness/malformed-global-config-ignored", 0)):
             check(check_id, vectors.get(check_id), sorted(key for key, ok in vectors.items() if not ok))
         check("mutant/every-mutant-caught", MUTANTS and not uncaught, uncaught)
         never = sorted(set(vectors) - exposed - UNMUTATED)

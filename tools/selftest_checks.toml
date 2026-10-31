@@ -2873,6 +2873,7 @@ expected-check-ids = [
   "completeness/untracked-script-not-entry",
   "completeness/tracked-unguarded-script-is-finding",
   "completeness/git-failure-cannot-evaluate",
+  "completeness/malformed-global-config-ignored",
   "mutant/every-mutant-caught",
   "mutant/every-vector-discriminates",
   "behaviour/opf-cli-refuses",
