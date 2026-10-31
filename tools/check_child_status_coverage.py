@@ -11,8 +11,8 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
-     tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py, tools/check_rule_placement.py
+     and tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
      (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
      and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
      for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
@@ -27,7 +27,10 @@ with exit 2). This gate holds where it runs:
      other than through a global declaration, or from another module is not seen.
   3. entries: each CLI copy's __main__ body is exactly its cli_entry line: for opf/tools/opf.py,
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
-     ends the process by raising SystemExit itself, never through sys.exit), and for every other,
+     ends the process by raising SystemExit itself, never through sys.exit); for each REPORT_ENTRY_NAMES entry
+     (tools/check_rule_placement.py, whose self-test the execution gate runs with an execution report),
+     _selftest_exit_report.exit_with(_child_status_refusal_exit("<basename>") or main()) (the guard is the
+     argument's first operand, so it runs before main() and before exit_with is called); and for every other,
      sys.exit(_child_status_refusal_exit("<basename>") or main()), except that of each SELF_TEST_COPIES entry
      (the three opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
      (SELF_TEST_ENTRY, held to opf.py's own _ENTRY_STATEMENT) then that second form, with self_test bound once
@@ -108,10 +111,20 @@ with exit 2). This gate holds where it runs:
      reads a child's status and every declared launch is through a guarded launcher) or RESIDUAL (it reads one
      and has no declared launcher). A LAUNCHER or RESIDUAL entry's direct launch is unguarded, so each must be
      listed in DIRECT_LAUNCH_RESIDUAL, which every run prints by name. A new such entry that is not listed, a
-     listed entry that is now SELF, NOT-APPLICABLE or gone (the list only shrinks), an unregistered hook mode and
-     a declared launch target that does not exist are findings.
+     listed entry that is now SELF, NOT-APPLICABLE or gone (stale), an unregistered hook mode and a declared
+     launch target that does not exist are findings.
   6. switch: DIRECT_LAUNCH_CHECK is False until the Python-floor prelude carries a refusal of its own; set True,
      a LAUNCHER or RESIDUAL entry is a finding whether listed or not, so the residual list must then be empty.
+  7. ratchet: DIRECT_LAUNCH_RESIDUAL only shrinks. It must hold exactly the entries of the checked-in baseline
+     RESIDUAL_BASELINE_REL (tools/direct-launch-residual-baseline.txt), read first, before any other input. An
+     entry the list holds and the baseline does not (the list grew, or one entry was swapped for another) is a
+     finding, and so is a baseline line the list no longer holds: a change that shrinks the list deletes the
+     same line from the baseline, so the headroom cannot be spent later on a listing that no reviewer sees.
+     Adding an entry therefore means adding a line to that file too, a diff of its own in the change (and in
+     .aiqt/manifest.toml, which records its sha256). The baseline is read through the non-blocking regular-file
+     reader (no final symlink), as strict UTF-8: leading # comment lines, then one repository path per line
+     (RESIDUAL_BASELINE_LINE_RE, no '.' or '..' component), sorted and unique, every line ending in LF; anything
+     else, or a file that is missing or unreadable, is cannot-evaluate (exit 2), never an empty baseline.
 
 The scan counts an import of subprocess, multiprocessing, pty or _posixsubprocess (asyncio.subprocess and
 concurrent.futures.process too) and a literal sys.modules subscript naming one of them; any attribute or
@@ -135,8 +148,9 @@ in a variable or computed is pinned only by the expression the call spells (R13)
   ... [--execution-report ABS_PATH]                    also write the execution report
                                                        (tools/_selftest_exit_report.py)
 Exit: 0 every leg holds; 1 findings, each named; 2 cannot evaluate (an input missing, not a regular file,
-unreadable, not UTF-8, outside the parity reader's grammar or unparsable; a directory that cannot be listed or
-walked; an unresolved dynamic load), the live refusal, or usage. There is no warning tier.
+unreadable, not UTF-8, outside the parity reader's grammar or unparsable; a residual baseline outside its line
+grammar; a directory that cannot be listed or walked; an unresolved dynamic load), the live refusal, or usage.
+There is no warning tier.
 
 Disclosed residuals, not closed by this gate: R1 an ignore or SA_NOCLDWAIT set below Python after interpreter
 start (a native extension, ctypes, an embedding host) is not seen by the disposition read, and the fork probe runs
@@ -176,10 +190,16 @@ workflows and not compared with the parser GitHub runs, so a file inside it that
 not seen; R16 the binding count of legs 2 and 3 (_bindings) reads the module's own binding statements, so a
 rebinding through a computed name made by a call (setattr on the module, globals().update) or inside a function
 body (a globals() or sys.modules[__name__] store there), including one of opf.py's _main_exit or an attribute
-store such as _main_exit.__code__ made there, is not seen. Whether a real
-launcher starts these tools with SIGCHLD ignored, and whether the steps of one CI job share one disposition, are
-not established: each job's probe step reads the disposition of its own step only, so it cannot show what the
-job's other steps inherit.
+store such as _main_exit.__code__ made there, is not seen; R17 the ratchet of leg 7 compares two files of one
+tree, so a change that adds the same entry to DIRECT_LAUNCH_RESIDUAL and a line to the baseline passes: the gate
+makes that raise a separate diff in its own file (and in the baseline's sha256 in .aiqt/manifest.toml) but cannot
+tell a reviewed raise from an unreviewed one, reads no git history or base branch, and no CODEOWNERS file binds a
+reviewer to the baseline; it holds names only, so a residual entry moved to a new path is a swap that needs a
+baseline edit like any raise; it holds the list, not the classification, so an entry point the scan misses (R10)
+is never listed and never counted; and a change that edits this gate itself (its leg 7, RESIDUAL_BASELINE_REL or
+the reader) is outside it. Whether a real launcher starts these tools with SIGCHLD ignored, and whether the steps
+of one CI job share one disposition, are not established: each job's probe step reads the disposition of its own
+step only, so it cannot show what the job's other steps inherit.
 """
 import sys
 
@@ -226,6 +246,7 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
+              ("tools/check_rule_placement.py", "check_rule_placement.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
@@ -253,6 +274,13 @@ CLI_ENTRY = 'sys.exit(_child_status_refusal_exit("{}") or main())'
 # process by raising SystemExit itself (code opf loads can replace sys.exit); a refusal still ends the process at
 # once with its own line and exit 2.
 CLI_ENTRY_BY_NAME = {"opf.py": '_main_exit(lambda: _child_status_refusal_exit("opf.py") or main())'}
+# The CLI copies whose entry line finalizes the execution report, by basename: an armed run finalizes its
+# report only for a status recorded through _selftest_exit_report.exit_with, so for a copy whose main() does
+# not record it there sys.exit would leave no report, and its entry line is REPORT_ENTRY (a copy whose main()
+# finalizes the report itself, check_verifier_delivery.py, keeps CLI_ENTRY). The guard is the argument's
+# first operand, so it runs, and refuses by name, before main() and before exit_with is called.
+REPORT_ENTRY = '_selftest_exit_report.exit_with(_child_status_refusal_exit("{}") or main())'
+REPORT_ENTRY_NAMES = ("check_rule_placement.py",)
 # Such an entry hands the guard to _main_exit inside a lambda, so the guard runs only if _main_exit calls its
 # argument: the module's one top-level MAIN_EXIT is an undecorated function with exactly MAIN_EXIT_DEF's
 # parameters, and its first statement after the docstring is a try whose body is exactly MAIN_EXIT_CALL. The
@@ -359,7 +387,8 @@ CHILD_TIMEOUT = 120
 DIRECT_LAUNCH_CHECK = False
 # Every entry point that reads a child's exit status and carries no guard of its own, sorted: a direct launch of
 # it from an ignoring parent is unguarded. Computed by this gate's own classification and reviewed; it only
-# shrinks.
+# shrinks: leg 7 holds it equal to the checked-in baseline RESIDUAL_BASELINE_REL, so an entry removed here is
+# removed there in the same change, and an entry added here fails unless that file gains its line too.
 DIRECT_LAUNCH_RESIDUAL = (
     ".github/check_cited_standards_contract.py",
     ".preview/char-policy-write.py",
@@ -447,7 +476,6 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_release_build.py",
     "tools/check_release_cut.py",
     "tools/check_release_delta.py",
-    "tools/check_rule_placement.py",
     "tools/check_site.py",
     "tools/check_sized_instructions.py",
     "tools/check_standards_currency.py",
@@ -486,6 +514,10 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/selftest_git_fixture_env_core.py",
     "tools/selftest_orch_hooks.py",
 )
+# Leg 7's baseline: the checked-in copy of DIRECT_LAUNCH_RESIDUAL that the list may only shrink from, and the shape
+# of each of its entry lines (a repository path to a .py file; a '.' or '..' component is refused separately).
+RESIDUAL_BASELINE_REL = "tools/direct-launch-residual-baseline.txt"
+RESIDUAL_BASELINE_LINE_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.py")
 
 # Run-time code loads reviewed by hand: (file, the exact text (ast.unparse) of every load call the scan sees in
 # it, sorted, the repository files those calls load, which the scan then follows as imports, and what is
@@ -677,7 +709,10 @@ def copy_findings(rel, tree, tmpl, names):
 
 
 def cli_entry(name):
-    """The CLI entry line of the entry point named name: its CLI_ENTRY_BY_NAME row, or else CLI_ENTRY."""
+    """The CLI entry line of the entry point named name: its CLI_ENTRY_BY_NAME row, REPORT_ENTRY for a
+    REPORT_ENTRY_NAMES entry, or else CLI_ENTRY."""
+    if name in REPORT_ENTRY_NAMES:
+        return REPORT_ENTRY.format(name)
     return CLI_ENTRY_BY_NAME.get(name, CLI_ENTRY.format(name))
 
 
@@ -1362,6 +1397,49 @@ def classify(entries, launched, reads_of, residual, direct_check):
     return classes, findings, cannot
 
 
+# ------------------------------------------------------------------------------------------- leg 7: ratchet
+
+def baseline_entries(data, rel):
+    """The entries of the residual baseline's bytes, as a tuple: strict UTF-8, every line ending in LF, leading #
+    comment lines, then one RESIDUAL_BASELINE_LINE_RE path per line with no '.' or '..' component, sorted and
+    unique. Anything else is cannot-evaluate, never read as fewer entries."""
+    text = _decoded(data, rel)
+    if text and not text.endswith("\n"):
+        raise CannotEvaluate("{}: its last line does not end in LF".format(rel))
+    entries = []
+    for number, line in enumerate(text.split("\n")[:-1], 1):
+        if line.startswith("#") and not entries:
+            continue
+        if not RESIDUAL_BASELINE_LINE_RE.fullmatch(line) or any(part in (".", "..") for part in line.split("/")):
+            raise CannotEvaluate("{}:{}: not a repository path to a .py file (a # comment may only come before the "
+                                 "first entry)".format(rel, number))
+        if entries and line <= entries[-1]:
+            raise CannotEvaluate("{}:{}: {} does not sort after {} (the entries are sorted and unique)".format(
+                rel, number, line, entries[-1]))
+        entries.append(line)
+    return tuple(entries)
+
+
+def ratchet_findings(residual, baseline):
+    """Leg 7's findings: each residual entry the baseline does not hold (the list grew) and each baseline entry the
+    residual no longer holds (the baseline was not lowered with the list)."""
+    findings, listed, allowed = [], set(residual), set(baseline)
+    for rel in sorted(listed - allowed):
+        findings.append("{}: listed in DIRECT_LAUNCH_RESIDUAL but not in its baseline {}; the list only shrinks, so "
+                        "guard the entry instead (a raise of the baseline is a reviewed change of its own)".format(
+                            rel, RESIDUAL_BASELINE_REL))
+    for rel in sorted(allowed - listed):
+        findings.append("{}: in the baseline {} but no longer in DIRECT_LAUNCH_RESIDUAL; delete its line there in "
+                        "the same change, so the baseline falls with the list".format(rel, RESIDUAL_BASELINE_REL))
+    return findings
+
+
+def residual_ratchet(root, residual):
+    """Leg 7: ratchet_findings of residual against the baseline read from root through the regular-file reader; a
+    baseline that is missing, not a regular file, unreadable or outside its grammar is cannot-evaluate."""
+    return ratchet_findings(residual, baseline_entries(_read(root, RESIDUAL_BASELINE_REL), RESIDUAL_BASELINE_REL))
+
+
 # ------------------------------------------------------------------------------------------------ evaluate
 
 def _shell_launchers(root, listdir=os.listdir, walk=os.walk, lexists=os.path.lexists):
@@ -1390,7 +1468,7 @@ def evaluate(root, residual=None, direct_check=None):
     root = Path(root)
     residual = DIRECT_LAUNCH_RESIDUAL if residual is None else residual
     direct_check = DIRECT_LAUNCH_CHECK if direct_check is None else direct_check
-    findings, launched = [], set()
+    findings, launched = residual_ratchet(root, residual), set()
     canonical = _parse(_read(root, CANONICAL_REL), CANONICAL_REL)
     tmpl = template(canonical)
     finding = cli_entry_finding(CANONICAL_REL, canonical, Path(CANONICAL_REL).name, exact=False)
@@ -1849,7 +1927,8 @@ def _inputs():
     def text(rel):
         return _read(ROOT, rel).decode("utf-8")
     real = {rel: text(rel) for rel in (CANONICAL_REL, HOOK_COPIES[0], LOCAL_RUNNER, OPF_RUNNER, HOOKS_JSON_REL,
-                                       WORKFLOWS_REL + "/quality.yml") + tuple(rel for rel, _ in CLI_COPIES)
+                                       WORKFLOWS_REL + "/quality.yml", RESIDUAL_BASELINE_REL)
+            + tuple(rel for rel, _ in CLI_COPIES)
             + tuple(rel for rel, _ in ENTRY_COPIES + SELF_TEST_FIRST_COPIES) + SHELL_REAL}
     opf, selftest, hook = real["opf/tools/opf.py"], real["tools/check_selftest_execution.py"], real[HOOK_COPIES[0]]
     declaration, opf_declaration = real["tools/check_opf_declaration.py"], real["opf/tools/_opf_declaration.py"]
@@ -1951,6 +2030,14 @@ def _inputs():
         selftest, main_line, "\nfrom operator import not_ as _child_status_refusal_exit\n" + main_line))
     trees["gitleaks-entry-bare"] = ast.parse(_swap(real["tools/check_gitleaks_pin.py"],
                                                    CLI_ENTRY.format("check_gitleaks_pin.py"), "sys.exit(main())"))
+    # The rule-placement gate (a REPORT_ENTRY_NAMES copy) with its guard reverted out of the entry line, and with
+    # the guarded line spelled through sys.exit, which an armed execution-report run cannot finalize.
+    placement = real["tools/check_rule_placement.py"]
+    placement_entry = REPORT_ENTRY.format("check_rule_placement.py")
+    trees["placement-entry-bare"] = ast.parse(_swap(placement, placement_entry,
+                                                    "_selftest_exit_report.exit_with(main())"))
+    trees["placement-entry-sys-exit"] = ast.parse(_swap(placement, placement_entry,
+                                                        CLI_ENTRY.format("check_rule_placement.py")))
     trees["opf-entry-statement-drift"] = ast.parse(_swap(
         opf, "_ENTRY_STATEMENT = 'if sys.argv[1:] == [\"--self-test\"]:",
         "_ENTRY_STATEMENT = 'if sys.argv[1:] == [\"--selftest\"]:"))
@@ -1990,6 +2077,7 @@ def _inputs():
                       for name in _listdir(ROOT, WORKFLOWS_REL) if name.endswith((".yml", ".yaml")))
     here_line = 'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 2\n'
     texts = {
+        "baseline": real[RESIDUAL_BASELINE_REL],
         "runner": real[LOCAL_RUNNER], "runner-moved": _swap(real[LOCAL_RUNNER], probe_line, ""),
         "runner-prelude-launch": _swap(real[LOCAL_RUNNER], probe_line,
                                        "python3 -I -B tools/check_leaks.py\n" + probe_line),
@@ -2140,10 +2228,18 @@ def _vectors(module, trees, texts, canonical_tree):
         return m.copy_findings(key, trees[key], tmpl(), names)
 
     state_rel, gitleaks_rel = "opf/tools/_opf_adopt_state.py", "tools/check_gitleaks_pin.py"
+    placement_rel = "tools/check_rule_placement.py"
+    placement_bare = placement_rel + ": its __main__ entry is not exactly " + m.REPORT_ENTRY.format(
+        "check_rule_placement.py")
 
     def cli_copies(rel, key):
         """The CLI copies' leg 2 and 3 findings, every copy read from its real tree except rel, read from key's."""
         return m.cli_copy_findings(lambda each: trees[key] if each == rel else trees[each], tmpl())
+
+    def placement(key):
+        """The rule-placement gate's entry finding, its tree read from key (the whole CLI-copy loop is held by
+        entries/cli-entry-checked; this reads the one tree, as the loop would)."""
+        return m.cli_entry_finding(placement_rel, trees[key], "check_rule_placement.py")
 
     def raises(thunk):
         """True when thunk is cannot-evaluate; any other exception propagates, so the vector is not ok."""
@@ -2152,6 +2248,35 @@ def _vectors(module, trees, texts, canonical_tree):
         except m.CannotEvaluate:
             return True
         return False
+
+    def cannot(thunk):
+        """The cannot-evaluate reason thunk raises, or None when it returns."""
+        try:
+            thunk()
+        except m.CannotEvaluate as exc:
+            return str(exc)
+        return None
+
+    # Leg 7 over a synthetic baseline of three entries: the list as it stands, grown by one, with one entry swapped
+    # for another, and shrunk by one (with the baseline lowered in step, and left as it was).
+    base = ("tools/a.py", "tools/b.py", "tools/c.py")
+    grown, swapped, shrunk = base + ("tools/d.py",), ("tools/a.py", "tools/b.py", "tools/d.py"), base[:1] + base[2:]
+
+    def grew(rel):
+        return "{}: listed in DIRECT_LAUNCH_RESIDUAL but not in its baseline {}".format(rel, m.RESIDUAL_BASELINE_REL)
+
+    def kept(rel):
+        return "{}: in the baseline {} but no longer in DIRECT_LAUNCH_RESIDUAL".format(rel, m.RESIDUAL_BASELINE_REL)
+
+    def ratchet(residual, baseline):
+        """Leg 7's findings, each cut at its first ';' (the instruction that follows is not compared)."""
+        return [finding.split(";", 1)[0] for finding in m.ratchet_findings(residual, baseline)]
+
+    # Each a baseline the grammar refuses: unsorted, a duplicate, a blank line, a CR, an absolute path, a '..' and a
+    # '.' component, a comment after an entry, no final LF, not a .py path, and not UTF-8.
+    malformed = (b"tools/b.py\ntools/a.py\n", b"tools/a.py\ntools/a.py\n", b"tools/a.py\n\ntools/b.py\n",
+                 b"tools/a.py\r\n", b"/tools/a.py\n", b"tools/../a.py\n", b"./tools/a.py\n",
+                 b"tools/a.py\n# late\n", b"# head\ntools/a.py", b"tools/a.txt\n", b"tools/\xff.py\n")
 
     def shell(rel, key):
         return [finding.split(": ", 1)[1] for finding in m.shell_findings(rel, texts[key], m.SELF_ENTRIES)]
@@ -2227,6 +2352,8 @@ def _vectors(module, trees, texts, canonical_tree):
             state_rel + ": its self_test() does not start with " + m.SELF_TEST_GUARD.format("_opf_adopt_state.py")]),
         ("entries/cli-entry-checked", lambda: cli_copies(gitleaks_rel, "gitleaks-entry-bare") == [
             gitleaks_rel + ": its __main__ entry is not exactly " + m.CLI_ENTRY.format("check_gitleaks_pin.py")]),
+        ("entries/report-entry-checked", lambda: placement("placement-entry-bare") == placement_bare),
+        ("entries/report-entry-not-sys-exit", lambda: placement("placement-entry-sys-exit") == placement_bare),
         ("entries/self-test-entry-pinned", lambda: [finding.split(": ", 1)[0] for finding in cli_copies(
             m.ENTRY_STATEMENT_REL, "opf-entry-statement-drift")] == [m.ENTRY_STATEMENT_REL]),
         ("entries/cli-line-shape", lambda: m.cli_entry_finding("opf", trees["opf-entry-bare"], "opf.py") is not None),
@@ -2426,6 +2553,19 @@ def _vectors(module, trees, texts, canonical_tree):
         ("completeness/scan-follows-local-imports",
          lambda: reads_of("tools/new_reader.py")[0] == [("tools/helper_mod.py", "import subprocess")]),
         ("completeness/scan-clean-module", lambda: reads_of("tools/plain.py") == ([], [])),
+        ("ratchet/real-baseline-equal", lambda: m.ratchet_findings(
+            m.DIRECT_LAUNCH_RESIDUAL, m.baseline_entries(texts["baseline"].encode("utf-8"), "b")) == []),
+        ("ratchet/unchanged-passes", lambda: ratchet(base, base) == []),
+        ("ratchet/shrunk-and-lowered-passes", lambda: ratchet(shrunk, shrunk) == []),
+        ("ratchet/grown-is-finding", lambda: ratchet(grown, base) == [grew("tools/d.py")]),
+        ("ratchet/swapped-is-finding", lambda: ratchet(swapped, base) == [grew("tools/d.py"), kept("tools/c.py")]),
+        ("ratchet/baseline-not-lowered-is-finding", lambda: ratchet(shrunk, base) == [kept("tools/b.py")]),
+        ("ratchet/baseline-grammar-fails-closed", lambda: m.baseline_entries(
+            b"# head\n#\ntools/a.py\ntools/b.py\n", "b") == ("tools/a.py", "tools/b.py")
+         and m.baseline_entries(b"", "b") == () and m.baseline_entries(b"# none left\n", "b") == ()
+         and all(raises(lambda data=data: m.baseline_entries(data, "b")) for data in malformed)),
+        ("ratchet/missing-baseline-cannot-evaluate", lambda: cannot(lambda: m.evaluate(FAKE_ROOT))
+         == m.RESIDUAL_BASELINE_REL + ": missing"),
     )
 
     def rebound(form, named):
@@ -2577,6 +2717,8 @@ MUTANTS = (
      "finding = (None if rel in SELF_TEST_COPIES", "entries/self-test-entry-checked"),
     ("copy-loop-cli-entry", "                   else cli_entry_finding(rel, tree, name))", "                   else None)",
      "entries/cli-entry-checked"),
+    ("report-entry-form", "    if name in REPORT_ENTRY_NAMES:\n", "    if False:\n",
+     "entries/report-entry-not-sys-exit"),
     ("entry-statement-call", "finding = entry_statement_finding(rel, tree) if rel == ENTRY_STATEMENT_REL else None",
      "finding = None", "entries/self-test-entry-pinned"),
     ("entry-statement-compare",
@@ -2706,6 +2848,24 @@ MUTANTS = (
      "completeness/reviewed-variable-target-limit"),
     ("scan-closure", "                stack.append(target)\n", "                pass\n",
      "completeness/scan-follows-local-imports"),
+    ("ratchet-wired", "    findings, launched = residual_ratchet(root, residual), set()\n",
+     "    findings, launched = [], set()\n", "ratchet/missing-baseline-cannot-evaluate"),
+    ("ratchet-growth", "    for rel in sorted(listed - allowed):\n", "    for rel in ():\n",
+     "ratchet/grown-is-finding"),
+    ("ratchet-every-entry", "    for rel in sorted(listed - allowed):\n", "    for rel in sorted(listed):\n",
+     "ratchet/unchanged-passes"),
+    ("ratchet-headroom", "    for rel in sorted(allowed - listed):\n", "    for rel in ():\n",
+     "ratchet/baseline-not-lowered-is-finding"),
+    ("baseline-line-shape", "if not RESIDUAL_BASELINE_LINE_RE.fullmatch(line) or any(", "if False or any(",
+     "ratchet/baseline-grammar-fails-closed"),
+    ("baseline-dot-component", ' or any(part in (".", "..") for part in line.split("/")):', ":",
+     "ratchet/baseline-grammar-fails-closed"),
+    ("baseline-sorted", "        if entries and line <= entries[-1]:\n", "        if False:\n",
+     "ratchet/baseline-grammar-fails-closed"),
+    ("baseline-final-lf", '    if text and not text.endswith("\\n"):\n', "    if False:\n",
+     "ratchet/baseline-grammar-fails-closed"),
+    ("baseline-comment-leading", 'if line.startswith("#") and not entries:', 'if line.startswith("#"):',
+     "ratchet/baseline-grammar-fails-closed"),
 )
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "entries/entry-function-real-pass",
              "launchers/real-launchers-pass",
@@ -2789,9 +2949,15 @@ def _behaviour(probe, base):
             ("behaviour/import-complete-self-test-refuses", "opf/tools/_opf_import_complete.py", ("--self-test",)),
             ("behaviour/gitleaks-pin-refuses", "tools/check_gitleaks_pin.py", ()),
             ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ()),
-            ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ())):
+            ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ()),
+            ("behaviour/rule-placement-refuses", "tools/check_rule_placement.py", ()),
+            ("behaviour/rule-placement-self-test-refuses", "tools/check_rule_placement.py", ("--self-test",))):
         got = via("ignore", python + [str(ROOT / rel)] + list(args), cwd=str(ROOT))
         out.append((check_id, refused(got, Path(rel).name), got))
+    # The rule-placement gate under the default disposition still reads the repository and passes.
+    got = via("default", python + [str(ROOT / "tools/check_rule_placement.py")], cwd=str(ROOT))
+    out.append(("control/rule-placement-default-runs",
+                ran(got, 0, "PASS: rule placement conforms to the taxonomy") and got[2] == "", got))
     for check_id, rel, marker in (("control/opf-cli-default-runs", "opf/tools/opf.py", "opf: the OPFiles"),
                                   ("control/launcher-cli-default-runs", "tools/check_selftest_execution.py",
                                    "usage: check_selftest_execution.py"),
@@ -2891,6 +3057,65 @@ def _behaviour(probe, base):
     runner = _copy(LOCAL_RUNNER, tree, _swap(text, RUNNER_PROBES[0][1] + "\n", ""))
     got = via("ignore", ["bash", str(runner)], cwd=str(tree))
     out.append(("revert/runner-probe-removed-red", got[0] == 0 and "RESULT: PASS" in got[1], got))
+
+    # Leg 7 reads its baseline only as a regular file, never through a final symlink: a symlink to a regular copy of
+    # the real baseline, a FIFO, a directory and an unreadable file (mode 000, its open also refused with EACCES so
+    # the vector holds whoever runs it) each stop a copy of this gate with exit 2, naming the baseline. Each refusal
+    # removed from a copy of the reader turns its vector red: the symlink is followed and the FIFO read as an empty
+    # baseline (the run goes on to its next input, absent from the copy), the directory fails only at its read, and
+    # the refused open escapes as an uncaught error (exit 1).
+    reader = (ROOT / "tools/check_entry_guard.py").read_text(encoding="utf-8")
+    baseline_text = (ROOT / RESIDUAL_BASELINE_REL).read_text(encoding="utf-8")
+    deny = ("_open = os.open\n", "def _open(path, flags):\n    if path.endswith({!r}):\n        raise PermissionError("
+            "errno.EACCES, \"open refused by the self-test\")\n    return os.open(path, flags)\n".format(
+                "/" + RESIDUAL_BASELINE_REL))
+    nofollow = ("OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC\n",
+                "OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC\n")
+    regular = ("        if not stat.S_ISREG(os.fstat(fd).st_mode):\n"
+               "            raise CannotEvaluate(\"{}: not a regular file\".format(label))\n", "")
+    opened = ("        raise CannotEvaluate(\"{}: cannot open ({})\".format(label, type(exc).__name__))\n",
+              "        raise\n")
+
+    def stopped(reason):
+        return 2, "", "error: cannot evaluate child-status coverage ({}); fail-closed\n".format(reason)
+
+    def baseline_gate(name, case, edits):
+        """A copy of this gate and the modules it imports, its reader edited by edits, its baseline made case."""
+        tree = Path(base) / name
+        for rel in ("tools/_selftest_exit_report.py", "tools/check_ci_parity.py", "tools/check_python_floor.py",
+                    "tools/check_selftest_execution.py", CANONICAL_REL):
+            _copy(rel, tree)
+        text = reader
+        for old, new in edits:
+            text = _swap(text, old, new)
+        _copy("tools/check_entry_guard.py", tree, text)
+        path = tree / RESIDUAL_BASELINE_REL
+        if case == "symlink":
+            _copy(RESIDUAL_BASELINE_REL + ".target", tree, baseline_text)
+            path.symlink_to(path.name + ".target")
+        elif case == "fifo":
+            os.mkfifo(path)
+        elif case == "directory":
+            path.mkdir()
+        else:
+            _copy(RESIDUAL_BASELINE_REL, tree).chmod(0)
+        return _copy(COVERAGE_REL, tree)
+
+    for case, edits, reason, flip, flipped in (
+            ("symlink", (), "is a symlink (refused)", nofollow, stopped("opf/tools/opf.py: missing")),
+            ("fifo", (), "not a regular file", regular, stopped("opf/tools/opf.py: missing")),
+            ("directory", (), "not a regular file", regular,
+             stopped(RESIDUAL_BASELINE_REL + ": unreadable (IsADirectoryError)")),
+            ("unreadable", (deny,), "cannot open (PermissionError)", opened, None)):
+        refusal = stopped(RESIDUAL_BASELINE_REL + ": " + reason)
+        gate = baseline_gate("baseline-" + case, case, edits)
+        got = via("default", python + [str(gate)], cwd=str(gate.parents[1]))
+        out.append(("behaviour/baseline-{}-refused".format(case), got == refusal, got))
+        gate = baseline_gate("baseline-{}-flipped".format(case), case, edits + (flip,))
+        got = via("default", python + [str(gate)], cwd=str(gate.parents[1]))
+        red = (got == flipped if flipped is not None else got[0] == 1 and got[1] == ""
+               and got[2].endswith("PermissionError: [Errno 13] open refused by the self-test\n"))
+        out.append(("revert/baseline-{}-refusal-removed-red".format(case), got != refusal and red, got))
 
     # The --self-test statement of opf/tools/_opf_declaration.py runs before its guard, so that launch is unguarded:
     # run it under the process-creation audit, which must record no launch, in its report or its record stream;
@@ -3028,7 +3253,8 @@ def self_test(lane, report_path=None):
                                 ("entries/self-test-guard-missing", 0), ("entries/self-test-decorated", 0),
                                 ("entries/self-test-rebound-assign", 0), ("entries/self-test-rebound-lambda", 0),
                                 ("entries/self-test-rebound-import", 0), ("entries/self-test-entry-checked", 0),
-                                ("entries/cli-entry-checked", 0), ("entries/self-test-entry-pinned", 0),
+                                ("entries/cli-entry-checked", 0), ("entries/report-entry-checked", 0),
+                                ("entries/report-entry-not-sys-exit", 0), ("entries/self-test-entry-pinned", 0),
                                 ("entries/cli-line-shape", 0),
                                 ("entries/cli-extra-statement", 0), ("entries/main-exit-skips-argument", 0),
                                 ("entries/main-exit-tuple-rebind", 0), ("entries/main-exit-list-rebind", 0),
@@ -3103,7 +3329,12 @@ def self_test(lane, report_path=None):
                                 ("completeness/reviewed-load-target-pinned", 0),
                                 ("completeness/reviewed-variable-target-limit", 0),
                                 ("completeness/scan-follows-local-imports", 0),
-                                ("completeness/scan-clean-module", 0)):
+                                ("completeness/scan-clean-module", 0), ("ratchet/real-baseline-equal", 0),
+                                ("ratchet/unchanged-passes", 0), ("ratchet/shrunk-and-lowered-passes", 0),
+                                ("ratchet/grown-is-finding", 0), ("ratchet/swapped-is-finding", 0),
+                                ("ratchet/baseline-not-lowered-is-finding", 0),
+                                ("ratchet/baseline-grammar-fails-closed", 0),
+                                ("ratchet/missing-baseline-cannot-evaluate", 0)):
             check(check_id, vectors.get(check_id), sorted(key for key, ok in vectors.items() if not ok))
         # One vector per REBINDINGS form for _entry and for the guard function, each id written out.
         for check_id, _kind in (("entries/entry-rebound-tuple", 0), ("copies/guard-rebound-tuple", 0),
@@ -3171,6 +3402,9 @@ def self_test(lane, report_path=None):
                                 ("behaviour/import-complete-self-test-refuses", 0),
                                 ("behaviour/gitleaks-pin-refuses", 0), ("behaviour/must-deliver-refuses", 0),
                                 ("behaviour/verifier-delivery-refuses", 0),
+                                ("behaviour/rule-placement-refuses", 0),
+                                ("behaviour/rule-placement-self-test-refuses", 0),
+                                ("control/rule-placement-default-runs", 0),
                                 ("control/opf-cli-default-runs", 0),
                                 ("control/launcher-cli-default-runs", 0), ("control/coverage-gate-default-runs", 0),
                                 ("behaviour/opf-declaration-cli-refuses", 0), ("behaviour/declaration-gate-refuses", 0),
@@ -3186,6 +3420,13 @@ def self_test(lane, report_path=None):
                                 ("revert/launcher-guard-removed-red", 0), ("revert/opf-guard-removed-red", 0),
                                 ("revert/hook-guard-removed-red", 0), ("revert/probe-guard-removed-red", 0),
                                 ("revert/coverage-guard-removed-red", 0), ("revert/runner-probe-removed-red", 0),
+                                ("behaviour/baseline-symlink-refused", 0),
+                                ("revert/baseline-symlink-refusal-removed-red", 0),
+                                ("behaviour/baseline-fifo-refused", 0), ("revert/baseline-fifo-refusal-removed-red", 0),
+                                ("behaviour/baseline-directory-refused", 0),
+                                ("revert/baseline-directory-refusal-removed-red", 0),
+                                ("behaviour/baseline-unreadable-refused", 0),
+                                ("revert/baseline-unreadable-refusal-removed-red", 0),
                                 ("behaviour/opf-declaration-self-test-launches-nothing", 0),
                                 ("behaviour/audit-reports-multiprocessing-launch", 0),
                                 ("revert/audit-fork-exec-unrecorded-red", 0),
