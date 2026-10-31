@@ -5724,6 +5724,15 @@ canonical-text = "Retiring, splitting, merging, or removing items from a record 
 source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
 
 [[clause]]
+clause-id = "setcmp.11"
+corpus-id = "setcmp"
+source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
+start-line = 37
+end-line = 40
+canonical-text = "A partial statement scoped to what was\nactually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a\nnamed, closed set, such as that all three of the listed modules pass, are not completeness claims and carry\nno added burden."
+source-digest = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
+
+[[clause]]
 clause-id = "expbnd.1"
 corpus-id = "expbnd"
 source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"

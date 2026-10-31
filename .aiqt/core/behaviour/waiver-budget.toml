@@ -1,0 +1,10 @@
+# .aiqt/core/behaviour/waiver-budget.toml: the per-change ceilings on live waiver rows.
+#
+# tools/check_rule_behaviour.py reads these ceilings from the BASE revision only, so a raise takes effect in
+# the change after the one that lands it, and a change that edits this file may append no waiver. A
+# missing file or key is a ceiling of 0. By convention a raise carries the maintainer's recorded approval
+# in its change; the gate cannot authenticate that approval.
+wording-only-per-change = 0
+unencoded-per-change = 0
+anchor-only-per-change = 0
+non-clause-text-per-change = 0

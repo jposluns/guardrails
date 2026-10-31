@@ -496,6 +496,10 @@ CONFIG_EXCLUSIONS = {
             "A bare launch is a real timing measurement of the shipped hooks, not a self-test:"
             " minutes at its defaults, and the hooks' own git calls drop GIT_CONFIG_NOSYSTEM by"
             " design; its self-test stays in this roster as the hook-latency-selftest suite step.",
+        ("tools/check_rule_behaviour.py",):
+            "A bare launch is the live gate over the working tree, not a self-test: it builds no"
+            " fixture and runs no git without --base or a retro case, so the lane has nothing to"
+            " observe; its self-test stays in this roster as the rule-behaviour-selftest suite step.",
         ("tools/check_internal_names.py",):
             "A bare launch is the real gate over this checkout, whose tracked-file read drops the"
             " GIT_* environment but deliberately keeps the caller's on-disk configuration (where"
@@ -989,13 +993,14 @@ def _config_poison_fixture(base):
 # pass or fail depends on this bound. This lane asks a different question (does the
 # member stay clean under injected caller hooks, ignore files, attributes and fsmonitor). The
 # roster is every registered self-test except CONFIG_EXCLUSIONS["all"] (the four git-fixture-env
-# suite runners and the bare hook-latency measurement, whose self-test stays in the roster as its
-# --suite step); the combined and system lanes rerun every roster member, the malformed lane
-# every one outside CONFIG_EXCLUSIONS["malformed"], the fsmonitor pass four of them under
-# --self-test (its _run_config_member calls), and the bound caps how long one stalled rerun can
-# hold that answer back. Cutting a rerun short leaves the question unanswered, never answered
-# wrongly: reaching the bound is cannot-evaluate (exit 2 when nothing definite was found), never a
-# FAIL of that member and never a pass.
+# suite runners, the bare hook-latency measurement, the bare rule-behaviour gate and the bare
+# internal-names gate, whose self-tests stay in the roster as their --suite steps); the combined
+# and system lanes rerun every roster member, the malformed lane every one outside
+# CONFIG_EXCLUSIONS["malformed"], the fsmonitor pass four of them under --self-test (its
+# _run_config_member calls), and the bound caps how long one stalled rerun can hold that answer
+# back. Cutting a rerun short leaves the question unanswered, never answered wrongly: reaching the
+# bound is cannot-evaluate (exit 2 when nothing definite was found), never a FAIL of that member
+# and never a pass.
 #
 # SIZING. MEASURED (2026-10-12, 24-CPU host, nice 10, every bound lifted to 10800 s): the suite's
 # own _config_results (four workers, run through main() with its lanes replaced) under the combined
@@ -1083,6 +1088,9 @@ def _config_poison_fixture(base):
 # standalone runs, no config-lane time known): it carries a SIZING_LATER_MEASURED entry and its own
 # entry below, sized outside SIZING by the SIZING formula; the other three still have no recorded
 # time.
+# The rule-behaviour change registers one more member, outside the account and with no recorded
+# time: tools/check_selftest_execution.py --suite rule-behaviour-selftest (the bare runner that
+# step expands to, tools/check_rule_behaviour.py, is a CONFIG_EXCLUSIONS["all"] entry).
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5

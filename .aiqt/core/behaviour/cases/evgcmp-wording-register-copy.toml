@@ -1,0 +1,16 @@
+id = "evgcmp-wording-register-copy"
+summary = "A wording fix that exempts the clause register's copy as history is incomplete."
+kind = "case"
+clauses = ["evgcmp.15"]
+
+[scenario]
+op = "wording-fix"
+probe = ["derived-from-correction", "validated-against-correction", "matches-across-line-wraps", "matches-across-escapes"]
+instances = [
+  { where = "rule", form = "operative", disposition = "fixed" },
+  { where = "register-copy", form = "operative", disposition = "exempt:history" },
+  { where = "changelog-quote", form = "quotation", disposition = "exempt:history" },
+]
+
+[expect]
+head = "REJECT instance:dispositioned:register-copy"

@@ -1009,6 +1009,26 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_child_status_coverage.py
 
+      - name: Rule-behaviour self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite rule-behaviour-selftest
+      # A pull_request binds against its target branch. A push judges every commit on HEAD's first-parent
+      # chain after the event's before, each against its own first parent, so a rule edit in any pushed
+      # commit needs its case; a before that does not resolve (the zero id included), is not on that
+      # chain, or leaves no commit fails closed. CI runs no bare leg (a CI parity local-only exception).
+      - name: Rule-behaviour gate
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_rule_behaviour.py --base "origin/${GITHUB_BASE_REF}"
+          else
+            python3 -I -B tools/check_rule_behaviour.py --base "$PUSH_BEFORE" --each-commit
+          fi
+
       - name: OPF declaration self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest

@@ -29,11 +29,6 @@ reason = "Scope note for setcmp.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "setcmp"
-text = "A partial statement scoped to what was\nactually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a\nnamed, closed set, such as that all three of the listed modules pass, are not completeness claims and carry\nno added burden."
-reason = "Scope carve-out bounding setcmp.1; a permission, not an obligation."
-
-[[exempt]]
-corpus-id = "setcmp"
 text = "The enumeration\nrequirement attaches to a quantifier that asserts the whole set, and the higher bar attaches only to a claim\nthat reduces work."
 reason = "Scope note restating where setcmp.1 and setcmp.4 apply; it adds no obligation."
 

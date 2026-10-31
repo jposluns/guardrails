@@ -1,0 +1,16 @@
+id = "evgcmp-wording-probe-misses-escapes"
+summary = "A wording fix whose probe does not match across escapes has not shown that it found every instance."
+kind = "case"
+clauses = ["evgcmp.15"]
+
+[scenario]
+op = "wording-fix"
+probe = ["derived-from-correction", "validated-against-correction", "matches-across-line-wraps"]
+instances = [
+  { where = "rule", form = "operative", disposition = "fixed" },
+  { where = "register-copy", form = "operative", disposition = "fixed" },
+  { where = "changelog-quote", form = "quotation", disposition = "exempt:history" },
+]
+
+[expect]
+head = "REJECT instance:probed"

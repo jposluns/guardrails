@@ -1,0 +1,17 @@
+id = "evgcmp-wording-register-copy-fixed"
+summary = "The same wording fix with the register copy fixed is complete."
+kind = "control"
+controls = "evgcmp-wording-register-copy"
+delta = ["instances"]
+
+[scenario]
+op = "wording-fix"
+probe = ["derived-from-correction", "validated-against-correction", "matches-across-line-wraps", "matches-across-escapes"]
+instances = [
+  { where = "rule", form = "operative", disposition = "fixed" },
+  { where = "register-copy", form = "operative", disposition = "fixed" },
+  { where = "changelog-quote", form = "quotation", disposition = "exempt:history" },
+]
+
+[expect]
+head = "ACCEPT"

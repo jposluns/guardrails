@@ -1,0 +1,11 @@
+id = "setcmp-bounded-named-set"
+summary = "A bounded claim over a named, closed set carries no enumeration burden."
+kind = "case"
+clauses = ["setcmp.11"]
+
+[scenario]
+claim = "bounded"
+named-set = { members = ["module-a", "module-b", "module-c"], count = 3 }
+
+[expect]
+head = "ACCEPT"

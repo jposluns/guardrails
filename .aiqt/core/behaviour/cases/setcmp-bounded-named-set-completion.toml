@@ -1,0 +1,12 @@
+id = "setcmp-bounded-named-set-completion"
+summary = "The same claim made as a completion-class claim needs the enumeration and the count."
+kind = "control"
+controls = "setcmp-bounded-named-set"
+delta = ["claim"]
+
+[scenario]
+claim = "completion"
+named-set = { members = ["module-a", "module-b", "module-c"], count = 3 }
+
+[expect]
+head = "REJECT count:reconciled set:enumerated"

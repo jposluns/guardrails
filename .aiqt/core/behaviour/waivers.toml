@@ -1,0 +1,13 @@
+# .aiqt/core/behaviour/waivers.toml: the review-waiver log tools/check_rule_behaviour.py reads.
+#
+# Append-only. Each [[waiver]] row records a reviewer's acceptance of one change that no case binds; it is
+# never behavioural evidence. A row is live only in the change that appends it: once that change merges,
+# the row is carried in every later base and discharges nothing. A carried row is never edited, deleted,
+# reordered or preceded by an inserted row. A new row whose transition repeats an earlier row's names that
+# row in repeats and counts as a fresh review against the base ceiling.
+#
+# Clause rows: id, kind (wording-only, unencoded or anchor-only), target, base-sha256, head-sha256,
+# base-anchor-sha256, head-anchor-sha256 (each a SHA-256 or "absent"), optional repeats (and, for a
+# wording-only removal, successor), and reason. Range rows tile prose residue outside clause text: id,
+# kind = "non-clause-text", path, side, start, end, bytes-sha256, base-file-sha256, head-file-sha256,
+# category (frontmatter, heading or whitespace), optional repeats, and reason.

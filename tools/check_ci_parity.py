@@ -789,6 +789,26 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_rule_behaviour.py --base <ref:origin/${GITHUB_BASE_REF}>",
+        "reason": (
+            "CI binds rule edits against the pull request's target branch, "
+            "derived from trusted event context; the bare leg runs locally only."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_rule_behaviour.py --base <ref:$PUSH_BEFORE> --each-commit",
+        "reason": (
+            "The push CI job supplies the event's before OID so the gate judges "
+            "every first-parent commit the push adds, each against its own "
+            "parent; there is no local push context, so this form is CI-only "
+            "by design."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": (
             "tools/check_branch_root.py --protected <ref:origin/${GITHUB_BASE_REF}> --head <ref:$PR_HEAD_SHA> --max-lag 200"
         ),
@@ -881,6 +901,17 @@ ALLOWLIST = (
             "The bare staleness leg is the only branch-root form that runs "
             "locally; CI always supplies a runtime-derived --protected ref, so "
             "the bare form is local-only by design."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "local-only",
+        "identity": "tools/check_rule_behaviour.py",
+        "reason": (
+            "The bare form, with binding not applicable, is the local leg; CI "
+            "always binds, a pull_request against its target branch and a push "
+            "commit by commit from the event's before, so the bare form is "
+            "local-only by design."
         ),
         "backlog": "GD-123",
     },

@@ -1,0 +1,40 @@
+# .aiqt/core/behaviour/obligations.toml: the obligation table tools/check_rule_behaviour.py reads.
+#
+# One [[row]] per encoded obligation. clause-id names a clause in .aiqt/core/clauses.toml and text-sha256
+# is the SHA-256 of that clause's canonical-text there, so a wording change to the clause makes the row
+# STALE until the row is re-reviewed. kind is require, exempt or limit; when is the set of scenario facts
+# that triggers the row; the one effect key of its kind lists atoms (require: require, exempt: suppresses,
+# limit: cancels). A require row may carry params: exempt-vocab (the exemption labels the clause names),
+# never-exempt (surfaces no label may exempt) and exempt-on (the label and surface pairs a label may
+# exempt). An encoding is a reviewed reading of the prose, not the prose: the gate checks the table against
+# its cases and binds clause edits to decision changes, and never shows that a row means what its clause
+# means.
+
+[[row]]
+clause-id = "setcmp.1"
+text-sha256 = "6542a406d95e3e0e3e7141100a3ab09fdc2d1d45b39329ef028fe8f69ae69f01"
+kind = "require"
+when = ["claim:completion"]
+require = ["set:enumerated"]
+
+[[row]]
+clause-id = "setcmp.3"
+text-sha256 = "597058af117b0223803679702326230bcec0e3e713f9ddf756fb5738004eaaae"
+kind = "require"
+when = ["claim:completion"]
+require = ["count:reconciled"]
+
+[[row]]
+clause-id = "setcmp.11"
+text-sha256 = "e2b656a551db1de7b244982f2b403e8e11f75c2e530939bb321c89169248ade0"
+kind = "exempt"
+when = ["claim:bounded"]
+suppresses = ["set:enumerated", "count:reconciled", "item:accounted"]
+
+[[row]]
+clause-id = "evgcmp.15"
+text-sha256 = "d2723c3d54b65d5d8b892603b14fc40f4c87a0a170c9ed7dcc78b8822d69b6a8"
+kind = "require"
+when = ["fix:wording"]
+require = ["instance:dispositioned"]
+params = { exempt-vocab = ["history", "warning"], never-exempt = ["register-copy"], exempt-on = [{ label = "history", where = "changelog-quote" }, { label = "history", where = "mistakes-register" }, { label = "warning", where = "correction-note" }] }

@@ -11,13 +11,13 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
-     tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
-     (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
-     and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
-     for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
-     name reaches the copy. The binding count (_bindings) is the one binding counter of legs 2 and 3; it is a
-     static walk of
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
+     tools/check_verifier_delivery.py and tools/check_rule_behaviour.py), in opf/tools/_opf_declaration.py and
+     tools/check_opf_declaration.py (the constant and both functions) and in the hooks dispatcher and its
+     generated plugin copy (the constant and the probe) are each bound exactly once at module scope, by one
+     top-level definition (an undecorated one for a function), and AST-identical (ast.dump, docstrings
+     included) to the canonical text, so a call by that name reaches the copy. The binding count (_bindings) is
+     the one binding counter of legs 2 and 3; it is a static walk of
      every node that runs in the module's own scope: nested if, try, with, for, while and match blocks, tuple,
      list and starred targets, walrus, for, with-as, except-as and match names, import and from-import aliases
      (a star import counts), del, and a global declaration of the name in any function. Every attribute or
@@ -226,7 +226,8 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
-              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
+              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
+              ("tools/check_rule_behaviour.py", "check_rule_behaviour.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
 ENTRY_COPIES = (("tools/check_opf_declaration.py", "check_opf_declaration.py"),)

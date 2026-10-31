@@ -1,0 +1,12 @@
+id = "setcmp-bounded-open-set-closed"
+summary = "The same claim stating the size of its listing is over a closed set and carries no added burden."
+kind = "control"
+controls = "setcmp-bounded-open-set"
+delta = ["named-set"]
+
+[scenario]
+claim = "bounded"
+named-set = { members = ["module-a", "module-b", "module-c"], count = 3 }
+
+[expect]
+head = "ACCEPT"
