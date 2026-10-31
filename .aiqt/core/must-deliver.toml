@@ -4,9 +4,10 @@
 # A removal is a reviewed change that the gate does not block: the schema has no field
 # that could record an approval, so review must judge it.
 # warn-margin-bytes: the gate prints a WARNING (still exit 0) when the tightest listed
-# margin drops under this figure. When this was written the tightest margin was already
-# below it (cmtidn, 8 bytes inside the cap), so every run warns; 512 is kept so a tight
-# margin stays visible rather than being tuned away. The gate prints the live margins.
+# margin drops under this figure; 512 is kept so a tight margin stays visible rather than
+# being tuned away. The gate prints the live margins. tools/gen_agents.py places every
+# listed rule right after the apex, ahead of every unlisted rule, so only the AGENTS.md
+# header and the listed rules' own text use up the margin.
 format-version = 1
 warn-margin-bytes = 512
 

@@ -17,7 +17,8 @@ rule, so it is not an obligation identifier here; the slug is a path component, 
 
 Rule span. tools/gen_agents.py renders AGENTS.md as a fixed header followed by each rule's body
 (gen_agents.body_of: the source text after the front matter, stripped, its title demoted one level) in
-gen_agents.sort_key order, the bodies separated by blank lines; the block registry
+gen_agents.ordered_pairs order (the apex, then the rules .aiqt/core/must-deliver.toml lists, then the
+rest, each group in gen_agents.sort_key order), the bodies separated by blank lines; the block registry
 (.aiqt/core/adapter-blocks.toml, composed by tools/_adapter_compose.py) may wrap that rule region in an
 AIQT-RULES block with reviewed blocks before or after it. A rule's span is the byte range of that body,
 UTF-8 encoded, inside the AGENTS.md bytes. It is located only after AGENTS.md is proven to be
@@ -85,7 +86,8 @@ RULES_PARTS = (".aiqt", "core", "rules")
 # it does not affect what this generator produces. No RENDERER_DECL: this is not an adapter renderer.
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/release/first-pin-demonstration.toml", "kind": "file",
-     "sources": ("AGENTS.md", ".aiqt/core/rules/", ".aiqt/core/adapter-blocks.toml"),
+     "sources": ("AGENTS.md", ".aiqt/core/rules/", ".aiqt/core/adapter-blocks.toml",
+                 ".aiqt/core/must-deliver.toml"),
      "regenerate": "python3 tools/gen_first_pin_demo.py"},
 )
 
@@ -177,8 +179,8 @@ def measure(root):
         raise DemoError("the rule corpus {} {} (cannot evaluate)".format("/".join(RULES_PARTS), problem))
     if not dir_present(src_dir, root=root):
         raise DemoError("the rule corpus {} is absent".format("/".join(RULES_PARTS)))
-    pairs = [(src, fm) for src, fm, _ in load_corpus(src_dir)]
-    pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
+    pairs = gen_agents.ordered_pairs([(src, fm) for src, fm, _ in load_corpus(src_dir)],
+                                     gen_agents.must_deliver_ids(src_dir.parent))
     composed = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, [gen_agents.body_of(src) for src, _ in pairs],
                                        adapter_compose.load_registry(root))
     if composed.data != agents:
@@ -300,8 +302,8 @@ def _write_tree(root, specs, registry=None, blocks=()):
     for _bid, _target, _position, _order, source, text in blocks:
         (root / source).parent.mkdir(parents=True, exist_ok=True)
         (root / source).write_text(text, encoding="utf-8")
-    pairs = [(src, fm) for src, fm, _ in load_corpus(rdir)]
-    pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
+    pairs = gen_agents.ordered_pairs([(src, fm) for src, fm, _ in load_corpus(rdir)],
+                                     gen_agents.must_deliver_ids(rdir.parent))
     raw = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, [gen_agents.body_of(src) for src, _ in pairs],
                                   adapter_compose.load_registry(root)).data
     (root / AGENTS_REL).write_bytes(raw)

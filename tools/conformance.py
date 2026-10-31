@@ -236,8 +236,9 @@ def _agents_drift(root, corpus):
         return (NA, "no AGENTS.md surface installed")
     try:
         registry = adapter_compose.load_registry(root, absent_is_legacy=True)
+        first = gen_agents.must_deliver_ids(root / ".aiqt" / "core")  # AGENTS.md alone puts these first
         content = adapter_compose.compose(gen_agents.AGENTS_REL, gen_agents.HEADER,
-                                          gen_agents.ordered_bodies(corpus), registry).data
+                                          gen_agents.ordered_bodies(corpus, first), registry).data
         current = out.read_bytes()
         current.decode("utf-8")  # an undecodable AGENTS.md is MALFORMED, as before the raw-byte compare
     except (ValueError, OSError) as exc:
