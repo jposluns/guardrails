@@ -5,7 +5,14 @@
 # self-contained subset the opf-standalone-closure gate exercises in physical isolation.
 # Never pipe this to a truncating sink: a masked exit code defeats the gate.
 set -uo pipefail
-here="$(cd "$(dirname "$0")" && pwd)" || exit 2
+# This script's directory, resolved in checked steps: a dirname that fails or prints nothing exits 2
+# here, before any gate. "$dir/." makes an empty name the filesystem root in every shell, never the
+# calling directory, so only the empty-name check stands between it and a gate run from /. CDPATH is
+# cleared for the cd, as in opf/enforcement/ci/opf-ci.sh: a relative start would otherwise resolve
+# through a CDPATH entry, and cd PRINTS a CDPATH match, adding a second line to here.
+dir=$(dirname -- "$0") || exit 2
+[ -n "$dir" ] || exit 2
+here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2
 
 # Each gate launches isolated: `python3 -I -B <opf/tools>/<gate>.py`. `-I` (isolated mode) drops the
 # script's own directory from sys.path so a tool-written sibling cannot shadow a stdlib import; `-B`
