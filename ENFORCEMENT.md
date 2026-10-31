@@ -17,7 +17,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Preview only | 2 |
 | Preview only, partial | 0 |
 | Pending | 0 |
-| No control | 90 |
+| No control | 91 |
 
 ## Rules
 
@@ -48,6 +48,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Cut branches from the live protected line and re-home after a rewrite | `brnrot` | Gate-linked (class c only), partial | `gate:branch-root`, class c; `hook:branch-root-guard`, class c |
 | A check fails closed on input it cannot read | `chkfcl` | No control | No shipped control cites this rule. |
 | Commit identity | `cmtidn` | Hook-linked | `hook:commit-identity`, class b |
+| A consumer follows its producer | `cnsprd` | No control | No shipped control cites this rule. |
 | Bind to the explicit target, not the ambient context | `expbnd` | Hook-linked | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
 | Gate discipline | `gatdis` | Gate-linked (class c only) | `gate:ci-parity`, class c; `gate:relied-exit-pipes`, class c; `hook:gate-weakening-guard`, class b |
 | A generated artefact is changed only through its source | `gensrc` | Gate-linked (class a) | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:char-policy-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:first-pin-demo-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:install-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |

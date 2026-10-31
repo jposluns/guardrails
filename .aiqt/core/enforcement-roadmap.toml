@@ -118,6 +118,11 @@ status = "enforced"
 mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
 
 [[rule]]
+corpus-id = "cnsprd"
+status = "none"
+mechanisms = []
+
+[[rule]]
 corpus-id = "cnstpr"
 status = "enforced"
 mechanisms = ["hook:constraint-reread"]
