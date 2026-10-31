@@ -19,3 +19,7 @@ divergence as a finding to resolve rather than a discrepancy to leave standing. 
 against observed reality, not the record's own last-known value, so a record can never certify itself
 current merely because nothing has updated it. A reconciliation preserves every committed record section
 or explicitly marks a supersession.
+
+An open finding records its last validated revision and evidence; reconciliation flags missing,
+unresolvable, or noncurrent revisions, and before reliance a cited check or direct probe at the line's
+observed current tip records the tested revision and result, closing only on evidence of resolution.

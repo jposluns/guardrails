@@ -10,3 +10,6 @@ conversation, is the source of truth: a decision that is not recorded did not ha
 A brief or record stating review or fix rounds used or allowed cites durable round records for usage and
 the recorded governing rule or authorized decision for the limit, reporting a missing or conflicting
 basis as unresolved rather than substituting memory.
+
+Pending records stay durable without obstructing synchronization of the checkout tracking the protected
+line; versioned records enter through reviewed integration.

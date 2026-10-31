@@ -14,3 +14,7 @@ re-homed on the same terms. On git the signal is the merge base between the prot
 branch: where it resolves to a commit the branch is rooted, and where it resolves to nothing the branch
 is orphaned. The check that asserts this derives the protected ref from the repository it runs in and
 fails closed when that ref, or the revision under check, cannot be resolved.
+
+Before branching or validation requiring the current protected line, the base is verified against its
+authoritative tip; a failed, declined, or skipped resync is surfaced, and work needing freshness is
+withheld until verified.
