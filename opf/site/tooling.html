@@ -149,6 +149,24 @@
       at posluns.dev/hashes.txt for that release. Refuse on a mismatch or missing evidence; the presence
       of this instruction does not establish that a reference is currently available.</p>
     <p>Publishing a verifiable signature alongside releases is a roadmap item.</p>
+    <p>The reference tooling declares its release identity and the <code>spec_version</code>, homes
+      generation, and worklog storage generation it supports (OPF-SPEC section 16.1) in one file, the
+      declaration file <code>opf/tools/opf-declaration.toml</code>. The shipped-file digest is carried in
+      <code>opf/tools/_opf_declaration.py</code> as <code>SHIPPED_DECLARATION_SHA256</code>. This release
+      declares:</p>
+    <div class="tree"><pre id="opf-declaration">
+release = "1.0.5"
+spec_version = "1.2.0"
+homes = 1
+worklog = 1
+</pre></div>
+    <p>Before <code>render</code>, <code>doctor</code>, <code>init</code>, <code>absorb</code>,
+      <code>record</code>, or <code>adopt</code> resolves a store, the tooling checks the installed copy of
+      that file against that digest and against its own build. A copy that is absent, unreadable, altered,
+      malformed, or contradictory refuses the command with exit 2 before any store is resolved.
+      <code>python3 -I -B opf/tools/opf.py --declaration</code> runs that check alone and prints the report:
+      the declaration as shipped, both digests, and the runtime result. <code>opf doctor</code> appends
+      the same report.</p>
   </div>
 </section>
 
