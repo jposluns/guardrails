@@ -422,13 +422,6 @@ ALLOWLIST = (
      "self-test harness: exec_module loads a private copy of the repository's own _opf_emit.py"
      " beside this file (or a vector's literal mutant source), never registered in sys.modules,"
      " the equivalent of an import; no external input"),
-    ("opf/tools/opf.py", "_cli_self_test._import_leg", "code", 5,
-     "self-test probes: types.FunctionType rebinds the repository's own _cmd_import code object"
-     " (or a planted swap of it compiled from this file's own source) to a probe namespace, and"
-     " the builtins module is planted as a probe namespace value; no external input"),
-    ("opf/tools/opf.py", "_cli_self_test._import_leg", "shell", 2,
-     "self-test deny table: (module, name) seams patched to refuse process and file effects"
-     " (subprocess.Popen and os names from a fixed literal tuple); replaced, never called"),
     ("tools/check_instruction_budget.py", "_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own production source with"
      " one reviewed literal substitution; no external input"),

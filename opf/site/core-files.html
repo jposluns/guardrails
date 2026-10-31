@@ -513,7 +513,7 @@
       <p>The standard describes acquisition before mutation and release at clean close or after
         reconciliation of a dead run. Implemented coverage is narrower: <code>opf record</code> claims
         a lease, and <code>opf doctor</code> validates its shape when present.
-        The retired <code>opf import</code> modes refuse before any write and take no lock.
+        The read-only <code>opf import</code> verbs make no store change and take no lease or lock.
         <code>opf init</code> holds the lease, under the shared operation lock, only while it writes
         the store, removes the lease and releases the lock before it reports success, and clears a
         dead run's leftover lock record only with <code>--recover</code>. <code>opf sync</code>

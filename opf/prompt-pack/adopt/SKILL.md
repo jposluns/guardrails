@@ -44,7 +44,7 @@ Three rules govern everything else:
 | Apply | `opf adopt apply` | not yet executable: refuses with exit 2 |
 | Complete | `opf adopt complete` | not yet executable: refuses with exit 2 |
 | Reconcile | `opf adopt reconcile [--root DIR]` | not yet executable: not enabled at base 2.0.0, so it refuses with exit 2, reading and writing nothing (section 2) |
-| Import | `opf record import --batch`; `opf import --prompt`, `--status`, `--verify` (procedure: `import/SKILL.md`) | not yet executable: `opf record` has no `import` subcommand, and `opf import` refuses every argument with exit 2 |
+| Import | `opf record import --batch`; `opf import --prompt`, `--status`, `--verify` (procedure: `import/SKILL.md`) | partly executable: the read-only `opf import` verbs run and write nothing; `opf record` has no `import` subcommand, so no batch can be submitted |
 
 Inside the apply engine, each of the ten plan operations has an executor, but `opf adopt apply`
 still refuses every plan with exit 2 before it writes anything: the apply stage's receipt step is

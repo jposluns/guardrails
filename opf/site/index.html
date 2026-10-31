@@ -261,13 +261,13 @@
       <span class="chip ok"><code>opf render</code></span>
       <span class="chip ok"><code>opf doctor</code></span>
       <span class="chip"><code>opf upgrade</code> (no store upgrade)</span>
-      <span class="chip"><code>opf import</code> (modes retired)</span>
+      <span class="chip"><code>opf import</code> (read-only)</span>
       <span class="chip ok"><code>opf absorb</code></span>
       <span class="chip ok"><code>opf record</code></span>
       <span class="chip"><code>opf migrate</code> (planned)</span>
       <span class="chip"><code>opf sync</code> (planned)</span>
     </p>
-    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>absorb</code> drafts changelog entries for human curation, and <code>record</code> authors one record change at a time. <code>upgrade</code> refuses with exit 2, since the reference tooling defines no store upgrade. The ordinary <code>import</code> modes are retired and refuse with exit 2: clean-start adoption is the intake, and post-adoption import will use the approved prompt pack. <code>migrate</code> and <code>sync</code> are specified but not yet implemented in the reference CLI.</p>
+    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>absorb</code> drafts changelog entries for human curation, and <code>record</code> authors one record change at a time. <code>upgrade</code> refuses with exit 2, since the reference tooling defines no store upgrade. <code>import</code> offers only its read-only verbs (<code>--prompt</code>, <code>--status</code>, <code>--verify</code>), and its batch writer is not offered yet: clean-start adoption is the intake, and post-adoption import uses the approved prompt pack. <code>migrate</code> and <code>sync</code> are specified but not yet implemented in the reference CLI.</p>
   </div>
 </section>
 

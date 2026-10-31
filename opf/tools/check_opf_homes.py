@@ -915,6 +915,11 @@ _CONTRACT = {
         'Missingness, ambiguity, conflicts and source precision MUST remain explicit; unmappable text MUST be retained verbatim.',
         'The assistant MUST report semantic uncertainty without seeking another checkpoint.',
         _D('opf import --prompt, --status and --verify expose that activity.'),
+        _D('The import surface is opf.import.surface/v1.'),
+        "opf import --prompt MUST read only the shipped prompt pack and the adoption run's approved plan, MUST print the pack's version, digest and import members and the plan's approved migrate-source scope, MUST refuse a pack that does not verify or does not match the plan's prompt-pack binding, MUST write nothing, and MUST exit 0 on a printed report and 2 on every refusal or cannot-evaluate.",
+        "opf import --status MUST read only the store manifest, the approved plan, the imported series and each frozen migrate source's live bytes, MUST report import_status and each migrate-disposed source's referencing import runs and records, MUST write nothing, and MUST exit 0 on a clean report, 1 on a finding and 2 on a cannot-evaluate.",
+        'opf import --verify MUST evaluate each migrate-disposed source\'s import completion read-only on the live tree, MUST record nothing, and MUST exit 0 only when every source is complete, 1 on an incomplete source and 2 on one it cannot evaluate.',
+        _D('Recording a source\'s result, its retirement and import_status stays with the completion writer, which this surface does not include.'),
         "For each migrate-disposed source, import completion MUST verify the preserved original's digest (the archived copy under section 14.2 for a source that occupied a managed destination, the frozen live file and its apply-archived retirement preimage otherwise), at least one imported record referencing that source or a recorded skip under the approved policy, and doctor VALID over both the strict store and the imported series, evaluated on the live tree.",
         "It MUST record the source's result in the adoption receipt's outcome-event chain.",
         "A green result records the source's retirement: for a frozen live source, an imported and a skipped one alike, one journaled transaction MUST record the retirement and remove the file, whose live bytes MUST still match the plan digest, and hence its apply-archived retirement preimage under completion check 3, when that transaction runs, and an archived source is already out of the live tree, so its recorded retirement changes no live path.",
@@ -1019,7 +1024,7 @@ _CONTRACT = {
         "The base defines one implementation model and no implementation conformance classes: a declared scope, exclusion, profile, or posture MUST NOT waive a base requirement, and current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind every implementation.",
         _D('An implementation supports base spec_version 2.0.0 and homes generation 2, the only ones this specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and initializes stores directly at them.'),
         _D('The reference tooling initializes and validates base 2.0.0 stores with homes = 2, and it makes no claim of conformance to this specification.'),
-        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0, and it does not yet implement post-adoption import.'),
+        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0, and of post-adoption import it implements only the read-only opf import --prompt, --status and --verify that section 14.1 defines, not the batch writer or the completion writer.'),
         _D('The reference tooling defines no store upgrade: its opf upgrade refuses every invocation with exit 2, reading and writing nothing.'),
         'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
@@ -7596,12 +7601,15 @@ def _self_test_vectors():
               'and may also upgrade older stores.'),
             )),
             # The reference tooling's adoption status at base 2.0.0: red when the sentence says the
-            # journal is read or that apply and reconcile run.
+            # journal is read, that apply and reconcile run, or that it implements more of
+            # post-adoption import than the read-only verbs.
             ('Its opf adopt plan, approve and status', (
              ('run at base 2.0.0 without reading the adoption journal,',
               'run at base 2.0.0 and read the adoption journal,'),
-             ('refuse at base 2.0.0, and it does not yet implement',
-              'run at base 2.0.0, and it does not yet implement'),
+             ('refuse at base 2.0.0, and of post-adoption import',
+              'run at base 2.0.0, and of post-adoption import'),
+             ('it implements only the read-only',
+              'it implements the batch writer and the read-only'),
             )),
     ))
     spec_vectors("17", (

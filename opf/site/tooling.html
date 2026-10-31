@@ -50,7 +50,7 @@
 <div class="wrap pagehead">
   <p class="eyebrow">Reference tooling</p>
   <h1>Reference tooling</h1>
-  <p class="lead">OPFiles names ten command verbs. This page documents nine: <code>init</code>, <code>import</code>, <code>doctor</code>, <code>render</code>, <code>migrate</code>, <code>sync</code>, <code>upgrade</code>, <code>absorb</code>, and <code>record</code>; the tenth, <code>adopt</code>, is documented in the <a href="./adopt#cmd-adopt">adoption command reference</a>. Of these nine, the reference CLI implements five. The ordinary <code>import</code> modes are retired and refuse with exit 2; <code>upgrade</code> refuses with exit 2, since the reference tooling defines no store upgrade; <code>migrate</code> and <code>sync</code> are planned and currently exit 2 (not yet implemented).</p>
+  <p class="lead">OPFiles names ten command verbs. This page documents nine: <code>init</code>, <code>import</code>, <code>doctor</code>, <code>render</code>, <code>migrate</code>, <code>sync</code>, <code>upgrade</code>, <code>absorb</code>, and <code>record</code>; the tenth, <code>adopt</code>, is documented in the <a href="./adopt#cmd-adopt">adoption command reference</a>. Of these nine, the reference CLI implements six. <code>import</code> offers only the read-only surface <code>opf.import.surface/v1</code> (<code>--prompt</code>, <code>--status</code>, <code>--verify</code>), and its batch writer is not offered yet; <code>upgrade</code> refuses with exit 2, since the reference tooling defines no store upgrade; <code>migrate</code> and <code>sync</code> are planned and currently exit 2 (not yet implemented).</p>
 </div>
 
 <section>
@@ -88,7 +88,7 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/><path d="M12 4v9"/><path d="m8 9 4 4 4-4"/></svg></span>
         <h3><code>opf import</code></h3>
-        <p>Retired modes: <code>--scan</code>, <code>--plan</code>, <code>--review</code>, and <code>--apply</code> refuse with exit 2 and write nothing. Clean-start adoption is the intake; post-adoption import will use the approved prompt pack (spec 14.1).</p>      </div>
+        <p>The read-only surface <code>opf.import.surface/v1</code>: <code>--prompt</code> verifies the shipped prompt pack against the plan's binding and prints the pack version and digest, each import member's path and sha256, and the approved migrate scope (not the pack documents themselves), <code>--status</code> reports per-source import state, and <code>--verify</code> evaluates source completion; each writes nothing (spec 14.1). The batch writer <code>opf record import --batch</code> is not offered yet, and the former <code>--scan</code>, <code>--plan</code>, <code>--review</code>, and <code>--apply</code> modes are gone.</p>      </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><path d="M9 10h6M9 14h6M9 18h4"/></svg></span>
         <h3><code>opf absorb</code></h3>
