@@ -7,11 +7,20 @@ name: Weekly self-tests
 # and quality.yml run, weekly and on manual dispatch, so such drift turns this scheduled run red in the
 # Actions tab without ever blocking a pull request. It is not a required status and gates nothing.
 #
-# Self-tests only: the live gates and drift checks judge the tree itself, which quality.yml already
-# judged on the push that made it, so they are not repeated here. The local runner's three opf.py
-# --self-test-group lines are not repeated either: the one whole opf.py --self-test below runs the same
-# registered self-tests. Each job keeps the checkout and Python setup of its quality.yml counterpart,
-# and the child-status probe stays the step right after the Python setup step of every job.
+# Two live legs run here because their verdict depends on the runner, not only on the tree: the git
+# option table gate (the installed git's help against the hook's option table) and the byte-canon
+# gate over a checkout made under core.autocrlf true, each as quality.yml runs it. The other live
+# gates and drift checks judge the tree itself, which quality.yml judged on the push that made it,
+# so they are not repeated. The local runner's three opf.py --self-test-group lines are not repeated
+# either: the one whole opf.py --self-test below runs the same registered self-tests. Every command
+# of tools/run_all_checks.sh and quality.yml not run here is listed with its reason in
+# WEEKLY_EXCLUSIONS in tools/check_ci_parity.py, which fails on a command in neither place.
+# Each job keeps the checkout and Python setup of its quality.yml counterpart except these:
+# opf-selftest runs on ubuntu-latest with '3.14' where quality.yml's opf-host-patch uses ubuntu-24.04
+# with the host patch release, and the four git-fixture-env jobs pin '3.14' on ubuntu-24.04 where
+# quality.yml runs git-fixture-env-core on ubuntu-latest and its host-patch jobs, the three config
+# lanes among them, pin the host patch release. The child-status probe stays the step right after the
+# Python setup step of every job.
 
 on:
   schedule:
@@ -859,6 +868,11 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_git_option_table.py --self-test
 
+      # Live: compares the runner's installed git help with the hook's option table.
+      - name: Git option table
+        shell: bash
+        run: python3 -I -B tools/check_git_option_table.py
+
       - name: Dangerous-API lint self-test
         shell: bash
         run: python3 -I -B tools/check_dangerous_api.py --self-test
@@ -875,7 +889,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite internal-names-selftest
 
-  # The byte-canon vectors on both platforms quality.yml covers.
+  # The byte-canon vectors and live gate on both platforms quality.yml covers. As there,
+  # core.autocrlf true is set BEFORE the checkout, so the working tree is materialized by the runner's
+  # git under the hostile setting and a CRLF conversion surfaces as a carriage-return finding.
   byte-canon-matrix:
     name: Byte canon vectors (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -884,6 +900,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
+      - name: Hostile checkout line-ending setting (before checkout)
+        shell: bash
+        run: git config --global core.autocrlf true
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -898,3 +917,6 @@ jobs:
       - name: Byte canon self-test (vectors)
         shell: bash
         run: python3 -I -B tools/check_byte_canon.py --self-test
+      - name: Byte canon (full gate on this platform)
+        shell: bash
+        run: python3 -I -B tools/check_byte_canon.py
