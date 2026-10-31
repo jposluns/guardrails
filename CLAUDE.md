@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.18** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.21** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -94,9 +94,9 @@ generated-file `--check` and the manifest check, run locally before its push, a 
 per head; the full roster is first proven on the train tree by the train pull request's Quality run.
 Whenever the full `tools/run_all_checks.sh` runs, it FAILS when gitleaks is not on PATH or reports another
 version than the `Secrets (gitleaks)` step of `quality.yml` pins (`tools/check_gitleaks_pin.py`; its live
-leg is local-only, and CI runs its self-test). Behind the trigger, as a second layer, the nine heavy jobs
-(`opf-tooling`, `selftest-execution`, the `git-fixture-env-core` canary, the five host jobs and
-`byte-canon-matrix`) carry one pinned job-level `if:` and run only on a push and on a pull
+leg is local-only, and CI runs its self-test). Behind the trigger, as a second layer, the eleven heavy jobs
+(`opf-tooling-a`, `opf-tooling-b`, `opf-tooling-c`, `selftest-execution`, the `git-fixture-env-core` canary,
+the five host jobs and `byte-canon-matrix`) carry one pinned job-level `if:` and run only on a push and on a pull
 request whose head is a `merge-train-*` branch of this repository; every other job runs in every run. A
 label added to any other pull request into main starts a run whose heavy jobs are skipped, so its
 `Quality gates` fails by design, and a change merges only by riding a train: a squash merge of an
@@ -104,6 +104,11 @@ up-to-date, labelled `merge-train-*` pull request, whose run is the full suite, 
 runs it again. A newer run of the same pull request cancels its superseded run; a push run has a
 concurrency group of its own and is never cancelled. `tools/check_ci_parity.py` and
 `tools/check_python_host_pin.py` accept exactly the pinned `concurrency` block and `if:` line.
+Every `actions/checkout` step in `.github/workflows` sets `persist-credentials: false`, so the job token
+stays out of the checkout's git config (no job pushes or fetches after its checkout);
+`tools/check_ci_parity.py` reads each workflow file there as parsed YAML and refuses a checkout step
+without it; a workflow outside that reader's conservative YAML subset is cannot-evaluate (exit 2),
+never skipped.
 `tools/ci-status.sh` requires a completed successful run of `.github/workflows/quality.yml` on every
 read, with or without `--require-base` and `--wait`, so a head with none (a member head) reads as missing
 (exit 1), never as passing. It also refuses a commit with any non-success run, a cancelled one included,
@@ -134,8 +139,9 @@ host jobs are the ONLY CI run of the OPF tooling self-test and of the combined, 
 git-fixture-env suites; `git-fixture-env-core` stays on `3.14` as the one canary of those suites. Every
 other job there that sets up Python pins `3.14` (the Quality gates job sets up none); with `check-latest`
 off, setup-python may resolve that pin to a 3.14 already on the runner rather than the newest patch release.
-Every other job in `quality.yml` stays required, `opf-tooling` (every OPF gate and direct self-test, run on
-`3.14`) among them. Under the maintainer's 2026-10-27 authorization this reverses the earlier decision that
+Every other job in `quality.yml` stays required, `opf-tooling-a`, `opf-tooling-b` and `opf-tooling-c`
+(every OPF gate and direct self-test on `3.14`, split by a local timing that stopped each step at 20
+seconds; live balance unconfirmed) among them. Under the maintainer's 2026-10-27 authorization this reverses the earlier decision that
 the host jobs' CI time was a cost accepted for running those suites twice: the `3.14` copies of the OPF
 tooling self-test and of the three config suites are gone, and the local runner's
 `opf.py --self-test-group` lines have no CI counterpart (CI runs the whole self-test once, on the host
@@ -151,9 +157,10 @@ setup-python versions manifest listed Linux x64 builds of 3.14.4 for Ubuntu 22.0
 holds the workflow's top-level keys (only `name`, `on`, `permissions`, the pinned `concurrency` block and
 `jobs`) and each host job whole (no job key but `name`, `runs-on`, `steps` and the pinned `if:`, that
 runner, the checkout step as written (`actions/checkout` pinned to the full 40-hex commit SHA the gate's
-`CHECKOUT_SHA` names, with only `fetch-depth: 0` and `fetch-tags: true`, so the tag form, another SHA and
-a short SHA are each refused), one setup-python pin, the gate itself as the next step, the
-job's suite) and fails when the running interpreter is another release, so `tools/run_all_checks.sh` FAILS
+`CHECKOUT_SHA` names, with only `fetch-depth: 0`, `fetch-tags: true` and `persist-credentials: false`,
+so the tag form, another SHA and a short SHA are each refused), one setup-python pin, the gate itself
+as the next step, the job's suite) and fails when the running interpreter is another release, so
+`tools/run_all_checks.sh` FAILS
 on any patch release other than the one the file names. When the host interpreter changes, update
 `python-host-patch` in `.aiqt/python-host.toml` and the `python-version` pin of every host job in
 `quality.yml` together, in one change.

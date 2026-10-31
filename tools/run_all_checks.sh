@@ -249,6 +249,8 @@ run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
 run_gate "import-closure-selftest" python3 -I -B tools/check_import_closure.py --self-test
 run_gate "import-closure" python3 -I -B tools/check_import_closure.py
 run_gate "verifier-delivery-selftest" python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
+run_gate "opf-declaration-selftest" python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
+run_gate "opf-declaration" python3 -I -B tools/check_opf_declaration.py
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test

@@ -371,8 +371,9 @@ model of sys.path; a row is held live by a sys.path.insert or sys.path.append ca
 set of shapes, the ones this tree's rows write, read by spelling and never evaluated: str() around a pathlib chain;
 os.path.join(os.path.dirname(os.path.abspath(__file__)), LITERAL, ...), in exactly that nesting; or a module-level
 name bound to one of those. A pathlib chain starts at Path(__file__).resolve() followed by .parent (1 to 17 times) or
-by one .parents[N] (N an int literal, 0 to 16), at repo_root(), or at a module-level name bound to a pathlib chain,
-and continues with / and a LITERAL any number of times. Every LITERAL is one path component, [A-Za-z0-9_.-]+ and
+by one .parents[N] (N an int literal, 0 to 16), at repo_root(), or at a module-level name bound to a pathlib chain
+(followed through at most two names, so a name bound to a chain that starts at a third name is not read), and
+continues with / and a LITERAL any number of times. Every LITERAL is one path component, [A-Za-z0-9_.-]+ and
 neither . nor .., so an absolute, empty, separator-holding or trailing-slash component never occurs, and a shape
 that climbs above the repository root is not read. A name is read only where the whole file binds it exactly once, by a plain
 module-level NAME = shape statement with one target naming no further name, and nowhere else in any form (annotated,
@@ -581,6 +582,7 @@ IMPORT_SEARCH_ROOTS = (
     ("tools/check_byte_canon.py", "opf/tools"),
     ("tools/check_crosswalk.py", "opf/tools"),
     ("tools/check_manifest.py", "opf/tools"),
+    ("tools/check_opf_declaration.py", "opf/tools"),
     ("tools/check_release_cut.py", "opf/tools"),
     ("tools/check_relied_exit_pipes.py", ".aiqt/core/hooks/scripts"),
     ("tools/check_versions.py", "opf/tools"),
@@ -599,6 +601,9 @@ IMPORT_SEARCH_ROOTS = (
 # the whole file, its exact import.
 INSERT_PART_RE = re.compile(r"[A-Za-z0-9_.-]+")
 MAX_PARENTS_INDEX = 16
+# The most names a pathlib chain's start is followed through, each read as a name is (see the docstring): an
+# insertion of str(NAME) where NAME = OTHER / LITERAL and OTHER is bound to Path(__file__).resolve().parents[N].
+MAX_NAME_HOPS = 2
 INSERT_IMPORTS = dict(os=("import", "os"), Path=("from", "pathlib", "Path"),
                       repo_root=("from", "_gen_common", "repo_root"))
 
@@ -681,7 +686,9 @@ DYNAMIC_IMPORT_SITES = (
       "#2: 'help'",
       "#3: 'help'",
       "#4: 'help'",
-      "#5: 'help'"),
+      "#5: 'help'",
+      "#6: 'help'",
+      "#7: 'help'"),
      "the string help is a git subcommand name in this file's subcommand and option tables, data, not the builtin "
      "help"),
     (".preview/char-policy-write.py", "_self_test",
@@ -1043,7 +1050,9 @@ DYNAMIC_IMPORT_SITES = (
       "#2: 'help'",
       "#3: 'help'",
       "#4: 'help'",
-      "#5: 'help'"),
+      "#5: 'help'",
+      "#6: 'help'",
+      "#7: 'help'"),
      "the string help is a git subcommand name in this file's subcommand and option tables, data, not the builtin "
      "help"),
     ("tools/_selftest_exit_report.py", MODULE_SCOPE,
@@ -1085,7 +1094,7 @@ DYNAMIC_IMPORT_SITES = (
       "#1: spec.loader.exec_module(module)"),
      "loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
      "canonical guard opf/tools/_child_status.py under the given root"),
-    ("tools/check_child_status_coverage.py", "_vectors.<lambda>#93/100",
+    ("tools/check_child_status_coverage.py", "_vectors.<lambda>#107/116",
      ("#1: 'import_module'",),
      "the string is matched in a cannot-evaluate reason the classifier gives for a fixture's load call; never "
      "called or resolved"),
@@ -1125,6 +1134,13 @@ DYNAMIC_IMPORT_SITES = (
       "#1: importlib.util.module_from_spec(spec)",
       "#1: spec.loader.exec_module(module)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
+    ("tools/check_footer.py", "_close_vectors",
+     ("#1: import importlib.util",
+      "#1: importlib.util.spec_from_file_location('_footer_close_revert', path)",
+      "#1: importlib.util.module_from_spec(spec)",
+      "#1: spec.loader.exec_module(reverted)"),
+     "self-test loads a scratch mutant of this file's _read_regular_page, written from its own source with the "
+     "descriptor ownership reverted, by its path, over a copy of this module's globals"),
     ("tools/check_footer.py", "_install_fault_hooks",
      ("#1: _threads.Thread._bootstrap",),
      "reads the standard-library threading's own Thread._bootstrap (threading imported under a local alias) only "
@@ -1165,6 +1181,39 @@ DYNAMIC_IMPORT_SITES = (
     ("tools/check_manifest.py", "_self_test_main_isolated",
      ("#1: __import__('subprocess').run(['git', '--version'], capture_output=True).returncode",),
      "inline __import__ of the standard-library module subprocess, a string literal"),
+    ("tools/check_opf_declaration.py", MODULE_SCOPE,
+     ("#1: import importlib.util",),
+     "imports importlib.util for this file's loads by path, each reviewed in its own row"),
+    ("tools/check_opf_declaration.py", "_mutant",
+     ("#1: importlib.util.spec_from_file_location('opf_declaration_mutant_{}'.format(number), "
+      "home / '_opf_declaration.py')",
+      "#1: importlib.util.module_from_spec(spec)",
+      "#1: spec.loader.exec_module(module)"),
+     "self-test loads a scratch mutant of opf/tools/_opf_declaration.py, written from that file's source with "
+     "one revert, by its path"),
+    ("tools/check_opf_declaration.py", "_copy_mutant",
+     ("#1: importlib.util.spec_from_file_location(name, home / (name + '.py'))",
+      "#1: importlib.util.module_from_spec(spec)",
+      "#1: spec.loader.exec_module(module)"),
+     "self-test loads a scratch mutant of this file or of opf/tools/opf.py, written from that file's own "
+     "source with one revert, by its path"),
+    ("tools/check_opf_declaration.py", "self_test",
+     ("#1: opf._bootstrap()",),
+     "calls opf.py's own _bootstrap function (the opf module of this tree), not importlib._bootstrap"),
+    ("tools/check_opf_declaration.py", "self_test",
+     ("#1: patch.object(here, '_load', missing_helper)",
+      "#1: patch.object(unguarded, '_load', missing_helper)",
+      "#1: '_load'",
+      "#1: patch.object(unguarded, '_load', lambda: None)"),
+     "the string _load names this gate's own _load helper, which the self-test replaces with a stand-in to "
+     "show a missing helper module refused; not pickle's _load, never resolved as a loader"),
+    ("tools/check_opf_declaration.py", "self_test.reach",
+     ("#1: '_load'",
+      "#2: '_load'",
+      "#3: '_load'",
+      "#4: '_load'"),
+     "the string _load names this gate's own _load helper, which the self-test replaces with a stand-in to "
+     "raise at that site; not pickle's _load, never resolved as a loader"),
     ("tools/check_opf_enforce_platforms.py", MODULE_SCOPE,
      ("#1: import importlib.util",),
      "imports importlib.util for load_hook"),
@@ -2333,8 +2382,9 @@ def _file_parents(node, rel, bindings):
 
 def _path_chain(node, rel, bindings, named):
     """The repo-relative components of a pathlib value in the read shapes (see the docstring), or None: a start
-    (_file_parents; repo_root(), the repository root; or, where named, a name bound to a pathlib chain that starts at
-    no name) then / with a literal component (_insert_part) any number of times."""
+    (_file_parents; repo_root(), the repository root; or, where named (the count of names still to follow, at most
+    MAX_NAME_HOPS), a name bound to a pathlib chain read with one name fewer, so a chain starting at no name once
+    none are left) then / with a literal component (_insert_part) any number of times."""
     parts = []
     while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         part = _insert_part(node.right)
@@ -2344,7 +2394,7 @@ def _path_chain(node, rel, bindings, named):
         node = node.left
     if isinstance(node, ast.Name) and named:
         value = _assigned(bindings, node.id)
-        start = None if value is None else _path_chain(value, rel, bindings, False)
+        start = None if value is None else _path_chain(value, rel, bindings, named - 1)
     elif _is_call(node, "repo_root", 0) and _imported(bindings, "repo_root"):
         start = []
     else:
@@ -2374,7 +2424,7 @@ def _str_shape(node, rel, bindings, named=True):
         value = _assigned(bindings, node.id)
         return None if value is None else _str_shape(value, rel, bindings, False)
     if _is_call(node, "str", 1) and _unbound(bindings, "str"):
-        return _path_chain(node.args[0], rel, bindings, named)
+        return _path_chain(node.args[0], rel, bindings, MAX_NAME_HOPS if named else 0)
     return _os_path_join(node, rel, bindings)
 
 
@@ -3569,6 +3619,10 @@ _GREEN_VECTORS = (
     ("insertion through a name bound once to a pathlib chain",
      (("tools/t.py", _T_PATH + "ROOT = Path(__file__).resolve().parents[1]\n"
                      "sys.path.insert(0, str(ROOT / 'lib' / '_vendor'))\nimport pkg\n"),), dict(search_roots=_T_ROOTS)),
+    # At the name bound: two names, the second bound to the chain the first starts at (one more is refused below).
+    ("insertion through two names, each bound once to a pathlib chain",
+     (("tools/t.py", _T_PATH + "ROOT = Path(__file__).resolve().parents[1]\nLIB = ROOT / 'lib'\n"
+                     "sys.path.insert(0, str(LIB / '_vendor'))\nimport pkg\n"),), dict(search_roots=_T_ROOTS)),
     ("insertion through repo_root imported from _gen_common",
      (("tools/t.py", _T_PATH + "from _gen_common import repo_root\n"
                      "sys.path.insert(0, str(repo_root() / 'lib' / '_vendor'))\nimport pkg\n"), _T_GEN_COMMON),
@@ -4086,6 +4140,13 @@ _CANNOT_VECTORS = (
     _unread_vector("name rebound as a for target", "ROOT",
                    source=_T_NAMED % "for ROOT in ('elsewhere',):\n    pass\n"),
     _unread_vector("name deleted", "ROOT", source=_T_NAMED % "del ROOT\n"),
+    # One name past the bound, and two names bound to chains that start at each other.
+    _unread_vector("pathlib chain through one name past the highest read", "str(LIB)",
+                   source=_T_PATH + "BASE = Path(__file__).resolve().parents[1]\nROOT = BASE / 'lib'\n"
+                   "LIB = ROOT / '_vendor'\nsys.path.insert(0, str(LIB))\nimport pkg\n"),
+    _unread_vector("names bound to pathlib chains that start at each other", "str(LIB / '_vendor')",
+                   source=_T_PATH + "LIB = ROOT / 'lib'\nROOT = LIB / 'up'\n"
+                   "sys.path.insert(0, str(LIB / '_vendor'))\nimport pkg\n"),
     _unread_vector("repo_root defined in the file", "str(repo_root() / 'lib' / '_vendor')",
                    source=_T_PATH + "def repo_root():\n    return Path('elsewhere')\n"
                    "sys.path.insert(0, str(repo_root() / 'lib' / '_vendor'))\nimport pkg\n"),
@@ -4557,6 +4618,8 @@ MUTANTS = (
     ("insert-part-dots", 'node.value not in (".", "..")', "True", "dot component on a read pathlib chain"),
     ("parents-bound", "if not 1 <= up <= MAX_PARENTS_INDEX + 1:", "if not 1 <= up:",
      ".parents index one past the highest read"),
+    ("name-hops-bound", "_path_chain(value, rel, bindings, named - 1)", "_path_chain(value, rel, bindings, named)",
+     "pathlib chain through one name past the highest read"),
     ("str-wrapper-required", "    return _os_path_join(node, rel, bindings)\n",
      "    return _os_path_join(node, rel, bindings) or _path_chain(node, rel, bindings, named)\n",
      "unwrapped pathlib value"),
