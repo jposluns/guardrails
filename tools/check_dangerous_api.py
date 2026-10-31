@@ -326,6 +326,9 @@ ALLOWLIST = (
      _MUTANT + " (the working_blob close revert)"),
     ("tools/check_release_cut.py", "_self_test_isolated", "code", 1,
      _MUTANT + " (each _CLOSE_SWEEP_REVERTS sweep revert, matched exactly once)"),
+    ("tools/check_release_cut.py", "_census_outcome_vectors", "code", 1,
+     _MUTANT + " (the census functions as they stand and each _CENSUS_FLIPS flip of them, matched exactly"
+     " once, or with one overridden global, loaded by exec_module from a scratch file)"),
     ("tools/pin.py", "_recover_close_vectors", "code", 1,
      _MUTANT + " (the recover close reverts)"),
     ("tools/selftest_git_fixture_env_core.py", "_system_pin_checks", "code", 1,
