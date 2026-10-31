@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF import batch parser (OPF-SPEC 1.3.0 sections 8.3 and 8.8): pure, canonical and INERT. No command or
+"""OPF import batch parser (OPF-SPEC base 2.0.0 sections 8.3 and 8.8): pure, canonical and INERT. No command or
 writer calls parse_batch in this release; it ships ahead of the import write mode (`opf record import
 --batch`), its one gate caller is check_opf_prompt_pack.py, which parses the prompt pack's import
 examples read-only, and it writes nothing: parse_batch performs no I/O (no file, clock, environment,

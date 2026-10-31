@@ -1176,7 +1176,7 @@ def _self_test_isolated():
         return failures
 
     def _precommit_suite():
-        """The pre-commit floor (enforcement pack, spec 1.3.0 (draft) 14.1: staged-snapshot pre-commit checks
+        """The pre-commit floor (enforcement pack, spec 14.1: staged-snapshot pre-commit checks
         with the per-clone installation residual disclosed). Each fixture is a committed clean store holding
         a copy of opf/enforcement/precommit at its pack path, with OPF_TOOL pointing at this opf.py and
         TMPDIR at a controlled directory. Returns the list of assertion failures; raises OSError if a fixture

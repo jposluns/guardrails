@@ -1,7 +1,11 @@
-"""The homes-1 adoption control area and the bounded adoption state the doctor reads (OPF-SPEC 4.2, 11, 14.2, 17).
+"""The adoption control area and bounded adoption state of the generation-1 grading (OPF-SPEC 4.2, 11, 14.2, 17).
 
-A store that has adopted (its `.working/imported/adoption/` home exists) registers, on homes 1, each ADMITTED
-run AT FILE LEVEL: the paths its committed inventories list, the base inventory's rows and, once its
+C-CONTAINMENT calls this reader only for a manifest graded at homes generation 1, which validation refuses
+(spec 9.2), so base 2.0.0 never calls it: the doctor grades a homes-2 store holding the adoption home
+`.working/imported/adoption/` as C-CONTAINMENT CANNOT-EVALUATE (spec 4.2: "At homes 2 the doctor does not
+yet grade that adoption home: it reports a store holding it as cannot-evaluate until adoption grading lands
+there."). The self-test therefore reads this reader's own verdict directly. Under that grading, a store that
+has adopted (its adoption home exists) registers each ADMITTED run AT FILE LEVEL: the paths its committed inventories list, the base inventory's rows and, once its
 retirement is recorded, the retirement inventory's rows (the plan's recorded Move destinations).
 C-CONTAINMENT recognizes exactly those files as OPF control area; every other path
 under the adoption homes, the run's own evidence bundle, its adoption archive and the Move root included, is
@@ -42,8 +46,8 @@ retirement the Move destination does not exist (the retirement-phase transaction
 at a plan Move destination beneath the Move root, default or explicit, is then a finding and the
 destination is not registered (an explicit destination outside the store is never graded); after it, the
 destination is registered and byte-verified through the retirement inventory. A recorded retirement ends
-the bounded state of the retire and move rows only. A migrate source retires through its import, which a
-later activation reads, so it stays bounded until then.
+the bounded state of the retire and move rows only. A migrate source retires through its import, which this
+reader does not read, so it stays bounded.
 
 Read-only and bounded by construction: the reader opens no journal and writes nothing. Every file read is
 contained, no-follow, single-link and bounded by the 16 MiB per-file read cap
@@ -52,8 +56,9 @@ with a FAILED read charged exactly the bytes its chunk loop consumed before fail
 first byte charges nothing); an
 exhausted budget refuses the next read before it happens, and one adoption_state
 call additionally refuses past RUN_CEILING run directories or SOURCE_CEILING frozen sources
-(CANNOT-EVALUATE, fail-closed). A store without the adoption home costs exactly one lstat and keeps the
-legacy grading unchanged. C-EVIDENCE-ENUM stays inactive on homes 1.
+(CANNOT-EVALUATE, fail-closed). Under the generation-1 grading, a store without the adoption home costs
+exactly one lstat and keeps that grading unchanged, and C-EVIDENCE-ENUM does not run there; a homes-2
+store runs C-EVIDENCE-ENUM over its evidence roots instead.
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules, so the standalone-closure property holds.

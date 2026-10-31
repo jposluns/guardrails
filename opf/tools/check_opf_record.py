@@ -230,10 +230,9 @@ Each case runs on its own copy of that template; the root is removed in a finall
       projection (flips: the reviewed head's outcome; its introduction)
   T54 this header describes every test in TESTS and never claims T46 names every case (flip: the
       reviewed head's T46 line)
-  T57 a homes-1 publication failing after INTENT retains its lock and says the transaction is left
-      for the next run's reconciliation as far as each step succeeds, never that the next run
-      reconciles it; an intervening edit then refuses that reconciliation (flip: the reviewed head's
-      promise)
+  T57 a homes-2 publication failing after INTENT keeps its transaction open in the typed journal and
+      says that work is left for the next run's recovery trigger, never that the next run reconciles
+      it; an intervening edit then refuses that reconciliation (flip: the reviewed head's promise)
   T58 a holder that releases between the trigger read and the recovery acquisition, with a staging
       leftover that acquisition removes, refuses once naming the removal and reclaiming no record,
       the re-run then proceeding, and the residual lists and the recovery docstring state that
