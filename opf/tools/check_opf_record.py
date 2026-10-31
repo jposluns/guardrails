@@ -191,9 +191,11 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T36 the journal home is reopened under the held capability: a home renamed aside and replaced by a
       peer's with an open transaction after the trigger read is planned from its current binding and
       rolled back (flip: plan through the trigger read's descriptor)
-  T37 a homes-2 capability leftover of another operation (a killed `ingest` holder) is reclaimed and
-      attributed to the operation its record names, never to opf record (flip: attribute every reclaim
-      to record)
+  T37 a homes-2 capability leftover of another operation (a confirmed-dead `ingest` holder with no
+      journal, a confirmed-dead `sync` holder beside an open record transaction) refuses with exit 2
+      naming that operation: the whole store, git internals included, is byte-identical, its lease and
+      active record stay and name it, the transaction stays open, no journal home is created (spec
+      8.8 item 1; flip: the substrate's same-operation check removed)
   T38 a recovery acquisition that removes a staging leftover and then refuses names the removal and
       claims only that no record operand, journal or projection was written; a contended one says it
       removed nothing (flip: the staging removal goes unreported)
@@ -1200,15 +1202,17 @@ def record_cli(env, root, args):
     return cli(env, ["record"] + list(args) + ["--root", str(root)])
 
 
-def snapshot(root):
-    """Every entry beneath root except .git, each with its mode bits: a regular file by content, a symlink
+def snapshot(root, include_git=False):
+    """Every entry beneath root except .git (with include_git, .git too: the operation capability's
+    active record and the git internals), each with its mode bits: a regular file by content, a symlink
     by its target text (never followed), a directory and any other type by its type. A directory the walk
     cannot list (root included) is a harness fault, never an entry silently left out of the comparison."""
     def unlistable(exc):
         raise Harness("snapshot cannot list the directory {!r} ({})".format(exc.filename, exc))
     result = {}
     for directory, dirs, files in os.walk(root, onerror=unlistable):
-        dirs[:] = [d for d in dirs if not (Path(directory) == Path(root) and d == ".git")]
+        if not include_git:
+            dirs[:] = [d for d in dirs if not (Path(directory) == Path(root) and d == ".git")]
         for name in sorted(dirs + files):
             path = Path(directory) / name
             st = path.lstat()
@@ -4682,39 +4686,78 @@ def capability_records(root):
     return (Path(root) / LEASE).exists(), active_record(root).exists()
 
 
-def t37_reclaim_names_operation(fx):
-    """A homes-2 capability leftover of ANOTHER operation (an `ingest` holder killed holding it, no record
-    journal present) is reclaimed and attributed to the operation its record names, never to opf record:
-    the lead describes a capability reclamation, the outcome names 'ingest' and says the record run does
-    not examine that operation's journal work. The reviewed head reported "an interrupted opf record run
-    was reconciled"."""
+def capability_operations(root):
+    """(the lease's operation, the active record's operation), each read from its file."""
+    return (model(root, LEASE)["operation"],
+            model(root, active_record(root).relative_to(root).as_posix())["operation"])
+
+
+def _t37_refused_leg(env, root, operation, states):
+    """One refusal leg: a confirmed-dead `operation` holder's lease and active record are present (with the
+    record journal in `states`); `opf record create` must refuse with exit 2 naming `operation`, every byte
+    of the store, .git included, unchanged (asserted before the message, so the check removed turns this
+    red on what was released), both records still naming `operation`, the journal exactly as found."""
+    assert Path(root) in active_record(root).parents, "T37 the active record lies inside the snapshot"
+    assert capability_records(root) == (True, True), "T37 the dead holder's lease and active record are left"
+    assert capability_operations(root) == (operation, operation), "T37 both records name " + operation
+    before = snapshot(root, include_git=True)
+    result = record_cli(env, root, CREATE)
+    assert snapshot(root, include_git=True) == before, (
+        "T37 the whole store, .git included, is byte-identical", operation, result[0], result[2][-1200:])
+    assert result[0] == 2, ("T37 exit 2", operation, result[0], result[2][-1200:])
+    refused(result, "were left by a confirmed-dead holder of the {!r} operation, not this {!r} "
+                    "operation".format(operation, record.VERB))
+    err = result[2]
+    assert "the acquisition removed nothing" in err, ("T37 the refusal says nothing was removed", err[-1200:])
+    assert "reclaimed" not in err and "rolled BACK" not in err, ("T37 nothing is reclaimed", err[-1200:])
+    assert capability_records(root) == (True, True), "T37 the lease and active record are kept"
+    assert capability_operations(root) == (operation, operation), "T37 both still name " + operation
+    assert journal_states(root, TYPED_JOURNAL) == states, "T37 the record journal is exactly as found"
+
+
+def t37_other_operation_no_journal(fx):
+    """A homes-2 capability leftover of ANOTHER operation is never released by record recovery (spec 8.8
+    item 1: a confirmed-dead leftover of another verb refuses before any recovery write and its lease is
+    never released): a confirmed-dead `ingest` holder with no record journal refuses with exit 2 naming
+    'ingest'; the whole store, git internals included, is byte-identical; the lease and active record are
+    still present and name 'ingest'; no journal home is created. Before the substrate's same-operation
+    check, recovery deleted both records."""
     env = fx.env
     base = fx.case("t37-homes2-base")
     with _self_test_homes2_active(base):
         root = fx.case("t37-homes2-ingest", base)
         assert die_holding(env, root, "ingest") == 137, "T37 the ingest holder is killed holding it"
-        assert capability_records(root) == (True, True), "T37 its lease and active record are left"
-        result = record_cli(env, root, CREATE)
-        refused(result, "the operation capability records an interrupted run left were reclaimed before "
-                        "this operation")
-        err = result[2]
-        assert "interrupted opf record run" not in err, ("T37 never attributed to opf record", err[-800:])
-        assert "left by an interrupted 'ingest' run whose holder" in err, ("T37 the operation named", err[-800:])
-        assert "any journal work of the 'ingest' operation is not examined here" in err, err[-800:]
-        assert capability_records(root) == (False, False), "T37 the confirmed-dead records are cleared"
+        assert not (Path(root) / TYPED_JOURNAL).exists(), "T37 the fixture has no journal home"
+        _t37_refused_leg(env, root, "ingest", {})
         assert not (Path(root) / TYPED_JOURNAL).exists(), "T37 no journal home is created"
 
 
-def flip_t37():
-    """Attribute every reclaim to opf record (the reviewed head's wording)."""
-    original = record._opf_oplock.acquire_operation
+def t37_other_operation_open_transaction(fx):
+    """As T37's no-journal vector, beside an OPEN record transaction: a confirmed-dead `sync` holder's
+    leftover next to the transaction a killed create left refuses with exit 2 naming 'sync'; the whole
+    store, git internals included, is byte-identical; the lease and active record are still present and
+    name 'sync'; the transaction is still open. Before the substrate's same-operation check, recovery
+    deleted both records and then rolled the transaction back."""
+    env = fx.env
+    base = fx.case("t37-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t37-homes2-sync-open", base)
+        proc = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP)
+        assert proc.returncode == 137, ("T37 the create is killed mid-apply", proc.returncode, proc.stderr[-800:])
+        # The killed create's own record leftover is released through the substrate (same operation), and
+        # a sync holder then dies holding the capability beside the still-open transaction.
+        record._opf_oplock.release_operation(record._opf_oplock.acquire_operation(str(root), record.VERB,
+                                                                                  recover=True))
+        assert die_holding(env, root, "sync") == 137, "T37 the sync holder is killed holding it"
+        states = journal_states(root, TYPED_JOURNAL)
+        assert len(states) == 1 and set(states.values()) == {"open"}, ("T37 one open transaction", states)
+        _t37_refused_leg(env, root, "sync", states)
 
-    def as_record(store_root, operation, holder=None, recover=False):
-        cap = original(store_root, operation, holder=holder, recover=recover)
-        if cap.recovered:
-            cap.recovered_operation = record.VERB
-        return cap
-    return patch.object(record._opf_oplock, "acquire_operation", as_record)
+
+def flip_t37():
+    """The substrate's same-operation check removed: a confirmed-dead holder of any operation is released."""
+    return patch.object(_opf_oplock, "_require_same_operation",
+                        lambda active_bytes, operation: _opf_oplock._recorded_operation(active_bytes))
 
 
 def t38_staging_removal_disclosed(fx):
@@ -5125,8 +5168,8 @@ FIX7_BOTH = ("left is handled by this run only as far as each step succeeds: its
              "a transaction that cannot be reconciled, which leaves it and each one planned after it",
              "a failed release of the recovery capability, which leaves whichever of this run's own records it "
              "did not remove",
-             "the journal work of an operation other than record (an 'ingest' holder's), which this verb never "
-             "examines",
+             "the capability records and journal work of an operation other than record (an 'ingest' "
+             "holder's), which this verb's recovery acquisition refuses and keeps, never examining that journal",
              "or a name the acquisition had itself created: a publication's staging name, or a new record its "
              "unwind removed), or saying that is not known when the error carries no report of it",
              "a record that is not a plain singly-linked regular file, a staging leftover that is not a regular "
@@ -5142,7 +5185,9 @@ FIX7_RETIRED = ("is reclaimed and reconciled by this run", "Only a run that take
                 "a record or its staging leftover that is not a plain singly-linked regular file",
                 "carrying the same three reports", "carries no report; no removal runs there",
                 "left for a later run's trigger in each of these cases", RULE_FIX8,
-                "own publication that fails before it completes, which leaves an open transaction")
+                "own publication that fails before it completes, which leaves an open transaction",
+                "the journal work of an operation other than record (an 'ingest' holder's), which this verb never "
+                "examines")
 
 
 def fix7_texts():
@@ -5184,7 +5229,7 @@ def t46_disclosures_exact(fx):
             assert not any(hasattr(exc, name) for name in REPORTS), "T46 a validation raise carries no report"
         else:
             raise AssertionError("T46 a non-bool recover must refuse")
-        assert die_holding(env, root, "ingest") == 137, "T46 the ingest holder is killed holding it"
+        assert die_holding(env, root, record.VERB) == 137, "T46 the record holder is killed holding it"
         staging = active_record(root).parent / _opf_oplock._staging_name(_opf_oplock.ACTIVE_NAME)
         os.link(active_record(root), staging)
         assert os.lstat(staging).st_nlink == 2, "T46 the staging name shares the active record's inode"
@@ -10897,7 +10942,8 @@ TESTS = (
     ("T34-trigger-residual-disclosed", t34_residual_disclosed, flip_t34),
     ("T35-released-holder-not-reconciled", t35_released_holder_not_reconciled, flip_t35),
     ("T36-journal-home-reopened", t36_journal_home_reopened, flip_t36),
-    ("T37-reclaim-names-operation", t37_reclaim_names_operation, flip_t37),
+    ("T37-other-operation-no-journal-refused", t37_other_operation_no_journal, flip_t37),
+    ("T37-other-operation-open-transaction-refused", t37_other_operation_open_transaction, flip_t37),
     ("T38-staging-removal-disclosed", t38_staging_removal_disclosed, flip_t38),
     ("T39-deletes-then-failure-disclosed", t39_deletes_then_failure_disclosed, flip_unreported_deletes),
     ("T40-held-refusal-discloses", t40_held_refusal_discloses, flip_unreported_deletes),
