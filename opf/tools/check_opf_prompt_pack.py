@@ -52,7 +52,32 @@ the tooling's single source-of-truth copy of it. The guard:
                     section 8.1 heading, an unreadable spec or an unavailable vendored reader never
                     passes. CRLF is normalized to LF exactly as the reader normalizes it; a BARE
                     carriage return anywhere in the spec, which the reader would also treat as a line
-                    ending but a line scan would not, is refused outright rather than normalized. The
+                    ending but a line scan would not, is refused outright rather than normalized.
+                    Every other input the vendored reader and a CommonMark 0.31.2 reader read as
+                    different blocks or rows is refused the same way, so the gate never grades VALID a
+                    spec a person or a CommonMark renderer reads with other module rows: a form feed
+                    anywhere (a line ending only for the vendored reader), a NUL anywhere (replaced
+                    with U+FFFD before parsing, so the parsed text is not the reviewed bytes), every
+                    other whitespace character beyond a space, a tab and the line feed (the vendored
+                    grammars accept ANY Unicode whitespace after an ATX heading's # run, after a
+                    setext underline, inside a thematic break, after a blockquote marker, after a
+                    fence line and around a table row's pipes, where CommonMark admits only a space
+                    or a tab), a line only one of the two readers opens an HTML block on (a "<!" not
+                    followed by an ASCII letter, a "meta" or "source" tag line, a "search" tag line,
+                    and a shared basic tag name followed by a tab, since a block only one reader opens
+                    swallows following lines, a decoy 8.1 heading or a table row included, for that
+                    reader alone), a link reference definition spanning more than one source line
+                    (the vendored reader lets its title swallow lines a CommonMark reader parses as
+                    blocks, a decoy 8.1 heading included), an entity-reference spelling inside any
+                    parsed heading's text (the vendored reader never resolves entities, so a heading
+                    spelled "&#56;.1" opens no section here while a reader shows "8.1"), a section
+                    table delimiter-row cell that is not exactly an optionally colon-fenced dash run
+                    (the vendored reader accepts a mere prefix match, opening a table a GFM reader
+                    does not), and, as defence in depth behind the whitespace rule, any parsed
+                    heading whose # run is not followed by a space, a tab or the line end. The
+                    vendored list-marker grammar needs no such rule: its marker must be followed by
+                    exactly a space, a tab or a line ending once the refused characters are gone,
+                    which is CommonMark's own rule. The
                     section must hold exactly one parsed table, wherever it nests, headed
                     Tier | Type | Namespace, and the rows are read from the parsed cells. Around that
                     table the rule stays bounded: no raw HTML the reader does not parse as a table,
@@ -76,7 +101,13 @@ the tooling's single source-of-truth copy of it. The guard:
                     reader pads or drops the difference; a tier or type cell whose plain text is not
                     exactly the label even where a rendering shows the label (a doubled inner space, a
                     tab between words, an HTML entity spelling such as "Delivery&#45;assurance
-                    module"); and a bare carriage return anywhere in the spec. Two earlier costs are
+                    module"); a bare carriage return anywhere in the spec; a table placed directly
+                    under a paragraph line with no blank line between them (the vendored reader opens
+                    no table that interrupts a paragraph where GitHub's reader does, so the section
+                    then holds no parsed table and is refused); and the divergence refusals above
+                    that scan the spec as text (a form feed, a NUL, non-space-or-tab whitespace, a
+                    divergent HTML opener line), which refuse such input even inside a code fence or
+                    an indented code block where both readers show it inertly. Two earlier costs are
                     gone: a backslash-escaped spelling ("Delivery\\-assurance module", "gate\\_run")
                     resolves to its plain text and is accepted, and "<table" as mere text in inline
                     code or a fenced example is no longer refused (raw HTML outside code still is)
@@ -104,12 +135,24 @@ the tooling's single source-of-truth copy of it. The guard:
                                         heading, an HTML comment or other raw HTML in the section, a
                                         pipe in prose or code outside the table, inline markup in a
                                         cell, a tier with a doubled inner space, an extra MODULE_TYPES
-                                        entry) is red with the module-table guard; a line-scan reading
-                                        put back by the flip grades the fenced and commented fake
-                                        headings, the decoy section and the bare carriage return
-                                        VALID, and a reading without the raw-HTML and plain-cell rules
-                                        grades the tag inside a row VALID, so the parsed reading is
-                                        load-bearing; and a row re-spelled the way a reader shows the
+                                        entry, a form feed that glues a module row onto another, fakes
+                                        a section-ending heading or swaps a namespace behind one, a
+                                        NUL, a no-break-space or vertical-tab fake heading, a fake
+                                        setext underline, thematic break, blockquote marker or fence
+                                        closer riding such whitespace, a prefix-matched delimiter
+                                        row, an HTML opener line only one reader opens a block on, a
+                                        multi-line link reference definition, an entity-spelled decoy
+                                        heading) is red with the module-table guard; a line-scan
+                                        reading put back by the flip grades the fenced and commented
+                                        fake headings, the decoy section and the bare carriage return
+                                        VALID, a reading without the raw-HTML and plain-cell rules
+                                        grades the tag inside a row VALID, and a reading without each
+                                        divergence refusal grades that refusal's vectors VALID again,
+                                        so the parsed reading and each refusal are load-bearing; the
+                                        parsed reading's module rows equal a plain line scan's rows on
+                                        the shipped table, so a parsed reading that drifts on the
+                                        shipped table is caught from the other direction; and a row
+                                        re-spelled the way a reader shows the
                                         same (indented up to three spaces, without outer pipes,
                                         unpadded, padded or aligned, a backslash-escaped spelling, a
                                         moved row, a Baseline row added, a CRLF spec) stays VALID
@@ -382,10 +425,14 @@ def _load_table_reader():
 
 
 def _new_table_parser(marko, gfm_elements):
-    """A FRESH parser per parse, the parse-only pattern of _commonmark_headings (never marko's Markdown
-    object, renderer, convert or named-extension loading), with exactly the three GFM table element
-    classes added, so the reader opens the pipe tables a GitHub-flavoured Markdown reader opens and no
-    other new construct."""
+    """A FRESH parser per parse, the parse-only pattern of _commonmark_headings, with exactly the three
+    GFM table element classes added, so the reader opens the pipe tables a GitHub-flavoured Markdown
+    reader opens and no other new construct. Importing marko.ext.gfm.elements is not free of marko's
+    higher layers: it runs the marko.ext.gfm package __init__, which imports the GFM renderer module
+    and builds a module-level Markdown object with the GFM extension at import time. This gate never
+    calls that object, its convert or its renderer, and because the extension is handed to it as an
+    already-built object, its named-extension loading (load_extension, import_module) never runs; the
+    parse path here touches only the fresh Parser below."""
     parser = marko.parser.Parser()
     for element in (gfm_elements.Table, gfm_elements.TableRow, gfm_elements.TableCell):
         parser.add_element(element)
@@ -467,6 +514,157 @@ def _section_html_nodes(marko, nodes):
             if isinstance(node, (marko.block.HTMLBlock, marko.inline.InlineHTML))]
 
 
+# Whitespace beyond a space, a tab and the line feed. After CRLF normalization and the bare-CR
+# refusal these are the only characters the vendored reader's \s-based grammars (the ATX "#" run,
+# a setext underline's or thematic break's trailing run, a blockquote marker's following space, a
+# fence line's trailing run, the table row splitter and every strip()) treat as whitespace where a
+# CommonMark 0.31.2 reader admits only a space or a tab, so refusing them anywhere makes the two
+# readings agree at every such site at once.
+_DIVERGENT_WHITESPACE_RE = re.compile(r"[^\S \t\n]")
+
+
+def _refuse_divergent_characters(norm):
+    """Refuse, anywhere in the LF-normalized spec, each character the vendored reader reads as line
+    or whitespace structure where a CommonMark 0.31.2 reader does not, exactly as a bare carriage
+    return is refused: a form feed (a line ending only for the vendored reader, so one source line
+    can carry several parsed rows), a NUL (replaced with U+FFFD before parsing, so the parsed text
+    is not the reviewed bytes), and every other whitespace character beyond a space, a tab and the
+    line feed."""
+    _require("\f" not in norm, "module-table",
+             "OPF-SPEC.md holds a form feed, which the vendored reader treats as a line ending but a "
+             "CommonMark reader reads as whitespace inside the line")
+    _require("\x00" not in norm, "module-table",
+             "OPF-SPEC.md holds a NUL, which the vendored reader replaces with U+FFFD before parsing, "
+             "so the parsed text is not the reviewed bytes")
+    stray = sorted({"U+{:04X}".format(ord(c)) for c in _DIVERGENT_WHITESPACE_RE.findall(norm)})
+    _require(not stray, "module-table",
+             "OPF-SPEC.md holds whitespace the vendored reader and a CommonMark reader read "
+             "differently ({}): only a space, a tab or a line feed is whitespace for both".format(
+                 ", ".join(stray)))
+
+
+# A line can open a block at top level or nested under blockquote or list markers; four or more
+# columns of plain indentation is code for both readers, which no pattern below reaches.
+_CONTAINER_PREFIX = r"^ {0,3}(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]{0,4}){0,8}"
+# The type-6 "basic" tag roster both readers share: the vendored roster minus the two names
+# CommonMark 0.31.2 does not list (meta, source); CommonMark's own extra name (search) has its own
+# pattern below. A shared name followed by a tab opens a block only for a CommonMark reader (the
+# vendored pattern admits only spaces there), so that spelling is refused too.
+_SHARED_BLOCK_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|"
+    "dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|"
+    "head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|"
+    "p|param|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul")
+# Lines on which exactly one of the two readers opens an HTML block. A block only one reader opens
+# swallows the following lines up to its end condition for that reader alone, a decoy 8.1 heading
+# or a table row included, so the two readers disagree about which headings and rows exist at all.
+# The accepted cost is such a line inside a code fence or an indented code block, refused as text
+# although both readers show it as code (the same bound the pipe rule accepts).
+_HTML_OPENER_DIVERGENCES = (
+    ("a '<!' declaration opener without an ASCII letter, which only the vendored reader opens an "
+     "HTML block on (CommonMark 0.31.2 requires a letter; '<!--' and '<![CDATA[' are shared)",
+     re.compile(r"(?m)" + _CONTAINER_PREFIX + r"<!(?!--|\[CDATA\[|[A-Za-z])")),
+    ("a 'meta' or 'source' tag line, which only the vendored reader opens an HTML block on "
+     "(neither name is on the CommonMark 0.31.2 basic tag roster)",
+     re.compile(r"(?mi)" + _CONTAINER_PREFIX + r"</?(?:meta|source)(?=[ >]|/>|$)")),
+    ("a 'search' tag line, which only a CommonMark 0.31.2 reader opens an HTML block on (the name "
+     "is not on the vendored roster)",
+     re.compile(r"(?mi)" + _CONTAINER_PREFIX + r"</?search(?=[ \t>]|/>|$)")),
+    ("a basic tag name followed by a tab, which only a CommonMark 0.31.2 reader opens an HTML "
+     "block on (the vendored pattern admits only spaces after the name)",
+     re.compile(r"(?mi)" + _CONTAINER_PREFIX + r"</?(?:" + _SHARED_BLOCK_TAGS + r")(?=\t)")),
+)
+
+
+def _refuse_html_opener_divergences(norm):
+    """Refuse, anywhere in the LF-normalized spec, each line on which exactly one of the two readers
+    opens an HTML block (_HTML_OPENER_DIVERGENCES). The shared openers stay accepted, and their end
+    conditions need no rule of their own: where the vendored reader ends a shared block earlier than
+    CommonMark (the CDATA block it closes at '>'), it exposes MORE lines, and an exposed decoy
+    heading or stray pipe is refused by the section rules, never graded VALID."""
+    for what, pattern in _HTML_OPENER_DIVERGENCES:
+        match = pattern.search(norm)
+        _require(match is None, "module-table",
+                 "OPF-SPEC.md holds {}: {!r}".format(what, match.group() if match else ""))
+
+
+def _refuse_heading_markers(marko, nodes, norm):
+    """Refuse any parsed ATX heading whose # run is not followed by a space, a tab or the line end
+    (CommonMark 0.31.2's rule; the vendored pattern admits any Unicode whitespace). Defence in depth:
+    while _refuse_divergent_characters holds, no accepted character can sit there, so this rule also
+    pins that invariant against a future preprocessing or grammar change."""
+    for node in nodes:
+        if not isinstance(node, marko.block.Heading):
+            continue
+        span = getattr(node, "source_span", None)
+        _require(_usable_span(span, len(norm)), "module-table",
+                 "a parsed heading carries no usable source span", CANNOT_EVALUATE)
+        line = norm[span[0]:span[1]]
+        match = re.match(r" {0,3}#{1,6}", line)
+        _require(match is not None, "module-table",
+                 "a parsed heading's source span does not re-match the heading grammar",
+                 CANNOT_EVALUATE)
+        after = line[match.end():match.end() + 1]
+        _require(after in ("", " ", "\t", "\n"), "module-table",
+                 "a parsed heading's # run is followed by {!r}, not a space, a tab or the line end, "
+                 "which a CommonMark reader does not read as a heading".format(after))
+
+
+def _refuse_multiline_link_defs(marko, nodes, norm):
+    """Refuse any parsed link reference definition spanning more than one source line: the vendored
+    reader reads its destination and title straight off the buffer, so a multi-line title swallows
+    lines a CommonMark reader parses as blocks (a decoy 8.1 heading included, since for CommonMark a
+    heading interrupts the paragraph the definition is read from, leaving the definition unclosed
+    and the heading live). A one-line definition swallows nothing beyond its own line, which neither
+    reader reads as a heading or a row, so it stays accepted."""
+    for node in nodes:
+        if not isinstance(node, marko.block.LinkRefDef):
+            continue
+        span = getattr(node, "source_span", None)
+        _require(_usable_span(span, len(norm)), "module-table",
+                 "a parsed link reference definition carries no usable source span", CANNOT_EVALUATE)
+        _require("\n" not in norm[span[0]:span[1]].rstrip("\n"), "module-table",
+                 "OPF-SPEC.md holds a link reference definition spanning more than one line, whose "
+                 "span the vendored reader and a CommonMark reader read differently")
+
+
+# An entity or numeric character reference as CommonMark 0.31.2 spells them (a named reference, a
+# decimal reference of up to 7 digits, or a hex reference of up to 6 digits).
+_ENTITY_RE = re.compile(r"&(?:[A-Za-z][A-Za-z0-9]{1,47};|#[0-9]{1,7};|#[xX][0-9a-fA-F]{1,6};)")
+
+
+def _refuse_entity_headings(marko, nodes):
+    """Refuse an entity-reference spelling inside any parsed heading's text: the vendored reader
+    never resolves entities while a CommonMark reader does, so a heading spelled '&#56;.1' opens no
+    section for this gate while a reader shows a section headed 8.1. The accepted cost is a heading
+    that merely mentions such a spelling, a code span included (where a reader also shows it
+    literally), refused all the same."""
+    for node in nodes:
+        if not isinstance(node, (marko.block.Heading, marko.block.SetextHeading)):
+            continue
+        text = _plain_text(node)
+        match = _ENTITY_RE.search(text)
+        _require(match is None, "module-table",
+                 "the parsed heading {!r} holds the entity spelling {!r}, which a CommonMark reader "
+                 "resolves to other text".format(text, match.group() if match else ""))
+
+
+def _refuse_delimiter_cells(table):
+    """Refuse a section table delimiter-row cell that is not exactly an optionally colon-fenced dash
+    run: the vendored reader accepts a mere PREFIX match (a cell such as '- x' opens its table),
+    where a GFM reader requires the whole cell and otherwise shows no table at all. The row grammar
+    has already stripped the cell's surrounding whitespace, so the comparison is over exactly what a
+    GFM reader trims."""
+    delimiters = getattr(table, "delimiters", None)
+    _require(isinstance(delimiters, list) and all(type(cell) is str for cell in delimiters),
+             "module-table", "the section 8.1 table exposes no delimiter cells", CANNOT_EVALUATE)
+    for cell in delimiters:
+        _require(re.fullmatch(r":?-+:?", cell.strip(" \t")) is not None, "module-table",
+                 "the section 8.1 table delimiter cell {!r} is one the vendored reader accepts (a "
+                 "prefix match) but a GFM reader does not, so a GFM reader shows no table "
+                 "here".format(cell))
+
+
 def _spec_section(marko, document, norm):
     """Section 8.1 of the parsed spec, as (section block nodes, content start, content end): the parsed
     heading whose first word is SECTION_WORD, and the top-level content up to the next heading of the
@@ -511,10 +709,14 @@ def _spec_module_rows(text):
     every body row holds exactly three plain-text source cells whose tier is exactly a SPEC_TIERS label,
     no module type listed twice. CRLF is normalized to LF exactly as the vendored reader itself
     normalizes line endings; a BARE carriage return anywhere in the spec is refused outright, never
-    normalized, so no content rides an ending a line-oriented diff or review shows as one line."""
+    normalized, so no content rides an ending a line-oriented diff or review shows as one line, and
+    every other input the vendored reader and a CommonMark 0.31.2 reader read as different blocks or
+    rows is refused by the _refuse_* rules above, named one by one, never graded VALID."""
     norm = text.replace("\r\n", "\n")
     _require("\r" not in norm, "module-table",
              "OPF-SPEC.md holds a bare carriage return, which a reader treats as a line ending")
+    _refuse_divergent_characters(norm)
+    _refuse_html_opener_divergences(norm)
     marko, gfm_elements = _load_table_reader()
     try:
         document = _new_table_parser(marko, gfm_elements).parse(norm)
@@ -528,6 +730,10 @@ def _spec_module_rows(text):
              "the parsed document span does not cover the spec", CANNOT_EVALUATE)
     _require(isinstance(getattr(document, "children", None), list), "module-table",
              "the parsed document exposes no children list", CANNOT_EVALUATE)
+    everything = _walk_nodes(document, [])
+    _refuse_heading_markers(marko, everything, norm)
+    _refuse_multiline_link_defs(marko, everything, norm)
+    _refuse_entity_headings(marko, everything)
     section, start, end = _spec_section(marko, document, norm)
     nodes = []
     for node in section:
@@ -540,6 +746,7 @@ def _spec_module_rows(text):
              "section 8.1 holds raw HTML the reader does not parse as a table ({})".format(
                  ", ".join(sorted({type(node).__name__ for node in html}))))
     table = tables[0]
+    _refuse_delimiter_cells(table)
     table_span = getattr(table, "source_span", None)
     _require(_usable_span(table_span, len(norm)) and start <= table_span[0] and table_span[1] <= end,
              "module-table", "the section 8.1 table carries no usable source span", CANNOT_EVALUATE)
@@ -1261,7 +1468,8 @@ def _self_test_vectors():
             # nothing leaves the text unchanged and fails its vector, so a stale mutation never passes.
             shipped_spec = _read_regular(SPEC_PATH, MAX_SPEC_BYTES, "spec").decode("utf-8")
             gate_run_row = "| Delivery-assurance module | gate_run | GR |\n"
-            table_end = "| Reserved, unassigned | (none) | LF |\n\nNotes on the roster:\n"
+            lf_row = "| Reserved, unassigned | (none) | LF |\n"
+            table_end = lf_row + "\nNotes on the roster:\n"
 
             def extra_row(row):
                 return lambda t: t.replace(gate_run_row, gate_run_row + row + "\n", 1)
@@ -1404,6 +1612,75 @@ def _self_test_vectors():
                     ("module-table-bare-carriage-return-at-eof", INVALID, "module-table",
                      lambda t: t + "\r"),
                     ("module-table-crlf-spec", VALID, None, lambda t: t.replace("\n", "\r\n")),
+                    # Inputs the vendored reader and a CommonMark reader read as different blocks or
+                    # rows, each refused up front: a form feed is a line ending only for the vendored
+                    # reader (gluing a module row onto another source line, faking a section-ending
+                    # heading, or hiding a namespace swap behind one), a NUL parses as U+FFFD, and a
+                    # no-break space or vertical tab after a "#" run, after a setext underline,
+                    # inside a thematic break, after a blockquote marker or after a closing fence is
+                    # whitespace only for the vendored reader, so the gate and a reader disagree
+                    # about which headings, fences and rows the section holds.
+                    ("module-table-formfeed-hides-module-row", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, "", 1).replace(
+                         lf_row, lf_row[:-1] + "\f" + gate_run_row, 1)),
+                    ("module-table-formfeed-fake-heading-extra-row", INVALID, "module-table",
+                     lambda t: t.replace(lf_row, lf_row[:-1] + "\f### Notes\n"
+                                         "| Governance module | extra_action | XA |\n", 1)),
+                    ("module-table-formfeed-swap-namespace", INVALID, "module-table",
+                     lambda t: t.replace(gate_run_row, "", 1).replace(
+                         lf_row, lf_row[:-1] + "\f" + gate_run_row[:-1] + "\f### Notes\n"
+                         "| Delivery-assurance module | gate_run | ZZ |\n", 1)),
+                    ("module-table-nbsp-fake-heading-extra-row", INVALID, "module-table",
+                     lambda t: t.replace(lf_row, lf_row + "###\u00a0Notes\n"
+                                         "| Governance module | extra_action | XA |\n", 1)),
+                    ("module-table-vt-fake-heading-extra-row", INVALID, "module-table",
+                     lambda t: t.replace(lf_row, lf_row + "###\x0bNotes\n"
+                                         "| Governance module | extra_action | XA |\n", 1)),
+                    ("module-table-nul-byte", INVALID, "module-table",
+                     lambda t: t.replace("Notes on the roster:", "Notes\x00on the roster:", 1)),
+                    ("module-table-vt-fake-setext-underline", INVALID, "module-table",
+                     after_table("Closing note.\n---\x0b\n\n" + second_table)),
+                    ("module-table-nbsp-thematic-break", INVALID, "module-table",
+                     after_table("-\u00a0-\u00a0-")),
+                    ("module-table-nbsp-blockquote-marker", INVALID, "module-table",
+                     after_table(">\u00a0a quoted roster note")),
+                    ("module-table-nbsp-fence-close", INVALID, "module-table",
+                     lambda t: t.replace("### 8.1 Type taxonomy and placement\n\n",
+                                         "### 8.1 Type taxonomy and placement\n\n"
+                                         "```\nexample\n```\u00a0\n\n", 1)),
+                    # The vendored reader opens a table on a delimiter row it merely prefix-matches;
+                    # a GFM reader requires each cell to be exactly an optionally colon-fenced dash
+                    # run and otherwise shows NO table here at all.
+                    ("module-table-delimiter-prefix-cells", INVALID, "module-table",
+                     lambda t: t.replace("| Tier | Type | Namespace |\n|---|---|---|\n",
+                                         "| Tier | Type | Namespace |\n"
+                                         "|- alignment|- note|- row|\n", 1)),
+                    # Lines only one of the two readers opens an HTML block on: a block only one
+                    # reader opens swallows the following lines for that reader alone, so one reader
+                    # shows a decoy section 8.1 (or loses the real heading) while the other does not.
+                    ("module-table-html-declaration-opener", INVALID, "module-table",
+                     lambda t: t.replace("\n### 4.3 ", "\n<!1\n### 8.1 Decoy placement\n\n"
+                                         + second_table + "\n>\n\n### 4.3 ", 1)),
+                    ("module-table-html-meta-tag-opener", INVALID, "module-table",
+                     lambda t: t.replace("\n### 4.3 ", "\n<meta roster q\n### 8.1 Decoy placement\n"
+                                         + second_table + "\n\n### 4.3 ", 1)),
+                    ("module-table-html-search-tag-opener", INVALID, "module-table",
+                     lambda t: t.replace("### 8.1 Type taxonomy and placement\n",
+                                         "<search scope q\n### 8.1 Type taxonomy and placement\n", 1)),
+                    ("module-table-html-tag-tab-opener", INVALID, "module-table",
+                     lambda t: t.replace("### 8.1 Type taxonomy and placement\n",
+                                         "Roster preamble.\n<div\thidden>\n"
+                                         "### 8.1 Type taxonomy and placement\n", 1)),
+                    # A link reference definition spanning more than one line swallows, for the
+                    # vendored reader alone, lines a CommonMark reader parses as blocks.
+                    ("module-table-multiline-link-ref-def", INVALID, "module-table",
+                     lambda t: t.replace("\n### 4.3 ", "\n[roster note]: /placement \"first\n"
+                                         "### 8.1 Decoy placement\nsecond\"\n\n### 4.3 ", 1)),
+                    # An entity-spelled heading resolves to "8.1" for a CommonMark reader while the
+                    # vendored reader keeps the literal spelling, which opens no section here.
+                    ("module-table-entity-named-heading", INVALID, "module-table",
+                     lambda t: t.replace("\n### 4.3 ", "\n### &#56;.1 Decoy placement\n\n"
+                                         + second_table + "\n\n### 4.3 ", 1)),
                     # The section is the PARSED heading named 8.1: a decoy heading inside a code fence
                     # never takes the section over, a duplicate or blockquote-nested heading named 8.1
                     # is ambiguous, and a missing or nested-only heading cannot bound the section.
@@ -1569,6 +1846,28 @@ def _self_test_vectors():
                 "PASS" if ok else "FAIL", ", ".join(got[0] for got in flipped)))
             if not ok:
                 failures.append("module-table-flip-line-scan-misses-parsed-vectors: {!r}".format(flipped))
+            # The other direction: the parsed reading and the old line scan read the SAME module rows
+            # from the shipped table, so a parsed reading that drifts on the shipped table (rows a
+            # line-oriented review does not read) is caught rather than trusted. The revert drifts
+            # one parsed namespace and must disagree with the scan.
+            parsed_rows = _spec_module_rows(shipped_spec)
+            scanned_rows = line_scan_rows(shipped_spec)
+            count += 1
+            ok = bool(parsed_rows) and parsed_rows == scanned_rows
+            print("{} module-table-parsed-reading-agrees-with-line-scan: {} row(s)".format(
+                "PASS" if ok else "FAIL", len(parsed_rows)))
+            if not ok:
+                failures.append("module-table-parsed-reading-agrees-with-line-scan: parsed {!r}, "
+                                "scanned {!r}".format(parsed_rows, scanned_rows))
+            count += 1
+            drifted = dict(parsed_rows)
+            drifted["gate_run"] = ("ZZ", drifted.get("gate_run", ("", ""))[1])
+            red = drifted != scanned_rows
+            print("{} module-table-parsed-reading-agrees-with-line-scan-revert: drift {}".format(
+                "PASS" if red else "FAIL", "caught" if red else "missed"))
+            if not red:
+                failures.append("module-table-parsed-reading-agrees-with-line-scan-revert: a drifted "
+                                "parsed reading was not caught")
             # Flip 2: without the raw-HTML rule's inline half and the plain-cell rule, the HTML table
             # tag INSIDE a row grades VALID (three source cells under a Baseline tier), while an HTML
             # table BLOCK stays red and the shipped spec stays green: exactly those two rules carry the
@@ -1588,6 +1887,60 @@ def _self_test_vectors():
             if not ok:
                 failures.append("module-table-flip-in-row-tag-rules: {!r} {!r} {!r}".format(
                     in_row, html_block, still_green))
+            # Flip 3: with the divergent-character rules removed (the form feed, NUL and whitespace
+            # refusals, and the heading-marker rule standing behind the whitespace one), every vector
+            # that rides such a character grades VALID again while the shipped spec stays green, so
+            # exactly those rules carry the refusals.
+            character_blind = ("module-table-formfeed-hides-module-row",
+                               "module-table-formfeed-fake-heading-extra-row",
+                               "module-table-formfeed-swap-namespace",
+                               "module-table-nbsp-fake-heading-extra-row",
+                               "module-table-vt-fake-heading-extra-row",
+                               "module-table-nul-byte",
+                               "module-table-vt-fake-setext-underline",
+                               "module-table-nbsp-thematic-break",
+                               "module-table-nbsp-blockquote-marker",
+                               "module-table-nbsp-fence-close")
+            with patch.dict(globals(), {"_refuse_divergent_characters": lambda norm: None,
+                                        "_refuse_heading_markers": lambda marko, nodes, norm: None}):
+                flipped = [validate_module_table(by_name[name](shipped_spec))
+                           for name in character_blind]
+                still_green = validate_module_table(shipped_spec)
+            count += 1
+            ok = (all(got[:2] == (VALID, None) for got in flipped)
+                  and still_green[:2] == (VALID, None))
+            print("{} module-table-flip-divergent-character-rules: {}".format(
+                "PASS" if ok else "FAIL", ", ".join(got[0] for got in flipped)))
+            if not ok:
+                failures.append("module-table-flip-divergent-character-rules: {!r} {!r}".format(
+                    flipped, still_green))
+            # Flips 4 to 7: removing each remaining divergence refusal alone grades exactly its
+            # vectors VALID again while the shipped spec stays green, so each refusal is
+            # load-bearing on its own.
+            single_flips = (
+                ("module-table-flip-delimiter-rule", "_refuse_delimiter_cells",
+                 lambda table: None, ("module-table-delimiter-prefix-cells",)),
+                ("module-table-flip-html-opener-rule", "_refuse_html_opener_divergences",
+                 lambda norm: None, ("module-table-html-declaration-opener",
+                                     "module-table-html-meta-tag-opener",
+                                     "module-table-html-search-tag-opener",
+                                     "module-table-html-tag-tab-opener")),
+                ("module-table-flip-link-ref-def-rule", "_refuse_multiline_link_defs",
+                 lambda marko, nodes, norm: None, ("module-table-multiline-link-ref-def",)),
+                ("module-table-flip-entity-heading-rule", "_refuse_entity_headings",
+                 lambda marko, nodes: None, ("module-table-entity-named-heading",)),
+            )
+            for flip_name, target, stub, names in single_flips:
+                with patch.dict(globals(), {target: stub}):
+                    flipped = [validate_module_table(by_name[name](shipped_spec)) for name in names]
+                    still_green = validate_module_table(shipped_spec)
+                count += 1
+                ok = (all(got[:2] == (VALID, None) for got in flipped)
+                      and still_green[:2] == (VALID, None))
+                print("{} {}: {}".format("PASS" if ok else "FAIL", flip_name,
+                                         ", ".join(got[0] for got in flipped)))
+                if not ok:
+                    failures.append("{}: {!r} {!r}".format(flip_name, flipped, still_green))
             # The default run (main with no argument) includes the import examples: the shipped pack reports
             # them, and a pack whose only fault is an example guard's is refused, not VALID.
             import contextlib
