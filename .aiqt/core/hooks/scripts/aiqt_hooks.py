@@ -7186,8 +7186,16 @@ def _git_alias_spelled_segments(command):
             last_end = -1
         if words:
             segments.append(words)
+    # A word holding no '$', backquote or '{' is all literal, with no brace and no unquoted part: each of the three
+    # searches below finds nothing in it. Where the text holds none, every word is such a word, so each gets its
+    # record (the shared one the lexer gives it, _WORD_SPELLINGS) with no search.
+    marked = "$" in text or "`" in text or "{" in text
     spelled = []
     for seg in segments:
+        if not marked:
+            spelled.append(_SpelledWords(seg, [_WORD_SPELLINGS[4 * len(word)] if len(word) < 64
+                                               else _WordSpelling(len(word), False, False) for word in seg]))
+            continue
         spelling = []
         for word in seg:
             mark = _GIT_ALIAS_SPELLED_MARK_RE.search(word)
@@ -15975,7 +15983,12 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
-def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
+# The kind a caller of _gate_weakening_fallback passes when it has not read _gate_weakening_fallback_kind of the
+# command (whose own results include None), so the fallback reads it itself.
+_GATE_KIND_UNREAD = object()
+
+
+def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind=_GATE_KIND_UNREAD):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
@@ -15992,8 +16005,10 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies."""
-    kind = _gate_weakening_fallback_kind(command)
+    only note or allow ($G commit -nv <<<x) denies. kind, when given, is _gate_weakening_fallback_kind(command)
+    as the caller has just read it, so the raw probes are not run over the command a second time."""
+    if kind is _GATE_KIND_UNREAD:
+        kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -16224,9 +16239,11 @@ def _gate_weakening_fallback_kind(command):
         return "no-verify"
     if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
         return "short-n"
-    if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
-            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+    # The swallow and sink probes are read first: each is a short literal scan, where the checker keyword
+    # alternation tries every word start, so a command with no such spelling skips that scan.
+    if ((_RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command)))
+            and _RAW_CHECKER_RE.search(command)):
         return "swallow"
     return None
 
@@ -16335,6 +16352,8 @@ _GATE_BASH_ESCAPE_RE = re.compile(
     r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]*)\}?|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})"
     r"|c(\\\\|.)|(.))", re.S)
 _GATE_ANSI_C_BODY_RE = re.compile(r"(?:[^'\\]|\\.)*", re.S)
+# A run of characters _gate_shell_level keeps as they stand: none is a backslash, a quote or a '$'.
+_GATE_SHELL_LEVEL_PLAIN_RE = re.compile(r"[^\\'\"$]+")
 
 # Where the bash-model readings split words: bash's blanks (space, tab and newline, not the other characters
 # Python's str.split() treats as whitespace) and every shell operator character and opener (; & | ( ) < > and
@@ -16410,8 +16429,15 @@ def _gate_shell_level(text):
                 i += 1
             i += 1
         else:
-            out.append(c)
-            i += 1
+            # A run of characters none of which opens anything at this level is kept as it stands, in one copy
+            # rather than one step per character; a '$' before no quote is kept on its own.
+            run = _GATE_SHELL_LEVEL_PLAIN_RE.match(text, i)
+            if run is None:
+                out.append(c)
+                i += 1
+            else:
+                out.append(run.group())
+                i = run.end()
     return "".join(out)
 
 
@@ -16420,8 +16446,18 @@ def _gate_reading_words(text):
     stands, a '$' before a quote and every quote character and backslash left in text removed, the rest split at
     _GATE_WORD_BREAK_RE, and a 'git' word added after an option word whose attached value names git, as in
     _gate_dequoted_words."""
+    return _gate_plain_words(_gate_reading_plain(text))
+
+
+def _gate_reading_plain(text):
+    """The text _gate_reading_words splits into words: env -S's \\_ read as a blank, then a '$' before a quote and
+    every quote character and backslash removed."""
     plain = re.sub(r"\$(?=['\"])", "", text.replace("\\_", " "))
-    plain = plain.replace("'", "").replace('"', "").replace(chr(92), "")
+    return plain.replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+def _gate_plain_words(plain):
+    """The words of _gate_reading_words for its text made plain (_gate_reading_plain)."""
     words = []
     for w in _GATE_WORD_BREAK_RE.split(plain):
         if not w:
@@ -16439,12 +16475,20 @@ def _gate_bash_readings(text):
     """The word lists of the bash-model readings of text, its line continuations joined first: the text at its
     own quoting level as bash reads it (_gate_shell_level), that result read once more as the shell it is handed
     to reads it (sh -c, eval or env -S, one level in), and the text with every ANSI-C $'...' quote the raw match
-    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words."""
+    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words.
+    Readings that are the same text once made plain (_gate_reading_plain) have the same words, so those words are
+    split once and the one list stands for each such reading; no reader of the lists changes one."""
     joined = _join_continuations(text)[0]
     outer = _gate_shell_level(joined)
     decoded = _GATE_ANSI_C_RE.sub(lambda m: _gate_ansi_c_text(m.group(1)), joined)
-    return (_gate_reading_words(outer), _gate_reading_words(_gate_shell_level(outer)),
-            _gate_reading_words(decoded))
+    split = {}
+    readings = []
+    for reading in (outer, _gate_shell_level(outer), decoded):
+        plain = _gate_reading_plain(reading)
+        if plain not in split:
+            split[plain] = _gate_plain_words(plain)
+        readings.append(split[plain])
+    return tuple(readings)
 
 
 def _gate_any_word_bypass(words, first=None):
@@ -16467,7 +16511,8 @@ def _gate_any_word_bypass(words, first=None):
                 found = (w, "a --no-verify spelling")
             elif short_at is not None and w in _NOVERIFY_SHORT_N_VERBS:
                 found = (w, "the short -n (--no-verify) in {!r}".format(words[short_at][:40]))
-        if _has_long_prefix((w,), "no-verify"):
+        # _has_long_prefix reads only a word starting with '--', so the test before it skips the call for any other.
+        if w[:2] == "--" and _has_long_prefix((w,), "no-verify"):
             long_at = p
         elif w[:1] == "-" and w[1:2] != "-" and "n" in w:
             short_at = p
@@ -16512,7 +16557,13 @@ def _gate_text_bypass(text, skip_own=False):
     readings."""
     if not _gate_text_may_name_git(text):
         return None
+    walked = []
     for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
+        # The walk below reads nothing but the words, so a reading whose words equal those of one already walked
+        # (which gave None, or this would have returned) gives None again and is not walked a second time.
+        if words in walked:
+            continue
+        walked.append(words)
         if skip_own:
             k = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
             words = words[k + 1:]
@@ -17427,7 +17478,8 @@ def gate_weakening(data):
             # each ANSI-C quote's escapes decoded). Quoting alone is no ground to deny: a quoted argument that
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
             # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
-            if (_gate_weakening_fallback_kind(command) not in _GATE_FALLBACK_DENIES
+            raw_kind = _gate_weakening_fallback_kind(command)
+            if (raw_kind not in _GATE_FALLBACK_DENIES
                     and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
                             for text in _decoded_readings(command))):
                 return _deny(
@@ -17444,7 +17496,7 @@ def gate_weakening(data):
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True)
+            return _gate_weakening_fallback(command, runtime=True, kind=raw_kind)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -17603,8 +17655,9 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command, heredoc_message=True)
+        raw_kind = _gate_weakening_fallback_kind(command)
+        if raw_kind in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True, kind=raw_kind)
     # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
     # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
     # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
