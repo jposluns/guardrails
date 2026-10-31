@@ -12,13 +12,18 @@ Input: the product root and nothing else (no transcript, no claim, no run id: th
   store-doctor    `opf doctor --require-store --root ROOT`
   render-check    `opf render --check --root ROOT`
 
-The receipt core is read ONCE per run and those bytes are what both receipt-core and event-chain grade.
+The receipt core is read ONCE per run by this module and those bytes are what both receipt-core and
+event-chain grade.
 The event files are the ones the import completion evaluator accepts (_opf_import_complete._event_files):
 every event-shaped name the bundle inventories list must be present, every one present must be listed,
 each spelled event-<NNNN>.toml of its number, numbered contiguously from event-0001.toml; a gap, a
 misspelled name or an unlisted event file is CANNOT_EVALUATE. The inventories it reconciles against are
 the exact bytes _opf_adopt_apply.verify_bundle read, and a bundle that verification grades INVALID is a
-finding. The chain validator proves internal agreement only (it seeds the run from the genesis event and
+finding. That verification re-reads every listed payload on its own, apart from the receipt core read
+here and the event bytes read here, so the graded bytes are bound to it: the sha256 of the receipt core
+bytes and of each event's bytes graded here must equal that path's row digest in those parsed
+inventories, and a missing row or another digest (a file swapped between the reads) is CANNOT_EVALUATE.
+The chain validator proves internal agreement only (it seeds the run from the genesis event and
 never recomputes a recorded digest), so a VALID chain is then held, as in the import completion
 evaluator, to every event naming this run and every recorded event_digest recomputing from the event's
 own canonical bytes (_opf_adopt_apply.event_digest); either failing is a finding. Last, the latest
@@ -34,8 +39,9 @@ only for its digest, which no leg grades), and each digest-only file that could 
   NOT_ADOPTED        adopt-status is clean and lists no adoption run (exit 1)
   INVALID            some leg reports a finding; the first such leg in the order above decides (exit 1)
   CANNOT_EVALUATE    some leg could not be read or run, or reported cannot-evaluate; the first such leg
-                     decides, never a pass (exit 2)
-  ADOPTED_AND_VALID  every leg passes for every listed run (exit 0)
+                     decides, never a pass; with every leg passing, an unread digest-only input
+                     (unread_inputs not empty) is CANNOT_EVALUATE decided by `unread-inputs` (exit 2)
+  ADOPTED_AND_VALID  every leg passes for every listed run and every input was read (exit 0)
 
 A finding outranks a cannot-evaluate, since a finding is a definite failure; both are non-pass.
 
@@ -51,11 +57,16 @@ adopted store scores ADOPTED_AND_VALID or that a real render detects view drift.
 
 DISCLOSED RESIDUALS: the input digests cover the bundle files this module reads (receipt, outcome events
 and the bundle-root inventories, graded; plan, approval and planning inventory, digest only, graded by no
-leg here); the files the composed legs read on their own are not digested here. The legs run in this
-process, one after another, so a tree changed between legs is not detected. OPF-SPEC section 14 requires
-an outcome-event chain but does not say which outcome kind completes an adoption, and the shipped apply
-mints only the genesis `applied`; so COMPLETING_EVENT is `applied`, and a chain whose latest event is any
-other kind (a later `failed`, and equally a later `signed-off`) is CANNOT_EVALUATE until the spec decides.
+leg here, and an unreadable one fails the verdict closed); the files the composed legs read on their own
+are not digested here. The legs run in this process, one after another, so a tree changed between legs is
+not detected. OPF-SPEC section 14 requires an outcome-event chain but does not say which outcome kind
+completes an adoption, and the shipped apply mints only the genesis `applied`; so COMPLETING_EVENT is
+`applied`, and a chain whose latest event is any other kind (a later `failed`, and equally a later
+`signed-off`) is CANNOT_EVALUATE until the spec decides. The chain validator allows `applied` only at the
+genesis position, so no chain longer than one event can score ADOPTED_AND_VALID. OPF-SPEC section 14.1
+says of import completion: "It MUST record the source's result in the adoption receipt's outcome-event
+chain." So every product root with a post-adoption outcome event, a completed import included, scores
+CANNOT_EVALUATE (or INVALID, for a second `applied`) until the spec names a completing kind.
 A leg deadline is a SIGALRM interval timer, so it holds only on the main thread of a platform with
 setitimer (elsewhere every leg is CANNOT_EVALUATE); the alarm raises inside the leg and repeats each
 second until the leg yields, so a leg that swallows it every time is not stopped, though its result is
@@ -106,8 +117,12 @@ PASS, FINDING, CANNOT = "pass", "finding", "cannot-evaluate"
 # The wiring prober handed to the completion roster: none ships (see the module docstring).
 PROBER = None
 # The outcome kind the latest event must carry for the run to count as adopted: the genesis `applied`, the
-# only kind the shipped apply mints (OPF-SPEC section 14 names no completing kind; module docstring).
+# only kind the shipped apply mints (OPF-SPEC section 14 names no completing kind; module docstring). As
+# `applied` is genesis-only, any post-adoption event, an import's included, is never ADOPTED_AND_VALID.
 COMPLETING_EVENT = "applied"
+# The OPF-SPEC section 14.1 sentence the residual cites: import completion appends to the chain.
+SPEC_IMPORT_RECORDS_EVENT = ("It MUST record the source's result in the adoption receipt's outcome-event "
+                             "chain.")
 # Each leg's deadline in seconds, well above its run time over the self-test fixture (each leg under 2 s
 # there); a leg past it is cannot-evaluate.
 LEG_DEADLINE_SECONDS = {"adopt-status": 120, "adopt-complete": 300, "receipt-core": 60, "event-chain": 300,
@@ -212,12 +227,11 @@ def _leg_receipt(core, run_id, read):
     return _graded(checked.status, checked.findings, "receipt core")
 
 
-def _event_paths(root, root_fd, run_id, read):
-    """The run's outcome-event paths in chain order by the import completion evaluator's own rule
-    (_opf_import_complete._event_files), reconciled against the bundle-root inventories parsed from the
-    exact bytes the bundle verification read (each digested as graded here). A bundle the verification
-    grades INVALID is a finding; a gap, a misspelled, unlisted or listed-but-absent event file, an
-    inventory that cannot evaluate and a verification that cannot are cannot-evaluate."""
+def _verified_bundle(root, run_id, read):
+    """((verification, parsed inventories), {path: row sha256}) of the run's bundle: the bundle-root
+    inventories are parsed from the exact bytes the bundle verification read (each digested as graded
+    here). A bundle the verification grades INVALID is a finding; an inventory that cannot evaluate, a
+    verification that cannot and a path two rows claim are cannot-evaluate."""
     raw = {}
     try:
         verified = apply.verify_bundle(root, run_id, inventory_bytes=raw)
@@ -228,19 +242,44 @@ def _event_paths(root, root_fd, run_id, read):
     if verified.status != store.VALID:
         raise _Leg(FINDING if verified.status == store.INVALID else CANNOT,
                    "adoption evidence bundle: {}: {}".format(verified.status, "; ".join(verified.findings)))
-    docs = {}
+    docs, rows = {}, {}
     for rel in sorted(raw):
         doc = _parsed(raw[rel], "the adoption bundle inventory " + rel)
         checked = apply.validate_inventory(doc, run_id)
         if checked.status == store.CANNOT_EVALUATE:
             raise _Leg(CANNOT, "the adoption bundle inventory {}: {}".format(rel, "; ".join(checked.findings)))
         docs[rel] = doc if checked.status == store.VALID else None
+        for row in doc["file"] if docs[rel] is not None else ():
+            if row["path"] in rows:
+                raise _Leg(CANNOT, "{} is claimed by two bundle inventory rows".format(row["path"]))
+            rows[row["path"]] = row["sha256"]
+    return (verified, docs), rows
+
+
+def _event_paths(root_fd, run_id, bundle):
+    """The run's outcome-event paths in chain order by the import completion evaluator's own rule
+    (_opf_import_complete._event_files), reconciled against the verified bundle's parsed inventories. A
+    gap and a misspelled, unlisted or listed-but-absent event file are cannot-evaluate."""
     ev = importc._Evaluation()
-    ev.root_fd, ev.run_id, ev.bundle = root_fd, run_id, (verified, docs)
+    ev.root_fd, ev.run_id, ev.bundle = root_fd, run_id, bundle
     try:
         return importc._event_files(ev, apply.evidence_home_rel(run_id))
     except importc.Unevaluable as exc:
         raise _Leg(CANNOT, str(exc))
+
+
+def _attested(rows, rel, data):
+    """`data`, the bytes graded here at `rel`, when the bundle inventory row the verification checked its
+    own read against carries their sha256. The verification reads every payload apart from this module's
+    reads, so a missing row or another digest (bytes swapped between the reads) is cannot-evaluate."""
+    if rel not in rows:
+        raise _Leg(CANNOT, "{} is listed by no bundle inventory, so the bytes graded here are not "
+                           "attested".format(rel))
+    if rows[rel] != _sha256(data):
+        raise _Leg(CANNOT, "{}: the bytes graded here (sha256 {}) are not the bytes the bundle inventory "
+                           "attests (sha256 {}); the file changed between the bundle verification and this "
+                           "read".format(rel, _sha256(data), rows[rel]))
+    return data
 
 
 def _chain_unbound(events, run_id):
@@ -264,16 +303,18 @@ def _chain_unbound(events, run_id):
 
 def _leg_events(root, root_fd, run_id, core, read):
     core = _receipt_core(core)
+    bundle, rows = _verified_bundle(root, run_id, read)
     events = []
-    for rel in _event_paths(root, root_fd, run_id, read):
+    for rel in _event_paths(root_fd, run_id, bundle):
         try:
             _fst, data = apply._read_live(root_fd, rel)
         except apply.AdoptApplyError as exc:
             raise _Leg(CANNOT, "{}: {}".format(rel, exc))
         if data is None:
             raise _Leg(CANNOT, "outcome event {} vanished after the bundle listing".format(rel))
-        events.append(_parsed(_digested(read, rel, data, "event-chain"), "outcome event " + rel))
-    _digested(read, apply.receipt_rel(run_id), core, "event-chain")
+        data = _attested(rows, rel, _digested(read, rel, data, "event-chain"))
+        events.append(_parsed(data, "outcome event " + rel))
+    _attested(rows, apply.receipt_rel(run_id), _digested(read, apply.receipt_rel(run_id), core, "event-chain"))
     chain = schema.validate_event_chain(events, "sha256:" + _sha256(core))
     if chain.status != store.VALID:
         return _graded(chain.status, chain.findings, "outcome-event chain")
@@ -345,7 +386,8 @@ def _attempt(call):
 
 
 def _digest_only(root_fd, rel, read, unread):
-    """Digest `rel` with no grading leg, or report it in `unread` with why it could not be read."""
+    """Digest `rel` with no grading leg, or report it in `unread` with why it could not be read; every
+    such input is required, so one in `unread` makes the verdict cannot-evaluate (_decide)."""
     data = _attempt(lambda: _read_bundle(root_fd, rel))
     if isinstance(data, _Leg):
         unread.append(dict(path=rel, reason=data.reason))
@@ -389,11 +431,19 @@ def score(product_root):
     _run_leg("store-doctor", legs, lambda: _leg_cli(["doctor", "--require-store", "--root", root]))
     if "render-check" in LEGS:
         _run_leg("render-check", legs, lambda: _leg_cli(["render", "--check", "--root", root]))
+    return _verdict(*_decide(legs, unread), legs, read, unread)
+
+
+def _decide(legs, unread):
+    """(verdict, decided_by): the first finding leg, else the first cannot-evaluate leg, else an unread
+    required input (fail closed), else ADOPTED_AND_VALID."""
     for outcome, verdict in ((FINDING, INVALID), (CANNOT, CANNOT_EVALUATE)):
         for leg in legs:
             if leg["outcome"] == outcome:
-                return _verdict(verdict, leg["leg"], legs, read, unread)
-    return _verdict(ADOPTED_AND_VALID, "all-legs", legs, read, unread)
+                return verdict, leg["leg"]
+    if unread:
+        return CANNOT_EVALUATE, "unread-inputs"
+    return ADOPTED_AND_VALID, "all-legs"
 
 
 def _verdict(verdict, decided_by, legs, read, unread):
@@ -517,6 +567,24 @@ def _unlisted(root):
     _put_event(root, _event_rel("event-0002.toml"), _failed_event(_genesis(root)))
 
 
+def _receipt_unlisted(root):
+    import tomllib
+    run = complete._RUN
+    doc = tomllib.loads(_get(root, apply.inventory_rel(run)).decode("utf-8"))
+    _put(root, apply.inventory_rel(run), apply.emit_inventory(
+        run, [row for row in doc["file"] if row["path"] != apply.receipt_rel(run)],
+        plan_digest=doc["adoption"]["plan_digest"]))
+
+
+def _second_event(kind):
+    def mutate(root):
+        genesis = _genesis(root)
+        _put_event(root, _event_rel("event-0002.toml"), dict(
+            genesis, kind=kind, recorded_at="2026-09-17T13:00:00Z", previous_event_digest=genesis["event_digest"]))
+        _reinventory(root, extra=(_event_rel("event-0002.toml"),))
+    return mutate
+
+
 def self_test():
     """Fixtures under TemporaryDirectory. The completion fixture's store holds only its manifest, so the
     real store doctor and render engine are cannot-evaluate over it: the vectors that need those legs green
@@ -612,7 +680,7 @@ def self_test():
         check("flip-foreign-run-unbound-turns-green",
               case(_full_fixture_then(_foreign_run), on + [no_binding])["verdict"] == ADOPTED_AND_VALID)
 
-        def probe_events(root, root_fd, run_id, read):
+        def probe_events(root_fd, run_id, bundle):
             # The reading this guard replaced: probe event-0001, event-0002, ... and stop at the first absent.
             out = []
             for number in range(1, importc.MAX_EVENTS + 1):
@@ -635,6 +703,17 @@ def self_test():
         check("flip-latest-failed-as-completing-turns-green",
               case(_full_fixture_then(_latest_failed), on + [(here, "COMPLETING_EVENT", "failed")])["verdict"]
               == ADOPTED_AND_VALID)
+        # No chain longer than one event scores ADOPTED_AND_VALID, whatever its second kind (an import's
+        # recorded result included), and the residual says so citing the spec sentence that requires it.
+        second = dict((kind, case(_full_fixture_then(_second_event(kind)), on)) for kind in schema.OUTCOME_EVENTS)
+        check("every-post-adoption-event-non-pass", all(
+            decided(doc, INVALID if kind == "applied" else CANNOT_EVALUATE, "event-chain")
+            for kind, doc in second.items()))
+        flat_doc = " ".join((__doc__ or "").split())
+        check("residual-cites-spec-import-event-and-cannot",
+              '"' + SPEC_IMPORT_RECORDS_EVENT + '"' in flat_doc
+              and "every product root with a post-adoption outcome event, a completed import included, scores "
+                  "CANNOT_EVALUATE" in flat_doc)
 
         # The receipt core is read once; a second read would see other bytes.
         receipt_rel = apply.receipt_rel(complete._RUN)
@@ -669,6 +748,66 @@ def self_test():
                 apply.planning_inventory_rel(complete._RUN))) and any(
             i["path"] == apply.inventory_rel(complete._RUN) and i["graded_by"] == ["event-chain"]
             for i in green["inputs"]))
+
+        # The bundle verification reads every payload through its own descriptors, never _read_live, so a
+        # read patched here hands only this module's legs other bytes: a swap between the two reads.
+        genesis_rel = apply.genesis_event_rel(complete._RUN)
+
+        def reminted(data, **fields):
+            import tomllib
+            from _opf_emit import emit_checked
+            doc = dict(tomllib.loads(data.decode("utf-8")), **fields)
+            if "event_digest" in doc:
+                doc["event_digest"] = apply.event_digest(doc)
+            return emit_checked(doc).encode("utf-8")
+
+        def swapped_core(data):
+            import tomllib
+            release = dict(tomllib.loads(data.decode("utf-8"))["release"], manifest_sha256="sha256:" + "4" * 64)
+            return reminted(data, release=release)
+
+        def swapping_read(both):
+            # A valid genesis event chained from the core (and, when `both`, a valid core it chains from),
+            # neither the bytes the bundle inventory attests.
+            def read(root_fd, rel):
+                fst, data = real_read(root_fd, rel)
+                if data is None or sys._getframe(1).f_globals is not vars(here):
+                    return fst, data
+                if both and rel == receipt_rel:
+                    return fst, swapped_core(data)
+                if rel == genesis_rel and both:
+                    core = swapped_core(real_read(root_fd, receipt_rel)[1])
+                    return fst, reminted(data, previous_event_digest="sha256:" + _sha256(core))
+                if rel == genesis_rel:
+                    return fst, reminted(data, recorded_at="2026-09-17T12:46:00Z")
+                return fst, data
+            return read
+
+        def digest_of(doc, rel):
+            return [i["sha256"] for i in doc["inputs"] if i["path"] == rel]
+
+        def leg_reason(doc, name):
+            return " ".join(leg["reason"] for leg in doc["legs"] if leg["leg"] == name)
+
+        unattested = (here, "_attested", lambda rows, rel, data: data)
+        for label, both, swapped in (("event", False, (genesis_rel,)),
+                                     ("receipt-and-event", True, (genesis_rel, receipt_rel))):
+            swap = on + [(apply, "_read_live", swapping_read(both))]
+            doc = case(_full_fixture, swap)
+            check("swapped-" + label + "-unattested-cannot", decided(doc, CANNOT_EVALUATE, "event-chain")
+                  and "not the bytes the bundle inventory attests" in leg_reason(doc, "event-chain"))
+            flip = case(_full_fixture, swap + [unattested])
+            check("flip-swapped-" + label + "-unbound-turns-green-on-unattested-digests",
+                  flip["verdict"] == ADOPTED_AND_VALID and all(
+                      len(digest_of(flip, rel)) == 1 and digest_of(flip, rel) != digest_of(green, rel)
+                      for rel in swapped))
+        no_row = case(_full_fixture_then(_receipt_unlisted), on)
+        check("receipt-without-inventory-row-cannot", no_row["verdict"] != ADOPTED_AND_VALID and any(
+            leg["leg"] == "event-chain" and leg["outcome"] == CANNOT and "listed by no bundle inventory"
+            in leg["reason"] for leg in no_row["legs"]))
+        check("flip-receipt-without-row-unbound-chain-passes", any(
+            leg["leg"] == "event-chain" and leg["outcome"] == PASS
+            for leg in case(_full_fixture_then(_receipt_unlisted), on + [unattested])["legs"]))
 
         check("cli-outcome-exact-int-only", [_cli_outcome(v) for v in (0, 1, False, True, 0.0, 2, None)]
               == [PASS, FINDING, CANNOT, CANNOT, CANNOT, CANNOT, CANNOT])
@@ -740,6 +879,19 @@ def self_test():
               and approval not in [i["path"] for i in unread["inputs"]])
         check("flip-swallowed-unreadable-file-unreported",
               case(_full_fixture, unreadable + [(here, "_digest_only", swallowing)])["unread_inputs"] == [])
+        check("unreadable-digest-only-file-cannot", decided(unread, CANNOT_EVALUATE, "unread-inputs"))
+
+        def legs_only(legs, unread_rows):
+            # The decision this guard replaced: an unread input was reported but never decided the verdict.
+            for outcome, verdict in ((FINDING, INVALID), (CANNOT, CANNOT_EVALUATE)):
+                for leg in legs:
+                    if leg["outcome"] == outcome:
+                        return verdict, leg["leg"]
+            return ADOPTED_AND_VALID, "all-legs"
+
+        flip_unread = case(_full_fixture, unreadable + [(here, "_decide", legs_only)])
+        check("flip-unread-input-ignored-turns-green", flip_unread["verdict"] == ADOPTED_AND_VALID
+              and [row["path"] for row in flip_unread["unread_inputs"]] == [approval])
 
         def slow_cli(argv):
             if argv[0] == "render":
