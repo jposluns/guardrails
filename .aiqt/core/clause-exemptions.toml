@@ -373,11 +373,6 @@ text = "When asked to assess, advise, consider, evaluate, review, compare, or we
 reason = "Defines the request class that asadv1.1 governs; the obligation (assess and stop) is asadv1.1."
 
 [[exempt]]
-corpus-id = "asadv1"
-text = "This is a specific instance of\nrequiring express authorization before execution."
-reason = "Cross-reference to the express-authorization rule (exauth); no obligation of its own."
-
-[[exempt]]
 corpus-id = "atmclm"
 text = "The mechanism can be a transaction, a conditional write, a compare-and-set, or a lock; the\natomicity is what matters, not the primitive."
 reason = "Scope note: any atomic primitive satisfies atmclm.1; it adds no obligation."
