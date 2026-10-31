@@ -604,7 +604,7 @@ _TOKEN_RE = re.compile(r"\S+")
 _WORDCH_RE = re.compile(r"[A-Za-z0-9]")
 _CLAIM_RE = re.compile(TIME_GRAMMAR + ZONE_GRAMMAR)
 _BTICK_RE = re.compile(r"`+")
-_SESS_RE = re.compile(r"[A-Za-z0-9]{1,32}-(\d{8}T\d{6}Z)")
+_SESS_RE = re.compile(r"[A-Za-z0-9]{1,32}-([0-9]{8}T[0-9]{6}Z)")
 _FOOT_RE = re.compile(r"(?<![A-Za-z0-9])session[ \t*_:\-\u2013\u2014]{1,8}elapsed[ \t*_:\-\u2013\u2014]{0,8}"
                       r"(\d{1,4}):([0-5]\d)(?!\d)", re.IGNORECASE)
 # the parenthetical footer form: (session: Xh Ym), (session: Xh), or (session: Ym)
@@ -938,7 +938,7 @@ def lease_file():
 
 
 _LEASE_FIELD_RE = re.compile(r"[ \t]*(?:[-*][ \t]+)?(\*\*)?(Active-session|Session-start-UTC):(?(1)\*\*)(.*)")
-_START_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z|\d{8}T\d{6}Z")
+_START_VALUE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|[0-9]{8}T[0-9]{6}Z")
 _HEADING_RE = re.compile(r"[ \t]{0,3}#{1,6}(?:[ \t]|$)")
 TRANSCRIPT_PREFIX_BYTES = 256 << 10
 
