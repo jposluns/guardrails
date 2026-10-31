@@ -280,8 +280,9 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        path in prose is never judged by P6: only a
                        declared input is, and an output the brief asks the worker to create is not declared, so
                        it is not judged. A brief the vendored parser cannot read, or one over the shared
-                       reading's bounds (its 512 KiB text ceiling, its whitespace-run, nesting and
-                       inline-mark cost prescans, its parse deadline), is CANNOT_EVALUATE, never read
+                       reading's bounds (its measured 64 KiB text ceiling, its whitespace-run and
+                       nesting prescans, its parse deadline, held by killing the parse child's process
+                       group), is CANNOT_EVALUATE, never read
                        another way;
                        conformance is exactly Marko
                        2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
@@ -589,7 +590,7 @@ command line is split on whitespace once and its tokens classified by a plain pr
 command line end; per opener, R6 measures its subject's length before reading it; and every word-run, command and
 file-name pattern is anchored at a token start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address
 space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print two finite, nonnegative times,
-each shape at 512 KiB must take at most LINEAR_FACTOR times as long as at 64 KiB plus LINEAR_SLACK seconds
+each shape at 64 KiB must take at most LINEAR_FACTOR times as long as at 8 KiB plus LINEAR_SLACK seconds
 (the input is eight times larger; a pass whose time grows with the square of the input takes about 64 times as
 long). Every shape carries a lead that holds "nput", so each runs through the shared parsed-document reading, never
 the ASCII fast path, and the larger size sits exactly at that reading's text ceiling; a shape the reading's own
@@ -633,9 +634,11 @@ import posixpath
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 import unicodedata
 from pathlib import Path
 
@@ -3894,6 +3897,26 @@ P5_CLONE_REVISION = (P5_PIN + "Use `git clone --revision={0} <url> w` and review
                      P5_PIN + "Use `git clone --revision {0} <url> w` and review w.\n",
                      P5_PIN + "Use `git clone --revision=main <url> w` and review w.\n")
 LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
+# the measured slack over the parse deadline for one whole read() through the killed child: the child
+# start, the kill, the reap and the result decode measured 0.04 to 0.14 s past the deadline on the two
+# old-ceiling shapes (an 80-cpu host at one-minute load averages 35 to 43), so three seconds is wide
+DEADLINE_MARGIN_SECONDS = 3.0
+# the probe child for revert/parse-thread-join-red: it runs the shared reading with the thread join
+# restored (PARSE_IN_CHILD=False) over one shape at the old ceiling and never returns within the
+# deadline (the join's timeout cannot fire while one regex match holds the GIL); the parent shows it
+# still running at the deadline plus DEADLINE_MARGIN_SECONDS and kills its process group
+THREAD_JOIN_PROBE = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import _input_declarations as m\n"
+    "m.MAX_TEXT_BYTES = 1 << 19\n"
+    "m.PARSE_IN_CHILD = False\n"
+    "text = ('x<!--' * ((1 << 19) // 5))[:(1 << 19) - 1] + chr(10) if sys.argv[2] == 'html-opener' "
+    "else chr(0xFF21) * (((1 << 19) - 1) // 3) + chr(10)\n"
+    "try:\n"
+    "    m.read(text)\n"
+    "except m.DeclarationError:\n"
+    "    pass\n")
 
 
 def _preflight_repo(base):
@@ -3940,7 +3963,7 @@ def _child_commit(repo, commit):
                            "maintenance.auto=false", "commit-tree", commit + "^{tree}", "-p", commit, "-m", "child"],
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
-# The child caps its address space at 1 GiB, then times evaluate() on 64 KiB and 512 KiB briefs (the
+# The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
 # larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
 # (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
 # A refusal (a prescan or deadline cannot-evaluate) is still a bounded evaluation and is timed as one.
@@ -3954,7 +3977,7 @@ LINEAR_CHILD = (
     "table = m.parse_table(m.TABLE_FIXTURE.encode('utf-8'))\n"
     "prefix, unit, suffix = sys.argv[2:5]\n"
     "lead = 'Input notes.\\n\\n'\n"
-    "for size in (1 << 16, 1 << 19):\n"
+    "for size in (1 << 13, 1 << 16):\n"
     "    body = size - len(lead) - len(prefix) - len(suffix)\n"
     "    data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
     "    began = time.perf_counter()\n"
@@ -3966,8 +3989,8 @@ LINEAR_CHILD = (
 
 
 def _linear(unit, prefix="", suffix=""):
-    """True when evaluate() on a 512 KiB brief (a parse-forcing lead, `prefix`, `unit` repeated, `suffix`)
-    takes at most LINEAR_FACTOR times as long as on the 64 KiB one plus LINEAR_SLACK seconds, both timed
+    """True when evaluate() on a 64 KiB brief (a parse-forcing lead, `prefix`, `unit` repeated, `suffix`)
+    takes at most LINEAR_FACTOR times as long as on the 8 KiB one plus LINEAR_SLACK seconds, both timed
     in a child capped at 1 GiB (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went
     wrong. The child must exit 0 and print exactly two finite, nonnegative times."""
     try:
@@ -3982,7 +4005,7 @@ def _linear(unit, prefix="", suffix=""):
     if done.returncode != 0 or not all(0.0 <= value < float("inf") for value in (small, large)):
         return "child exit {}, output {!r}: {}".format(done.returncode, done.stdout.strip()[-80:],
                                                       done.stderr.strip()[-200:])
-    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "512 KiB took {:.3f} s, 64 KiB {:.3f} s".format(
+    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "64 KiB took {:.3f} s, 8 KiB {:.3f} s".format(
         large, small)
 
 
@@ -4822,26 +4845,24 @@ def self_test(report_path=None):
           [([], [])] * len(run_class))
     check("cannot/whitespace-ff-run-separator",
           [_outcome("a" + "\x0c" * count + "b\n") for count in (2000, 2001)], ["CannotEvaluate"] * 2)
-    # the total-cost bounds, each decided on the text: just inside, exactly at and just over each sum
-    # (the whitespace sum per squared run length, the nesting sum per deep opening, the inline-mark sum
-    # per squared chunk count), with the review-measured 260-run shape refused up front
-    eight_runs = ("a" + " " * 2000 + "b\n\n") * 8
-    seven_short = ("a" + " " * 2000 + "b\n\n") * 7 + "a" + " " * 1999 + "b\n"
-    check("structure/whitespace-cost-boundary",
-          (read_inputs(parse_lead + seven_short), read_inputs(parse_lead + eight_runs)),
-          (([], []), ([], [])))
-    check("cannot/whitespace-cost-2", [_outcome(text) for text in (
-        eight_runs + "c  d\n", ("a" + " " * 2000 + "b\n") * 260)], ["CannotEvaluate"] * 2)
-    reopen = "> " * 13 + "x\n\n"
-    check("structure/nesting-cost-boundary",
-          (read_inputs(parse_lead + reopen * 19), read_inputs(parse_lead + reopen * 20)),
-          (([], []), ([], [])))
-    check("cannot/nesting-cost-2", _outcome(reopen * 21), "CannotEvaluate")
-    check("structure/inline-mark-cost-boundary",
-          (read_inputs(parse_lead + "*a" * 32767 + "\n"), read_inputs(parse_lead + "*a" * 32768 + "\n"),
-           read_inputs(parse_lead + "*a" * 2000 + "\n\n" + "*a" * 2000 + "\n")),
-          (([], []), ([], []), ([], [])))
-    check("cannot/inline-mark-cost-2", _outcome("*a" * 32769 + "\n"), "CannotEvaluate")
+    # the deleted total-cost sums stay deleted: each shape the old sums refused up front (just over the
+    # whitespace, nesting and inline-mark caps) is now read through the bounded parse and answered; the
+    # deadline, not a text model, is what bounds the pathological relatives of these shapes
+    check("structure/cost-shapes-read", [read_inputs(parse_lead + text) for text in (
+        ("a" + " " * 2000 + "b\n\n") * 9,
+        ("> " * 13 + "x\n\n") * 21,
+        "*" * 32769 + "a\n")], [([], [])] * 3)
+    # the quote prefix consumes one optional whitespace character after >, any whitespace but LF, as the
+    # parser's own pattern does: a no-break space, a vertical tab or an ideographic space between quote
+    # markers hides no level from the prescan, alone, mixed with spaced markers, or after bullets
+    check("cannot/nesting-quote-prefix-2", [_outcome(text) for text in (
+        ">\xa0" * 30 + "x\n", ">\x0b" * 30 + "x\n", ">　" * 30 + "x\n",
+        ">\xa0" + "> " * 21 + "x\n", "- " * 5 + ">\xa0" * 25 + "x\n")], ["CannotEvaluate"] * 5)
+    # the same lead at the depth ceiling is read (just inside, exactly at, just over: 19, 20 and 21
+    # no-break-space quote markers), so the prefix reading widens no refusal
+    check("structure/nesting-quote-prefix-boundary",
+          ([_outcome(parse_lead + ">\xa0" * depth + "x\n")[0] for depth in (19, 20)],
+           _outcome(">\xa0" * 21 + "x\n")), ([0, 0], "CannotEvaluate"))
     # each bound's just-inside value is read through the full parsed document (the lead forces the parse,
     # the shared reading answers), asserted on the reading itself so the structure rules take no part
     check("structure/parse-bounds-boundary",
@@ -4850,6 +4871,76 @@ def self_test(report_path=None):
            read_inputs("Input notes.\n\n" + "".join("  " * level + "- a\n" for level in range(20))),
            read_inputs("Input notes.\n\na" + " " * 2000 + "b\n")),
           (([], []), ([], []), ([], []), ([], [])))
+    # the child parse and the in-process seam read the same document: over briefs that exercise every
+    # unit kind (declarations, look-alikes, code, tables, task lists, quotes, HTML, non-ASCII folds),
+    # read() answers identically with PARSE_IN_CHILD on and off
+    identity_corpus = (
+        "INPUT: /abs/in.md\n", "**INPUT:** /abs/in.md\n", "- INPUT: `/abs/dir with space/in.md`\n",
+        "Input: /abs/in.md\n", "| INPUT | x |\n|---|---|\n| a | b |\n",
+        "```\nINPUT: /abs/in.md\n```\n", "- [ ] INPUT: /abs/in.md\n", "> INPUT: /abs/in.md\n",
+        "<div>\nINPUT: /abs/in.md\n</div>\n", "ІNPUT: /abs/in.md\n",
+        "I&#78;PUT: /abs/in.md\n", "prose `code` *emph* [link](/x) <!-- c -->\n")
+
+    def read_outcome(text):
+        try:
+            return ("ok", read_inputs(text))
+        except _input_declarations.DeclarationError as caught:
+            return ("error", str(caught))
+
+    in_child = [read_outcome(text) for text in identity_corpus]
+    _input_declarations.PARSE_IN_CHILD = False
+    try:
+        in_process = [read_outcome(text) for text in identity_corpus]
+    finally:
+        _input_declarations.PARSE_IN_CHILD = True
+    check("parse/child-matches-in-process", in_child, in_process)
+    # the wall-clock bound holds by construction, shown at the OLD 512 KiB ceiling on the two shapes
+    # that held the in-process parse far past the deadline (a paragraph of unclosed inline-HTML openers,
+    # held inside InlineHTML.pattern's lazy scans, and a line of fullwidth letters, held inside the GFM
+    # bare-URL lookbehind's quadratic backtracking): with the ceiling patched up to admit them, read()
+    # answers or refuses within the deadline plus DEADLINE_MARGIN_SECONDS of measured wall clock, timed
+    # here in the parent around the call that waits on the killed child
+    old_ceiling = 1 << 19
+    slow_shapes = (("x<!--" * (old_ceiling // 5))[:old_ceiling - 1] + "\n",
+                   "Ａ" * ((old_ceiling - 1) // 3) + "\n")
+    saved_ceiling = _input_declarations.MAX_TEXT_BYTES
+    held = []
+    try:
+        _input_declarations.MAX_TEXT_BYTES = old_ceiling
+        for shape in slow_shapes:
+            began = time.monotonic()
+            try:
+                read_inputs(shape)
+                ended = "answered"
+            except _input_declarations.DeclarationError:
+                ended = "refused"
+            held.append((ended in ("answered", "refused"),
+                         time.monotonic() - began
+                         <= _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS))
+    finally:
+        _input_declarations.MAX_TEXT_BYTES = saved_ceiling
+    check("parse/deadline-held-at-old-ceiling", held, [(True, True)] * 2)
+    # and shown red under the flip that restores the thread join: a probe child runs the flipped read on
+    # each shape, has NOT returned at the deadline plus the same margin (join cannot fire while one regex
+    # match holds the GIL), and its own process group is then killed, never left running
+    still_running = []
+    for name in ("html-opener", "fullwidth"):
+        probe = subprocess.Popen([sys.executable, "-I", "-B", "-c", THREAD_JOIN_PROBE,
+                                  str(Path(__file__).resolve().parent), name],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        try:
+            probe.communicate(timeout=_input_declarations.PARSE_DEADLINE_SECONDS
+                              + DEADLINE_MARGIN_SECONDS)
+            still_running.append(False)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(probe.pid, signal.SIGKILL)
+            except OSError:
+                probe.kill()
+            probe.communicate()
+            still_running.append(True)
+    check("revert/parse-thread-join-red", still_running, [True, True])
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-selftest-"))
     try:
         table_path = str(tmp / "table.toml")
@@ -6193,20 +6284,15 @@ def self_test(report_path=None):
              lambda: p6_code("Input notes.\n\n" + tall_list + "\n# Notes\n\n" + wide_fence),
              lambda: p6_code("Input notes.\n\n" + tall_list + "# Notes\n" + wide_fence)],
             ["CannotEvaluate"] * 3, NESTING_RESETS=False))
-        # with a total-cost cap lifted, the just-over text is read again instead of refused up front
-        check("revert/whitespace-cost-red", *parser_flip(
-            [lambda: p6_code("Input notes.\n\n" + eight_runs + "c  d\n")], [0],
-            MAX_WHITESPACE_COST=1 << 62))
-        check("revert/nesting-cost-red", *parser_flip(
-            [lambda: p6_code("Input notes.\n\n" + reopen * 21)], [0], MAX_NESTING_COST=1 << 62))
-        check("revert/inline-mark-cost-red", *parser_flip(
-            [lambda: p6_code("Input notes.\n\n" + "*a" * 32769 + "\n")], [0],
-            MAX_INLINE_MARK_COST=1 << 62))
+        # with the nesting ceiling lifted, the no-break-space quote lead is read too, so the ceiling is
+        # load-bearing for the quote-prefix vectors (their text never forces a parse)
+        check("revert/nesting-quote-prefix-red", *parser_flip(
+            [lambda: p6_code(">\xa0" * 30 + "x\n")], [0], MAX_NESTING_DEPTH=1 << 30))
     finally:
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 209)
+    check("revert/every-flip-ran", len(flipped), 207)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -6269,8 +6355,9 @@ def self_test(report_path=None):
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
-          "each evaluate within the linear growth bound at 512 KiB, through the parsed-document reading "
-          "with its size, whitespace-run, nesting, total-cost and deadline bounds, in a capped child that must exit 0; "
+          "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
+          "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
+          "in a capped child that must exit 0; "
           "scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
           "missing, non-regular, backwards-range and unknown-family input exits 2); execution set reconciled "

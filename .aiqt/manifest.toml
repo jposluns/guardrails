@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "9c512ad45f76501af3c6dae032627cba436e798ff0897402b72b15d86bac3100"
+tree-sha256 = "4432f316d8cf7697632e575b85c255c5cfaf7094e16c1ffe67e599f8ff527b99"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2276,8 +2276,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 44496
-sha256 = "ecf24f16dfa95ad433237d805dd1c5bdfd40bdbc1da7ba6318ba738b7fe6ca0e"
+bytes = 44543
+sha256 = "a6395314e6d114ac68ae617a4e31238a91e71b435d3e2af0d29bcddc85eaee95"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -3356,8 +3356,13 @@ sha256 = "f96440610c978d5138acf597d202323a5c661f90816452c03a38b3e3bf660978"
 
 [[sources]]
 path = "tools/_input_declarations.py"
-bytes = 51771
-sha256 = "9d26e9c8755f78a0f489d519cd63b5820bd5982aac2403bbb198f9da21210420"
+bytes = 52645
+sha256 = "49b4c5cc7775a1980d83357421b8d5007689fce2b0b5b27f7a9de5c8eff33876"
+
+[[sources]]
+path = "tools/_input_declarations_child.py"
+bytes = 1695
+sha256 = "d382f8331dba97dc24b7b038953a5a40d85f55b233ad2ab90960edf672959bf4"
 
 [[sources]]
 path = "tools/_load_bound.py"
@@ -3421,8 +3426,8 @@ sha256 = "8e1c6b93ccceb818cb6ccc411c8945591c1ab34d187ec38b3607fdee17ceece9"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 427450
-sha256 = "4fb67e8614d5d4e7e8d952b2c6c5b090ea70d51a07f46f19c9a07b4ca05a47ea"
+bytes = 432403
+sha256 = "a88aa0d6bd4be35f482cbe1712b3d8fc1e739f63f9d389c74c144fcf4917d971"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -3671,8 +3676,8 @@ sha256 = "7422a69b4ce6513111622aa77115546fa1b82883c1dee2e3fdc7d9a52e9c9579"
 
 [[sources]]
 path = "tools/check_verifier_delivery.py"
-bytes = 265300
-sha256 = "80186120296c38a90eedc86b68b1186d36cb8fc5f14c6f381d2892f9556539cc"
+bytes = 265102
+sha256 = "ab71576324495968acac080abd5d6a0a1c5794ab2c71596182ca01ae936734f5"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"
@@ -3891,8 +3896,8 @@ sha256 = "76e57148e1ad7a82478091682afd175a1ea994d4a8b002b5fac6933e243b3d6e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 170640
-sha256 = "7ec62d1f4e94556760ae15285c6df2b9d20cf68d20ccf2a95473e15776fa1cc1"
+bytes = 170599
+sha256 = "64c1e4dcbaa5a72a00932cf0e1a86e8fa9b3c591cf257135db52a2af3bc72e12"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

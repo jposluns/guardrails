@@ -23,36 +23,36 @@ provenance pin, a text over MAX_TEXT_BYTES, a parse that misses PARSE_DEADLINE_S
 that does not cover the text is DeclarationError, which both callers turn into their cannot-evaluate
 refusal, never a silent empty reading.
 
-BOUNDS. The evaluation is bounded by construction, each bound decided on the text alone so no outcome
-depends on unrelated content elsewhere in the brief: a text over MAX_TEXT_BYTES (512 KiB; every file in
-the real-brief corpus measures under 224 KiB and every real brief under 64 KiB, so the ceiling holds each
-with wide margin) is refused up front in forbidden(), whatever it holds; a text that can nest blocks more
-than MAX_NESTING_DEPTH levels deep (judged by _nesting_refused, a conservative prescan over marker runs
-and indentation whose running depth follows block structure, resetting where a new top-level block must
-start, so a block's outcome never depends on content before its block) is refused up front too, because
-the parser opens a run of nested quote markers in time that grows about twofold per level and a single
-long regex match holds the interpreter where no in-process deadline can stop it; a line holding a run of
-more than MAX_WHITESPACE_RUN consecutive whitespace characters (the class the parser itself reads as
-whitespace, vertical tab and no-break space included, never only space and tab) is refused the same way,
-because the parser reads such a run in time that grows with the square of the run, also inside matches a
-deadline cannot interrupt. Each of those costs is additive across a text, so a text inside every per-item
-bound could still be slow in total, answered on an idle host and refused on a busy one; three total-cost
-bounds close that gap, each a sum the parser's measured cost grows with, capped where each sum's worst
-measured in-bound text parses in about a second: MAX_WHITESPACE_COST over squared whitespace-run
-lengths, MAX_NESTING_COST over deep marker openings, and MAX_INLINE_MARK_COST over squared per-chunk
-counts of emphasis, strikethrough and code-span marks. The worst in-bound text measured on the vendored
-pin, a text at the byte ceiling sitting at every cost cap at once with the rest deep steady quote
-lines, parses in about 3.2 s, well under the deadline. Every prescan runs on every text, so no refusal depends on
-whether the rest of the brief forces a parse. The parse itself runs in a fresh daemon thread (a full
-recursion stack, whatever the caller's depth) joined under PARSE_DEADLINE_SECONDS, a backstop for shapes
-outside the measured model: a pathological shape the parser reads superlinearly in many steps costs at
-most about the deadline and is then refused, never trusted partial. Named residuals, each availability
-only, never a wrong verdict: a thread a missed deadline abandons may keep consuming CPU until the process
-exits; in a long-lived process such abandoned threads accumulate and compete with later parses, which can
-push a later in-bound parse past its own deadline; process exit itself can be delayed while an abandoned
-thread sits inside one long regex match, since the main thread cannot run until the match steps; and the
-deadline fires only when the parser is between matches, so a single match that runs long under the bounds
-above would stretch it. A brief that is pure ASCII, holds no "nput" substring in any case and none of the characters that
+BOUNDS. The one hard bound is wall clock, held by construction: the parse runs in its own child process
+(python3 -I -B on this module's sibling child script tools/_input_declarations_child.py, the text on
+stdin, one JSON result on stdout) in its own session, and a parse that has not delivered its result
+within PARSE_DEADLINE_SECONDS has its whole process group killed and the text refused, never read
+partially; a killed, crashed or silent child is the same fail-closed refusal. No in-process deadline can
+hold that bound, because a single regex match holds the GIL and the re engine reads some texts inside one
+match for minutes (an unclosed inline-HTML opener scans to its paragraph's end per opener; a run of
+fullwidth letters backtracks quadratically in the GFM autolink lookbehind), where a thread join waits out
+the match however short its timeout; and per-shape cost models over the text cannot enumerate every slow
+shape, so no such model is relied on for the bound. Before any parse, two cheap structural prescans
+refuse degenerate shapes up front with a named reason, each decided on the text alone: a text over
+MAX_TEXT_BYTES (sized from measurement; the constant's comment records the measurements) is refused in
+forbidden() whatever it holds; a text that can nest blocks more than MAX_NESTING_DEPTH levels deep
+(judged by _nesting_refused, a conservative prescan over marker runs and indentation whose running depth
+follows block structure, resetting where a new top-level block must start, so a block's outcome never
+depends on content before its block; after a quote marker it consumes one optional non-LF whitespace
+character as a column, exactly as the parser's own quote prefix does, so a no-break space or a
+vertical tab after > hides no level) is refused up front too; and so is a line holding a run of more than
+MAX_WHITESPACE_RUN consecutive whitespace characters (the class the parser itself reads as whitespace,
+vertical tab and no-break space included, never only space and tab). Both prescans run on every text, so
+neither refusal depends on whether the rest of the brief forces a parse. The earlier additive total-cost
+prescans (summed squared whitespace-run lengths, summed deep marker openings, summed squared per-chunk
+inline-mark counts) are gone: their only purpose was to keep the in-process parse under a deadline the
+process could not otherwise enforce, and the child kill now holds that bound for every shape, counted or
+not. Named residuals, each availability only, never a wrong verdict: near the deadline, whether a slow
+in-bound text is answered or refused still depends on host load, so a text the ceiling admits can be
+refused on a busy host (the bound is deterministic, the answer is not); every parse pays one child start
+(an interpreter and the vendored-parser import); and a caller that ignores SIGCHLD reads a failed
+child's status as 0, so the result is trusted only on a complete well-formed JSON document on stdout,
+never on the exit status alone. A brief that is pure ASCII, holds no "nput" substring in any case and none of the characters that
 can make rendered text differ from source text (RENDERING_MARK_RE: a character reference's &, emphasis or
 strikethrough or code marks, a link bracket, inline HTML's <, a backslash escape) is answered without
 parsing: nothing in such a text can render, spell or disguise the label, and ASCII holds no format
@@ -110,46 +110,54 @@ list, so an unlisted look-alike letter or colon (small capitals, U+A4FD) passes;
 definition ([INPUT]: /x) renders as nothing and declares nothing; and a soft-wrapped continuation line of a
 declaration's paragraph is prose, as the line-based reading always had it.
 
-This module opens no brief path itself and runs nothing beyond the vendored parser; the one filesystem
-access is importing that parser. Callers: check_brief_capability (decode_brief refuses what forbidden()
+This module opens no brief path itself and runs nothing beyond the vendored parser and the parse child
+that hosts it (this interpreter, python3 -I -B, on the sibling child script); the filesystem accesses are
+importing that parser and starting that child. Callers: check_brief_capability (decode_brief refuses what forbidden()
 finds, PreflightText reads read()), check_verifier_delivery (_declared_inputs refuses both and takes
 read()'s declarations); both call forbidden() first, so read() may assume LF-only line ends.
 """
 import bisect
 import html
+import json
 import os
 import re
+import signal
+import subprocess
 import sys
 import threading
 import unicodedata
 
 MARKO_VERSION = "2.2.4"           # the exact vendored pin; any other resolved version fails closed
-# the brief ceiling, enforced on every text before any other rule: 512 KiB holds every file of the
-# real-brief corpus (largest file under 224 KiB, largest real brief under 64 KiB) with wide margin
-MAX_TEXT_BYTES = 1 << 19
-# the parse must finish within this wall-clock bound or the text is refused (DeclarationError): a plain
-# text exactly at the ceiling parses in about 0.7 s on the vendored pin, and the worst measured in-bound
-# text (at the byte ceiling and at every cost cap below at once) in about 3.2 s, so an in-bound text
-# stays well under the deadline and the deadline is only a backstop for shapes outside the measured model
+# the brief ceiling, enforced on every text before any other rule, SIZED FROM MEASUREMENT on the host
+# this reading runs on (an 80-cpu machine at one-minute load averages 35 to 43, each shape parsed once
+# per size in its own child on the vendored pin, 2026-10-31): at this ceiling (64 KiB) every brief-like
+# shape measured finishes well under half the 10 s deadline, and the ceiling cannot sit lower because the
+# largest real brief is under 64 KiB, so any lower ceiling would refuse a real brief up front. Measured
+# at 64 KiB: prose 0.30 s, headings 0.73 s, one-line paragraphs 3.3 s, flat bullets 5.0 s, setext pairs
+# 2.8 s, an 8-column table 1.2 s, a 2,000-column table 0.94 s, backtick runs 0.34 s, asterisk marks
+# 0.49 s, 20-deep quote lines 0.21 s, blank-separated 13-deep quote openings 4.3 s, 2,000-space runs
+# 3.0 s, no-break-space runs 3.5 s, a fullwidth-letter line 3.5 s. Degenerate walls of repeated marker
+# or opener lines measured 5 to 11 s at 64 KiB (unclosed <!-- openers 7.0 s, unclosed <? openers 10.6 s,
+# unclosed CDATA openers 5.7 s, link-reference-definition walls 7.6 s, 13-deep bullet walls 5.4 s, lazy
+# continuations under a 20-deep quote 5.9 s and under a 20-deep bullet lead 10.0 s), and a nested-bracket
+# run measured 12.5 s at 16 KiB already, so no ceiling that admits a real brief can hold every shape
+# under the deadline: those shapes are answered or refused at the deadline by the child kill (the bound
+# that holds whatever the shape), while every measured brief-like shape keeps at least half the deadline
+# as margin at this ceiling
+MAX_TEXT_BYTES = 1 << 16
+# the parse must deliver its result within this wall-clock bound or the parse child's process group is
+# killed and the text refused (DeclarationError), the fail-closed refusal an oversized text gets; the
+# bound holds by construction for every shape, because the kill needs no cooperation from the parser,
+# where an in-process join cannot return while one regex match holds the GIL
 PARSE_DEADLINE_SECONDS = 10.0
 # the nesting ceiling, judged by the prescan in forbidden() before any parse: the parser opens a run of
-# quote markers on one line in time that grows about twofold per level (measured on the vendored pin:
-# about 0.06 s at 20, about 4 s at 26), and a single long regex match holds the interpreter so no
-# deadline can stop it mid-match, so the depth is capped where the worst single opening stays near a
-# tenth of a second; a real brief nests far shallower
+# nested markers on one line in time that grows about twofold per level (measured on the vendored pin:
+# about 0.06 s at 20, about 4 s at 26), so past a few levels more a single opening would burn the whole
+# deadline before the kill refuses it; the prescan refuses the shape up front, instantly and with a
+# reason that names the lead, where the kill could only refuse it at the deadline. A real brief nests
+# far shallower. This prescan is kept for that cheap up-front refusal; it is not what holds the
+# wall-clock bound (the child kill is)
 MAX_NESTING_DEPTH = 20
-# the total parse cost of a text's nested openings: re-opening nested levels (a marker line after a
-# blank line, or a line deeper than the one before it) costs the parser about two to the depth times
-# 1e-7 s, additively across openings (measured on the vendored pin with only the depth ceiling applied:
-# 0.10 s for one 20-deep quote opening, 2.1 s for twenty of them blank-separated), so a text inside the
-# per-line depth ceiling could still be slow in total (16,000 blank-separated 13-marker quote openings
-# stay inside every per-line bound and measured past the 10 s deadline), where whether it answered would
-# depend on host load, not text. _nesting_refused charges each line that opens levels beyond those
-# still open two to the power of its depth and caps the sum at ten full-depth openings' worth, about
-# one second of measured opening cost; a line that only continues already-open levels costs the parser
-# little at any in-bound depth (a text at the ceiling made of 20-deep quote lines measures about 1.2 s)
-# and is charged nothing
-MAX_NESTING_COST = 10 * (1 << MAX_NESTING_DEPTH)
 # the block-structure resets of _nesting_refused, a patchable seam for its callers' self-tests
 NESTING_RESETS = True
 # the longest run of consecutive whitespace characters a line may hold, judged in forbidden() before any
@@ -163,30 +171,14 @@ NESTING_RESETS = True
 # U+000B VERTICAL TAB, the information separators U+001C..U+001F, U+00A0 NO-BREAK SPACE, U+1680 OGHAM
 # SPACE MARK, U+2000..U+200A, U+202F, U+205F and U+3000, plus the five SEPARATORS, which the caller
 # refuses first as line separators. The parser reads one run in time that grows with the square of its
-# length, inside single regex matches the deadline cannot interrupt (measured on the vendored pin:
-# 93.5 s at a 64 KiB space run, 52 s at a 64 KiB vertical-tab run; about 0.1 s at this bound for space,
-# vertical tab and no-break space alike); a real brief's longest run (alignment padding, indented code)
-# is far shorter
+# length inside single regex matches (measured on the vendored pin: 93.5 s at a 64 KiB space run, 52 s
+# at a 64 KiB vertical-tab run; about 0.1 s at this bound for space, vertical tab and no-break space
+# alike); the prescan refuses such a run up front, instantly and with a reason that names the line,
+# where the child kill could only refuse it at the deadline. A real brief's longest run (alignment
+# padding, indented code) is far shorter. Kept for that cheap up-front refusal; it is not what holds
+# the wall-clock bound (the child kill is)
 MAX_WHITESPACE_RUN = 2000
 WHITESPACE_RUN_RE = re.compile(r"[^\S\n]{%d}" % (MAX_WHITESPACE_RUN + 1))
-# the total parse cost of a text's whitespace runs: a run costs the parser about its length squared times
-# 3e-8 s at worst (a no-break-space run in its own paragraph), additively across runs, so a text inside
-# the per-run bound could still be slow in total (260 runs of 2000 spaces measured 11 s, an answer or a
-# deadline refusal depending on host load, not text). _whitespace_refused charges each maximal run of two
-# or more class characters its length squared and caps the sum at eight full-length runs, which parse in
-# about one second
-MAX_WHITESPACE_COST = 8 * MAX_WHITESPACE_RUN ** 2
-WHITESPACE_COST_RE = re.compile(r"[^\S\n]{2,}")
-# the total parse cost of a text's inline marks: the parser's inline delimiter pass costs about the
-# square of one paragraph's count of emphasis, strikethrough and code-span marks times 5e-10 s (measured
-# on the vendored pin: 0.5 s at 32,768 asterisks in one paragraph, 14.6 s at 131,071, where the deadline
-# would decide by host load, not text; backtick, tilde and underscore shapes measure cheaper), additively
-# across paragraphs. _inline_marks_refused counts marks per chunk of lines between blank lines, which
-# covers every paragraph the chunk can hold (marks in code are counted too, over-counting only, so a
-# fenced example never widens what is read), charges each chunk its count squared and caps the sum at one
-# full chunk of 32,768 marks, which parses in about half a second
-MAX_INLINE_MARK_COST = 1 << 30
-INLINE_MARK_CHARACTERS = "*_~`"
 # the characters that can make rendered text differ from source text: a character reference (&#78;),
 # emphasis, strikethrough or code marks, a link bracket, inline HTML and a backslash escape; a pure-ASCII
 # text with none of them and no "nput" substring cannot render or disguise the label and skips the parse
@@ -239,6 +231,13 @@ LOOK_ALIKE_REASON = ("the line opens with a look-alike of the INPUT: label (anot
 _VENDOR_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "opf", "tools", "_vendor")
 _LOADED = None                    # (marko module, gfm elements module) after a successful pinned load
+# the parse child, a fixed path derived from THIS file's own absolute location (never the CWD): it reads
+# the text from stdin, parses it in its own process and session, and writes one JSON document to stdout
+_CHILD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_input_declarations_child.py")
+# a patchable seam for the callers' self-tests only: False restores the abandoned in-process thread join,
+# whose timeout cannot fire while one regex match holds the GIL, so a self-test can show the child kill
+# is what holds the wall-clock bound; production callers never set it
+PARSE_IN_CHILD = True
 
 
 class DeclarationError(Exception):
@@ -300,37 +299,110 @@ def _load_marko():
     return _LOADED
 
 
-def _parse(text):
-    """The marko Document for `text`: a FRESH extension-free Parser per call with the vendored GFM
-    elements registered (never marko's Markdown object, which is documented not thread-safe). The byte
-    ceiling is enforced before parsing. The parse runs in its own daemon thread, which starts with a full
-    recursion stack whatever the caller's depth, and must finish within PARSE_DEADLINE_SECONDS: a parse
-    that misses the deadline, a parse exception (a recursion error included) and a document span that does
-    not cover `text` (the parser's buffer rewrites are length-preserving only over LF-only text, which
-    forbidden() guarantees first) are DeclarationError, fail closed. A thread a missed deadline abandons
-    may keep consuming CPU until the process exits; the refusal itself is prompt, and the residuals (the
-    module docstring names each: abandoned threads accumulating in a long-lived process and competing
-    with later parses, and process exit waiting out an abandoned thread's current match) are
-    availability, never a wrong verdict."""
-    if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
-        raise DeclarationError("the brief is larger than {} bytes, over this reading's ceiling".format(
-            MAX_TEXT_BYTES))
-    # the same prescans forbidden() runs, kept here too so no caller can reach an unbounded parse: these
-    # shapes cost the parser time the deadline below cannot soundly bound, inside single matches it
-    # cannot interrupt or in sums of steps whose refusal would otherwise depend on host load
-    for prescan in (_whitespace_refused, _nesting_refused, _inline_marks_refused):
-        found = prescan(text)
-        if found is not None:
-            raise DeclarationError("the brief is over this reading's bounds: " + found[1])
+def _parse_document(text):
+    """The marko Document for `text`, parsed IN THIS PROCESS with no bound of its own: a FRESH
+    extension-free Parser per call with the vendored GFM elements registered (never marko's Markdown
+    object, which is documented not thread-safe). Only the parse child and the in-process seam below run
+    it; every caller of this module reaches it through _parse, which holds the wall-clock bound."""
     marko, gfm_elements = _load_marko()
+    parser = marko.parser.Parser()
+    for name in GFM_ELEMENT_NAMES:
+        parser.add_element(getattr(gfm_elements, name))
+    return parser.parse(text)
+
+
+def _serialize(element):
+    """The parsed element as a tree of plain dicts, the one shape both sides of the process boundary
+    read: kind (the element's class name), span (its source span), text (its string children), children
+    (its element children, a bare string child as kind "str"), task (it carries a task-list check state),
+    escape (a RawText's character-reference switch) and body (an HTML block's raw text). Every reading
+    this module makes of a parsed document is made of these fields alone, so the in-process seam and the
+    child return identical documents by construction."""
+    node = {"kind": type(element).__name__}
+    span = getattr(element, "source_span", None)
+    if isinstance(span, tuple) and len(span) == 2:
+        node["span"] = [span[0], span[1]]
+    if hasattr(element, "checked"):
+        node["task"] = True
+    body = getattr(element, "body", None)
+    if isinstance(body, str):
+        node["body"] = body
+    if node["kind"] == "RawText":
+        node["escape"] = bool(getattr(element, "escape", True))
+    children = getattr(element, "children", None)
+    if isinstance(children, str):
+        node["text"] = children
+    elif children:
+        node["children"] = [{"kind": "str", "text": child} if isinstance(child, str)
+                            else _serialize(child) for child in children]
+    return node
+
+
+def _kill_group(process):
+    """Kill the parse child's whole process group (it was started with start_new_session, so its group id
+    is its pid and holds only processes it started), then the child itself where the group is already
+    gone; never a pid this module did not start."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _child_parse(text):
+    """The serialized document from a parse of `text` in a child process (python3 -I -B _CHILD_PATH, its
+    own session, the text on stdin as UTF-8, one JSON document on stdout). The wall-clock bound holds by
+    construction: a child that has not delivered within PARSE_DEADLINE_SECONDS has its process group
+    killed and the text is refused. A child that cannot be started, dies, is killed, or writes anything
+    but one well-formed JSON document is the same refusal, never a partial read; the exit status alone is
+    never trusted (a caller that ignores SIGCHLD reads a failed child's status as 0)."""
+    try:
+        process = subprocess.Popen([sys.executable, "-I", "-B", _CHILD_PATH],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        raise DeclarationError("cannot start the parse child {}: {}".format(_CHILD_PATH, exc)) from exc
+    try:
+        stdout, _ = process.communicate(text.encode("utf-8"), timeout=PARSE_DEADLINE_SECONDS)
+    except subprocess.TimeoutExpired:
+        _kill_group(process)
+        process.communicate()   # reap the killed child and close both pipe ends
+        raise DeclarationError("the CommonMark parser did not finish over the brief within {} s, this "
+                               "reading's deadline; the brief is refused, never read partially".format(
+                                   PARSE_DEADLINE_SECONDS))
+    except BaseException:       # whatever interrupted the wait, the child never outlives the call
+        _kill_group(process)
+        process.communicate()
+        raise
+    try:
+        result = json.loads(stdout.decode("utf-8"))
+    except ValueError as exc:
+        raise DeclarationError("the parse child returned no readable result over the brief (exit status "
+                               "{}); the brief is refused, never read partially".format(
+                                   process.returncode)) from exc
+    if not isinstance(result, dict):
+        raise DeclarationError("the parse child returned a malformed result over the brief; the brief "
+                               "is refused, never read partially")
+    if "declaration_error" in result:
+        raise DeclarationError(str(result["declaration_error"]))
+    if "error" in result or not isinstance(result.get("tree"), dict):
+        raise DeclarationError("the CommonMark parser failed over the brief: {}".format(
+            result.get("error", "the child returned no document")))
+    return result["tree"]
+
+
+def _joined_parse(text):
+    """The serialized document from the in-process parse behind a daemon-thread join: the seam
+    PARSE_IN_CHILD=False restores it so a self-test can show that this join cannot hold the deadline (a
+    single regex match holds the GIL, so join() waits out the match however short its timeout) where the
+    child kill can; no production caller takes this path."""
     outcome = []
 
     def parse_text():
         try:
-            parser = marko.parser.Parser()
-            for name in GFM_ELEMENT_NAMES:
-                parser.add_element(getattr(gfm_elements, name))
-            outcome.append(("document", parser.parse(text)))
+            outcome.append(("document", _serialize(_parse_document(text))))
         except BaseException as exc:    # held for the joining thread; a worker thread must not die silent
             outcome.append(("error", exc))
 
@@ -346,8 +418,27 @@ def _parse(text):
         if isinstance(value, DeclarationError):
             raise value
         raise DeclarationError("the CommonMark parser failed over the brief: {}".format(value)) from value
-    document = value
-    if getattr(document, "source_span", None) != (0, len(text)):
+    return value
+
+
+def _parse(text):
+    """The serialized document (_serialize) for `text`, bounded: the byte ceiling and the structural
+    prescans are enforced first (kept here as well as in forbidden(), so no caller can reach an unbounded
+    parse), then the parse runs in its own killed-at-the-deadline child process (_child_parse; the seam
+    PARSE_IN_CHILD=False restores the old in-process thread join for the self-tests that show the join
+    cannot hold the bound). A parse that misses the deadline, a parse exception (a recursion error
+    included), a child that dies or returns garbage, and a document span that does not cover `text` (the
+    parser's buffer rewrites are length-preserving only over LF-only text, which forbidden() guarantees
+    first) are DeclarationError, fail closed, never a partial read."""
+    if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
+        raise DeclarationError("the brief is larger than {} bytes, over this reading's ceiling".format(
+            MAX_TEXT_BYTES))
+    for prescan in (_whitespace_refused, _nesting_refused):
+        found = prescan(text)
+        if found is not None:
+            raise DeclarationError("the brief is over this reading's bounds: " + found[1])
+    document = _child_parse(text) if PARSE_IN_CHILD else _joined_parse(text)
+    if document.get("span") != [0, len(text)]:
         raise DeclarationError("the parsed document span does not cover the brief's text")
     return document
 
@@ -490,10 +581,10 @@ def _scan_segment(kind, characters):
     return None
 
 
-def _segments(classes, element):
-    """The rendered lines of a unit's inline children: a list of [(character, kind)] lists, one per
-    rendered line (LineBreak splits; each split matches one source newline, so a segment's line number is
-    the unit's start line plus its index). A code span's text is literal (kind "code" while
+def _segments(element):
+    """The rendered lines of a serialized unit's inline children: a list of [(character, kind)] lists,
+    one per rendered line (LineBreak splits; each split matches one source newline, so a segment's line
+    number is the unit's start line plus its index). A code span's text is literal (kind "code" while
     CODE_SPANS_ARE_CODE); inline HTML is kind "html"; raw text has character references applied with
     html.unescape, exactly as the vendored renderer applies them; a backslash escape's Literal is its
     unescaped character; emphasis, strong emphasis, strikethrough, links, images and autolinks contribute
@@ -502,105 +593,87 @@ def _segments(classes, element):
 
     def walk(children):
         for child in children:
-            if isinstance(child, classes["LineBreak"]):
+            kind = child["kind"]
+            if kind == "LineBreak":
                 lines.append([])
-            elif isinstance(child, classes["CodeSpan"]):
-                kind = "code" if CODE_SPANS_ARE_CODE else "text"
-                lines[-1].extend((character, kind) for character in str(child.children))
-            elif isinstance(child, classes["InlineHTML"]):
-                lines[-1].extend((character, "html") for character in str(child.children))
-            elif isinstance(child, classes["RawText"]):
-                piece = str(child.children)
-                if getattr(child, "escape", True):
+            elif kind == "CodeSpan":
+                piece_kind = "code" if CODE_SPANS_ARE_CODE else "text"
+                lines[-1].extend((character, piece_kind) for character in child.get("text", ""))
+            elif kind == "InlineHTML":
+                lines[-1].extend((character, "html") for character in child.get("text", ""))
+            elif kind == "RawText":
+                piece = child.get("text", "")
+                if child.get("escape", True):
                     piece = html.unescape(piece)
                 lines[-1].extend((character, "text") for character in piece)
-            elif isinstance(child, classes["Literal"]):
-                lines[-1].extend((character, "text") for character in str(child.children))
-            else:
-                grand = getattr(child, "children", None)
-                if isinstance(grand, str):
-                    lines[-1].extend((character, "text") for character in grand)
-                elif grand:
-                    walk(grand)
+            elif kind == "Literal":
+                lines[-1].extend((character, "text") for character in child.get("text", ""))
+            elif kind == "str":   # a bare string child of a list of elements renders nothing
+                continue
+            elif "text" in child:
+                lines[-1].extend((character, "text") for character in child["text"])
+            elif child.get("children"):
+                walk(child["children"])
 
-    children = getattr(element, "children", None)
-    if children and not isinstance(children, str):
-        walk(children)
+    if element.get("children"):
+        walk(element["children"])
     return lines
 
 
-def _units(classes, element, declaring, line_of):
-    """(kind, start line, element) for every unit of the document, in order: paragraphs ("paragraph" in a
-    declaring position, "task" for a task-list item, "quoted" elsewhere), headings, table cells, HTML
-    blocks and, with the code rule patched out, code blocks. Quotes and alerts recurse with declaring off;
-    lists keep it; an unknown block with element children recurses with it off (fail closed: its
-    paragraphs are still scanned)."""
-    for child in getattr(element, "children", []) or []:
-        span = getattr(child, "source_span", None)
+def _units(element, declaring, line_of):
+    """(kind, start line, serialized element) for every unit of the document, in order: paragraphs
+    ("paragraph" in a declaring position, "task" for a task-list item, "quoted" elsewhere), headings,
+    table cells, HTML blocks and, with the code rule patched out, code blocks. Quotes, alerts and every
+    other unknown block recurse with declaring off (fail closed: their paragraphs are still scanned);
+    lists keep it."""
+    for child in element.get("children") or []:
+        span = child.get("span")
         line = line_of(span[0]) if span else None
-        if isinstance(child, (classes["FencedCode"], classes["CodeBlock"])):
+        kind = child["kind"]
+        if kind in ("FencedCode", "CodeBlock"):
             if not CODE_BLOCKS_ARE_CODE:
                 yield "code", line, child
-        elif isinstance(child, classes["Paragraph"]):
-            if hasattr(child, "checked"):
-                kind = "task"
+        elif kind == "Paragraph":
+            if child.get("task"):
+                unit = "task"
             else:
-                kind = "paragraph" if declaring else "quoted"
-            yield kind, line, child
-        elif isinstance(child, (classes["Heading"], classes["SetextHeading"])):
+                unit = "paragraph" if declaring else "quoted"
+            yield unit, line, child
+        elif kind in ("Heading", "SetextHeading"):
             yield "heading", line, child
-        elif isinstance(child, classes["Table"]):
-            for row in child.children:
-                row_span = getattr(row, "source_span", None)
+        elif kind == "Table":
+            for row in child.get("children") or []:
+                row_span = row.get("span")
                 row_line = line_of(row_span[0]) if row_span else line
-                for cell in row.children:
-                    cell_span = getattr(cell, "source_span", None)
+                for cell in row.get("children") or []:
+                    cell_span = cell.get("span")
                     yield "cell", line_of(cell_span[0]) if cell_span else row_line, cell
-        elif isinstance(child, classes["HTMLBlock"]):
+        elif kind == "HTMLBlock":
             yield "html", line, child
-        elif isinstance(child, classes["Quote"]):
-            yield from _units(classes, child, False, line_of)
-        elif isinstance(child, (classes["List"], classes["ListItem"])):
-            yield from _units(classes, child, declaring, line_of)
-        elif isinstance(child, (classes["BlankLine"], classes["ThematicBreak"], classes["LinkRefDef"])):
+        elif kind in ("List", "ListItem"):
+            yield from _units(child, declaring, line_of)
+        elif kind in ("BlankLine", "ThematicBreak", "LinkRefDef"):
             continue
-        else:
-            yield from _units(classes, child, False, line_of)
+        else:   # Quote, Alert and every block this reading does not name: never a declaring position
+            yield from _units(child, False, line_of)
 
 
-def _classes():
-    """The parsed-element classes of the verified vendored load, by name."""
-    marko, gfm_elements = _load_marko()
-    return {
-        "FencedCode": marko.block.FencedCode, "CodeBlock": marko.block.CodeBlock,
-        "Paragraph": marko.block.Paragraph, "Heading": marko.block.Heading,
-        "SetextHeading": marko.block.SetextHeading, "Quote": marko.block.Quote,
-        "List": marko.block.List, "ListItem": marko.block.ListItem,
-        "BlankLine": marko.block.BlankLine, "ThematicBreak": marko.block.ThematicBreak,
-        "LinkRefDef": marko.block.LinkRefDef, "HTMLBlock": marko.block.HTMLBlock,
-        "Table": gfm_elements.Table,
-        "LineBreak": marko.inline.LineBreak, "CodeSpan": marko.inline.CodeSpan,
-        "RawText": marko.inline.RawText, "Literal": marko.inline.Literal,
-        "InlineHTML": marko.inline.InlineHTML,
-    }
-
-
-def _code_regions(classes, element):
-    """The [start, end) spans of the document's code: fenced and indented code blocks (their whole spans,
-    marker lines included) and code spans, each honoured only while its rule says it is code."""
+def _code_regions(element):
+    """The [start, end) spans of the serialized document's code: fenced and indented code blocks (their
+    whole spans, marker lines included) and code spans, each honoured only while its rule says it is
+    code."""
     regions = []
 
     def walk(node):
-        for child in getattr(node, "children", []) or []:
-            if isinstance(child, str):
+        for child in node.get("children") or []:
+            kind = child["kind"]
+            if kind in ("FencedCode", "CodeBlock"):
+                if CODE_BLOCKS_ARE_CODE and child.get("span"):
+                    regions.append(tuple(child["span"]))
                 continue
-            if isinstance(child, (classes["FencedCode"], classes["CodeBlock"])):
-                if CODE_BLOCKS_ARE_CODE and getattr(child, "source_span", None):
-                    regions.append(child.source_span)
-                continue
-            if isinstance(child, classes["CodeSpan"]):
-                if CODE_SPANS_ARE_CODE and getattr(child, "source_span", None):
-                    regions.append(child.source_span)
+            if kind == "CodeSpan":
+                if CODE_SPANS_ARE_CODE and child.get("span"):
+                    regions.append(tuple(child["span"]))
                 continue
             walk(child)
 
@@ -622,8 +695,10 @@ def _line_starts(text):
 def _lead_shape(line):
     """(markers, columns) of one line's lead: the count of its leading marker tokens (a quote mark; a
     bullet or an ordered mark of at most nine digits, each followed by whitespace or the line's end, as
-    the parser requires) and of the whitespace columns between and before them (a tab counts four). The
-    scan stops at the first character that is neither; it never reads the rest of the line."""
+    the parser requires) and of the whitespace columns between and before them (a tab counts four; after
+    a quote mark, one character of any whitespace but LF counts one column, exactly the one optional
+    whitespace character the parser's own quote prefix consumes there). The scan stops at the first
+    character that is neither; it never reads the rest of the line."""
     markers = columns = position = 0
     length = len(line)
     while position < length:
@@ -637,6 +712,14 @@ def _lead_shape(line):
         elif character == ">":
             markers += 1
             position += 1
+            # the parser's quote prefix (block.py, " {,3}>[^\n\S]?") consumes ONE optional whitespace
+            # character after the marker, any whitespace but LF, so a no-break space, a vertical tab or
+            # an ideographic space there is the column a space would be, never the end of the lead; a
+            # space or tab is left to the loop, which already counts it
+            if position < length and line[position] not in " \t" and line[position] != "\n" \
+                    and line[position].isspace():
+                columns += 1
+                position += 1
         elif character in "-*+" and (position + 1 == length or line[position + 1] in " \t"):
             markers += 1
             position += 1
@@ -666,31 +749,23 @@ BLOCK_START_RE = re.compile(r" ?(?:#{1,6}(?=\s|$)|`{3,}[^`\n]*$|~{3,})")
 
 def _nesting_refused(text):
     """(line number, reason) for the first line whose lead can take the document past MAX_NESTING_DEPTH
-    nested levels, or whose opening takes the text's summed opening cost over MAX_NESTING_COST; None when
-    neither. A conservative upper bound, never a parse: a line's marker tokens each open at most one
-    level, and its leading whitespace continues at most the levels already opened (every two columns one
-    level, and never more than any earlier line of the same block run opened), so a deeply indented fence
-    body or continuation line alone opens nothing, while a run of markers on one line, or marker lines
-    that march deeper line by line, is counted in full. The running depth follows block structure: it
-    resets to zero where a new top-level block must start, at a non-blank line with no lead markers and
-    under two lead columns that either follows a blank line (nothing open can read it as item content,
-    which needs two columns, or as a lazy continuation, which needs an open paragraph) or opens an ATX
-    heading or code fence (BLOCK_START_RE, which breaks a paragraph too), so a block's outcome never
-    depends on content before its block; blank is what the parser's BlankLine reads as blank (str.strip,
-    every whitespace character). Opening cost: a line whose depth exceeds the levels still open from the
-    lines before it is charged two to the power of its depth, the growth the parser's opening time was
-    measured to follow, and a blank line closes every open level for this charge, as it closes an open
-    quote (for an open list it over-charges the next marker line, never under). Over-counting only
-    refuses more (a fenced example shaped like a deeper-than-the-ceiling list is refused with the real
-    thing), never less."""
+    nested levels; None otherwise. A conservative upper bound, never a parse: a line's marker tokens each
+    open at most one level, and its leading whitespace continues at most the levels already opened (every
+    two columns one level, and never more than any earlier line of the same block run opened), so a
+    deeply indented fence body or continuation line alone opens nothing, while a run of markers on one
+    line, or marker lines that march deeper line by line, is counted in full. The running depth follows
+    block structure: it resets to zero where a new top-level block must start, at a non-blank line with
+    no lead markers and under two lead columns that either follows a blank line (nothing open can read it
+    as item content, which needs two columns, or as a lazy continuation, which needs an open paragraph)
+    or opens an ATX heading or code fence (BLOCK_START_RE, which breaks a paragraph too), so a block's
+    outcome never depends on content before its block; blank is what the parser's BlankLine reads as
+    blank (str.strip, every whitespace character). Over-counting only refuses more (a fenced example
+    shaped like a deeper-than-the-ceiling list is refused with the real thing), never less."""
     running = 0
-    open_levels = 0
-    cost = 0
     after_blank = True
     for number, line in enumerate(text.split("\n"), 1):
         if not line.strip():
             after_blank = True
-            open_levels = 0
             continue
         markers, columns = _lead_shape(line)
         if NESTING_RESETS and markers == 0 and columns < 2 \
@@ -705,77 +780,30 @@ def _nesting_refused(text):
                     MAX_NESTING_DEPTH))
         if depth > running:
             running = depth
-        if depth > open_levels:
-            cost += 1 << depth
-            if cost > MAX_NESTING_COST:
-                return number, (
-                    "the brief's nested list and quote openings, counted together, cost the parser more "
-                    "than this reading evaluates (the summed opening cost is over {}); flatten the "
-                    "nesting or open deep levels fewer times".format(MAX_NESTING_COST))
-        open_levels = depth
     return None
 
 
 def _whitespace_refused(text):
     """(line number, reason) for the first line holding a whitespace run of more than MAX_WHITESPACE_RUN
-    characters of the parser's whitespace class, or the line whose run takes the text's summed squared
-    run length over MAX_WHITESPACE_COST (the growth the parser's reading time was measured to follow);
-    None when neither."""
+    characters of the parser's whitespace class; None otherwise."""
     run = WHITESPACE_RUN_RE.search(text)
     if run is not None:
         return text.count("\n", 0, run.start()) + 1, (
             "the line holds a run of more than {} consecutive whitespace characters (space, tab or any "
             "other character the parser reads as whitespace), which the parser reads in time that grows "
             "with the square of the run; break the run".format(MAX_WHITESPACE_RUN))
-    total = 0
-    for match in WHITESPACE_COST_RE.finditer(text):
-        length = match.end() - match.start()
-        total += length * length
-        if total > MAX_WHITESPACE_COST:
-            return text.count("\n", 0, match.start()) + 1, (
-                "the brief's whitespace runs, counted together, cost the parser more than this reading "
-                "evaluates (the summed squared run length is over {}); shorten or break the runs".format(
-                    MAX_WHITESPACE_COST))
-    return None
-
-
-def _inline_marks_refused(text):
-    """(line number, reason) for the line that takes the summed squared count of inline marks (the
-    INLINE_MARK_CHARACTERS: emphasis, strikethrough and code-span marks, whose delimiter pass the parser
-    runs per paragraph in time that grows with the square of the marks) over MAX_INLINE_MARK_COST; None
-    otherwise. Marks are counted per chunk of lines between blank lines (blank as the parser's BlankLine
-    reads it), which covers every paragraph the chunk can hold; marks inside code are counted with the
-    rest, over-counting only."""
-    total = 0
-    count = 0
-    for number, line in enumerate(text.split("\n"), 1):
-        if not line.strip():
-            total += count * count
-            count = 0
-            continue
-        marks = sum(line.count(character) for character in INLINE_MARK_CHARACTERS)
-        if marks:
-            count += marks
-            if total + count * count > MAX_INLINE_MARK_COST:
-                return number, (
-                    "the brief's emphasis, strikethrough and code marks, counted together, cost the "
-                    "parser more than this reading evaluates (the summed squared per-paragraph count is "
-                    "over {}); split the marks across paragraphs or quote them in fewer runs".format(
-                        MAX_INLINE_MARK_COST))
     return None
 
 
 def forbidden(text):
     """(line number, reason) for the first line separator other than LF anywhere in `text`, for the first
-    line a cost prescan refuses (_whitespace_refused for a run over MAX_WHITESPACE_RUN or a summed run
-    cost over MAX_WHITESPACE_COST, _nesting_refused for a lead past MAX_NESTING_DEPTH or a summed opening
-    cost over MAX_NESTING_COST, _inline_marks_refused for a summed mark cost over MAX_INLINE_MARK_COST),
-    or for the first format character (category Cf) outside the parsed document's code blocks and code
-    spans; None when there is none. The cost prescans are judged on every text whatever else it holds, so
-    those refusals never depend on unrelated content. DeclarationError for a text over MAX_TEXT_BYTES
-    (refused here up front, parse path or not) and when a Cf stands in text the vendored parser cannot
-    read. The Cf region check is one sorted sweep: positions ascend, so one pointer over the sorted
-    regions visits each region once."""
+    line a structural prescan refuses (_whitespace_refused for a run over MAX_WHITESPACE_RUN,
+    _nesting_refused for a lead past MAX_NESTING_DEPTH), or for the first format character (category Cf)
+    outside the parsed document's code blocks and code spans; None when there is none. The prescans are
+    judged on every text whatever else it holds, so those refusals never depend on unrelated content.
+    DeclarationError for a text over MAX_TEXT_BYTES (refused here up front, parse path or not) and when a
+    Cf stands in text the vendored parser cannot read. The Cf region check is one sorted sweep: positions
+    ascend, so one pointer over the sorted regions visits each region once."""
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
         raise DeclarationError("the brief is larger than {} bytes, over this reading's ceiling".format(
             MAX_TEXT_BYTES))
@@ -784,7 +812,7 @@ def forbidden(text):
         line = text.count("\n", 0, found.start()) + 1
         return line, "the brief holds a line separator other than LF ({}); only LF ends a line".format(
             SEPARATORS[found.group(0)])
-    for prescan in (_whitespace_refused, _nesting_refused, _inline_marks_refused):
+    for prescan in (_whitespace_refused, _nesting_refused):
         refused = prescan(text)
         if refused is not None:
             return refused
@@ -794,7 +822,7 @@ def forbidden(text):
                  if unicodedata.category(character) == "Cf"]
     if not positions:
         return None
-    regions = sorted(_code_regions(_classes(), _parse(text)))
+    regions = sorted(_code_regions(_parse(text)))
     starts = _line_starts(text)
     pointer = 0
     for index in positions:
@@ -817,20 +845,19 @@ def read(text):
         # nothing in it can spell the token INPUT, even folded, and no character reference, markup,
         # escape or inline HTML can make the rendered text differ from this source text
         return [], []
-    classes = _classes()
     document = _parse(text)
     starts = _line_starts(text)
     line_of = lambda position: bisect.bisect_right(starts, position)  # noqa: E731
     inputs, bad = [], []
-    for kind, line, element in _units(classes, document, True, line_of):
+    for kind, line, element in _units(document, True, line_of):
         if kind in ("html", "code"):
-            body = element.body if kind == "html" else "".join(
-                str(raw.children) for raw in element.children)
+            body = element.get("body", "") if kind == "html" else "".join(
+                raw.get("text", "") for raw in element.get("children") or [])
             for offset, raw_line in enumerate(body.split("\n")):
                 if _line_scan(raw_line, strip_tags=(kind == "html")):
                     bad.append(((line or 1) + offset, LOOK_ALIKE_REASON))
             continue
-        for offset, characters in enumerate(_segments(classes, element)):
+        for offset, characters in enumerate(_segments(element)):
             found = _scan_segment(kind, characters)
             if found is None:
                 continue
