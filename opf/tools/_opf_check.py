@@ -1927,7 +1927,7 @@ def _archive_triaged_dir(archive_rel, path):
 
 
 def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1,
-                      unread=None, unconfirmed=None, active_counted=None):
+                      unread=None, unconfirmed=None, active_counted=None, walk=None):
     """Walk the archive tree, validating each bucket's archive.toml, its archived non-worklog records, and
     its archived worklog, and reconciling the enumeration BIDIRECTIONALLY against what is actually present
     (OPF-SPEC 12/13). Enumeration and record-schema faults attribute to the caller's C-ARCHIVE-ENUM focus;
@@ -1972,7 +1972,9 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     at. `active_counted` (when given) maps each active location the caller's
     collectors read in full to the ids counted there, keyed store-relative exactly as an archive.toml
     destination names it (`<type>.index.toml`, `worklog.toml`); only membership is read for a ledger.
-    Without it no active location is counted, so a destination naming one stays in `unread`."""
+    Without it no active location is counted, so a destination naming one stays in `unread`. `walk`
+    (when given, a dict whose caller's report has a `cannot` list) takes "tree": "absent" when no
+    archive tree exists, "unreadable" when one exists but cannot be listed, else "listed"."""
     if unread is None:
         unread = set()
     if unconfirmed is None:
@@ -1999,12 +2001,18 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     # grading), matching C-CONTAINMENT.
     partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep, homes)
     archive_rel = _rel(machine_rel, ARCHIVE_DIRNAME)
+    cant_before = len(rep.cannot) if walk is not None else 0
     years, top_files = _list_dir(root_fd, archive_rel, rep, unread, enabled_types)
     if years is None:
         # An ABSENT archive/ tree means no rotation has happened (clean). A tree that EXISTS but cannot
         # be listed takes the same return, with the cant and every enabled type already recorded unread
-        # by _list_dir above, so nothing downstream reads the unwalked tree as rotation-free.
+        # by _list_dir above, so nothing downstream reads the unwalked tree as rotation-free. Only the
+        # listing's own cant tells the two apart, so `walk` reads it from the report.
+        if walk is not None:
+            walk["tree"] = "unreadable" if len(rep.cannot) > cant_before else "absent"
         return archive_recs, archive_worklogs, rotatable
+    if walk is not None:
+        walk["tree"] = "listed"
     for fn_ in (top_files or []):
         # A regular file directly under archive/ is unmanaged: only <YYYY> bucket directories belong here.
         # C-CONTAINMENT skips the archive subtree, so its stray-path grading lives here (spec 12/14.2; B2).
@@ -2549,6 +2557,54 @@ def archived_records(root_fd, machine_rel, enabled_types, registered_vendors, im
     archive_recs, _worklogs, rotatable = _validate_archive(
         root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=homes)
     return archive_recs, rep.cannot + rep.findings + rotatable
+
+
+class ArchiveRead:
+    """What one archive walk held (archive_read). `tree` is "absent" (no archive tree: nothing rotated),
+    "unreadable" (a tree exists but cannot be listed) or "listed". `records` lists one
+    (location, type, body) triple per archived row the walk seated, in walk order, so a duplicate id
+    keeps every copy. `problems` lists every cannot-evaluate, finding and C-ROTATION message, a
+    duplicate archived id included. `complete` is False when any record population could not be read
+    or confirmed in full. `source_bytes` maps each store-relative path the walk parsed to the exact bytes
+    of that parse."""
+    __slots__ = ("tree", "records", "problems", "complete", "source_bytes")
+
+    def __init__(self, tree, records, problems, complete, source_bytes):
+        self.tree = tree
+        self.records = records
+        self.problems = problems
+        self.complete = complete
+        self.source_bytes = source_bytes
+
+
+def archive_read(root_fd, machine_rel, enabled_types, registered_vendors, import_status, homes=1):
+    """The archive as one _validate_archive walk read it, for a caller that must account the archive
+    inputs it renders from: the record bodies archived_records seats, the same problems (plus one per
+    archived id seated more than once, every copy kept), whether every population was read and
+    confirmed in full, and the bytes of each archive.toml, index and worklog the walk parsed. Those
+    bytes are the report's read cache (_read_toml, _gather_worklog), the first read of each path, which
+    is the read every returned record was parsed from; a destination probe that reads a path again
+    only adds a problem. A file that could not be read or parsed has no bytes and a problem names it.
+    A caller relies on the result only when `problems` is empty and `complete` is True."""
+    rep = _Report()
+    rep.ran("C-ARCHIVE-ENUM")
+    unread, unconfirmed, walk = set(), set(), {}
+    archive_recs, _worklogs, rotatable = _validate_archive(
+        root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=homes,
+        unread=unread, unconfirmed=unconfirmed, walk=walk)
+    problems = rep.cannot + rep.findings + rotatable
+    seen = {}
+    for rec in archive_recs:
+        if isinstance(rec.id, str):
+            seen.setdefault(rec.id, []).append(rec.location)
+    for rid in sorted(seen):
+        if len(seen[rid]) > 1:
+            problems.append("C-ARCHIVE-ENUM: archived id {!r} is seated {} times ({}); every copy is kept "
+                            "and none stands for another (spec 11)".format(
+                                rid, len(seen[rid]), ", ".join(seen[rid])))
+    complete = not (rep.cannot or unread or unconfirmed)
+    records = [(rec.location, rec.rtype, rec.body) for rec in archive_recs]
+    return ArchiveRead(walk.get("tree"), records, problems, complete, dict(rep.toml_reads))
 
 
 def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
@@ -10358,6 +10414,168 @@ def self_test():
             globals()["_dest_index_has_id"] = _real_dest_probe
         check("presence-gates-moved-row-probe-hit-uncounted-cannot-evaluate",
               _probe_hit_uncounted == ("cant", "cant"))
+
+        # archive_read runs the one archive walk archived_records runs, so on every archive shape below its
+        # records and problems equal that reader's, and the bytes it returns are exactly the fixture bytes
+        # of the files the walk parsed: none for a file that is absent or did not parse, and the first read
+        # of an index the destination probe reads again. A row the schema refuses is kept beside its
+        # finding, a row that is not a table is a cannot-evaluate, and a duplicate archived id keeps both
+        # copies and adds one problem beyond archived_records'.
+        _ar_mf = "archive/2026/archive.toml"
+        _ar_wl = "archive/2026/worklog.toml"
+        _ar_pd = "archive/2026/pending_decision.index.toml"
+        _ar_mf25 = "archive/2025/archive.toml"
+        _ar_wl25 = "archive/2025/worklog.toml"
+        _ar_pd25 = "archive/2025/pending_decision.index.toml"
+
+        def _ar_bytes(doc):
+            return (doc if isinstance(doc, str) else _opf_emit.emit(doc)).encode("utf-8")
+
+        def _ar_moved(*rows, wl_span=("WL-1", "WL-2"), bucket="2026"):
+            return {"schema": 1,
+                    "moved": [{"id": rid, "type": "pending_decision",
+                               "destination": "archive/{}/pending_decision.index.toml".format(bucket)}
+                              for rid in rows],
+                    "worklog_moved": [{"span": list(wl_span),
+                                       "destination": "archive/{}/worklog.toml".format(bucket)}]}
+
+        def _ar_run(machine):
+            aroot = build(machine)
+            ares = resolve_store(aroot)
+            afd = _open_store_root_fd(ares.store_root, ares.pointer_source != "default")
+            try:
+                atypes = _authoritative_types(_enabled_modules(machine["manifest.toml"]),
+                                              machine["manifest.toml"]["types"])
+                legacy = archived_records(afd, ares.machine_rel, atypes, frozenset(), None)
+                read = archive_read(afd, ares.machine_rel, atypes, frozenset(), None)
+            finally:
+                os.close(afd)
+            return ares.machine_rel, legacy, read
+
+        def _ar_case_absent(f):
+            del f[_ar_mf]
+            del f[_ar_wl]
+            return ()
+
+        def _ar_case_unreadable(f):
+            del f[_ar_mf]
+            del f[_ar_wl]
+            f["archive"] = "not a directory\n"
+            return ()
+
+        def _ar_case_one_year(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            f[_ar_pd] = idx([pd(1)])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_several_years(f):
+            f[_ar_mf25] = _ar_moved("PD-1", wl_span=("WL-1", "WL-1"), bucket="2025")
+            f[_ar_pd25] = idx([pd(1)])
+            f[_ar_wl25] = {"schema": 1, "entry": [wl(1)]}
+            f[_ar_mf] = _ar_moved("PD-2", wl_span=("WL-2", "WL-2"))
+            f[_ar_pd] = idx([pd(2, supersedes="PD-1")])
+            f[_ar_wl] = {"schema": 1, "entry": [wl(2)]}
+            return (_ar_mf25, _ar_pd25, _ar_wl25, _ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_missing_destination(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            return (_ar_mf, _ar_wl)
+
+        def _ar_case_malformed_manifest(f):
+            f[_ar_mf] = "this is not valid toml === ["
+            f[_ar_pd] = idx([pd(1)])
+            return ()
+
+        def _ar_case_malformed_index(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            f[_ar_pd] = {"schema": 1, "record": "PD-1"}
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_incomplete_enumeration(f):
+            f[_ar_mf] = _ar_moved("PD-1", "PD-2")
+            f[_ar_pd] = idx([pd(1)])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_unenumerated_record(f):
+            f[_ar_mf] = _ar_moved()
+            f[_ar_pd] = idx([pd(1)])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_malformed_row(f):
+            f[_ar_mf] = _ar_moved("PD-1", "PD-2")
+            f[_ar_pd] = idx([pd(1), {"id": "PD-2"}])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_non_table_row(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            f[_ar_pd] = 'schema = 1\nrecord = ["PD-1"]\n'
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        # (name, fixture, tree, complete, clean, seated pending decision ids)
+        for _name, _case, _tree, _complete, _clean, _seated in (
+                ("absent", _ar_case_absent, "absent", True, True, []),
+                ("unreadable", _ar_case_unreadable, "unreadable", False, False, []),
+                ("one-year", _ar_case_one_year, "listed", True, True, ["PD-1"]),
+                ("several-years", _ar_case_several_years, "listed", True, True, ["PD-1", "PD-2"]),
+                ("missing-destination", _ar_case_missing_destination, "listed", False, False, []),
+                ("malformed-manifest", _ar_case_malformed_manifest, "listed", False, False, []),
+                ("malformed-index", _ar_case_malformed_index, "listed", False, False, []),
+                ("incomplete-enumeration", _ar_case_incomplete_enumeration, "listed", False, False, ["PD-1"]),
+                ("unenumerated-record", _ar_case_unenumerated_record, "listed", True, False, ["PD-1"]),
+                ("malformed-row", _ar_case_malformed_row, "listed", True, False, ["PD-1", "PD-2"]),
+                ("non-table-row", _ar_case_non_table_row, "listed", False, False, [])):
+            f = clean_machine()
+            _parsed = _case(f)
+            _mrel, (_lrecs, _lprobs), _rd = _ar_run(f)
+            check("archive-read-{}-records-match-archived-records".format(_name),
+                  _rd.records == [(r.location, r.rtype, r.body) for r in _lrecs])
+            check("archive-read-{}-problems-match-archived-records".format(_name), _rd.problems == _lprobs)
+            check("archive-read-{}-bytes-are-the-parsed-fixture-bytes".format(_name),
+                  _rd.source_bytes == {_mrel + "/" + rel: _ar_bytes(f[rel]) for rel in _parsed})
+            check("archive-read-{}-tree-and-completeness".format(_name),
+                  (_rd.tree, _rd.complete, not _rd.problems) == (_tree, _complete, _clean))
+            check("archive-read-{}-seats-every-read-row".format(_name),
+                  [b.get("id") for _l, t, b in _rd.records if t == "pending_decision"] == _seated)
+        f = clean_machine()
+        _ar_case_several_years(f)
+        f[_ar_pd] = idx([pd(1)])
+        f[_ar_mf] = _ar_moved("PD-1", wl_span=("WL-2", "WL-2"))
+        _mrel, (_lrecs, _lprobs), _rd = _ar_run(f)
+        _ar_dup = [p for p in _rd.problems if p not in _lprobs]
+        check("archive-read-duplicate-id-keeps-every-copy",
+              [(l, b.get("id")) for l, _t, b in _rd.records]
+              == [("archive/2025", "PD-1"), ("archive/2026", "PD-1")]
+              and _rd.records == [(r.location, r.rtype, r.body) for r in _lrecs])
+        check("archive-read-duplicate-id-is-a-problem",
+              _rd.problems[:len(_lprobs)] == _lprobs and len(_ar_dup) == 1
+              and "'PD-1' is seated 2 times" in _ar_dup[0])
+
+        # The reader contract a decision view relies on: an archived pending decision comes back with the
+        # bytes of the index it was parsed from and of the manifest that enumerates it. Red when the read
+        # cache does not keep the bytes of the reads the walk parsed.
+        def _ar_contract(machine):
+            mrel, _legacy, read = _ar_run(machine)
+            return (read.tree == "listed" and read.complete and not read.problems
+                    and [b.get("id") for _l, t, b in read.records if t == "pending_decision"] == ["PD-1"]
+                    and all(read.source_bytes.get(mrel + "/" + rel) == _ar_bytes(machine[rel])
+                            for rel in (_ar_mf, _ar_pd)))
+
+        f = clean_machine()
+        _ar_case_one_year(f)
+        check("archive-read-contract-pending-decision-with-index-and-manifest-bytes", _ar_contract(f))
+        _real_read_toml = _read_toml
+
+        def _read_toml_dropping_bytes(root_fd, relpath, rep):
+            data, st = _real_read_toml(root_fd, relpath, rep)
+            rep.toml_reads.pop(relpath, None)
+            return data, st
+
+        globals()["_read_toml"] = _read_toml_dropping_bytes
+        try:
+            _ar_flipped = _ar_contract(f)
+        finally:
+            globals()["_read_toml"] = _real_read_toml
+        check("archive-read-contract-red-when-bytes-dropped", not _ar_flipped)
 
         def _presence_worklog(wl_rows, wl2_in_bucket=False, extra=None):
             f = clean_machine()

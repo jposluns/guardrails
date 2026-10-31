@@ -579,9 +579,10 @@ def _entry_point_census(check):
     # The doctor's archive walk (archived_records) reads no manifest either: its
     # caller passes the manifest-derived inputs, so its entry case below is its
     # own first intake, the archive worklog, judged against the doctor's walk.
+    # The archive reader (archive_read) runs that same walk and is judged the same way.
     check("F2f-public-entry-census", boundaries == {
         "_opf_absorb.evaluate", "_opf_changelog.evaluate", "_opf_check.validate_store",
-        "_opf_check.archived_records",
+        "_opf_check.archived_records", "_opf_check.archive_read",
         "_opf_views.plan_views", "_opf_worklog.load_worklog", "_opf_worklog.load_worklog_at",
         "_opf_worklog.load_archive_worklog_at"})
 
@@ -677,7 +678,8 @@ def _entry_point_regressions(check):
     # reports nothing; each archive worklog intake fault, the enumerated worklog
     # missing included, reaches the caller as exactly the doctor's own
     # C-ARCHIVE-ENUM attribution for that store, the archive worklog is read when
-    # present, and the active worklog never is.
+    # present, and the active worklog never is. The archive reader's public entry
+    # (archive_read) runs the same walk, so its problems are judged the same way.
     moved = (b'schema = 1\n[[worklog_moved]]\nspan = ["WL-1", "WL-1"]\n'
              b'destination = "archive/2026/worklog.toml"\n')
     archive_faults = (
@@ -698,24 +700,27 @@ def _entry_point_regressions(check):
                 fx.files[ARCHIVE] = raw
             types = _opf_check._authoritative_types(
                 _opf_check._enabled_modules(fx.manifest), fx.manifest.get("types"))
-            reads = []
-
-            def read(fd, rel, **kwargs):
-                reads.append(fx.path(fd, rel))
-                return fx.read(fd, rel, **kwargs)
-
-            with patch.object(_journal, "_read_contained", side_effect=read):
-                _recs, problems = _opf_check.archived_records(fx.fd, M, types, frozenset(), None)
             doctor = _opf_check.validate_store(fx.res).by_check.get("C-ARCHIVE-ENUM", [])
-            label = "F2f-entry-archive-walk-" + name
-            check(label + "-doctor-attribution", problems == doctor)
-            if message is None:
-                check(label + "-clean", problems == [] and doctor == [])
-            else:
-                check(label + "-diagnostic", message in problems)
-            check(label + "-archive-read", (ARCHIVE in reads) == (raw != "absent"))
-            check(label + "-no-active-read", not any(
-                path == LEGACY or path.startswith(M + "/worklog/") for path in reads))
+            for entry, walk in (
+                    ("archive-walk", lambda: _opf_check.archived_records(fx.fd, M, types, frozenset(), None)[1]),
+                    ("archive-read", lambda: _opf_check.archive_read(fx.fd, M, types, frozenset(), None).problems)):
+                reads = []
+
+                def read(fd, rel, **kwargs):
+                    reads.append(fx.path(fd, rel))
+                    return fx.read(fd, rel, **kwargs)
+
+                with patch.object(_journal, "_read_contained", side_effect=read):
+                    problems = walk()
+                label = "F2f-entry-{}-{}".format(entry, name)
+                check(label + "-doctor-attribution", problems == doctor)
+                if message is None:
+                    check(label + "-clean", problems == [] and doctor == [])
+                else:
+                    check(label + "-diagnostic", message in problems)
+                check(label + "-archive-read", (ARCHIVE in reads) == (raw != "absent"))
+                check(label + "-no-active-read", not any(
+                    path == LEGACY or path.startswith(M + "/worklog/") for path in reads))
 
 
 def _doctor_snapshot_regressions(check):
