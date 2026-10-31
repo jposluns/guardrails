@@ -1751,7 +1751,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 16
 end-line = 17
 canonical-text = "Classify a decision before enacting it: is it yours to make (ACT), the maintainer's (ASK), or blocked\n(BLOCKED)?"
-source-digest = "dae06196008c0bf9f98c4c82961af2943e601b8374abf2717d0fba38ef78f476"
+source-digest = "08734a4efa21af3c6df5d3082c6d4753cf303fb183d6b3ec19ee333cbf2169ff"
 
 [[clause]]
 clause-id = "deccls.2"
@@ -1760,7 +1760,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 17
 end-line = 17
 canonical-text = "Record the classification before acting on it."
-source-digest = "dae06196008c0bf9f98c4c82961af2943e601b8374abf2717d0fba38ef78f476"
+source-digest = "08734a4efa21af3c6df5d3082c6d4753cf303fb183d6b3ec19ee333cbf2169ff"
 
 [[clause]]
 clause-id = "deccls.3"
@@ -1769,7 +1769,16 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 17
 end-line = 21
 canonical-text = "Before an ASK goes to the maintainer or any\nprocedure standing in for them, search the decision record for that subject: a maintainer ruling answers it\nand outranks any predicted one, but counts only when recorded in an artefact the maintainer controls and the\nassistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is\nunclear, the ASK goes ahead."
-source-digest = "dae06196008c0bf9f98c4c82961af2943e601b8374abf2717d0fba38ef78f476"
+source-digest = "08734a4efa21af3c6df5d3082c6d4753cf303fb183d6b3ec19ee333cbf2169ff"
+
+[[clause]]
+clause-id = "deccls.4"
+corpus-id = "deccls"
+source-path = ".aiqt/core/rules/progr-decision.md"
+start-line = 21
+end-line = 24
+canonical-text = "An ASK whose options act on a target states, as read or probed for that ASK\nand not recalled from earlier, each fact about that target an option depends on, such as whether it exists,\nwhat triggers it, or whether the name an option selects it by is unique to it. A fact that cannot be read or\nprobed before the ASK is stated as an inference, naming the observation that would confirm it."
+source-digest = "08734a4efa21af3c6df5d3082c6d4753cf303fb183d6b3ec19ee333cbf2169ff"
 
 [[clause]]
 clause-id = "rpfail.1"
