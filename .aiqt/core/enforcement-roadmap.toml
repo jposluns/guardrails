@@ -414,8 +414,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "sechau"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:destructive-op-guard"]
 
 [[rule]]
 corpus-id = "secinp"
@@ -514,8 +514,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secrst"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:destructive-op-guard"]
 
 [[rule]]
 corpus-id = "secsec"

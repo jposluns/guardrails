@@ -135,6 +135,28 @@ the session is armed, and every cannot-evaluate denies once armed. Fixtures are 
 sibling repo, and a nested repo), with the declaration written into the redirected XDG_STATE_HOME and the
 floor synthesized in-tree, removed in the finally.
 
+It also covers the destructive-operation guard (destructive_guard, sechau/secrst) through synthetic payloads
+only (no submitted command runs). The guard is DENY UNLESS UNDERSTOOD, an allow-list of exactly modelled command
+shapes: rm/unlink, truncate and dd of= operands outside scratch and outside every repository, the home
+directory, the repository root, a linked worktree .git file (and any .git component), ignored content, a
+nested repository, a submodule, an unresolvable operand, an operand whose '..' follows a symlink or a missing
+component, and rm --no-preserve-root DENY, as do find -delete, mkfs/wipefs, shred, dropdb, a psql DROP,
+terraform/tofu destroy and kubectl delete; a destructive word behind an unmodelled runner (every
+_COMMAND_RUNNERS word without an exact spec, table-driven, xargs and find -exec among them), an unmodelled
+wrapper option or operand (env -C/-S, sudo -D, timeout 1e2), a known command in a running form (git -c, docker
+run), a computed command word, a line continuation, an ANSI-C escape, a heredoc operator, a pipeline or heredoc
+feeding an unmodelled command, a substitution, or an unparseable command DENIES; a cd that is conditional,
+backgrounded, wrapped, inside a compound body, through '..', to a missing directory or under CDPATH leaves
+the cwd unknown, so a later relative operand DENIES. A literal /tmp or TMPDIR path, a regenerable build
+DIRECTORY, tracked clean content (positive ls-files evidence required), a modelled wrapper or keyword in front
+of an allowed command, a known non-runner naming a destructive word as data (echo, git rm, sudo docker rm) and
+the exact $(cat <<'EOF' ...) prose idiom ALLOW (some with a note), and untracked content in a repository is
+SNAPSHOT-THEN-ALLOWED. Every reproduced slip is asserted denied. No in-band override exists: a command carrying
+a leading GUARDRAIL_ALLOW_DESTRUCTIVE assignment of a plain value gets the decision, and the snapshot, of the
+same command without it, and no reason, note or hook string spells that assignment. A mutant sweep removes each
+named rule from _DESTRUCT_RULES and requires every vector that names it to change outcome; functional mutants
+cover the probe tracked evidence and a fake clock that crosses the classification deadline mid-work.
+
 It also covers the PreToolUse deadline posture (the dl-* checks): the hook's deadline derives from
 tools/gen_hooks.py TIMEOUT; each linear raw-scan probe decides what the single regex it replaced decided
 over a generated corpus; every PreToolUse mode exits 2 with the named refusal when a stub handler sleeps
@@ -2312,15 +2334,22 @@ def _make_stash_fixture(repo, failures):
 
 def _symlink_probe(target, link, failures):
     """Create and remove a probe symlink at link and return True; on a platform that cannot create it
-    record the NAMED cannot-evaluate failure and return False."""
+    record the NAMED cannot-evaluate failure and return False. A failure to REMOVE the probe link once it
+    was created is its own named failure (ws-cs-symlink-cleanup), never conflated with creation failure: the
+    platform can create symlinks, so this still returns True and the symlink cases still run."""
     try:
         os.symlink(str(target), str(link))
-        os.unlink(str(link))
-        return True
     except OSError as exc:
         failures.append("(ws-cs-symlink-cannot-evaluate) the symlink probe failed ({}), so the frozen-floor, "
                         "frozen-registry and lexical-tree symlink cases were not evaluated".format(exc))
         return False
+    try:
+        os.unlink(str(link))
+    except OSError as exc:
+        failures.append("(ws-cs-symlink-cleanup) the symlink probe was created but could not be unlinked ({}); "
+                        "the frozen-floor, frozen-registry and lexical-tree symlink cases still "
+                        "ran".format(exc))
+    return True
 
 
 def _test_cannot_evaluate_paths(failures, tmp):
@@ -2342,6 +2371,26 @@ def _test_cannot_evaluate_paths(failures, tmp):
         if made is not False or len(probe) != 1 or not probe[0].startswith("(" + name + ")"):
             failures.append("({}-inject) an injected setup fault must record the named failure and skip "
                             "the case; got made={!r} recorded={!r}".format(name, made, probe))
+    # A probe link that is created but cannot be removed records its own named failure and still lets the
+    # symlink cases run: the removal is made to fail by an os.unlink that raises, put back before the link
+    # is removed for real.
+    name = "ws-cs-symlink-cleanup"
+    link = tmp / "cannot-evaluate-cleanup-link"
+    probe = []
+    real_unlink = os.unlink
+
+    def failing_unlink(path, *args, **kwargs):
+        raise PermissionError("injected unlink failure: {}".format(path))
+    os.unlink = failing_unlink
+    try:
+        made = _symlink_probe(tmp, link, probe)
+    finally:
+        os.unlink = real_unlink
+    if made is not True or len(probe) != 1 or not probe[0].startswith("(" + name + ")"):
+        failures.append("(ws-cs-symlink-cleanup-inject) a probe link that cannot be removed must record the named "
+                        "cleanup failure and still run the case; got made={!r} recorded={!r}".format(made, probe))
+    if os.path.lexists(str(link)):
+        os.unlink(str(link))
 
 
 def _test_git_stash_ref(failures):
@@ -2507,6 +2556,1546 @@ def _test_git_stash_ref(failures):
     if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
             aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
+# The destructive guard's text-marker regex and function-header pattern as they stood before their linear
+# rewrites (_destruct_text_search, and the third alternative of _DESTRUCT_SHADOW_RE), kept verbatim as the
+# references those rewrites must agree with (_destruct_scan_equivalence_failures). A pattern opening with a
+# group is passed by keyword so the label-unique check never reads its text as a case label.
+_DESTRUCT_TEXT_RE_BEFORE = re.compile(
+    pattern=r"(?<![\w.-])(?:rm|rmdir|unlink|shred|truncate|dropdb|mke2fs|mkswap|wipefs|mkfs(?:\.\w+)?)(?![\w.-])"
+    r"|(?<![\w.-])dd\s[^\n]*\bof="
+    r"|(?<![\w.-])find\s[^\n]*\s-delete\b"
+    r"|(?<![\w.-])kubectl\s[^\n]*\bdelete\b"
+    r"|(?<![\w.-])(?:terraform|tofu)\s[^\n]*-?destroy\b"
+    r"|(?<![\w.-])(?:psql|mysql|mariadb|sqlite3)\s[^\n]*(?i:\bdrop\b|\btruncate\b)"
+    r"|(?<![\w.-])git\s[^\n]*\b(?:clean|restore|reset\s[^\n]*--hard|checkout\s[^\n]*\s--(?=\s|$))"
+    r"|(?<![\w.-])(?:docker|podman)\s[^\n]*\b(?:rm|rmi|prune)\b")
+_DESTRUCT_SHADOW_RE_BEFORE = re.compile(
+    r"(?:^|[\s;&|(){}])(?:function|alias|hash|enable)\s|(?:^|[\s;&|(){}])(?:export\s+)?PATH\+?="
+    r"|[A-Za-z_][A-Za-z0-9_.:-]*\s*\(\s*\)")
+# Texts on each side of every alternative of the former regex: a hit and a miss for each head, a tail on the
+# line that a newline after the head opens, a tail on the next line, a whitespace tail starting on the line's
+# own newline, the last of several tails, Unicode word and space characters, and short forms of the inputs
+# the former regex took super-linear time on.
+_DESTRUCT_TEXT_EDGES = (
+    "rm", "rm -rf x", "xrm", "rm.x", "rm-x", "a/rm x", "rmdir d", "unlinkx", "shred -u f", "truncate -s 0 f",
+    "dropdb db", "mke2fs /dev/x", "mkswap s", "wipefs -a d", "mkfs", "mkfs.ext4 /dev/x", "mkfs.ext4.x", "mkfs.",
+    "mkfs-x", "mkfs.\u00e9 x", "dd if=a of=b", "dd\nof=b", "dd x\nof=b", "dd of=b x of=c", "dd xof=b",
+    "dd .of=b", "dd", "dd ", "x dd", "find . -delete", "find .\n-delete", "find . x-delete", "find . -deletex",
+    "find . -delete-x", "find -delete", "find .\t-delete\n", "find . y\n -delete", "kubectl delete pod",
+    "kubectl undelete", "kubectl delete-x", "kubectl\ndelete", "terraform destroy", "tofu apply -destroy",
+    "terraform xdestroy", "terraform destroyx", "tofu --destroy", "psql -c 'DROP TABLE x'", "mysql drop",
+    "sqlite3 x TRUNCATE", "psql dropx", "mariadb Drop", "git clean -f", "git cleanx", "git restore .",
+    "git reset --hard", "git reset\n--hard", "git reset x\n--hard", "git reset --hardx", "git reset -- hard",
+    "git checkout -- f", "git checkout x --", "git checkout x\n--", "git checkout x --\n", "git checkout --x",
+    "git checkout x\n -- y", "git x reset --hard reset", "git git reset --hard", "git reset --hard; git clean",
+    "git reset a --hard b --hard", "git checkout a -- b -- c", "docker rm x", "podman rmi y", "docker prune",
+    "docker rmx", "docker x\nrm", "echo ok\ngit reset --hard", "git\u00a0clean", "rm\u00a0x", "dd\u2003of=x",
+    "echo git reset", "git reset " * 40, "dd " * 40 + "of=x", "git checkout " * 20 + "-- x", "find " * 30,
+    "mkfs.ext\u0663 /dev/x")
+_DESTRUCT_SHADOW_EDGES = (
+    "f() { true; }", "f ( )", "1abc()", "a.b:c-d ()", "x ( \t)", "a" * 60 + "(", "f()", ".()", "1()", "-()",
+    "a=b()", "function f", "alias x=y", "PATH=/x", "export PATH=x", "x f(", "\u00e9()", "_()", "9_()", "a b()",
+    "echo hi", "")
+# The raw writer patterns and the client meta-command patterns as they stood before their linear rewrites
+# (_DESTRUCT_WRITER_RES and _DESTRUCT_SQL_EXEC_RE, read by _destruct_raw_found), kept verbatim as the references
+# those rewrites must agree with, and texts on each side of every alternative of each: a hit and a miss for
+# each head and option, a stop character between them, a tail on the next line, a backslash, newline or head
+# run with and without a hit after it, Unicode space and word characters, and the case-folded spellings.
+_DESTRUCT_WRITER_RES_BEFORE = (
+    re.compile(pattern=r"(?<![\w.-])curl(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-[oO]|-s[oO]|--output)(?![\w.-])"),
+    re.compile(pattern=r"(?<![\w.-])wget(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-O|--output-document)(?![\w.-])"),
+    re.compile(pattern=r"(?<![\w.-])tar(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-C(?![\w.-])"),
+    re.compile(pattern=r"(?<![\w.-])unzip(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-d(?![\w.-])"),
+    re.compile(pattern=r"(?<![\w.-])chmod(?![\w.-])[^\n;&|()`]*?\+x"),
+    re.compile(pattern=r"(?<![\w.-])(?:python3?|perl|ruby|node)(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-[ce](?![\w.-])"),
+)
+_DESTRUCT_SQL_EXEC_RE_BEFORE = {
+    "psql": re.compile(pattern=r"(?is)\\+(?:!|e[fv]?\b|ir?\b|include(?:_relative)?\b|(?:gx?|o|w|copy)\b[^\n]*\|)"
+                               r"|\bcopy\b[^;]*\b(?:to|from)\s+program\b"),
+    "mysql": re.compile(pattern=r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
+    "mariadb": re.compile(pattern=r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
+    "sqlite3": re.compile(pattern=r"(?im)(?:^|\n)\s*\.(?:shell|system|import|load|read)\b"
+                                  r"|(?:^|\n)\s*\.(?:output|once)\s+[\x22\x27]?\|"),
+}
+_DESTRUCT_WRITER_EDGES = (
+    "curl -o f", "curl x -O f", "curl -so f", "curl -sO f", "curl --output f", "curl -oo f", "curl -o.f",
+    "curl a-o f", "xcurl -o f", "curl.x -o f", "curl;-o f", "curl x\n-o f", "curl x | tee -o f", "curl x `-o`",
+    "(curl -o f)", "curl x (-o f)", "curl\u2028-o f", "curl\u00a0-o f", "curl\u00e9 -o f", "curl", "curl ",
+    "curl curl curl", "curl " * 40, "curl " * 40 + "-o f", "curl x; curl -o f", "curl -o f; curl x", "-o curl",
+    "wget -O f", "wget --output-document=f", "wget -o f", "tar -x -C d", "tar -xC d", "unzip z -d d",
+    "unzip z -dd", "chmod +x f", "chmod u+x f", "chmod+x", "chmod 600 f", "chmod x\n+x", "python -c x",
+    "python3 -c x", "python3.12 -c x", "perl -e x", "ruby x -c", "node -e x", "pythons -c", "perl -E x",
+    "perl & -e x", "perl " * 30 + "-e", "")
+_DESTRUCT_SQL_EXEC_EDGES = (
+    "\\! ls", "\\\\! ls", "\\" * 40 + "!", "\\" * 40, "\\e", "\\ef", "\\ev", "\\ex", "\\E", "\\EF", "\\i f",
+    "\\ir f", "\\include f", "\\include_relative f", "\\includex", "\\g | cat", "\\g x", "\\gx |", "\\gxy |",
+    "\\o|", "\\w x|", "\\copy x | y", "\\COPY x |", "\\g x\n| y", "\\g " * 40, "\\g " * 40 + "|",
+    "a | \\g b", "copy t to program 'x'", "COPY t FROM PROGRAM 'x'", "copy t to \n program 'x'",
+    "copy t; to program x", "copy " * 40, "copy " * 40 + "to program x", "xcopy to program", "copy toprogram",
+    "copy to programs", "\\.", "\\. f", "\\P", "\\p", "\\px", "\\" * 30 + ".", "system ls", "x; system ls",
+    "x;\n\n  system ls", "\n" * 40 + "system", "\n" * 40 + "x", " \n \n \n source f", "\u2028system",
+    "x\u2028system", "\u00a0pager", "  edit", "editx", "systems", ";" * 30 + "system", "; \t;\n pager",
+    ".shell ls", "\n.system x", "  .import f t", ".load x", ".read f", ".output |cat", ".output '|cat'",
+    ".once \"|x\"", ".output f", ".outputx |", "\n" * 40 + ".shell", "\n" * 40 + ".x",
+    ".output" + " " * 40 + "x", ".output\n\n|", "x .shell", ";.shell", ".SHELL", "")
+# Commands on each side of the prose idiom of _destruct_shell_text, the texts its two chunk checks read: a
+# bare cat with blanks around it in any chunks (an ANSI-C quote and an empty one included), a quoted and an
+# unquoted delimiter, text before or after the here-document in the substitution, a second operator, nested
+# idioms and substitutions, and a short form of the nested input the joined checks took quadratic time on.
+_DESTRUCT_PROSE_EDGES = (
+    "x=$(cat <<'EOF'\nrm -rf /\nEOF\n)", "x=$( cat <<'EOF'\nrm\nEOF\n )", "x=$(cat <<EOF\nrm\nEOF\n)",
+    "x=$(cat x <<'E'\nrm\nE\n)", "x=$($'c'at <<'E'\nrm\nE\n)", "x=$($''cat <<'E'\nrm\nE\n)",
+    "x=$(c''at <<'E'\nrm\nE\n)", "x=$(cat <<'E' y\nrm\nE\n)", "x=$(cat <<'E'\nrm\nE\necho)",
+    "x=$(cat <<'E'\nrm\nE\n$(true))", "x=$(\ncat\n<<'E'\nrm\nE\n)", "x=$(cat\t<<'E'\nrm\nE\n)",
+    "x=$(cat <<'E' <<'F'\nrm\nE\nrm\nF\n)", "x=\"$(cat <<'E'\nrm\nE\n)\"", "x=$(cats <<'E'\nrm\nE\n)",
+    "x=$(ca <<'E'\nrm\nE\n)", "x=$(\u00a0cat\u2003<<'E'\nrm\nE\n)", "x=$(ca\\\nt <<'E'\nrm\nE\n)",
+    "$(cat <<'A'\nrm\nA\n$(cat <<'B'\nrm\nB\n))", "$(cat <<'A'\nrm\nA\n $(cat <<'B'\nrm\nB\n) )",
+    "x $(cat <<'E'\nrm\nE\n) y", "".join("$(cat <<'E'\nrm\nE\n" for _ in range(6)) + ")" * 6,
+    "x " + "$( " * 6 + "true" + ") <<'E'\nrm\nE\n" * 6, "x=$(cat <<'E'\nrm\nE\n) # c", "")
+
+
+def _destruct_chunks_blank_before(chunks, start, stop):
+    """The prose idiom's blank check as _destruct_shell_text read it before _destruct_chunks_blank (the former
+    expression verbatim but for its arguments), the reference the self-test compares that check with."""
+    return not "".join(chunks[start:stop]).strip()
+
+
+def _destruct_chunks_cat_before(chunks, start):
+    """The prose idiom's bare-cat check as _destruct_shell_text read it before _destruct_chunks_cat (the former
+    expression verbatim but for its arguments), the reference the self-test compares that check with."""
+    return "".join(chunks[start:]).strip() == "cat"
+
+
+def _destruct_argv_marker_before(words):
+    """The guard's argv marker before it read later words from an index (verbatim but for the module
+    prefix), the reference _destruct_scan_equivalence_failures compares the current one with."""
+    for k, tok in enumerate(words):
+        word = aiqt_hooks._destruct_word(tok)
+        later = words[k + 1:]
+        if word in aiqt_hooks._DESTRUCT_KILL_WORDS or word.startswith("mkfs"):
+            return word
+        if ((word == "find" and "-delete" in later) or (word == "kubectl" and "delete" in later)
+                or (word in ("terraform", "tofu") and ("destroy" in later or "-destroy" in later))
+                or (word in aiqt_hooks._DESTRUCT_SQL_CLIENTS
+                    and any(aiqt_hooks._DESTRUCT_SQL_RE.search(arg) for arg in later))
+                or (word == "git" and ("clean" in later or "restore" in later
+                                       or ("reset" in later and "--hard" in later)
+                                       or ("checkout" in later
+                                           and any(arg in ("--", ".", "-f", "--force") for arg in later))))
+                or (word in ("docker", "podman") and any(arg in ("rm", "rmi", "prune") for arg in later))):
+            return " ".join([word] + later)[:60]
+    return None
+
+
+@contextlib.contextmanager
+def _destruct_scan_recorder():
+    """While the block runs, every text handed to the guard's text scan, every word list handed to its argv
+    marker and every (patterns, text) pair handed to its raw pattern reader is recorded (each still answers as
+    before): yields (texts, word_lists, raw_pairs)."""
+    texts, word_lists, raw_pairs = [], [], []
+    search, marker, raw = (aiqt_hooks._destruct_text_search, aiqt_hooks._destruct_argv_marker,
+                           aiqt_hooks._destruct_raw_found)
+
+    def recording_search(text):
+        texts.append(text)
+        return search(text)
+
+    def recording_marker(words):
+        word_lists.append(list(words))
+        return marker(words)
+
+    def recording_raw(patterns, text):
+        raw_pairs.append((patterns, text))
+        return raw(patterns, text)
+    aiqt_hooks._destruct_text_search, aiqt_hooks._destruct_argv_marker = recording_search, recording_marker
+    aiqt_hooks._destruct_raw_found = recording_raw
+    try:
+        yield texts, word_lists, raw_pairs
+    finally:
+        aiqt_hooks._destruct_text_search, aiqt_hooks._destruct_argv_marker = search, marker
+        aiqt_hooks._destruct_raw_found = raw
+
+
+def _destruct_scan_equivalence_failures(texts, commands, word_lists, raw_pairs=()):
+    """(dz-text-scan-equal, dz-shadow-scan-equal, dz-argv-marker-equal, dz-writer-scan-equal,
+    dz-sql-exec-equal, dz-prose-scan-equal, dz-scan-equal-vacuous) The linear rewrites give what the former
+    forms gave. The text scan finds the matched text the former regex found,
+    or misses where it missed, on every text the guard's vectors handed it (texts) and on _DESTRUCT_TEXT_EDGES.
+    The function-header search finds a header in exactly the texts the former pattern did, on the
+    shell-context reading of every vector command (the text it is searched in) and on _DESTRUCT_SHADOW_EDGES.
+    The argv marker returns what the former one returned on every word list the vectors handed it. Each raw
+    writer pattern, and each client's meta-command patterns, find a hit in exactly the texts the former
+    pattern matched, on every text the vectors handed them (raw_pairs) and on _DESTRUCT_WRITER_EDGES and
+    _DESTRUCT_SQL_EXEC_EDGES. The shell-context reading with the prose idiom's chunk checks gives the text it
+    gives with the former joined checks, on every vector command and on _DESTRUCT_PROSE_EDGES. Each
+    comparison must see at least one hit and one miss, so none passes vacuously."""
+    out = []
+    writer_texts = [text for patterns, text in raw_pairs if patterns is aiqt_hooks._DESTRUCT_WRITER_RES]
+    writer_texts = list(dict.fromkeys(writer_texts + list(_DESTRUCT_WRITER_EDGES)))
+    writer_hits = 0
+    for text in writer_texts:
+        for k, before_rx in enumerate(_DESTRUCT_WRITER_RES_BEFORE):
+            want = bool(before_rx.search(text))
+            writer_hits += want
+            if aiqt_hooks._destruct_raw_found((aiqt_hooks._DESTRUCT_WRITER_RES[k],), text) != want:
+                out.append("(dz-writer-scan-equal) writer {} on {!r}: the former pattern matched: {}, the scan "
+                           "found: {}".format(k, text[:120], want, not want))
+    sql_texts = {client: [] for client in _DESTRUCT_SQL_EXEC_RE_BEFORE}
+    for patterns, text in raw_pairs:
+        for client in sql_texts:
+            if patterns is aiqt_hooks._DESTRUCT_SQL_EXEC_RE.get(client):
+                sql_texts[client].append(text)
+    sql_total = sql_hits = 0
+    for client, seen in sorted(sql_texts.items()):
+        for text in dict.fromkeys(seen + list(_DESTRUCT_SQL_EXEC_EDGES)):
+            want = bool(_DESTRUCT_SQL_EXEC_RE_BEFORE[client].search(text))
+            sql_total += 1
+            sql_hits += want
+            if aiqt_hooks._destruct_raw_found(aiqt_hooks._DESTRUCT_SQL_EXEC_RE[client], text) != want:
+                out.append("(dz-sql-exec-equal) {} on {!r}: the former pattern matched: {}, the scan found: "
+                           "{}".format(client, text[:120], want, not want))
+    prose_commands = list(dict.fromkeys(list(commands) + list(_DESTRUCT_PROSE_EDGES)))
+    prose_hits = 0
+    saved_checks = aiqt_hooks._destruct_chunks_blank, aiqt_hooks._destruct_chunks_cat
+    for command in prose_commands:
+        got = aiqt_hooks._destruct_shell_text(command, True)
+        aiqt_hooks._destruct_chunks_blank = _destruct_chunks_blank_before
+        aiqt_hooks._destruct_chunks_cat = _destruct_chunks_cat_before
+        try:
+            want = aiqt_hooks._destruct_shell_text(command, True)
+        finally:
+            aiqt_hooks._destruct_chunks_blank, aiqt_hooks._destruct_chunks_cat = saved_checks
+        prose_hits += want != aiqt_hooks._destruct_shell_text(command, False)
+        if got != want:
+            out.append("(dz-prose-scan-equal) {!r}: the joined checks read {!r}, the chunk checks {!r}".format(
+                command[:120], want[:120], got[:120]))
+    texts = list(dict.fromkeys(list(texts) + list(_DESTRUCT_TEXT_EDGES)))
+    text_hits = 0
+    for text in texts:
+        before = _DESTRUCT_TEXT_RE_BEFORE.search(text)
+        want = before.group(0) if before else None
+        got = aiqt_hooks._destruct_text_search(text)
+        text_hits += want is not None
+        if got != want:
+            out.append("(dz-text-scan-equal) {!r}: the former regex matched {!r}, the scan {!r}".format(
+                text[:120], want, got))
+    shells = list(dict.fromkeys([aiqt_hooks._destruct_shell_text(command, True) for command in commands]
+                                + list(_DESTRUCT_SHADOW_EDGES)))
+    headers = 0
+    for text in shells:
+        want = bool(_DESTRUCT_SHADOW_RE_BEFORE.search(text))
+        headers += want
+        if bool(aiqt_hooks._DESTRUCT_SHADOW_RE.search(text)) != want:
+            out.append("(dz-shadow-scan-equal) {!r}: the former pattern found a header: {}, the search: {}".format(
+                text[:120], want, not want))
+    marks = 0
+    for words in word_lists:
+        want = _destruct_argv_marker_before(words)
+        marks += want is not None
+        got = aiqt_hooks._destruct_argv_marker(words)
+        if got != want:
+            out.append("(dz-argv-marker-equal) {!r}: the former marker gave {!r}, the current one {!r}".format(
+                words[:20], want, got))
+    for label, total, found in (("text scan", len(texts), text_hits), ("header search", len(shells), headers),
+                                ("argv marker", len(word_lists), marks),
+                                ("writer scan", len(writer_texts) * len(_DESTRUCT_WRITER_RES_BEFORE), writer_hits),
+                                ("meta-command scan", sql_total, sql_hits),
+                                ("prose reading", len(prose_commands), prose_hits)):
+        if not 0 < found < total:
+            out.append("(dz-scan-equal-vacuous) the {} comparison found {} hits in {} inputs; it needs a hit "
+                       "and a miss".format(label, found, total))
+    return out
+
+
+def _test_destructive_guard(failures, tmp):
+    """(dz-*) The destructive-operation guard (destructive_guard, sechau/secrst), driven only through
+    synthetic payloads: no submitted command is executed, and every absolute target outside the fixture tree
+    is a path this suite never creates. Fixtures: a working repo (a tracked clean src/pkg, an untracked file,
+    an untracked FILE named src/dist, an ignored .env, an ignored directory under each regenerable name, and
+    a symlink 'link' escaping to a plain directory outside every repo), a repo holding a nested repository
+    and a committed gitlink, a clean repo whose tracked homedir stands in for HOME plus a LINKED worktree of
+    it (its .git is a file), a dedicated scratch root used as TMPDIR (holding the directory d/sub), and a
+    symlink 'cdlink' outside every repo pointing into it. Repository vectors see only that scratch root (the
+    fixture tree may itself sit under /tmp or TMPDIR, which the guard treats as disposable); the scratch
+    vectors use the guard's real scratch roots. CDPATH is cleared for the run. Every vector names the one rule
+    it depends on, and the mutant sweep removes that rule from _DESTRUCT_RULES and requires the vector's
+    outcome to change, so no deny or allow vector passes by accident."""
+    handler = aiqt_hooks.destructive_guard
+    base = tmp / "destructive"
+    saved_env = {key: os.environ.get(key) for key in ("HOME", "TMPDIR", "CDPATH")}
+    saved_roots = aiqt_hooks._destruct_scratch_roots
+    saved_rules = aiqt_hooks._DESTRUCT_RULES
+    saved_record = aiqt_hooks._record_recovery
+    saved_budget = aiqt_hooks._DESTRUCT_BUDGET
+    try:
+        scratch = base / "scratch"
+        scratch.mkdir(parents=True)
+        repo = _init_repo(base / "repo")
+        (repo / "src" / "pkg").mkdir(parents=True)
+        (repo / "src" / "pkg" / "a.py").write_text("x = 1\n", encoding="utf-8")
+        regen = sorted(aiqt_hooks._DESTRUCT_REGENERABLE)
+        (repo / ".gitignore").write_text(".env\n" + "".join(name + "/\n" for name in regen), encoding="utf-8")
+        # a tracked clean file lp beside an untracked file ':lp', whose name read as a pathspec WITHOUT
+        # --literal-pathspecs is the short-magic spelling of lp, so the probe would see the clean lp instead
+        (repo / "lp").write_text("tracked\n", encoding="utf-8")
+        _git(repo, "add", ".gitignore", "src/pkg/a.py", "lp")
+        _git(repo, "commit", "-q", "-m", "pkg", env_identity=True)
+        (repo / ".env").write_text("TOKEN=placeholder\n", encoding="utf-8")
+        for name in regen:
+            (repo / name).mkdir()
+            (repo / name / "artifact.bin").write_text("generated\n", encoding="utf-8")
+        (repo / "notes.txt").write_text("uncommitted notes\n", encoding="utf-8")
+        (repo / ":lp").write_text("untracked\n", encoding="utf-8")
+        nest = _init_repo(base / "nest")
+        (nest / "holder").mkdir()
+        subprocess.run(["git", "init", "-q", str(nest / "holder" / "inner")], check=True, capture_output=True,
+                       text=True, timeout=30, env=git_fixture_env())
+        (nest / "holder" / "inner" / "work.txt").write_text("nested work\n", encoding="utf-8")
+        head = subprocess.run(["git", "-C", str(nest), "rev-parse", "HEAD"], check=True, capture_output=True,
+                              text=True, timeout=30, env=git_fixture_env()).stdout.strip()
+        _git(nest, "update-index", "--add", "--cacheinfo", "160000,{},mod".format(head))
+        _git(nest, "commit", "-q", "-m", "gitlink", env_identity=True)
+        (nest / "mod").mkdir()
+        clean = _init_repo(base / "clean")
+        (clean / "homedir").mkdir()
+        (clean / "homedir" / "profile").write_text("profile\n", encoding="utf-8")
+        _git(clean, "add", "homedir/profile")
+        _git(clean, "commit", "-q", "-m", "home", env_identity=True)
+        # a plain directory OUTSIDE every fixture repository (and outside the patched scratch root), the
+        # real location the dotdot vector's symlink escapes to
+        (base / "outside" / "sub").mkdir(parents=True)
+        os.symlink(str(base / "outside" / "sub"), str(repo / "link"))
+        # an ordinary untracked FILE carrying a regenerable NAME (.gitignore ignores only the dist/ DIR
+        # form), for the directory-type gate on the regenerable exception
+        (repo / "src" / "dist").write_text("built-file\n", encoding="utf-8")
+        # a LINKED worktree (its .git is a FILE pointing at clean's admin dir), for the git-admin rule
+        _git(clean, "worktree", "add", "--detach", str(base / "linked"))
+        # a scratch directory (the target of the cd vectors) and a symlink OUTSIDE every repository and outside
+        # scratch that points into it, for the cd-through-'..' vector
+        (scratch / "d" / "sub").mkdir(parents=True)
+        os.symlink(str(scratch / "d" / "sub"), str(base / "cdlink"))
+        # a HARD link under scratch to the repository's ignored .env: its real path is the scratch path
+        os.link(str(repo / ".env"), str(scratch / "hl"))
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(dz-fixture) could not build the destructive-guard fixtures: {}".format(exc))
+        return
+    os.environ["TMPDIR"] = str(scratch)
+    os.environ.pop("CDPATH", None)
+    scratch_real = os.path.realpath(str(scratch))
+    home0 = saved_env["HOME"] or ""
+    rp, absent = str(repo), "/srv/aiqt-selftest-absent"
+    real_roots, fake_home = {"real_roots": True}, {"home": str(clean / "homedir")}
+
+    def run(command, cwd, opts):
+        os.environ["HOME"] = opts.get("home", home0)
+        aiqt_hooks._destruct_scratch_roots = saved_roots if opts.get("real_roots") else (lambda: [scratch_real])
+        try:
+            return _decision(handler, command, cwd=cwd)
+        finally:
+            os.environ["HOME"] = home0
+            aiqt_hooks._destruct_scratch_roots = saved_roots
+
+    # (label, rule, command, cwd, expected, options): the rule is the one the vector depends on.
+    vectors = [
+        ("deny-abs-outside", "rm", "rm -rf {}/appdata".format(absent), rp, "deny", {}),
+        ("deny-root", "rm", "rm -rf /", rp, "deny", {}),
+        ("deny-unlink-outside", "rm", "unlink {}/one.db".format(absent), rp, "deny", {}),
+        ("deny-variable", "unresolvable", "rm -rf $TARGET", rp, "deny", {}),
+        ("deny-home-tilde", "home", "rm -rf ~", rp, "deny", fake_home),
+        ("deny-home-literal", "home", "rm -rf {}".format(clean / "homedir"), rp, "deny", fake_home),
+        ("deny-no-preserve-root", "no-preserve-root", "rm -rf --no-preserve-root {}/x".format(scratch), rp,
+         "deny", real_roots),
+        ("deny-find-delete", "find", "find . -name '*.pyc' -delete", rp, "deny", {}),
+        ("deny-terraform", "terraform", "terraform destroy -auto-approve", rp, "deny", {}),
+        ("deny-tofu-apply-destroy", "terraform", "tofu apply -destroy", rp, "deny", {}),
+        ("deny-kubectl-namespace", "kubectl", "kubectl delete namespace prod", rp, "deny", {}),
+        ("deny-dropdb", "dropdb", "dropdb prod", rp, "deny", {}),
+        ("deny-psql-drop", "sql", "psql -c 'DROP TABLE users'", rp, "deny", {}),
+        ("deny-truncate-data", "truncate", "truncate -s 0 {}/data.db".format(absent), rp, "deny", {}),
+        ("deny-dd-device", "dd", "dd if=/dev/zero of=/dev/sda bs=1M", rp, "deny", {}),
+        ("deny-mkfs", "format", "mkfs.ext4 /dev/sdb1", rp, "deny", {}),
+        ("deny-wipefs", "format", "wipefs -a /dev/sdb", rp, "deny", {}),
+        ("deny-shred", "shred", "shred -u {}/secrets.txt".format(rp), rp, "deny", {}),
+        ("deny-unparseable-rm", "raw", 'rm -rf "{}/appdata'.format(absent), rp, "deny", {}),
+        ("deny-unparseable-find", "raw", "find . -delete 'x", rp, "deny", {}),
+        ("deny-cd-tracked", "cd", "cd /srv && rm -rf build", rp, "deny", {}),
+        ("deny-backtick-subst", "subst", "echo `rm -rf {}/appdata`".format(absent), rp, "deny", {}),
+        ("deny-quoted-subst", "subst", 'echo "$(rm -rf {}/appdata)"'.format(absent), rp, "deny", {}),
+        ("deny-subst-nonrecursive", "subst", 'echo "$(rm -f {}/x)"'.format(absent), rp, "deny", {}),
+        # Two STILL-RUNS stops inside a parseable
+        # substitution (a case statement behind an assignment, a process substitution after a
+        # descriptor number), pinned so a later regression is caught (both already denied at the
+        # parent pin; red when the subst-gated recover read is removed).
+        ("deny-subst-assign-case", "subst", 'x="$(echo; case y in y) {}/zz;; esac)"'.format(scratch),
+         rp, "deny", {}),
+        ("deny-subst-descriptor-procsub", "subst", 'echo "$(cat 3<(true); {}/zz)"'.format(scratch),
+         rp, "deny", {}),
+        ("deny-repo-root", "repo-root", "rm -rf {}".format(clean), rp, "deny", {}),
+        ("deny-ignored-file", "ignored", "rm .env", rp, "deny", {}),
+        ("deny-nested-repo", "embedded", "rm -rf holder", str(nest), "deny", {}),
+        ("deny-gitlink", "gitlink", "rm -rf mod", str(nest), "deny", {}),
+        ("allow-clean-dir-note", "clean", "rm -rf src/pkg", rp, "allow-note", {}),
+        ("allow-clean-file", "clean", "rm src/pkg/a.py", rp, "allow", {}),
+        ("allow-truncate-clean", "clean", "truncate -s 0 src/pkg/a.py", rp, "allow", {}),
+        ("allow-tmp-literal", "scratch", "rm -rf /tmp/aiqt-selftest-absent-dir", rp, "allow", real_roots),
+        ("allow-tmpdir-literal", "scratch", "rm -rf {}/work".format(scratch), rp, "allow", real_roots),
+        ("allow-untracked-snapshot", "snapshot", "rm notes.txt", rp, "allow-note", {}),
+        # The removed opt-out: a leading GUARDRAIL_ALLOW_DESTRUCTIVE assignment is an ordinary assignment, so the
+        # prefixed delete outside scratch and every repository denies exactly as deny-abs-outside does (the
+        # opt-out skipped the segment and allowed it with a note).
+        ("deny-optout-removed", "rm", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/appdata".format(absent), rp,
+         "deny", {}),
+        ("allow-dd-null", "benign-sink", "dd if=/dev/zero of=/dev/null count=1", rp, "allow", {}),
+        # (A) an operand '..' resolves the way the kernel does: the symlink BEFORE it first, so the lexical
+        # collapse (rp/src/pkg, an allow-note) is a forgery; the real target is outside every repository. A
+        # '..' whose prefix does not resolve strictly cannot be proven kernel-equivalent and DENIES.
+        ("deny-dotdot-symlink", "dotdot", "rm -rf link/../src/pkg", rp, "deny", {}),
+        ("deny-dotdot-missing", "dotdot", "rm -rf src/nonexist/../pkg", rp, "deny", {}),
+        # DENY UNLESS UNDERSTOOD: a modelled wrapper or keyword keeps the classification of what it runs (the
+        # mutant, with no wrapper model, reads every wrapper as an unmodelled runner and denies) ...
+        ("allow-wrapped-modelled", "wrappers", "sudo -u root nice -n 5 timeout -s KILL 30 rm -rf src/absent",
+         rp, "allow", {}),
+        ("allow-keyword-modelled", "wrappers", "if true; then rm -rf src/absent; fi", rp, "allow", {}),
+        # ... while an option or operand outside the wrapper model DENIES when a destructive word follows
+        # (the mutant skips the unmodelled word and classifies what follows).
+        ("deny-env-split", "wrapper-opts", "env -S 'rm -rf {}/x'".format(absent), rp, "deny", {}),
+        ("deny-env-split-long", "wrapper-opts", "env --split-string='rm -rf {}/x'".format(absent), rp,
+         "deny", {}),
+        ("deny-timeout-float", "wrapper-opts", "timeout 1e2 rm -f src/absent", rp, "deny", {}),
+        # an unmodelled command runner (xargs, find -exec, every _COMMAND_RUNNERS word without a spec, appended
+        # below) DENIES when a destructive word follows it; the mutant allows it unexamined.
+        ("deny-xargs-fed", "runner", "find . -name '*.log' | xargs rm -f", rp, "deny", {}),
+        ("deny-find-exec-rm", "runner", "find /srv -type f -exec rm -f {} +", rp, "deny", {}),
+        # The creator-in-runner-argument rule is
+        # BOUNDED to uncertain reads, where the word-level rule reads EVERY word of the runner's
+        # argument list (the pe-runner-*/pe-find-exec-*/pe-word-* vectors and their branch mutants);
+        # the certain-read runner forms an earlier hook denied are harmless allow controls
+        # (pe-control-xvfbrun-python and kin), the parent-pin behaviour.
+        # a KNOWN non-runner reads a destructive word as data; the mutant (nothing known) denies these ...
+        ("allow-wrapper-stop", "known", "sudo docker rm -f $CID", rp, "allow", {}),
+        ("allow-echo-text", "known", "echo rm -rf /", rp, "allow", {}),
+        ("allow-git-rm", "known", "git rm -r src", rp, "allow", {}),
+        # ... except in the forms where a known word runs another command.
+        ("deny-git-alias", "known-forms", "git -c 'alias.x=!rm -rf {}/x' x".format(absent), rp, "deny", {}),
+        ("deny-docker-run", "known-forms", "docker run --rm -v /:/host alpine rm -rf /host/srv", rp, "deny", {}),
+        ("deny-computed-word", "computed", "X=rm; $X -rf {}/x".format(absent), rp, "deny", {}),
+        ("deny-computed-glob", "computed", "/bin/r? -rf {}/x".format(absent), rp, "deny", {}),
+        # The subshell and substitution spellings of a
+        # computed or globbed word, pinned so a later regression is caught (both already denied at the
+        # parent pin; red when the computed rule is removed).
+        ("deny-computed-subshell", "computed", "(X=rm; $X -rf {}/x)".format(absent), rp, "deny", {}),
+        ("deny-computed-glob-subst", "computed", "echo $(/bin/r? -rf {}/x)".format(absent), rp, "deny",
+         {}),
+        # an environment assignment in front of a command can name a command it runs (GIT_EXTERNAL_DIFF, PAGER)
+        ("deny-assign-value", "assign", "GIT_EXTERNAL_DIFF='rm -rf {}/x' git diff".format(absent), rp, "deny",
+         {}),
+        # a definition that can shadow cat turns the $(cat <<EOF ...) prose idiom off
+        ("deny-prose-shadowed", "prose-shadow",
+         "cat() {{ bash; }}; git commit -m \"$(cat <<'EOF'\nrm -rf {}/x\nEOF\n)\"".format(absent), rp, "deny", {}),
+        # constructs this guard does not model: a line continuation, an ANSI-C escape, a heredoc operator.
+        ("deny-continuation", "construct", "rm -rf \\\n src/absent", rp, "deny", {}),
+        ("deny-ansi-c", "construct", "$'\\x72m' -rf src/absent", rp, "deny", {}),
+        ("deny-heredoc-op", "construct", "rm -rf src/absent <<'EOF'\nx\nEOF", rp, "deny", {}),
+        # destructive text FED to an unmodelled command through a pipeline or a heredoc.
+        ("deny-pipe-feed", "pipe-feed", "echo rm -rf {}/x | sh".format(absent), rp, "deny", {}),
+        ("deny-heredoc-feed", "heredoc-feed", "bash <<'EOF'\nrm -rf {}/x\nEOF".format(absent), rp, "deny", {}),
+        # (C) a cd that may not run in the parent shell must not move the inferred cwd: conditional (&&/||),
+        # backgrounded (&, a subshell), wrapped (command cd is modelled; time cd is not and fails closed).
+        ("deny-cd-conditional", "cd-flow", "false && cd {}/d && rm -rf relic".format(scratch), rp,
+         "deny", {}),
+        ("deny-cd-or", "cd-flow", "true || cd {}/d && rm -rf relic".format(scratch), rp, "deny", {}),
+        # a cd's move holds only through the && chain it gates: after a background operator or a ';' a
+        # later step runs whether or not the cd succeeded (it can fail at run time when an earlier step
+        # removes DIR), so the cwd is UNKNOWN there; the mutant keeps the move and allows .env under d
+        ("deny-cd-background", "cd-gate", "cd {}/d && true & rm -rf relic".format(scratch), rp, "deny", {}),
+        ("deny-cd-ungated", "cd-gate", "cd {}/d && true; rm -f .env".format(scratch), rp, "deny", {}),
+        ("deny-cd-command", "cd-flow", "command cd {} && rm -rf data".format(absent), rp, "deny", {}),
+        ("deny-cd-wrapped", "cd-flow", "time cd {}/d && rm -rf relic".format(scratch), rp, "deny", {}),
+        # a cd inside a compound body (skipped or repeated), a cd through '..' (logical and physical cd differ),
+        # a cd to a directory that does not exist (the shell stays put) and a relative cd under CDPATH.
+        ("deny-cd-if-body", "scope", "if false; then true; cd {}/d && rm -rf relic; fi".format(scratch),
+         rp, "deny", {}),
+        ("deny-cd-while-body", "scope",
+         "while false; do true; cd {}/d && rm -rf relic; done".format(scratch), rp, "deny", {}),
+        ("deny-cd-dotdot", "cd-dotdot", "cd {}/cdlink/.. && rm -rf relic".format(base), rp, "deny", {}),
+        ("deny-cd-absent", "cd-exists", "cd {}/absent-dir && rm -rf relic".format(scratch), rp, "deny", {}),
+        # truncate and dd write in place through a hard link, so a scratch path gets no scratch exemption for
+        # them (hl is a hard link to the repository's ignored .env); rm of the same name removes only it
+        ("deny-truncate-scratch-hardlink", "scratch-writer", "truncate -s 0 {}/hl".format(scratch), rp, "deny",
+         {}),
+        ("deny-dd-scratch-hardlink", "scratch-writer", "dd if=/dev/null of={}/hl".format(scratch), rp, "deny",
+         {}),
+        ("allow-rm-scratch-hardlink", "scratch", "rm -f {}/hl".format(scratch), rp, "allow", {}),
+        # the probes read the operand as a LITERAL pathspec: ':lp' is untracked and gets a snapshot, while
+        # without --literal-pathspecs git reads it as the clean tracked lp and the delete allows unsnapshotted
+        ("allow-literal-pathspec-snapshot", "snapshot", "rm :lp", rp, "allow-note", {}),
+        ("deny-cd-cdpath", "cd-cdpath", "export CDPATH=/srv; cd repo && rm -rf src/absent", str(base), "deny",
+         {}),
+        # (E) a linked worktree's .git FILE is an administrative entry, never restorable content.
+        ("deny-worktree-gitfile", "git-admin", "rm -rf .git", str(base / "linked"), "deny", {}),
+        # (D) the lexer rejects a here-string, and the raw fallback must cover every in-scope word.
+        ("deny-herestring-truncate", "raw", "truncate -s 0 {}/d <<< x".format(absent), rp, "deny", {}),
+        ("deny-herestring-dd", "raw", "dd if=/dev/zero of={}/d <<< x".format(absent), rp, "deny", {}),
+        ("deny-herestring-kubectl", "raw", "kubectl delete namespace prod <<< x", rp, "deny", {}),
+        # (D) a quote-concatenated spelling inside a substitution scans as the word the shell runs.
+        ("deny-subst-concat", "subst", "echo \"$(r''m -rf {}/x)\"".format(absent), rp, "deny", {}),
+        # the text scans read the shell quoting context: a heredoc inside a substitution is data only in the
+        # exact $(cat <<'EOF' ...) idiom (the mutant strips every quoted heredoc body, hiding the input of bash) ...
+        ("deny-subst-heredoc-runner", "shell-context",
+         "echo \"$(bash <<'EOF'\nrm -rf {}/x\nEOF\n)\"".format(absent), rp, "deny", {}),
+        # ... and a line continuation inside a QUOTED heredoc body still joins in the text scan (the
+        # mutant reads r, m apart). The body is QUOTED because an UNQUOTED join now denies through
+        # recover-stop whatever it spells, which no single rule removal flips;
+        # the raw-join scan deliberately over-reads the quoted body, whose join bash does not perform,
+        # toward deny. No TRUE-POSITIVE raw-join witness exists for an isolating mutant: recover-stop
+        # denies every UNQUOTED heredoc join outright BEFORE the raw-join text scan is consulted, so the
+        # raw-join rule now catches only this conservative over-read of a quoted body.
+        # The fed command is strace, a command runner that is NOT a creator. The unquoted
+        # bash and strace join spellings stay in the corpus (_repro) under the differential locks
+        # (the old bash join vector kept beside the strace one).
+        ("deny-heredoc-join-text", "raw-join", "strace <<'EOF'\nr\\\nm -rf {}/x\nEOF".format(absent),
+         rp, "deny", {}),
+        # ANY recover-mode stop that leaves text at or after the stop point
+        # unread is cannot-evaluate and DENIES, whatever that text spells; removing only recover-stop
+        # reverts to the uncertain+effectful read, where neither witness is effectful (the quoted
+        # creator tail was never recovered; the deep form is wholly benign), so each flips to allow.
+        ("deny-recover-stop-strayquote", "recover-stop",
+         "cat <<EOF\nignored '\nEO\\\nF\nt''ouch {}/zz; {}/zz".format(scratch, scratch), rp, "deny",
+         {}),
+        ("deny-recover-stop-depth-benign", "recover-stop",
+         "cat " + "<(cat " * 8 + "<(printf ok)" + ")" * 8, rp, "deny", {}),
+    ] + [("allow-regenerable-" + name.strip("._"), "regenerable", "rm -rf " + name, rp, "allow", {})
+         for name in regen] + [
+        # every command runner without an exact model DENIES 'RUNNER rm -rf data' where the bare command
+        # allows (data is absent inside the repository); the runner mutant allows each one unexamined
+        ("deny-runner-" + name, "runner", "{} rm -rf data".format(name), rp, "deny", {})
+        for name in sorted(aiqt_hooks._COMMAND_RUNNERS - set(aiqt_hooks._DESTRUCT_WRAPPER_SPECS))]
+    # The registry-derived route matrix - EVERY runner in _COMMAND_RUNNERS, and find beside the
+    # registry, behind an uncertain read, on each route the word rule claims (direct, behind the
+    # reserved words time and time -p, behind a leading bang, and behind coproc), with each
+    # word-rule trigger kind (an opaque operand, a shell word, an env split-string spelling),
+    # denies. The uncertainty wrapper is spelled AFTER the probe (PROBE; zzf() { true; }; zzf):
+    # a definition AHEAD of the probe would open the whole-tail judgment
+    # and deny every benign runner word behind it, making every row trigger-independent. The
+    # REQUIRED set is recorded independently of the generator (the literal constants below, never
+    # the generator inputs), WITH the route prefixes and the trigger texts, not only their labels,
+    # so dropping, renaming or REWRITING a route, a trigger or a runner
+    # fails the reconciliation. Each row has a BENIGN counterpart (the same runner and route with
+    # printf ok in place of the trigger), asserted against the recorded EXPECTED verdict table:
+    # a row whose counterpart ALLOWS pins its trigger; a row whose counterpart DENIES is
+    # TRIGGER-INDEPENDENT (the runner and route deny by themselves - every coproc-route row,
+    # where the coproc word rule denies the runner word, and the runners the word or arity rules
+    # deny bare) and claims no trigger coverage. A benign verdict that differs from the table in
+    # EITHER direction (a benign false denial, or a silent new allow) fails row by row, and the
+    # measured pinned/independent split is asserted against the recorded figures.
+    _ROUTE_REQUIRED_ROUTES = (('direct', ''), ('time', 'time '), ('time-p', 'time -p '), ('bang', '! '), ('coproc', 'coproc '))
+    _ROUTE_REQUIRED_TRIGGERS = (('opaque', 'printf "$Z"'), ('shell-word', 'printf ash'), ('split-string', 'env -S"printf ok"'))
+    _ROUTE_REQUIRED_REGISTRY = 55  # the recorded _COMMAND_RUNNERS size; find is counted beside it
+    # The EXPECTED benign verdict for EVERY runner and route: the 19
+    # runners whose bare RUNNER printf ok shape the word and arity rules certify allow benignly
+    # on the four non-coproc routes; every OTHER (runner, route) benign counterpart denies, the
+    # whole coproc route included. 19 runners x 4 routes = 76 trigger-pinning rows per trigger
+    # kind: 228 pinned and 612 trigger-independent rows over the 840-row matrix, the recorded
+    # figures asserted below.
+    _ROUTE_EXPECTED_BENIGN_ALLOW = ("builtin", "busybox", "chrt", "command", "doas", "env",
+                                    "exec", "find", "ionice", "nice", "nohup", "setsid",
+                                    "stdbuf", "strace", "sudo", "taskset", "time", "toybox",
+                                    "xargs")
+    _ROUTE_REQUIRED_PINNED = 76
+    _ROUTE_REQUIRED_INDEPENDENT = 612
+    _route_prefixes = (('direct', ''), ('time', 'time '), ('time-p', 'time -p '), ('bang', '! '), ('coproc', 'coproc '))
+    _route_triggers = (('opaque', 'printf "$Z"'), ('shell-word', 'printf ash'), ('split-string', 'env -S"printf ok"'))
+    if _route_prefixes != _ROUTE_REQUIRED_ROUTES:
+        failures.append("(dz-route-matrix-routes) generated routes {} differ from the required "
+                        "routes, prefixes included: {}".format(_route_prefixes,
+                                                               _ROUTE_REQUIRED_ROUTES))
+    if _route_triggers != _ROUTE_REQUIRED_TRIGGERS:
+        failures.append("(dz-route-matrix-triggers) generated triggers {} differ from the "
+                        "required triggers, texts included: {}".format(_route_triggers,
+                                                                       _ROUTE_REQUIRED_TRIGGERS))
+    if len(aiqt_hooks._COMMAND_RUNNERS) != _ROUTE_REQUIRED_REGISTRY:
+        failures.append("(dz-route-matrix-registry) _COMMAND_RUNNERS holds {} runners where the "
+                        "recorded size is {}; a drop loses matrix rows, so the recorded size "
+                        "moves only WITH the registry".format(len(aiqt_hooks._COMMAND_RUNNERS),
+                                                              _ROUTE_REQUIRED_REGISTRY))
+    if "find" in aiqt_hooks._COMMAND_RUNNERS:
+        failures.append("(dz-route-matrix-find) find is expected outside _COMMAND_RUNNERS and is "
+                        "added beside the registry; listing it would double its rows")
+    _route_pinned = {_tlabel: 0 for _tlabel, _trigger in _ROUTE_REQUIRED_TRIGGERS}
+    _route_rows = []
+    for _rname in sorted(set(aiqt_hooks._COMMAND_RUNNERS) | {"find"}):
+        for _plabel, _prefix in _route_prefixes:
+            _benign = run("{}{} printf ok; zzf() {{ true; }}; zzf".format(_prefix, _rname),
+                          rp, {})
+            _expected = ("allow" if _plabel != "coproc"
+                         and _rname in _ROUTE_EXPECTED_BENIGN_ALLOW else "deny")
+            if _benign != _expected:
+                failures.append("(dz-route-benign-{}-{}) the benign counterpart must {} per the "
+                                "recorded expected-verdict table, got {}".format(
+                                    _rname, _plabel, _expected, _benign))
+            for _tlabel, _trigger in _route_triggers:
+                _route_rows.append(("deny-route-{}-{}-{}".format(_rname, _plabel, _tlabel),
+                                    "prior-effect",
+                                    "{}{} {}; zzf() {{ true; }}; zzf".format(
+                                        _prefix, _rname, _trigger),
+                                    rp, "deny", {}))
+                if _benign == "allow":
+                    _route_pinned[_tlabel] += 1
+    if len(_route_rows) != ((_ROUTE_REQUIRED_REGISTRY + 1) * len(_ROUTE_REQUIRED_ROUTES)
+                            * len(_ROUTE_REQUIRED_TRIGGERS)):
+        failures.append("(dz-route-matrix-count) the route matrix holds {} rows where the "
+                        "required (registry + find) x routes x triggers is {}".format(
+                            len(_route_rows), (_ROUTE_REQUIRED_REGISTRY + 1)
+                            * len(_ROUTE_REQUIRED_ROUTES) * len(_ROUTE_REQUIRED_TRIGGERS)))
+    for _tlabel, _trigger in _ROUTE_REQUIRED_TRIGGERS:
+        if _route_pinned[_tlabel] != _ROUTE_REQUIRED_PINNED:
+            failures.append("(dz-route-trigger-pinned-{}) {} trigger-dependent rows (benign "
+                            "counterpart allowing) pin the {} trigger where the recorded figure "
+                            "is {}; a benign false denial or a new benign allow moves this "
+                            "count".format(_tlabel, _route_pinned[_tlabel], _tlabel,
+                                           _ROUTE_REQUIRED_PINNED))
+    _route_independent = len(_route_rows) - sum(_route_pinned.values())
+    if _route_independent != _ROUTE_REQUIRED_INDEPENDENT:
+        failures.append("(dz-route-matrix-independent) {} trigger-independent rows where the "
+                        "recorded figure is {}".format(_route_independent,
+                                                       _ROUTE_REQUIRED_INDEPENDENT))
+    vectors.extend(_route_rows)
+    from selftest_destruct_prior_effect_vectors import PRIOR_EFFECT_VECTORS, PRIOR_EFFECT_CONTROLS
+
+    def prior_command(template):
+        return template.replace("{rp}", rp).replace("{scratch}", str(scratch)).replace("{absent}", absent)
+
+    vectors.extend((label, "prior-effect", prior_command(template), rp, want, {})
+                   for label, _class, template, want in PRIOR_EFFECT_VECTORS)
+    try:
+        for label, template, want in PRIOR_EFFECT_CONTROLS:
+            got = run(prior_command(template), rp, {})
+            if got != want:
+                failures.append("(dz-{}) expected {}, got {}".format(label, want, got))
+        # every text the vectors hand the text scan and every word list they hand the argv marker is recorded,
+        # and the former forms are compared on exactly those after the run
+        with _destruct_scan_recorder() as (seen_texts, seen_words, seen_raw):
+            for label, rule, command, cwd, want, opts in vectors:
+                got = run(command, cwd, opts)
+                if got != want:
+                    failures.append("(dz-{}) {!r}: expected {}, got {}".format(label, command, want, got))
+                    continue
+                if rule not in saved_rules:
+                    failures.append("(dz-rule-{}) the vector names rule {!r}, which _DESTRUCT_RULES does not "
+                                    "hold".format(label, rule))
+                    continue
+                aiqt_hooks._DESTRUCT_RULES = saved_rules - {rule}
+                try:
+                    mutant = run(command, cwd, opts)
+                finally:
+                    aiqt_hooks._DESTRUCT_RULES = saved_rules
+                if rule == "prior-effect" and mutant != "allow":
+                    failures.append("(dz-prior-mutant-{}) removing prior-effect must allow, got {}"
+                                    .format(label, mutant))
+                if mutant == want:
+                    failures.append("(dz-mutant-{}) removing rule {!r} left {!r} at {}; the vector does not "
+                                    "depend on its rule".format(label, rule, command, want))
+        failures.extend(_destruct_scan_equivalence_failures(seen_texts, [vec[2] for vec in vectors], seen_words,
+                                                            seen_raw))
+        # REAL-SHELL ORACLE: each row builds a fresh repository holding an ignored keep.log and a scratch
+        # directory s (holding qa, and hl, a hard link to keep.log), asks the hook from the repository, then
+        # RUNS the command in real bash there and reads whether keep.log survived. The hook must deny exactly
+        # the rows bash damages, and each deny row must flip to allow with its rules removed (a truncate after a
+        # failed cd is guarded twice: the unknown cwd, and no scratch exemption at the cwd the mutant assumes).
+        oracle_rows = [
+            ("cd-failed-rm", ("cd-gate",), "rmdir {s}/qa; cd {s}/qa && true; rm -f keep.log", "deny"),
+            ("cd-failed-truncate", ("cd-gate", "scratch-writer"),
+             "rmdir {s}/qa; cd {s}/qa && true; truncate -s 0 keep.log", "deny"),
+            ("cd-gated-rm", ("cd-gate",), "cd {s}/qa && rm -f keep.log", "allow"),
+            ("hardlink-truncate", ("scratch-writer",), "truncate -s 0 {s}/hl", "deny"),
+            ("hardlink-dd", ("scratch-writer",), "dd if=/dev/null of={s}/hl", "deny"),
+            ("cp-symlink-truncate", ("scratch-writer",), "cp -s {r}/keep.log {s}/sl && truncate -s 0 {s}/sl",
+             "deny"),
+            ("hardlink-rm", ("scratch",), "rm -f {s}/hl", "allow"),
+        ]
+        bash_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(base), "LC_ALL": "C"}
+        for label, rules, template, want in oracle_rows:
+            orepo = base / "oracle" / label
+            oscr = scratch / ("oracle-" + label)
+            try:
+                orepo.mkdir(parents=True)
+                subprocess.run(["git", "init", "-q", str(orepo)], check=True, capture_output=True, text=True,
+                               timeout=30, env=git_fixture_env())
+                (orepo / ".gitignore").write_text("keep.log\n", encoding="utf-8")
+                _git(orepo, "add", ".gitignore")
+                _git(orepo, "commit", "-q", "-m", "ignore", env_identity=True)
+                (orepo / "keep.log").write_text("keep\n", encoding="utf-8")
+                (oscr / "qa").mkdir(parents=True)
+                os.link(str(orepo / "keep.log"), str(oscr / "hl"))
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("(dz-oracle-fixture-{}) could not build the fixture: {}".format(label, exc))
+                continue
+            command = template.format(s=oscr, r=orepo)
+            got = run(command, str(orepo), {})
+            aiqt_hooks._DESTRUCT_RULES = saved_rules - frozenset(rules)
+            try:
+                mutant = run(command, str(orepo), {})
+            finally:
+                aiqt_hooks._DESTRUCT_RULES = saved_rules
+            try:
+                subprocess.run(["bash", "--noprofile", "--norc", "-c", command], cwd=str(orepo), env=bash_env,
+                               capture_output=True, text=True, timeout=30)
+                kept = (orepo / "keep.log").read_text(encoding="utf-8") == "keep\n"
+            except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+                kept = False
+            if got != want:
+                failures.append("(dz-oracle-{}) {!r}: expected {}, got {}".format(label, command, want, got))
+            if kept != (want == "allow"):
+                failures.append("(dz-oracle-effect-{}) {!r}: real bash {} the ignored keep.log, but the row "
+                                "expects {}".format(label, command, "kept" if kept else "damaged", want))
+            if want == "deny" and mutant != "allow":
+                failures.append("(dz-oracle-mutant-{}) removing rules {} must allow the damaging {!r}, got {}"
+                                .format(label, rules, command, mutant))
+        covered = {vec[1] for vec in vectors}
+        if covered != saved_rules:
+            failures.append("(dz-rules-covered) rules without a vector: {}; vectors naming no rule: {}".format(
+                sorted(saved_rules - covered), sorted(covered - saved_rules)))
+        # Per-branch mutants: each prior-effect sub-branch has a witness only it
+        # catches, so disabling just that branch -- not the whole rule -- must flip the witness to allow.
+        # This isolates definition tracking from the computed-runner branch and gives the mysql and
+        # mariadb client matchers a vector each, which the whole-rule mutant alone did not exercise.
+        templates = {label: template for label, _cls, template, _want in PRIOR_EFFECT_VECTORS}
+        saved_prior_effects = aiqt_hooks._destruct_prior_effects
+        saved_sql_exec = aiqt_hooks._DESTRUCT_SQL_EXEC_RE
+        never_match = re.compile(r"(?!x)x")
+
+        def blank_field(field, empty):
+            def patched(segments, _field=field, _empty=empty):
+                records = saved_prior_effects(segments)
+                for record in records:
+                    record[_field] = _empty() if callable(_empty) else _empty
+                return records
+            return patched
+
+        def blank_client(name):
+            return ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, **{name: (never_match,)}))
+
+        saved_creators = aiqt_hooks._DESTRUCT_EFFECT_CREATORS
+
+        def drop_creator(name):
+            # Remove exactly one word from the closed creator set, so each listed creator word is pinned
+            # live by its own witness. With the raw writer regexes
+            # beside the decoded set, every member a raw backstop can see (curl/wget/tar/unzip/chmod via
+            # the writer regexes, cp/mv/ln/tee/mkdir/touch/install/rsync via _DESTRUCT_CREATOR_RE, dd via
+            # the dd-of= text marker) needs a witness NO raw signal matches: a quote-concatenated name, or
+            # (for the interpreters) a script argument the writer -c/-e regex does not catch. Only then
+            # does dropping the word from the decoded set flip the witness to allow.
+            return ("_DESTRUCT_EFFECT_CREATORS", saved_creators - frozenset((name,)))
+
+        saved_writers = aiqt_hooks._DESTRUCT_WRITER_RES
+
+        def blank_writer(sample):
+            # Replace exactly the one writer pattern that matches sample. A dead pattern matches nothing,
+            # so its mutant would be a no-op and its witness would stay deny, failing the flip check: each
+            # writer mutant is also a liveness pin on its own pattern (one mutant per pattern, never
+            # one whole-tuple mutant).
+            return ("_DESTRUCT_WRITER_RES",
+                    tuple(never_match if aiqt_hooks._destruct_raw_found((rx,), sample) else rx
+                          for rx in saved_writers))
+
+        saved_tail = aiqt_hooks._destruct_tail_segment_unknown
+
+        def tail_first_only():
+            # The former one-segment
+            # carry judged ONLY the first BODY COMMAND after a definition or coproc opened;
+            # later tail segments went back to the direct route. The stand-in models exactly
+            # that: the EMPTY segment closing the ( ) header pair is skipped WITHOUT consuming
+            # the single scan (the carry reached past it to the first body command), the first
+            # NON-EMPTY tail segment is judged for real, and every later call reports nothing.
+            # A STATEFUL stand-in built once per witness run: the guard reads a parseable
+            # command through _destruct_creator_segments once per decision.
+            state = {"used": False}
+
+            def judge(seg):
+                if state["used"]:
+                    return None
+                if not seg.argv:
+                    return None  # the empty ( ) header-closing segment: not the first body command
+                state["used"] = True
+                return saved_tail(seg)
+            return judge
+
+        def tail_assign_drop(seg):
+            # The former one-segment carry sliced a carried segment at its
+            # command word, dropping the leading assignment words and their opacity flags.
+            _i = aiqt_hooks._command_word_index(seg.argv)
+            return aiqt_hooks._destruct_segment_word_unknown(seg.argv[_i:], seg.argv_opaque[_i:])
+
+        branch_mutants = [
+            ("names", "pe-func-shadows-known-pure",
+             ("_destruct_prior_effects", blank_field("names", set))),
+            ("env", "pe-export-pager",
+             ("_destruct_prior_effects", blank_field("env", dict))),
+            ("config", "pe-git-config-pager",
+             ("_destruct_prior_effects", blank_field("config", lambda: None))),
+            ("outputs", "pe-copy-then-run",
+             ("_destruct_prior_effects", blank_field("outputs", list))),
+            ("links", "pe-link-then-remove-through",
+             ("_destruct_prior_effects", blank_field("links", list))),
+            ("mutates", "pe-move-then-remove",
+             ("_destruct_prior_effects", blank_field("mutates", lambda: False))),
+            ("computed-runner", "pe-xargs-variable-word",
+             ("_destruct_prior_runner", lambda *a, **k: [])),
+            ("sql-psql", "pe-psql-shell-escape", blank_client("psql")),
+            ("sql-sqlite3", "pe-sqlite-shell", blank_client("sqlite3")),
+            ("sql-mysql", "pe-mysql-shell-escape", blank_client("mysql")),
+            ("sql-mariadb", "pe-mariadb-source", blank_client("mariadb")),
+            # A recover-mode stop with a separator after it denies, and the sqlite3 single-quoted pipe form
+            # has its own witness
+            ("recover-stop-rule", "pe-stop-separator-after-quote",
+             ("_DESTRUCT_RULES", saved_rules - frozenset(("recover-stop",)))),
+            ("sql-sqlite3-single-quote", "pe-sqlite-output-pipe-single",
+             ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, sqlite3=tuple(
+                 re.compile(rx.pattern.replace("\\x27", ""), rx.flags) for rx in saved_sql_exec["sqlite3"])))),
+            # The substitution, case-reserved and parseable still-runs branches, one isolating witness
+            # each. Collapsing the sentinel to the unmarked raw erases the quoted/unquoted distinction, so
+            # the run-path-only restriction spreads to every substitution group (a regression): the
+            # unquoted-substitution client witness must then allow.
+            ("subst-restrict", "pe-unquoted-subst-sql-run", ("_LEX_SUBST_RUNPATH_RAW", "")),
+            # Disabling the reserved-position predicate reverts the case refusal entirely: the
+            # reserved-position witness must then allow. The predicate is its own module attribute so
+            # this mutant isolates its branch; blanking _DESTRUCT_KEYWORDS instead would also hit the
+            # three other read sites that consult it.
+            ("case-reserved", "pe-case-reserved-procsub-run", ("_lex_case_reserved", lambda words: False)),
+            # With the predicate off, the parseable path discards a still-runs stop and falls back to the
+            # plain read: the fallback witness must then allow.
+            ("parseable-stillruns", "pe-parseable-fallback-stillruns-run",
+             ("_destruct_parseable_stillruns", lambda rf: False)),
+            # The redir-write witnesses carry the redirect in a DATA argument, which only the raw signal
+            # can see: a stopped-heredoc witness would now deny through recover-stop whatever the regex
+            # matches and could not flip. The digits-minus witness is matched by
+            # ONLY the new '>&2-x' alternative, so it is also that alternative's liveness pin.
+            ("redir-write", "pe-redir-raw-word-arg", ("_DESTRUCT_REDIR_WRITE_RE", never_match)),
+            ("redir-write-digits-minus", "pe-redir-raw-digits-minus-arg",
+             ("_DESTRUCT_REDIR_WRITE_RE", never_match)),
+            # The closed creator set. The committed per-word mutants below keep their
+            # QUOTE-CONCATENATED witnesses (the writer/creator regexes are spelling-blind) or an
+            # interpreter SCRIPT argument (the writer -c/-e regex does not match), so only the decoded
+            # set denies and the set mutant alone flips them; the GENERATED liveness loop after this
+            # sweep reconciles EVERY declaration member the same way.
+            # creator-segments turns the whole decoded-word branch off; creator-versioned is the
+            # versioned-name rule; runner-creator, find-creator and coproc-creator isolate the
+            # effectful runner, find and coproc reads, and runner-word-scan isolates the word-level
+            # rule inside the first two; the writer-* mutants pin each raw writer pattern
+            # live on a DATA-argument witness; creator-raw-backstop pins _DESTRUCT_CREATOR_RE; cmdvar
+            # and recover-depth keep their isolating witnesses.
+            ("creator-curl", "pe-writer-curl-quoted-mid", drop_creator("curl")),
+            ("creator-wget", "pe-writer-wget-quoted-name", drop_creator("wget")),
+            ("creator-tar", "pe-writer-tar-quoted-name", drop_creator("tar")),
+            ("creator-unzip", "pe-writer-unzip-quoted-name", drop_creator("unzip")),
+            ("creator-chmod", "pe-writer-chmod-quoted-name", drop_creator("chmod")),
+            ("creator-install", "pe-writer-install-quoted-name", drop_creator("install")),
+            ("creator-rsync", "pe-writer-rsync-quoted-name", drop_creator("rsync")),
+            ("creator-dd", "pe-creator-dd-quoted", drop_creator("dd")),
+            ("creator-tee", "pe-creator-tee-quoted", drop_creator("tee")),
+            ("creator-mkdir", "pe-creator-mkdir-quoted", drop_creator("mkdir")),
+            ("creator-touch", "pe-creator-touch-quoted", drop_creator("touch")),
+            ("creator-ruby", "pe-creator-ruby", drop_creator("ruby")),
+            ("creator-bash", "pe-creator-bash", drop_creator("bash")),
+            ("creator-sh", "pe-creator-sh", drop_creator("sh")),
+            ("creator-zsh", "pe-creator-zsh", drop_creator("zsh")),
+            ("creator-versioned", "pe-writer-python-script",
+             ("_DESTRUCT_EFFECT_CREATOR_VERSIONED", frozenset())),
+            ("creator-segments", "pe-writer-curl-quoted-name",
+             ("_destruct_creator_segments", lambda segments: False)),
+            ("runner-creator", "pe-runner-xargs-quoted-cp",
+             ("_destruct_runner_creator", lambda *a: None)),
+            ("find-creator", "pe-find-exec-quoted-cp", ("_destruct_find_creator", lambda *a: None)),
+            # With ONLY the word-level rule disabled, the kept arity scan
+            # resolves grep as the witness's executed word (a known non-creator), so the over-deny
+            # witness flips to allow; every other deny path stays live under this mutant.
+            ("runner-word-scan", "pe-word-xargs-grep-sh-overdeny",
+             ("_destruct_runner_word_unknown", lambda *a: None)),
+            ("coproc-creator", "pe-coproc-quoted-cp", ("_destruct_coproc_creator", lambda *a: None)),
+            # With ONLY the segment word rule disabled, a coproc NAME
+            # compound carrying a runner word but no creator reports nothing, so the witness flips;
+            # a creator behind a coproc stays denied through the kept creator scan.
+            ("segment-word-scan", "pe-word-coproc-named-brace-xargs-script",
+             ("_destruct_segment_word_unknown", lambda *a: None)),
+            # With ONLY the split-string predicate disabled, the bundled
+            # spelling at a DATA position passes the word scan and the kept arity scan resolves
+            # printf, so the witness flips; the canonical spellings behind env itself stay denied
+            # through the arity scan.
+            ("split-string-word", "pe-word-env-bundled-split-data",
+             ("_destruct_split_string_word", lambda *a: False)),
+            # With ONLY the segment word rule
+            # disabled, the whole-tail judgment reports nothing for a NAME () body, so the
+            # witness flips; the direct-route read of that same segment stays benign.
+            ("segment-word-carry", "pe-word-funcparen-xargs-script",
+             ("_destruct_segment_word_unknown", lambda *a: None)),
+            # With ONLY the split-string predicate disabled, the
+            # slash-bearing attached spelling at a DATA position passes the word scan and the
+            # kept arity scan resolves printf, so the witness flips.
+            ("split-string-slash", "pe-word-env-slash-split-data",
+             ("_destruct_split_string_word", lambda *a: False)),
+            # Restoring the former
+            # FIRST-body-command-only carry must turn a named row red - a SECOND body command
+            # is reached only by the whole-tail judgment, so the stand-in (the empty
+            # header-closing segment skipped, a real judgment for the first body command,
+            # nothing for every later segment) flips this witness, whose opener is the FIRST
+            # definition of its command; the retained FIRST-body denial under the same
+            # stand-in is asserted by the dz-tail-first-only-first-body check after this sweep.
+            ("tail-first-only", "pe-word-funcparen-second-xargs-script",
+             ("_destruct_tail_segment_unknown", tail_first_only())),
+            # Dropping the leading assignment words of a tail segment
+            # (the former one-segment carry sliced the segment at its command word) must turn a named
+            # row red - the newline-split assignment body denies only through the opacity flag
+            # of its assignment word, so the mutant flips it.
+            ("tail-assign-drop", "pe-word-funcparen-newline-assign-opaque",
+             ("_destruct_tail_segment_unknown", tail_assign_drop)),
+            # The reserved-prefix skip that reaches a coproc behind time.
+            # With no skip the time-fronted read is not uncertain, so the coproc creator is not denied.
+            ("reserved-prefix-skip", "pe-time-coproc-quoted-cp",
+             ("_destruct_skip_reserved_prefix", lambda argv, start: start)),
+            ("creator-raw-backstop", "pe-raw-creator-argument", ("_DESTRUCT_CREATOR_RE", never_match)),
+            ("writer-curl", "pe-writer-raw-curl-arg", blank_writer("curl -o f")),
+            ("writer-wget", "pe-writer-raw-wget-arg", blank_writer("wget -O f")),
+            ("writer-tar", "pe-writer-raw-tar-arg", blank_writer("tar -x -C d")),
+            ("writer-unzip", "pe-writer-raw-unzip-arg", blank_writer("unzip z -d d")),
+            ("writer-chmod", "pe-writer-raw-chmod-arg", blank_writer("chmod +x f")),
+            ("writer-interp", "pe-writer-raw-interp-arg", blank_writer("perl -e x")),
+            ("cmdvar", "pe-cmdvar-uncertain-assign", ("_DESTRUCT_CMDVAR_RE", never_match)),
+            ("recover-depth", "pe-depth-stop-curl-plain", ("_LEX_RECOVER_DEPTH", 100)),
+        ]
+        for branch, label, (attr, replacement) in branch_mutants:
+            command = prior_command(templates[label])
+            if run(command, rp, {}) != "deny":
+                failures.append("(dz-branch-base-{}) the {} witness {!r} must deny"
+                                .format(branch, label, command))
+                continue
+            original = getattr(aiqt_hooks, attr)
+            setattr(aiqt_hooks, attr, replacement)
+            try:
+                mutated = run(command, rp, {})
+            finally:
+                setattr(aiqt_hooks, attr, original)
+            if mutated != "allow":
+                failures.append("(dz-branch-mutant-{}) disabling only the {} branch must allow {!r}, "
+                                "got {}".format(branch, branch, command, mutated))
+        # The first-body coverage the tail-first-only stand-in models
+        # is asserted directly - under the restored carry the FIRST body command is still
+        # judged, so a first-body row keeps denying while the second-body witness above flips.
+        # The row spells its opener as the first definition of the command, so the stand-in
+        # spends its single scan on ITS first body command.
+        _tfo_cmd = prior_command(templates["pe-word-funcparen-body-runner-overdeny"])
+        if run(_tfo_cmd, rp, {}) != "deny":
+            failures.append("(dz-tail-first-only-first-body-base) the first-body row {!r} must "
+                            "deny".format(_tfo_cmd))
+        else:
+            aiqt_hooks._destruct_tail_segment_unknown = tail_first_only()
+            try:
+                _tfo_got = run(_tfo_cmd, rp, {})
+            finally:
+                aiqt_hooks._destruct_tail_segment_unknown = saved_tail
+            if _tfo_got != "deny":
+                failures.append("(dz-tail-first-only-first-body) under the first-body-only carry "
+                                "stand-in the first-body row {!r} must STAY denied, got {}"
+                                .format(_tfo_cmd, _tfo_got))
+        # The function-keyword OPENER branch has an isolating SOURCE
+        # mutant - the live hook source with ONLY the word == "function" branch of
+        # _destruct_creator_segments removed, loaded as its own module - and EVERY
+        # function-keyword opener row must flip to allow under it. Each row spells its opener
+        # as the FIRST definition of its command (an earlier zzf() definition would open the
+        # whole-tail judgment itself and mask the broken branch; the
+        # pe-word-funckw-active-tail-* rows pin exactly that already-active-tail behaviour and
+        # are deliberately NOT in this list), so a removed or rewritten function-keyword opener
+        # turns every listed row red here.
+        _FUNCKW_OPENER_ROWS = (
+            "pe-word-funckw-paren-xargs-script", "pe-word-funckw-paren-opaque",
+            "pe-word-funckw-tilde-overdeny", "pe-word-funckw-echo-time-overdeny",
+            "pe-word-funckw-brace-newline-xargs-script", "pe-word-funckw-brace-newline-opaque",
+            "pe-word-funckw-name-newline-brace-xargs-script",
+            "pe-word-funckw-name-newline-brace-tilde",
+            "pe-word-funckw-brace-blank-line-xargs-script",
+            "pe-word-funckw-brace-blank-line-tilde",
+            "pe-word-funckw-paren-body-xargs-script", "pe-word-funckw-paren-body-opaque")
+        _fk_anchor = ('        if word == "function":\n'
+                      '            if _destruct_segment_word_unknown(argv[start + 1:], '
+                      'seg.argv_opaque[start + 1:]):\n'
+                      '                return True\n'
+                      '            tail = True\n'
+                      '            continue\n')
+        _fk_source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+        if _fk_source.count(_fk_anchor) != 1:
+            failures.append("(dz-funckw-opener-anchor) the function-keyword branch anchor occurs "
+                            "{} times in the hook source, expected once"
+                            .format(_fk_source.count(_fk_anchor)))
+        else:
+            import importlib.util as _fk_ilu
+            _fk_path = base / "funckw_opener_mutant.py"
+            _fk_path.write_text(_fk_source.replace(_fk_anchor, ""), encoding="utf-8")
+            _fk_spec = _fk_ilu.spec_from_file_location("aiqt_hooks_funckw_mutant", str(_fk_path))
+            _fk_mod = _fk_ilu.module_from_spec(_fk_spec)
+            _fk_spec.loader.exec_module(_fk_mod)
+            _saved_fk_roots = _fk_mod._destruct_scratch_roots
+            for _fk_label in _FUNCKW_OPENER_ROWS:
+                _fk_cmd = prior_command(templates[_fk_label])
+                if run(_fk_cmd, rp, {}) != "deny":
+                    failures.append("(dz-funckw-opener-base-{}) the function-keyword opener row "
+                                    "must deny at the live hook".format(_fk_label))
+                    continue
+                _fk_mod._destruct_scratch_roots = lambda: [scratch_real]
+                try:
+                    _fk_got = _decision(_fk_mod.destructive_guard, _fk_cmd, cwd=rp)
+                finally:
+                    _fk_mod._destruct_scratch_roots = _saved_fk_roots
+                if _fk_got != "allow":
+                    failures.append("(dz-funckw-opener-mutant-{}) with ONLY the function-keyword "
+                                    "opener branch removed, {!r} must flip to allow, got {}"
+                                    .format(_fk_label, _fk_cmd, _fk_got))
+        # The except-path preservation of a recorded
+        # heredoc-join (_LEX_PRESERVE_RECORDED_JOIN) is DISCLOSED REDUNDANT today: with ONLY that
+        # return disabled, every recorded-join row still DENIES through the full-width category-0
+        # rule (the later unterminated quote or escape leaves text unread). This sweep pins that
+        # redundancy: if a later change narrows category 0, a row below flips to allow under the
+        # mutant while the production hook still denies it, and this check turns RED, forcing a
+        # vector that only the preservation catches.
+        _pj_rows = ("pe-recover-join-trail-squote", "pe-recover-join-trail-dquote",
+                    "pe-recover-join-trail-bs")
+        for _pj_label in _pj_rows:
+            _pj_cmd = prior_command(templates[_pj_label])
+            if run(_pj_cmd, rp, {}) != "deny":
+                failures.append("(dz-preserve-join-base-{}) the recorded-join row must deny"
+                                .format(_pj_label))
+                continue
+            aiqt_hooks._LEX_PRESERVE_RECORDED_JOIN = False
+            try:
+                _pj_got = run(_pj_cmd, rp, {})
+            finally:
+                aiqt_hooks._LEX_PRESERVE_RECORDED_JOIN = True
+            if _pj_got != "deny":
+                failures.append("(dz-preserve-join-redundant-{}) with the recorded-join preservation "
+                                "disabled, {!r} no longer denies ({}): the category-0 rule has been "
+                                "narrowed and the preservation is now LOAD-BEARING; add a vector that "
+                                "only it catches".format(_pj_label, _pj_cmd, _pj_got))
+        # Creator liveness reconciled against the DECLARATION itself. Every
+        # member of _DESTRUCT_EFFECT_CREATORS gets a GENERATED witness - a quote-concatenated spelling
+        # in command position beside a defined-then-called function, which no raw signal can see - that
+        # must deny, and must flip to allow when ONLY that member is dropped from the set. The witness
+        # spells its definition AFTER the creator word: a definition AHEAD of it would
+        # judge the SHELL creators (bash, sh, zsh, ...) by the whole-tail word rule, where each is also
+        # a LISTED RUNNER word that denies with the member dropped, and the flip could not fire. A
+        # member whose witness does not discriminate FAILS the suite, so a creator added without
+        # liveness, or one shadowed by another signal, turns red here (a hand-written list pinned
+        # only 15 of the 32 members).
+        for _name in sorted(saved_creators):
+            _wit = _name[:1] + "''" + _name[1:] + "; zzf() { " + str(scratch) + "/zz; }; zzf"
+            _got = run(_wit, rp, {})
+            if _got != "deny":
+                failures.append("(dz-creator-liveness-{}) the generated witness for creator {!r} must "
+                                "deny, got {}".format(_name, _name, _got))
+                continue
+            aiqt_hooks._DESTRUCT_EFFECT_CREATORS = saved_creators - frozenset((_name,))
+            try:
+                _mut = run(_wit, rp, {})
+            finally:
+                aiqt_hooks._DESTRUCT_EFFECT_CREATORS = saved_creators
+            if _mut != "allow":
+                failures.append("(dz-creator-liveness-mutant-{}) dropping only {!r} from the creator "
+                                "set must allow its witness, got {}".format(_name, _name, _mut))
+        # The versioned-name rule IS the interpreter declaration, and every
+        # family holds at its three boundaries: bare (a creator through the set), versioned (bash5 and
+        # bash5.2 through the stem rule), and a non-version tail (bashdoc, bash-config: no creator;
+        # perldoc and python-config are the reviewed spellings of that boundary).
+        if aiqt_hooks._DESTRUCT_EFFECT_CREATOR_VERSIONED != aiqt_hooks._DESTRUCT_EFFECT_INTERPRETERS:
+            failures.append("(dz-creator-versioned-derived) _DESTRUCT_EFFECT_CREATOR_VERSIONED must BE "
+                            "the interpreter declaration, not a drifting copy")
+        if not aiqt_hooks._DESTRUCT_EFFECT_INTERPRETERS <= saved_creators:
+            failures.append("(dz-creator-versioned-subset) every interpreter family must be in the "
+                            "creator declaration")
+        for _fam in sorted(aiqt_hooks._DESTRUCT_EFFECT_CREATOR_VERSIONED):
+            for _probe_word, _want in ((_fam, True), (_fam + "5", True), (_fam + "5.2", True),
+                                       (_fam + "doc", False), (_fam + "-config", False)):
+                if aiqt_hooks._destruct_creator_word(_probe_word) != _want:
+                    failures.append("(dz-creator-versioned-{}) _destruct_creator_word({!r}) must be "
+                                    "{}".format(_fam, _probe_word, _want))
+        # The '>&WORD' write signal at its boundaries - a WORD of digits then
+        # '-' then more writes a file ('>&2-x' creates '2-x'), while a dup (2>&1), a descriptor move
+        # ('>&2-', '>&12-') and a close ('>&-', '2>&-') do not; each end tested just inside, at,
+        # and just outside the boundary.
+        for _frag, _want in ((">&2-x", True), (">& 2-x", True), (">&1-f", True), (">&-f", True),
+                             (">&f", True), (">&--", True), ("2>&-f", True), (">&123x", True),
+                             (">&-", False), (">&2", False), (">&12", False), (">&2-", False),
+                             (">&12-", False), ("2>&1", False), ("2>&-", False)):
+            if bool(aiqt_hooks._DESTRUCT_REDIR_WRITE_RE.search("printf ok " + _frag + " ")) != _want:
+                failures.append("(dz-redir-write-boundary) {!r} must {} the redirect-write signal".format(
+                    _frag, "match" if _want else "not match"))
+        # DIFFERENTIAL: the base hook (3123dbce, an
+        # earlier parent) and the new hook are both run over the committed vector corpus, the controls and
+        # every pinned reproduction; a command the BASE denies and the NEW hook allows is a deny-to-allow
+        # regression and FAILS, unless it is on the reviewed allow-list of intended false-deny fixes (today
+        # only the data case argument cat <(printf case)). The base is a FROZEN FIXTURE FILE committed
+        # beside this test and verified against its recorded sha256 before use: a git read of
+        # the commit could return substituted content under a replacement ref without failing, fails with
+        # rc 128 (dubious ownership) on a checkout owned by another uid, and depends on 3123dbce staying
+        # reachable across a rebase or squash. A missing, unreadable, undecodable or WRONG-HASH fixture
+        # FAILS the self-test naming the real cause: a check that cannot read its required input fails
+        # closed. Each frozen copy (this base and the parent pin below) is that revision's hook source
+        # with an internal role name and internal tracker labels reworded in comment or docstring lines
+        # only, which no decision reads; the recorded sha256 is of that copy. An unexpected or malformed decision from either
+        # hook is a differential failure too, never a silent pass.
+        import importlib.util as _ilu
+        _basesha = "3123dbcef602f1e89d68febc4354107a47116696"
+        _fixture = Path(__file__).resolve().parent / "fixtures" / "aiqt_hooks_base_3123dbce.frozen"
+        _fixture_sha = "c06485acbd33c90a90cd86b1b9aa64dfbbabec1cf4639a245113bda4ec00286e"
+        _blob, _fx_cause = None, None
+        try:
+            _fixture_bytes = _fixture.read_bytes()
+        except OSError as _fx_exc:
+            _fx_cause = "the fixture file could not be read: {}".format(_fx_exc)
+        else:
+            _got_sha = hashlib.sha256(_fixture_bytes).hexdigest()
+            if _got_sha != _fixture_sha:
+                _fx_cause = ("the fixture's sha256 is {} where {} is recorded, so its content cannot be "
+                             "trusted as the base revision".format(_got_sha, _fixture_sha))
+            else:
+                try:
+                    _blob = _fixture_bytes.decode("utf-8")
+                except UnicodeDecodeError as _fx_exc:
+                    _fx_cause = "the fixture is not decodable utf-8: {}".format(_fx_exc)
+        if not _blob:
+            failures.append("(dz-differential-base) the differential base {} could not be loaded from the "
+                            "frozen fixture {}: {}; the deny-to-allow regression gate cannot run, and a "
+                            "check that cannot read its required input fails closed".format(
+                                _basesha[:12], _fixture, _fx_cause))
+        else:
+            _bpath = base / "base_hooks_differential.py"
+            _bpath.write_text(_blob, encoding="utf-8")
+            _bspec = _ilu.spec_from_file_location("aiqt_hooks_base_differential", str(_bpath))
+            _bmod = _ilu.module_from_spec(_bspec)
+            _bspec.loader.exec_module(_bmod)
+            _saved_base_roots = _bmod._destruct_scratch_roots
+
+            def run_base(command, cwd, opts):
+                os.environ["HOME"] = opts.get("home", home0)
+                _bmod._destruct_scratch_roots = (saved_roots if opts.get("real_roots")
+                                                 else (lambda: [scratch_real]))
+                try:
+                    return _decision(_bmod.destructive_guard, command, cwd=cwd)
+                finally:
+                    os.environ["HOME"] = home0
+                    _bmod._destruct_scratch_roots = _saved_base_roots
+
+            _repro = ['(rm {absent}/x)', '(shred {absent}/x)', '(eval rm {absent}/x)', "(r''m {absent}/x)", 'true; (rm {absent}/x)', 'true | (rm {absent}/x)', 'f() ( rm {absent}/x )', 'if true; then (rm {absent}/x); fi', '( (rm {absent}/x) )', '(cd / && rm -rf srv)', '(dd if=/dev/zero of=/dev/sda)', '(truncate -s 0 {absent}/db)', '(find {absent} -delete)', "(psql -c 'drop database prod')", 'echo $(rm {absent}/x)', "echo $(sqlite3 :memory: '.shell sh')", "echo $(psql -c '\\! sh')", 'cp helper {scratch}/zz; cat <(if true; then case x in x) {scratch}/zz;; esac; fi)', 'cp helper {scratch}/zz; cat <(! case x in x) {scratch}/zz;; esac)', 'cp helper {scratch}/zz; cat <({ case x in x) {scratch}/zz;; esac; })', 'cp helper {scratch}/zz; cat <(for i in 1; do case x in x) {scratch}/zz;; esac; done)', 'cp helper {scratch}/zz; cat <(time case x in x) {scratch}/zz;; esac)', 'cp helper {scratch}/zz; echo $({ case x in x) {scratch}/zz;; esac; })', 'cp helper {scratch}/zz; echo "$(case x in x) {scratch}/zz;; esac)"', 'cat <(cat <(cat <(cat <(cat <(cat <(cat <(cat <(cat <(cat <(cat <(printf ok > {scratch}/zz; {scratch}/zz)))))))))))', 'cat <<EOF\nEO\\\nF\nprintf ok > {scratch}/zz; {scratch}/zz', 'cp helper {scratch}/zz; cat <(time -p case x in x) {scratch}/zz;; esac)', 'cp helper {scratch}/zz; cat <(time -- case x in x) {scratch}/zz;; esac)', 'cp helper {scratch}/zz; cat <(time -p -- case x in x) {scratch}/zz;; esac)', 'cp helper {scratch}/zz; cat <(! time -p case x in x) {scratch}/zz;; esac)', 'cp helper {scratch}/zz; echo $(time -p case x in x) {scratch}/zz;; esac)', 'cp helper {scratch}/zz; echo "$(time -p case x in x) {scratch}/zz;; esac)"', 'bash <<EOF\nr\\\nm -rf {absent}/x\nEOF', 'strace <<EOF\nr\\\nm -rf {absent}/x\nEOF', 'cp helper {scratch}/zz; cat <(coproc zz2 case x in x) {scratch}/zz;; esac)']
+            _corpus = [(c, cwd, opts) for _l, _r, c, cwd, _w, opts in vectors]
+            _corpus += [(prior_command(t), rp, {}) for _l, _c, t, _w in PRIOR_EFFECT_VECTORS]
+            _corpus += [(prior_command(t), rp, {}) for _l, t, _w in PRIOR_EFFECT_CONTROLS]
+            _corpus += [(prior_command(t), rp, {}) for t in _repro]
+            _allow = {"cat <(printf case)": "a data case argument, not a case statement (a false-deny fix)",
+                      "zzf() { true; }; printf ok >&2-; zzf":
+                      "a descriptor MOVE (>&2-), not a file write",
+                      "zzf() { true; }; printf ok >&12-; zzf":
+                      "a descriptor MOVE (>&12-), not a file write",
+                      # The declaration-then-declaration false deny -
+                      # an earlier sibling header predicate recorded the declaration builtin
+                      # itself as a defined function - is an intended, reviewed fix; each entry
+                      # has its own pe-control-*-then-* control row.
+                      "declare -a arr=(); declare -p arr":
+                      "a declaration builtin is no function definition",
+                      "local arr=(); local -p arr":
+                      "a declaration builtin is no function definition",
+                      "readonly arr=(); readonly -p arr":
+                      "a declaration builtin is no function definition",
+                      "export arr=(); export -p":
+                      "a declaration builtin is no function definition",
+                      "typeset -a arr=(); typeset -p arr":
+                      "a declaration builtin is no function definition"}
+            _regress = []
+            _known_results = ("allow", "allow-note", "explicit-allow", "ask", "deny")
+            for _c, _cwd, _opts in _corpus:
+                _base_got = run_base(_c, _cwd, _opts)
+                _new_got = run(_c, _cwd, _opts)
+                if _base_got not in _known_results or _new_got not in _known_results:
+                    failures.append("(dz-differential-malformed) {!r} reduced to base={!r} / new={!r}; an "
+                                    "unexpected or malformed result is a differential failure, never a "
+                                    "pass".format(_c, _base_got, _new_got))
+                    continue
+                if _base_got == "deny" and _new_got != "deny" and _c not in _allow:
+                    _regress.append(_c)
+            for _c in sorted(set(_regress)):
+                failures.append("(dz-differential) base DENIES and the new hook ALLOWS {!r}; a deny-to-allow "
+                                "regression not on the reviewed allow-list".format(_c))
+            # Parent-pin regression lock: the frozen 3123dbce differential
+            # above predates BOTH the raw writer regexes AND the decoded creator-set redesign, so it
+            # cannot see a regression where the IMMEDIATE PARENT PIN e09e999f denied a command the new hook
+            # now allows (coproc curl -o, the stopped-heredoc writers: 3123dbce allows all of these). A
+            # SECOND frozen fixture of the PIN hook, verified against its recorded sha256 before use exactly
+            # as the 3123dbce base is (a git read could return substituted content under a replacement ref;
+            # the frozen bytes cannot), runs the same corpus: every command the pin DENIES the new hook must
+            # still deny. A missing, unreadable, undecodable or WRONG-HASH fixture fails naming the real
+            # cause (fail closed).
+            _pinsha = "e09e999f457121a1ec16f240bd351b6703a7f5ce"
+            _pin_fixture = Path(__file__).resolve().parent / "fixtures" / "aiqt_hooks_pin_e09e999f.frozen"
+            _pin_fixture_sha = "8cdd4d73c02121fe69fbc47e1aaa837673bb5991fc3ecfaa440f0ffc5d2c6597"
+            _pin_blob, _pin_cause = None, None
+            try:
+                _pin_bytes = _pin_fixture.read_bytes()
+            except OSError as _pin_exc:
+                _pin_cause = "the pin fixture file could not be read: {}".format(_pin_exc)
+            else:
+                _pin_got_sha = hashlib.sha256(_pin_bytes).hexdigest()
+                if _pin_got_sha != _pin_fixture_sha:
+                    _pin_cause = ("the pin fixture's sha256 is {} where {} is recorded, so its content "
+                                  "cannot be trusted as the parent pin".format(_pin_got_sha, _pin_fixture_sha))
+                else:
+                    try:
+                        _pin_blob = _pin_bytes.decode("utf-8")
+                    except UnicodeDecodeError as _pin_exc:
+                        _pin_cause = "the pin fixture is not decodable utf-8: {}".format(_pin_exc)
+            if not _pin_blob:
+                failures.append("(dz-pin-differential-base) the parent pin {} could not be loaded from the "
+                                "frozen fixture {}: {}; the parent-pin regression lock cannot run, and a "
+                                "check that cannot read its required input fails closed".format(
+                                    _pinsha[:12], _pin_fixture, _pin_cause))
+            else:
+                _ppath = base / "pin_hooks_differential.py"
+                _ppath.write_text(_pin_blob, encoding="utf-8")
+                _pspec = _ilu.spec_from_file_location("aiqt_hooks_pin_differential", str(_ppath))
+                _pmod = _ilu.module_from_spec(_pspec)
+                _pspec.loader.exec_module(_pmod)
+                _saved_pin_roots = _pmod._destruct_scratch_roots
+
+                def run_pin(command, cwd, opts):
+                    os.environ["HOME"] = opts.get("home", home0)
+                    _pmod._destruct_scratch_roots = (saved_roots if opts.get("real_roots")
+                                                     else (lambda: [scratch_real]))
+                    try:
+                        return _decision(_pmod.destructive_guard, command, cwd=cwd)
+                    finally:
+                        os.environ["HOME"] = home0
+                        _pmod._destruct_scratch_roots = _saved_pin_roots
+
+                _pin_regress = []
+                for _c, _cwd, _opts in _corpus:
+                    _pin_got = run_pin(_c, _cwd, _opts)
+                    _new_got = run(_c, _cwd, _opts)
+                    if _pin_got not in _known_results or _new_got not in _known_results:
+                        failures.append("(dz-pin-differential-malformed) {!r} reduced to pin={!r} / "
+                                        "new={!r}; an unexpected or malformed result is a differential "
+                                        "failure, never a pass".format(_c, _pin_got, _new_got))
+                        continue
+                    if _pin_got == "deny" and _new_got != "deny" and _c not in _allow:
+                        _pin_regress.append(_c)
+                for _c in sorted(set(_pin_regress)):
+                    failures.append("(dz-pin-differential) the parent pin e09e999f DENIES and the new hook "
+                                    "ALLOWS {!r}; a deny-to-allow regression against the immediate parent "
+                                    "pin".format(_c))
+
+        # Outcomes that are not rule-attributed: the boundary, the fail posture, and the snapshot evidence.
+        before = _recovery_refs(repo)
+        for label, command, cwd, want in (
+                ("dz-snapshot-ref", "rm -f notes.txt", rp, "allow-note"),
+                # spellings of the removed opt-out (falsy, last-wins empty, behind a wrapper, on another
+                # segment): each denies, as the same command without the assignment does
+                ("dz-optout-falsy", "GUARDRAIL_ALLOW_DESTRUCTIVE=0 rm -rf {}/appdata".format(absent), rp, "deny"),
+                ("dz-optout-last-wins",
+                 "GUARDRAIL_ALLOW_DESTRUCTIVE=1 GUARDRAIL_ALLOW_DESTRUCTIVE= rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-optout-after-wrapper", "sudo GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/x".format(absent), rp,
+                 "deny"),
+                ("dz-optout-other-segment", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 true; rm -rf {}/x".format(absent), rp,
+                 "deny"),
+                ("dz-glob", "rm -f src/*.py", rp, "deny"),
+                ("dz-relative-no-cwd", "rm -rf build", None, "deny"),
+                ("dz-cd-semicolon", "cd src ; rm -rf pkg", rp, "deny"),
+                ("dz-cd-and-tracked", "cd src && rm -rf pkg", rp, "allow-note"),
+                ("dz-absent-in-repo", "rm -rf src/absent", rp, "allow"),
+                ("dz-dot-git", "rm -rf .git", rp, "deny"),
+                # A bare unbalanced quote is a category-0 recover stop that
+                # leaves text unread, so it denies at full width (no longer the separator-gated allow).
+                ("dz-recover-stop-unbalanced", 'ls "unbalanced', rp, "deny"),
+                ("dz-git-rm", "git rm -r src", rp, "allow"),
+                ("dz-unquoted-subst", "echo $(rm -rf {}/appdata)".format(absent), rp, "deny"),
+                ("dz-subst-benign", 'git log -1 --format="$(echo %H)"', rp, "allow"),
+                ("dz-subst-heredoc-prose", "git commit -m \"$(cat <<'EOF'\nRefuse rm -rf outside scratch\nEOF\n)\"",
+                 rp, "allow"),
+                ("dz-prose-idiom-piped", "git commit -m \"$(cat <<'EOF' | sh\nrm -rf {}/x\nEOF\n)\"".format(absent),
+                 rp, "deny"),
+                ("dz-prose-idiom-runner", "bash -c \"$(cat <<'EOF'\nrm -rf {}/x\nEOF\n)\"".format(absent),
+                 rp, "deny"),
+                ("dz-ls", "ls -la", rp, "allow"),
+                ("dz-kubectl-get", "kubectl get pods", rp, "allow"),
+                # (G) an ordinary untracked FILE named like a regenerable directory is classified normally
+                # (snapshot-then-allow), never name-allowed: the exception requires the DIRECTORY type.
+                # The pinned-code mutant (no type gate) returned a silent "allow" here.
+                ("dz-regenerable-file", "rm src/dist", rp, "allow-note"),
+                ("dz-psql-select", "psql -c 'SELECT 1'", rp, "allow"),
+                # deny-unless-understood forms that also deny through another rule (no single-rule mutant)
+                ("dz-sudo-wrapped", "sudo rm -rf {}/appdata".format(absent), rp, "deny"),
+                ("dz-control-flow", "if true; then rm -rf {}/appdata; fi".format(absent), rp, "deny"),
+                ("dz-busybox", "busybox rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-env-chdir", "env -C {} rm -rf data".format(absent), rp, "deny"),
+                ("dz-sudo-chdir", "sudo -D {} rm -rf data".format(absent), rp, "deny"),
+                ("dz-shell-c", "sh -c 'rm -rf data'", rp, "deny"),
+                ("dz-bash-c", "bash -c \"rm -rf data\"", rp, "deny"),
+                # the false-deny cost stays small: modelled shapes and known non-runners still allow
+                ("dz-cost-nice", "nice rm -rf src/absent", rp, "allow"),
+                ("dz-cost-timeout", "timeout 5 rm -rf src/absent", rp, "allow"),
+                ("dz-cost-env", "env FOO=1 rm -rf src/absent", rp, "allow"),
+                ("dz-cost-sudo-echo", "sudo echo rm -rf /", rp, "allow"),
+                ("dz-cost-grep", 'grep -rn "rm -rf" .', rp, "allow"),
+                ("dz-cost-gh", 'gh pr create --body "drop the rm -rf fallback"', rp, "allow"),
+                ("dz-cost-command-v", "command -v rm", rp, "allow"),
+                ("dz-cost-brace-group", "{ rm -rf src/absent; }", rp, "allow"),
+                ("dz-cost-case", "case x in x) rm -rf src/absent;; esac", rp, "allow"),
+                ("dz-function-body", "function f {{ rm -rf {}/x; }}; f".format(absent), rp, "deny"),
+                ("dz-computed-subst", "$(printf r%s m) -rf {}/x".format(absent), rp, "deny"),
+                ("dz-computed-quoted-subst", "\"$(printf r%s m)\" -rf {}/x".format(absent), rp, "deny"),
+                ("dz-computed-assigned", "X=$(printf r%s m); $X -rf {}/x".format(absent), rp, "deny"),
+                ("dz-prose-mentions-call", "git commit -m \"$(cat <<'EOF'\nFix f() handling of rm -rf\nEOF\n)\"",
+                 rp, "allow"),
+                # the reproduced runner and continuation slips (each allowed at the pinned revision), denied
+                ("dz-repro-xargs-i-rm", "xargs -i rm -rf {}", rp, "deny"),
+                ("dz-repro-xargs-i-unlink", "xargs -i unlink {}", rp, "deny"),
+                ("dz-repro-xargs-i-shred", "xargs -i shred {}", rp, "deny"),
+                ("dz-repro-xargs-i-truncate", "xargs -i truncate -s 0 {}", rp, "deny"),
+                ("dz-repro-xargs-i-dd", "xargs -i dd of={}", rp, "deny"),
+                ("dz-repro-xargs-l", "xargs -l rm -rf {}/data".format(absent), rp, "deny"),
+                ("dz-repro-xargs-e", "xargs -e rm -rf {}/data".format(absent), rp, "deny"),
+                ("dz-repro-xargs-slot", "xargs --process-slot-var SLOT rm -f {}/data".format(absent), rp, "deny"),
+                ("dz-repro-timeout-1e2", "timeout 1e2 rm -f {}/data".format(absent), rp, "deny"),
+                ("dz-repro-sudo-flock", "sudo flock {0}/lock rm -f {0}/data".format(absent), rp, "deny"),
+                ("dz-repro-continuation", "r\\\nm -rf {}/data <<< x".format(absent), rp, "deny"),
+                ("dz-repro-subst-continuation", "echo \"$(r\\\nm -rf {}/data)\"".format(absent), rp, "deny"),
+                ("dz-repro-heredoc-in-quotes", "echo \"<<'EOF' \"\nrm -rf {}/data <<< x".format(absent), rp, "deny"),
+                ("dz-repro-env-chdir-repeat", "env -C {} -C . rm -rf data".format(scratch), rp, "deny"),
+                ("dz-repro-env-split-quotes", "env -S \"r''m -rf {}/data\"".format(absent), rp, "deny"),
+                ("dz-repro-taskset", "taskset -c 0 rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-flock", "flock /tmp/l rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-flock-x", "flock -x /tmp/l rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-flock-truncate", "flock /tmp/l truncate -s0 {}/x".format(absent), rp, "deny"),
+                ("dz-repro-pkexec", "pkexec rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-runuser", "runuser -u root -- rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-setpriv", "setpriv --reuid 1000 rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-strace", "strace -f rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-ltrace", "ltrace rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-xvfb-run", "xvfb-run rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-unbuffer", "unbuffer rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-unshare", "unshare rm -rf {}/x".format(absent), rp, "deny"),
+                ("dz-repro-proot", "proot rm -rf {}/x".format(absent), rp, "deny")):
+            got = run(command, cwd, {})
+            if got != want:
+                failures.append("({}) {!r}: expected {}, got {}".format(label, command, want, got))
+        # the ONE runner table: every runner in it DENIES "RUNNER rm -rf data" from a cwd outside every
+        # repository, the exactly modelled wrappers included (timeout needs its DURATION, so there the bare
+        # form is an unmodelled operand), and the gate-discipline note tier reads the same table
+        for name in sorted(aiqt_hooks._COMMAND_RUNNERS):
+            got = run("{} rm -rf data".format(name), absent, {})
+            if got != "deny":
+                failures.append("(dz-runner-table-{}) {!r} from {}: expected deny, got {}".format(
+                    name, "{} rm -rf data".format(name), absent, got))
+        if (aiqt_hooks._GATE_NOTE_WRAPPERS is not aiqt_hooks._COMMAND_RUNNERS
+                or not set(aiqt_hooks._DESTRUCT_WRAPPER_SPECS) <= aiqt_hooks._COMMAND_RUNNERS):
+            failures.append("(dz-one-runner-table) _GATE_NOTE_WRAPPERS must be _COMMAND_RUNNERS, and every "
+                            "modelled wrapper must be a member of it")
+        if len(_recovery_refs(repo)) <= len(before):
+            failures.append("(dz-snapshot-made) the untracked-delete allow left no new refs/aiqt-recovery/ ref")
+        roots = aiqt_hooks._destruct_scratch_roots()
+        if os.path.realpath("/tmp") not in roots or scratch_real not in roots:
+            failures.append("(dz-roots) the scratch roots {!r} must hold /tmp and the TMPDIR {}"
+                            .format(roots, scratch_real))
+        os.environ["TMPDIR"] = str(tmp)
+        if os.path.realpath(str(tmp)) in aiqt_hooks._destruct_scratch_roots():
+            failures.append("(dz-roots-home) a TMPDIR that is an ancestor of HOME must not be a scratch root")
+        os.environ["TMPDIR"] = str(scratch)
+        aiqt_hooks._record_recovery = lambda *_a, **_k: ("fail", "forced by the self-test")
+        try:
+            got = run("rm notes.txt", rp, {})
+        finally:
+            aiqt_hooks._record_recovery = saved_record
+        if got != "deny":
+            failures.append("(dz-snapshot-fail) a failed recovery snapshot must deny; got {}".format(got))
+        aiqt_hooks._DESTRUCT_BUDGET = -1.0
+        try:
+            got = run("rm src/pkg/a.py", rp, {})
+        finally:
+            aiqt_hooks._DESTRUCT_BUDGET = saved_budget
+        if got != "deny":
+            failures.append("(dz-budget) an operand reached past the time budget must deny; got {}".format(got))
+        # (E) POSITIVE tracked evidence: an EXISTING path git reports nothing about (every probe fact False,
+        # the stand-in for an administrative or otherwise invisible entry) must DENY, never earn a "git can
+        # restore it" note. The mutant is the pinned probe shape (no 'tracked' fact consulted): it allowed.
+        saved_probe = aiqt_hooks._destruct_probe
+        aiqt_hooks._destruct_probe = lambda top, rel, deadline=None: {
+            "ignored": False, "embedded": False, "untracked": False, "dirty": False, "gitlink": False,
+            "tracked": False}
+        try:
+            got = run("rm -rf src/pkg", rp, {})
+        finally:
+            aiqt_hooks._destruct_probe = saved_probe
+        if got != "deny":
+            failures.append("(dz-tracked-evidence) an existing path with no tracked listing must deny; "
+                            "got {}".format(got))
+        # (F) the WORK ITSELF crossing the deadline (a fake clock advancing 2 simulated seconds per reading,
+        # so the 6-second budget passes DURING classification, not before the first operand) must DENY the
+        # completed result. The dz-budget vector above only proves the cheap pre-operand check; the
+        # pinned-code mutant (no deadline threading, no completion check) returned "allow" here.
+        class _FakeClock:
+            def __init__(self):
+                self.now = 0.0
+
+            def __getattr__(self, name):
+                return getattr(saved_time, name)
+
+            def monotonic(self):
+                self.now += 2.0
+                return self.now
+        saved_time = aiqt_hooks.time
+        aiqt_hooks.time = _FakeClock()
+        try:
+            got = run("rm src/pkg/a.py", rp, {})
+        finally:
+            aiqt_hooks.time = saved_time
+        if got != "deny":
+            failures.append("(dz-deadline-crossed) a classification that finishes after the deadline must "
+                            "deny; got {}".format(got))
+        for label, data, want in (
+                ("dz-missing-tool", {"hook_event_name": "PreToolUse", "tool_input": {"command": "rm -rf /"}},
+                 "deny"),
+                ("dz-other-tool", {"hook_event_name": "PreToolUse", "tool_name": "Read",
+                                   "tool_input": {"file_path": "/etc/hosts"}}, "allow"),
+                ("dz-unreadable", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                   "tool_input": {"command": 7}}, "deny")):
+            code, obj, _err = handler(data)
+            got = _reduce_result(code, obj)
+            if got != want:
+                failures.append("({}) expected {}, got {}".format(label, want, got))
+        code, _obj, _err = handler({"hook_event_name": "Stop"})
+        if code != 2:
+            failures.append("(dz-wrong-event) a mis-wired event must hard-block with exit 2; got {}".format(code))
+        if (aiqt_hooks.HANDLERS.get("destructive_guard") is not handler
+                or aiqt_hooks.HANDLER_EVENT.get("destructive_guard") != aiqt_hooks.PRETOOL):
+            failures.append("(dz-wiring) destructive_guard handler/event wiring is missing or wrong")
+        # NO IN-BAND OVERRIDE. The GUARDRAIL_ALLOW_DESTRUCTIVE opt-out skipped every rule for its segment, but
+        # the guarded assistant could type it, so it is removed. (dz-optout-removed-<row>) a command carrying
+        # it gets the decision of the same command without it (deny where the bare command denies), as with
+        # any other leading assignment of a plain value (FOO=1), on a whole command and on a later segment;
+        # the opt-out allowed every deny row with a note. (dz-optout-removed-snapshot) the prefixed untracked
+        # delete takes the recovery snapshot the opt-out skipped. (dz-optout-removed-text-<case>) no reason or
+        # note of the parseable, unparseable and note paths names the removed prefix, and each deny there asks
+        # the operator to run an intended operation themselves. (dz-optout-removed-source) no string in either
+        # hook copy spells a GUARDRAIL_ALLOW_DESTRUCTIVE assignment, and (dz-optout-removed-dead, -dead-live)
+        # its names, rule and _destruct_scan parameter are gone from both copies and the loaded module.
+        def run_text(command, cwd, opts):
+            """(reduced decision, every reason and note text) for one Bash command, set up as run() is."""
+            os.environ["HOME"] = opts.get("home", home0)
+            aiqt_hooks._destruct_scratch_roots = saved_roots if opts.get("real_roots") else (lambda: [scratch_real])
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+            if cwd is not None:
+                data["cwd"] = cwd
+            try:
+                code, obj, _err = handler(data)
+            finally:
+                os.environ["HOME"] = home0
+                aiqt_hooks._destruct_scratch_roots = saved_roots
+            texts = []
+            if isinstance(obj, dict):
+                texts.append(str(obj.get("systemMessage", "")))
+                specific = obj.get("hookSpecificOutput")
+                if isinstance(specific, dict):
+                    texts.append(str(specific.get("permissionDecisionReason", "")))
+            return _reduce_result(code, obj), " ".join(texts)
+
+        removed_prefixes = ("GUARDRAIL_ALLOW_DESTRUCTIVE=1 ", "GUARDRAIL_ALLOW_DESTRUCTIVE=yes ", "FOO=1 ")
+        for label, head, tail, cwd, want, opts in (
+                ("abs-outside", "", "rm -rf {}/appdata".format(absent), rp, "deny", {}),
+                ("root", "", "rm -rf /", rp, "deny", {}),
+                ("home", "", "rm -rf {}".format(clean / "homedir"), rp, "deny", fake_home),
+                ("repo-root", "", "rm -rf {}".format(clean), rp, "deny", {}),
+                ("dot-git", "", "rm -rf .git", rp, "deny", {}),
+                ("ignored", "", "rm .env", rp, "deny", {}),
+                ("find-delete", "", "find . -name '*.pyc' -delete", rp, "deny", {}),
+                ("dropdb", "", "dropdb prod", rp, "deny", {}),
+                ("terraform", "", "terraform destroy -auto-approve", rp, "deny", {}),
+                ("later-segment", "true && ", "rm -rf {}/x".format(absent), rp, "deny", {}),
+                ("unparseable", "", "rm -rf {}/x; cat <<< ok".format(absent), rp, "deny", {}),
+                ("clean-dir", "", "rm -rf src/pkg", rp, "allow-note", {}),
+                ("clean-file", "", "rm src/pkg/a.py", rp, "allow", {}),
+                ("tmpdir", "", "rm -rf {}/work".format(scratch), rp, "allow", real_roots)):
+            bare = run(head + tail, cwd, opts)
+            got = [run(head + prefix + tail, cwd, opts) for prefix in removed_prefixes]
+            if bare != want or got != [want] * len(removed_prefixes):
+                failures.append("(dz-optout-removed-{}) {!r} must be {} bare and with each of {}; got {} bare "
+                                "and {}".format(label, head + tail, want, removed_prefixes, bare, got))
+        refs_before = len(_recovery_refs(repo))
+        got = run("GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm notes.txt", rp, {})
+        if got != "allow-note" or len(_recovery_refs(repo)) != refs_before + 1:
+            failures.append("(dz-optout-removed-snapshot) the prefixed untracked delete must snapshot then allow "
+                            "with a note, as the bare one does; got {} with {} new recovery ref(s)".format(
+                                got, len(_recovery_refs(repo)) - refs_before))
+        for case, command in (
+                ("bare-deny", "rm -rf {}/appdata".format(absent)),
+                ("prefixed-deny", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/appdata".format(absent)),
+                ("unparseable-deny", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf {}/x; cat <<< ok".format(absent)),
+                ("prefixed-note", "GUARDRAIL_ALLOW_DESTRUCTIVE=1 rm -rf src/pkg")):
+            got, text = run_text(command, rp, {})
+            if ("GUARDRAIL_ALLOW" in text.upper()
+                    or (got == "deny" and "ask the human operator to run it themselves" not in text)):
+                failures.append("(dz-optout-removed-text-{}) {!r} gave {} with a reason or note that names the "
+                                "removed prefix or omits the operator-runs-it step: {!r}".format(
+                                    case, command, got, text[:600]))
+        assignment_re = re.compile(r"GUARDRAIL_ALLOW_DESTRUCTIVE[\s()\\+?]*=", re.IGNORECASE)
+
+        def fold(node):
+            """The text of a str constant, a '+' chain of them, or an f-string (an unfoldable field reads as
+            ''), else None."""
+            if isinstance(node, ast.Constant):
+                return node.value if isinstance(node.value, str) else None
+            if isinstance(node, ast.JoinedStr):
+                return "".join(part.value if isinstance(part, ast.Constant) else
+                               (fold(part.value) or "") if isinstance(part, ast.FormattedValue) else ""
+                               for part in node.values)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                left, right = fold(node.left), fold(node.right)
+                return None if left is None or right is None else left + right
+            return None
+
+        def spelled_lines(tree):
+            """Line numbers of every string in `tree` that spells a GUARDRAIL_ALLOW_DESTRUCTIVE assignment."""
+            return sorted({node.lineno for node in ast.walk(tree) if assignment_re.search(fold(node) or "")})
+
+        hook_copies = (Path(aiqt_hooks.__file__),
+                       repo_root() / "plugin" / "aiqt-guardrails-hooks" / "hooks" / "scripts" / "aiqt_hooks.py")
+        for copy in hook_copies:
+            tree = ast.parse(copy.read_text(encoding="utf-8"))
+            if spelled_lines(tree):
+                failures.append("(dz-optout-removed-source) {} has strings spelling a GUARDRAIL_ALLOW_DESTRUCTIVE "
+                                "assignment at lines {}".format(copy, spelled_lines(tree)))
+            bound = {node.name for node in tree.body
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            bound.update(target.id for node in tree.body if isinstance(node, ast.Assign)
+                         for target in node.targets if isinstance(target, ast.Name))
+            live = sorted(bound & {"_DESTRUCT_OPTOUT_RE", "_DESTRUCT_OPTOUT_FALSY"})
+            if live:
+                failures.append("(dz-optout-removed-dead) {} still binds {}".format(copy, live))
+        # the scan itself: each spelling below is caught, and a mention that spells no assignment is not
+        for probe in ("x = 'Prefix GUARDRAIL_ALLOW_DESTRUCTIVE=1 to override.'",
+                      "x = 'GUARDRAIL_ALLOW_' + 'DESTRUCTIVE=yes'", "x = f\"GUARDRAIL_ALLOW_DESTRUCTIVE={'1'}\""):
+            if not spelled_lines(ast.parse(probe)):
+                failures.append("(dz-optout-removed-scan) the assignment scan misses {!r}".format(probe))
+        if spelled_lines(ast.parse("x = 'GUARDRAIL_ALLOW_DESTRUCTIVE, a removed opt-out, is read nowhere'")):
+            failures.append("(dz-optout-removed-scan-mention) the assignment scan flags a mention")
+        scan_code = aiqt_hooks._destruct_scan.__code__
+        if ("optout" in saved_rules or "optout" in scan_code.co_varnames[:scan_code.co_argcount]
+                or hasattr(aiqt_hooks, "_DESTRUCT_OPTOUT_RE") or hasattr(aiqt_hooks, "_DESTRUCT_OPTOUT_FALSY")):
+            failures.append("(dz-optout-removed-dead-live) the loaded hook still carries the optout rule, the "
+                            "_destruct_scan optout parameter or an opt-out name")
+    finally:
+        aiqt_hooks._destruct_scratch_roots = saved_roots
+        aiqt_hooks._DESTRUCT_RULES = saved_rules
+        aiqt_hooks._record_recovery = saved_record
+        aiqt_hooks._DESTRUCT_BUDGET = saved_budget
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 # pgrep_self_match rows (trkasy): each deny row is a process check that can match the shell running it (pgrep,
@@ -4675,6 +6264,22 @@ _DEADLINE_SHAPES = {
     "ansi_c_herestr": lambda n, base: ("Bash", {"command": _repeat("git $'\\x41' ", n, " <<<x")}),
     "ansi_c_noverify_after": lambda n, base: ("Bash", {"command": _repeat(
         "git $'\\x41' ", n, "; git commit --no-$'\\x76'erify -m x <<<x")}),
+    # The destructive guard's own scans, each over one long quoted argument of an unmodelled command, which the
+    # guard reads as text. Its text-marker regex backtracked over the rest of the line for every head word: one
+    # call of the text marker took about 30.7 s of CPU on 16 KB of git reset and about 4.1 s on 16 KB of dd.
+    # Its function-header pattern tried every letter of a name run: one search took about 4.0 s on a 16 KB
+    # name. Its shell-context reading walked back over every empty ANSI-C body for each character: one call
+    # took about 0.27 s on 16 KB of $''. (Each figure is one in-process call of that function alone, before
+    # this change, on an 80-core host with Python 3.14.4, 2026-10-29.) The *_after form ends the git reset
+    # run with --hard, which the text scan must deny within the bound; a run of true commands ending in shred
+    # times the per-segment work up to a deny.
+    "text_git_reset_run": lambda n, base: ("Bash", {"command": "x '" + _repeat("git reset ", n - 3, "'")}),
+    "text_git_reset_hard_after": lambda n, base: ("Bash", {"command": "x '" + _repeat(
+        "git reset ", n - 3, "--hard'")}),
+    "text_dd_run": lambda n, base: ("Bash", {"command": "x '" + _repeat("dd ", n - 3, "'")}),
+    "name_run": lambda n, base: ("Bash", {"command": "x " + "a" * (n - 2)}),
+    "ansi_c_empty_run": lambda n, base: ("Bash", {"command": "x " + _repeat("$''", n - 2)}),
+    "sep_semicolon_shred_after": lambda n, base: ("Bash", {"command": _repeat("true;", n, "shred x")}),
     "write_content": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": "a" * n}),
     "write_secretish": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": _repeat("a=", n)}),
     "write_deep_path": lambda n, base: ("Write", {"file_path": base + _repeat("/a", n - len(base)),
@@ -4756,6 +6361,10 @@ _DEADLINE_CASES = {
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens", "procsubst_run_after"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
+    "destructive_guard": ("git_words", "sep_semicolon", "sep_semicolon_shred_after", "fg_detach_after",
+                          "fg_arith_open", "nest_cmdsubst", "redirects_many", "procsubst_run_after",
+                          "text_git_reset_run", "text_git_reset_hard_after", "text_dd_run", "name_run",
+                          "ansi_c_empty_run"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
                        "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after",
@@ -4789,7 +6398,8 @@ _DEADLINE_PLAIN_CASES = {
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
     ("bash_absolute_paths", "dq_case_substs_after"),
-    ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
+    ("commit_msg_subst", "subst_after"), ("destructive_guard", "sep_semicolon_shred_after"),
+    ("destructive_guard", "text_git_reset_hard_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
@@ -7716,6 +9326,31 @@ def _fixture_tmpdir(prefix):
     raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
 
 
+def _ledger_last_line_failures(last_line):
+    """The failure labels the recovery ledger LAST line earns (empty when it is a well-formed JSON
+    OBJECT carrying the required fields). json.loads of a JSON null returns None, the SAME sentinel a
+    decode failure uses, so the object gate is REQUIRED before the field checks: a null, list, number,
+    string or boolean last line earns (rec-ledger-json-object) and never silently skips the field checks.
+    The ledger records the bare VERB, the ref, sha, classes and restore command,
+    never the raw command."""
+    try:
+        rec = json.loads(last_line)
+    except ValueError:
+        return ["(rec-ledger-json) the ledger's last line is not a JSON record"]
+    if not isinstance(rec, dict):
+        return ["(rec-ledger-json-object) the last line decoded but is not a JSON OBJECT; a null or "
+                "non-object record must not pass the field checks"]
+    out = []
+    for key in ("ts", "repo", "verb", "ref", "sha", "classes", "restore"):
+        if key not in rec:
+            out.append("(rec-ledger-field) ledger record missing key {!r}".format(key))
+    if rec.get("verb", "x").startswith("git") or " " in rec.get("verb", " "):
+        out.append("(rec-ledger-verb) ledger 'verb' should be a bare subcommand, got {!r}".format(rec.get("verb")))
+    if rec.get("ref", "") not in rec.get("restore", ""):
+        out.append("(rec-ledger-restore) the restore command should reference the ref")
+    return out
+
+
 _PL239_DEADLINE_NOTE = "commit evaluation deadline exhausted"
 # A deadline denial on every launch while a MEASURED load factor read at each launch stayed at or below
 # this (the host ran about as much work as it has CPUs) is reported as a latency regression: a failure,
@@ -9454,20 +11089,19 @@ def _main_isolated(monitor):
             failures.append("(rec-ledger) expected the recovery ledger to exist after snapshots")
         else:
             lines = [ln for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
-            try:
-                rec = json.loads(lines[-1])
-            except (ValueError, IndexError):
-                rec = None
+            if not lines:
                 failures.append("(rec-ledger-json) the ledger's last line is not a JSON record")
-            if rec is not None:
-                for key in ("ts", "repo", "verb", "ref", "sha", "classes", "restore"):
-                    if key not in rec:
-                        failures.append("(rec-ledger-field) ledger record missing key {!r}".format(key))
-                if rec.get("verb", "x").startswith("git") or " " in rec.get("verb", " "):
-                    failures.append("(rec-ledger-verb) ledger 'verb' should be a bare subcommand, got {!r}"
-                                    .format(rec.get("verb")))
-                if rec.get("ref", "") not in rec.get("restore", ""):
-                    failures.append("(rec-ledger-restore) the restore command should reference the ref")
+            else:
+                failures.extend(_ledger_last_line_failures(lines[-1]))
+            # Run the REAL ledger validator on a last line that is a
+            # JSON null, list, number, string and boolean. json.loads of a JSON null returns None, the SAME
+            # sentinel a decode failure uses, so each MUST earn (rec-ledger-json-object); removing the object
+            # gate from _ledger_last_line_failures turns this red (the former loop only tested json round-trip).
+            for _nonobj in ("null", "[]", "1", json.dumps("x"), "true"):
+                if not any(f.startswith("(rec-ledger-json-object)")
+                           for f in _ledger_last_line_failures(_nonobj)):
+                    failures.append("(rec-ledger-nonobj-{}) a non-object ledger last line must earn the "
+                                    "object-gate failure".format(_nonobj))
 
         # (rec-idxfile) A: an ambient GIT_INDEX_FILE is a TARGET-REDIRECT var. The probe would scrub it and
         # read the real cwd repo, but the guard cannot scrub it from the ACTUAL command, which would discard
@@ -27155,6 +28789,7 @@ def _main_isolated(monitor):
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
         _test_stream_failure_exits(failures)
+        _test_destructive_guard(failures, tmp)
         _test_stop_field_claim_check(failures, tmp)
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
@@ -27884,7 +29519,7 @@ def _main_isolated(monitor):
     _bash_guards = [aiqt_hooks.diff_source_pretool, aiqt_hooks.bash_absolute_paths,
                     aiqt_hooks.git_explicit_binding, aiqt_hooks.git_discard, aiqt_hooks.protected_line,
                     aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst,
-                    aiqt_hooks.gensrc_guard]
+                    aiqt_hooks.destructive_guard, aiqt_hooks.gensrc_guard]
     _bash_vectors = [
         "git status", "ls -la", "git diff", "git diff --color=always | grep foo", "/usr/bin/git diff",
         "git checkout -- file.txt", "git reset --hard", "git reset --soft", "git clean -fd",
@@ -27895,6 +29530,7 @@ def _main_isolated(monitor):
         'git commit -m "fix `whoami`"', "git commit -m x", "git -c alias.co=checkout co -- f",
         "git checkout-index -a -f", "eval 'git reset --hard'", 'git reset --hard "unbalanced',
         'git push --force "unbalanced', 'git commit -m "x `y', "git branch --track t origin/x",
+        "rm -rf /srv/aiqt-noask-absent", 'rm -rf "unbalanced', "find . -delete", "rm -f rel.txt",
     ]
     for _g in _bash_guards:
         for _cmd in _bash_vectors:
@@ -28219,7 +29855,17 @@ def _main_isolated(monitor):
           "the frozen/floor denials are evaluated BEFORE the companion-store allow so a symlink into a "
           "declared store cannot bypass the freeze, so a companion_stores widening cannot "
           "be self-declared through a guarded tool; the general Bash-write path stays the disclosed wrtscp "
-          "residual. A "
+          "residual. sechau/secrst (destructive_guard) is DENY UNLESS UNDERSTOOD: it DENIES-and-educates a "
+          "destructive operation with no verified restore path (a path outside scratch and every repository, "
+          "the home directory, a repository root, a .git administrative entry, ignored or nested-repository or "
+          "submodule content, an unresolvable or symlink-escaping '..' operand, find -delete, a device, database "
+          "or cloud destroyer) and any destructive word in a shape it does not model exactly (an unmodelled "
+          "runner or wrapper option, a known command in a running form, a computed command word, a continuation, "
+          "heredoc or ANSI-C construct, a fed pipeline or heredoc, a substitution, an unparseable command), "
+          "SNAPSHOT-THEN-ALLOWS untracked repository content, and ALLOWS tracked clean content (positive "
+          "ls-files evidence, a note on a recursive delete), a literal scratch path, and a regenerable build "
+          "directory (the directory type required); no in-band override exists, so a command carrying the "
+          "removed GUARDRAIL_ALLOW_DESTRUCTIVE prefix with a plain value gets the decision of the same command without it. A "
           "mis-wired PreToolUse event hard-blocks (exit 2). Historical note: several guards were "
           "originally ASK-based; this suite now asserts the no-ask outcomes above and the global "
           "invariant guarantees none reverts to an ask.")
