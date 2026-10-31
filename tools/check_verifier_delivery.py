@@ -168,8 +168,8 @@ Rules:
      colon in any case, or a table cell that is exactly INPUT or INPUTS) is
      CANNOT_EVALUATE, exactly what the brief lint refuses before a brief is sent, so the two readings
      cannot disagree, and a text the vendored parser cannot read, or one over the shared reading's own
-     bounds (its text ceiling, whitespace-run and nesting prescans, and parse deadline), is
-     CANNOT_EVALUATE, never read another way. The path is compared as text and never opened. A BLOCKERS FOUND or any other verdict
+     bounds (its text ceiling, its whitespace-run, nesting and inline-mark cost prescans, and its parse
+     deadline), is CANNOT_EVALUATE, never read another way. The path is compared as text and never opened. A BLOCKERS FOUND or any other verdict
      is unchanged, and an UNVERIFIABLE answer that names no declared input is legitimate as above.
      Coverage n/m is reported: n answered answers, m the brief's numbered questions.
   C2 verbatim. Every fenced code block, every blockquote run and every inline double-quoted span must
@@ -2521,11 +2521,32 @@ def _self_test_cases(fx):
         BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "Inp&#117;t: /abs/in.md"))],
         ["CANNOT_EVALUATE"] * 10)
     # the shared reading's own bounds refuse a brief up front, whatever else it holds: a marker run that
-    # nests past the nesting ceiling, and a whitespace run past the run ceiling
+    # nests past the nesting ceiling, a run past the whitespace-run ceiling of any character the parser
+    # reads as whitespace (a vertical tab and a no-break space here, not only a space), and the three
+    # total-cost sums (whitespace runs, deep marker openings, inline marks) each just past its cap
     check("c1/brief-bounds-cannot-evaluate", [verdict(fx.run(unread, brief)) for brief in (
         BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "1) " * 150 + "x"),
-        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "a" + " " * 2001 + "b"))],
-        ["CANNOT_EVALUATE"] * 2)
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "a" + " " * 2001 + "b"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "a" + "\x0b" * 2001 + "b"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "a" + "\xa0" * 2001 + "b"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n",
+                                     "INPUT: /abs/in.md\n" + ("a" + " " * 2000 + "b\n\n") * 9),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n",
+                                     "INPUT: /abs/in.md\n" + ("> " * 13 + "x\n\n") * 21),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n",
+                                     "INPUT: /abs/in.md\n\n" + "*a" * 32769 + "\n"))],
+        ["CANNOT_EVALUATE"] * 7)
+    # inside the bounds the brief evaluates, and a block is read as it reads alone: the same deep fenced
+    # example after an unrelated five-deep list and a heading evaluates like the fenced example by itself
+    deep_example = ("```yaml\n"
+                    + "".join("        " * level + "- k%d:\n" % level for level in range(18)) + "```\n")
+    check("c1/brief-bounds-block-local", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT_DECLARED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n\n" + deep_example),
+        BRIEF_INPUT_DECLARED.replace(
+            "BRIEF-PIN: {pin}\n",
+            "BRIEF-PIN: {pin}\n\n" + "".join("  " * level + "- a\n" for level in range(5))
+            + "\n# Notes\n\n" + deep_example))],
+        ["NO_VOTE"] * 2)
     # the declarations come from the shared parser seam: with it patched to declare nothing, the en-dash
     # look-alike is read past (the legacy per-tool reading) and the clean verdict stands
     endash = BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2013) + " INPUT: /abs/in.md")

@@ -28,18 +28,31 @@ depends on unrelated content elsewhere in the brief: a text over MAX_TEXT_BYTES 
 the real-brief corpus measures under 224 KiB and every real brief under 64 KiB, so the ceiling holds each
 with wide margin) is refused up front in forbidden(), whatever it holds; a text that can nest blocks more
 than MAX_NESTING_DEPTH levels deep (judged by _nesting_refused, a conservative prescan over marker runs
-and indentation) is refused up front too, because the parser reads a run of quote markers in time that
-grows about fourfold per level and a single long regex match holds the interpreter where no in-process
-deadline can stop it; a line holding a run of more than MAX_WHITESPACE_RUN consecutive spaces or tabs is
-refused the same way, because the parser reads such a run in time that grows with the square of the run,
-also inside matches a deadline cannot interrupt; both prescans run on every text, so neither refusal
-depends on whether the rest of the brief forces a parse. The parse itself runs in a fresh daemon thread
-(a full recursion stack, whatever the caller's depth) joined under PARSE_DEADLINE_SECONDS, so a
-pathological shape the parser reads superlinearly in many steps costs at most about the deadline and is
-then refused, never trusted partial. Named residuals: a thread a missed deadline abandons may keep
-consuming CPU until the process exits, and the deadline fires only when the parser is between matches, so
-a single match that runs long under the bounds above would stretch it; both are availability, never a
-wrong verdict. A brief that is pure ASCII, holds no "nput" substring in any case and none of the characters that
+and indentation whose running depth follows block structure, resetting where a new top-level block must
+start, so a block's outcome never depends on content before its block) is refused up front too, because
+the parser opens a run of nested quote markers in time that grows about twofold per level and a single
+long regex match holds the interpreter where no in-process deadline can stop it; a line holding a run of
+more than MAX_WHITESPACE_RUN consecutive whitespace characters (the class the parser itself reads as
+whitespace, vertical tab and no-break space included, never only space and tab) is refused the same way,
+because the parser reads such a run in time that grows with the square of the run, also inside matches a
+deadline cannot interrupt. Each of those costs is additive across a text, so a text inside every per-item
+bound could still be slow in total, answered on an idle host and refused on a busy one; three total-cost
+bounds close that gap, each a sum the parser's measured cost grows with, capped where each sum's worst
+measured in-bound text parses in about a second: MAX_WHITESPACE_COST over squared whitespace-run
+lengths, MAX_NESTING_COST over deep marker openings, and MAX_INLINE_MARK_COST over squared per-chunk
+counts of emphasis, strikethrough and code-span marks. The worst in-bound text measured on the vendored
+pin, a text at the byte ceiling sitting at every cost cap at once with the rest deep steady quote
+lines, parses in about 3.2 s, well under the deadline. Every prescan runs on every text, so no refusal depends on
+whether the rest of the brief forces a parse. The parse itself runs in a fresh daemon thread (a full
+recursion stack, whatever the caller's depth) joined under PARSE_DEADLINE_SECONDS, a backstop for shapes
+outside the measured model: a pathological shape the parser reads superlinearly in many steps costs at
+most about the deadline and is then refused, never trusted partial. Named residuals, each availability
+only, never a wrong verdict: a thread a missed deadline abandons may keep consuming CPU until the process
+exits; in a long-lived process such abandoned threads accumulate and compete with later parses, which can
+push a later in-bound parse past its own deadline; process exit itself can be delayed while an abandoned
+thread sits inside one long regex match, since the main thread cannot run until the match steps; and the
+deadline fires only when the parser is between matches, so a single match that runs long under the bounds
+above would stretch it. A brief that is pure ASCII, holds no "nput" substring in any case and none of the characters that
 can make rendered text differ from source text (RENDERING_MARK_RE: a character reference's &, emphasis or
 strikethrough or code marks, a link bracket, inline HTML's <, a backslash escape) is answered without
 parsing: nothing in such a text can render, spell or disguise the label, and ASCII holds no format
@@ -114,22 +127,66 @@ MARKO_VERSION = "2.2.4"           # the exact vendored pin; any other resolved v
 # the brief ceiling, enforced on every text before any other rule: 512 KiB holds every file of the
 # real-brief corpus (largest file under 224 KiB, largest real brief under 64 KiB) with wide margin
 MAX_TEXT_BYTES = 1 << 19
-# the parse must finish within this wall-clock bound or the text is refused (DeclarationError): an
-# ordinary text at the ceiling parses in well under a second, so the margin is wide
+# the parse must finish within this wall-clock bound or the text is refused (DeclarationError): a plain
+# text exactly at the ceiling parses in about 0.7 s on the vendored pin, and the worst measured in-bound
+# text (at the byte ceiling and at every cost cap below at once) in about 3.2 s, so an in-bound text
+# stays well under the deadline and the deadline is only a backstop for shapes outside the measured model
 PARSE_DEADLINE_SECONDS = 10.0
-# the nesting ceiling, judged by the prescan in forbidden() before any parse: the parser reads a run of
-# quote markers on one line in time that grows about fourfold per level (measured on the vendored pin:
-# 0.06 s at 20, 3.6 s at 26), and a single long regex match holds the interpreter so no deadline can stop
-# it mid-match, so the depth is capped where the worst parse stays well under a tenth of a second; a real
-# brief nests far shallower
+# the nesting ceiling, judged by the prescan in forbidden() before any parse: the parser opens a run of
+# quote markers on one line in time that grows about twofold per level (measured on the vendored pin:
+# about 0.06 s at 20, about 4 s at 26), and a single long regex match holds the interpreter so no
+# deadline can stop it mid-match, so the depth is capped where the worst single opening stays near a
+# tenth of a second; a real brief nests far shallower
 MAX_NESTING_DEPTH = 20
-# the longest run of consecutive spaces and tabs a line may hold, judged in forbidden() before any parse:
-# the parser reads a whitespace run in time that grows with the square of the run, inside single regex
-# matches the deadline cannot interrupt (measured on the vendored pin: 93.5 s at a 64 KiB run), while a
-# run at this bound costs well under a tenth of a second; a real brief's longest run (alignment padding,
-# indented code) is far shorter
+# the total parse cost of a text's nested openings: re-opening nested levels (a marker line after a
+# blank line, or a line deeper than the one before it) costs the parser about two to the depth times
+# 1e-7 s, additively across openings (measured on the vendored pin with only the depth ceiling applied:
+# 0.10 s for one 20-deep quote opening, 2.1 s for twenty of them blank-separated), so a text inside the
+# per-line depth ceiling could still be slow in total (16,000 blank-separated 13-marker quote openings
+# stay inside every per-line bound and measured past the 10 s deadline), where whether it answered would
+# depend on host load, not text. _nesting_refused charges each line that opens levels beyond those
+# still open two to the power of its depth and caps the sum at ten full-depth openings' worth, about
+# one second of measured opening cost; a line that only continues already-open levels costs the parser
+# little at any in-bound depth (a text at the ceiling made of 20-deep quote lines measures about 1.2 s)
+# and is charged nothing
+MAX_NESTING_COST = 10 * (1 << MAX_NESTING_DEPTH)
+# the block-structure resets of _nesting_refused, a patchable seam for its callers' self-tests
+NESTING_RESETS = True
+# the longest run of consecutive whitespace characters a line may hold, judged in forbidden() before any
+# parse. The run class is the parser's own whitespace by construction, never a remembered list: every
+# whitespace test in the vendored tree is Python's \s or the isspace/strip predicate behind it
+# (marko/patterns.py whitespace r"\s+"; marko/inline_parser.py whitespace_re r"\s", the emphasis
+# flanking test; marko/helpers.py normalize_label r"\s+"; marko/block.py SetextHeading str.isspace,
+# ThematicBreak r"\s+", BlankLine str.strip, and the [^\n\S] classes of the Heading and HTML patterns;
+# marko/ext/gfm/elements.py task-list r"\s", the autolink lookbehinds, the table splitter r"\s*" and the
+# alert pattern r"\s*"), so the class here is [^\S\n], exactly \s minus the LF line end: space, tab,
+# U+000B VERTICAL TAB, the information separators U+001C..U+001F, U+00A0 NO-BREAK SPACE, U+1680 OGHAM
+# SPACE MARK, U+2000..U+200A, U+202F, U+205F and U+3000, plus the five SEPARATORS, which the caller
+# refuses first as line separators. The parser reads one run in time that grows with the square of its
+# length, inside single regex matches the deadline cannot interrupt (measured on the vendored pin:
+# 93.5 s at a 64 KiB space run, 52 s at a 64 KiB vertical-tab run; about 0.1 s at this bound for space,
+# vertical tab and no-break space alike); a real brief's longest run (alignment padding, indented code)
+# is far shorter
 MAX_WHITESPACE_RUN = 2000
-WHITESPACE_RUN_RE = re.compile(r"[ \t]{%d}" % (MAX_WHITESPACE_RUN + 1))
+WHITESPACE_RUN_RE = re.compile(r"[^\S\n]{%d}" % (MAX_WHITESPACE_RUN + 1))
+# the total parse cost of a text's whitespace runs: a run costs the parser about its length squared times
+# 3e-8 s at worst (a no-break-space run in its own paragraph), additively across runs, so a text inside
+# the per-run bound could still be slow in total (260 runs of 2000 spaces measured 11 s, an answer or a
+# deadline refusal depending on host load, not text). _whitespace_refused charges each maximal run of two
+# or more class characters its length squared and caps the sum at eight full-length runs, which parse in
+# about one second
+MAX_WHITESPACE_COST = 8 * MAX_WHITESPACE_RUN ** 2
+WHITESPACE_COST_RE = re.compile(r"[^\S\n]{2,}")
+# the total parse cost of a text's inline marks: the parser's inline delimiter pass costs about the
+# square of one paragraph's count of emphasis, strikethrough and code-span marks times 5e-10 s (measured
+# on the vendored pin: 0.5 s at 32,768 asterisks in one paragraph, 14.6 s at 131,071, where the deadline
+# would decide by host load, not text; backtick, tilde and underscore shapes measure cheaper), additively
+# across paragraphs. _inline_marks_refused counts marks per chunk of lines between blank lines, which
+# covers every paragraph the chunk can hold (marks in code are counted too, over-counting only, so a
+# fenced example never widens what is read), charges each chunk its count squared and caps the sum at one
+# full chunk of 32,768 marks, which parses in about half a second
+MAX_INLINE_MARK_COST = 1 << 30
+INLINE_MARK_CHARACTERS = "*_~`"
 # the characters that can make rendered text differ from source text: a character reference (&#78;),
 # emphasis, strikethrough or code marks, a link bracket, inline HTML and a backslash escape; a pure-ASCII
 # text with none of them and no "nput" substring cannot render or disguise the label and skips the parse
@@ -251,19 +308,20 @@ def _parse(text):
     that misses the deadline, a parse exception (a recursion error included) and a document span that does
     not cover `text` (the parser's buffer rewrites are length-preserving only over LF-only text, which
     forbidden() guarantees first) are DeclarationError, fail closed. A thread a missed deadline abandons
-    may keep consuming CPU until the process exits; the refusal itself is prompt and the residual is
+    may keep consuming CPU until the process exits; the refusal itself is prompt, and the residuals (the
+    module docstring names each: abandoned threads accumulating in a long-lived process and competing
+    with later parses, and process exit waiting out an abandoned thread's current match) are
     availability, never a wrong verdict."""
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
         raise DeclarationError("the brief is larger than {} bytes, over this reading's ceiling".format(
             MAX_TEXT_BYTES))
     # the same prescans forbidden() runs, kept here too so no caller can reach an unbounded parse: these
-    # shapes cost the parser time single matches hold, which the deadline below cannot interrupt
-    if WHITESPACE_RUN_RE.search(text) is not None:
-        raise DeclarationError("the brief holds a run of more than {} consecutive spaces or tabs, over "
-                               "this reading's bound".format(MAX_WHITESPACE_RUN))
-    if _nesting_refused(text) is not None:
-        raise DeclarationError("the brief nests lists or quotes more than {} levels deep, over this "
-                               "reading's bound".format(MAX_NESTING_DEPTH))
+    # shapes cost the parser time the deadline below cannot soundly bound, inside single matches it
+    # cannot interrupt or in sums of steps whose refusal would otherwise depend on host load
+    for prescan in (_whitespace_refused, _nesting_refused, _inline_marks_refused):
+        found = prescan(text)
+        if found is not None:
+            raise DeclarationError("the brief is over this reading's bounds: " + found[1])
     marko, gfm_elements = _load_marko()
     outcome = []
 
@@ -597,34 +655,127 @@ def _lead_shape(line):
     return markers, columns
 
 
+# a line that must start a new block at the document's top level when it carries no lead markers and
+# under two lead columns: an ATX heading (one to six #, then whitespace or the line's end, as the
+# parser's Heading pattern requires) or a code fence (three or more backticks with no backtick in the
+# info string, as FencedCode.match requires, or three or more tildes with any info string). Each breaks
+# a paragraph, so it is never a lazy continuation, and under two columns it cannot continue any list
+# item's content, whose indent is at least two
+BLOCK_START_RE = re.compile(r" ?(?:#{1,6}(?=\s|$)|`{3,}[^`\n]*$|~{3,})")
+
+
 def _nesting_refused(text):
-    """The number of the first line whose lead can take the document past MAX_NESTING_DEPTH nested
-    levels, or None. A conservative upper bound, never a parse: a line's marker tokens each open at most
-    one level, and its leading whitespace continues at most the levels already opened (every two columns
-    one level, and never more than any earlier line opened), so a deeply indented fence body or
-    continuation line alone opens nothing, while a run of markers on one line, or marker lines that march
-    deeper line by line, is counted in full. Over-counting only refuses more (a fenced example shaped like
-    a deeper-than-the-ceiling list is refused with the real thing), never less."""
+    """(line number, reason) for the first line whose lead can take the document past MAX_NESTING_DEPTH
+    nested levels, or whose opening takes the text's summed opening cost over MAX_NESTING_COST; None when
+    neither. A conservative upper bound, never a parse: a line's marker tokens each open at most one
+    level, and its leading whitespace continues at most the levels already opened (every two columns one
+    level, and never more than any earlier line of the same block run opened), so a deeply indented fence
+    body or continuation line alone opens nothing, while a run of markers on one line, or marker lines
+    that march deeper line by line, is counted in full. The running depth follows block structure: it
+    resets to zero where a new top-level block must start, at a non-blank line with no lead markers and
+    under two lead columns that either follows a blank line (nothing open can read it as item content,
+    which needs two columns, or as a lazy continuation, which needs an open paragraph) or opens an ATX
+    heading or code fence (BLOCK_START_RE, which breaks a paragraph too), so a block's outcome never
+    depends on content before its block; blank is what the parser's BlankLine reads as blank (str.strip,
+    every whitespace character). Opening cost: a line whose depth exceeds the levels still open from the
+    lines before it is charged two to the power of its depth, the growth the parser's opening time was
+    measured to follow, and a blank line closes every open level for this charge, as it closes an open
+    quote (for an open list it over-charges the next marker line, never under). Over-counting only
+    refuses more (a fenced example shaped like a deeper-than-the-ceiling list is refused with the real
+    thing), never less."""
     running = 0
+    open_levels = 0
+    cost = 0
+    after_blank = True
     for number, line in enumerate(text.split("\n"), 1):
+        if not line.strip():
+            after_blank = True
+            open_levels = 0
+            continue
         markers, columns = _lead_shape(line)
+        if NESTING_RESETS and markers == 0 and columns < 2 \
+                and (after_blank or BLOCK_START_RE.match(line)):
+            running = 0
+        after_blank = False
         depth = min(running, columns // 2) + markers
         if depth > MAX_NESTING_DEPTH:
-            return number
+            return number, (
+                "the line's leading list or quote markers and indentation open more than {} nested "
+                "levels, deeper than this reading evaluates; flatten the nesting".format(
+                    MAX_NESTING_DEPTH))
         if depth > running:
             running = depth
+        if depth > open_levels:
+            cost += 1 << depth
+            if cost > MAX_NESTING_COST:
+                return number, (
+                    "the brief's nested list and quote openings, counted together, cost the parser more "
+                    "than this reading evaluates (the summed opening cost is over {}); flatten the "
+                    "nesting or open deep levels fewer times".format(MAX_NESTING_COST))
+        open_levels = depth
+    return None
+
+
+def _whitespace_refused(text):
+    """(line number, reason) for the first line holding a whitespace run of more than MAX_WHITESPACE_RUN
+    characters of the parser's whitespace class, or the line whose run takes the text's summed squared
+    run length over MAX_WHITESPACE_COST (the growth the parser's reading time was measured to follow);
+    None when neither."""
+    run = WHITESPACE_RUN_RE.search(text)
+    if run is not None:
+        return text.count("\n", 0, run.start()) + 1, (
+            "the line holds a run of more than {} consecutive whitespace characters (space, tab or any "
+            "other character the parser reads as whitespace), which the parser reads in time that grows "
+            "with the square of the run; break the run".format(MAX_WHITESPACE_RUN))
+    total = 0
+    for match in WHITESPACE_COST_RE.finditer(text):
+        length = match.end() - match.start()
+        total += length * length
+        if total > MAX_WHITESPACE_COST:
+            return text.count("\n", 0, match.start()) + 1, (
+                "the brief's whitespace runs, counted together, cost the parser more than this reading "
+                "evaluates (the summed squared run length is over {}); shorten or break the runs".format(
+                    MAX_WHITESPACE_COST))
+    return None
+
+
+def _inline_marks_refused(text):
+    """(line number, reason) for the line that takes the summed squared count of inline marks (the
+    INLINE_MARK_CHARACTERS: emphasis, strikethrough and code-span marks, whose delimiter pass the parser
+    runs per paragraph in time that grows with the square of the marks) over MAX_INLINE_MARK_COST; None
+    otherwise. Marks are counted per chunk of lines between blank lines (blank as the parser's BlankLine
+    reads it), which covers every paragraph the chunk can hold; marks inside code are counted with the
+    rest, over-counting only."""
+    total = 0
+    count = 0
+    for number, line in enumerate(text.split("\n"), 1):
+        if not line.strip():
+            total += count * count
+            count = 0
+            continue
+        marks = sum(line.count(character) for character in INLINE_MARK_CHARACTERS)
+        if marks:
+            count += marks
+            if total + count * count > MAX_INLINE_MARK_COST:
+                return number, (
+                    "the brief's emphasis, strikethrough and code marks, counted together, cost the "
+                    "parser more than this reading evaluates (the summed squared per-paragraph count is "
+                    "over {}); split the marks across paragraphs or quote them in fewer runs".format(
+                        MAX_INLINE_MARK_COST))
     return None
 
 
 def forbidden(text):
     """(line number, reason) for the first line separator other than LF anywhere in `text`, for the first
-    line holding a whitespace run over MAX_WHITESPACE_RUN, for the first line whose lead opens more than
-    MAX_NESTING_DEPTH nested levels (_nesting_refused), or for the first format character (category Cf)
-    outside the parsed document's code blocks and code spans; None when there is none. The run and nesting
-    prescans are judged on every text whatever else it holds, so those refusals never depend on unrelated
-    content. DeclarationError for a text over MAX_TEXT_BYTES (refused here up front, parse path or not)
-    and when a Cf stands in text the vendored parser cannot read. The Cf region check is one sorted sweep:
-    positions ascend, so one pointer over the sorted regions visits each region once."""
+    line a cost prescan refuses (_whitespace_refused for a run over MAX_WHITESPACE_RUN or a summed run
+    cost over MAX_WHITESPACE_COST, _nesting_refused for a lead past MAX_NESTING_DEPTH or a summed opening
+    cost over MAX_NESTING_COST, _inline_marks_refused for a summed mark cost over MAX_INLINE_MARK_COST),
+    or for the first format character (category Cf) outside the parsed document's code blocks and code
+    spans; None when there is none. The cost prescans are judged on every text whatever else it holds, so
+    those refusals never depend on unrelated content. DeclarationError for a text over MAX_TEXT_BYTES
+    (refused here up front, parse path or not) and when a Cf stands in text the vendored parser cannot
+    read. The Cf region check is one sorted sweep: positions ascend, so one pointer over the sorted
+    regions visits each region once."""
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
         raise DeclarationError("the brief is larger than {} bytes, over this reading's ceiling".format(
             MAX_TEXT_BYTES))
@@ -633,16 +784,10 @@ def forbidden(text):
         line = text.count("\n", 0, found.start()) + 1
         return line, "the brief holds a line separator other than LF ({}); only LF ends a line".format(
             SEPARATORS[found.group(0)])
-    run = WHITESPACE_RUN_RE.search(text)
-    if run:
-        return text.count("\n", 0, run.start()) + 1, (
-            "the line holds a run of more than {} consecutive spaces or tabs, which the parser reads in "
-            "time that grows with the square of the run; break the run".format(MAX_WHITESPACE_RUN))
-    deep = _nesting_refused(text)
-    if deep is not None:
-        return deep, ("the line's leading list or quote markers and indentation open more than {} nested "
-                      "levels, deeper than this reading evaluates; flatten the nesting".format(
-                          MAX_NESTING_DEPTH))
+    for prescan in (_whitespace_refused, _nesting_refused, _inline_marks_refused):
+        refused = prescan(text)
+        if refused is not None:
+            return refused
     if text.isascii():   # ASCII holds no format character
         return None
     positions = [index for index, character in enumerate(text)

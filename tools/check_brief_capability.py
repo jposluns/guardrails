@@ -280,8 +280,9 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        path in prose is never judged by P6: only a
                        declared input is, and an output the brief asks the worker to create is not declared, so
                        it is not judged. A brief the vendored parser cannot read, or one over the shared
-                       reading's bounds (its 512 KiB text ceiling, its whitespace-run and nesting
-                       prescans, its parse deadline), is CANNOT_EVALUATE, never read another way;
+                       reading's bounds (its 512 KiB text ceiling, its whitespace-run, nesting and
+                       inline-mark cost prescans, its parse deadline), is CANNOT_EVALUATE, never read
+                       another way;
                        conformance is exactly Marko
                        2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
                        CommonMark reading (a no-break space accepted after a closing fence, for one).
@@ -4766,13 +4767,16 @@ def self_test(report_path=None):
     check("cannot/nul-blank-2", _outcome(b"\x00\x00\n"), "CannotEvaluate")
     check("cannot/zero-width-blank-2", _outcome(chr(0x200B) + chr(0xFEFF) + "\n"), "CannotEvaluate")
     # the shared reading's text ceiling, judged up front on every brief: at the ceiling the brief is
-    # evaluated, one byte over it is refused whatever the brief holds, a parse-free pure-ASCII text and a
-    # parse-forcing one alike
+    # evaluated (on the parse-free fast path and through the full parse alike), one byte over it is
+    # refused whatever the brief holds, a parse-free pure-ASCII text and a parse-forcing one alike
     at_ceiling = "a" * _input_declarations.MAX_TEXT_BYTES
+    parse_lead = "Input notes.\n\n"
     check("cannot/text-ceiling-boundary",
-          (_outcome(at_ceiling)[0], _outcome(at_ceiling + "a"),
-           _outcome("Input notes.\n\n" + at_ceiling)),
-          (0, "CannotEvaluate", "CannotEvaluate"))
+          (_outcome(at_ceiling)[0],
+           _outcome(parse_lead + "a" * (_input_declarations.MAX_TEXT_BYTES - len(parse_lead)))[0],
+           _outcome(at_ceiling + "a"),
+           _outcome(parse_lead + at_ceiling)),
+          (0, 0, "CannotEvaluate", "CannotEvaluate"))
     # the nesting prescan refuses up front, whatever else the brief holds: the same deep lead in a
     # parse-free ASCII brief and beside a non-ASCII character, a marker run on one line, and marker lines
     # that march deeper line by line
@@ -4780,16 +4784,72 @@ def self_test(report_path=None):
     check("cannot/nesting-depth-2", [_outcome(text) for text in (
         deep_line, "Café.\n\n" + deep_line, "> " * 21 + "x\n",
         "".join("  " * level + "- a\n" for level in range(21)))], ["CannotEvaluate"] * 4)
+    # the stated over-counts stand: a second 20-marker quote line re-counts its markers past the levels
+    # its indentation continues; after a blank line, a two-column line continues a deep list, so a deep
+    # indent after it still counts; an ordered marker run one past the ceiling is refused like the others
+    tall_list = "".join("  " * level + "- a\n" for level in range(20))
+    check("cannot/nesting-overcount-2", [_outcome(text) for text in (
+        "> " * 20 + "x\n" + "> " * 20 + "y\n",
+        tall_list + "\n  x\n" + " " * 40 + "- x\n",
+        "1. " * 21 + "x\n")], ["CannotEvaluate"] * 3)
+    # the running depth follows block structure: a block is read as it reads alone, whatever stood
+    # earlier in the brief, where a new top-level block starts (after a blank line, a margin line with no
+    # markers and under two columns; anywhere, a margin ATX heading or fence, which breaks a paragraph)
+    deep_list = "".join("  " * level + "- a\n" for level in range(5))
+    deep_yaml = ("```yaml\n"
+                 + "".join("        " * level + "- k%d:\n" % level for level in range(18)) + "```\n")
+    wide_fence = "```\n" + " " * 40 + "- x\n```\n"
+    check("structure/nesting-block-local", [read_inputs(parse_lead + text) for text in (
+        deep_yaml, deep_list + "\n# Notes\n\n" + deep_yaml,
+        wide_fence, tall_list + "\n# Notes\n\n" + wide_fence,
+        tall_list + "# Notes\n" + wide_fence,
+        tall_list + "\nplain prose.\n" + wide_fence)], [([], [])] * 6)
     # the whitespace-run prescan refuses the same way on both paths
     check("cannot/whitespace-run-2", [_outcome(text) for text in (
         "a" + " " * 2001 + "b\n", "Input notes.\n\na" + " " * 2001 + "b\n")], ["CannotEvaluate"] * 2)
+    # every character the vendored parser reads as whitespace is run-bounded like a space: over the bound
+    # each is refused up front, at it each is read through the full parse (the class is \s minus LF; the
+    # five separators among them are refused at any count by the separator gate, the form feed asserted
+    # here, the rest with the separator vectors)
+    run_class = [chr(point) for point in (
+        0x0B, 0x1C, 0x1D, 0x1E, 0x1F, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+        0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000)]
+    check("cannot/whitespace-class-over",
+          [_outcome("a" + character * 2001 + "b\n") for character in run_class],
+          ["CannotEvaluate"] * len(run_class))
+    check("structure/whitespace-class-at",
+          [read_inputs(parse_lead + "a" + character * 2000 + "b\n") for character in run_class],
+          [([], [])] * len(run_class))
+    check("cannot/whitespace-ff-run-separator",
+          [_outcome("a" + "\x0c" * count + "b\n") for count in (2000, 2001)], ["CannotEvaluate"] * 2)
+    # the total-cost bounds, each decided on the text: just inside, exactly at and just over each sum
+    # (the whitespace sum per squared run length, the nesting sum per deep opening, the inline-mark sum
+    # per squared chunk count), with the review-measured 260-run shape refused up front
+    eight_runs = ("a" + " " * 2000 + "b\n\n") * 8
+    seven_short = ("a" + " " * 2000 + "b\n\n") * 7 + "a" + " " * 1999 + "b\n"
+    check("structure/whitespace-cost-boundary",
+          (read_inputs(parse_lead + seven_short), read_inputs(parse_lead + eight_runs)),
+          (([], []), ([], [])))
+    check("cannot/whitespace-cost-2", [_outcome(text) for text in (
+        eight_runs + "c  d\n", ("a" + " " * 2000 + "b\n") * 260)], ["CannotEvaluate"] * 2)
+    reopen = "> " * 13 + "x\n\n"
+    check("structure/nesting-cost-boundary",
+          (read_inputs(parse_lead + reopen * 19), read_inputs(parse_lead + reopen * 20)),
+          (([], []), ([], [])))
+    check("cannot/nesting-cost-2", _outcome(reopen * 21), "CannotEvaluate")
+    check("structure/inline-mark-cost-boundary",
+          (read_inputs(parse_lead + "*a" * 32767 + "\n"), read_inputs(parse_lead + "*a" * 32768 + "\n"),
+           read_inputs(parse_lead + "*a" * 2000 + "\n\n" + "*a" * 2000 + "\n")),
+          (([], []), ([], []), ([], [])))
+    check("cannot/inline-mark-cost-2", _outcome("*a" * 32769 + "\n"), "CannotEvaluate")
     # each bound's just-inside value is read through the full parsed document (the lead forces the parse,
     # the shared reading answers), asserted on the reading itself so the structure rules take no part
     check("structure/parse-bounds-boundary",
           (read_inputs("Input notes.\n\n" + "> " * 20 + "ok\n"),
+           read_inputs("Input notes.\n\n" + "1. " * 20 + "ok\n"),
            read_inputs("Input notes.\n\n" + "".join("  " * level + "- a\n" for level in range(20))),
            read_inputs("Input notes.\n\na" + " " * 2000 + "b\n")),
-          (([], []), ([], []), ([], [])))
+          (([], []), ([], []), ([], []), ([], [])))
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-selftest-"))
     try:
         table_path = str(tmp / "table.toml")
@@ -6120,11 +6180,33 @@ def self_test(report_path=None):
         # with the whitespace-run scan patched out, the over-long run is read the same way
         check("revert/whitespace-run-red", *parser_flip(
             [lambda: p6_code("a" + " " * 2001 + "b\n")], [0], WHITESPACE_RUN_RE=never))
+        # with the run class narrowed to space and tab (the class a remembered list would have kept), an
+        # over-long vertical-tab or no-break-space run is read again instead of refused
+        check("revert/whitespace-class-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\na" + "\x0b" * 2001 + "b\n"),
+             lambda: p6_code("Input notes.\n\na" + "\xa0" * 2001 + "b\n")], [0, 0],
+            WHITESPACE_RUN_RE=re.compile(r"[ \t]{2001}")))
+        # with the block-structure resets patched out, a block's outcome depends on the unrelated deep
+        # list before it again (each of these briefs reads clean with the resets)
+        check("revert/nesting-resets-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + deep_list + "\n# Notes\n\n" + deep_yaml),
+             lambda: p6_code("Input notes.\n\n" + tall_list + "\n# Notes\n\n" + wide_fence),
+             lambda: p6_code("Input notes.\n\n" + tall_list + "# Notes\n" + wide_fence)],
+            ["CannotEvaluate"] * 3, NESTING_RESETS=False))
+        # with a total-cost cap lifted, the just-over text is read again instead of refused up front
+        check("revert/whitespace-cost-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + eight_runs + "c  d\n")], [0],
+            MAX_WHITESPACE_COST=1 << 62))
+        check("revert/nesting-cost-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + reopen * 21)], [0], MAX_NESTING_COST=1 << 62))
+        check("revert/inline-mark-cost-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + "*a" * 32769 + "\n")], [0],
+            MAX_INLINE_MARK_COST=1 << 62))
     finally:
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 204)
+    check("revert/every-flip-ran", len(flipped), 209)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -6188,7 +6270,7 @@ def self_test(report_path=None):
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
           "each evaluate within the linear growth bound at 512 KiB, through the parsed-document reading "
-          "with its size, whitespace-run, nesting and deadline bounds, in a capped child that must exit 0; "
+          "with its size, whitespace-run, nesting, total-cost and deadline bounds, in a capped child that must exit 0; "
           "scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
           "missing, non-regular, backwards-range and unknown-family input exits 2); execution set reconciled "
