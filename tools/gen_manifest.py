@@ -272,7 +272,23 @@ def parse_ownership(data):
     return exclusions, release, namespace, binary_set
 
 
-def git_tracked(root):
+def _pinned_git_env(environ=None):
+    """The environment of a git child of this module: `environ` (os.environ when None) with every GIT_-prefixed
+    variable dropped, then, after that drop (which would otherwise remove them), GIT_NO_LAZY_FETCH=1 and
+    caller-configuration pins modelled on the fixture pins of tools/_git_fixture_env.py: GIT_CONFIG_NOSYSTEM=1,
+    and GIT_CONFIG_GLOBAL, HOME and XDG_CONFIG_HOME at os.devnull (the fixture points HOME and XDG_CONFIG_HOME at
+    a scratch directory instead; a read needs none). git then reads no system, home or XDG configuration, so a
+    malformed file there cannot fail the read (exit 128) and a hostile one cannot steer it."""
+    env = {k: v for k, v in (os.environ if environ is None else environ).items() if not k.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["HOME"] = os.devnull
+    env["XDG_CONFIG_HOME"] = os.devnull
+    return env
+
+
+def git_tracked(root, environ=None):
     """The tracked path set from `git ls-files -z --cached --stage`, strictly decoded and validated.
     Fail-closed (GateError) on an unusable repository, a nonzero exit, empty output, a duplicate path,
     a case-fold or NFC/NFD collision, a symlink (120000), a gitlink (160000), or an unknown mode.
@@ -280,9 +296,13 @@ def git_tracked(root):
     core.fsmonitor=false (a repo-config fsmonitor hook is attacker-chosen code and
     must never run under a gate read; the genesis and delta branches of check_release_delta consume
     this enumerator), protocol.allow=never and GIT_NO_LAZY_FETCH=1 (a missing object is a refusal,
-    never a transport), atop the GIT_* environment scrub."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env["GIT_NO_LAZY_FETCH"] = "1"
+    never a transport), atop the GIT_* environment scrub. The caller's git configuration is pinned away
+    after the scrub (_pinned_git_env: no system, home or XDG configuration file is read), so a malformed
+    file there no longer makes this read exit 128. `environ` replaces os.environ as the base the scrub and
+    pins apply to (the self-test passes its own). Side effect: a safe.directory entry in the caller's global
+    configuration no longer applies, so a checkout owned by another user is cannot-evaluate (git refuses it
+    as dubious ownership, GateError, exit 2: fail closed); no -c safe.directory is passed, by design."""
+    env = _pinned_git_env(environ)
     try:
         proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
                                "-c", "protocol.allow=never",
@@ -322,7 +342,7 @@ def git_tracked(root):
     return paths
 
 
-def check_output_modes(root):
+def check_output_modes(root, environ=None):
     """The GENERATED_OUTPUTS_REL are generated TEXT and MUST carry git index mode 100644, never
     100755. gen_manifest reads the index mode at build and check_manifest re-reads it (defence in depth);
     otherwise a mode flip 100644->100755 on a generated output passes both gates unnoticed. Scoped STRICTLY
@@ -330,9 +350,9 @@ def check_output_modes(root):
     touched. An output not yet tracked (genesis, before the release commit git-adds it) is not in the index
     and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read.
     Pinned exactly as git_tracked (the sibling index read): core.fsmonitor=false,
-    protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env["GIT_NO_LAZY_FETCH"] = "1"
+    protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub, the caller's git configuration pinned
+    away after it (_pinned_git_env, with the same safe.directory side effect), and `environ` injectable."""
+    env = _pinned_git_env(environ)
     try:
         proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
                                "-c", "protocol.allow=never",
@@ -879,7 +899,9 @@ def main():
 #       second or third level, or under a directory whose lstat fails, exits 2 naming it (the same tree with real
 #       directories exits 0), and the real one reads as exactly the two shipped roster paths;
 #   a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
-#       and a class outside the vocabulary each fail closed.
+#       and a class outside the vocabulary each fail closed;
+#   (n) the tracked-file reads succeed under a malformed home and XDG git configuration, which fails an unpinned
+#       read, and fail there when the pins are dropped (mutant).
 
 _OWN_BASE = '''format-version = 1
 
@@ -1068,6 +1090,63 @@ def _frozen_partition_vector():
             RELEASE_CLASSES, FROZEN_CLASSES = saved_release, saved_frozen
         return "{} expected GateError from the frozen floor".format(label)
     return None
+
+
+def _config_pin_vector(root, scratch):
+    """The tracked-file reads ignore the caller's git configuration. Under a HOME and an XDG_CONFIG_HOME whose
+    config files (.gitconfig, git/config) each open with the malformed line '[invalid', git_tracked returns
+    the same set as under the self-test's own environment and check_output_modes passes. Controls: an unpinned
+    `git ls-files` (the GIT_* scrub alone) exits nonzero under the malformed home alone, the malformed XDG
+    alone, and both, so the vector is not vacuous. Mutant: _pinned_git_env replaced by the scrub without the
+    pins makes git_tracked raise GateError under both, so the pins are what passes it. The patched global is
+    restored on every path. Returns a list of failure strings."""
+    global _pinned_git_env
+    failures = []
+    (scratch / "xdg" / "git").mkdir(parents=True)
+    (scratch / ".gitconfig").write_text("[invalid\n", encoding="utf-8")
+    (scratch / "xdg" / "git" / "config").write_text("[invalid\n", encoding="utf-8")
+    clean = scratch / "clean"
+    clean.mkdir()
+    lanes = (("home", dict(os.environ, HOME=str(scratch), XDG_CONFIG_HOME=str(clean))),
+             ("XDG", dict(os.environ, HOME=str(clean), XDG_CONFIG_HOME=str(scratch / "xdg"))),
+             ("home and XDG", dict(os.environ, HOME=str(scratch), XDG_CONFIG_HOME=str(scratch / "xdg"))))
+    for label, environ in lanes:
+        unpinned = {k: v for k, v in environ.items() if not k.startswith("GIT_")}
+        control = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                                  "ls-files", "-z", "--cached", "--stage"],
+                                 capture_output=True, timeout=60, env=unpinned)
+        if control.returncode == 0:
+            failures.append("config pins: an unpinned ls-files under a malformed {} configuration expected a "
+                            "nonzero exit (the vector would be vacuous), got 0".format(label))
+    environ = lanes[2][1]
+    try:
+        want = git_tracked(root)
+        got = git_tracked(root, environ)
+        check_output_modes(root, environ)
+    except GateError as exc:
+        failures.append("config pins: the tracked-file reads under a malformed home and XDG configuration "
+                        "expected to succeed, got GateError ({})".format(exc))
+    else:
+        if got != want:
+            failures.append("config pins: the tracked set read under a malformed home and XDG configuration "
+                            "differs from the clean read")
+    saved = _pinned_git_env
+
+    def scrub_only(environ=None):
+        env = {k: v for k, v in (os.environ if environ is None else environ).items() if not k.startswith("GIT_")}
+        env["GIT_NO_LAZY_FETCH"] = "1"
+        return env
+    _pinned_git_env = scrub_only
+    try:
+        git_tracked(root, environ)
+    except GateError:
+        pass
+    else:
+        failures.append("config pins: the mutant that drops the pins expected GateError from git_tracked under "
+                        "a malformed home and XDG configuration (the vector does not bite)")
+    finally:
+        _pinned_git_env = saved
+    return failures
 
 
 def self_test_main():
@@ -1594,6 +1673,9 @@ def _self_test_main_isolated():
         partition_failure = _frozen_partition_vector()
         if partition_failure is not None:
             failures.append(partition_failure)
+
+        # (n) the tracked-file reads pin the caller's system, home and XDG git configuration away.
+        failures.extend(_config_pin_vector(good, tmp / "config-pins"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1624,7 +1706,9 @@ def _self_test_main_isolated():
           "closed (exit 2); "
           "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
-          "class outside the vocabulary each fail the frozen floor closed")
+          "class outside the vocabulary each fail the frozen floor closed; and the tracked-file reads "
+          "succeed under a malformed home and XDG git configuration that fails an unpinned read, and fail "
+          "there once the pins are dropped")
     return 0
 
 
