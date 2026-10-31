@@ -13463,6 +13463,104 @@ def _main_isolated(report_path=None):
               _verdict(bg("cat > a <<'A'\nit's\nA\njob &\ncat > b <<'B'\nit's\nB", rib=False)), "deny")
         check("trunc/fg-comment-shift-detach-denies",
               _verdict(bg('echo "$(echo "a" "b # ")" & job # "', rib=False)), "deny")
+        # A quoted here-document body a shell runs is code whatever spelling feeds it to the shell, and its
+        # bare `&` backgrounds a job in real bash. These bodies carry a bare `&` and NO apostrophe, so the
+        # scan reads the command to its end and the end-only lift (a body with a provable delimiter) would
+        # allow them; the consumer narrowing reads each body as code because its owner is not one simple
+        # cat, tee or git write, so they deny. Each row allows if the lift ignores the body's consumer.
+        check("trunc/fg-quoted-heredoc-shellfed-bare-amp-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "bash <<'EOF'\nsleep 30 &\nEOF", "cat <<'EOF' | sh\nsleep 30 &\nEOF",
+                  "sh -s <<'EOF'\nsleep 30 &\nEOF", "dash <<'EOF'\nsleep 30 &\nEOF",
+                  "zsh <<'EOF'\nsleep 30 &\nEOF", "ksh <<'EOF'\nsleep 30 &\nEOF",
+                  "/bin/bash <<'EOF'\nsleep 30 &\nEOF", "env bash <<'EOF'\nsleep 30 &\nEOF",
+                  "cat <<'EOF' | while read l; do eval \"$l\"; done\nsleep 30 &\nEOF",
+                  "<<'EOF' bash\nsleep 30 &\nEOF", "bash \\\n<<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 11)
+        # The allowlisted consumers, with a bare `&` and no apostrophe in the body, still allow: one simple
+        # cat, tee or git command that writes the body to a file or its own output, and the commit-message
+        # form, none of which runs the body. Each row denies if the consumer check rejects the owner.
+        check("trunc/fg-quoted-heredoc-shellfed-allowlist-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF'\nFix A & B\nEOF", "cat > /abs/f <<'EOF'\nFix A & B\nEOF",
+                  "tee /abs/f <<'EOF'\nFix A & B\nEOF", "git hash-object --stdin <<'EOF'\nFix A & B\nEOF",
+                  "git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"")],
+              ["allow"] * 5)
+        # NAMED COST (over-refusal restored): a quoted body read by a non-shell filter that is not cat, tee
+        # or git runs nothing, yet its bare `&` now denies, because the narrowing proves non-execution only
+        # for the allowlisted owners. Each row allows if the lift reads any body with a provable end.
+        check("trunc/fg-quoted-heredoc-nonshell-filter-overrefuses",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "grep x <<'EOF'\nsleep 30 &\nEOF", "sort <<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 2)
+        # git reads the body as DATA only under a fixed built-in subcommand directly after `git`, with no
+        # global option before it: hash-object with --stdin hashes the bytes, commit reading its message from
+        # standard input (-F - or --file=-, with only --allow-empty or --no-edit besides) reads them as the
+        # message, and apply reads them as a patch. A built-in name cannot be shadowed by a git alias, so these
+        # cannot be redirected to a shell. Each row denies if the subcommand rule rejects the form.
+        check("trunc/fg-quoted-heredoc-git-data-subcommand-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "git hash-object --stdin <<'EOF'\nFix A & B\nEOF",
+                  "git commit -F - <<'EOF'\nFix A & B\nEOF",
+                  "git commit --file=- <<'EOF'\nFix A & B\nEOF",
+                  "git commit --allow-empty --no-edit -F - <<'EOF'\nFix A & B\nEOF",
+                  "git apply <<'EOF'\nFix A & B\nEOF")],
+              ["allow"] * 5)
+        # Every other git form reads the body as code: a configured or -c alias runs it (`!sh`), `git run` is
+        # an alias not a built-in, a global option before the subcommand (-c, --exec-path and the rest) can
+        # define an alias or set core.editor to a shell, commit with an editor-opening option (-e, --edit, a
+        # bundled -eF-) runs the message file through core.editor, hash-object without --stdin and bare commit
+        # take no stdin body. Each row allows if `git` is lifted without proving the subcommand reads data.
+        check("trunc/fg-quoted-heredoc-git-executes-body-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "git -c alias.x=!sh x <<'EOF'\nsleep 30 &\nEOF",
+                  "git -c alias.x='!sh' x <<'EOF'\nsleep 30 &\nEOF",
+                  "git -c alias.x='!bash -s' x <<'EOF'\nsleep 30 &\nEOF",
+                  "git run <<'EOF'\nsleep 30 &\nEOF",
+                  "git -c core.editor=sh commit --allow-empty -e -F - <<'EOF'\nsleep 30 &\nEOF",
+                  "git commit -e -F - <<'EOF'\nsleep 30 &\nEOF",
+                  "git commit --edit -F - <<'EOF'\nsleep 30 &\nEOF",
+                  "git commit -eF- <<'EOF'\nsleep 30 &\nEOF",
+                  "git hash-object <<'EOF'\nsleep 30 &\nEOF",
+                  "git commit <<'EOF'\nsleep 30 &\nEOF",
+                  "git --exec-path=/x apply <<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 11)
+        # An environment-assignment prefix (GIT_CONFIG_COUNT and GIT_CONFIG_VALUE_0, which can carry a `!sh`
+        # alias, or GIT_EDITOR, which names the editor an -e commit opens) is the command's first word, so the
+        # command word is not a bare `git` and the body reads as code. Each row allows if the prefix is
+        # stripped and the trailing git is lifted.
+        check("trunc/fg-quoted-heredoc-git-env-config-prefix-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0=!sh git x <<'EOF'\n"
+                  "sleep 30 &\nEOF",
+                  "GIT_EDITOR=sh git commit --allow-empty -e -F - <<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 2)
+        # The command word can be redefined EARLIER in the same command, so a body is lifted only when its
+        # opener is the command's first line: a function, alias (with expand_aliases), hash -p, or a PATH
+        # assignment on an earlier line can point cat or git at a shell. Each row allows if a body opened on a
+        # later line is lifted on the command word as written.
+        check("trunc/fg-quoted-heredoc-command-word-redefined-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "function cat { sh; }\ncat <<'EOF'\nsleep 30 &\nEOF",
+                  "function git { sh; }\ngit <<'EOF'\nsleep 30 &\nEOF",
+                  "hash -p /bin/sh cat\ncat <<'EOF'\nsleep 30 &\nEOF",
+                  "shopt -s expand_aliases\nalias cat=sh\ncat <<'EOF'\nsleep 30 &\nEOF",
+                  "PATH=/tmp/x\ncat <<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 5)
+        # Keeping the single-segment, first-line consumer rule denies several forms that run nothing (the named
+        # cost): a body piped to a filter, a here-document after an && chain, a here-document followed by ';'
+        # and another command, an absolute or command-prefixed cat, and a body fed to a non-shell interpreter.
+        # Each row allows if the owning segment is lifted though it is chained, prefixed or piped onward.
+        check("trunc/fg-quoted-heredoc-chained-or-prefixed-consumer-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF' | grep A\nsleep 30 &\nEOF",
+                  "git add -A && git commit -F - <<'EOF'\nsleep 30 &\nEOF",
+                  "mkdir -p d && cat > d/f <<'EOF'\nsleep 30 &\nEOF",
+                  "cat > f <<'EOF'; chmod 644 f\nsleep 30 &\nEOF",
+                  "/usr/bin/cat <<'EOF'\nsleep 30 &\nEOF",
+                  "command cat <<'EOF'\nsleep 30 &\nEOF",
+                  "python3 - <<'EOF'\nprint(6 & 3)\nEOF")],
+              ["deny"] * 7)
         # Where the lexer refuses the command (an unquoted here-document, an open quote, a process
         # substitution, a here-string) the scan alone decides: its detach and open quote deny, and a
         # command it reads with no bare `&` allows.
