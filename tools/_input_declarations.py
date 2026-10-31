@@ -170,6 +170,9 @@ MAX_NESTING_DEPTH = 20
 NESTING_RESETS = True
 # the fenced-code skip of _nesting_refused, a patchable seam for its callers' self-tests
 NESTING_FENCES = True
+# the open-label reading of _nesting_refused (a link label kept open across empty lines until its "]"), a
+# patchable seam for its callers' self-tests
+NESTING_LABELS = True
 # the longest run of consecutive whitespace characters a line may hold, judged in forbidden() before any
 # parse. The run class is the parser's own whitespace by construction, never a remembered list: every
 # whitespace test in the vendored tree is Python's \s or the isspace/strip predicate behind it
@@ -845,6 +848,11 @@ HTML_END_STARTS = ((re.compile(r"<(script|pre|style|textarea)(?:[>\s]|$)", re.I)
                    (re.compile(r"<!--"), lambda found: re.compile(r"-->")),
                    (re.compile(r"<\?"), lambda found: re.compile(r"\?>")),
                    (re.compile(r"<!"), lambda found: re.compile(r">")))
+# where a link label ends on one line, as LinkRefDef.match reads it (inline_parser._parse_link_label,
+# find_next(text, "]", start + 1, disallowed="[")): the first "]" or "[" not escaped by a backslash. The
+# search runs over the raw buffer with no line or empty-line limit, so a label with neither on its lines
+# stays open; a backslash ending a line escapes the LF, so no escape carries into the next line
+LABEL_END_RE = re.compile(r"(?:[^\\\[\]]|\\.)*([\[\]])")
 
 
 def _fence_opening(line, position, markers, running, after_blank):
@@ -921,15 +929,22 @@ def _fence_holds(fence, line):
 def _opaque_start(rest):
     """The block the parser may read on from a line whose text after its lead is `rest`, where a line
     shaped like a fence is not a fence: an end-marker pattern for an HTML block of types 1 to 4
-    (HTML_END_STARTS), "html" for any other < (an HTML block that ends at a blank line), "link" for [ (a
-    link reference definition, read on to an empty line), None otherwise."""
+    (HTML_END_STARTS), "html" for any other < (an HTML block that ends at a blank line), and for [ (a
+    link reference definition) "label" while its label is still open at the line's end (LABEL_END_RE),
+    "link" once its "]" has appeared (the destination and title, read on to an empty line), or None where
+    a "[" comes first (no definition: the parser's label search fails); None otherwise."""
     if rest.startswith("<"):
         for start, end in HTML_END_STARTS:
             found = start.match(rest)
             if found:
                 return end(found)
         return "html"
-    return "link" if rest.startswith("[") else None
+    if not rest.startswith("["):
+        return None
+    found = LABEL_END_RE.match(rest, 1)
+    if found is None:
+        return "label"
+    return "link" if found.group(1) == "]" else None
 
 
 def _nesting_refused(text):
@@ -950,7 +965,8 @@ def _nesting_refused(text):
     to three columns in their container, an unclosed fence running to its container's end), at the top
     level and in a list item. From the first fence-shaped line it cannot place exactly (a fence in a
     quote, a tab in a fence line's lead, a fence-shaped line where an HTML block or link reference
-    definition may be open, which the parser reads on as that block) it skips no line, so a misplaced
+    definition may be open, which the parser reads on as that block, a link label across any number of
+    empty lines until its "]") it skips no line, so a misplaced
     fence can only count more. Over-counting only refuses more, never less."""
     running = 0
     after_blank = True
@@ -970,7 +986,10 @@ def _nesting_refused(text):
             closing = held == "closed"
         if not line.strip():
             after_blank = True
-            opaque = {kind for kind in opaque if not isinstance(kind, str) or (kind == "link" and line)}
+            # an open label survives any blank line (its "]" search has no line limit); a title survives
+            # a line of whitespace alone, since the parser refuses only a title holding "\n\n"
+            opaque = {kind for kind in opaque if not isinstance(kind, str)
+                      or (kind == "label" and NESTING_LABELS) or (kind in ("label", "link") and line)}
             continue
         markers, columns, position = _lead_shape(line)
         if placed and not closing:
@@ -980,6 +999,12 @@ def _nesting_refused(text):
                 fence = fence or None
             else:
                 opaque = {kind for kind in opaque if isinstance(kind, str) or not kind.search(line)}
+                if "label" in opaque:
+                    ended = LABEL_END_RE.match(line)
+                    if ended is not None:   # the label closes ("]") or its search fails ("[")
+                        opaque.discard("label")
+                        if ended.group(1) == "]":
+                            opaque.add("link")
                 started = _opaque_start(line[position:])
                 if started is not None and (isinstance(started, str) or not started.search(line)):
                     opaque.add(started)

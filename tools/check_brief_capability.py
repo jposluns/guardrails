@@ -5031,12 +5031,23 @@ def self_test(report_path=None):
     # item an unindented line ends, after a backtick line with a backtick in its info string (no fence),
     # after a tilde fence that a backtick line does not close, after a four-space line at the top level
     # (indented code, no fence), and after a fence-shaped line the prescan cannot place (in an HTML block,
-    # which the parser reads on to the blank line; in a quote)
+    # which the parser reads on to the blank line; in a quote; in a link label still open across an empty
+    # line, whose "]" the parser searches for with no line limit, in backtick and tilde forms; in a link
+    # title across a line of whitespace alone, which the parser does not end there)
     deep21 = "".join("  " * level + "- a\n" for level in range(21))
     check("cannot/nesting-fence-bounds", [_outcome(text) for text in (
         "```\nquoted\n```\n" + deep21, "- ```\n  code\n" + deep21, "``` a`\n" + deep21,
         "~~~\n```\n~~~\n" + deep21, "    ```\n" + deep21, "<div>\n```\n\n" + deep21,
-        "> ```\n" + deep21)], ["CannotEvaluate"] * 7)
+        "> ```\n" + deep21, "[a\n\n```\n]: /u\n" + deep21, "[a\n\n~~~\n]: /u\n" + deep21,
+        "[a]: /u 't\n  \n```\n'\n" + deep21)], ["CannotEvaluate"] * 10)
+    # the link-label bound just inside, exactly at and just outside it: a label whose "]" comes after the
+    # fence line holds it (refused, also across two empty lines and past an escaped "]"); a label closed
+    # on its own line and a title cut by an empty line hold nothing past that line, and a "[" before any
+    # "]" fails the label, so the fence after each is placed (True: the prescan passes the text)
+    check("structure/nesting-label-boundary", [_input_declarations._nesting_refused(text) is None for text in (
+        "[a\n\n\n```\n]: /u\n" + deep21, "[a\\]\n\n```\n]: /u\n" + deep21,
+        "[a]: /u\n\n```\n" + deep21, "[a]: /u 't\n\n```\n'\n" + deep21, "[a[b\n```\n" + deep21)],
+          [False, False, True, True, True])
     # each fence bound just inside, exactly at and just outside it: an opening run indented three columns
     # opens, four does not; a closing run indented three columns closes, four does not (the deep list
     # after it stays fence content); a closing run one shorter than the opening run does not close, as
@@ -6529,6 +6540,12 @@ def self_test(report_path=None):
             [lambda: p6_code("Input notes.\n\n```diff\n" + diff_body + "```\n"),
              lambda: p6_code("Input notes.\n\n- ```diff\n" + indented_body("  ") + "  ```\n")],
             ["CannotEvaluate"] * 2, NESTING_FENCES=False))
+        # with an open link label cleared at an empty line again, the fence line inside the label is read
+        # as a fence, the real nesting after it is skipped and the brief is read clean (each is refused
+        # with the label kept open)
+        check("revert/nesting-labels-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n[a\n\n```\n]: /u\n" + deep21),
+             lambda: p6_code("Input notes.\n\n[a\n\n~~~\n]: /u\n" + deep21)], [0, 0], NESTING_LABELS=False))
         # with the nesting ceiling lifted, the no-break-space quote lead is read too, so the ceiling is
         # load-bearing for the quote-prefix vectors (their text never forces a parse)
         check("revert/nesting-quote-prefix-red", *parser_flip(
@@ -6619,7 +6636,7 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 214)
+    check("revert/every-flip-ran", len(flipped), 215)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
