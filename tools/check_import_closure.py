@@ -4195,6 +4195,22 @@ _CANNOT_VECTORS = (
     _unread_vector("name rebound by an async def", "ROOT", source=_T_NAMED % "async def ROOT():\n    pass\n"),
     _unread_vector("name rebound by a class", "ROOT", source=_T_NAMED % "class ROOT:\n    pass\n"),
     _unread_vector("name declared global in a function", "ROOT", source=_T_NAMED % "def move():\n    global ROOT\n"),
+    # A method's nonlocal declaration of an implicit class cell compiles with no binding of that name in any
+    # enclosing function, so only the nonlocal branch records it.
+    _unread_vector("name read beside a nonlocal __class__ in a method", "__class__",
+                   source=_T_PATH + "__class__ = str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor')\n"
+                   "class Moved:\n    def move(self):\n        nonlocal __class__\nsys.path.insert(0, __class__)\n"
+                   "import pkg\n"),
+    _unread_vector("name read beside a nonlocal __classdict__ in a method", "__classdict__",
+                   source=_T_PATH + "__classdict__ = str(Path(__file__).resolve().parents[1] / 'lib' / '_vendor')\n"
+                   "class Moved:\n    def move(self):\n        nonlocal __classdict__\n"
+                   "sys.path.insert(0, __classdict__)\nimport pkg\n"),
+    _unread_vector("name read beside a nonlocal __conditional_annotations__ in a method",
+                   "__conditional_annotations__",
+                   source=_T_PATH + "__conditional_annotations__ = str(Path(__file__).resolve().parents[1] / 'lib' / "
+                   "'_vendor')\nclass Moved:\n    if True:\n        moved: int\n    def move(self):\n"
+                   "        nonlocal __conditional_annotations__\nsys.path.insert(0, __conditional_annotations__)\n"
+                   "import pkg\n"),
     # One name past the bound, and two names bound to chains that start at each other.
     _unread_vector("pathlib chain through one name past the highest read", "str(LIB)",
                    source=_T_PATH + "BASE = Path(__file__).resolve().parents[1]\nROOT = BASE / 'lib'\n"
@@ -4816,6 +4832,8 @@ MUTANTS = (
      "name rebound by a class"),
     ("binding-globals", "        elif isinstance(node, (ast.Global, ast.Nonlocal)):\n",
      "        elif isinstance(node, ast.Nonlocal):\n", "name declared global in a function"),
+    ("binding-nonlocals", "        elif isinstance(node, (ast.Global, ast.Nonlocal)):\n",
+     "        elif isinstance(node, ast.Global):\n", "name read beside a nonlocal __class__ in a method"),
     ("binding-def-parameters", (_BINDING_WALK, _ARG_BRANCH),
      (_PARAMETERS_PLAIN % "(ast.FunctionDef, ast.AsyncFunctionDef)" + _BINDING_WALK, _ARG_BRANCH_UNPLAIN),
      "name rebound as a function parameter"),
@@ -5454,6 +5472,7 @@ _BINDING_BRANCH_MUTANTS = (
     ("ast.AsyncFunctionDef", ("binding-async-defs",)),
     ("ast.ClassDef", ("binding-classes",)),
     ("ast.Global", ("binding-globals",)),
+    ("ast.Nonlocal", ("binding-nonlocals",)),
     ("ast.arg", ("binding-def-parameters", "binding-lambda-parameters")),
     ("ast.ExceptHandler", ("binding-except-targets",)),
     ("ast.MatchAs", ("binding-match-captures",)),
@@ -5464,21 +5483,30 @@ _BINDING_BRANCH_MUTANTS = (
     ("ast.MatchMapping", ("binding-match-mapping-rests",)),
 )
 # A binding branch no vector can catch a mutant of, with why.
-_EQUIVALENT_BINDING_BRANCHES = (
-    ("ast.Nonlocal", "a nonlocal name compiles only with a binding in an enclosing function, and another branch "
-     "records that binding, so dropping the nonlocal one never leaves the name bound once"),
-)
+_EQUIVALENT_BINDING_BRANCHES = ()
+# The containers _file_bindings records a binding in: the bindings dict and the names each walked node binds.
+_BINDING_CONTAINERS = ("bindings", "names")
 
 
 def _binding_records(stmts):
-    """Whether stmts, outside any if statement nested in them, record a binding: set names, or call setdefault."""
+    """Whether stmts, outside any if statement nested in them, record a binding: any write to a binding container
+    (_BINDING_CONTAINERS), a name of one bound in any form (assigned, augmented, a tuple, for, with or walrus
+    target, deleted) or one used as the base of an attribute or a subscript (a method call such as setdefault or
+    update, an item assignment, an append to an item), or a setdefault call on anything. A read that is none of
+    these (a membership test, a len) is no record."""
     stack = list(stmts)
     while stack:
         node = stack.pop()
         if isinstance(node, ast.If):
             continue
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "names" for t in node.targets):
+        if isinstance(node, ast.Name) and node.id in _BINDING_CONTAINERS and not isinstance(node.ctx, ast.Load):
             return True
+        if isinstance(node, (ast.Attribute, ast.Subscript)):
+            base = node.value
+            while isinstance(base, (ast.Attribute, ast.Subscript, ast.Call)):
+                base = base.func if isinstance(base, ast.Call) else base.value
+            if isinstance(base, ast.Name) and base.id in _BINDING_CONTAINERS:
+                return True
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "setdefault":
             return True
         stack.extend(ast.iter_child_nodes(node))
@@ -5530,26 +5558,39 @@ def _binding_branches(gate_source):
     return found
 
 
-def _binding_branch_failures(gate_source, credited):
+def _binding_branch_failures(gate_source, credited, branch_rows=_BINDING_BRANCH_MUTANTS,
+                             equivalent_rows=_EQUIVALENT_BINDING_BRANCHES):
     """The failures of the binding-branch rule: every branch of gate_source's _file_bindings that records a binding
-    (_binding_branches) has a row in _BINDING_BRANCH_MUTANTS, each of whose mutants edits _file_bindings and was
-    credited by its vector in this run (credited, the ids), or a reason in _EQUIVALENT_BINDING_BRANCHES, never
-    both; a row naming no such branch fails too."""
+    (_binding_branches) has one label no other branch has, and a row in branch_rows (_BINDING_BRANCH_MUTANTS) that
+    lists at least one mutant, each of whose mutants edits _file_bindings and was credited by its vector in this run
+    (credited, the ids), or a reason in equivalent_rows (_EQUIVALENT_BINDING_BRANCHES), never both; a row naming no
+    such branch, and a label listed twice, fail too."""
     branches = _binding_branches(gate_source)
-    rows = dict(_BINDING_BRANCH_MUTANTS)
-    equivalent = dict(_EQUIVALENT_BINDING_BRANCHES)
+    rows = dict(branch_rows)
+    equivalent = dict(equivalent_rows)
     entries = dict((entry[0], entry) for entry in MUTANTS)
     own = ast.dump(_bindings_function(gate_source))
     failures = []
+    for labels, problem in ((branches, "of _file_bindings is the label of %d branches, so one row cannot close them "
+                                       "all"),
+                            ([row[0] for row in tuple(branch_rows) + tuple(equivalent_rows)], "is listed %d times")):
+        counts = dict()
+        for label in labels:
+            counts[label] = counts.get(label, 0) + 1
+        for label in sorted(counts):
+            if counts[label] > 1:
+                failures.append(("binding branch %s " + problem) % (label, counts[label]))
     for branch in branches:
         if branch not in rows and branch not in equivalent:
             failures.append("binding branch %s of _file_bindings has no mutant registered against a vector" % branch)
-        elif branch in rows and branch in equivalent:
+        elif rows.get(branch) and branch in equivalent:
             failures.append("binding branch %s has both mutants and a reason no mutant can be caught" % branch)
     for branch in sorted(set(rows) | set(equivalent)):
         if branch not in branches:
             failures.append("binding branch %s is listed, but _file_bindings has no such branch" % branch)
-    for branch, mutants in _BINDING_BRANCH_MUTANTS:
+    for branch, mutants in branch_rows:
+        if not mutants and branch not in equivalent:
+            failures.append("binding branch %s has no mutant: its row lists none" % branch)
         for mutant in mutants:
             if mutant not in credited:
                 failures.append("binding branch %s: mutant %s was not credited by its vector" % (branch, mutant))
@@ -5560,6 +5601,62 @@ def _binding_branch_failures(gate_source, credited):
                 mutated = mutated.replace(text, replacement)
             if ast.dump(_bindings_function(mutated)) == own:
                 failures.append("binding branch %s: mutant %s leaves _file_bindings unchanged" % (branch, mutant))
+    return failures
+
+
+# A recording arm put into _file_bindings' walk ahead of the parameter branch, for the vectors below.
+_ARM_ANCHOR = "        elif isinstance(node, ast.arg):\n"
+_NEW_ARM = "        elif isinstance(node, ast.TryStar):\n%s" + _ARM_ANCHOR
+# The binding-branch rule's own vectors: (name, edits to the gate half, the branch rows to check it with, None for
+# _BINDING_BRANCH_MUTANTS, and the failure _binding_branch_failures must give). Each edit's text occurs once.
+_BINDING_RULE_VECTORS = (
+    ("a row that lists no mutant", (),
+     tuple((branch, () if branch == "ast.ClassDef" else mutants) for branch, mutants in _BINDING_BRANCH_MUTANTS),
+     "binding branch ast.ClassDef has no mutant: its row lists none"),
+    ("a second recording arm under an existing label",
+     (('            bindings.setdefault(node.targets[0].id, []).append(("assign", node.value))\n',
+       '            bindings.setdefault(node.targets[0].id, []).append(("assign", node.value))\n'
+       '        if isinstance(node, ast.Assign) and len(node.targets) > 1:\n'
+       '            bindings.setdefault("*", []).append(("other",))\n'),), None,
+     "binding branch ast.Assign of _file_bindings is the label of 2 branches"),
+    ("a label listed twice", (), _BINDING_BRANCH_MUTANTS + (("ast.ClassDef", ("binding-classes",)),),
+     "binding branch ast.ClassDef is listed 2 times"),
+    ("an arm recording through an augmented assignment",
+     ((_ARM_ANCHOR, _NEW_ARM % "            names += (node.name,)\n"),), None,
+     "binding branch ast.TryStar of _file_bindings has no mutant registered against a vector"),
+    ("an arm recording through an item assignment",
+     ((_ARM_ANCHOR, _NEW_ARM % "            bindings[\"*\"] = [(\"other\",)]\n"),), None,
+     "binding branch ast.TryStar of _file_bindings has no mutant registered against a vector"),
+    ("an arm recording through a tuple target",
+     ((_ARM_ANCHOR, _NEW_ARM % "            names, _rest = (\"*\",), ()\n"),), None,
+     "binding branch ast.TryStar of _file_bindings has no mutant registered against a vector"),
+    ("an arm recording through another method of the bindings",
+     ((_ARM_ANCHOR, _NEW_ARM % "            bindings.update({\"*\": [(\"other\",)]})\n"),), None,
+     "binding branch ast.TryStar of _file_bindings has no mutant registered against a vector"),
+)
+
+
+def _binding_rule_failures(gate_source, credited):
+    """The failures of the binding-branch rule's own vectors (_BINDING_RULE_VECTORS): each must make
+    _binding_branch_failures give its failure. Prints a RULE line for each that does."""
+    failures = []
+    for name, edits, branch_rows, expected in _BINDING_RULE_VECTORS:
+        source = gate_source
+        for old, new in edits:
+            if source.count(old) != 1:
+                source = None
+                break
+            source = source.replace(old, new)
+        if source is None:
+            failures.append("binding-branch rule vector %s: an edit's text does not occur once" % name)
+            continue
+        got = _binding_branch_failures(source, credited, _BINDING_BRANCH_MUTANTS if branch_rows is None
+                                       else branch_rows)
+        if not any(expected in failure for failure in got):
+            failures.append("binding-branch rule vector %s: expected a failure saying %r, got %r"
+                            % (name, expected, got))
+        else:
+            print("RULE %s fails the binding-branch rule" % name)
     return failures
 
 
@@ -5931,6 +6028,8 @@ def self_test_main():
         # credited by its vector, or a reason none can be caught.
         unclosed = _binding_branch_failures(gate_source, credited_ids)
         failures.extend(unclosed)
+        # The rule itself fails a row with no mutant, a repeated label, and an arm recording in any form.
+        failures.extend(_binding_rule_failures(gate_source, credited_ids))
         if not unclosed:
             print("BRANCHES each of _file_bindings' %d binding branches has a mutant caught by its vector (%d with a "
                   "reason none can be)" % (len(_binding_branches(gate_source)), len(_EQUIVALENT_BINDING_BRANCHES)))
