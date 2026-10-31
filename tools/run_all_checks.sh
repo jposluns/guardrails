@@ -246,6 +246,8 @@ run_gate "brief-capability-behaviour-selftest" python3 -I -B tools/check_selftes
 run_gate "hook-latency-selftest" python3 -I -B tools/check_selftest_execution.py --suite hook-latency-selftest
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
+run_gate "import-closure-selftest" python3 -I -B tools/check_import_closure.py --self-test
+run_gate "import-closure" python3 -I -B tools/check_import_closure.py
 run_gate "verifier-delivery-selftest" python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
 run_gate "opf-declaration-selftest" python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
 run_gate "opf-declaration" python3 -I -B tools/check_opf_declaration.py

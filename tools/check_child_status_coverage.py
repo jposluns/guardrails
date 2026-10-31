@@ -426,6 +426,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
     "tools/check_hooks_preview.py",
+    "tools/check_import_closure.py",
     "tools/check_instruction_budget.py",
     "tools/check_internal_names.py",
     "tools/check_license_qualification.py",

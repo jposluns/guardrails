@@ -2219,9 +2219,9 @@ def _self_test(caller_env=None):
             (ratch / ".github").mkdir()
             (ratch / ".github" / "note.md").write_text("x {} y\n".format(qa_label), encoding="utf-8")
             (ratch / "opf").mkdir()
-            (ratch / "opf" / "util.py").write_text("x {} y\n".format(qa_label), encoding="utf-8")
+            (ratch / "opf" / "sample.py").write_text("x {} y\n".format(qa_label), encoding="utf-8")
             tracked_in = scan_shipped_tracker_labels(ratch, ["docs/c.md", ".github/note.md",
-                                                             "opf/util.py"], history=exempt_pair)
+                                                             "opf/sample.py"], history=exempt_pair)
             (ratch / ".aiqt" / "manifest.toml").write_text(
                 man_two + '\n[[sources]]\npath = "docs/c.md"\n', encoding="utf-8")
             listed = scan_shipped_tracker_labels(ratch, [], history=exempt_pair)
@@ -2231,7 +2231,7 @@ def _self_test(caller_env=None):
             check("tracker/scope-membership-decides",
                   not outside and not any("docs/c.md" in f for f in tracked_in)
                   and any(".github/note.md" in f for f in tracked_in)
-                  and any("opf/util.py" in f for f in tracked_in)
+                  and any("opf/sample.py" in f for f in tracked_in)
                   and any("docs/c.md" in f for f in listed), (outside, tracked_in, listed))
             (ratch / "docs" / "c.md").write_text("{} kept on purpose  # internal-allow\n".format(qa_label),
                                                  encoding="utf-8")

@@ -1099,6 +1099,17 @@ count = 2
 class = "EXEMPT"
 reason = "test-code"
 
+# the self-test seam that reads tomllib.loads as bound: the parser-failure vectors save it and restore it in
+# a finally around an injected RecursionError or MemoryError at the parse call (neither can be provoked
+# safely and portably)
+[[site]]
+path = "tools/check_import_closure.py"
+function = "_toml_parser"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 [[site]]
 path = "tools/check_manifest.py"
 function = "_self_test_main_isolated"

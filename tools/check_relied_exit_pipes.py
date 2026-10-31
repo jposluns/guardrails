@@ -196,6 +196,9 @@ class GateError(Exception):
 
 
 _AIQT_HOOKS = None
+# The shared shell lexer's directory, bound once at module level so the import-closure gate reads the
+# sys.path insertion below as its search root.
+_HOOKS_DIR = str(Path(__file__).resolve().parents[1] / ".aiqt" / "core" / "hooks" / "scripts")
 
 
 def _hooks():
@@ -203,9 +206,8 @@ def _hooks():
     path needs no lexer, and fail-closed when it cannot be imported."""
     global _AIQT_HOOKS
     if _AIQT_HOOKS is None:
-        hooks_dir = Path(__file__).resolve().parents[1] / ".aiqt" / "core" / "hooks" / "scripts"
-        if str(hooks_dir) not in sys.path:
-            sys.path.insert(0, str(hooks_dir))
+        if _HOOKS_DIR not in sys.path:
+            sys.path.insert(0, _HOOKS_DIR)
         try:
             import aiqt_hooks
         except BaseException as exc:

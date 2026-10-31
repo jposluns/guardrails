@@ -1083,6 +1083,8 @@ def _config_poison_fixture(base):
 # standalone runs, no config-lane time known): it carries a SIZING_LATER_MEASURED entry and its own
 # entry below, sized outside SIZING by the SIZING formula; the other three still have no recorded
 # time.
+# The import-closure gate registers one more member, outside the account and with no recorded
+# time: tools/check_import_closure.py --self-test.
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
