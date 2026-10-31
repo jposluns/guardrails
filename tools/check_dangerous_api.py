@@ -456,9 +456,11 @@ _AI_WORD = (_WORD + " (_WORD_CHAR_RE tests the character before a value as AI_ID
             " Unicode \\b does, so the bounded scan finds what the plain scan finds)")
 _GIT_WORD = (_WORD + " (_GIT_WORD_RE reads git as a word with the same Unicode \\w test as its"
              " search twin _CMTIDN_GIT_WORD_RE; a letter of any script beside it makes another word)")
-_MKFS_WORD = (_WORD + " (_DESTRUCT_TEXT_MKFS_RE reads mkfs.TYPE in a word cut by the same Unicode \\w"
-              " as the former single regex the scan must agree with; a hit there only denies, so the"
-              " wider match is the fail-closed side)")
+_MKFS_WORD = ("Unicode on purpose: \\w here is a word-character test over command text, where a letter"
+              " or a digit of any script is part of the word (the self-test pins mkfs.ext followed by"
+              " the Arabic-Indic digit U+0663); the pattern holds no \\d (_DESTRUCT_TEXT_MKFS_RE reads"
+              " mkfs.TYPE in a word cut by the same Unicode \\w as the former single regex the scan must"
+              " agree with; a hit there only denies, so the wider match is the fail-closed side)")
 _LIST_DIGIT = ("Unicode on purpose: the list-marker \\d is read as a renderer that takes a non-ASCII"
                " digit for a list number reads it, and the wider read is the fail-closed side")
 ALLOWLIST = (

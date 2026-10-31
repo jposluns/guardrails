@@ -920,7 +920,7 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
     redirects = []
     opaque = [False]
     seg_start = [_start]
-    pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
+    pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip
     bodies = {}  # recover: pending-heredoc position -> the segment index its body substitutions go before
     groups = [[0, None]] if _close else []  # recover: open groups as [unclosed '(' count, saved outer state]
     token = [_start]  # recover: where the token being read began, reported when the read stops
@@ -1061,7 +1061,7 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
                     seg_start[0] = i
                 elif pending_heredocs:
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
-                    # literal data (finding 17), then resume lexing after the closing delimiter line(s).
+                    # literal data, then resume lexing after the closing delimiter line(s).
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
                     del pending_heredocs[:]
                     seg_start[0] = i
@@ -1101,7 +1101,7 @@ def _lex_command(command, partial=False, recover=False, _start=0, _close=False, 
                         parsed = _parse_heredoc_delim(command, i + oplen, n)
                         if parsed is not None and parsed[0]:
                             # a QUOTED heredoc: queue its delimiter; the literal body is skipped at the next
-                            # newline (finding 17). The delimiter spec is consumed here; the current line's
+                            # newline. The delimiter spec is consumed here; the current line's
                             # remaining tokens (e.g. 'cat <<'EOF' > out') keep being lexed normally. An
                             # UNQUOTED heredoc (parsed[0] False) interpolates and stays the unsupported raise.
                             _quoted, _delim, _strip, _next_i = parsed
@@ -1531,7 +1531,7 @@ def _has_patch_flag(tokens):
     return any(t in _PATCH_FLAGS or t.startswith("--patch") for t in tokens)
 
 
-# --- cnsdif git-show no-patch exemption (F-R2-2/F-R2-3): a position/argument/cluster-aware pass -------
+# --- cnsdif git-show no-patch exemption: a position/argument/cluster-aware pass -----------------------
 # The no-patch exemption (git show -s / --no-patch prints only commit metadata and the message, no diff, so
 # it is NOT a console patch) is granted ONLY when a GENUINE suppression flag sits in a real OPTION position
 # AND no patch-enabling option and no UNKNOWN option shares the option region. Conservative by construction
@@ -1666,7 +1666,7 @@ def _is_diff_producer(tokens):
         # (-p/-u/--patch*/-U/--unified/-c/--cc or a p/u short cluster), and no unknown option. A suppression
         # token after '--' (a pathspec) or consumed as a value-taking option's argument (git show -S -s) does
         # NOT earn it, and any patch enabler re-enables the diff (git show -s -p). cleanlanguage adopter
-        # report 2026-09-12; F-R2-2/F-R2-3 hardening 2026-09-12.
+        # report 2026-09-12; position-aware hardening 2026-09-12.
         if _show_no_patch_exempt(rest):
             return False
         return True
@@ -1789,7 +1789,7 @@ def _final_stdout_dest(redirects):
 # deliberately EXCLUDES the combined-diff letters -c/-cc, which emit a patch ONLY on a MERGE commit and are
 # NOPATCH on the ordinary (non-merge) commit the classifier sees; treating them as enablers would over-deny
 # the common `git show -c --stat` / `git show --cc --stat` summary form (verified NOPATCH against real git,
-# F-R2-5), so they stay summary-only allow-notes. The merge-commit --cc/-c-with-summary patch is a disclosed
+# a summary-only listing), so they stay summary-only allow-notes. The merge-commit --cc/-c-with-summary patch is a disclosed
 # residual (the guard cannot see whether the ref is a merge), not chased here. -U is an enabler whatever its
 # attached value (`-U`, `-U3`); git rejects the separated `-U 3` form outright, so no separated value is skipped.
 _SUMMARY_PATCH_SHORT = frozenset(("p", "u", "U"))
@@ -1806,7 +1806,7 @@ def _argv_has_patch_enabler(argv):
     narrows the short patch-letter set to _SUMMARY_PATCH_SHORT (p/u/U, excluding the merge-only -c letter;
     see that constant), and the long enablers to the --patch*/--unified* prefixes (excluding --cc, the
     merge-only combined-diff form). Any other (unknown) option is not a patch enabler; this predicate
-    answers only 'is a patch forced on', leaving every other classification to the caller (F-R2-5)."""
+    answers only 'is a patch forced on', leaving every other classification to the caller."""
     i = 0
     n = len(argv)
     while i < n:
@@ -1853,7 +1853,7 @@ def _diff_emits_only_summary(argv):
     pathspec: a real dump) and from a summary with a co-present patch enabler (git diff --stat -p, or the
     argument-aware -U/--unified and p/u/U-cluster forms, still a full patch dump). Patch-enabler recognition
     is argument-aware via _argv_has_patch_enabler, so -U/--unified and a p/u short cluster (git show -s --stat
-    -U3 / --unified=3 / -sp) are no longer mistaken for summary-only (F-R2-5)."""
+    -U3 / --unified=3 / -sp) are no longer mistaken for summary-only."""
     has_summary = False
     for word in argv:
         if word in _DIFF_END_OF_OPTIONS:
@@ -3079,7 +3079,7 @@ def _expbnd_fallback(command):
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
         return _expbnd_target_ask("mutation")
     if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
-        return _expbnd_breadth_publish_deny("breadth operation")  # finding 11: breadth + publish -> deny
+        return _expbnd_breadth_publish_deny("breadth operation")  # breadth + publish -> deny
     return _allow()
 
 
@@ -5007,7 +5007,7 @@ def _nonpristine_discard_actions(segments, cwd):
                 eff_certain = False
         elif cw in ("cd", "pushd", "popd"):
             # a cd/pushd at depth>0 (a subshell-internal cd, e.g. '(cd T && ...)'): the walk does not model
-            # the subshell's cwd, so note it, and a later same-subshell git discard fails closed (finding 3).
+            # the subshell's cwd, so note it, and a later same-subshell git discard fails closed.
             subshell_cd_seen = True
         else:
             # a segment whose command word is neither git nor a cd-family builtin. A
@@ -8425,7 +8425,7 @@ def _checkout_creation_start(args, switch=False):
                 ch = chars[j]
                 if ch in _CLEAN_SHORT_LETTERS or ch == "t":  # 't' is -t (--track): enables tracking only
                     if ch == "t":
-                        track_seen = True                    # a -t upstream-tracking request (finding 6)
+                        track_seen = True                    # a -t upstream-tracking request
                     j += 1
                     continue
                 if ch in short_triggers and not created:
@@ -8678,7 +8678,7 @@ _BRANCH_ROOT_PROTECTED_REFS = ("origin/HEAD", "main", "master")
 
 
 def _branch_root_protected_commit(repo):
-    """The protected line's commit sha, trying origin/HEAD then a local main/master (finding 12), or None
+    """The protected line's commit sha, trying origin/HEAD then a local main/master, or None
     when no protected ref resolves at all (a repo with no origin/HEAD and no local main/master)."""
     for ref in _BRANCH_ROOT_PROTECTED_REFS:
         p = _branch_root_git(
@@ -8873,7 +8873,7 @@ def branch_root(data):
     if pending_deny is not None:
         return _deny(*pending_deny)  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
     if pending_note is not None:
-        return _allow_note(pending_note)  # an unresolvable command-local redirect (finding 12)
+        return _allow_note(pending_note)  # an unresolvable command-local redirect
     return _allow()
 
 
@@ -10168,7 +10168,7 @@ def _gensrc_fail_ask(detail):
     Hooks never ask, and these branches are NOT confirmed generated-artefact edits: they are cases where
     the guard could not run (an unreadable/malformed payload, a non-git session, an outside-repo target, a
     resolution fault). A PRESENT-but-unreadable/malformed registry is NOT among them: it fails CLOSED (DENY)
-    in gensrc_guard's 'bad' branch (finding 8), never routing here. Denying these would block legitimate
+    in gensrc_guard's 'bad' branch, never routing here. Denying these would block legitimate
     Write/Edit/MultiEdit calls
     (an edit outside the repo, or in a non-git session) and stall an
     unattended orchestrator, and there is no confirmed hazard or reachable "edit the source" action to
@@ -11593,10 +11593,10 @@ def _orch_live_ledger_ids(root, task_hours):
             continue  # a row for neither event is not a ledger record: ignored, not counted malformed
         # a launch/complete row MUST carry a str task_id and a str ts; a launch MUST carry a bool wake.
         # A schema-invalid dict row (e.g. a launch missing ts) is MALFORMED, not a silently-ignored row,
-        # so a tracked item cannot be demoted to actionable by a half-written record (CX-R4-1).
+        # so a tracked item cannot be demoted to actionable by a half-written record.
         if not isinstance(row.get("task_id"), str) or _orch_parse_utc(row.get("ts")) is None \
                 or (event == "launch" and not isinstance(row.get("wake"), bool)):
-            schema_bad += 1  # ts must PARSE, not merely be a string (a 'banana' ts is malformed, CX-R5-2)
+            schema_bad += 1  # ts must PARSE, not merely be a string (a 'banana' ts is malformed)
             continue
         last[row["task_id"]] = row  # file order: the LAST valid event per tid wins (relaunch = live)
     live = set()
@@ -11617,7 +11617,7 @@ def _orch_live_ledger_ids(root, task_hours):
 def _orch_pending_haystack(reg, root):
     """The human-decision proof surface: the DECLARED pending-decisions record ONLY. The machine-written
     pending-asks keys are NOT decision rows and are excluded (an ask key session::tool_use could otherwise
-    forge a row via the id-colon match, CX-R4-2). Returns None when no surface is declared or it is
+    forge a row via the id-colon match). Returns None when no surface is declared or it is
     unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate) rather
     than demoting it to a definite actionable; the Stop guard DENIES the stop on that cannot-evaluate below the loop
     bound (ignorance refuses the wind-down), the operator escape releasing a genuine block."""
@@ -11711,7 +11711,7 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
         if kind == "tracked-task":
             if not ledger_readable:
                 # readable checked FIRST: a partially-malformed ledger cannot be trusted even for an id
-                # that happens to appear live in a good row (CX-R5-1), so the item is HELD.
+                # that happens to appear live in a good row, so the item is HELD.
                 out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
                                                "ledger unreadable/malformed; held"))
             elif ref in live_ids:
@@ -12051,7 +12051,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     ts = _orch_turn_state(root)
     tstate = _orch_validate("turn_state", ts)[1]
     # stop counter fails OPEN to the loop bound (an unreadable counter never licenses unbounded denies);
-    # schedule counter fails CLOSED to 0 (a malformed value never manufactures cap relief, CX-R4-3).
+    # schedule counter fails CLOSED to 0 (a malformed value never manufactures cap relief).
     counter = tstate["stop_denials"] if tstate["stop_denials"] is not None else _ORCH_LOOP_BOUND
     schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
     status, payload = _orch_enumerate(reg, root)
@@ -15999,7 +15999,7 @@ def orch_prompt_stamp(data):
                            "could not be written ({}), so its time was not stamped and the denial counters were "
                            "not reset; record it manually (nocncl).".format(unsaved))
     # one-shot: consume the matched wake digest so a later prompt with identical text (including genuine
-    # human input) is not perpetually misclassified as timer-originated (R2-CM4/CX-M7).
+    # human input) is not perpetually misclassified as timer-originated.
     wd = list(ts.get("wake_digests") or [])
     if digest in wd:
         wd.remove(digest)  # consume exactly ONE token, so a second identical wake is still recognized

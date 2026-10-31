@@ -3644,7 +3644,7 @@ def _test_destructive_guard(failures, tmp):
         import importlib.util as _ilu
         _basesha = "3123dbcef602f1e89d68febc4354107a47116696"
         _fixture = Path(__file__).resolve().parent / "fixtures" / "aiqt_hooks_base_3123dbce.frozen"
-        _fixture_sha = "c06485acbd33c90a90cd86b1b9aa64dfbbabec1cf4639a245113bda4ec00286e"
+        _fixture_sha = "812506b9ce2e17ab5a2190d1beee81f85215637c84505bd6baaeb524bcf71127"
         _blob, _fx_cause = None, None
         try:
             _fixture_bytes = _fixture.read_bytes()
@@ -3733,7 +3733,7 @@ def _test_destructive_guard(failures, tmp):
             # cause (fail closed).
             _pinsha = "e09e999f457121a1ec16f240bd351b6703a7f5ce"
             _pin_fixture = Path(__file__).resolve().parent / "fixtures" / "aiqt_hooks_pin_e09e999f.frozen"
-            _pin_fixture_sha = "8cdd4d73c02121fe69fbc47e1aaa837673bb5991fc3ecfaa440f0ffc5d2c6597"
+            _pin_fixture_sha = "ea787ef4ed0ceeba6f4a40fdd9f0bfcb52107402c67e69e45db14a338f891d5d"
             _pin_blob, _pin_cause = None, None
             try:
                 _pin_bytes = _pin_fixture.read_bytes()
