@@ -50,6 +50,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import base64
+import builtins
+import errno
 import json
 import os
 import stat
@@ -5233,6 +5235,4247 @@ def _perm_sweep(base):
                 if got != expected:
                     mismatches.append(("model" if model else "kernel",) + key + (oct(index << 6), got, expected))
     return counts[0], counts[1], mismatches
+
+
+def _cite_prune_in(directory, keep, now_ns):
+    """aiqt_hooks._cite_prune run on the directory at path directory: the number of files it removed."""
+    dirfd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        return aiqt_hooks._cite_prune(dirfd, keep, now_ns)
+    finally:
+        os.close(dirfd)
+
+
+def _citeledger_cases(tmp):
+    """The citation read recorder (aiqt_hooks.citation_read_recorder): the rows each recognized tool call
+    earns, the shapes that record nothing, the owner-only modes, the refused symlink, rotation,
+    deduplication, pruning and the size bounds (each bound tried just inside, at and just outside it), and
+    the surfaced write failure. Every tool_response here is built by hand in the shape the recorder
+    recognizes; none was captured from a live session."""
+    root = tmp / "citeledger"
+    tools_dir = root / "tools"
+    tools_dir.mkdir(parents=True)
+    a_py, b_py, c_py = tools_dir / "a.py", tools_dir / "b.py", tools_dir / "c.py"
+    a_bytes = b"alpha = 1\nbeta = 2\ngamma = 3\ndelta = 4\nepsilon = 5\n"
+    a_py.write_bytes(a_bytes)
+    b_py.write_bytes(b"other\n")
+    for args in (["init", "-q", "-b", "main"], ["add", "tools"],
+                 ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "-m", "seed"]):
+        subprocess.run(["git", "-C", str(root)] + args, check=True, capture_output=True, timeout=30)
+    state = Path(aiqt_hooks._orch_state_dir_for_root(str(root)))
+    ledger_dir = state / "citation-ledger"
+    verdicts = []
+
+    def ledger(session):
+        return ledger_dir / (hashlib.sha256(session.encode("utf-8")).hexdigest()[:16] + ".jsonl")
+
+    def rows(session):
+        path = ledger(session)
+        if not path.exists():
+            return []
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def spans(session):
+        return [(r["via"], r["rel"], r["start"], r["end"]) for r in rows(session)]
+
+    def call(tool, tool_input, response, session, event="PostToolUse"):
+        data = {"hook_event_name": event, "cwd": str(root), "tool_name": tool, "tool_input": tool_input,
+                "tool_response": response}
+        if session is not None:
+            data["session_id"] = session
+        result = aiqt_hooks.citation_read_recorder(data)
+        verdicts.append(_verdict(result))
+        return result
+
+    def read(content, start, count, path=a_py, kind="text"):
+        return {"type": kind, "file": {"filePath": str(path), "content": content, "numLines": count,
+                                       "startLine": start, "totalLines": 6}}
+
+    def bash(command, stdout, session):
+        return call("Bash", {"command": command}, {"stdout": stdout, "stderr": "", "interrupted": False,
+                                                    "isImage": False}, session)
+
+    def digest(data):
+        return hashlib.sha256(data).hexdigest()
+
+    def mode(path):  # None for a missing path, so a recorder that writes nothing fails a check, not the run
+        return oct(os.stat(str(path)).st_mode & 0o777) if os.path.lexists(str(path)) else None
+
+    def size(path):
+        return os.stat(str(path)).st_size if os.path.lexists(str(path)) else -1
+
+    # The ledger directory and file are owner-only under a permissive umask, and wider modes found later
+    # are narrowed again on the next append (red when the explicit modes are dropped for umask defaults).
+    saved_umask = os.umask(0o022)
+    try:
+        call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "modes")
+        fresh = (mode(ledger_dir), mode(ledger("modes")))
+        for path, wide in ((ledger_dir, 0o755), (ledger("modes"), 0o644)):
+            if os.path.lexists(str(path)):
+                os.chmod(str(path), wide)
+        call("Read", {"file_path": str(a_py)}, read("beta = 2", 2, 1), "modes")
+        narrowed = (mode(ledger_dir), mode(ledger("modes")))
+    finally:
+        os.umask(saved_umask)
+    check("citeledger/ledger-owner-only", (fresh, narrowed), (("0o700", "0o600"), ("0o700", "0o600")))
+
+    # Read: the span comes from startLine and numLines, confirmed line by line against the file, the digest
+    # is of the raw bytes of those lines as read from disk, and the pieces are the per-line digests of the
+    # span (one line per piece for a span of at most _CITE_PIECES_MAX lines).
+    call("Read", {"file_path": str(a_py), "offset": 3, "limit": 2}, read("gamma = 3\ndelta = 4", 3, 2),
+         "read-span")
+    check("citeledger/read-span-recorded",
+          [(r["kind"], r["via"], r["path"], r["rel"], r["start"], r["end"], r["sha256"], r["pieces"], r["rev"])
+           for r in rows("read-span")],
+          [("read", "Read", os.path.realpath(str(a_py)), "tools/a.py", 3, 4,
+            digest(b"gamma = 3\ndelta = 4\n"), digest(b"gamma = 3\n")[:16] + digest(b"delta = 4\n")[:16],
+            None)])
+    # A whole-file read shows an empty line after the final line feed; it is no line of the file, whether
+    # numLines counts it or not.
+    call("Read", {"file_path": str(a_py)}, read(a_bytes.decode("utf-8"), 1, 6), "read-whole-6")
+    call("Read", {"file_path": str(a_py)}, read(a_bytes.decode("utf-8"), 1, 5), "read-whole-5")
+    check("citeledger/read-final-line-feed-not-a-line", (spans("read-whole-6"), spans("read-whole-5")),
+          ([("Read", "tools/a.py", 1, 5)], [("Read", "tools/a.py", 1, 5)]))
+    # Shapes the recorder does not recognize record nothing, never a guessed span: the span a 0-based
+    # offset would claim, cat -n prefixed text, a non-integer or boolean field, a count the content
+    # disagrees with, an image read, a response naming another file, no file object, a bare string, a
+    # zero startLine.
+    unknown_read = (
+        ("zero-based-offset", read("gamma = 3\ndelta = 4", 2, 2)),
+        ("cat-n-prefixed", read("     3\tgamma = 3\n     4\tdelta = 4", 3, 2)),
+        ("string-start", read("gamma = 3\ndelta = 4", "3", 2)),
+        ("bool-count", read("gamma = 3", 3, True)),
+        ("count-disagrees", read("gamma = 3\ndelta = 4", 3, 3)),
+        ("image", read("gamma = 3", 3, 1, kind="image")),
+        ("other-file", read("other", 1, 1, path=b_py)),
+        ("no-file-object", {"type": "text"}),
+        ("bare-string", "     3\tgamma = 3"),
+        ("zero-start", read("alpha = 1", 0, 1)))
+    for name, response in unknown_read:
+        call("Read", {"file_path": str(a_py), "offset": 3, "limit": 2}, response, "unknown-read-" + name)
+    check("citeledger/read-unknown-shape-records-nothing",
+          [name for name, _resp in unknown_read if ledger("unknown-read-" + name).exists()], [])
+
+    # No session id, an empty one, or an event other than PostToolUse: nothing is written.
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), None)
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "")
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "pre-event", event="PreToolUse")
+    check("citeledger/no-session-no-row",
+          (sorted(p.name for p in (ledger_dir.iterdir() if ledger_dir.is_dir() else ()) if p.name.startswith(
+              hashlib.sha256(b"").hexdigest()[:16])), ledger("pre-event").exists()), ([], False))
+    # A malformed payload (a tool_name that is not a string, a tool_input that is not an object, a path
+    # holding a NUL) allows silently and records nothing, never a handler crash.
+    malformed = []
+    for name, tool, tool_input, response in (
+            ("tool-list", ["Read"], {"file_path": str(a_py)}, read("alpha = 1", 1, 1)),
+            ("input-list", "Read", [str(a_py)], read("alpha = 1", 1, 1)),
+            ("nul-path", "Read", {"file_path": str(a_py) + "\x00"}, read("alpha = 1", 1, 1))):
+        try:
+            outcome = call(tool, tool_input, response, "malformed-" + name)
+        except Exception as exc:  # a handler crash fails this check rather than ending the run
+            outcome = "crash: {}".format(type(exc).__name__)
+        malformed.append((outcome, ledger("malformed-" + name).exists()))
+    check("citeledger/malformed-payload-records-nothing", malformed, [((0, None, None), False)] * 3)
+
+    # Grep, content mode: hit and context lines of a directory search (paths relative to cwd, consecutive
+    # lines merged into one span) and the N:TEXT lines of a one-file search.
+    call("Grep", {"pattern": "gamma|other", "path": str(root), "output_mode": "content", "-n": True, "-A": 1},
+         {"mode": "content", "numFiles": 2, "filenames": [], "numLines": 4,
+          "content": "tools/a.py:3:gamma = 3\ntools/a.py-4-delta = 4\n--\ntools/b.py:1:other"}, "grep-dir")
+    call("Grep", {"pattern": "beta", "path": str(a_py), "output_mode": "content"},
+         {"mode": "content", "numFiles": 1, "filenames": [], "numLines": 1, "content": "2:beta = 2"},
+         "grep-file")
+    check("citeledger/grep-hit-recorded", (spans("grep-dir"), spans("grep-file")),
+          ([("Grep", "tools/a.py", 3, 4), ("Grep", "tools/b.py", 1, 1)], [("Grep", "tools/a.py", 2, 2)]))
+    # A line that splits into a line of two different files is ambiguous, and one whose text is not the
+    # file's line, a files-only search and a search without line numbers name no line: nothing is recorded.
+    (tools_dir / "c").write_bytes(b"d:1:e\n")
+    (tools_dir / "c:1:d").write_bytes(b"e\n")
+    grep_unknown = (
+        ("ambiguous", {"pattern": "e", "path": str(root), "output_mode": "content"},
+         {"mode": "content", "content": "tools/c:1:d:1:e"}),
+        ("text-differs", {"pattern": "g", "path": str(root), "output_mode": "content"},
+         {"mode": "content", "content": "tools/a.py:3:gamma = 33"}),
+        ("files-only", {"pattern": "g", "path": str(root)},
+         {"mode": "files_with_matches", "filenames": ["tools/a.py"], "content": "tools/a.py:3:gamma = 3"}),
+        ("no-line-numbers", {"pattern": "g", "path": str(root), "output_mode": "content", "-n": False},
+         {"mode": "content", "content": "tools/a.py:3:gamma = 3"}))
+    for name, tool_input, response in grep_unknown:
+        call("Grep", tool_input, response, "unknown-grep-" + name)
+    check("citeledger/grep-unrecognized-records-nothing",
+          [name for name, _i, _r in grep_unknown if ledger("unknown-grep-" + name).exists()], [])
+
+    # git show REV:PATH: lines 1..k, digested from the blob, which here differs from the working tree.
+    a_py.write_bytes(a_bytes.replace(b"beta = 2", b"beta = 22"))
+    bash("git show HEAD:tools/a.py", a_bytes.decode("utf-8"), "git-show")
+    bash("git --no-pager -C {} show HEAD:tools/a.py".format(root), a_bytes.decode("utf-8")[:-1],
+         "git-show-c")
+    a_py.write_bytes(a_bytes)
+    check("citeledger/git-show-recorded",
+          ([(r["via"], r["rel"], r["start"], r["end"], r["sha256"], r["rev"]) for r in rows("git-show")],
+           spans("git-show-c")),
+          ([("git-show", "tools/a.py", 1, 5, digest(a_bytes), "HEAD")], [("git-show", "tools/a.py", 1, 5)]))
+    # grep -n, rg -n and sed -n 'A,Bp' as one plain command each.
+    bash("grep -n beta tools/a.py", "2:beta = 2\n", "bash-grep")
+    bash("rg -n -C1 gamma tools", "tools/a.py-2-beta = 2\ntools/a.py:3:gamma = 3\ntools/a.py-4-delta = 4\n",
+         "bash-rg")
+    bash("sed -n '2,3p' tools/a.py", "beta = 2\ngamma = 3\n", "bash-sed")
+    check("citeledger/bash-read-recorded", (spans("bash-grep"), spans("bash-rg"), spans("bash-sed")),
+          ([("grep", "tools/a.py", 2, 2)], [("grep", "tools/a.py", 2, 4)], [("sed", "tools/a.py", 2, 3)]))
+    # Bash shapes that record nothing: a pipeline, a trailing separator, a redirect, an unrecorded command,
+    # a commit operand, a relative -C, output that is not the blob, grep without -n, a reversed sed range,
+    # an interrupted call, and a response with no stdout string.
+    bash_unknown = (
+        ("pipeline", "git show HEAD:tools/a.py | cat", a_bytes.decode("utf-8")),
+        ("trailing-separator", "git show HEAD:tools/a.py;", a_bytes.decode("utf-8")),
+        ("redirect", "git show HEAD:tools/a.py 2>/dev/null", a_bytes.decode("utf-8")),
+        ("cat", "cat tools/a.py", a_bytes.decode("utf-8")),
+        ("commit-operand", "git show HEAD", a_bytes.decode("utf-8")),
+        ("relative-c", "git -C tools show HEAD:tools/a.py", a_bytes.decode("utf-8")),
+        ("not-the-blob", "git show HEAD:tools/a.py", a_bytes.decode("utf-8").replace("beta", "BETA")),
+        ("grep-no-n", "grep beta tools/a.py", "beta = 2\n"),
+        ("sed-reversed", "sed -n '3,2p' tools/a.py", "gamma = 3\n"))
+    for name, command, stdout in bash_unknown:
+        bash(command, stdout, "unknown-bash-" + name)
+    call("Bash", {"command": "sed -n '2p' tools/a.py"}, {"stdout": "beta = 2\n", "interrupted": True},
+         "unknown-bash-interrupted")
+    call("Bash", {"command": "sed -n '2p' tools/a.py"}, {"output": "beta = 2\n"}, "unknown-bash-no-stdout")
+    check("citeledger/bash-unrecognized-records-nothing",
+          [name for name in [n for n, _c, _s in bash_unknown] + ["interrupted", "no-stdout"]
+           if ledger("unknown-bash-" + name).exists()], [])
+    # A nested quote in a recorded command: the recorder lexes as bash nests a substitution's quotes inside
+    # a double-quoted string, so the double quote inside single quotes in $(...) does not end the pattern,
+    # and the pattern, a substitution, records nothing (the walk's lexing, which ends the string there,
+    # leaves a quote that does not close and records nothing too). A single quote inside double quotes with
+    # no substitution is recorded.
+    bash("grep -n \"$(echo '\"')beta\" tools/a.py", "2:beta = 2\n", "nested-quote-subst")
+    bash("grep -n \"b'*eta\" tools/a.py", "2:beta = 2\n", "nested-quote-plain")
+    check("citeledger/bash-nested-quote", (spans("nested-quote-subst"), spans("nested-quote-plain")),
+          ([], [("grep", "tools/a.py", 2, 2)]))
+
+    # Write is the whole written file and Edit the lines of its new text, both as "wrote" rows; a Write
+    # whose file does not hold the written content records nothing.
+    c_py.write_bytes(b"x = 1\ny = 2\n")
+    call("Write", {"file_path": str(c_py), "content": "x = 1\ny = 2\n"}, {"filePath": str(c_py), "success": True},
+         "write")
+    call("Write", {"file_path": str(c_py), "content": "x = 9\n"}, {"filePath": str(c_py), "success": True},
+         "write-differs")
+    c_py.write_bytes(b"x = 1\ny = 2\nz = 3\n")
+    call("Edit", {"file_path": str(c_py), "old_string": "y = 2\n", "new_string": "y = 2\nz = 3\n"},
+         {"filePath": str(c_py)}, "edit")
+    check("citeledger/write-edit-recorded",
+          ([(r["kind"], r["via"], r["rel"], r["start"], r["end"]) for r in rows("write")],
+           ledger("write-differs").exists(),
+           [(r["kind"], r["via"], r["rel"], r["start"], r["end"]) for r in rows("edit")]),
+          ([("wrote", "Write", "tools/c.py", 1, 2)], False, [("wrote", "Edit", "tools/c.py", 2, 3)]))
+
+    # A file of exactly _CITE_MAX_FILE bytes is read; one byte more is not.
+    saved_max = aiqt_hooks._CITE_MAX_FILE
+    try:
+        sizes = []
+        for limit in (len(a_bytes) + 1, len(a_bytes), len(a_bytes) - 1):
+            aiqt_hooks._CITE_MAX_FILE = limit
+            call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "max-file-{}".format(limit))
+            sizes.append(ledger("max-file-{}".format(limit)).exists())
+    finally:
+        aiqt_hooks._CITE_MAX_FILE = saved_max
+    check("citeledger/max-file-boundary", sizes, [True, True, False])
+
+    # The writer's bounds, driven through _cite_append with one fixed row of L bytes after F filler bytes.
+    def row(start):
+        return {"v": 1, "ts": "t", "kind": "read", "via": "Read", "path": "/x/p.py", "rel": None,
+                "start": start, "end": start, "sha256": "0" * 64, "rev": None}
+
+    width = len((json.dumps(row(1), sort_keys=True) + "\n").encode("utf-8"))
+    filler = b"#" * 99 + b"\n"
+    saved = (aiqt_hooks._CITE_CAP, aiqt_hooks._CITE_DEDUP_BELOW, aiqt_hooks._CITE_ROW_MAX)
+    try:
+        # rotation: a cap of F+L+1 and of F+L keeps one file (it ends at most at the cap); F+L-1 rotates.
+        rotated = []
+        for name, cap in (("inside", len(filler) + width + 1), ("at", len(filler) + width),
+                          ("outside", len(filler) + width - 1)):
+            ledger("rot-" + name).parent.mkdir(parents=True, exist_ok=True)
+            ledger("rot-" + name).write_bytes(filler)
+            aiqt_hooks._CITE_CAP = cap
+            failure = aiqt_hooks._cite_append(str(state), "rot-" + name, [row(1)])
+            older = Path(str(ledger("rot-" + name)) + ".1")
+            rotated.append((failure, ledger("rot-" + name).stat().st_size,
+                            older.stat().st_size if older.exists() else None))
+        check("citeledger/rotation-cap-boundary", rotated,
+              [(None, len(filler) + width, None), (None, len(filler) + width, None),
+               (None, width, len(filler))])
+        aiqt_hooks._CITE_CAP = saved[0]
+        # deduplication: the held row is skipped below the bound (F+L < F+L+1) and appended again at it
+        # (F+L == F+L) and above it (F+L > F+L-1).
+        deduped = []
+        for name, bound in (("inside", len(filler) + width + 1), ("at", len(filler) + width),
+                            ("outside", len(filler) + width - 1)):
+            ledger("dedup-" + name).write_bytes(filler)
+            aiqt_hooks._cite_append(str(state), "dedup-" + name, [row(1)])
+            aiqt_hooks._CITE_DEDUP_BELOW = bound
+            aiqt_hooks._cite_append(str(state), "dedup-" + name, [row(1)])
+            aiqt_hooks._CITE_DEDUP_BELOW = saved[1]
+            deduped.append(ledger("dedup-" + name).stat().st_size)
+        check("citeledger/dedup-boundary", deduped,
+              [len(filler) + width, len(filler) + 2 * width, len(filler) + 2 * width])
+        # row size: a JSON line of L bytes is kept under a bound of L+1 and dropped at L and at L-1.
+        kept = []
+        for name, bound in (("inside", width + 1), ("at", width), ("outside", width - 1)):
+            aiqt_hooks._CITE_ROW_MAX = bound
+            aiqt_hooks._cite_append(str(state), "row-" + name, [row(1)])
+            kept.append(ledger("row-" + name).exists())
+        check("citeledger/row-max-boundary", kept, [True, False, False])
+        # a row at or over the bound loses only its pieces: kept whole under a bound its whole line fits,
+        # kept without pieces at that line's length, and dropped where even the slim line is at the bound.
+        pieced = dict(row(1), pieces="0" * 32)
+        wide = len((json.dumps(pieced, sort_keys=True) + "\n").encode("utf-8"))
+        slimmed = []
+        for name, bound in (("whole", wide + 1), ("slim", wide), ("dropped", width)):
+            aiqt_hooks._CITE_ROW_MAX = bound
+            aiqt_hooks._cite_append(str(state), "pieces-" + name, [dict(pieced)])
+            held = rows("pieces-" + name)
+            slimmed.append((len(held), any("pieces" in r for r in held)))
+        check("citeledger/row-max-drops-pieces-first", slimmed, [(1, True), (1, False), (0, False)])
+    finally:
+        aiqt_hooks._CITE_CAP, aiqt_hooks._CITE_DEDUP_BELOW, aiqt_hooks._CITE_ROW_MAX = saved
+
+    # Rotation through the hook, with a cap of three rows: the fourth read rotates the first three onto .1
+    # (one older generation), and the current file stays at or under the cap.
+    saved_cap = aiqt_hooks._CITE_CAP
+    try:
+        for start in range(1, 6):
+            line = a_bytes.split(b"\n")[start - 1].decode("utf-8")
+            call("Read", {"file_path": str(a_py)}, read(line, start, 1), "rot-hook")
+            if start == 1:
+                aiqt_hooks._CITE_CAP = 3 * max(size(ledger("rot-hook")), 1)
+        older = Path(str(ledger("rot-hook")) + ".1")
+        older_starts = [json.loads(x)["start"] for x in older.read_text(encoding="utf-8").splitlines()] \
+            if older.exists() else []
+        check("citeledger/rotation-bounded",
+              (0 <= size(ledger("rot-hook")) <= aiqt_hooks._CITE_CAP, older_starts,
+               [r["start"] for r in rows("rot-hook")]),
+              (True, [1, 2, 3], [4, 5]))
+    finally:
+        aiqt_hooks._CITE_CAP = saved_cap
+
+    # Pruning keeps a file modified exactly 14 days before now or later, removes one a nanosecond older,
+    # and passes over a symlink, another name shape and the session's own files; at most 50 per call.
+    prune_dir = tmp / "cite-prune"
+    prune_dir.mkdir()
+    now_ns = 1_800_000_000 * 10 ** 9
+    age = aiqt_hooks._CITE_PRUNE_AGE_NS
+    keep = "f" * 16 + ".jsonl"
+    stamps = {"a" * 16 + ".jsonl": now_ns - age + 1, "b" * 16 + ".jsonl": now_ns - age,
+              "c" * 16 + ".jsonl": now_ns - age - 1, "d" * 16 + ".jsonl.1": now_ns - age - 1,
+              keep: now_ns - age - 1, keep + ".1": now_ns - age - 1, "notes.txt": now_ns - age - 1}
+    for name, when in stamps.items():
+        (prune_dir / name).write_bytes(b"x\n")
+        os.utime(str(prune_dir / name), ns=(when, when))
+    os.symlink(str(prune_dir / "notes.txt"), str(prune_dir / ("e" * 16 + ".jsonl")))
+    removed = _cite_prune_in(prune_dir, keep, now_ns)
+    check("citeledger/prune-boundary", (removed, sorted(p.name for p in prune_dir.iterdir())),
+          (2, sorted(["a" * 16 + ".jsonl", "b" * 16 + ".jsonl", "e" * 16 + ".jsonl", keep, keep + ".1",
+                      "notes.txt"])))
+    # The prune count: 49, 50 and 51 old files leave none, none and one.
+    pruned = []
+    for total in (49, 50, 51):
+        many_dir = tmp / "cite-prune-many-{}".format(total)
+        many_dir.mkdir()
+        for index in range(total):
+            old = many_dir / ("{:016x}.jsonl".format(index))
+            old.write_bytes(b"x\n")
+            os.utime(str(old), ns=(now_ns - age - 1, now_ns - age - 1))
+        pruned.append((_cite_prune_in(many_dir, keep, now_ns), len(list(many_dir.iterdir()))))
+    check("citeledger/prune-at-most-fifty", pruned, [(49, 0), (50, 0), (50, 1)])
+    # Through the hook: a new session file prunes an old ledger file; an append to an existing one does not.
+    stale = ledger_dir / ("9" * 16 + ".jsonl")
+    stale.write_bytes(b"x\n")
+    old_ns = time.time_ns() - age - 10 ** 9
+    os.utime(str(stale), ns=(old_ns, old_ns))
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "read-span")
+    kept_on_append = stale.exists()
+    call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "prune-new-session")
+    check("citeledger/new-session-prunes-old", (kept_on_append, stale.exists()), (True, False))
+
+    # A write that fails is surfaced, never swallowed: a regular file where the ledger directory belongs,
+    # and a symlink at the session file, whose target is left untouched.
+    saved_xdg = os.environ.get("XDG_STATE_HOME")
+    try:
+        os.environ["XDG_STATE_HOME"] = str(tmp / "cite-alt-xdg")
+        alt = Path(aiqt_hooks._orch_state_dir_for_root(str(root)))
+        alt.mkdir(parents=True)
+        (alt / "citation-ledger").write_bytes(b"not a directory\n")
+        failed = call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "fail")
+    finally:
+        if saved_xdg is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = saved_xdg
+    note = failed[1].get("systemMessage", "") if isinstance(failed[1], dict) else ""
+    check("citeledger/write-failure-noted",
+          (_verdict(failed), "citation-ledger write failed (FileExistsError" in note), ("warn", True))
+    target = tmp / "cite-symlink-target.txt"
+    target.write_bytes(b"keep\n")
+    os.symlink(str(target), str(ledger("symlinked")))
+    linked = call("Read", {"file_path": str(a_py)}, read("alpha = 1", 1, 1), "symlinked")
+    note = linked[1].get("systemMessage", "") if isinstance(linked[1], dict) else ""
+    check("citeledger/symlink-ledger-refused",
+          (_verdict(linked), "citation-ledger write failed" in note, target.read_bytes()), ("warn", True, b"keep\n"))
+
+    # The recorder never decides a permission: every call above allowed, silently or with a note.
+    check("citeledger/never-denies", sorted(set(verdicts)), ["allow", "warn"])
+
+
+class _CiteRepo:
+    """A committed git repository for the citation recorder's cases: files (bytes) and symlinks (target
+    text) written under root and committed, calls made as PostToolUse payloads with cwd at root, and the
+    rows each session's ledger holds."""
+
+    def __init__(self, root, files, links=()):
+        self.root = root
+        for rel, data in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(data)
+        for rel, target in links:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(target, str(root / rel))
+        for args in (["init", "-q", "-b", "main"], ["add", "-A"],
+                     ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                      "commit", "-q", "-m", "seed"]):
+            subprocess.run(["git", "-C", str(root)] + args, check=True, capture_output=True, timeout=30)
+        self.top = os.path.realpath(str(root))
+        self.ledger_dir = Path(aiqt_hooks._orch_state_dir_for_root(str(root))) / "citation-ledger"
+        self.verdicts = []
+
+    def ledger(self, session):
+        return self.ledger_dir / (hashlib.sha256(session.encode("utf-8")).hexdigest()[:16] + ".jsonl")
+
+    def rows(self, session):
+        path = self.ledger(session)
+        if not path.exists():
+            return []
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def spans(self, session):
+        return [(r["via"], r["rel"], r["start"], r["end"]) for r in self.rows(session)]
+
+    def call(self, tool, tool_input, response, session):
+        result = aiqt_hooks.citation_read_recorder({
+            "hook_event_name": "PostToolUse", "cwd": str(self.root), "session_id": session, "tool_name": tool,
+            "tool_input": tool_input, "tool_response": response})
+        self.verdicts.append(_verdict(result))
+        return result
+
+    def bash(self, command, stdout, session):
+        return self.call("Bash", {"command": command}, {"stdout": stdout, "stderr": "", "interrupted": False},
+                         session)
+
+    def grep(self, path, content, session):
+        tool_input = {"pattern": "p", "output_mode": "content", "-n": True}
+        if path is not None:
+            tool_input["path"] = str(path)
+        return self.call("Grep", tool_input, {"mode": "content", "content": content}, session)
+
+
+class _CiteClock:
+    """Stands in for the time module inside aiqt_hooks: monotonic() returns first until the clock is
+    advanced and later from then on, so a deadline set from the first reading is met by later exactly as
+    chosen. With step, the first reading advances it; otherwise advance() does (called here by a stand-in
+    toplevel probe). Every other attribute is the real time module's."""
+
+    def __init__(self, first, later, step):
+        self.first, self.later, self.step, self.advanced = first, later, step, False
+
+    def monotonic(self):
+        value = self.later if self.advanced else self.first
+        self.advanced = self.advanced or self.step
+        return value
+
+    def advance(self):
+        self.advanced = True
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _citeledger_fixture_cases(tmp):
+    """The recorder on tool_response fixtures whose key names, key order and value types were copied from
+    real Claude Code tool results (toolUseResult objects of a session transcript, captured 2026-10-18), with
+    every path and content value replaced by synthetic data: a Read text response (type; file with filePath,
+    content, numLines, startLine, totalLines) and a Write create response (type, filePath, content,
+    structuredPatch, originalFile, userModified). That a PostToolUse hook's tool_response is the same object
+    as the tool result those shapes were copied from is an INFERENCE, not an observation, so these vectors
+    show the recorder reads the captured shapes, not that the platform sends them to hooks; every other
+    recorder vector builds its response by hand from the recorder's own expectations. No captured Edit or
+    Grep tool result was available, and the platform's documentation reachable from this repository does not
+    give their response shapes, so no Edit or Grep fixture is added here (said rather than guessed); the
+    hand-built Edit and Grep vectors in _citeledger_cases are the only coverage of those shapes."""
+    repo = _CiteRepo(tmp / "cite-fixture", {"tools/a.py": b"alpha\nbeta\ngamma\n"})
+    a_py, b_py = repo.root / "tools" / "a.py", repo.root / "tools" / "b.py"
+    b_py.write_bytes(b"alpha\nbeta\ngamma\n")
+    repo.call("Read", {"file_path": str(a_py)},
+              {"type": "text",
+               "file": {"filePath": str(a_py), "content": "alpha\nbeta\ngamma\n", "numLines": 3,
+                        "startLine": 1, "totalLines": 3}}, "fixture-read")
+    repo.call("Write", {"file_path": str(b_py), "content": "alpha\nbeta\ngamma\n"},
+              {"type": "create", "filePath": str(b_py), "content": "alpha\nbeta\ngamma\n",
+               "structuredPatch": [], "originalFile": None, "userModified": False}, "fixture-write")
+    digest = hashlib.sha256(b"alpha\nbeta\ngamma\n").hexdigest()
+    pieces = "".join(hashlib.sha256(line).hexdigest()[:16] for line in (b"alpha\n", b"beta\n", b"gamma\n"))
+    held = {session: [(r["kind"], r["via"], r["rel"], r["start"], r["end"], r["sha256"], r["pieces"], r["rev"])
+                      for r in repo.rows(session)] for session in ("fixture-read", "fixture-write")}
+    check("citeledger/platform-shape-read-recorded", held["fixture-read"],
+          [("read", "Read", "tools/a.py", 1, 3, digest, pieces, None)])
+    check("citeledger/platform-shape-write-recorded", held["fixture-write"],
+          [("wrote", "Write", "tools/b.py", 1, 3, digest, pieces, None)])
+
+
+def _citeledger_show_cases(tmp):
+    """git show REV:PATH is recorded against the repository path and revision it names, never a
+    working-tree file the path now resolves to: a committed symlink records nothing, and a path the working
+    tree has replaced by a symlink, lost under a symlinked parent, replaced by a directory, or removed is
+    recorded at that path. A repository other than the session's (here one nested inside it) leaves rel
+    null."""
+    blobs = {"tools/a.py": b"alpha = 1\n", "tools/b.py": b"bravo = 2\n", "tools/sub/s.py": b"sub = 3\n",
+             "tools/d.py": b"delta = 4\n", "tools/gone.py": b"gone = 5\n", "tools/elsewhere/keep.txt": b"keep\n"}
+    repo = _CiteRepo(tmp / "cite-show", blobs, links=[("tools/link", "b.py")])
+    tools_dir = repo.root / "tools"
+    os.unlink(str(tools_dir / "a.py"))
+    os.symlink("b.py", str(tools_dir / "a.py"))
+    shutil.rmtree(str(tools_dir / "sub"))
+    os.symlink("elsewhere", str(tools_dir / "sub"))
+    os.unlink(str(tools_dir / "d.py"))
+    (tools_dir / "d.py").mkdir()
+    os.unlink(str(tools_dir / "gone.py"))
+    nested = repo.root / "vendor" / "inner"
+    nested.mkdir(parents=True)
+    (nested / "tools").mkdir()
+    (nested / "tools" / "a.py").write_bytes(b"inner = 6\n")
+    for args in (["init", "-q", "-b", "main"], ["add", "-A"],
+                 ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "-m", "seed"]):
+        subprocess.run(["git", "-C", str(nested)] + args, check=True, capture_output=True, timeout=30)
+    cases = (("symlink-entry", "git show HEAD:tools/link", "b.py"),
+             ("replaced-by-symlink", "git show HEAD:tools/a.py", "alpha = 1\n"),
+             ("parent-replaced-by-symlink", "git show HEAD:tools/sub/s.py", "sub = 3\n"),
+             ("replaced-by-directory", "git show HEAD:tools/d.py", "delta = 4\n"),
+             ("removed", "git show HEAD:tools/gone.py", "gone = 5\n"),
+             ("nested-repository", "git -C {} show HEAD:tools/a.py".format(nested), "inner = 6\n"))
+    got = {}
+    for name, command, stdout in cases:
+        repo.bash(command, stdout, "show-" + name)
+        got[name] = [(r["path"], r["rel"], r["start"], r["end"], r["sha256"], r["rev"])
+                     for r in repo.rows("show-" + name)]
+
+    def want(rel, data, top=repo.top, named=True):
+        return [(os.path.join(top, rel), rel if named else None, 1, 1, hashlib.sha256(data).hexdigest(), "HEAD")]
+    check("citeledger/git-show-names-blob-path", got, {
+        "symlink-entry": [],
+        "replaced-by-symlink": want("tools/a.py", b"alpha = 1\n"),
+        "parent-replaced-by-symlink": want("tools/sub/s.py", b"sub = 3\n"),
+        "replaced-by-directory": want("tools/d.py", b"delta = 4\n"),
+        "removed": want("tools/gone.py", b"gone = 5\n"),
+        "nested-repository": want("tools/a.py", b"inner = 6\n", top=os.path.realpath(str(nested)), named=False)})
+
+
+def _citeledger_edit_cases(tmp):
+    """An Edit records only the lines its new text wholly occupies after the edit, at the edit's own
+    position: from originalFile in the response where it is given (the replacement must reproduce the file
+    on disk), else at the one occurrence of the new text; never another occurrence, never a line the new
+    text only partly covers, and nothing where the position is ambiguous or the file disagrees."""
+    repo = _CiteRepo(tmp / "cite-edit", {"seed.txt": b"seed\n"})
+    cases = (
+        ("partial-line", "x = 9\nsecret_token_two = 2\nw = 2\n", "9", "2", False, True),
+        ("partial-line-no-original", "x = 9\nsecret_token_two = 2\nw = 2\n", "9", "2", False, False),
+        ("other-occurrence", "keep\nOLD\nNEW\n", "OLD", "NEW", False, True),
+        ("ambiguous-no-original", "keep\nOLD\nNEW\n", "OLD", "NEW", False, False),
+        ("multi-line-partial-ends", "x = 1\ny = 2\n", "1\ny", "1\nz = 3\ny", False, True),
+        ("replace-all", "a OLD\nOLD\nb\n", "OLD", "NEW", True, True),
+        ("replace-all-no-original", "a OLD\nOLD\nb\n", "OLD", "NEW", True, False),
+        ("whole-lines", "a\nb\nc\n", "b\n", "B1\nB2\n", False, True),
+        ("unique-no-original", "m = 1\nold line\n", "old line\n", "new line\n", False, False),
+        ("crlf-file", "a\r\nb\r\nc\r\n", "b", "B", False, True))
+    got = {}
+    for name, before, old, new, every, original in cases:
+        path = repo.root / (name + ".txt")
+        path.write_bytes((before.replace(old, new) if every else before.replace(old, new, 1)).encode("utf-8"))
+        response = {"filePath": str(path)}
+        if original:
+            response["originalFile"] = before
+        tool_input = {"file_path": str(path), "old_string": old, "new_string": new}
+        if every:
+            tool_input["replace_all"] = True
+        repo.call("Edit", tool_input, response, "edit-" + name)
+        got[name] = [(r["kind"], r["start"], r["end"]) for r in repo.rows("edit-" + name)]
+    # The file on disk no longer equals originalFile with the edit made: nothing is recorded.
+    drifted = repo.root / "drifted.txt"
+    drifted.write_bytes(b"q = 3\nq = 2\n")
+    repo.call("Edit", {"file_path": str(drifted), "old_string": "q = 1", "new_string": "q = 2"},
+              {"filePath": str(drifted), "originalFile": "q = 1\n"}, "edit-drifted")
+    got["drifted"] = [(r["kind"], r["start"], r["end"]) for r in repo.rows("edit-drifted")]
+    check("citeledger/edit-own-lines-only", got, {
+        "partial-line": [], "partial-line-no-original": [], "other-occurrence": [("wrote", 2, 2)],
+        "ambiguous-no-original": [], "multi-line-partial-ends": [("wrote", 2, 2)],
+        "replace-all": [("wrote", 2, 2)], "replace-all-no-original": [], "whole-lines": [("wrote", 2, 3)],
+        "unique-no-original": [("wrote", 2, 2)], "crlf-file": [("wrote", 2, 2)], "drifted": []})
+
+
+def _citeledger_scope_cases(tmp):
+    """A Grep or grep/rg hit counts only where its resolved path is the searched file or lies under the
+    searched directory (cwd when none is named), and the line-number flag is read as grep and rg parse it:
+    the n of -en is -e's pattern, and a later -N or --no-line-number turns numbering off again."""
+    repo = _CiteRepo(tmp / "cite-scope", {
+        "tools/searched/s.txt": b"seen\n", "tools/unsearched/u.txt": b"secret\n", "tools/a.py": b"alpha = 1\n",
+        "tools/b.py": b"other\n", "tools/e.txt": b"3:n\nx\nn\n"},
+        links=[("tools/searched/ln.txt", "../unsearched/u.txt")])
+    tools_dir = repo.root / "tools"
+    repo.grep(tools_dir / "searched", "tools/unsearched/u.txt:1:secret", "scope-dir-outside")
+    repo.grep(tools_dir / "a.py", "tools/b.py:1:other", "scope-file-outside")
+    repo.grep(tools_dir / "searched", "tools/searched/ln.txt:1:secret", "scope-link-outside")
+    repo.grep(tools_dir / "searched", "tools/searched/s.txt:1:seen", "scope-dir-inside")
+    repo.grep(None, "tools/b.py:1:other", "scope-no-path")
+    repo.bash("grep -rn secret tools/searched", "tools/unsearched/u.txt:1:secret\n", "scope-bash-outside")
+    repo.bash("rg -n seen tools/searched", "tools/searched/s.txt:1:seen\n", "scope-bash-inside")
+    names = ("dir-outside", "file-outside", "link-outside", "dir-inside", "no-path", "bash-outside",
+             "bash-inside")
+    check("citeledger/grep-scope", {name: repo.spans("scope-" + name) for name in names}, {
+        "dir-outside": [], "file-outside": [], "link-outside": [],
+        "dir-inside": [("Grep", "tools/searched/s.txt", 1, 1)], "no-path": [("Grep", "tools/b.py", 1, 1)],
+        "bash-outside": [], "bash-inside": [("grep", "tools/searched/s.txt", 1, 1)]})
+    # tools/e.txt is "3:n", "x", "n": unnumbered output of its lines 1 and 3 reads "3:n" and "n", which
+    # a numbered reading would take as line 3.
+    flags = (("rg-n-then-N", "rg -n -N n tools/e.txt", "3:n\nn\n"),
+             ("rg-long-off", "rg --line-number --no-line-number n tools/e.txt", "3:n\nn\n"),
+             ("grep-e-cluster", "grep -en tools/e.txt", "3:n\nn\n"),
+             ("grep-n-cluster", "grep -in n tools/e.txt", "1:3:n\n3:n\n"),
+             ("grep-e-then-n", "grep -e n -n tools/e.txt", "1:3:n\n3:n\n"))
+    for name, command, stdout in flags:
+        repo.bash(command, stdout, "flag-" + name)
+    check("citeledger/grep-flag-parse", {name: repo.spans("flag-" + name) for name, _c, _s in flags}, {
+        "rg-n-then-N": [], "rg-long-off": [], "grep-e-cluster": [],
+        "grep-n-cluster": [("grep", "tools/e.txt", 1, 1), ("grep", "tools/e.txt", 3, 3)],
+        "grep-e-then-n": [("grep", "tools/e.txt", 1, 1), ("grep", "tools/e.txt", 3, 3)]})
+    # Option forms as GNU grep 3.12 and ripgrep 15.1.0 parse them. grep's --color and --colour take a value
+    # only after '=', so the next word is the pattern; grep takes an unambiguous prefix of a long option
+    # (--regex=, --line-n) and refuses an ambiguous one (--line); -X takes a value in grep and -d (--max-depth)
+    # in rg; and a command the tool refuses (an unknown option, =VALUE on a flag, a value missing at the end)
+    # records nothing. Numbered output reads "1:3:n" and "3:n", unnumbered "3:n" and "n"; the out-of-scope
+    # line imitates a misread output line, as above. Each rg -N/-n order with each long line-number option
+    # is pinned too, and the ones whose parse did not change are coverage.
+    numbered, plain = "1:3:n\n3:n\n", "3:n\nn\n"
+    both = [("grep", "tools/e.txt", 1, 1), ("grep", "tools/e.txt", 3, 3)]
+    forms = (("grep-color-next-word", "grep -n --color n tools/e.txt", numbered, both),
+             ("grep-colour-attached", "grep -n --colour=always n tools/e.txt", numbered, both),
+             ("grep-colour-bare", "grep -n --colour n tools/e.txt", numbered, both),
+             ("grep-regex-prefix", "grep -n --regex=n tools/e.txt", numbered, both),
+             ("grep-line-number-prefix", "grep --line-n n tools/e.txt", numbered, both),
+             ("grep-ambiguous-prefix", "grep -n --line n tools/e.txt", numbered, []),
+             ("grep-X-value", "grep -n -X grep n tools/e.txt", numbered, both),
+             ("grep-unknown-short", "grep -n -p n tools/e.txt", numbered, []),
+             ("grep-flag-given-value", "grep --line-number=x n tools/e.txt", numbered, []),
+             ("grep-value-missing", "grep -n n tools/e.txt -e", numbered, []),
+             ("rg-no-prefix", "rg -n --regex=n tools/e.txt", numbered, []),
+             ("rg-d-value", "rg -n -d 1 tools tools/searched", "tools/unsearched/u.txt:1:secret\n", []),
+             ("rg-d-value-inside", "rg -n -d 1 seen tools/searched", "tools/searched/s.txt:1:seen\n",
+              [("grep", "tools/searched/s.txt", 1, 1)]),
+             ("rg-N-then-long-on", "rg -N --line-number n tools/e.txt", numbered, both),
+             ("rg-long-on-then-N", "rg --line-number -N n tools/e.txt", plain, []),
+             ("rg-n-then-long-off", "rg -n --no-line-number n tools/e.txt", plain, []),
+             ("rg-long-off-then-n", "rg --no-line-number -n n tools/e.txt", numbered, both))
+    for name, command, stdout, _want in forms:
+        repo.bash(command, stdout, "form-" + name)
+    check("citeledger/grep-option-forms", {name: repo.spans("form-" + name) for name, _c, _s, _w in forms},
+          {name: want for name, _c, _s, want in forms})
+    # A long option written without '=' takes the next word as its value: --regexp's pattern, --file's
+    # pattern file and --context's count are never read as the pattern or a searched path.
+    (repo.root / "tools" / "pats.txt").write_bytes(b"n\n")
+    taking = (("regexp", "grep -n --regexp n tools/e.txt", numbered, both),
+              ("file", "grep -n --file tools/pats.txt tools/e.txt", numbered, both),
+              ("context", "grep -n --context 2 x tools/e.txt", "1-3:n\n2:x\n3-n\n",
+               [("grep", "tools/e.txt", 1, 3)]))
+    for name, command, stdout, _want in taking:
+        repo.bash(command, stdout, "take-" + name)
+    check("citeledger/grep-long-value-next-word",
+          {name: repo.spans("take-" + name) for name, _c, _s, _w in taking},
+          {name: want for name, _c, _s, want in taking})
+
+
+def _citeledger_dedup_cases(tmp):
+    """Deduplication keys on kind, via and rev as well as path, span and digest: rows that differ only in
+    those are different facts and are all kept, within one call and against the file, while an exact
+    repeat is still skipped."""
+    def row(**fields):
+        base = {"v": 1, "ts": "t", "kind": "read", "via": "Read", "path": "/x/p.py", "rel": None, "start": 1,
+                "end": 1, "sha256": "0" * 64, "rev": None}
+        base.update(fields)
+        return base
+    state = str(tmp / "cite-dedup-state")
+    aiqt_hooks._cite_append(state, "dedup-key", [row()])
+    aiqt_hooks._cite_append(state, "dedup-key", [row(via="git-show", rev="HEAD"), row(via="git-show", rev="main"),
+                                                 row(kind="wrote", via="Edit"), row(),
+                                                 row(via="git-show", rev="HEAD")])
+    path = Path(state) / "citation-ledger" / (hashlib.sha256(b"dedup-key").hexdigest()[:16] + ".jsonl")
+    held = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    check("citeledger/dedup-key-separates-facts", [(r["kind"], r["via"], r["rev"]) for r in held],
+          [("read", "Read", None), ("read", "git-show", "HEAD"), ("read", "git-show", "main"),
+           ("wrote", "Edit", None)])
+
+
+def _citeledger_bound_cases(tmp):
+    """The per-call bounds, each tried just inside, at and just outside it: 50 distinct files read, 500
+    rows appended, 8 path splits tried per output line, 50 replacements of a replace_all Edit, the deadline
+    (met by a stand-in clock: a git probe is started, and a read made, only while the deadline has not been
+    reached), and the length of a path the recorder resolves, both a path a tool input or command names and
+    a path split from an output line. The four count bounds are coverage: the recorder enforced each of
+    them before the per-call deadline was added, so their checks pin the bounds and do not show a change to
+    them."""
+    files = {"many/f{:02d}.txt".format(i): "hit {:02d}\n".format(i).encode("utf-8") for i in range(51)}
+    files["rows.txt"] = "".join("r{}\n".format(i) for i in range(1, 1002)).encode("utf-8")
+    for k in (7, 8, 9):
+        files["split{}/{}".format(k, "s" + ":1:s" * (k - 1))] = b"t\n"
+    repo = _CiteRepo(tmp / "cite-bounds", files)
+
+    def count(session):
+        return len(repo.rows(session))
+    # Coverage (see the docstring): files, rows, splits and Edit replacements.
+    for n in (49, 50, 51):
+        repo.grep(repo.root / "many", "\n".join("many/f{:02d}.txt:1:hit {:02d}".format(i, i) for i in range(n)),
+                  "files-{}".format(n))
+    check("citeledger/max-files-boundary", [count("files-{}".format(n)) for n in (49, 50, 51)], [49, 50, 50])
+    for n in (499, 500, 501):
+        repo.grep(repo.root / "rows.txt", "\n".join("{0}:r{0}".format(2 * k - 1) for k in range(1, n + 1)),
+                  "rows-{}".format(n))
+    check("citeledger/max-rows-boundary", [count("rows-{}".format(n)) for n in (499, 500, 501)], [499, 500, 500])
+    for k in (7, 8, 9):
+        repo.grep(repo.root / "split{}".format(k), "split{}/{}:1:t".format(k, "s" + ":1:s" * (k - 1)),
+                  "splits-{}".format(k))
+    check("citeledger/max-splits-boundary", [count("splits-{}".format(k)) for k in (7, 8, 9)], [1, 1, 0])
+    for n in (49, 50, 51):
+        path = repo.root / "edit-{}.txt".format(n)
+        path.write_bytes(b"NEW\nx\n" * n)
+        repo.call("Edit", {"file_path": str(path), "old_string": "OLD", "new_string": "NEW", "replace_all": True},
+                  {"filePath": str(path), "originalFile": "OLD\nx\n" * n}, "edits-{}".format(n))
+    check("citeledger/edit-max-boundary", [count("edits-{}".format(n)) for n in (49, 50, 51)], [49, 50, 50])
+    # The deadline, set from the handler's first clock reading: with the clock just inside, at or just past
+    # it before the toplevel probe, is the probe started and is the read made; and with the clock moved
+    # there only once the probe has returned, is the read made.
+    saved_time, saved_top = aiqt_hooks.time, aiqt_hooks._recovery_toplevel
+    probed, read = [], []
+    try:
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            for step, session in ((True, "deadline-probe-" + name), (False, "deadline-read-" + name)):
+                clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITE_BUDGET + offset, step)
+                calls = []
+                aiqt_hooks._recovery_toplevel = lambda *args, **kwargs: calls.append(clock.advance()) or str(
+                    repo.root)
+                repo.call("Read", {"file_path": str(repo.root / "rows.txt")},
+                          {"type": "text", "file": {"filePath": str(repo.root / "rows.txt"), "content": "r1",
+                                                    "startLine": 1, "numLines": 1}}, session)
+                if step:
+                    probed.append((bool(calls), repo.ledger(session).exists()))
+                else:
+                    read.append(repo.ledger(session).exists())
+    finally:
+        aiqt_hooks.time, aiqt_hooks._recovery_toplevel = saved_time, saved_top
+    check("citeledger/deadline-boundary", (probed, read),
+          ([(True, True), (False, False), (False, False)], [True, False, False]))
+    # The path bound: each path is written as the path to a file padded with slashes (which resolution
+    # drops) to one under, at and one over _CITE_MAX_PATH characters. Over it the path is never resolved
+    # (no longer path reaches _cite_real inside _cite_rows) and records nothing. Input paths: Read
+    # and Write file_path and filePath, a Grep path, the file of a sed command and a file a grep command
+    # names; Linux refuses a path of more than 4095 bytes itself, so that grep file over the bound already
+    # fails its stat before any resolution, and its column is coverage (this suite runs on Linux). Split
+    # paths: a path split from a Grep content line and from a grep command's output line.
+    bound_repo = _CiteRepo(tmp / "cite-path-bound", {"a.txt": b"a1\n", "w.txt": b"w1\n"})
+    root, limit = str(bound_repo.root), aiqt_hooks._CITE_MAX_PATH
+    shapes = {
+        "input": (
+            ("Read", lambda p, s: bound_repo.call("Read", {"file_path": p("a.txt")}, {"type": "text", "file": {
+                "filePath": p("a.txt"), "content": "a1", "startLine": 1, "numLines": 1}}, s)),
+            ("Write", lambda p, s: bound_repo.call("Write", {"file_path": p("w.txt"), "content": "w1\n"},
+                                                   {"filePath": p("w.txt")}, s)),
+            ("Grep", lambda p, s: bound_repo.grep(p(""), "a.txt:1:a1", s)),
+            ("sed", lambda p, s: bound_repo.bash("sed -n 1p " + p("a.txt"), "a1\n", s)),
+            ("grep", lambda p, s: bound_repo.bash("grep -n a1 " + p("a.txt"), "1:a1\n", s))),
+        "split": (
+            ("Grep", lambda p, s: bound_repo.grep(bound_repo.root, p("a.txt") + ":1:a1", s)),
+            ("grep", lambda p, s: bound_repo.bash("grep -rn a1 .", p("a.txt") + ":1:a1\n", s)))}
+    counts, longest = {}, {}
+    for shape, calls in shapes.items():
+        for tool, call in calls:
+            for size in (limit - 1, limit, limit + 1):
+                session = "path-{}-{}-{}".format(shape, tool, size)
+
+                def pad(name, size=size):
+                    return root + "/" * (size - len(root) - len(name)) + name
+                resolved = _cite_resolutions(lambda call=call, pad=pad, session=session: call(pad, session))
+                longest[shape] = max([longest.get(shape, 0)] + [len(path) for path in resolved])
+                counts.setdefault(shape, {}).setdefault(tool, []).append(len(bound_repo.rows(session)))
+    check("citeledger/input-path-bound", (counts["input"], longest["input"]),
+          ({tool: [1, 1, 0] for tool, _call in shapes["input"]}, limit))
+    check("citeledger/split-path-bound", (counts["split"], longest["split"]),
+          ({tool: [1, 1, 0] for tool, _call in shapes["split"]}, limit))
+
+
+class _CiteSplitProbe(str):
+    """A response text that counts the lines split out of it, by one str.split or by one str.find per line,
+    so a vector can tell how far the recorder split it."""
+
+    def split(self, *args, **kwargs):
+        pieces = str.split(self, *args, **kwargs)
+        self.lines = getattr(self, "lines", 0) + len(pieces)
+        return pieces
+
+    def find(self, *args, **kwargs):
+        self.lines = getattr(self, "lines", 0) + 1
+        return str.find(self, *args, **kwargs)
+
+
+class _CiteCutProbe(_CiteSplitProbe):
+    """A _CiteSplitProbe that moves the stand-in clock set as its clock (a _CiteClock) on once cut lines have
+    been split out of it by str.find, so the deadline is reached at a known line."""
+
+    def find(self, *args, **kwargs):
+        found = _CiteSplitProbe.find(self, *args, **kwargs)
+        if self.lines == self.cut:
+            self.clock.advance()
+        return found
+
+
+def _cite_stub_git(stub_dir):
+    """Write a git stand-in into stub_dir, for PATH: when one of its arguments is in CITE_STUB_SLOW (one per
+    line; "*" slows every call) it appends "start" to the file CITE_STUB_MARK, sleeps 8 seconds, appends
+    "done", and only then runs the real git. A "start" mark shows the slowed probe was reached, and "start"
+    alone that its caller cut it off. 8 seconds is well past the 5 seconds a probe gets by default, so on a
+    runner however loaded a probe given any timeout up to that default leaves "start" alone and only a probe
+    given none leaves "done"; which timeout each probe was given, the time left or the default, is told
+    apart by _cite_probe_timeouts, not by the marks. 8 seconds stays under the hook timeout of 10."""
+    real_git = shutil.which("git")
+    stub_dir.mkdir()
+    (stub_dir / "git").write_text(
+        "#!{} -I\nimport os, sys, time\nslow = set(os.environ.get('CITE_STUB_SLOW', '').split('\\n')) - {{''}}\n"
+        "if '*' in slow or slow & set(sys.argv[1:]):\n"
+        "    with open(os.environ['CITE_STUB_MARK'], 'a') as handle:\n"
+        "        handle.write('start\\n')\n"
+        "    time.sleep(8)\n"
+        "    with open(os.environ['CITE_STUB_MARK'], 'a') as handle:\n"
+        "        handle.write('done\\n')\n"
+        "os.execv({!r}, [{!r}] + sys.argv[1:])\n".format(sys.executable, real_git, real_git), encoding="utf-8")
+    os.chmod(str(stub_dir / "git"), 0o755)
+
+
+def _cite_stubbed(stub_dir, slow, mark, run):
+    """run() with the git stand-in of _cite_stub_git first on PATH, slowing the probes slow names and
+    marking mark: the marks it left ([] where no slowed probe started)."""
+    saved_path = os.environ.get("PATH", "")
+    try:
+        os.environ["PATH"] = str(stub_dir) + os.pathsep + saved_path
+        os.environ["CITE_STUB_SLOW"], os.environ["CITE_STUB_MARK"] = slow, str(mark)
+        run()
+    finally:
+        os.environ["PATH"] = saved_path
+        os.environ.pop("CITE_STUB_SLOW", None)
+        os.environ.pop("CITE_STUB_MARK", None)
+    return mark.read_text(encoding="utf-8").split() if mark.exists() else []
+
+
+def _cite_probe_timeouts(run, budget):
+    """run() with every git probe of the citation hooks (aiqt_hooks._recovery_toplevel and _review_git)
+    recorded: whether at least one probe ran and each was given a timeout greater than 0 and at most budget,
+    so a probe given the time left is told apart from one given its 5 second default or none."""
+    saved = (aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git)
+    given = []
+
+    def top(repo_dir, *args, **kwargs):
+        given.append(kwargs.get("timeout", args[0] if args else None))
+        return saved[0](repo_dir, *args, **kwargs)
+
+    def git(repo_dir, *args, **kwargs):
+        given.append(kwargs.get("timeout"))
+        return saved[1](repo_dir, *args, **kwargs)
+    try:
+        aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = top, git
+        run()
+    finally:
+        aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved
+    return bool(given) and all(isinstance(t, (int, float)) and 0 < t <= budget for t in given)
+
+
+class _CiteStepClock:
+    """Stands in for the time module inside aiqt_hooks: monotonic() returns now, which moves only when
+    move() is called (here by a stand-in git probe, as if the probe took that long), so the time left at
+    each probe is known exactly. Every other attribute is the real time module's."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def monotonic(self):
+        return self.now
+
+    def move(self, seconds):
+        self.now += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _cite_resolutions(run, within="_cite_rows"):
+    """run() with every call of aiqt_hooks._cite_real (the walk that resolves a path through its symlinks)
+    made inside aiqt_hooks.<within> (the recorder's _cite_rows, or the check's _citechk_run) recorded: the
+    paths it was given, in order, so a vector can tell which paths the recorder or the check resolved."""
+    saved_within, saved_real, active, paths = getattr(aiqt_hooks, within), aiqt_hooks._cite_real, [], []
+
+    def scoped(*args, **kwargs):
+        active.append(True)
+        try:
+            return saved_within(*args, **kwargs)
+        finally:
+            active.pop()
+
+    def real(path, *args, **kwargs):
+        if active:
+            paths.append(path)
+        return saved_real(path, *args, **kwargs)
+    try:
+        setattr(aiqt_hooks, within, scoped)
+        aiqt_hooks._cite_real = real
+        run()
+    finally:
+        setattr(aiqt_hooks, within, saved_within)
+        aiqt_hooks._cite_real = saved_real
+    return paths
+
+
+def _citeledger_deadline_cases(tmp):
+    """Where the recorder's deadline is checked. Every git probe is given the time left: a stand-in probe
+    records the timeout it was given and then moves a stand-in clock on by half a second, as if it took
+    that long, so each later probe must be given half a second less. Each tried with a stand-in clock just
+    inside, at and just past the deadline: _cite_span, _cite_within and _cite_resolve stop at it, and a
+    response's split into lines, the words of a grep or rg command, the merge of grep hits into spans and
+    the digest of each row are not carried on once it is reached (the clock is moved there just before each
+    step, by a stand-in around the step before it); and once the toplevel probe has moved it there, no path
+    is resolved, whatever the tool."""
+    repo = _CiteRepo(tmp / "cite-deadline", {"a.txt": b"a1\na2\na3\na4\na5\na6\n"})
+    other = _CiteRepo(tmp / "cite-deadline-other", {"o.txt": b"o1\n"})
+    shown = "a1\na2\na3\na4\na5\na6\n"
+    # Each git probe is given what is left of the deadline when it starts, never the whole budget or its
+    # own default: the handler's toplevel probe, the toplevel probe of a git -C repository, and the ls-tree
+    # and cat-file probes of git show. Halves add and subtract exactly in binary, so the timeouts are exact.
+    saved = (aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git, aiqt_hooks._CITE_BUDGET)
+    tops, gits = [], []
+
+    def top(repo_dir, *args, **kwargs):
+        tops.append(kwargs.get("timeout", args[0] if args else "none given"))
+        result = saved[1](repo_dir, *args, **kwargs)
+        aiqt_hooks.time.move(0.5)
+        return result
+
+    def git(repo_dir, *args, **kwargs):
+        gits.append((args[0], kwargs.get("timeout", "none given")))
+        result = saved[2](repo_dir, *args, **kwargs)
+        aiqt_hooks.time.move(0.5)
+        return result
+    given = []
+    try:
+        aiqt_hooks._CITE_BUDGET = 2.5
+        aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = top, git
+        for session, command, stdout in (("left-own", "git show HEAD:a.txt", shown),
+                                         ("left-other", "git -C {} show HEAD:o.txt".format(other.root), "o1\n")):
+            aiqt_hooks.time = _CiteStepClock(1000.0)
+            del tops[:], gits[:]
+            repo.bash(command, stdout, session)
+            given.append((list(tops), list(gits), repo.spans(session)))
+    finally:
+        (aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git,
+         aiqt_hooks._CITE_BUDGET) = saved
+    check("citeledger/probe-given-time-left", given,
+          [([2.5], [("ls-tree", 2.0), ("cat-file", 1.5)], [("git-show", "a.txt", 1, 6)]),
+           ([2.5, 2.0], [("ls-tree", 1.5), ("cat-file", 1.0)], [("git-show", None, 1, 1)])])
+    # _cite_span and _cite_within compare and walk lines only while the deadline has not been reached.
+    entry, inner = aiqt_hooks._cite_entry(shown.encode("utf-8"), "/x"), []
+    try:
+        aiqt_hooks.time = _CiteClock(1000.0, 1000.0, False)
+        for offset in (0.001, 0.0, -0.001):
+            inner.append((aiqt_hooks._cite_span(entry, 2, ["a2", "a3"], 1000.0 + offset),
+                          aiqt_hooks._cite_within(shown, 3, 9, 1000.0 + offset)))
+    finally:
+        aiqt_hooks.time = saved[0]
+    check("citeledger/span-and-within-deadline", inner, [(3, (2, 3)), (None, None), (None, None)])
+    # _cite_resolve resolves a path only while the deadline has not been reached, and only a path of at
+    # most _CITE_MAX_PATH characters: tried with the deadline just ahead of, at and just behind the clock,
+    # and with a path to a.txt padded with slashes (which resolution drops) to one under, at and one over
+    # the bound.
+    target, limit = os.path.realpath(str(repo.root / "a.txt")), aiqt_hooks._CITE_MAX_PATH
+    padded = [str(repo.root) + "/" * (size - len(str(repo.root)) - len("a.txt")) + "a.txt"
+              for size in (limit - 1, limit, limit + 1)]
+    try:
+        aiqt_hooks.time = _CiteClock(1000.0, 1000.0, False)
+        timed = [aiqt_hooks._cite_resolve(target, 1000.0 + offset) for offset in (0.001, 0.0, -0.001)]
+        sized = [aiqt_hooks._cite_resolve(path, 1000.001) for path in padded]
+    finally:
+        aiqt_hooks.time = saved[0]
+    check("citeledger/resolve-bound-and-deadline", (timed, [len(path) for path in padded], sized),
+          ([target, None, None], [limit - 1, limit, limit + 1], [target, target, None]))
+    # Once a stand-in toplevel probe has moved the clock to just inside, at or just past the deadline, no
+    # path is resolved, the session root included, whatever the tool: Read, Write and Grep stop at their
+    # first resolution, and grep, sed and git show before it. Just inside, every tool resolves its paths
+    # and records its row. git show's ls-tree and cat-file probes are each given the one millisecond left
+    # (recorded, to the microsecond) by a stand-in that then runs the real probe with git's own default
+    # timeout, so what is recorded never depends on how fast a real git process starts.
+    (repo.root / "w.txt").write_bytes(b"w1\n")
+    a_txt, w_txt = str(repo.root / "a.txt"), str(repo.root / "w.txt")
+    tools = (("Read", [], lambda s: repo.call("Read", {"file_path": a_txt}, {"type": "text", "file": {
+                 "filePath": a_txt, "content": "a1", "startLine": 1, "numLines": 1}}, s)),
+             ("Write", [], lambda s: repo.call("Write", {"file_path": w_txt, "content": "w1\n"},
+                                               {"filePath": w_txt}, s)),
+             ("Grep", [], lambda s: repo.grep(repo.root, "a.txt:1:a1", s)),
+             ("grep", [], lambda s: repo.bash("grep -n a1 a.txt", "1:a1\n", s)),
+             ("sed", [], lambda s: repo.bash("sed -n 1p a.txt", "a1\n", s)),
+             ("git-show", [("ls-tree", 0.001), ("cat-file", 0.001)],
+              lambda s: repo.bash("git show HEAD:a.txt", shown, s)))
+    resolved, probes = {}, []
+
+    def probe(repo_dir, *args, **kwargs):
+        probes.append((args[0], round(kwargs.get("timeout", -1.0), 6)))
+        return saved[2](repo_dir, *args)
+    try:
+        aiqt_hooks._review_git = probe
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            for tool, _probes, call in tools:
+                clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITE_BUDGET + offset, False)
+                aiqt_hooks._recovery_toplevel = lambda *args, clock=clock, **kwargs: clock.advance() or str(
+                    repo.root)
+                session = "resolve-{}-{}".format(tool, name)
+                del probes[:]
+                paths = _cite_resolutions(lambda call=call, session=session: call(session))
+                resolved.setdefault(tool, []).append((bool(paths), len(repo.rows(session)), list(probes)))
+    finally:
+        aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved[0], saved[1], saved[2]
+    check("citeledger/no-resolution-past-deadline", resolved,
+          {tool: [(True, 1, given), (False, 0, []), (False, 0, [])] for tool, given, _call in tools})
+
+    def stepped(step_name, after, session_of, call, seen=None):
+        """call(session) once per clock position, with the clock moved to it by a stand-in around
+        aiqt_hooks.<step_name> (after the step's own work when after, else before it). With seen, each
+        position's result is paired with seen(value) for each value the step returned there, so a vector
+        can tell how far the step itself went, not only what the call recorded."""
+        saved_step = getattr(aiqt_hooks, step_name, None)
+        out = []
+        try:
+            for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+                clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITE_BUDGET + offset, False)
+                returned = []
+
+                def stand_in(*args, clock=clock, returned=returned, **kwargs):
+                    if not after:
+                        clock.advance()
+                    result = saved_step(*args, **kwargs)
+                    clock.advance()
+                    returned.append(result)
+                    return result
+                setattr(aiqt_hooks, step_name, stand_in)
+                result = call(session_of(name))
+                out.append(result if seen is None else (result, [seen(value) for value in returned]))
+        finally:
+            aiqt_hooks.time = saved[0]
+            if saved_step is None:
+                delattr(aiqt_hooks, step_name)
+            else:
+                setattr(aiqt_hooks, step_name, saved_step)
+        return out
+
+    def read_split(session):
+        content = _CiteSplitProbe(shown)
+        repo.call("Read", {"file_path": str(repo.root / "a.txt")},
+                  {"type": "text", "file": {"filePath": str(repo.root / "a.txt"), "content": content,
+                                            "startLine": 1, "numLines": 6}}, session)
+        return getattr(content, "lines", 0), len(repo.rows(session))
+
+    def grep_split(session):
+        content = _CiteSplitProbe("1:a1\n2:a2\n3:a3")
+        repo.grep(repo.root / "a.txt", content, session)
+        return getattr(content, "lines", 0), len(repo.rows(session))
+
+    # The split of a Read content (after the file read) and of a Grep content (after the searched path is
+    # resolved): at the deadline not one line is split off, and nothing is recorded.
+    check("citeledger/split-stops-at-deadline",
+          (stepped("_cite_read", True, "split-read-{}".format, read_split),
+           stepped("_cite_real", True, "split-grep-{}".format, grep_split)),
+          ([(7, 1), (0, 0), (0, 0)], [(3, 1), (0, 0), (0, 0)]))
+
+    def grep_rows(session):
+        repo.grep(repo.root / "a.txt", "1:a1\n3:a3\n5:a5", session)
+        return [(r["start"], r["end"]) for r in repo.rows(session)]
+    # Three hits that merge into three spans: at the deadline _cite_merge itself returns no span (its own
+    # return is checked, since the digest step would also leave the ledger empty), and once the first row
+    # is digested at it no further row is.
+    check("citeledger/merge-and-digest-stop-at-deadline",
+          (stepped("_cite_merge", False, "merge-{}".format, grep_rows,
+                   lambda spans: [(span[3], span[4]) for span in spans]),
+           stepped("_cite_sha256", True, "digest-{}".format, grep_rows)),
+          ([([(1, 1), (3, 3), (5, 5)], [[(1, 1), (3, 3), (5, 5)]]), ([], [[]]), ([], [[]])],
+           [[(1, 1), (3, 3), (5, 5)], [(1, 1)], [(1, 1)]]))
+
+    def grep_words(session):
+        repo.bash("grep --line-number --color --regexp a1 a.txt", "1:a1\n", session)
+        return [(r["start"], r["end"]) for r in repo.rows(session)]
+    # A grep command's words: once the first long option has been read at the deadline, no further word is
+    # (the options _cite_long_option returned are checked, since the output scan would also record nothing).
+    check("citeledger/command-words-stop-at-deadline",
+          stepped("_cite_long_option", True, "words-{}".format, grep_words, lambda option: option[0]),
+          [([(1, 1)], ["line-number", "color", "regexp"]), ([], ["line-number"]), ([], ["line-number"])])
+
+
+def _citeledger_timing_cases(tmp):
+    """One deadline bounds the probes, reads, scans and digests of a call. With the budget cut, each worst
+    shape is shown reached and cut short by evidence a loaded runner cannot change, never by a wall clock: a
+    git probe slowed by the stand-in of _cite_stub_git leaves a "start" mark and no "done" mark (it was
+    reached and cut off), and every probe was given a timeout of at most the budget, never its 5 second
+    default (_cite_probe_timeouts); a large file read in slowed chunks and many files read slowly make at
+    least one slowed read and fewer than reading them whole takes; and a huge grep output takes at most
+    the budget plus one second of this process's CPU time (CPU time, not elapsed time, so a runner busy
+    with other work cannot stretch it), and with the deadline reached at a known line by a stand-in clock
+    is split up to that line, scanned into hits up to the line before it, and records nothing. Each of the
+    toplevel, ls-tree and cat-file probes, slowed alone, is reached and cut off, and nothing is recorded.
+    The probe and read vectors get a 2.5 second budget, so the unslowed probes before the slowed step finish
+    well inside it on a busy runner, and a slowed read takes half a second, so a whole read of big.txt (9
+    reads) takes 4.5 seconds and of the many files (100 reads) 50: the budget cuts both short."""
+    budget, slack, cut_budget = 0.5, 1.0, 2.5
+    big = b"x\n" * (4 * 1024 * 1024)
+    files = {"tools/a.py": b"alpha = 1\n", "big.txt": big,
+             "huge.txt": "".join("h{}\n".format(i) for i in range(1, 400001)).encode("utf-8")}
+    files.update({"many/f{:02d}.txt".format(i): "hit {:02d}\n".format(i).encode("utf-8") for i in range(51)})
+    repo = _CiteRepo(tmp / "cite-timing", files)
+    stub_dir = tmp / "cite-stub-bin"
+    _cite_stub_git(stub_dir)
+    real_read, reads = os.read, {"count": 0, "targets": set()}
+
+    def slow_read(fd, size):  # a read of a target file is slowed and counted; any other (a probe's pipe) is not
+        try:
+            st = os.fstat(fd)
+            target = (st.st_dev, st.st_ino) in reads["targets"]
+        except OSError:
+            target = False
+        if target:
+            reads["count"] += 1
+            time.sleep(0.5)
+        return real_read(fd, size)
+
+    def slowed(paths, run):
+        reads["count"] = 0
+        reads["targets"] = {(os.stat(str(p)).st_dev, os.stat(str(p)).st_ino) for p in paths}
+        try:
+            os.read = slow_read
+            run()
+        finally:
+            os.read = real_read
+        return reads["count"]
+    many = sorted((repo.root / "many").iterdir())
+    many_out = "\n".join("many/f{:02d}.txt:1:hit {:02d}".format(i, i) for i in range(51))
+    huge_out = "\n".join("{0}:h{0}".format(i) for i in range(1, 400001))
+    saved_budget = aiqt_hooks._CITE_BUDGET
+    try:
+        aiqt_hooks._CITE_BUDGET = cut_budget
+        timed = []
+        marks = _cite_stubbed(stub_dir, "*", tmp / "cite-mark-all", lambda: timed.append(_cite_probe_timeouts(
+            lambda: repo.bash("git show HEAD:tools/a.py", "alpha = 1\n", "slow-git"), cut_budget)))
+        # A whole read of big.txt takes 9 reads (8 chunks of 1 MiB and the empty read at its end); of the
+        # first 50 many/ files (the per-call file bound), 2 each. At least one read shows the read was reached.
+        big_reads = slowed([repo.root / "big.txt"], lambda: repo.call(
+            "Read", {"file_path": str(repo.root / "big.txt")},
+            {"type": "text", "file": {"filePath": str(repo.root / "big.txt"), "content": "x", "startLine": 1,
+                                      "numLines": 1}}, "slow-read"))
+        many_reads = slowed(many, lambda: repo.grep(repo.root / "many", many_out, "many-files"))
+        aiqt_hooks._CITE_BUDGET = budget
+        began = time.process_time()
+        repo.grep(repo.root / "huge.txt", huge_out, "huge-grep")
+        cpu = time.process_time() - began
+        aiqt_hooks._CITE_BUDGET = cut_budget
+        # The same output with the deadline reached at a known line: the 1,000th line split off moves a
+        # stand-in clock to it (_CiteCutProbe; the toplevel probe is a stand-in too), so the scan is shown
+        # reached and cut short whatever the runner: 1,000 lines split off, the 999 before the cut scanned
+        # into hits (the hits _cite_merge is given), and no row, since no span is merged past the deadline.
+        saved_scan = (aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._cite_merge)
+        merged, cut_out = [], _CiteCutProbe(huge_out)
+        try:
+            cut_out.clock, cut_out.cut = _CiteClock(1000.0, 1000.0 + cut_budget + 0.001, False), 1000
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel = cut_out.clock, lambda *args, **kwargs: str(repo.root)
+            aiqt_hooks._cite_merge = lambda hits, *args: merged.append(
+                sum(len(numbers) for numbers in hits.values())) or saved_scan[2](hits, *args)
+            repo.grep(repo.root / "huge.txt", cut_out, "huge-grep-cut")
+        finally:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._cite_merge = saved_scan
+        scanned = (getattr(cut_out, "lines", 0), merged, len(repo.rows("huge-grep-cut")))
+        cut = []
+        for name, word in (("toplevel", "--show-toplevel"), ("ls-tree", "ls-tree"), ("cat-file", "cat-file")):
+            within = []
+            left = _cite_stubbed(stub_dir, word, tmp / "cite-mark-{}".format(name),
+                                 lambda name=name, within=within: within.append(_cite_probe_timeouts(
+                                     lambda: repo.bash("git show HEAD:tools/a.py", "alpha = 1\n", "cut-" + name),
+                                     cut_budget)))
+            cut.append((name, left, within, repo.spans("cut-" + name)))
+    finally:
+        aiqt_hooks._CITE_BUDGET = saved_budget
+    check("citeledger/deadline-bounds-worst-shapes",
+          [("slow-git-probe", marks, timed, repo.rows("slow-git")), ("slow-file-read", 0 < big_reads < 9),
+           ("many-files", 0 < many_reads < 2 * 50), ("huge-grep-output", cpu <= budget + slack, scanned)],
+          [("slow-git-probe", ["start"], [True], []), ("slow-file-read", True), ("many-files", True),
+           ("huge-grep-output", True, (1000, [999], 0))])
+    check("citeledger/slow-probe-cut-off", cut,
+          [("toplevel", ["start"], [True], []), ("ls-tree", ["start"], [True], []),
+           ("cat-file", ["start"], [True], [])])
+
+
+def _citecheck_cases(tmp):
+    """The citation read check (aiqt_hooks.citation_read_check) over ledgers the recorder writes: the warned
+    and silent verdicts, the class of each citation in its guard-events row, the message and body sources,
+    the five exclusions with their paired positives, the fail-closed notes (an unreadable ledger, a missing
+    session id, an unreadable body), and each bound tried just inside, at and just outside it."""
+    root = tmp / "citecheck"
+    tools_dir = root / "tools"
+    tools_dir.mkdir(parents=True)
+    a_py, d_py = tools_dir / "a.py", tools_dir / "d.py"
+    a_py.write_text("".join("line{} = {}\n".format(n, n) for n in range(1, 13)), encoding="utf-8")
+    d_py.write_text("".join("d{}\n".format(n) for n in range(1, 7)), encoding="utf-8")
+    (root / "Makefile").write_text("all:\n\ttrue\n", encoding="utf-8")
+    for args in (["init", "-q", "-b", "main"], ["add", "."],
+                 ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "-m", "seed"]):
+        subprocess.run(["git", "-C", str(root)] + args, check=True, capture_output=True, timeout=30)
+    state = Path(aiqt_hooks._orch_state_dir_for_root(str(root)))
+    events = state / "guard-events.jsonl"
+    ledger_dir = state / "citation-ledger"
+    verdicts = []
+
+    def ledger(session):
+        return ledger_dir / (hashlib.sha256(session.encode("utf-8")).hexdigest()[:16] + ".jsonl")
+
+    def read(session, start, end, path=a_py):
+        shown = path.read_text(encoding="utf-8").split("\n")[start - 1:end]
+        aiqt_hooks.citation_read_recorder({
+            "hook_event_name": "PostToolUse", "cwd": str(root), "session_id": session, "tool_name": "Read",
+            "tool_input": {"file_path": str(path)},
+            "tool_response": {"type": "text", "file": {"filePath": str(path), "content": "\n".join(shown),
+                                                        "startLine": start, "numLines": end - start + 1}}})
+
+    def event_rows():
+        if not events.is_file():
+            return []
+        return [json.loads(x) for x in events.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def run(command, session="cc", cwd=None, event="PreToolUse", tool="Bash"):
+        data = {"hook_event_name": event, "cwd": str(cwd or root), "tool_name": tool,
+                "tool_input": {"command": command}}
+        if session is not None:
+            data["session_id"] = session
+        before = len(event_rows())
+        try:
+            result = aiqt_hooks.citation_read_check(data)
+        except Exception as exc:  # a handler crash fails the check that made it rather than ending the run
+            result = (2, None, "crash: {}".format(type(exc).__name__))
+        verdicts.append(_verdict(result))
+        note = result[1].get("systemMessage", "") if isinstance(result[1], dict) else ""
+        return _verdict(result), note, [r for r in event_rows()[before:] if r.get("kind") == "citint"]
+
+    def judged(command, session="cc", **kw):
+        verdict, _note, new = run(command, session, **kw)
+        return (verdict, [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+                [r["decision"] for r in new])
+
+    def classes(command, session="cc", **kw):
+        return judged(command, session, **kw)[1]
+
+    # Unread and read: a commit message citing a range no row covers warns (a note, never a decision) and its
+    # row says warn; after reading lines 1-10 the same citation is silent and its row says allow.
+    verdict, note, new = run("git commit -m 'see tools/a.py:3'", "unread")
+    check("citeledger/commit-m-unread-warns",
+          (verdict, "tools/a.py:3 (no read or write recorded this session covers these lines)" in note,
+           [(r["decision"], r["detail"]["cmd"], r["detail"]["citations"]) for r in new]),
+          ("warn", True, [("warn", "git-commit", [{"cite": "tools/a.py:3", "class": "unread", "form": "A"}])]))
+    read("read", 1, 10)
+    check("citeledger/commit-m-read-silent", judged("git commit -m 'see tools/a.py:3-5'", "read"),
+          ("allow", [("tools/a.py:3-5", "covered")], ["allow"]))
+    # A row covers a range only to its own ends: read 4-6, then 4-6 and 5 are covered, 3-6 and 4-7 are not.
+    read("edge", 4, 6)
+    check("citeledger/coverage-boundary",
+          classes("git commit -m 'tools/a.py:4-6 tools/a.py:5 tools/a.py:3-6 tools/a.py:4-7'", "edge"),
+          [("tools/a.py:4-6", "covered"), ("tools/a.py:5", "covered"), ("tools/a.py:3-6", "unread"),
+           ("tools/a.py:4-7", "unread")])
+    # Two adjacent reads cover a range across them; a one-line gap between them does not.
+    read("union", 1, 5)
+    read("union", 6, 10)
+    read("gap", 1, 5)
+    read("gap", 7, 10)
+    check("citeledger/union-covers",
+          (classes("git commit -m 'tools/a.py:4-7'", "union"), classes("git commit -m 'tools/a.py:4-7'", "gap")),
+          ([("tools/a.py:4-7", "covered")], [("tools/a.py:4-7", "unread")]))
+    # A read whose lines changed afterwards is stale (an untracked file, so no diff credits the change).
+    u_py = tools_dir / "u.py"
+    u_py.write_text("u1\nu2\nu3\nu4\nu5\n", encoding="utf-8")
+    read("stale", 1, 5, path=u_py)
+    u_py.write_text("u1\nu2\nU3\nu4\nu5\n", encoding="utf-8")
+    verdict, note, new = run("git commit -m 'tools/u.py:3'", "stale")
+    check("citeledger/stale-warns",
+          (verdict, [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+           "those lines have changed since" in note),
+          ("warn", [("tools/u.py:3", "stale")], True))
+    # Freshness is judged per piece of a row, not per row: the edit of line 3 inside the read span leaves
+    # the untouched cited lines beside it covered, while the changed line, and any range that crosses it,
+    # stays stale.
+    check("citeledger/stale-only-changed-lines",
+          classes("git commit -m 'tools/u.py:2 tools/u.py:4-5 tools/u.py:2-3 tools/u.py:1-5'", "stale"),
+          [("tools/u.py:2", "covered"), ("tools/u.py:4-5", "covered"), ("tools/u.py:2-3", "stale"),
+           ("tools/u.py:1-5", "stale")])
+    # A piece covers only lines the file still has: after the file shrinks, a recorded line at the new last
+    # line still covers, one just past it does not, and neither does the recorded span's last line. That
+    # last line was recorded empty, so its digest equals that of the bytes past the new end (both b"\n"):
+    # only the end bound, not a digest mismatch, keeps it stale.
+    v_py = tools_dir / "v.py"
+    v_py.write_text("v1\nv2\nv3\nv4\nv5\n\n", encoding="utf-8")
+    read("shrunk", 1, 6, path=v_py)
+    v_py.write_text("v1\nV2\nv3\nv4\n", encoding="utf-8")
+    shrunk_cites = "git commit -m 'tools/v.py:1 tools/v.py:3-4 tools/v.py:2 tools/v.py:5 tools/v.py:6'"
+    check("citeledger/piece-end-bound", classes(shrunk_cites, "shrunk"),
+          [("tools/v.py:1", "covered"), ("tools/v.py:3-4", "covered"), ("tools/v.py:2", "stale"),
+           ("tools/v.py:5", "stale"), ("tools/v.py:6", "stale")])
+    # The end bound decides that vector: under a variant of _citechk_fresh without it, the recorded empty
+    # line 6 digests to the bytes past the new end, so the same citation reads covered (line 5, whose
+    # recorded text was not empty, stays stale through its digest alone).
+    pieces_variants = tmp / "citecheck-pieces-variants"
+    pieces_variants.mkdir()
+    no_end_bound = _hook_variant(pieces_variants, "_citechk_fresh",
+                                 _hook_functions("_citechk_fresh").get("_citechk_fresh", ""),
+                                 "if to <= held and _cite_sha256", "if _cite_sha256")
+    if no_end_bound is None:
+        unbounded_end = "no variant: the end bound does not occur exactly once in _citechk_fresh"
+    else:
+        original = aiqt_hooks._citechk_fresh
+        aiqt_hooks._citechk_fresh = no_end_bound
+        try:
+            unbounded_end = classes(shrunk_cites, "shrunk")
+        finally:
+            aiqt_hooks._citechk_fresh = original
+    check("citeledger/piece-end-bound-variant", unbounded_end,
+          [("tools/v.py:1", "covered"), ("tools/v.py:3-4", "covered"), ("tools/v.py:2", "stale"),
+           ("tools/v.py:5", "stale"), ("tools/v.py:6", "covered")])
+    # Past _CITE_PIECES_MAX lines a piece is a run of ceil(n / _CITE_PIECES_MAX) consecutive lines (the cap
+    # cut to 2 here, so a five-line read holds runs 1-3 and 4-5): an edit inside a run stales every cited
+    # line of that run, and the other run still covers its lines.
+    w_py = tools_dir / "w.py"
+    w_py.write_text("w1\nw2\nw3\nw4\nw5\n", encoding="utf-8")
+    saved_pieces = aiqt_hooks._CITE_PIECES_MAX
+    try:
+        aiqt_hooks._CITE_PIECES_MAX = 2
+        read("runs", 1, 5, path=w_py)
+        w_py.write_text("W1\nw2\nw3\nw4\nw5\n", encoding="utf-8")
+        runs = classes("git commit -m 'tools/w.py:1 tools/w.py:3 tools/w.py:4-5'", "runs")
+    finally:
+        aiqt_hooks._CITE_PIECES_MAX = saved_pieces
+    check("citeledger/piece-run-granularity", runs,
+          [("tools/w.py:1", "stale"), ("tools/w.py:3", "stale"), ("tools/w.py:4-5", "covered")])
+    # A row ending at the file's last line can be current; one ending a line past it never is, even when
+    # its digest equals that of the lines the file does hold.
+    read("whole", 1, 12)
+    whole = classes("git commit -m 'tools/a.py:12'", "whole")
+    pieces = a_py.read_bytes()
+    ledger("past").write_bytes((json.dumps({"v": 1, "ts": "t", "kind": "read", "via": "Read",
+                                            "path": os.path.realpath(str(a_py)), "rel": "tools/a.py", "start": 1,
+                                            "end": 13, "sha256": hashlib.sha256(pieces).hexdigest(),
+                                            "rev": None}) + "\n").encode("utf-8"))
+    check("citeledger/row-end-bound", (whole, classes("git commit -m 'tools/a.py:12'", "past")),
+          ([("tools/a.py:12", "covered")], [("tools/a.py:12", "stale")]))
+    # A row's pieces field is used only where it is well formed: per-line pieces and one piece for the whole
+    # span cover (the span digest matches nothing), while a piece count over the span's lines, a length that
+    # is not whole digests, and uppercase hex each leave the row judged whole, so the citation is stale. The
+    # count is tried just inside (1), at (3, the span's lines) and just outside (4) its bound. These vectors
+    # pin the judged-whole outcome, not each validation alone: the ragged and uppercase digests could never
+    # match any line's digest either, and the over-count row also fails the tiling re-derivation. The count
+    # ceiling and the tiling are each shown to reject on their own just below; the hex and whole-digest
+    # scans bound form (the recorder writes neither shape, and an uppercase digest matches no computed
+    # lowercase one).
+    span_lines = [b"line%d = %d" % (n, n) for n in (1, 2, 3)]
+    per_line = "".join(hashlib.sha256(piece + b"\n").hexdigest()[:16] for piece in span_lines)
+    one_piece = hashlib.sha256(b"\n".join(span_lines) + b"\n").hexdigest()[:16]
+    shapes = {"pieces-ok": per_line, "pieces-one": one_piece, "pieces-over": per_line + "f" * 16,
+              "pieces-ragged": per_line[:-1], "pieces-case": per_line.upper()}
+    for session, pieces in shapes.items():
+        ledger(session).write_bytes((json.dumps(
+            {"v": 1, "ts": "t", "kind": "read", "via": "Read", "path": os.path.realpath(str(a_py)),
+             "rel": "tools/a.py", "start": 1, "end": 3, "sha256": "0" * 64, "pieces": pieces,
+             "rev": None}) + "\n").encode("utf-8"))
+    check("citeledger/row-pieces-shape",
+          {session: classes("git commit -m 'tools/a.py:2'", session) for session in shapes},
+          {"pieces-ok": [("tools/a.py:2", "covered")], "pieces-one": [("tools/a.py:2", "covered")],
+           "pieces-over": [("tools/a.py:2", "stale")], "pieces-ragged": [("tools/a.py:2", "stale")],
+           "pieces-case": [("tools/a.py:2", "stale")]})
+
+    def pieces_row(session, path, rel, end, row_pieces):
+        ledger(session).write_bytes((json.dumps(
+            {"v": 1, "ts": "t", "kind": "read", "via": "Read", "path": os.path.realpath(str(path)),
+             "rel": rel, "start": 1, "end": end, "sha256": "0" * 64, "pieces": row_pieces,
+             "rev": None}) + "\n").encode("utf-8"))
+    # The piece-count ceiling rejects on its own: 129 per-line digests of a 129-line span are within the
+    # span's lines but over the 128-piece ceiling, so the row is judged whole and the citation is stale,
+    # while the matching per-line digests at 127 (just inside) and 128 (at the ceiling) cover. Every
+    # rejected pieces field here holds digests that match the file, so only the rejection keeps the
+    # citation stale, never a digest mismatch.
+    p_py = tools_dir / "p.py"
+    p_py.write_text("".join("p{}\n".format(n) for n in range(1, 130)), encoding="utf-8")
+    p_entry = aiqt_hooks._cite_entry(p_py.read_bytes(), str(p_py))
+
+    def per_line_pieces(end):
+        return "".join(hashlib.sha256(aiqt_hooks._cite_bytes(p_entry, n, n)).hexdigest()[:16]
+                       for n in range(1, end + 1))
+    for n in (127, 128, 129):
+        pieces_row("count-{}".format(n), p_py, "tools/p.py", n, per_line_pieces(n))
+    check("citeledger/piece-count-ceiling",
+          {n: classes("git commit -m 'tools/p.py:2'", "count-{}".format(n)) for n in (127, 128, 129)},
+          {127: [("tools/p.py:2", "covered")], 128: [("tools/p.py:2", "covered")],
+           129: [("tools/p.py:2", "stale")]})
+    # The ceiling, not the span-lines bound, decides the 129-piece row: under a variant of _citechk_row
+    # whose count bound is the span's lines alone, the same citation reads covered.
+    no_ceiling = _hook_variant(pieces_variants, "_citechk_row",
+                               _hook_functions("_citechk_row").get("_citechk_row", ""),
+                               "0 < count <= min(lines, _CITE_PIECES_MAX)", "0 < count <= lines")
+    if no_ceiling is None:
+        unceilinged = "no variant: the ceiling does not occur exactly once in _citechk_row"
+    else:
+        original = aiqt_hooks._citechk_row
+        aiqt_hooks._citechk_row = no_ceiling
+        try:
+            unceilinged = classes("git commit -m 'tools/p.py:2'", "count-129")
+        finally:
+            aiqt_hooks._citechk_row = original
+    check("citeledger/piece-count-ceiling-variant", unceilinged, [("tools/p.py:2", "covered")])
+    # The tiling re-derivation rejects on its own: 4 pieces of a 5-line span pass the count bounds, but
+    # ceil(5 / ceil(5/4)) is 3, a tiling the recorder cannot have made, so the row is judged whole and the
+    # citation is stale, while the true 3-piece tiling of the same span (runs 1-2, 3-4 and 5) covers. The
+    # impossible row's first three digests are that tiling's, so under a variant of _citechk_row without
+    # the re-derivation they match at the re-derived run size of 2 and the citation reads covered.
+    two_line_runs = "".join(hashlib.sha256(aiqt_hooks._cite_bytes(p_entry, at, min(at + 1, 5))).hexdigest()[:16]
+                            for at in (1, 3, 5))
+    pieces_row("tile-3", p_py, "tools/p.py", 5, two_line_runs)
+    pieces_row("tile-4", p_py, "tools/p.py", 5, two_line_runs + "f" * 16)
+    check("citeledger/piece-impossible-tiling",
+          {count: classes("git commit -m 'tools/p.py:2'", "tile-{}".format(count)) for count in (3, 4)},
+          {3: [("tools/p.py:2", "covered")], 4: [("tools/p.py:2", "stale")]})
+    no_tiling = _hook_variant(pieces_variants, "_citechk_row",
+                              _hook_functions("_citechk_row").get("_citechk_row", ""),
+                              "if extra or not group or -(-lines // group) != count \\\n",
+                              "if extra or not group \\\n")
+    if no_tiling is None:
+        untiled = "no variant: the tiling check does not occur exactly once in _citechk_row"
+    else:
+        original = aiqt_hooks._citechk_row
+        aiqt_hooks._citechk_row = no_tiling
+        try:
+            untiled = classes("git commit -m 'tools/p.py:2'", "tile-4")
+        finally:
+            aiqt_hooks._citechk_row = original
+    check("citeledger/piece-impossible-tiling-variant", untiled, [("tools/p.py:2", "covered")])
+    # The recorder's run size at its boundary, with no cap patched: a span of 127 or 128 lines carries one
+    # line per piece, so an edit of line 1 leaves lines 2 and 3 covered, while at 129 lines a piece is a
+    # two-line run, so the edit stales line 2 with it and line 3, the next run's first line, still covers.
+    boundary_runs = {}
+    for n in (127, 128, 129):
+        b_py = tools_dir / "b{}.py".format(n)
+        b_py.write_text("".join("b{}\n".format(k) for k in range(1, n + 1)), encoding="utf-8")
+        read("bound-{}".format(n), 1, n, path=b_py)
+        b_py.write_text("B1\n" + "".join("b{}\n".format(k) for k in range(2, n + 1)), encoding="utf-8")
+        boundary_runs[n] = classes(
+            "git commit -m 'tools/b{0}.py:1 tools/b{0}.py:2 tools/b{0}.py:3'".format(n), "bound-{}".format(n))
+    check("citeledger/piece-run-boundary", boundary_runs,
+          {127: [("tools/b127.py:1", "stale"), ("tools/b127.py:2", "covered"), ("tools/b127.py:3", "covered")],
+           128: [("tools/b128.py:1", "stale"), ("tools/b128.py:2", "covered"), ("tools/b128.py:3", "covered")],
+           129: [("tools/b129.py:1", "stale"), ("tools/b129.py:2", "stale"), ("tools/b129.py:3", "covered")]})
+
+    # Message and body sources: -F and --file= files, a relative path under git -C, the option spellings,
+    # gh pr create --body-file and gh pr edit --body, and one row per command of a compound command.
+    msg = tmp / "cite-msg.txt"
+    msg.write_text("see tools/a.py:7\n", encoding="utf-8")
+    (root / "rel-msg.txt").write_text("see tools/a.py:8\n", encoding="utf-8")
+    other = tmp / "citecheck-other"
+    (other / "lib").mkdir(parents=True)
+    (other / "lib" / "x.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(other)], check=True, capture_output=True, timeout=30)
+    check("citeledger/commit-F-file",
+          (classes("git commit -F {}".format(msg), "files"), classes("git commit --file={}".format(msg), "files"),
+           classes("git -C .. commit -qF rel-msg.txt", "files", cwd=tools_dir),
+           classes("git -C {} commit -m 'lib/x.py:1'".format(other), "files")),
+          ([("tools/a.py:7", "unread")], [("tools/a.py:7", "unread")], [("tools/a.py:8", "unread")],
+           [("lib/x.py:1", "unread")]))
+    check("citeledger/option-forms",
+          [classes(command, "forms") for command in (
+              "git commit -am 'tools/a.py:1'", "git commit -m'tools/a.py:2'", "git commit --message='tools/a.py:3'",
+              "git commit --message 'tools/a.py:4'", "git commit --author '-mtools/a.py:5' -m x",
+              "git commit -m x -- '-mtools/a.py:6'", "git commit -Smtools/a.py:7 -m x")],
+          [[("tools/a.py:1", "unread")], [("tools/a.py:2", "unread")], [("tools/a.py:3", "unread")],
+           [("tools/a.py:4", "unread")], [], [], []])
+    body = tmp / "cite-body.md"
+    body.write_text("Touches tools/a.py:9.\n", encoding="utf-8")
+    check("citeledger/gh-body-file-and-inline",
+          [judged(command, "gh") for command in (
+              "gh pr create --title t --body-file {}".format(body), "gh pr create -F={}".format(body),
+              "gh pr edit 12 --body 'see tools/a.py:10'", "gh pr create -db 'see tools/a.py:11'",
+              "gh pr view 12 --body 'tools/a.py:1'")],
+          [("warn", [("tools/a.py:9", "unread")], ["warn"]), ("warn", [("tools/a.py:9", "unread")], ["warn"]),
+           ("warn", [("tools/a.py:10", "unread")], ["warn"]), ("warn", [("tools/a.py:11", "unread")], ["warn"]),
+           ("allow", [], [])])
+    verdict, note, new = run("git add tools && git commit -m 'tools/a.py:3' && gh pr create --body 'tools/a.py:4'",
+                             "multi")
+    check("citeledger/multi-command",
+          (verdict, [r["detail"]["cmd"] for r in new], "this gh pr create body and git commit message" in note),
+          ("warn", ["git-commit", "gh-pr-create"], True))
+    check("citeledger/lines-of-form",
+          [[(c["cite"], c["class"], c["form"]) for r in run(command, "form-b")[2] for c in r["detail"]["citations"]]
+           for command in ("git commit -m 'per lines 2-4 of tools/a.py.'", "git commit -m 'line 5 in `tools/a.py`'",
+                           "git commit -m 'Lines 6 - 7 of tools/a.py'", "git commit -m 'line 3 of tools/a.py:5'")],
+          [[("tools/a.py:2-4", "unread", "B")], [("tools/a.py:5", "unread", "B")], [("tools/a.py:6-7", "unread", "B")],
+           [("tools/a.py:5", "unread", "A")]])
+    # A body that cannot be read is named, never skipped: a directory, a missing file, a FIFO (held open here
+    # so a read could not block the suite), a path under /dev, and standard input with no here-document.
+    fifo = tmp / "cite-fifo"
+    os.mkfifo(str(fifo))
+    holder = os.open(str(fifo), os.O_RDWR | os.O_NONBLOCK)
+    try:
+        unreadable = [run(command, "bodies")[:2] for command in (
+            "git commit -F {}".format(tmp), "git commit -F {}".format(tmp / "absent.txt"),
+            "gh pr create --body-file {}".format(fifo), "git commit -F /dev/null",
+            "printf x | git commit -F -")]
+    finally:
+        os.close(holder)
+    check("citeledger/unreadable-body-noted",
+          [(verdict, phrase in note) for (verdict, note), phrase in zip(unreadable, (
+              "was not read: it is not a regular file", "was not read: it cannot be opened (FileNotFoundError",
+              "was not read: it is not a regular file", "was not read: it is under /dev or /proc",
+              "was not read: it is read from standard input, which this check cannot see"))],
+          [("warn", True)] * 5)
+    # A command the lexer refuses (an unquoted here-document) is scanned whole; a quoted here-document on
+    # -F - is read as the message.
+    verdict, _note, new = run("git commit -F - <<EOF\nsee tools/a.py:3\nEOF", "heredoc")
+    raw = (verdict, [(r["detail"]["parse"], r["detail"]["citations"][0]["class"]) for r in new])
+    verdict, _note, new = run("git commit -F - <<'EOF'\nsee tools/a.py:4\nEOF\necho tools/a.py:9\n", "heredoc")
+    quoted = (verdict, [(r["detail"]["parse"], r["detail"]["sources"], [c["cite"] for c in r["detail"]["citations"]])
+                        for r in new])
+    check("citeledger/raw-fallback", raw, ("warn", [("raw", "unread")]))
+    check("citeledger/heredoc-body-read", quoted, ("warn", [("lexed", ["here-document"], ["tools/a.py:4"])]))
+
+    # Exclusion 1, quoted logs and tracebacks: a fenced log, an unfenced log line and a traceback frame are
+    # silent; the same citation in plain prose warns.
+    fenced = "git commit -m 'Fails:\n```\ntools/a.py:3: AssertionError\ntools/a.py:4\n```\nfixed'"
+    check("citeledger/excl-fence-log",
+          [judged(command, "excl")[:2] for command in (
+              fenced, "git commit -m 'tools/a.py:3: AssertionError raised'",
+              "git commit -m 'tools/a.py:3:7: error: bad'", "git commit -m 'tools/a.py:3: see the loop'")],
+          [("allow", []), ("allow", []), ("allow", []), ("warn", [("tools/a.py:3", "unread")])])
+    # FORM_B needs only whitespace between the line number and "of" or "in", so a frame's ", in NAME" never
+    # reads as a citation of NAME, even where NAME is a file.
+    check("citeledger/excl-traceback",
+          [judged("git commit -m 'File \"tools/a.py\", line 3, in {}'".format(name), "excl")[:2]
+           for name in ("f", "Makefile")], [("allow", [])] * 2)
+    # Fences open with three or more backticks or tildes indented at most three spaces; a closing run shorter
+    # than the opening one does not close it, and an unclosed fence runs to the end.
+    check("citeledger/fence-bounds",
+          [classes("git commit -m 'x\n{}\ntools/a.py:3\n{}'".format(fence, fence.strip()), "excl")
+           for fence in ("```", "  ```", "   ```", "    ```", "``", "````", "~~~")]
+          + [classes("git commit -m '````\n```\ntools/a.py:3\n````'", "excl"),
+             classes("git commit -m '```\n~~~\ntools/a.py:3\n```'", "excl"),
+             classes("git commit -m '```\ntools/a.py:3'", "excl"),
+             classes("git commit -m '```inline``` tools/a.py:3'", "excl")],
+          [[], [], [], [("tools/a.py:3", "unread")], [("tools/a.py:3", "unread")], [], [], [], [], [],
+           [("tools/a.py:3", "unread")]])
+    # Block quotes are indented at most three spaces; an indented block needs four spaces or a tab after a
+    # blank line (or at the start).
+    check("citeledger/quote-indent-bounds",
+          [classes("git commit -m {}".format(_single_quoted(text)), "excl") for text in (
+              "x\n> tools/a.py:3", "x\n   > tools/a.py:3", "x\n    > tools/a.py:3", "x\n\n    tools/a.py:3",
+              "x\n\n   tools/a.py:3", "x\n\n\ttools/a.py:3", "x\n    tools/a.py:3")],
+          [[], [], [("tools/a.py:3", "unread")], [], [("tools/a.py:3", "unread")], [],
+           [("tools/a.py:3", "unread")]])
+    # Exclusion 2, URLs and #L anchors.
+    verdict, _note, new = run("git commit -m 'https://github.com/o/r/blob/main/tools/a.py#L3-L5 "
+                              "https://h.example/tools/a.py:3 <https://h.example/tools/a.py:4> tools/a.py#L3 "
+                              "https://h.example/view?f=tools/a.py:5'", "excl")
+    check("citeledger/excl-url-anchor", (verdict, [r["detail"]["citations"] for r in new],
+                                         [r["detail"]["masked"]["url"] for r in new]), ("allow", [[]], [4]))
+    # Exclusion 3, times and versions: none names a file or is path-shaped, so each is dropped and counted;
+    # a cited file with no slash and no extension still counts where it exists.
+    verdict, _note, new = run("git commit -m 'at 12:30 and 12:30:45, v1:2 python3.14:2 1.2.3:4 node:18 "
+                              "localhost:8080 example.com:8080'", "excl")
+    check("citeledger/excl-time-version",
+          ((verdict, [(r["detail"]["citations"], r["detail"]["dropped_not_citation"]) for r in new]),
+           classes("git commit -m 'tools/a.py:3 Makefile:1'", "excl")),
+          (("allow", [([], 8)]), [("tools/a.py:3", "unread"), ("Makefile:1", "unread")]))
+    # A path-shaped citation (a slash and a lettered extension of one to ten characters) that names no file
+    # is nofile; an eleven-character extension or none is not path-shaped and is dropped.
+    check("citeledger/ext-length-bound",
+          classes("git commit -m 'x/a.abcdefghi:3 x/a.abcdefghij:3 x/a.abcdefghijk:3 x/abc:3'", "excl"),
+          [("x/a.abcdefghi:3", "nofile"), ("x/a.abcdefghij:3", "nofile")])
+    # A line number has one to nine digits and no leading zero; a reversed range is dropped and counted.
+    verdict, _note, new = run("git commit -m 'tools/a.py:12345678 tools/a.py:123456789 tools/a.py:1234567890 "
+                              "tools/a.py:0 tools/a.py:5-3'", "excl")
+    check("citeledger/line-number-bound",
+          ([(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+           [r["detail"]["masked"]["reversed"] for r in new]),
+          ([("tools/a.py:12345678", "unread"), ("tools/a.py:123456789", "unread")], [1]))
+    # Exclusion 4, verifier-supplied ranges: exempt and counted under a verifier or reviewer heading (to the
+    # next heading of the same or a higher level) or on a Verifier-cited: line; the same citation unlabelled
+    # warns.
+    check("citeledger/excl-verifier-label",
+          [judged("git commit -m {}".format(_single_quoted(text)), "excl")[:2] for text in (
+              "x\n\n## Verifier report\ntools/a.py:3", "x\n\ntools/a.py:3", "Verifier-cited: tools/a.py:3")],
+          [("allow", [("tools/a.py:3", "exempt-verifier")]), ("warn", [("tools/a.py:3", "unread")]),
+           ("allow", [("tools/a.py:3", "exempt-verifier")])])
+    check("citeledger/verifier-section-bounds",
+          [classes("git commit -m {}".format(_single_quoted(text)), "excl") for text in (
+              "###### Reviewer findings\ntools/a.py:3", "####### Verifier report\ntools/a.py:3",
+              "## Verifier report\n### Detail\ntools/a.py:3\n## Next\ntools/a.py:4",
+              "## Verifier report\n# Top\ntools/a.py:5")],
+          [[("tools/a.py:3", "exempt-verifier")], [("tools/a.py:3", "unread")],
+           [("tools/a.py:3", "exempt-verifier"), ("tools/a.py:4", "unread")], [("tools/a.py:5", "unread")]])
+    # Exclusion 5, lines the author wrote: a Write row covers like a read, and lines the diff from HEAD to the
+    # working tree adds count as authored at each end of the hunk, but not one line outside it.
+    new_py = tools_dir / "new.py"
+    new_py.write_text("n1\nn2\n", encoding="utf-8")
+    aiqt_hooks.citation_read_recorder({
+        "hook_event_name": "PostToolUse", "cwd": str(root), "session_id": "wrote", "tool_name": "Write",
+        "tool_input": {"file_path": str(new_py), "content": "n1\nn2\n"},
+        "tool_response": {"filePath": str(new_py), "success": True}})
+    check("citeledger/excl-authored-write", judged("git commit -m 'adds tools/new.py:2'", "wrote")[:2],
+          ("allow", [("tools/new.py:2", "covered")]))
+    d_py.write_text("d1\nd2\nd3\nn1\nn2\nn3\nd4\nD5\nd6\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "tools/d.py"], check=True, capture_output=True, timeout=30)
+    verdict, _note, new = run("git commit -m 'tools/d.py:4 tools/d.py:5 tools/d.py:6 tools/d.py:3 tools/d.py:7 "
+                              "tools/d.py:8'", "diff")
+    check("citeledger/excl-authored-diff",
+          (verdict, [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+           [r["detail"]["diff"] for r in new]),
+          ("warn", [("tools/d.py:4", "authored-in-diff"), ("tools/d.py:5", "authored-in-diff"),
+                    ("tools/d.py:6", "authored-in-diff"), ("tools/d.py:3", "unread"), ("tools/d.py:7", "unread"),
+                    ("tools/d.py:8", "authored-in-diff")], ["used"]))
+    # A pull request's diff starts at the merge base of its --base and HEAD, not at the base itself (here a
+    # branch that already holds the change); with no resolvable base the exemption is skipped and the row
+    # says so.
+    pr_base = run("gh pr create --base main --body 'tools/d.py:5'", "diff")[2]
+    pr_none = run("gh pr create --body 'tools/d.py:5'", "diff")[2]
+    for args in (["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "-m", "ahead"], ["branch", "ahead"], ["reset", "-q", "--soft", "HEAD~1"]):
+        subprocess.run(["git", "-C", str(root)] + args, check=True, capture_output=True, timeout=30)
+    pr_ahead = run("gh pr create --base ahead --body 'tools/d.py:5'", "diff")[2]
+    check("citeledger/gh-diff-base",
+          [[(c["class"], r["detail"]["diff"]) for r in rows for c in r["detail"]["citations"]]
+           for rows in (pr_base, pr_none, pr_ahead)],
+          [[("authored-in-diff", "used")], [("unread", "unavailable")], [("authored-in-diff", "used")]])
+
+    # Ledger reading: rows held only in the older generation (.1) cover; a cited path that is a suffix of
+    # exactly one recorded path resolves to it; two recorded paths with that suffix do not resolve.
+    read("rotated", 1, 4)
+    os.replace(str(ledger("rotated")), str(ledger("rotated")) + ".1")
+    (tools_dir / "sub").mkdir()
+    (root / "other" / "sub").mkdir(parents=True)
+    for path in (tools_dir / "sub" / "x.py", root / "other" / "sub" / "x.py"):
+        path.write_text("x1\nx2\n", encoding="utf-8")
+    read("suffix", 1, 2, path=tools_dir / "sub" / "x.py")
+    read("suffix-two", 1, 2, path=tools_dir / "sub" / "x.py")
+    read("suffix-two", 1, 2, path=root / "other" / "sub" / "x.py")
+    check("citeledger/rotated-generation-and-suffix",
+          (classes("git commit -m 'tools/a.py:2'", "rotated"), classes("git commit -m 'sub/x.py:2'", "suffix"),
+           classes("git commit -m 'sub/x.py:2'", "suffix-two")),
+          ([("tools/a.py:2", "covered")], [("sub/x.py:2", "covered")], [("sub/x.py:2", "nofile")]))
+    # Fail closed on a ledger that cannot be read: a directory or a symlink at the session file, a regular
+    # file where the ledger directory belongs, and lines that are not rows each name the fault in a note,
+    # even where the rows that remain cover every citation.
+    read("faulty", 1, 12)
+    with open(str(ledger("faulty")), "ab") as handle:
+        handle.write(b"not json\n[1]\n")
+    faults = [run("git commit -m 'tools/a.py:2'", "faulty")]
+    os.mkdir(str(ledger("dir-gen")))
+    faults.append(run("git commit -m 'tools/a.py:2'", "dir-gen"))
+    os.symlink(str(ledger("faulty")), str(ledger("link-gen")))
+    faults.append(run("git commit -m 'tools/a.py:2'", "link-gen"))
+    saved_xdg = os.environ.get("XDG_STATE_HOME")
+    try:
+        os.environ["XDG_STATE_HOME"] = str(tmp / "citecheck-alt-xdg")
+        alt = Path(aiqt_hooks._orch_state_dir_for_root(str(root)))
+        alt.mkdir(parents=True)
+        (alt / "citation-ledger").write_bytes(b"not a directory\n")
+        faults.append(run("git commit -m 'tools/a.py:2'", "faulty")[:2] + ([],))
+    finally:
+        if saved_xdg is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = saved_xdg
+    check("citeledger/unreadable-ledger-noted",
+          [(verdict, "could not be read in full" in note and phrase in note,
+            [(r["decision"], r["detail"]["ledger"]) for r in new])
+           for (verdict, note, new), phrase in zip(faults, (
+               "2 line(s) are not ledger rows", "it is not a regular file", "it cannot be opened (OSError",
+               "the ledger directory"))],
+          [("warn", True, [("warn", "unreadable")])] * 3 + [("warn", True, [])])
+    # A row is a ledger row only with 1 <= start <= end: start 1 and end == start are rows, start 0 and an
+    # end before the start are not.
+    ledger("shape").write_bytes(b"".join((json.dumps({"v": 1, "kind": "read", "path": os.path.realpath(str(a_py)),
+                                                      "start": start, "end": end, "sha256": "0" * 64}) + "\n")
+                                         .encode("utf-8") for start, end in ((1, 1), (2, 2), (0, 3), (5, 4))))
+    check("citeledger/row-shape-bounds",
+          "2 line(s) are not ledger rows" in run("git commit -m 'tools/a.py:2'", "shape")[1], True)
+    # No rows at all, and no session id: each is named, and its row says which.
+    empty = run("git commit -m 'tools/a.py:2'", "never-recorded")
+    nosession = run("git commit -m 'tools/a.py:2'", None)
+    clean_nosession = run("git commit -m 'at 12:30'", None)
+    check("citeledger/ledger-empty-and-no-session",
+          ((empty[0], "no citation-ledger rows at all" in empty[1], [r["detail"]["ledger"] for r in empty[2]]),
+           (nosession[0], "carries no session id" in nosession[1], [r["detail"]["ledger"] for r in nosession[2]]),
+           clean_nosession[:2]),
+          (("warn", True, ["empty"]), ("warn", True, ["no-session"]), ("allow", "")))
+    # A file the recorder never records (a notebook, a file over its size bound) is named as such.
+    (root / "docs").mkdir()
+    (root / "docs" / "n.ipynb").write_text("{}\n{}\n{}\n", encoding="utf-8")
+    saved_max = aiqt_hooks._CITE_MAX_FILE
+    try:
+        aiqt_hooks._CITE_MAX_FILE = 4
+        big = run("git commit -m 'tools/a.py:1'", "blind")
+    finally:
+        aiqt_hooks._CITE_MAX_FILE = saved_max
+    notebook = run("git commit -m 'docs/n.ipynb:2'", "blind")
+    check("citeledger/unrecordable-noted",
+          ([(c["class"]) for r in notebook[2] + big[2] for c in r["detail"]["citations"]],
+           "records nothing for a notebook, PDF or image read" in notebook[1], "records nothing for a file over 4 bytes"
+           in big[1]),
+          (["unrecordable", "unrecordable"], True, True))
+
+    # Bounds of the check itself, each just inside, at and just outside.
+    read("bounds", 1, 12)
+    saved = (aiqt_hooks._CITECHK_MAX_CITES, aiqt_hooks._CITECHK_MAX_FILES, aiqt_hooks._CITECHK_SHOWN,
+             aiqt_hooks._CITECHK_BODY_MAX, aiqt_hooks._CITECHK_LEDGER_MAX, aiqt_hooks.time,
+             aiqt_hooks._CITECHK_READ_MAX, aiqt_hooks._recovery_toplevel)
+    try:
+        aiqt_hooks._CITECHK_MAX_CITES = 2
+        caps = []
+        for k in (1, 2, 3):
+            verdict, note, new = run("git commit -m '{}'".format(
+                " ".join("tools/a.py:{}".format(n) for n in range(1, k + 1))), "bounds")
+            caps.append((verdict, [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]],
+                         [(r["decision"], r["detail"]["not_judged_past_cap"]) for r in new],
+                         "1 citation(s) past the first 2 were not judged" in note))
+        aiqt_hooks._CITECHK_MAX_CITES = saved[0]
+        check("citeledger/cite-cap-boundary", caps,
+              [("allow", [("tools/a.py:1", "covered")], [("allow", 0)], False),
+               ("allow", [("tools/a.py:1", "covered"), ("tools/a.py:2", "covered")], [("allow", 0)], False),
+               ("warn", [("tools/a.py:1", "covered"), ("tools/a.py:2", "covered")], [("warn", 1)], True)])
+        read("bounds", 1, 2, path=tools_dir / "sub" / "x.py")
+        read("bounds", 1, 2, path=root / "other" / "sub" / "x.py")
+        aiqt_hooks._CITECHK_MAX_FILES = 2
+        names = ("tools/a.py:1", "tools/sub/x.py:1", "other/sub/x.py:1")
+        files_cap = [judged("git commit -m '{}'".format(" ".join(names[:k])), "bounds")[:2] for k in (1, 2, 3)]
+        aiqt_hooks._CITECHK_MAX_FILES = saved[1]
+        check("citeledger/file-cap-boundary", files_cap,
+              [("allow", [(names[0], "covered")]), ("allow", [(names[0], "covered"), (names[1], "covered")]),
+               ("warn", [(names[0], "covered"), (names[1], "covered"), (names[2], "unjudged")])])
+        held_bytes = os.path.getsize(str(a_py)) + os.path.getsize(str(tools_dir / "sub" / "x.py"))
+        read_bound = []
+        for bound in (held_bytes + 1, held_bytes, held_bytes - 1):
+            aiqt_hooks._CITECHK_READ_MAX = bound
+            verdict, note, new = run("git commit -m '{}'".format(" ".join(names[:2])), "bounds")
+            read_bound.append((verdict, [c["class"] for r in new for c in r["detail"]["citations"]],
+                               "the cited files hold more than {} bytes".format(bound) in note))
+        aiqt_hooks._CITECHK_READ_MAX = saved[6]
+        check("citeledger/read-bytes-boundary", read_bound,
+              [("allow", ["covered", "covered"], False), ("allow", ["covered", "covered"], False),
+               ("warn", ["covered", "unjudged"], True)])
+        aiqt_hooks._CITECHK_SHOWN = 2
+        shown = [run("git commit -m '{}'".format(" ".join("tools/d.py:{}".format(n) for n in (1, 2, 3)[:k])),
+                     "never-recorded")[1] for k in (1, 2, 3)]
+        aiqt_hooks._CITECHK_SHOWN = saved[2]
+        check("citeledger/shown-bound",
+              [(note.count("\n  tools/d.py:"), "\n  and " in note, "\n  and 1 more" in note) for note in shown],
+              [(1, False, False), (2, False, False), (2, True, True)])
+        size = len(msg.read_bytes())
+        sized = []
+        for bound in (size + 1, size, size - 1):
+            aiqt_hooks._CITECHK_BODY_MAX = bound
+            sized.append(judged("git commit -F {}".format(msg), "bounds")[:2])
+        aiqt_hooks._CITECHK_BODY_MAX = saved[3]
+        check("citeledger/body-max-boundary", sized,
+              [("allow", [("tools/a.py:7", "covered")]), ("allow", [("tools/a.py:7", "covered")]),
+               ("warn", [])])
+        held = os.path.getsize(str(ledger("bounds")))
+        gens = []
+        for bound in (held + 1, held, held - 1):
+            aiqt_hooks._CITECHK_LEDGER_MAX = bound
+            verdict, note, _new = run("git commit -m 'tools/a.py:2'", "bounds")
+            gens.append((verdict, "it is larger than {} bytes".format(bound) in note))
+        aiqt_hooks._CITECHK_LEDGER_MAX = saved[4]
+        check("citeledger/ledger-max-boundary", gens, [("allow", False), ("allow", False), ("warn", True)])
+        # The deadline, set from the handler's first clock reading (a stand-in clock): with the clock moved
+        # just inside, at or just past it once the toplevel probe has returned, is a range judged (one in a
+        # file, and a path-shaped one that names no file, which needs no read); and with the clock there
+        # before the probe, is the probe started at all (one not started is named in a note, with no row,
+        # since no state directory is known without it).
+        budget, probed = {"tools/a.py:2": [], "x/none.py:1": []}, []
+        for offset in (-0.001, 0.0, 0.001):
+            for step, cited in ((False, "tools/a.py:2"), (False, "x/none.py:1"), (True, "tools/a.py:2")):
+                clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + offset, step)
+                calls = []
+                aiqt_hooks._recovery_toplevel = lambda *args, **kwargs: calls.append(clock.advance()) or str(root)
+                verdict, note, new = run("git commit -m '{}'".format(cited), "bounds")
+                aiqt_hooks.time, aiqt_hooks._recovery_toplevel = saved[5], saved[7]
+                if step:
+                    probed.append((bool(calls), verdict, "before it resolved the repository" in note, len(new)))
+                else:
+                    budget[cited].append((verdict, [(c["class"], r["detail"]["budget_exhausted"]) for r in new
+                                                    for c in r["detail"]["citations"]], "incomplete (budget)" in note))
+        check("citeledger/budget-noted", budget,
+              {"tools/a.py:2": [("allow", [("covered", False)], False), ("warn", [("unjudged", True)], True),
+                                ("warn", [("unjudged", True)], True)],
+               "x/none.py:1": [("warn", [("nofile", False)], False), ("warn", [("unjudged", True)], True),
+                               ("warn", [("unjudged", True)], True)]})
+        check("citeledger/check-deadline-probe-boundary", probed,
+              [(True, "allow", False, 1), (False, "warn", True, 0), (False, "warn", True, 0)])
+    finally:
+        (aiqt_hooks._CITECHK_MAX_CITES, aiqt_hooks._CITECHK_MAX_FILES, aiqt_hooks._CITECHK_SHOWN,
+         aiqt_hooks._CITECHK_BODY_MAX, aiqt_hooks._CITECHK_LEDGER_MAX, aiqt_hooks.time,
+         aiqt_hooks._CITECHK_READ_MAX, aiqt_hooks._recovery_toplevel) = saved
+    # The deadline is checked before each ledger row is digested against the cited file: with the clock moved
+    # just inside, at or just past it once the file is read, the range is covered, or not judged (budget)
+    # with no row digested.
+    read("digest", 1, 12)
+    saved_time, saved_read = aiqt_hooks.time, aiqt_hooks._cite_read
+    digested = []
+    try:
+        for offset in (-0.001, 0.0, 0.001):
+            clock = aiqt_hooks.time = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + offset, False)
+
+            def read_then_advance(*args, clock=clock):
+                entry = saved_read(*args)
+                clock.advance()
+                return entry
+            aiqt_hooks._cite_read = read_then_advance
+            verdict, note, new = run("git commit -m 'tools/a.py:2'", "digest")
+            aiqt_hooks.time, aiqt_hooks._cite_read = saved_time, saved_read
+            digested.append((verdict, [(c["class"], r["detail"]["budget_exhausted"]) for r in new
+                                       for c in r["detail"]["citations"]], "incomplete (budget)" in note))
+    finally:
+        aiqt_hooks.time, aiqt_hooks._cite_read = saved_time, saved_read
+    check("citeledger/check-digest-deadline", digested,
+          [("allow", [("covered", False)], False), ("warn", [("unjudged", True)], True),
+           ("warn", [("unjudged", True)], True)])
+
+    # Inert outside its scope (no row): another command, event or tool, a payload with no command, a cwd
+    # outside any git repository; a commit with no message source still earns its allow row.
+    outside = tmp / "citecheck-not-a-repo"
+    outside.mkdir()
+    inert = [run("git status", "inert"), run("git commit -m 'tools/a.py:3'", "inert", event="PostToolUse"),
+             run("git commit -m 'tools/a.py:3'", "inert", tool="Read"),
+             run("git commit -m 'tools/a.py:3'", "inert", cwd=outside)]
+    before = len(event_rows())
+    no_command = aiqt_hooks.citation_read_check({"hook_event_name": "PreToolUse", "cwd": str(root),
+                                                 "tool_name": "Bash", "tool_input": {}, "session_id": "inert"})
+    verdicts.append(_verdict(no_command))
+    inert.append((_verdict(no_command), "", event_rows()[before:]))
+    amend = run("git commit --amend --no-edit", "inert")
+    check("citeledger/inert-outside-scope",
+          ([(verdict, note, new) for verdict, note, new in inert],
+           (amend[0], [(r["decision"], r["detail"]["citations"]) for r in amend[2]])),
+          ([("allow", "", [])] * 5, ("allow", [("allow", [])])))
+    # A fault inside the check is caught and named; a guard-events row that cannot be written is named too.
+    saved_run = aiqt_hooks._citechk_run
+    try:
+        def broken(data):
+            raise RuntimeError("injected")
+        aiqt_hooks._citechk_run = broken
+        crashed = run("git commit -m 'tools/a.py:3'", "fault")
+    finally:
+        aiqt_hooks._citechk_run = saved_run
+    events.rename(events.with_name("guard-events.saved"))
+    events.mkdir()
+    try:
+        unrecorded = run("git commit -m 'tools/a.py:3'", "fault")
+    finally:
+        events.rmdir()
+        events.with_name("guard-events.saved").rename(events)
+    check("citeledger/check-fault-noted",
+          ((crashed[0], "could not run (RuntimeError)" in crashed[1]),
+           (unrecorded[0], "the guard-events row for this warn (citint) could not be written" in unrecorded[1])),
+          (("warn", True), ("warn", True)))
+
+    # The check never decides a permission: every call above allowed, silently or with a note.
+    check("citeledger/bake-never-denies", sorted(set(verdicts)), ["allow", "warn"])
+
+
+def _citecheck_run(root, command, session):
+    """One citation_read_check call on a Bash command run at root: (verdict, note, the citint guard-events
+    rows it appended)."""
+    events = Path(aiqt_hooks._orch_state_dir_for_root(str(root))) / "guard-events.jsonl"
+
+    def rows():
+        if not events.is_file():
+            return []
+        return [json.loads(x) for x in events.read_text(encoding="utf-8").splitlines() if x.strip()]
+    before = len(rows())
+    result = aiqt_hooks.citation_read_check({"hook_event_name": "PreToolUse", "cwd": str(root), "tool_name": "Bash",
+                                             "tool_input": {"command": command}, "session_id": session})
+    note = result[1].get("systemMessage", "") if isinstance(result[1], dict) else ""
+    return _verdict(result), note, [r for r in rows()[before:] if r.get("kind") == "citint"]
+
+
+def _hook_functions(*names):
+    """The source text of each named top-level function of the hook, by name."""
+    import ast
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    rows = source.splitlines(keepends=True)
+    return {node.name: "".join(rows[node.lineno - 1:node.end_lineno]) for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name in names}
+
+
+def _hook_variant(tmp, name, text, old, new):
+    """The hook's function name, whose source is text, with the one occurrence of old in that text
+    replaced by new (None where old does not occur exactly once): written to a module under tmp and
+    loaded, its code bound to the hook's own globals, so it calls the hook's other functions and reads its
+    constants as the original does. types.FunctionType binds no default argument values on its own, so the
+    variant's defaults (and keyword-only defaults) are carried over from the loaded module's function; a
+    call that omits an argument then takes the default the variant's source gives it, as the original
+    does."""
+    import importlib.util
+    import types
+    if text.count(old) != 1:
+        return None
+    path = tmp / "variant{}.py".format(len(list(tmp.glob("variant*.py"))))
+    path.write_text(text.replace(old, new), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    loaded = getattr(module, name)
+    variant = types.FunctionType(loaded.__code__, aiqt_hooks.__dict__, name, loaded.__defaults__)
+    variant.__kwdefaults__ = loaded.__kwdefaults__
+    return variant
+
+
+def _citecheck_show_cases(tmp):
+    """A git show row counts for a citation as any row does, where the working tree's lines still hold the
+    bytes it digested, whatever revision it named: a row of HEAD whose lines the working tree has since
+    changed (the change committed here, so no diff credits it) is stale at the changed cited line and still
+    covers an untouched one through its pieces, and a row of an older revision whose bytes the working tree
+    holds again covers. A row is matched at the repository path it names, so a citation of a path the
+    working tree has replaced by a symlink resolves to the link's target and that row does not count for
+    it."""
+    repo = _CiteRepo(tmp / "citecheck-show", {"tools/g.py": b"g1\ng2\ng3\n", "tools/h.py": b"h1\nh2\n",
+                                              "tools/t.py": b"t1\n", "tools/l.py": b"l1\n"})
+    tools_dir = repo.root / "tools"
+    (tools_dir / "h.py").write_bytes(b"h1\nH2\n")
+    subprocess.run(["git", "-C", str(repo.root), "-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c",
+                    "commit.gpgsign=false", "commit", "-q", "-am", "next"], check=True, capture_output=True, timeout=30)
+    (tools_dir / "h.py").write_bytes(b"h1\nh2\n")
+    os.unlink(str(tools_dir / "l.py"))
+    os.symlink("t.py", str(tools_dir / "l.py"))
+    repo.bash("git show HEAD:tools/g.py", "g1\ng2\ng3\n", "show")
+    repo.bash("git show HEAD~1:tools/h.py", "h1\nh2\n", "show")
+    repo.bash("git show HEAD:tools/l.py", "l1\n", "show")
+    (tools_dir / "g.py").write_bytes(b"g1\nG2\ng3\n")
+    subprocess.run(["git", "-C", str(repo.root), "add", "tools/g.py"], check=True, capture_output=True, timeout=30)
+    subprocess.run(["git", "-C", str(repo.root), "-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c",
+                    "commit.gpgsign=false", "commit", "-q", "-m", "third"], check=True, capture_output=True,
+                   timeout=30)
+    verdict, _note, new = _citecheck_run(repo.root, "git commit -m 'tools/g.py:2 tools/g.py:1 tools/h.py:2 "
+                                                    "tools/l.py:1'", "show")
+    check("citeledger/git-show-row-judged-at-working-tree",
+          ([(r["via"], r["rel"], r["start"], r["end"], r["rev"]) for r in repo.rows("show")], verdict,
+           [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]]),
+          ([("git-show", "tools/g.py", 1, 3, "HEAD"), ("git-show", "tools/h.py", 1, 2, "HEAD~1"),
+            ("git-show", "tools/l.py", 1, 1, "HEAD")], "warn",
+           [("tools/g.py:2", "stale"), ("tools/g.py:1", "covered"), ("tools/h.py:2", "covered"),
+            ("tools/l.py:1", "unread")]))
+
+
+def _citecheck_deadline_cases(tmp):
+    """One deadline bounds every git probe and cited-file read of the check: with the budget cut to 2.5
+    seconds and one kind of probe slowed (the stand-in of _cite_stub_git, which sleeps 8 seconds when one
+    of its arguments is the slowed word), or a cited file of 8 MiB read in chunks slowed by half a second
+    each, each of the session's toplevel probe, a git -C repository's toplevel probe, the base resolution,
+    the merge base, the diff probe and the file read is reached and cut short, and what it could not finish
+    is named: the repository not resolved, or the range not judged (budget). Reached and cut short are shown
+    by evidence a loaded runner cannot change, never by a wall clock: the slowed probe leaves a "start" mark
+    and no "done" mark, every probe was given a timeout of at most the budget, never its 5 second default
+    (_cite_probe_timeouts), and the slowed file read makes at least one read and fewer than the 9 a whole
+    read takes (8 chunks of 1 MiB and the empty read at its end). The budget leaves the probes before the
+    slowed one ample time on a busy runner, and still cuts the slowed one off 5.5 seconds before its
+    stand-in would finish."""
+    repo = _CiteRepo(tmp / "citecheck-slow", {"tools/a.py": b"a1\na2\n", "big.txt": b"x\n" * (4 * 1024 * 1024)})
+    other = _CiteRepo(tmp / "citecheck-slow-other", {"lib/x.py": b"x1\n"})
+    real_read, big = os.read, os.stat(str(repo.root / "big.txt"))
+    reads = []
+
+    def slow_read(fd, size):  # a read of big.txt is slowed and counted; any other (a probe's pipe) is not
+        try:
+            st = os.fstat(fd)
+            target = (st.st_dev, st.st_ino) == (big.st_dev, big.st_ino)
+        except OSError:
+            target = False
+        if target:
+            reads.append(size)
+            time.sleep(0.5)
+        return real_read(fd, size)
+    stub_dir = tmp / "citecheck-stub-bin"
+    _cite_stub_git(stub_dir)
+    shapes = (("toplevel", "--show-toplevel", "git commit -m 'tools/a.py:1'"),
+              ("other-toplevel", str(other.root), "git -C {} commit -m 'lib/x.py:1'".format(other.root)),
+              ("base", "--verify", "git commit -m 'tools/a.py:1'"),
+              ("merge-base", "merge-base", "gh pr create --base main --body 'tools/a.py:1'"),
+              ("diff", "-U0", "git commit -m 'tools/a.py:1'"),
+              ("file-read", None, "git commit -m 'big.txt:1'"))
+    saved_budget = aiqt_hooks._CITECHK_BUDGET
+    got = []
+    try:
+        aiqt_hooks._CITECHK_BUDGET = 2.5
+        for name, word, command in shapes:
+            del reads[:]
+            outcome, within = [], []
+
+            def run(name=name, command=command, word=word, outcome=outcome, within=within):
+                try:
+                    if word is None:
+                        os.read = slow_read
+                    within.append(_cite_probe_timeouts(
+                        lambda: outcome.extend(_citecheck_run(repo.root, command, "slow-" + name)), 2.5))
+                finally:
+                    os.read = real_read
+            marks = _cite_stubbed(stub_dir, word or "", tmp / "citecheck-mark-{}".format(name), run)
+            verdict, note, new = outcome
+            got.append((name, marks, 0 < len(reads) < 9, within, verdict,
+                        "before it resolved the repository" in note, "incomplete (budget)" in note,
+                        [(c["cite"], c["class"]) for r in new for c in r["detail"]["citations"]]))
+    finally:
+        aiqt_hooks._CITECHK_BUDGET = saved_budget
+    # Each slowed probe is reached and cut off ("start" alone, with no slowed read); the file read is
+    # reached and cut short (no slowed probe, and between 1 and 8 slowed reads).
+    check("citeledger/check-deadline-bounds-slow-probes", got,
+          [("toplevel", ["start"], False, [True], "warn", True, False, []),
+           ("other-toplevel", ["start"], False, [True], "warn", False, True, [("lib/x.py:1", "unjudged")]),
+           ("base", ["start"], False, [True], "warn", False, True, [("tools/a.py:1", "unjudged")]),
+           ("merge-base", ["start"], False, [True], "warn", False, True, [("tools/a.py:1", "unjudged")]),
+           ("diff", ["start"], False, [True], "warn", False, True, [("tools/a.py:1", "unjudged")]),
+           ("file-read", [], True, [True], "warn", False, True, [("big.txt:1", "unjudged")])])
+
+
+def _citecheck_path_cases(tmp):
+    """Every path the citation check resolves is resolved only when it is at most _CITE_MAX_PATH characters
+    long and the check's deadline has not been reached: a message or body file (-F), a cited path (joined
+    to the repository top where relative), the repository top a diff is read against, and a git -C
+    directory and the session cwd it is compared with. Each is tried one under, at and one over the bound
+    (padded with slashes or ./ segments, which resolution drops), and with a stand-in clock moved past the
+    deadline just before the step that resolves it. Whether a path was resolved is read from the paths given
+    to _cite_real inside _citechk_run (_cite_resolutions), never from timing; the toplevel probe is a
+    stand-in naming a fixed top, so a path git itself would refuse still reaches its site. Over the bound
+    the body file is named as not read, in the note and in the sources_unread of the command's warn row,
+    and the range as not judged, the bound named; past the deadline, the budget named, and a body file not
+    read for it is named in the note that says the repository was not resolved. Where both the session cwd
+    and the git -C directory are refused, the reason for each is named. One end-to-end call, with the real
+    toplevel probe, cites a path of 800,000 characters: it returns the warn note naming the bound within the
+    budget in this process's CPU time, the note and the row showing the path shortened; a cited path and a
+    body file path one under, at and one over _CITECHK_PATH_SHOWN characters are shown whole, whole and
+    shortened to that many."""
+    repo = _CiteRepo(tmp / "citecheck-path", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n"})
+    root, limit = repo.top, aiqt_hooks._CITE_MAX_PATH
+    shown_max = getattr(aiqt_hooks, "_CITECHK_PATH_SHOWN", 200)  # a hook without the bound shows paths whole
+    out_of_time = aiqt_hooks._CITECHK_OUT_OF_TIME
+    saved = (aiqt_hooks.time, aiqt_hooks._recovery_toplevel)
+
+    def pad(head, tail, size):
+        return head + "/" * (size - len(head) - len(tail)) + tail
+
+    def cited(size):
+        """A relative cited path naming tools/a.py that is size characters long once joined to root."""
+        rest = size - len(root) - 1 - len("tools/a.py")
+        detour = "tools/../" if rest % 2 else ""
+        return "./" * ((rest - len(detour)) // 2) + detour + "tools/a.py"
+
+    def run(command, session, cwd=root, top=root, step=None, after=False):
+        """citation_read_check on command at cwd, its toplevel probe a stand-in naming top: the paths
+        resolved inside _citechk_run, the command's guard-events rows, and the note. With step, a stand-in
+        clock is moved past the deadline just before aiqt_hooks.<step> runs (for _recovery_toplevel, as the
+        stand-in probe returns), or with after, once its first call has returned."""
+        clock = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + 0.001, False)
+        saved_step = None if step in (None, "_recovery_toplevel") else getattr(aiqt_hooks, step)
+
+        def toplevel(*args, **kwargs):
+            if step == "_recovery_toplevel":
+                clock.advance()
+            return top
+
+        def stand_in(*args, **kwargs):
+            if not after:
+                clock.advance()
+            try:
+                return saved_step(*args, **kwargs)
+            finally:
+                clock.advance()
+        events = Path(aiqt_hooks._orch_state_dir_for_root(top)) / "guard-events.jsonl"
+        before = len(events.read_text(encoding="utf-8").splitlines()) if events.is_file() else 0
+        result = []
+        try:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel = clock, toplevel
+            if saved_step is not None:
+                setattr(aiqt_hooks, step, stand_in)
+            paths = _cite_resolutions(lambda: result.append(aiqt_hooks.citation_read_check({
+                "hook_event_name": "PreToolUse", "cwd": cwd, "tool_name": "Bash", "session_id": session,
+                "tool_input": {"command": command}})), "_citechk_run")
+        finally:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel = saved
+            if saved_step is not None:
+                setattr(aiqt_hooks, step, saved_step)
+        note = result[0][1].get("systemMessage", "") if isinstance(result[0][1], dict) else ""
+        rows = [r for r in (json.loads(x) for x in (events.read_text(encoding="utf-8").splitlines()[before:]
+                                                    if events.is_file() else []) if x.strip())
+                if r.get("kind") == "citint"]
+        return paths, rows, note
+
+    def summary(rows):
+        """The classes and the decisions of rows, and each sources_unread entry as whether its label is a -F
+        option and its reason."""
+        return ([c["class"] for r in rows for c in r["detail"]["citations"]], [r["decision"] for r in rows],
+                [(u.startswith("-F "), u.split(": ", 1)[-1]) for r in rows for u in r["detail"]["sources_unread"]])
+
+    # Per site: the call at a size, the path whose resolution is looked for, and the step the stand-in clock
+    # is moved past the deadline before.
+    sites = (
+        ("body", lambda size: (pad(root, "msg.txt", size), "git commit -F " + pad(root, "msg.txt", size), {}),
+         "_citechk_read_body"),
+        ("cited", lambda size: (os.path.join(root, cited(size)), "git commit -m 'see {}:1'".format(cited(size)),
+                                {}), "_citechk_resolve"),
+        ("top", lambda size: (pad(root, "", size), "git commit -m 'see {}/tools/a.py:1'".format(root),
+                              {"top": pad(root, "", size)}), "_citechk_diff"),
+        ("git-C-directory", lambda size: (pad(root, "", size), "git -C {} commit -m 'see tools/a.py:1'".format(
+            pad(root, "", size)), {}), "_recovery_toplevel"),
+        ("git-C-cwd", lambda size: (pad(root, "", size), "git -C {} commit -m 'see tools/a.py:1'".format(root),
+                                    {"cwd": pad(root, "", size)}), "_recovery_toplevel"))
+    bound = "is longer than {} characters".format(limit)
+    sized, timed = {}, {}
+    for site, call, step in sites:
+        for size in (limit - 1, limit, limit + 1):
+            path, command, where = call(size)
+            paths, rows, note = run(command, "path-{}-{}".format(site, size), **where)
+            sized.setdefault(site, []).append((path in paths,) + summary(rows) + (bound in note, "budget" in note))
+        path, command, where = call(limit - 1)
+        paths, rows, note = run(command, "path-{}-late".format(site), step=step, **where)
+        timed[site] = (path in paths,) + summary(rows)[:2] + ("budget" in note,
+                                                              "was not read: {}.".format(out_of_time) in note)
+    inside, over = (True, ["unread"], ["warn"], [], False, False), (False, ["unjudged"], ["warn"], [], True, False)
+    # Over the bound the body file's command still earns its warn row, which names the file as not read.
+    check("citeledger/check-path-bound", sized,
+          {"body": [inside, inside, (False, [], ["warn"], [(True, "its path {}, the most this check resolves".format(
+              bound))], True, False)],
+           "cited": [inside, inside, over], "top": [inside, inside, over], "git-C-directory": [inside, inside, over],
+           "git-C-cwd": [inside, inside, over]})
+    # Past the deadline: the body file's resolution comes before the toplevel probe, so that probe is not
+    # started either: the note says the repository was not resolved within the budget and names the body
+    # file as not read for it, and no row is written.
+    check("citeledger/check-no-resolution-past-deadline", timed,
+          {"body": (False, [], [], True, True), "cited": (False, ["unjudged"], ["warn"], True, False),
+           "top": (False, ["unjudged"], ["warn"], True, False),
+           "git-C-directory": (False, ["unjudged"], ["warn"], True, False),
+           "git-C-cwd": (False, ["unjudged"], ["warn"], True, False)})
+    # Both the session cwd and the git -C directory refused: the range's detail names the reason for each,
+    # the cwd's first. Both over the length bound; the cwd over it and the directory refused for the budget
+    # (the clock moved past the deadline once the cwd's refusal has returned, so the budget is named too);
+    # and both refused for the budget (named once).
+    long_cwd, long_dir, short_dir = pad(root, "", limit + 1), pad(root, "/.", limit + 1), root + "/."
+    over_cwd = "the session cwd {}, the most this check resolves".format(bound)
+    over_dir = "the git -C directory {}, the most this check resolves".format(bound)
+    prefix = "  tools/a.py:1 (not judged: "
+    both = []
+    for session, command, cwd, step, after in (
+            ("both-bound", "git -C {} commit -m 'see tools/a.py:1'".format(long_dir), long_cwd, None, False),
+            ("bound-then-budget", "git -C {} commit -m 'see tools/a.py:1'".format(short_dir), long_cwd,
+             "_citechk_real", True),
+            ("both-budget", "git -C {} commit -m 'see tools/a.py:1'".format(short_dir), root + "/./.",
+             "_citechk_real", False)):
+        _paths, rows, note = run(command, session, cwd=cwd, step=step, after=after)
+        details = [line[len(prefix):-1] for line in note.split("\n") if line.startswith(prefix)]
+        both.append(summary(rows)[:2] + (details, "incomplete (budget)" in note))
+    check("citeledger/check-both-refusals-named", both,
+          [(["unjudged"], ["warn"], [over_cwd + "; " + over_dir], False),
+           (["unjudged"], ["warn"], [over_cwd + "; " + out_of_time], True),
+           (["unjudged"], ["warn"], [out_of_time], True)])
+    # End to end, with the real toplevel probe and clock: a cited path of 800,000 characters is never
+    # resolved (none longer than the bound is), the warn note naming the bound comes back within the budget
+    # in this process's CPU time, and the note and the row show the path shortened, so the note stays under
+    # 4,096 characters here.
+    long_path = "x/" * 399998 + "a.py"
+    events = Path(aiqt_hooks._orch_state_dir_for_root(str(repo.root))) / "guard-events.jsonl"
+    before = len(events.read_text(encoding="utf-8").splitlines()) if events.is_file() else 0
+    result = []
+    began = time.process_time()
+    paths = _cite_resolutions(lambda: result.append(aiqt_hooks.citation_read_check({
+        "hook_event_name": "PreToolUse", "cwd": str(repo.root), "tool_name": "Bash", "session_id": "path-long",
+        "tool_input": {"command": "git commit -m 'see {}:1'".format(long_path)}})), "_citechk_run")
+    cpu = time.process_time() - began
+    note = result[0][1].get("systemMessage", "") if isinstance(result[0][1], dict) else ""
+    rows = [json.loads(x) for x in (events.read_text(encoding="utf-8").splitlines()[before:]
+                                    if events.is_file() else []) if x.strip()]
+    check("citeledger/check-long-cited-path",
+          (len(long_path), _verdict(result[0]), [c["class"] for r in rows for c in r["detail"]["citations"]],
+           "is longer than {} characters".format(limit) in note, cpu <= aiqt_hooks._CITECHK_BUDGET,
+           max([0] + [len(path) for path in paths]) <= limit, len(note) < 4096,
+           [len(c["cite"]) for r in rows for c in r["detail"]["citations"]]),
+          (800000, "warn", ["unjudged"], True, True, True, True, [shown_max + len(":1")]))
+    # A cited path that names no file (its class nofile) and a relative body file that is not there (it
+    # cannot be opened), each one under, at and one over _CITECHK_PATH_SHOWN characters: the row's cite and
+    # its sources_unread label show the path whole, whole, and shortened to that many characters.
+    shown = {"cited": [], "body": []}
+    for size in (shown_max - 1, shown_max, shown_max + 1):
+        name = "d" * (size - len("/a.py")) + "/a.py"
+        _paths, rows, _note = run("git commit -m 'see {}:1'".format(name), "shown-cited-{}".format(size))
+        shown["cited"] += [(len(c["cite"]) - len(":1"), c["cite"] == name + ":1")
+                           for r in rows for c in r["detail"]["citations"]]
+        body = "m" * size
+        _paths, rows, _note = run("git commit -F " + body, "shown-body-{}".format(size))
+        shown["body"] += [(len(entry.split(": ", 1)[0]) - len("-F "), entry.startswith("-F {}: ".format(body)))
+                          for r in rows for entry in r["detail"]["sources_unread"]]
+    check("citeledger/check-shown-path-bound", shown,
+          {"cited": [(shown_max - 1, True), (shown_max, True), (shown_max, False)],
+           "body": [(shown_max - 1, True), (shown_max, True), (shown_max, False)]})
+
+
+def _citecheck_cross_cases(tmp):
+    """The recorder keeps a read in the ledger of the toplevel the session cwd resolved to at the time, so
+    the check reads, and merges, the ledgers under the session cwd's toplevel, each command's git -C
+    toplevel and each cited file's toplevel. A read of f.py made with the cwd in repository a covers its
+    citation from a cwd in a (the control), from a cwd in b through git -C a, and from a cwd in b as an
+    absolute path, each silent. Each kind of toplevel counts on its own: a read of a's f.py made with the
+    cwd in b covers it through git -C a from b (the session cwd's ledger), and a read made with the cwd in a
+    of a file outside every repository covers it through git -C a from b (the command's ledger), while the
+    absolute citation above needs the file's. A line of a that was not read is still noted from b, with no
+    word of a ledger with no rows, since a's holds some. Where no ledger read holds a row, the note names how many
+    state directories were read, and where none was read it says nothing of rows. At most
+    _CITECHK_MAX_LEDGERS state directories are read: citations of files read in one under, at and one over
+    that many repositories, counting the session's own, are covered, covered, and the one past the bound
+    unread with its toplevel named as not read. At most _CITECHK_MAX_FILES cited files' directories are
+    probed for their toplevel, each probe given only the time left, and a directory past that bound, or
+    whose probe the deadline leaves no time to start or cuts short, is named as not probed (each tried one
+    under, at and one over the bound, and just inside, at and just past the deadline). Each ledger read
+    stops at the deadline: with a stand-in clock
+    moved just inside, at or just past it as the toplevels are found, as the session cwd's ledger read
+    returns, as a ledger generation's read returns, or as a generation's first chunk returns, the next
+    ledger, generation or chunk is read inside it and, at and past it, not read (no step on the ledger
+    file) and named, with the budget."""
+    a = _CiteRepo(tmp / "citecheck-cross-a", {"f.py": b"f1\nf2\nf3\n"})
+    b = _CiteRepo(tmp / "citecheck-cross-b", {"g.py": b"g1\n"})
+    bound = aiqt_hooks._CITECHK_MAX_LEDGERS
+    others = [_CiteRepo(tmp / "citecheck-cross-r{}".format(n), {"h.py": b"h1\nh2\n"}) for n in range(bound)]
+
+    def read(repo, rel, lines, session):
+        path = os.path.join(repo.top, rel)
+        repo.call("Read", {"file_path": path}, {"type": "text", "file": {
+            "filePath": path, "content": "\n".join("{}{}".format(rel[0], n) for n in range(1, lines + 1)),
+            "startLine": 1, "numLines": lines}}, session)
+
+    def seen(repo, command, session):
+        """The verdict, each citation's class, each row's ledgers read and not read, and the note."""
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, [(c["cite"], c["class"]) for r in rows for c in r["detail"]["citations"]],
+                [(r["detail"]["ledgers_read"], r["detail"]["ledgers_not_read"]) for r in rows], note)
+    read(a, "f.py", 2, "cross")
+    git_c, f_py = "git -C {} commit -m 'see {{}}'".format(a.root), os.path.join(a.top, "f.py")
+    covered = ("allow", [("f.py:2", "covered")])
+    control = seen(a, "git commit -m 'see f.py:2'", "cross")
+    check("citeledger/cross-repo-control-cwd-a", control[:3] + (control[3] == "",), covered + ([(1, [])], True))
+    through = seen(b, git_c.format("f.py:2"), "cross")
+    check("citeledger/cross-repo-git-C-silent", through[:3] + (through[3] == "",), covered + ([(2, [])], True))
+    absolute = seen(b, "git commit -m 'see {}:2'".format(f_py), "cross")
+    check("citeledger/cross-repo-absolute-silent", absolute[:3] + (absolute[3] == "",),
+          ("allow", [(f_py + ":2", "covered")], [(2, [])], True))
+    # Each kind of toplevel is read on its own account: a read of a's f.py made with the cwd in b covers it
+    # through git -C a from b (the session cwd's ledger, though neither the command's nor the file's is b's),
+    # and a read made with the cwd in a of a file outside every repository covers it through git -C a from b
+    # (the command's ledger, though the file has no toplevel).
+    outside = tmp / "citecheck-cross-outside"
+    outside.mkdir()
+    (outside / "o.txt").write_bytes(b"o1\no2\n")
+    o_txt = os.path.realpath(str(outside / "o.txt"))
+    b.call("Read", {"file_path": f_py}, {"type": "text", "file": {"filePath": f_py, "content": "f1\nf2",
+                                                                  "startLine": 1, "numLines": 2}}, "cross-from-b")
+    a.call("Read", {"file_path": o_txt}, {"type": "text", "file": {"filePath": o_txt, "content": "o1\no2",
+                                                                    "startLine": 1, "numLines": 2}}, "cross-outside")
+    from_b = seen(b, git_c.format("f.py:2"), "cross-from-b")
+    check("citeledger/cross-repo-session-cwd-ledger", from_b[:2] + (from_b[3] == "",), covered + (True,))
+    beyond = seen(b, git_c.format(o_txt + ":2"), "cross-outside")
+    check("citeledger/cross-repo-git-C-outside-file", beyond[:2] + (beyond[3] == "",),
+          ("allow", [(o_txt + ":2", "covered")], True))
+    unread = seen(b, git_c.format("f.py:3"), "cross")
+    check("citeledger/cross-repo-unread-still-noted",
+          unread[:3] + ("f.py:3 (no read or write recorded this session covers these lines)" in unread[3],
+                        "no citation-ledger rows at all" in unread[3]),
+          ("warn", [("f.py:3", "unread")], [(2, [])], True, False))
+    # No rows in any ledger read: the note names the number of state directories read, one or two here.
+    empty = [seen(repo, command, "cross-none") for repo, command in ((a, "git commit -m 'see f.py:2'"),
+                                                                      (b, git_c.format("f.py:2")))]
+    check("citeledger/cross-repo-empty-names-count",
+          [(verdict, classes, dirs, "no citation-ledger rows at all in the {} read".format(count) in note)
+           for (verdict, classes, dirs, note), count in zip(empty, ("1 state directory", "2 state directories"))],
+          [("warn", [("f.py:2", "unread")], [(1, [])], True), ("warn", [("f.py:2", "unread")], [(2, [])], True)])
+    # The bound: from a cwd in b, citations of h.py in bound - 2, bound - 1 and bound other repositories, each
+    # read there, need one under, at and one over the bound of state directories with b's own.
+    for repo in others:
+        read(repo, "h.py", 2, "cross-bound")
+    cited = [os.path.join(repo.top, "h.py") + ":1" for repo in others]
+    over = "{} (past the {} state directories read per call)".format(others[-1].top, bound)
+    capped = []
+    for count in (bound - 2, bound - 1, bound):
+        verdict, classes, dirs, note = seen(b, "git commit -m '{}'".format(" ".join(cited[:count])), "cross-bound")
+        capped.append((verdict, [cls for _cite, cls in classes], dirs, over in note))
+    check("citeledger/ledger-dirs-bound", (bound, capped),
+          (8, [("allow", ["covered"] * (bound - 2), [(bound - 1, [])], False),
+               ("allow", ["covered"] * (bound - 1), [(bound, [])], False),
+               ("warn", ["covered"] * (bound - 1) + ["unread"], [(bound, [over])], True)]))
+    # The cited files' directories: at most _CITECHK_MAX_FILES are probed (lowered to two here), so citations
+    # in one under, at and one over that many directories are covered, covered, and the last named as not
+    # probed (its range not judged, past the file cap of the same bound). A probe is given only the time
+    # left: with a stand-in clock moved just inside, at or just past the deadline as the cited path's
+    # resolution returns, the probe is started inside it and, at and past it, not started and its directory
+    # named as not probed (budget); and a probe that returns nothing (as one cut short does) as the clock
+    # moves there is read inside it as no repository (the range unread, nothing named) and, at and past
+    # it, named as not probed (budget).
+    saved_probe = (aiqt_hooks._CITECHK_MAX_FILES, aiqt_hooks.time, aiqt_hooks._recovery_toplevel,
+                   aiqt_hooks._citechk_resolve)
+    probes = {"dirs-bound": []}
+    hs = [os.path.join(repo.top, "h.py") + ":1" for repo in others[:3]]
+    past = "the toplevel of {} (not probed: more than 2 distinct directories hold cited files)".format(others[2].top)
+    try:
+        aiqt_hooks._CITECHK_MAX_FILES = 2
+        for count in (1, 2, 3):
+            verdict, classes, dirs, note = seen(b, "git commit -m '{}'".format(" ".join(hs[:count])), "cross-bound")
+            probes["dirs-bound"].append((verdict, [cls for _cite, cls in classes], dirs, past in note))
+        aiqt_hooks._CITECHK_MAX_FILES = saved_probe[0]
+        tops_of = {str(b.root): b.top, b.top: b.top, a.top: a.top}
+        not_probed = "the toplevel of {} (not probed: {})".format(a.top, aiqt_hooks._CITECHK_OUT_OF_TIME)
+        for site in ("probe-start", "probe-cut"):
+            for offset in (-0.001, 0.0, 0.001):
+                clock, started = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + offset, False), []
+
+                def toplevel(directory, *args, site=site, clock=clock, started=started, **kwargs):
+                    if directory != a.top:
+                        return tops_of.get(directory)
+                    started.append(True)
+                    if site == "probe-cut":
+                        clock.advance()
+                        return None
+                    return tops_of.get(directory)
+
+                def resolve(*args, clock=clock, **kwargs):
+                    try:
+                        return saved_probe[3](*args, **kwargs)
+                    finally:
+                        clock.advance()
+                try:
+                    aiqt_hooks.time, aiqt_hooks._recovery_toplevel = clock, toplevel
+                    if site == "probe-start":
+                        aiqt_hooks._citechk_resolve = resolve
+                    verdict, classes, _dirs, note = seen(b, "git commit -m 'see {}:2'".format(f_py), "cross")
+                finally:
+                    (aiqt_hooks.time, aiqt_hooks._recovery_toplevel,
+                     aiqt_hooks._citechk_resolve) = saved_probe[1:]
+                probes.setdefault(site, []).append((bool(started), verdict, classes, not_probed in note))
+    finally:
+        (aiqt_hooks._CITECHK_MAX_FILES, aiqt_hooks.time, aiqt_hooks._recovery_toplevel,
+         aiqt_hooks._citechk_resolve) = saved_probe
+    cut_short = (True, "warn", [(f_py + ":2", "unjudged")], True)
+    check("citeledger/cited-top-probe-bounds", probes,
+          {"dirs-bound": [("allow", ["covered"], [(2, [])], False), ("allow", ["covered"] * 2, [(3, [])], False),
+                          ("warn", ["covered", "covered", "unjudged"], [(3, [past])], True)],
+           "probe-start": [(True, "allow", [(f_py + ":2", "covered")], False),
+                           (False, "warn", [(f_py + ":2", "unjudged")], True),
+                           (False, "warn", [(f_py + ":2", "unjudged")], True)],
+           "probe-cut": [(True, "warn", [(f_py + ":2", "unread")], False), cut_short, cut_short]})
+    # The deadline: the clock moved as _citechk_tops returns (no ledger read, the session cwd's toplevel
+    # named, and nothing said of rows), as the session cwd's ledger read returns (the git -C repository's
+    # ledger), as the absent older generation's read returns (the current one's open) and as the current
+    # generation's first chunk returns (its next chunk).
+    name = hashlib.sha256("cross".encode("utf-8")).hexdigest()[:16] + ".jsonl"
+    late = aiqt_hooks._CITECHK_OUT_OF_TIME
+    sites = (("tops", "_citechk_tops", None, a, "git commit -m 'see f.py:2'", "{} ({})".format(a.top, late)),
+             ("ledger-dir", "_citechk_ledger", None, b, git_c.format("f.py:2"), "{} ({})".format(a.top, late)),
+             ("generation-open", "_citechk_generation", None, a, "git commit -m 'see f.py:2'",
+              "{}: {}".format(os.path.join(str(a.ledger_dir), name), late)),
+             ("generation-chunk", None, "read", a, "git commit -m 'see f.py:2'",
+              "{}: {}".format(os.path.join(str(a.ledger_dir), name), late)))
+    timed = {}
+    for site, step, cut, repo, command, named in sites:
+        for offset in (-0.001, 0.0, 0.001):
+            clock = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + offset, False)
+            saved_time, saved_step, out = aiqt_hooks.time, None if step is None else getattr(aiqt_hooks, step), []
+
+            def stand_in(*args, saved_step=saved_step, clock=clock, **kwargs):
+                try:
+                    return saved_step(*args, **kwargs)
+                finally:
+                    clock.advance()
+            try:
+                aiqt_hooks.time = clock
+                if step is not None:
+                    setattr(aiqt_hooks, step, stand_in)
+                made = _cite_touches({name}, clock, lambda repo=repo, command=command: out.append(
+                    seen(repo, command, "cross")), cut)
+            finally:
+                aiqt_hooks.time = saved_time
+                if step is not None:
+                    setattr(aiqt_hooks, step, saved_step)
+            verdict, classes, dirs, note = out[0]
+            timed.setdefault(site, []).append((any(made), verdict, classes, named in note,
+                                               "no citation-ledger rows at all" in note))
+    # Cut off at the ledger-dir site, the one ledger read (b's, which holds no row) is named as holding none.
+    inside = (True, "allow", [("f.py:2", "covered")], False, False)
+    cut_off = {site: (False, "warn", [("f.py:2", "unjudged")], True, site == "ledger-dir") for site, *_rest in sites}
+    check("citeledger/ledger-read-deadline", timed, {site: [inside, cut, cut] for site, cut in cut_off.items()})
+    # The toplevels not read are named, at most _CITECHK_TOPS_SHOWN of them (lowered to two here), and the
+    # rest counted, in the note and in the row: with one state directory read (b's), citations of h.py in
+    # one, two and three other repositories leave one under, at and one over that many toplevels not read.
+    saved_list = (aiqt_hooks._CITECHK_MAX_LEDGERS, getattr(aiqt_hooks, "_CITECHK_TOPS_SHOWN", 10))
+    named = ["{} (past the 1 state directories read per call)".format(repo.top) for repo in others[:3]]
+    listed = []
+    try:
+        aiqt_hooks._CITECHK_MAX_LEDGERS, aiqt_hooks._CITECHK_TOPS_SHOWN = 1, 2
+        for count in (1, 2, 3):
+            verdict, note, rows = _citecheck_run(b.root, "git commit -m '{}'".format(" ".join(cited[:count])),
+                                                 "cross-bound")
+            listed.append((verdict, [(r["detail"]["ledgers_read"], r["detail"]["ledgers_not_read"],
+                                      r["detail"].get("ledgers_not_read_more")) for r in rows],
+                           "not read under {} toplevel(s)".format(count) in note,
+                           [entry in note for entry in named[:count]], "; and 1 more." in note))
+    finally:
+        aiqt_hooks._CITECHK_MAX_LEDGERS, aiqt_hooks._CITECHK_TOPS_SHOWN = saved_list
+    check("citeledger/ledgers-not-read-shown-bound", listed,
+          [("warn", [(1, named[:1], 0)], True, [True], False),
+           ("warn", [(1, named[:2], 0)], True, [True, True], False),
+           ("warn", [(1, named[:2], 1)], True, [True, True, False], True)])
+    # The registry that locates a toplevel's state directory is read only for a toplevel reached before the
+    # bound and the deadline. From a cwd in b, citations of h.py in bound - 1 and bound other repositories
+    # read the registry of each, then of each but the last (the one past the bound); through git -C a, with
+    # the stand-in clock moved just inside, at or just past the deadline as b's ledger read returns, a's
+    # registry is read inside it and, at and past it, not read, a's toplevel named as not read.
+    saved_registry, located = aiqt_hooks._orch_registry, []
+
+    def registry(root, *args, **kwargs):
+        located.append(root)
+        return saved_registry(root, *args, **kwargs)
+    unlocated = {"bound": [], "deadline": []}
+    try:
+        aiqt_hooks._orch_registry = registry
+        for count in (bound - 1, bound):
+            del located[:]
+            _citecheck_run(b.root, "git commit -m '{}'".format(" ".join(cited[:count])), "cross-bound")
+            unlocated["bound"].append([repo.top in located for repo in others[:count]])
+        for offset in (-0.001, 0.0, 0.001):
+            del located[:]
+            clock = _CiteClock(1000.0, 1000.0 + aiqt_hooks._CITECHK_BUDGET + offset, False)
+            saved_time, saved_ledger = aiqt_hooks.time, aiqt_hooks._citechk_ledger
+
+            def stand_in(*args, saved_ledger=saved_ledger, clock=clock, **kwargs):
+                try:
+                    return saved_ledger(*args, **kwargs)
+                finally:
+                    clock.advance()
+            try:
+                aiqt_hooks.time, aiqt_hooks._citechk_ledger = clock, stand_in
+                verdict, _note, rows = _citecheck_run(b.root, git_c.format("f.py:2"), "cross")
+            finally:
+                aiqt_hooks.time, aiqt_hooks._citechk_ledger = saved_time, saved_ledger
+            unlocated["deadline"].append((a.top in located, verdict,
+                                          [r["detail"]["ledgers_not_read"] for r in rows]))
+    finally:
+        aiqt_hooks._orch_registry = saved_registry
+    check("citeledger/ledger-registry-not-read-skipped", unlocated,
+          {"bound": [[True] * (bound - 1), [True] * (bound - 1) + [False]],
+           "deadline": [(True, "allow", [[]]), (False, "warn", [["{} ({})".format(a.top, late)]]),
+                        (False, "warn", [["{} ({})".format(a.top, late)]])]})
+
+
+def _citecheck_suffix_cases(tmp):
+    """A relative cited path that names no file under the command's repository is matched by its suffix only
+    to a recorded path under that repository's resolved toplevel, whichever ledger read holds the row, so a
+    read of a file in another repository never covers it. Repository a holds f.py, sub/x.py and
+    pkg/sub/y.py, b holds g.py and lib/sub/y.py, and a's f.py and sub/x.py are read with the cwd in a. From
+    a cwd in a, git -C b citing f.py:1 (no slash, so no citation once no recorded path matches) is dropped,
+    not covered, and citing sub/x.py:2 is no such file; from a cwd in b, sub/x.py:2 is no such file alone
+    and beside an absolute citation of a's f.py:1, which is covered and adds a's ledger. A recorded path
+    under a directory whose name only begins with b's (b's toplevel without its closing slash) does not
+    match either. The control: from a cwd in b, git -C a citing sub/y.py:2, with a's pkg/sub/y.py read in
+    full with the cwd in a and b's lib/sub/y.py read at its first line only with the cwd in b (both
+    ledgers read, and both recorded paths end with the cited one), is covered by a's read alone, and so is
+    the same citation from a cwd in a."""
+    a = _CiteRepo(tmp / "citecheck-suffix-a", {"f.py": b"f1\n", "sub/x.py": b"x1\nx2\n",
+                                                "pkg/sub/y.py": b"y1\ny2\n"})
+    b = _CiteRepo(tmp / "citecheck-suffix-b", {"g.py": b"g1\n", "lib/sub/y.py": b"Y1\nY2\n"})
+    twin = tmp / "citecheck-suffix-b-twin"
+    (twin / "sub").mkdir(parents=True)
+    (twin / "sub" / "q.py").write_bytes(b"q1\n")
+
+    def read(repo, path, lines, session):
+        path = os.path.realpath(str(path))
+        content = Path(path).read_text(encoding="utf-8").splitlines()[:lines]
+        repo.call("Read", {"file_path": path}, {"type": "text", "file": {
+            "filePath": path, "content": "\n".join(content), "startLine": 1, "numLines": lines}}, session)
+
+    def seen(repo, command, session):
+        """The verdict, each citation's class, each row's count of tokens dropped as no citation, and the
+        note."""
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, [(c["cite"], c["class"]) for r in rows for c in r["detail"]["citations"]],
+                [r["detail"]["dropped_not_citation"] for r in rows], note)
+    read(a, a.root / "f.py", 1, "suffix")
+    read(a, a.root / "sub" / "x.py", 2, "suffix")
+    nofile = "sub/x.py:2 (no such file under {}".format(b.top)
+    git_c_b = "git -C {} commit -m 'see {{}}'".format(b.root)
+    flat, shaped = seen(a, git_c_b.format("f.py:1"), "suffix"), seen(a, git_c_b.format("sub/x.py:2"), "suffix")
+    check("citeledger/suffix-other-repo-git-C", (flat[:3] + (flat[3] == "",), shaped[:3] + (nofile in shaped[3],)),
+          (("allow", [], [1], True), ("warn", [("sub/x.py:2", "nofile")], [0], True)))
+    f_py = os.path.join(a.top, "f.py")
+    alone = seen(b, "git commit -m 'see sub/x.py:2'", "suffix")
+    mixed = seen(b, "git commit -m 'see sub/x.py:2 and {}:1'".format(f_py), "suffix")
+    check("citeledger/suffix-other-repo-absolute",
+          (alone[:2] + (nofile in alone[3],), mixed[:2] + (nofile in mixed[3],)),
+          (("warn", [("sub/x.py:2", "nofile")], True),
+           ("warn", [("sub/x.py:2", "nofile"), (f_py + ":1", "covered")], True)))
+    read(b, twin / "sub" / "q.py", 1, "suffix-twin")
+    prefix = seen(b, "git commit -m 'see sub/q.py:1'", "suffix-twin")
+    check("citeledger/suffix-sibling-prefix",
+          prefix[:2] + ("sub/q.py:1 (no such file under {}".format(b.top) in prefix[3],),
+          ("warn", [("sub/q.py:1", "nofile")], True))
+    read(a, a.root / "pkg" / "sub" / "y.py", 2, "suffix-control")
+    read(b, b.root / "lib" / "sub" / "y.py", 1, "suffix-control")
+    through = seen(b, "git -C {} commit -m 'see sub/y.py:2'".format(a.root), "suffix-control")
+    own = seen(a, "git commit -m 'see sub/y.py:2'", "suffix-control")
+    check("citeledger/suffix-own-repo-covered", (through[:2] + (through[3] == "",), own[:2] + (own[3] == "",)),
+          (("allow", [("sub/y.py:2", "covered")], True), ("allow", [("sub/y.py:2", "covered")], True)))
+    # The same citation from a cwd in a, with the deadline reached as the command's repository top is
+    # resolved for the suffix match (a stand-in clock, moved by a wrapper around that one resolution, which
+    # the real _citechk_real then refuses): unjudged, naming the budget, never no such file.
+    saved = (aiqt_hooks.time, aiqt_hooks._citechk_real)
+    clock, original = _CiteClock(0.0, 1e12, False), aiqt_hooks._citechk_real
+
+    def real(path, what, deadline):
+        if what == "the repository top":
+            clock.advance()
+        return original(path, what, deadline)
+    aiqt_hooks.time, aiqt_hooks._citechk_real = clock, real
+    try:
+        late = seen(a, "git commit -m 'see sub/y.py:2'", "suffix-control")
+    finally:
+        aiqt_hooks.time, aiqt_hooks._citechk_real = saved
+    check("citeledger/suffix-top-not-resolved", late[:2] + (aiqt_hooks._CITECHK_OUT_OF_TIME in late[3],),
+          ("warn", [("sub/y.py:2", "unjudged")], True))
+    # The limit is on the recorded path alone: a repository nested inside a's tree (here at vendor/n) is
+    # under a's toplevel, so a read of its sub/z.py, made with the cwd in a, covers sub/z.py:1 cited from a,
+    # which names no file there.
+    nested = _CiteRepo(a.root / "vendor" / "n", {"sub/z.py": b"z1\n"})
+    read(a, nested.root / "sub" / "z.py", 1, "suffix-nested")
+    inside = seen(a, "git commit -m 'see sub/z.py:1'", "suffix-nested")
+    check("citeledger/suffix-nested-repo-covered", inside[:2] + (inside[3] == "",),
+          ("allow", [("sub/z.py:1", "covered")], True))
+
+
+class _CiteCutPattern:
+    """Stands in for a compiled pattern of aiqt_hooks: match() is the pattern's own, and its cut-th call moves
+    the stand-in clock set as clock on, so a scan that matches the pattern once per line reaches the
+    deadline at a known line."""
+
+    def __init__(self, pattern, clock, cut):
+        self.pattern, self.clock, self.cut, self.calls = pattern, clock, cut, 0
+
+    def match(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == self.cut:
+            self.clock.advance()
+        return self.pattern.match(*args, **kwargs)
+
+
+def _cite_touches(targets, clock, run, cut=None):
+    """run() with each step a hook can take on a path in targets recorded as whether the stand-in clock had
+    been advanced when it was made: an os.stat, os.lstat, os.open, os.readlink or builtin open of the path,
+    and an os.fstat or os.read of a descriptor os.open gave for it (until os.close closes it). Those flags,
+    in order. With cut, the name of one of those os functions, the clock is advanced as the first such step
+    on targets returns, so the step after it is the first one the deadline can stop."""
+    saved = {"stat": os.stat, "lstat": os.lstat, "open": os.open, "readlink": os.readlink, "fstat": os.fstat,
+             "read": os.read, "close": os.close}
+    saved_builtin, made, fds = builtins.open, [], set()
+
+    def touched(name, step):
+        made.append(clock.advanced)
+        try:
+            return step()
+        finally:
+            if name == cut:
+                clock.advance()
+
+    def by_path(name):
+        def stand_in(path, *args, **kwargs):
+            if not (isinstance(path, str) and path in targets):
+                return saved[name](path, *args, **kwargs)
+            result = touched(name, lambda: saved[name](path, *args, **kwargs))
+            if name == "open":
+                fds.add(result)
+            return result
+        return stand_in
+
+    def by_fd(name):
+        def stand_in(fd, *args, **kwargs):
+            if fd not in fds:
+                return saved[name](fd, *args, **kwargs)
+            return touched(name, lambda: saved[name](fd, *args, **kwargs))
+        return stand_in
+
+    def close(fd, *args, **kwargs):
+        fds.discard(fd)
+        return saved["close"](fd, *args, **kwargs)
+
+    def builtin_open(file, *args, **kwargs):
+        if not (isinstance(file, str) and file in targets):
+            return saved_builtin(file, *args, **kwargs)
+        return touched("builtin open", lambda: saved_builtin(file, *args, **kwargs))
+    try:
+        os.stat, os.lstat, os.open, os.readlink = by_path("stat"), by_path("lstat"), by_path("open"), by_path("readlink")
+        os.fstat, os.read, os.close, builtins.open = by_fd("fstat"), by_fd("read"), close, builtin_open
+        run()
+    finally:
+        os.stat, os.lstat, os.open, os.readlink = saved["stat"], saved["lstat"], saved["open"], saved["readlink"]
+        os.fstat, os.read, os.close, builtins.open = saved["fstat"], saved["read"], saved["close"], saved_builtin
+    return made
+
+
+def _citeledger_walk_cases(tmp):
+    """How far a resolution walks. It follows at most _CITE_MAX_LINKS symlinks: a chain of one under, at and
+    one over that many resolves, resolves, and is refused for the link bound, and wherever it completes its
+    result is os.path.realpath's. A symlink passed through again counts again, as many symlinks as Linux
+    follows for it each time, though the walk takes it from its cache: passes through one symlink, or
+    through a symlink to a symlink, that follow one or two under, exactly, and one or two over that many
+    resolve, resolve, and are refused for the link bound, as the kernel opens, opens, and refuses each
+    (ELOOP). A symlink loop (one to itself, two to each other), met within a path or at its end, is refused
+    for the link bound, as the kernel refuses it (ELOOP), where os.path.realpath keeps the link's own path.
+    It stops at the deadline between two components: with a stand-in clock moved just inside, at
+    or just past the deadline as the first symlink of a chain of three is read, the walk reads the rest, or
+    stops with the deadline as its reason and makes no further lstat. It stops at the deadline before it
+    reads a symlink: with the clock moved as the lstat of that first symlink returns, the walk reads all
+    three, or reads none and stops with the deadline as its reason. The link
+    fan-out (24 symlinked directories of 700 symlinks each, every one to 819 times e/../, cited as one path
+    of 162 characters joined to the repository top) ends within each hook's budget in this process's CPU
+    time: the check names the link bound for the range, and for a body file reached the same way, which it
+    names as not read, and the recorder records nothing."""
+    resolution = getattr(aiqt_hooks, "_cite_resolution", None)
+    links = getattr(aiqt_hooks, "_CITE_MAX_LINKS", 40)  # a hook without the bound is held to Linux's own
+
+    def resolved(path, deadline):
+        """The hook's (resolution, reason) of path; a hook without _cite_resolution names no reason."""
+        if resolution is None:
+            return aiqt_hooks._cite_resolve(path, deadline), None
+        return resolution(path, deadline)
+    walk = tmp / "cite-walk"
+    (walk / "d" / "e").mkdir(parents=True)
+    (walk / "d" / "f").write_bytes(b"f\n")
+    target = os.path.realpath(str(walk / "d" / "f"))
+
+    def chain(count):
+        """A chain l1 -> l2 -> ... -> l<count> -> the target, in its own directory: the path of l1."""
+        where = walk / "chain-{}".format(count)
+        where.mkdir()
+        os.symlink(target, str(where / "l{}".format(count)))
+        for k in range(count - 1, 0, -1):
+            os.symlink("l{}".format(k + 1), str(where / "l{}".format(k)))
+        return str(where / "l1")
+    for name, value in (("rel", "d"), ("abs", str(walk / "d")), ("loop1", "loop2"), ("loop2", "loop1"),
+                        ("dangling", "missing/x"), ("d/e/up", "../e/..")):
+        os.symlink(value, str(walk / name))
+    shapes = ["/", "//", "/.", "/..", str(walk), str(walk) + "/", str(walk / "rel" / "f"), str(walk) + "/abs/e/../f",
+              str(walk) + "/rel/../rel/f", str(walk / "dangling"), str(walk) + "/dangling/y", str(walk) + "/d/f/g",
+              str(walk) + "/d/e/up/f", str(walk) + "/no/../d/./f", str(walk) + "/rel//e/", "relative/x", ".", ""]
+    unequal = [shape for shape in shapes if resolved(shape, time.monotonic() + 60) != (os.path.realpath(shape), None)]
+    bounded = [resolved(chain(count), time.monotonic() + 60) for count in (links - 1, links, links + 1)]
+    check("citeledger/resolve-link-bound", (unequal, bounded),
+          ([], [(target, None), (target, None), (None, "links")]))
+    # The deadline inside the walk: a stand-in readlink moves the stand-in clock on as the first symlink of
+    # l1 -> l2 -> l3 -> target is read; each lstat made once the clock reads at or past the deadline counts.
+    three, stopped = chain(3), []
+    saved_time, saved_readlink, saved_lstat = aiqt_hooks.time, os.readlink, os.lstat
+    try:
+        for offset in (-0.001, 0.0, 0.001):
+            clock = aiqt_hooks.time = _CiteClock(1000.0, 1005.0 + offset, False)
+            counts = {"readlink": 0, "late": 0}
+
+            def readlink(path, *args, clock=clock, counts=counts, **kwargs):
+                counts["readlink"] += 1
+                try:
+                    return saved_readlink(path, *args, **kwargs)
+                finally:
+                    clock.advance()
+
+            def lstat(path, *args, clock=clock, counts=counts, **kwargs):
+                counts["late"] += clock.monotonic() >= 1005.0
+                return saved_lstat(path, *args, **kwargs)
+            os.readlink, os.lstat = readlink, lstat
+            try:
+                got = resolved(three, 1005.0)
+            finally:
+                os.readlink, os.lstat = saved_readlink, saved_lstat
+            stopped.append((got, counts["readlink"], counts["late"]))
+    finally:
+        aiqt_hooks.time, os.readlink, os.lstat = saved_time, saved_readlink, saved_lstat
+    check("citeledger/resolve-stops-mid-walk", stopped,
+          [((target, None), 3, 0), ((None, "deadline"), 1, 0), ((None, "deadline"), 1, 0)])
+    # The deadline before a symlink is read: a stand-in lstat moves the stand-in clock on as it finds l1 of
+    # l1 -> l2 -> l3 -> target to be a symlink; each lstat or readlink made once the clock reads at or past
+    # the deadline counts. Inside it the walk reads all three; at and past it, it reads none.
+    first, paused = os.path.join(os.path.realpath(os.path.dirname(three)), "l1"), []
+    try:
+        for offset in (-0.001, 0.0, 0.001):
+            clock = aiqt_hooks.time = _CiteClock(1000.0, 1005.0 + offset, False)
+            counts = {"readlink": 0, "late": 0}
+
+            def readlink(path, *args, clock=clock, counts=counts, **kwargs):
+                counts["readlink"] += 1
+                counts["late"] += clock.monotonic() >= 1005.0
+                return saved_readlink(path, *args, **kwargs)
+
+            def lstat(path, *args, clock=clock, counts=counts, **kwargs):
+                counts["late"] += clock.monotonic() >= 1005.0
+                try:
+                    return saved_lstat(path, *args, **kwargs)
+                finally:
+                    if path == first:
+                        clock.advance()
+            os.readlink, os.lstat = readlink, lstat
+            try:
+                got = resolved(three, 1005.0)
+            finally:
+                os.readlink, os.lstat = saved_readlink, saved_lstat
+            paused.append((got, counts["readlink"], counts["late"]))
+    finally:
+        aiqt_hooks.time, os.readlink, os.lstat = saved_time, saved_readlink, saved_lstat
+    check("citeledger/resolve-no-readlink-past-deadline", paused,
+          [((target, None), 3, 0), ((None, "deadline"), 0, 0), ((None, "deadline"), 0, 0)])
+    # Passes through one symlink, each one Linux follows again, cached or not: pass1 leads to d, so a pass
+    # through it follows one symlink, and pass2 to pass1, so a pass through it follows two. A path through
+    # either that follows one or two under, exactly, and one or two over _CITE_MAX_LINKS symlinks before
+    # naming d/f resolves to os.path.realpath's result, resolves, and is refused for the link bound, as the
+    # kernel opens, opens, and refuses it (ELOOP). Built under the resolved directory, so no symlink above
+    # it adds to the count.
+    base = os.path.realpath(str(walk))
+    for name, value in (("pass1", "d"), ("pass2", "pass1")):
+        os.symlink(value, os.path.join(base, name))
+
+    def kernel(path):
+        try:
+            os.stat(path)
+            return "opens"
+        except OSError as exc:
+            return errno.errorcode.get(exc.errno, exc.errno)
+    passes = {}
+    for name, per in (("pass1", 1), ("pass2", 2)):
+        for count in (links // per - 1, links // per, links // per + 1):
+            path = base + "/{}/..".format(name) * count + "/d/f"
+            got = resolved(path, time.monotonic() + 60)
+            passes.setdefault(name, []).append((count * per, got, got[0] in (None, os.path.realpath(path)),
+                                                kernel(path)))
+    # A loop, a symlink met again inside its own resolution (self to itself, and loop1 to loop2 and back),
+    # which the kernel follows until it passes its bound and then refuses (ELOOP): refused for the link
+    # bound, whether the path goes on through it (self/../d/f) or ends at it.
+    os.symlink("self", os.path.join(base, "self"))
+    loops = ("self", "self/../d/f", "loop1", "loop1/../d/f", "loop1/x")
+    passes["loops"] = [(rel, resolved(base + "/" + rel, time.monotonic() + 60), kernel(base + "/" + rel))
+                       for rel in loops]
+    want = {name: [(links - per, (target, None), True, "opens"), (links, (target, None), True, "opens"),
+                   (links + per, (None, "links"), True, "ELOOP")] for name, per in (("pass1", 1), ("pass2", 2))}
+    want["loops"] = [(rel, (None, "links"), "ELOOP") for rel in loops]
+    check("citeledger/resolve-link-passes", passes, want)
+    # The link fan-out, built in this run's own directory: each s<i> leads through d<i>/t0 ... t699, and each
+    # t<j> back to d<i> by 819 times e/../ (a target of 4,095 characters).
+    fan = _CiteRepo(tmp / "cite-fan-out", {"a.py": b"a1\n", "msg.txt": b"see a.py:1\n"})
+    for i in range(24):
+        (fan.root / "d{}".format(i) / "e").mkdir(parents=True)
+        for j in range(700):
+            os.symlink("e/../" * 819, str(fan.root / "d{}".format(i) / "t{}".format(j)))
+        os.symlink("d{}/".format(i) + "/".join("t{}".format(j) for j in range(700)), str(fan.root / "s{}".format(i)))
+    token = "".join("s{}/../".format(i) for i in range(24)) + "a.py"
+    began = time.process_time()
+    verdict, note, rows = _citecheck_run(fan.root, "git commit -m 'see {}:1'".format(token), "fan-out")
+    check_cpu = time.process_time() - began
+    # The same fan-out leading to a body file (-F): the file is named as not read, the link bound its reason.
+    began = time.process_time()
+    _verdict_, _note, body_rows = _citecheck_run(fan.root, "git commit -F " + os.path.join(
+        str(fan.root), token[:-len("a.py")] + "msg.txt"), "fan-out-body")
+    body = ([r["decision"] for r in body_rows], [u.split(": ", 1)[-1] for r in body_rows
+                                                 for u in r["detail"]["sources_unread"]],
+            time.process_time() - began <= aiqt_hooks._CITECHK_BUDGET)
+    joined, walked = os.path.join(str(fan.root), token), []
+    saved_real = aiqt_hooks._cite_real
+
+    def real(path, *args, **kwargs):
+        result = saved_real(path, *args, **kwargs)
+        if path == joined:
+            walked.append(result[1] if isinstance(result, tuple) else "resolved")
+        return result
+    began = time.process_time()
+    try:
+        aiqt_hooks._cite_real = real
+        fan.call("Read", {"file_path": joined}, {"type": "text", "file": {
+            "filePath": joined, "content": "a1", "startLine": 1, "numLines": 1}}, "fan-out-read")
+    finally:
+        aiqt_hooks._cite_real = saved_real
+    record_cpu = time.process_time() - began
+    check("citeledger/link-fan-out-bounded",
+          (len(token), verdict, [c["class"] for r in rows for c in r["detail"]["citations"]],
+           [r["detail"]["budget_exhausted"] for r in rows],
+           "leads through more than {} symbolic links".format(links) in note, check_cpu <= aiqt_hooks._CITECHK_BUDGET,
+           walked, len(fan.rows("fan-out-read")), record_cpu <= aiqt_hooks._CITE_BUDGET, body),
+          (162, "warn", ["unjudged"], [False], True, True, ["links"], 0, True,
+           (["warn"], ["its path leads through more than {} symbolic links, the most this check follows".format(
+               links)], True)))
+
+
+def _citecheck_step_cases(tmp):
+    """No step of either hook is taken on a resolved path once the deadline is reached, and the check reads
+    each message text once, in its command's option order, and stops its scan at the deadline. With a
+    stand-in clock moved just inside, at or just past the deadline as one step returns, no further step is
+    made on the path (_cite_touches records each os.stat, os.lstat, os.open, os.readlink and builtin open of
+    it, and each os.fstat and os.read of a descriptor opened for it): in the check, the body file's open
+    after its resolution, its fstat after its open, its first read chunk after its fstat and its next chunk
+    after the first (_citechk_read_body), the cited file's stat after its resolution (_citechk_resolve), its
+    size stat (_citechk_class), its open after its resolution and its fstat after its open (_cite_read), and
+    a cited symlink's readlink after the lstat that finds it (_cite_real); in the recorder, a sed read's
+    open after its resolution and its fstat after its open (_cite_read), a Grep path's stat
+    (_cite_from_grep), a grep command's file stat after its resolution, and the second stat of the files a
+    grep command names after the first (_cite_grep_command). Inside, each is made and the range judged or
+    the row recorded; at and past it, the range is not judged (budget), the body file is named as not read
+    (budget), or nothing is recorded. A grep command gives each path it names one stat, a single named file
+    included. The here-document a command reads is scanned once, whatever the number
+    of its -F - options: 1,000 options over a 101,000 character here-document take one scan and end within
+    the budget in this process's CPU time, and a command's row lists each citation and source once. Each
+    command reads only the here-document its own standard input receives (bash gives it the last of its
+    standard-input redirections, and a later one of fd 0 onto itself leaves it), its sources keep their
+    option order in the note, the row and under the citation cap, and where its standard input is not its
+    own here-document it is named as not read. A command that does not lex, or in which a backslash-newline
+    splits a here-document delimiter where bash reads one (at an operator the lexer reads, quoted or not, or
+    unquoted inside a command substitution in double quotes), is scanned as written and names the expansion
+    of each here-document with an unquoted delimiter as not read (a shift inside a one-line $((...)) is
+    none), a command after a split delimiter that bash reads as quoted is lexed as bash reads it and its
+    files named as not read, and text that bash can run in a body that a split delimiter bash reads as
+    unquoted runs to the end of the command is named as not read, also where quotes split its git or gh
+    word, so neither allows silently; one whose double-quoted string holds what the walk there does not
+    follow as bash does is read
+    both ways, its message and body files read and its text scanned as written, and its note and rows say so
+    and why; and each rule that decides where such a delimiter counts, and the rule that scans a command
+    with a split delimiter as written before its two lexings are compared, is shown to decide its vector,
+    which gives another result under a variant of the hook without that rule; a command is read after the
+    reserved words that begin its segment (a brace group's '{', '!', 'if', 'then', 'do', 'time -p',
+    'time --', 'coproc'). The scan of a message stops at the deadline: a stand-in pattern moves the clock on
+    at line 2 of the masking or of the search, line 3 is not scanned, and the note says no citation was
+    checked, naming the budget."""
+    steps = _CiteRepo(tmp / "citecheck-steps", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n",
+                                                "a.txt": b"a1\n", "b.txt": b"b1\n"}, links=(("tools/l.py", "a.py"),))
+    root, budget = steps.top, aiqt_hooks._CITECHK_BUDGET
+
+    def spelled(rel):
+        """The spellings a hook may give a path under the repository: joined to it, and resolved."""
+        return {os.path.join(root, rel), os.path.join(str(steps.root), rel)}
+    saved = (aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git)
+
+    def stepped(step, offset, budget_s, targets, call):
+        """call() with a stand-in clock moved to the deadline plus offset once aiqt_hooks.<step> first
+        returns, or, for a step written os.NAME, once the first such call on targets returns
+        (_cite_touches), the toplevel probe a stand-in naming the repository and no diff probe: whether a
+        step on targets was made after that, and call's result."""
+        clock = _CiteClock(1000.0, 1000.0 + budget_s + offset, False)
+        cut = step[len("os."):] if step.startswith("os.") else None
+        saved_step, out = (None if cut else getattr(aiqt_hooks, step)), []
+
+        def stand_in(*args, **kwargs):
+            try:
+                return saved_step(*args, **kwargs)
+            finally:
+                clock.advance()
+        try:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel = clock, lambda *args, **kwargs: str(steps.root)
+            aiqt_hooks._review_git = lambda *args, **kwargs: None
+            if cut is None:
+                setattr(aiqt_hooks, step, stand_in)
+            made = _cite_touches(targets, clock, lambda: out.append(call()), cut)
+        finally:
+            aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved
+            if cut is None:
+                setattr(aiqt_hooks, step, saved_step)
+        return any(made), out[0]
+    a_py, msg, l_py = spelled("tools/a.py"), spelled("msg.txt"), spelled("tools/l.py")
+    body_file, cites_a = "git commit -F " + os.path.join(root, "msg.txt"), "git commit -m 'see tools/a.py:1'"
+    # Per site: the step the clock is moved at, the command, and the paths whose steps are recorded. The
+    # body file is cut at the return of its resolution, its open, its fstat and its first read chunk; the
+    # cited file at the return of its resolution (before its stat), of _citechk_resolve (before its size
+    # stat), of _cite_resolve (before its open) and of its open (before its fstat); and a cited symlink
+    # (tools/l.py, to a.py) at the lstat that finds it to be one, before its readlink.
+    sites = (("body-open", "_citechk_real", body_file, msg), ("body-fstat", "os.open", body_file, msg),
+             ("body-read", "os.fstat", body_file, msg), ("body-chunk", "os.read", body_file, msg),
+             ("cited-stat", "_citechk_real", cites_a, a_py), ("cited-size", "_citechk_resolve", cites_a, a_py),
+             ("cited-open", "_cite_resolve", cites_a, a_py), ("cited-fstat", "os.open", cites_a, a_py),
+             ("cited-readlink", "os.lstat", "git commit -m 'see tools/l.py:1'", l_py))
+    checked = {}
+    for site, step, command, targets in sites:
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            made, (_verdict_, note, rows) = stepped(step, offset, budget, targets, lambda command=command, site=site,
+                                                    name=name: _citecheck_run(steps.root, command,
+                                                                              "step-{}-{}".format(site, name)))
+            checked.setdefault(site, []).append((made, [c["class"] for r in rows for c in r["detail"]["citations"]],
+                                                 "budget" in note))
+    judged, late, unread = [(True, ["unread"], False)], [(False, ["unjudged"], True)] * 2, [(False, [], True)] * 2
+    check("citeledger/check-no-step-past-deadline", checked,
+          {site: judged + (unread if site.startswith("body-") else late) for site, _step, _command, _targets in sites})
+    # The recorder: each tool's step cut as the first resolution returns, a sed read cut at its open (before
+    # its fstat), and a grep command naming two files cut at the first stat of the files it names (before
+    # the second stat).
+    a_txt, recorded = spelled("a.txt"), {}
+    tools = (("sed", "_cite_real", a_txt, lambda s: steps.bash("sed -n 1p a.txt", "a1\n", s)),
+             ("Grep", "_cite_real", a_txt, lambda s: steps.grep(steps.root / "a.txt", "1:a1", s)),
+             ("grep", "_cite_real", a_txt, lambda s: steps.bash("grep -n a1 a.txt", "1:a1\n", s)),
+             ("sed-fstat", "os.open", a_txt, lambda s: steps.bash("sed -n 1p a.txt", "a1\n", s)),
+             ("grep-stat", "os.stat", a_txt | spelled("b.txt"),
+              lambda s: steps.bash("grep -n a1 a.txt b.txt", "a.txt:1:a1\n", s)))
+    for tool, step, targets, call in tools:
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            session = "step-{}-{}".format(tool, name)
+            made, _result = stepped(step, offset, aiqt_hooks._CITE_BUDGET, targets,
+                                    lambda call=call, session=session: call(session))
+            recorded.setdefault(tool, []).append((made, len(steps.rows(session))))
+    check("citeledger/recorder-no-step-past-deadline", recorded,
+          {tool: [(True, 1), (False, 0), (False, 0)] for tool, _step, _targets, _call in tools})
+    # One stat per path a grep command names: the stat that admits a single named file also says it is a
+    # regular file, so it is not given to stat again.
+    named_files, saved_stat, per_path = a_txt | spelled("b.txt"), os.stat, {}
+    for name, command, shown in (("one", "grep -n a1 a.txt", "1:a1\n"), ("two", "grep -n a1 a.txt b.txt",
+                                                                         "a.txt:1:a1\n")):
+        counts = {}
+
+        def counted(path, *args, counts=counts, **kwargs):
+            if isinstance(path, str) and path in named_files:
+                counts[os.path.basename(path)] = counts.get(os.path.basename(path), 0) + 1
+            return saved_stat(path, *args, **kwargs)
+        try:
+            os.stat = counted
+            steps.bash(command, shown, "stat-" + name)
+        finally:
+            os.stat = saved_stat
+        per_path[name] = (counts, len(steps.rows("stat-" + name)))
+    check("citeledger/grep-one-stat-per-path", per_path,
+          {"one": ({"a.txt": 1}, 1), "two": ({"a.txt": 1, "b.txt": 1}, 1)})
+    # Here-documents: each body scanned once (the scans of _citechk_extract counted), whatever the number of
+    # -F - options, and each command reads only the here-document its own standard input receives.
+    saved_extract, scans = aiqt_hooks._citechk_extract, []
+
+    def extract(text, *args, **kwargs):
+        scans.append(len(text))
+        return saved_extract(text, *args, **kwargs)
+    body = ("word " * 20 + "\n") * 1000
+    shapes = (("options", "git commit" + " -F -" * 1000 + " <<'EOF'\n" + body + "EOF\n"),
+              ("three", "git commit -F - -F - -F - <<'EOF'\nsee tools/a.py:1\n```\nx\n```\nEOF\n"),
+              ("two-commands", "git commit -F - <<'A'\nsee tools/a.py:1\nA\ngit commit -F - <<'B'\nsee tools/a.py:2\n"
+                               "B\n"))
+    once = {}
+    try:
+        aiqt_hooks._citechk_extract = extract
+        for name, command in shapes:
+            del scans[:]
+            began = time.process_time()
+            verdict, _note, rows = _citecheck_run(steps.root, command, "heredoc-" + name)
+            cpu = time.process_time() - began
+            once[name] = (len(scans), cpu <= budget, verdict,
+                          [([(c["cite"], c["class"]) for c in r["detail"]["citations"]], r["detail"]["sources"],
+                            r["detail"]["masked"].get("fence", 0), r["detail"]["not_judged_past_cap"]) for r in rows])
+    finally:
+        aiqt_hooks._citechk_extract = saved_extract
+    check("citeledger/check-heredoc-once", once,
+          {"options": (1, True, "allow", [([], ["here-document"], 0, 0)]),
+           "three": (1, True, "warn", [([("tools/a.py:1", "unread")], ["here-document"], 3, 0)]),
+           "two-commands": (2, True, "warn", [([("tools/a.py:1", "unread")], ["here-document"], 0, 0),
+                                              ([("tools/a.py:2", "unread")], ["here-document"], 0, 0)])})
+    # A command's sources keep the order of its options: the here-document on -F - takes that option's
+    # place, before or after -m, in the note, in the row's citations and sources, and under the citation
+    # cap (lowered to one here), which judges the first source's range and counts the other's.
+    saved_cap, ordered, here = aiqt_hooks._CITECHK_MAX_CITES, {}, " <<'EOF'\nsee tools/a.py:1\nEOF\n"
+    try:
+        for cap in (saved_cap, 1):
+            aiqt_hooks._CITECHK_MAX_CITES = cap
+            for name, command in (("F-first", "git commit -F - -m 'see tools/a.py:2'" + here),
+                                  ("m-first", "git commit -m 'see tools/a.py:2' -F -" + here)):
+                _verdict_, note, rows = _citecheck_run(steps.root, command, "order-{}-{}".format(name, cap))
+                ordered["{}-{}".format(name, "capped" if cap == 1 else "all")] = (
+                    [line.split()[0] for line in note.split("\n") if line.startswith("  tools/")],
+                    [c["cite"] for r in rows for c in r["detail"]["citations"]],
+                    [r["detail"]["sources"] for r in rows], [r["detail"]["not_judged_past_cap"] for r in rows])
+    finally:
+        aiqt_hooks._CITECHK_MAX_CITES = saved_cap
+    first, second = ["tools/a.py:1", "tools/a.py:2"], ["tools/a.py:2", "tools/a.py:1"]
+    check("citeledger/check-heredoc-order", ordered,
+          {"F-first-all": (first, first, [["here-document", "-m value"]], [0]),
+           "m-first-all": (second, second, [["-m value", "here-document"]], [0]),
+           "F-first-capped": (first[:1], first[:1], [["here-document", "-m value"]], [1]),
+           "m-first-capped": (second[:1], second[:1], [["-m value", "here-document"]], [1])})
+    # Standard input is what bash gives the command, its last standard-input redirection: of two
+    # here-documents the second; a file redirected after the here-document replaces it (standard input named
+    # as not read), one before it does not; a later redirection that duplicates or moves fd 0 onto itself
+    # (<&0, 0<&0, 0>&0, <&00, 0<&0-) leaves the here-document, as bash does, while one from fd 1 or a close
+    # (<&-) replaces it; <<- strips the body's leading tabs, as bash does, so a tab does not hide a line as an
+    # indented block; and a here-document another command of a pipeline reads is not this command's
+    # (standard input named as not read).
+    unseen = ["-F -: it is read from standard input, which this check cannot see"]
+    stdin, own = {}, [(["tools/a.py:1"], ["here-document"], [])]
+    dups = (("self", "<&0"), ("self-fd", "0<&0"), ("self-out", "0>&0"), ("self-00", "<&00"),
+            ("self-move", "0<&0-"), ("from-1", "0<&1"), ("closed", "<&-"))
+    for name, command in (("two", "git commit -F - <<'A' <<'B'\nsee tools/a.py:1\nA\nsee tools/a.py:2\nB\n"),
+                          ("file-after", "git commit -F - <<'A' < a.txt\nsee tools/a.py:1\nA\n"),
+                          ("file-before", "git commit -F - < a.txt <<'A'\nsee tools/a.py:1\nA\n"),
+                          ("tabs", "git commit -F - <<-'A'\n\tsee tools/a.py:1\n\tA\n"),
+                          ("piped", "cat <<'A' | git commit -F -\nsee tools/a.py:1\nA\n")) + tuple(
+            (name, "git commit -F - <<'A' {}\nsee tools/a.py:1\nA\n".format(dup)) for name, dup in dups):
+        _verdict_, _note, rows = _citecheck_run(steps.root, command, "stdin-" + name)
+        stdin[name] = [([c["cite"] for c in r["detail"]["citations"]], r["detail"]["sources"],
+                        r["detail"]["sources_unread"]) for r in rows]
+    want = {"two": [(["tools/a.py:2"], ["here-document"], [])], "file-after": [([], [], unseen)],
+            "file-before": own, "tabs": own, "piped": [([], [], unseen)]}
+    want.update((name, own if name.startswith("self") else [([], [], unseen)]) for name, _dup in dups)
+    check("citeledger/check-heredoc-stdin", stdin, want)
+    # A command that does not lex is scanned as written, and the expansion of each here-document with an
+    # unquoted delimiter in it is named as not read, with or without a $ in its body: plain text, whose
+    # citation the scan still judges; a citation only the expansion makes, which the scan cannot see; the
+    # <<- form; an operator split by a backslash-newline, which bash joins; and two such here-documents, each
+    # named. A here-string, and a quoted here-document in a command that does not lex for a process
+    # substitution, name none. A '<<' inside $((...)) is a shift and is not named, while one inside a
+    # $((...) ) that bash reads as a command substitution of a subshell is a here-document and is named. A
+    # '$((' that bash does not expand, in a comment or in a quoted here-document's body, does not hide a
+    # here-document with an unquoted delimiter on a later line before a later '))': its expansion is named.
+    # A $((...)) that spans lines is not passed over, so its '<<' is named (a note the command did not
+    # earn). The operators are found without lexing: inside single quotes, as in 'x <<EOF', the closing
+    # quote leaves no delimiter and none is named, while "x <<EOF y" in double quotes is named.
+    reason = ("its delimiter is unquoted, so bash expands parameters, command substitutions and arithmetic in its "
+              "body, and the command does not lex, so only its text as written was scanned")
+    unquoted = {}
+    for name, command in (("plain", "git commit -F - <<EOF\nsee tools/a.py:1\nEOF\n"),
+                          ("dollar", "git commit -F - <<EOF\nsee $(printf tools/a.py):1\nEOF\n"),
+                          ("dash", "git commit -F - <<-EOF\n\tsee tools/a.py:1\n\tEOF\n"),
+                          ("split", "git commit -F - <\\\n<EOF\nsee tools/a.py:1\nEOF\n"),
+                          ("two", "git commit -F - <<A <<B\nsee tools/a.py:1\nA\nsee tools/a.py:2\nB\n"),
+                          ("here-string", "git commit -F - <<< 'see tools/a.py:1'"),
+                          ("quoted", "cat <(true); git commit -F - <<'EOF'\nsee tools/a.py:1\nEOF\n"),
+                          ("arith", "x=$((1<<2)); git commit -F - <<A\nsee tools/a.py:1\nA\n"),
+                          ("arith-subshell", "echo $((cat <<B\nx\nB\n) ); git commit -F - <<A\nsee tools/a.py:1\nA\n"),
+                          ("arith-comment", "# $((x\ngit commit -F - <<A\nsee tools/${F}.py:1\nA\n# ))"),
+                          ("arith-quoted-body", "cat <<'Q'\nuse $((n\nQ\ngit commit -F - <<A\nsee tools/${F}.py:1\n"
+                                                "A\n# ))"),
+                          ("arith-lines", "x=$((1 <<A\n)); git commit -m 'see tools/a.py:1'"),
+                          ("in-single-quotes", "git commit -m 'see tools/a.py:1 <<EOF' <(true)"),
+                          ("in-double-quotes", "git commit -m \"see tools/a.py:1 <<EOF y\" <(true)")):
+        verdict, note, rows = _citecheck_run(steps.root, command, "unquoted-" + name)
+        unquoted[name] = (verdict, [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
+                                     r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows],
+                          "The git commit message expanded <<" in note)
+
+    def named(*delims):
+        return ["expanded <<{} here-document: {}".format(delim, reason) for delim in delims]
+    check("citeledger/check-unquoted-heredoc", unquoted,
+          {"plain": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))], True),
+           "dollar": ("warn", [("raw", [], ["command text"], named("EOF"))], True),
+           "dash": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))], True),
+           "split": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))], True),
+           "two": ("warn", [("raw", ["tools/a.py:1", "tools/a.py:2"], ["command text"], named("A", "B"))], True),
+           "here-string": ("warn", [("raw", ["tools/a.py:1"], ["command text"], [])], False),
+           "quoted": ("warn", [("raw", ["tools/a.py:1"], ["command text"], [])], False),
+           "arith": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("A"))], True),
+           "arith-subshell": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("B", "A"))], True),
+           "arith-comment": ("warn", [("raw", [], ["command text"], named("A"))], True),
+           "arith-quoted-body": ("warn", [("raw", [], ["command text"], named("A"))], True),
+           "arith-lines": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("A"))], True),
+           "in-single-quotes": ("warn", [("raw", ["tools/a.py:1"], ["command text"], [])], False),
+           "in-double-quotes": ("warn", [("raw", ["tools/a.py:1"], ["command text"], named("EOF"))], True)})
+    # A here-document delimiter that a backslash-newline splits is the word bash reads once it is removed:
+    # <<E\, a newline and OF, <<\, a newline and EOF, and <<-\, a newline and EOF are the unquoted EOF, so
+    # bash expands the body, and the command is scanned as one that does not lex, with that expansion named,
+    # with or without a $ in the body. A message or body file such a command names is kept: each one a
+    # lexing that lexed names is named as not read, once per option spelling and path as written, however
+    # many lexings name it (the file and file-twice
+    # vectors), never read, judged or silently dropped (the file vector, whose msg.txt holds
+    # the only citation), on the raw scan's own item, or as the lexed command's
+    # item where the kind search finds no command in the text, as where quotes split its git word (the
+    # file-kindless vector); -F - whose here-document lies in the scanned text earns no such entry (the mid
+    # and quoted vectors), while -F - or --body-file - that a pipe or a file redirection feeds is named as
+    # read from standard input, which this scan cannot see (the stdin-pipe, stdin-redirect and stdin-gh
+    # vectors), once at the first option that names it, whatever its spelling (the stdin-mixed vector, which
+    # names it with -F - and --file - and gets the first spelling's entry only; the taken-once rule decides
+    # it, shown by its variant below). The lexer reads each split delimiter that is unquoted once the
+    # backslash-newline is removed, at an operator it reads, as one that holds a newline, which no line
+    # matches, so it takes the rest of the command as that body: a later command is scanned too, and a git
+    # commit or gh pr create that lies after the split delimiter, which each lexing reads as that body, is
+    # named as not read by the kind search over each body a lexing read (the after-unquoted-git and
+    # after-unquoted-gh vectors, whose message or body file no reading of the command reads, and the later
+    # vector, whose -m citation the scanned text still judges), and so is one after a split '<<' inside
+    # $((...)), which the lexer reads as an operator and bash as a shift. Where that search finds none in
+    # such a body, as for a git or gh word that quotes split (g'i't, "g"it, g"h"), which bash runs as git or
+    # gh, the body is named as text that bash can run (the after-unquoted-split-git, after-unquoted-dq-git,
+    # after-unquoted-split-gh and after-arith-split-git vectors), never allowed silently, but not where bash
+    # ends the body at its delimiter line with nothing after it (in-unquoted-body-split-git, whose quote-split
+    # commit lies inside the body bash reads, so bash runs no git and the command allows). A split delimiter
+    # that bash reads as quoted (<<'E'\, a newline and OF; <<E\, a newline and 'OF'; <<$\, a newline and
+    # 'EOF'; <<"E"\, a newline and OF; <<"E\, a newline and OF") is lexed as bash reads it, so a command after
+    # its body is lexed and gives its own item, for which no expansion is named: its message or body file, or
+    # the standard input a pipe feeds it, is named as not read (the after-file, after-pipe, after-gh,
+    # after-quoted-git and after-quoted-gh vectors), as the lexed command's own item too where quotes split
+    # its git or gh word and the kind search finds no command in the text (after-quoted-split-git,
+    # after-quoted-dq-git and after-quoted-split-gh, which were allowed silently while the lexer read such a
+    # delimiter as one no line matches), and its -m value is scanned with the command's text (the
+    # later-quoted vectors) or, where the kind search finds no command, so that scan reads nothing, named as
+    # not read (after-quoted-split-value). The variants below show that each of these rules decides its
+    # vectors. Inside single quotes bash keeps the backslash-newline and also runs the
+    # body to the end, so the later command scanned there is a note the command did not earn. A here-document
+    # inside a command substitution $(...) in double quotes is real: bash expands its body, which the lexer
+    # reads as text, so with a split delimiter that bash reads as unquoted the command is scanned as written
+    # and that expansion named, also on the line after a comment in the substitution, after a '#' inside a
+    # word (x#y, $(true)#z), after an escaped blank (a\ #y) and after a '#' that a run of backslash-newlines
+    # joins to a word. A '<<' inside single quotes, a comment (from a '#' at the substitution's opening,
+    # after an opening '(', a blank, a tab, a newline, ';', '&' or '|', to its newline) or $((...)) in such a
+    # substitution leaves the command lexed with its -F file read; one inside an ANSI-C quote with an escaped
+    # quote there, which the nested lexing refuses, leaves it read both ways with its -F file read. A
+    # look-alike the lexer does not read as an operator, inside quotes (after a substitution closes, too), a
+    # comment or a quoted here-document's body (also one that, with '<(' for its '<<', would be the line that
+    # closes that body), or after an escaped '<', leaves the command lexed, so its -F file (after the escaped
+    # '<', its -m value) is read, and so do nine of them. Where the walk through such a string meets what it
+    # does not follow as bash does, the command is read both ways, lexed with its -m value or -F file read and
+    # scanned as written with each unquoted here-document's expansion named, and the note and each row say so
+    # and why: a backslash or a '#' inside backticks (a doubled backslash, a backslash-newline in a comment
+    # there, a split delimiter there), '${' (in ${x/;#/y}, ${x:-|#} and ${x/ #/y}), a process substitution
+    # (<(true)#z), a case command, a double quote inside the substitution, a delimiter word that runs to the
+    # string's closing quote, a backslash-newline after a '$' or inside '<<', an arithmetic command ((...)),
+    # $[...], a '$((' that closes as a substitution of a subshell, and a here-document's body after a '<<'
+    # that does not decide (a split delimiter bash reads as quoted, also after earlier backslash-newlines,
+    # and the common quoted here-document in -m when a backslash-newline follows the string, whose citation
+    # both readings find and so judge twice).
+    split, commands, later = {}, {}, "git commit -m 'see tools/a.py:1'\n"
+    expansion, both_ways = "The git commit message expanded <<", "This command was read both ways"
+    body, plain = "OF\nsee tools/${F}.py:1\nEOF\n", "OF\nsee $F\nEOF\n"
+
+    def read_split(command, session, phrase=None):
+        """One check of command: the verdict, each row's parse, reason, citations, sources and sources not
+        read, whether the note names an expansion, and the reason the note gives for reading it both ways;
+        with phrase, also whether the note holds it."""
+        verdict, note, rows = _citecheck_run(steps.root, command, session)
+        why = note.partition("because a double-quoted string in it holds ")[2].partition(", which this check")[0]
+        return (verdict, [(r["detail"]["parse"], r["detail"]["parse_why"],
+                           [c["cite"] for c in r["detail"]["citations"]], r["detail"]["sources"],
+                           r["detail"]["sources_unread"]) for r in rows],
+                expansion in note, why if both_ways in note else None) + ((phrase in note,) if phrase else ())
+    for name, command in (("mid", "git commit -F - <<E\\\nOF\nsee tools/a.py:1\nEOF\n"),
+                          ("mid-dollar", "git commit -F - <<E\\\nOF\nsee $(printf tools/a.py):1\nEOF\n"),
+                          ("lead", "git commit -F - <<\\\nEOF\nsee tools/a.py:1\nEOF\n"),
+                          ("dash", "git commit -F - <<-\\\nEOF\n\tsee tools/a.py:1\n\tEOF\n"),
+                          ("file", "git commit -F msg.txt <<E\\\nOF\nx\nEOF\n"),
+                          ("file-twice", "git commit -F msg.txt -F msg.txt <<E\\\nOF\nx\nEOF\n"),
+                          ("file-kindless", "g'i't commit -F msg.txt <<E\\\nOF\nx\nEOF\n"),
+                          ("stdin-pipe", "cat msg.txt | git commit -F -; cat <<E\\\n'OF'\nx\nEOF\n"),
+                          ("stdin-redirect", "git commit -F - < msg.txt; cat <<E\\\n'OF'\nx\nEOF\n"),
+                          ("stdin-gh", "cat msg.txt | gh pr create --title t --body-file -; "
+                                       "cat <<E\\\n'OF'\nx\nEOF\n"),
+                          ("stdin-mixed", "cat msg.txt | git commit -F - --file -; cat <<E\\\n'OF'\nx\nEOF\n"),
+                          ("after-file", "cat <<\"E\\\nOF\"\nx\nEOF\ngit commit -F msg.txt\n"),
+                          ("after-pipe", "cat <<\"E\\\nOF\"\nx\nEOF\ncat msg.txt | git commit -F -\n"),
+                          ("after-gh", "cat <<\"E\\\nOF\"\nx\nEOF\n"
+                                       "gh pr create --title t --body-file msg.txt\n"),
+                          ("after-quoted-git", "cat <<'E'\\\nOF\nx\nEOF\ngit commit -F msg.txt\n"),
+                          ("after-quoted-gh", "cat <<'E'\\\nOF\nx\nEOF\ngh pr create --title t --body-file msg.txt\n"),
+                          ("after-quoted-split-git", "cat <<'E'\\\nOF\nx\nEOF\ng'i't commit -F msg.txt\n"),
+                          ("after-quoted-dq-git", "cat <<'E'\\\nOF\nx\nEOF\n\"g\"it commit -F msg.txt\n"),
+                          ("after-quoted-split-gh", "cat <<'E'\\\nOF\nx\nEOF\n"
+                                                    "g\"h\" pr create --title t --body-file msg.txt\n"),
+                          ("after-quoted-split-value", "cat <<'E'\\\nOF\nx\nEOF\ng'i't commit -m 'see tools/a.py:1'\n"),
+                          ("after-unquoted-git", "cat <<E\\\nOF\nx\nEOF\ngit commit -F msg.txt\n"),
+                          ("after-unquoted-gh", "cat <<E\\\nOF\nx\nEOF\ngh pr create --title t --body-file msg.txt\n"),
+                          ("after-unquoted-split-git", "cat <<E\\\nOF\nx\nEOF\ng'i't commit -F msg.txt\n"),
+                          ("after-unquoted-dq-git", "cat <<E\\\nOF\nx\nEOF\n\"g\"it commit -F msg.txt\n"),
+                          ("after-unquoted-split-gh", "cat <<E\\\nOF\nx\nEOF\n"
+                                                      "g\"h\" pr create --title t --body-file msg.txt\n"),
+                          ("after-arith-split-git", "echo $((x<<\\\n2))\ng'i't commit -F msg.txt\n"),
+                          ("in-unquoted-body-split-git", "cat <<E\\\nOF\ng'i't commit -F msg.txt\nEOF\n"),
+                          ("later", "cat <<E\\\nOF\nx\nEOF\n" + later),
+                          ("quoted", "git commit -F - <<E\\\n'OF'\nsee tools/a.py:1\nEOF\n"),
+                          ("later-quoted", "cat <<E\\\n'OF'\nx\nEOF\n" + later),
+                          ("later-ansi-c", "cat <<$\\\n'EOF'\nx\nEOF\n" + later),
+                          ("later-quoted-part", "cat <<\"E\"\\\nOF\nx\nEOF\n" + later),
+                          ("later-in-double-quotes", "cat <<\"E\\\nOF\"\nx\nEOF\n" + later),
+                          ("later-arith", "echo $((x<<\\\n2))\n" + later),
+                          ("later-in-single-quotes", "cat <<'E\\\nOF'\nx\nEOF\n" + later),
+                          ("look-alike-single", "git commit -F msg.txt; echo 'x <<E\\\nOF y'"),
+                          ("look-alike-double", "git commit -F msg.txt; echo \"x <<E\\\nOF y\""),
+                          ("look-alike-comment", "git commit -F msg.txt # x <<E\\\nOF\n"),
+                          ("look-alike-body", "git commit -F msg.txt; cat <<'Q'\nx <<E\\\nOF y\nQ\n"),
+                          ("look-alike-escaped", "echo a\\<<E\\\nOF\n" + later),
+                          ("look-alike-collision", "git commit -F msg.txt; cat <<'x <(E\\'\nx <<E\\\nOF\nx <(E\\\n"),
+                          ("look-alike-after-subst", "git commit -F msg.txt; echo \"$(date) x <<E\\\nOF y\""),
+                          ("look-alike-many", "git commit -F msg.txt; echo" + " \"x <<E\\\nOF y\"" * 9),
+                          ("subst-double", "git commit -m \"$(cat <<E\\\n" + body + ")\""),
+                          ("backticks-double", "git commit -m \"`cat <<E\\\n" + body + "`\""),
+                          ("subst-quoted", "git commit -F msg.txt; echo \"$(cat <<E\\\n'OF'\nx\nEOF\n)\""),
+                          ("subst-single", "git commit -F msg.txt; echo \"$(echo 'x <<E\\\nOF y')\""),
+                          ("subst-arith", "git commit -F msg.txt; echo \"$((x<<\\\n2))\""),
+                          ("subst-comment", "git commit -F msg.txt; echo \"$( # <<E\\\n# OF\n: )\""),
+                          ("subst-comment-after", "git commit -F msg.txt; echo \"$(true # x <<E\\\nOF\n)\""),
+                          ("subst-comment-line", "git commit -m \"$(echo a # x\ncat <<E\\\n" + body + ")\""),
+                          ("subst-hash-word", "git commit -m \"$(: x#y $(true)#z; cat <<E\\\n" + body + ")\""),
+                          ("backticks-comment", "git commit -m \"`echo a # x` `cat <<E\\\n" + body + "`\""),
+                          ("subst-ansi-c", "git commit -F msg.txt; echo \"$(echo $'x\\' <<E\\\nOF y')\""),
+                          ("subst-joins-before", "git commit -F msg.txt; echo \"a\\\nb\\\nc\\\n $(cat <<E\\\n'OF'\n"
+                                                 "abc ${HOME}\nEOF\n)\""),
+                          ("backticks-to-quote", "git commit -F msg.txt; echo \"`cat <<E\\\nOF`\""),
+                          ("subst-escaped-blank", "git commit -m \"$(: \\\na\\ #y; cat <<E\\\n" + body + ")\""),
+                          ("subst-join-run", "git commit -m \"$(:\\\n\\\n#x; cat <<E\\\n" + body + ")\""),
+                          ("subst-comment-at-open", "git commit -F msg.txt; echo \"$(#x <<E\\\nOF\n)\""),
+                          ("subst-comment-at-paren", "git commit -F msg.txt; echo \"$( (#x <<E\\\nOF\n) )\""),
+                          ("subst-comment-after-tab", "git commit -F msg.txt; echo \"$(true\t# <<E\\\nOF\n)\""),
+                          ("subst-comment-after-semicolon", "git commit -F msg.txt; echo \"$(true;# <<E\\\nOF\n)\""),
+                          ("subst-comment-after-ampersand", "git commit -F msg.txt; echo \"$(true&# <<E\\\nOF\n)\""),
+                          ("subst-comment-after-pipe", "git commit -F msg.txt; echo \"$(true|# <<E\\\nOF\ncat)\""),
+                          ("backticks-comment-at-open", "git commit -F msg.txt; echo \"`#x <<E\\\nOF\n`\""),
+                          ("backticks-hash", "git commit -F msg.txt; echo \"`#x <<E`\\\ny\""),
+                          ("backticks-doubled-backslash", "git commit -m \"`echo a\\\\ #y; cat <<E\\\n" + body + "`\""),
+                          ("backticks-comment-join", "git commit -F msg.txt; echo \"`: # x \\\n<<E\\\nOF\nsee ${F}"
+                                                     "\nEOF\n`\""),
+                          ("subst-procsub-hash", "git commit -m \"$(echo <(true)#z; cat <<E\\\n" + body + ")\""),
+                          ("subst-brace-semicolon", "git commit -m \"$(: ${x/;#/y}; cat <<E\\\n" + body + ")\""),
+                          ("subst-brace-pipe", "git commit -m \"$(echo g ${x:-|#} h; cat <<E\\\n" + body + ")\""),
+                          ("subst-brace-blank", "git commit -F msg.txt; echo \"$(: ${x/ #/y})\n <<E\\\nOF y\""),
+                          ("subst-case", "git commit -m \"$(case x in x) cat <<E\\\n" + plain + ";; esac)\""),
+                          ("subst-double-quote", "git commit -F msg.txt; echo \"$(echo \"x\"; cat <<E\\\n" + body
+                                                 + ")\""),
+                          ("subst-word-to-quote", "git commit -F msg.txt; echo \"$(cat <<E\\\nOF\"Q\"\nx${F}\nEOFQ"
+                                                  "\n)\""),
+                          ("subst-dollar-join", "git commit -m \"$\\\n(cat <<E\\\n" + body + ")\""),
+                          ("subst-lt-join", "git commit -m \"$(cat <\\\n<E\\\n" + body + ")\""),
+                          ("subst-arith-command", "git commit -F msg.txt; echo \"$( ((x=1<<\\\n2)); echo $x)\""),
+                          ("subst-dollar-bracket", "git commit -F msg.txt; echo \"$(echo $[1<<\\\n2])\""),
+                          ("subst-arith-subshell", "git commit -m \"$((cat <<E\\\n" + plain + ") )\""),
+                          ("subst-quoted-heredoc-then-join", "git commit -m \"$(cat <<'EOF'\nsee tools/a.py:1\nEOF"
+                                                             "\n)\" \\\n--no-edit")):
+        commands[name] = command
+        split[name] = read_split(command, "split-delim-" + name)
+
+    def named_both(*delims):
+        return ["expanded <<{} here-document: {}".format(delim, reason_both) for delim in delims]
+
+    def by_value(why):
+        """A -m value whose body cites only through ${F} or $F, read both ways: no citation either way, and
+        the expansion of <<EOF named by the scan as written."""
+        return ("warn", [("both", why, [], ["-m value"], []), ("both", why, [], ["command text"], named_both("EOF"))],
+                True, why)
+
+    def by_both(why, *delims):
+        """-F msg.txt read, and the command scanned as written with the expansion of each delimiter named."""
+        return ("warn", [("both", why, ["tools/a.py:1"], ["-F msg.txt"], []),
+                         ("both", why, [], ["command text"], named_both(*delims))], bool(delims), why)
+    reason_both = ("its delimiter is unquoted, so bash expands parameters, command substitutions and arithmetic in "
+                   "its body, and the command's text was scanned only as written")
+    reason_split = ("a backslash-newline splits a here-document delimiter in this command, so the command is "
+                    "scanned only as written and this file, which a lexing of it names, was not read: no "
+                    "citation in it was checked")
+
+    def split_unread(*labels):
+        return ["{}: {}".format(label, reason_split) for label in labels]
+
+    def stdin_unread(name):
+        return ["{} -: it is read from standard input, which this check cannot see".format(name)]
+    reason_swallowed = ("a backslash-newline splits a here-document delimiter in this command, so a lexing "
+                        "reads the rest of the command as that here-document's body and this command, which "
+                        "bash can still run, was scanned only as text: no message or body file it names was "
+                        "read and no standard input it reads was seen")
+
+    def swallowed(kind):
+        return ["{} in a here-document's body: {}".format(kind, reason_swallowed)]
+    reason_swallowed_text = ("a backslash-newline splits a here-document delimiter in this command, so a lexing "
+                             "reads the rest of the command as that here-document's body, which holds text bash "
+                             "can run as commands; the search for a git commit or gh pr create or edit finds "
+                             "none there, but it misses one whose command word quotes split (such as g'i't), so "
+                             "a command there was not read: no message or body file it names was read and no "
+                             "standard input it reads was seen")
+    swallowed_text = ["text in a here-document's body: " + reason_swallowed_text]
+    reason_unscanned = ("a backslash-newline splits a here-document delimiter in this command, so the command is "
+                        "scanned only as written, and the search for a git commit or gh pr create or edit in "
+                        "its text finds none (it misses one whose command word quotes split, such as g'i't), so "
+                        "this value, which a lexing of it names, was not scanned: no citation in it was checked")
+    by_raw = [("raw", None, ["tools/a.py:1"], ["command text"], named("EOF"))]
+    by_later = [("raw", None, ["tools/a.py:1"], ["command text"], named("EOF") + swallowed("git commit"))]
+    by_quoted = [("raw", None, ["tools/a.py:1"], ["command text"], [])]
+    by_quoted_later = [("raw", None, ["tools/a.py:1"], ["command text"], swallowed("git commit"))]
+    by_kindless_file = ("warn", [("raw", None, [], [], split_unread("-F msg.txt"))], False, None)
+    by_swallowed_text = ("warn", [("raw", None, [], [], swallowed_text)], False, None)
+    by_file = ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt"], [])], False, None)
+    by_text = ("warn", [("raw", None, [], ["command text"], named("EOF"))], True, None)
+    in_ticks, hash_in_ticks, braces = "a backslash inside backticks", "a '#' inside backticks", \
+        "a parameter expansion's braces"
+    open_at_quote, heredoc_body = "a command substitution still open at its closing quote", "a here-document's body"
+    check("citeledger/check-split-heredoc-delim", split,
+          {"mid": ("warn", by_raw, True, None),
+           "mid-dollar": ("warn", [("raw", None, [], ["command text"], named("EOF"))], True, None),
+           "lead": ("warn", by_raw, True, None), "dash": ("warn", by_raw, True, None),
+           "file": ("warn", [("raw", None, [], ["command text"], named("EOF") + split_unread("-F msg.txt"))],
+                    True, None),
+           "file-twice": ("warn", [("raw", None, [], ["command text"],
+                                    named("EOF") + split_unread("-F msg.txt"))], True, None),
+           "file-kindless": ("warn", [("raw", None, [], [], split_unread("-F msg.txt"))], False, None),
+           "stdin-pipe": ("warn", [("raw", None, [], ["command text"], stdin_unread("-F"))], False, None),
+           "stdin-redirect": ("warn", [("raw", None, [], ["command text"], stdin_unread("-F"))], False, None),
+           "stdin-gh": ("warn", [("raw", None, [], ["command text"], stdin_unread("--body-file"))],
+                        False, None),
+           "stdin-mixed": ("warn", [("raw", None, [], ["command text"], stdin_unread("-F"))], False, None),
+           "after-file": ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))], False, None),
+           "after-pipe": ("warn", [("raw", None, [], ["command text"], stdin_unread("-F"))], False, None),
+           "after-gh": ("warn", [("raw", None, [], ["command text"], split_unread("--body-file msg.txt"))],
+                        False, None),
+           "after-quoted-git": ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))],
+                                False, None),
+           "after-quoted-gh": ("warn", [("raw", None, [], ["command text"], split_unread("--body-file msg.txt"))],
+                               False, None),
+           "after-quoted-split-git": by_kindless_file, "after-quoted-dq-git": by_kindless_file,
+           "after-quoted-split-gh": ("warn", [("raw", None, [], [], split_unread("--body-file msg.txt"))],
+                                     False, None),
+           "after-quoted-split-value": ("warn", [("raw", None, [], [],
+                                                  ["-m value: " + reason_unscanned])], False, None),
+           "after-unquoted-git": ("warn", [("raw", None, [], ["command text"],
+                                            named("EOF") + swallowed("git commit"))], True, None),
+           "after-unquoted-gh": ("warn", [("raw", None, [], ["command text"],
+                                           named("EOF") + swallowed("gh pr create"))], False, None),
+           "after-unquoted-split-git": by_swallowed_text, "after-unquoted-dq-git": by_swallowed_text,
+           "after-unquoted-split-gh": by_swallowed_text, "after-arith-split-git": by_swallowed_text,
+           "in-unquoted-body-split-git": ("allow", [], False, None),
+           "later": ("warn", by_later, True, None), "quoted": ("warn", by_quoted, False, None),
+           "later-quoted": ("warn", by_quoted, False, None),
+           "later-ansi-c": ("warn", by_quoted, False, None),
+           "later-quoted-part": ("warn", by_quoted, False, None),
+           "later-in-double-quotes": ("warn", by_quoted, False, None),
+           "later-arith": ("warn", by_quoted_later, False, None),
+           "later-in-single-quotes": ("warn", by_quoted_later, False, None), "look-alike-single": by_file,
+           "look-alike-double": by_file, "look-alike-comment": by_file, "look-alike-body": by_file,
+           "look-alike-escaped": ("warn", [("lexed", None, ["tools/a.py:1"], ["-m value"], [])], False, None),
+           "look-alike-collision": by_file, "look-alike-after-subst": by_file, "look-alike-many": by_file,
+           "subst-double": by_text, "backticks-double": by_value(in_ticks), "subst-quoted": by_both(heredoc_body),
+           "subst-single": by_file, "subst-arith": by_file, "subst-comment": by_file, "subst-comment-after": by_file,
+           "subst-comment-line": by_text, "subst-hash-word": by_text, "backticks-comment": by_value(hash_in_ticks),
+           "subst-ansi-c": by_both(aiqt_hooks._CITECHK_LEXINGS_DIFFER, "EOF"),
+           "subst-joins-before": by_both(heredoc_body),
+           "backticks-to-quote": by_both(in_ticks), "subst-escaped-blank": by_text, "subst-join-run": by_text,
+           "subst-comment-at-open": by_file, "subst-comment-at-paren": by_file, "subst-comment-after-tab": by_file,
+           "subst-comment-after-semicolon": by_file, "subst-comment-after-ampersand": by_file,
+           "subst-comment-after-pipe": by_file, "backticks-comment-at-open": by_both(in_ticks, "EOF"),
+           "backticks-hash": by_both(hash_in_ticks), "backticks-doubled-backslash": by_value(in_ticks),
+           "backticks-comment-join": by_both(in_ticks, "EOF"), "subst-procsub-hash": by_value("a process substitution"),
+           "subst-brace-semicolon": by_value(braces), "subst-brace-pipe": by_value(braces),
+           "subst-brace-blank": by_both(braces, "EOF"), "subst-case": by_value("a case command"),
+           "subst-double-quote": by_both(open_at_quote, "EOF"), "subst-word-to-quote": by_both(open_at_quote),
+           "subst-dollar-join": by_value("a backslash-newline after a '$'"),
+           "subst-lt-join": by_value("a backslash-newline inside '<<'"),
+           "subst-arith-command": by_both("an arithmetic command ((...))", "2"),
+           "subst-dollar-bracket": by_both("an arithmetic expansion $[...]", "2]"),
+           "subst-arith-subshell": by_value("a '$((' that does not close with '))'"),
+           "subst-quoted-heredoc-then-join": ("warn", [("both", heredoc_body, ["tools/a.py:1"], ["-m value"], []),
+                                                       ("both", heredoc_body, ["tools/a.py:1"], ["command text"], [])],
+                                              False, heredoc_body)})
+    # Each rule of the walk through a double-quoted substitution and of the split-delimiter decision decides
+    # its vector above: under a variant of the hook with that rule removed (_hook_variant: one line of
+    # _citechk_substituted_ops or _citechk_split_delim replaced) the vector gives the other result pinned here.
+    # The rules: a substitution ends at its ')'; single quotes, an ANSI-C quote and $((...)) in it; a comment
+    # in it, which begins at a '#' that begins a word (just after '$(' or an opening '(', or after a blank, a
+    # tab, ';', '&' or '|'; not just after a substitution's close, an escaped blank, or a run of
+    # backslash-newlines that follows a word) and ends at its newline; a '#' inside backticks; '${'; the
+    # joined delimiter read as quoted; the offset of the '<<' past earlier backslash-newlines; and a delimiter
+    # word that runs to the string's closing quote. Four of these vectors (after the substitution's close, in
+    # single quotes, in $((...)) and with a quoted joined delimiter) give their result above under a hook that
+    # finds split delimiters by lexing the command again, so alone they are continuity coverage; the variants
+    # are what show that each rule decides them. The x#y in subst-hash-word is passed over both by the
+    # characters the walk stops at and by the comment rule, so no one-line variant shows it; its variant
+    # removes only the rule for a '#' just after a substitution's close ($(true)#z).
+    walk, decide = "_citechk_substituted_ops", "_citechk_split_delim"
+    texts, base, variants = _hook_functions(walk, decide), tmp / "citecheck-variants", {}
+    base.mkdir()
+    starts = 'before in " \\t\\n;&|()"'
+    for name, func, old, new in (("look-alike-after-subst", walk, 'elif opened[-1] != "`":', "elif False:"),
+                                 ("subst-single", walk, "elif c == \"'\":", "elif False:"),
+                                 ("subst-arith", walk, 'if command.startswith("((", k + 1):', "if False:"),
+                                 ("subst-quoted", decide, "if not joined[0]:", "if True:"),
+                                 ("subst-comment", walk, 'elif c == "#":', "elif False:"),
+                                 ("subst-comment-after", walk, 'elif c == "#":', "elif False:"),
+                                 ("subst-comment-line", walk, 'close = command.find("\\n", k, last)', "close = -1"),
+                                 ("subst-hash-word", walk, "glue, lead = k + step, -1  # a '#' just after",
+                                  "pass  # a '#' just after"),
+                                 ("subst-ansi-c", walk, "elif opened and opened[-1] != \"$((\" and "
+                                                        "command.startswith(\"'\", k + 1):", "elif False:"),
+                                 ("subst-joins-before", decide, "at - start - 2 * j + 2", "at - start + 2"),
+                                 ("subst-word-to-quote", decide, "if parsed[3] == end - 1:", "if False:"),
+                                 ("subst-escaped-blank", walk, "lead = -1  # a '#' just after an escaped",
+                                  "pass  # a '#' just after an escaped"),
+                                 ("subst-join-run", walk, "elif k != glue:", "elif True:"),
+                                 ("subst-comment-at-open", walk, starts, 'before in " \\t\\n;&|)"'),
+                                 ("subst-comment-at-paren", walk, starts, 'before in " \\t\\n;&|)"'),
+                                 ("subst-comment-after-tab", walk, starts, 'before in " \\n;&|()"'),
+                                 ("subst-comment-after-semicolon", walk, starts, 'before in " \\t\\n&|()"'),
+                                 ("subst-comment-after-ampersand", walk, starts, 'before in " \\t\\n;|()"'),
+                                 ("subst-comment-after-pipe", walk, starts, 'before in " \\t\\n;&()"'),
+                                 ("backticks-hash", walk, 'if command.find("#", k + 1, tick) != -1:', "if False:"),
+                                 ("subst-brace-semicolon", walk, 'if command.startswith("{", k + 1):', "if False:")):
+        variant = _hook_variant(base, func, texts.get(func, ""), old, new)
+        if variant is None:
+            variants[name] = "no variant: {!r} does not occur exactly once in {}".format(old, func)
+            continue
+        original = getattr(aiqt_hooks, func)
+        setattr(aiqt_hooks, func, variant)
+        try:
+            variants[name] = read_split(commands[name], "split-variant-" + name)
+        finally:
+            setattr(aiqt_hooks, func, original)
+    # Under a variant that sends a command holding -F msg.txt to the split-delimiter scan, the raw item also
+    # names msg.txt as not read (the fallback keeps the files a lexing recognized), so these expectations
+    # carry that entry where by_text and by_scan, whose commands name no file, do not.
+    by_scan_file = ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))], False, None)
+    by_text_file = ("warn", [("raw", None, [], ["command text"], named("EOF") + split_unread("-F msg.txt"))],
+                    True, None)
+    lexed_value = ("allow", [("lexed", None, [], ["-m value"], [])], False, None)
+    check("citeledger/check-split-heredoc-variants", variants,
+          {"look-alike-after-subst": by_text_file, "subst-single": by_text_file,
+           "subst-arith": by_both("an arithmetic command ((...))"), "subst-quoted": by_scan_file,
+           "subst-comment": ("warn", [("raw", None, [], ["command text"],
+                                       named("E#") + split_unread("-F msg.txt"))], True, None),
+           "subst-comment-after": by_text_file, "subst-comment-line": by_value(open_at_quote),
+           "subst-hash-word": by_value(braces), "subst-ansi-c": by_text_file, "subst-joins-before": by_scan_file,
+           "subst-word-to-quote": by_scan_file, "subst-escaped-blank": by_value(braces),
+           "subst-join-run": by_value(braces),
+           "subst-comment-at-open": by_text_file, "subst-comment-at-paren": by_text_file,
+           "subst-comment-after-tab": by_text_file,
+           "subst-comment-after-semicolon": by_text_file, "subst-comment-after-ampersand": by_text_file,
+           "subst-comment-after-pipe": by_text_file, "backticks-hash": by_file, "subst-brace-semicolon": lexed_value})
+    # The command is also lexed as bash nests a substitution's quotes inside a double-quoted string, with no
+    # backslash-newline needed. Where that lexing and the walk's (each string ending at its next double
+    # quote) differ, or only one of them lexes, the command is read both ways, the -F file of each lexing
+    # read: a double quote inside single quotes in a substitution, which the walk's lexing reads as the
+    # string's end and so takes the -F msg.txt between two such strings into one -m value; a single quote
+    # inside double quotes in a substitution, which leaves the walk's lexing with a quote that does not close
+    # (the command was scanned only as written, msg.txt unread); and an ANSI-C quote with an escaped quote in
+    # a substitution, which the nested lexing refuses, so its note says that a lexing that did not lex is
+    # not evaluated. A substitution with no quote inside, which both lexings read alike, leaves the command
+    # lexed. A backslash-newline that splits a here-document delimiter overrides all of this: with the same
+    # ANSI-C quote and a split quoted delimiter, the command is scanned as one that does not lex (parse raw,
+    # its text as written), and the -F file of the lexing that lexes is named as not read, never read or
+    # judged. That vector, ansi-c-split-delim, holds its only citation in msg.txt, so its row shows the
+    # citation unjudged (none listed) and the source named as not read: the file is skipped loudly, never
+    # silently. A file that only the second lexing names is named too: in dquote-split-delim the first
+    # lexing takes the double quote inside each substitution as its string's end, so -F msg.txt falls
+    # inside one -m value and only the second, nested lexing names it, and the split quoted delimiter
+    # (whose newline no line matches) keeps the command on the raw scan, where that file is still named as
+    # not read.
+    differ, commands_differ, lexings = {}, {}, aiqt_hooks._CITECHK_LEXINGS_DIFFER
+    unlexed = ("as lexed (a read attempted of each message and body file that a lexing of it that lexed names, each "
+               "one that could not be read named as not read; a lexing that did not lex is not evaluated, so a "
+               "file only it names is neither read nor named)")
+    for name, command in (("dquote-in-subst", "git commit -m \"$(echo '\"')\" -F msg.txt -m \"$(echo '\"')\""),
+                          ("squote-in-subst", "git commit -F msg.txt -m \"$(echo \"it's\")\""),
+                          ("ansi-c-in-subst", "git commit -F msg.txt -m \"$(echo $'x\\' y')\""),
+                          ("ansi-c-split-delim", "git commit -F msg.txt -m \"$(echo $'x\\' y')\" <<'E\\\nOF'\n"
+                                                 "x\nEOF\n"),
+                          ("dquote-split-delim", "git commit <<E\\\n'OF' -m \"$(echo '\"')\" -F msg.txt "
+                                                 "-m \"$(echo '\"')\"\nx\nEOF\n"),
+                          ("alike", "git commit -F msg.txt -m \"$(echo x)\"")):
+        commands_differ[name] = command
+        differ[name] = read_split(command, "lexings-" + name, unlexed if name == "ansi-c-in-subst" else None)
+    check("citeledger/check-lexings-differ", differ,
+          {"dquote-in-subst": ("warn", [("both", lexings, [], ["-m value"], []),
+                                        ("both", lexings, ["tools/a.py:1"], ["-m value", "-F msg.txt", "-m value"],
+                                         []),
+                                        ("both", lexings, [], ["command text"], [])], False, lexings),
+           "squote-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
+                                        ("both", lexings, [], ["command text"], [])], False, lexings),
+           "ansi-c-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
+                                        ("both", lexings, [], ["command text"], [])], False, lexings, True),
+           "ansi-c-split-delim": ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))],
+                                  False, None),
+           "dquote-split-delim": ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))],
+                                  False, None),
+           "alike": ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt", "-m value"], [])], False, None)})
+    # The rule that scans a command with a split delimiter as one that does not lex before its two lexings
+    # are compared decides ansi-c-split-delim: under a variant of _citechk_commands without it, the same
+    # command is read both ways, its -F msg.txt read, so the vector above gives another result.
+    raw_first = _hook_variant(base, "_citechk_commands",
+                              _hook_functions("_citechk_commands").get("_citechk_commands", ""),
+                              'if parse == "raw":', "if False:")
+    if raw_first is None:
+        ordered_raw = "no variant: the raw decision does not occur exactly once in _citechk_commands"
+    else:
+        original = aiqt_hooks._citechk_commands
+        aiqt_hooks._citechk_commands = raw_first
+        try:
+            ordered_raw = read_split(commands_differ["ansi-c-split-delim"], "lexings-variant-ansi-c-split-delim")
+        finally:
+            aiqt_hooks._citechk_commands = original
+    check("citeledger/check-lexings-differ-variant", ordered_raw,
+          ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
+                    ("both", lexings, [], ["command text"], [])], False, lexings))
+    # Visiting every lexing that lexed decides dquote-split-delim: under a variant of _citechk_commands
+    # whose fallback keeps only the first lexing, the -F msg.txt that only the second lexing names is
+    # dropped silently, the defect the fallback guards against: with no entry and no citation in the
+    # scanned text, the whole command allows with no warning at all.
+    first_only = _hook_variant(base, "_citechk_commands",
+                               _hook_functions("_citechk_commands").get("_citechk_commands", ""),
+                               "for segments, heredocs, spans in readings:",
+                               "for segments, heredocs, spans in readings[:1]:")
+    if first_only is None:
+        first_lexing_only = "no variant: the fallback loop does not occur exactly once in _citechk_commands"
+    else:
+        original = aiqt_hooks._citechk_commands
+        aiqt_hooks._citechk_commands = first_only
+        try:
+            first_lexing_only = read_split(commands_differ["dquote-split-delim"],
+                                           "lexings-variant-dquote-split-delim")
+        finally:
+            aiqt_hooks._citechk_commands = original
+    check("citeledger/check-split-fallback-variant", first_lexing_only,
+          ("allow", [("raw", None, [], ["command text"], [])], False, None))
+    # The kind search over each here-document body a lexing read decides which command the after-unquoted-git
+    # and after-unquoted-gh vectors name: their git commit or gh pr create lies after a split delimiter that
+    # is unquoted once the backslash-newline is removed, so each lexing reads it as the here-document's body
+    # and names no file, and only that search names the command. Under a variant of _citechk_commands
+    # without the search, each body is named only as text that bash can run (_citechk_swallowed), never
+    # allowed silently, and the command it holds is not named.
+    no_search = _hook_variant(base, "_citechk_commands",
+                              _hook_functions("_citechk_commands").get("_citechk_commands", ""),
+                              "kind = _citechk_kind(body)", "kind = None")
+    if no_search is None:
+        swallowed_variant = "no variant: the body search does not occur exactly once in _citechk_commands"
+    else:
+        original = aiqt_hooks._citechk_commands
+        aiqt_hooks._citechk_commands = no_search
+        try:
+            swallowed_variant = {name: read_split(commands[name], "swallowed-variant-" + name)
+                                 for name in ("after-unquoted-git", "after-unquoted-gh")}
+        finally:
+            aiqt_hooks._citechk_commands = original
+    # (read_split's expansion flag matches the git commit note's wording, so the gh vector's is False.)
+    as_text = ("raw", None, [], ["command text"], named("EOF") + swallowed_text)
+    check("citeledger/check-split-swallowed-variant", swallowed_variant,
+          {"after-unquoted-git": ("warn", [as_text], True, None),
+           "after-unquoted-gh": ("warn", [as_text], False, None)})
+    # Three rules decide the vectors whose git or gh word quotes split, each shown by a variant of the hook
+    # without it, under which those vectors allow with no row and no note, the silent allow the finding
+    # reported: the lexer reads a split delimiter as one no line matches only where it is unquoted once the
+    # backslash-newline is removed (a variant of _lex_pass that reads every split delimiter so swallows the
+    # command after a quoted one, and the kind search misses it there), a body that such a delimiter runs to
+    # the end of the command is named as text where bash can run text in it (a variant of _citechk_commands
+    # without that naming), and a message value a lexing names is named as not read where the scan as written
+    # reads nothing (a variant of _citechk_items without that entry, which drops the value).
+    after_quoted = ("after-quoted-split-git", "after-quoted-dq-git", "after-quoted-split-gh",
+                    "after-quoted-split-value")
+    after_unquoted = ("after-unquoted-split-git", "after-unquoted-dq-git", "after-unquoted-split-gh",
+                      "after-arith-split-git")
+    rules = (("_lex_pass", "if (split_delims and parsed is not None and not parsed[0]",
+              "if (split_delims and parsed is not None", after_quoted),
+             ("_citechk_commands", "elif at < len(places) and _citechk_swallowed(", "elif False and (", after_unquoted),
+             ("_citechk_items", "if name in inline_names and not scanned:", "if False:", ("after-quoted-split-value",)))
+    quote_split = {}
+    for func, old, new, names in rules:
+        variant = _hook_variant(base, func, _hook_functions(func).get(func, ""), old, new)
+        if variant is None:
+            quote_split[func] = "no variant: {!r} does not occur exactly once in {}".format(old, func)
+            continue
+        original = getattr(aiqt_hooks, func)
+        setattr(aiqt_hooks, func, variant)
+        try:
+            quote_split[func] = {name: read_split(commands[name], "quote-split-variant-{}-{}".format(func, name))
+                                 for name in names}
+        finally:
+            setattr(aiqt_hooks, func, original)
+    check("citeledger/check-split-quote-split-variants", quote_split,
+          {func: {name: ("allow", [], False, None) for name in names} for func, _old, _new, names in rules})
+    # Standard input is taken once in the fallback, at the first option that names it, whatever its
+    # spelling, as when it is evaluated: the stdin-mixed vector names it with -F - and --file - and gets
+    # the first spelling's entry only. Under a variant of _citechk_items that takes it at every option, the
+    # same command gets both spellings' entries.
+    retaken = _hook_variant(base, "_citechk_items", _hook_functions("_citechk_items").get("_citechk_items", ""),
+                            'if value == "-":\n                    if taken:\n                        continue',
+                            'if value == "-":\n                    if False:\n                        continue')
+    if retaken is None:
+        taken_once = "no variant: the taken flag does not occur exactly once in _citechk_items"
+    else:
+        original = aiqt_hooks._citechk_items
+        aiqt_hooks._citechk_items = retaken
+        try:
+            taken_once = read_split(commands["stdin-mixed"], "split-variant-stdin-mixed")
+        finally:
+            aiqt_hooks._citechk_items = original
+    check("citeledger/check-split-stdin-taken-variant", taken_once,
+          ("warn", [("raw", None, [], ["command text"], stdin_unread("-F") + stdin_unread("--file"))],
+           False, None))
+    # The fallback names each entry once through a set, so a split-delimiter command that names many
+    # distinct message files costs time that grows with their number, not with its square: the set-backed
+    # call must take at most a tenth of the time of a variant whose found is list-backed (its membership
+    # test scans the entries already named), on one command naming 16,000 distinct files, and both must
+    # name the same entries in the same order. The set-backed figure is the fastest of three runs against
+    # one run of the variant, as check-linear-patterns times its patterns (measured here: about 0.07 s
+    # set-backed and 2.4 s list-backed in one process).
+    many = "git commit " + " ".join("-F f{:05d}".format(i) for i in range(16000)) + " <<E\\\nOF\nx\nEOF\n"
+
+    def dedup_entries(commands_call):
+        began = time.process_time()
+        entries = [entry for item in commands_call(many, root, time.monotonic() + 1000.0)
+                   for entry in item["unread"]]
+        return time.process_time() - began, entries
+    listed = _hook_variant(base, "_citechk_commands",
+                           _hook_functions("_citechk_commands").get("_citechk_commands", ""),
+                           "found = set()", 'found = type("", (list,), {"add": list.append})()')
+    if listed is None:
+        dedup = "no variant: the set does not occur exactly once in _citechk_commands"
+    else:
+        runs = [dedup_entries(aiqt_hooks._citechk_commands) for _ in range(3)]
+        slow_time, slow_entries = dedup_entries(listed)
+        entries = runs[0][1]
+        dedup = (len(entries), entries[1][0], entries[-1][0], entries == slow_entries,
+                 min(run[0] for run in runs) * 10 <= slow_time)
+    check("citeledger/check-split-fallback-dedup-cost", dedup,
+          (16001, "-F f00000", "-F f15999", True, True))
+    # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
+    # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
+    # with the NAME bash reads before a compound command. Where bash runs another command, none is read: a
+    # -p after time's '--' is that command, and so is the word after coproc where a simple command follows
+    # it. Standard input that a brace group, a subshell or a loop is given as a whole is not the command's
+    # own here-document, so it is named as not read; a here-document on the command itself inside a group is
+    # read.
+    grouped = {}
+    for name, command in (("brace-stdin", "{ git commit -F -; } <<'A'\nsee tools/a.py:1\nA\n"),
+                          ("brace-own", "{ git commit -F - <<'A'\nsee tools/a.py:1\nA\n}\n"),
+                          ("brace-m", "{ git commit -m 'see tools/a.py:1'; }"),
+                          ("subshell", "( git commit -F - ) <<'A'\nsee tools/a.py:1\nA\n"),
+                          ("loop", "while read -r x; do git commit -F -; done <<'A'\nsee tools/a.py:1\nA\n"),
+                          ("bang", "! git commit -m 'see tools/a.py:1'"),
+                          ("if-then", "if git commit -m 'see tools/a.py:1'; then git commit -m 'see tools/a.py:2';"
+                                      " fi"),
+                          ("time", "time -p git commit -m 'see tools/a.py:1'"),
+                          ("time-dashdash", "time -- git commit -m 'see tools/a.py:1'"),
+                          ("time-p-dashdash", "time -p -- git commit -m 'see tools/a.py:1'"),
+                          ("time-dashdash-p", "time -- -p git commit -m 'see tools/a.py:1'"),
+                          ("coproc", "coproc git commit -m 'see tools/a.py:1'"),
+                          ("coproc-name", "coproc NAME { git commit -m 'see tools/a.py:1'; }"),
+                          ("coproc-name-simple", "coproc NAME git commit -m 'see tools/a.py:1'")):
+        verdict, _note, rows = _citecheck_run(steps.root, command, "grouped-" + name)
+        grouped[name] = (verdict, [([c["cite"] for c in r["detail"]["citations"]], r["detail"]["sources"],
+                                    r["detail"]["sources_unread"]) for r in rows])
+    by_m = [(["tools/a.py:1"], ["-m value"], [])]
+    check("citeledger/check-command-in-group", grouped,
+          {"brace-stdin": ("warn", [([], [], unseen)]), "brace-own": ("warn", own), "brace-m": ("warn", by_m),
+           "subshell": ("warn", [([], [], unseen)]), "loop": ("warn", [([], [], unseen)]), "bang": ("warn", by_m),
+           "if-then": ("warn", by_m + [(["tools/a.py:2"], ["-m value"], [])]), "time": ("warn", by_m),
+           "time-dashdash": ("warn", by_m), "time-p-dashdash": ("warn", by_m), "time-dashdash-p": ("allow", []),
+           "coproc": ("warn", by_m), "coproc-name": ("warn", by_m), "coproc-name-simple": ("allow", [])})
+    # The scan's deadline: line 2's match of the search's heading pattern, or of the masking's fence
+    # pattern, moves a stand-in clock to just inside, at or just past the deadline. Inside, line 3 (the
+    # second citation) is scanned too (three matches) and both ranges judged; at and past it the scan stops
+    # after line 2 (two matches), the scan comes before the toplevel probe, so that probe is not started,
+    # and the note says no citation was checked, naming the budget (no row, with no state directory known).
+    command = "git commit -m 'see tools/a.py:1\nx\nsee tools/a.py:2'"
+    scanned = {}
+    for loop, attr in (("search", "_CITECHK_HEADING"), ("masking", "_CITECHK_FENCE")):
+        for name, offset in (("inside", -0.001), ("at", 0.0), ("outside", 0.001)):
+            clock = _CiteClock(1000.0, 1000.0 + budget + offset, False)
+            saved_pattern, pattern = getattr(aiqt_hooks, attr), None
+            try:
+                aiqt_hooks.time, aiqt_hooks._recovery_toplevel = clock, lambda *args, **kwargs: str(steps.root)
+                aiqt_hooks._review_git = lambda *args, **kwargs: None
+                pattern = _CiteCutPattern(saved_pattern, clock, 2)
+                setattr(aiqt_hooks, attr, pattern)
+                _verdict_, note, rows = _citecheck_run(steps.root, command, "scan-{}-{}".format(loop, name))
+            finally:
+                aiqt_hooks.time, aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved
+                setattr(aiqt_hooks, attr, saved_pattern)
+            scanned.setdefault(loop, []).append((
+                pattern.calls, [c["class"] for r in rows for c in r["detail"]["citations"]],
+                [r["decision"] for r in rows], "budget before it resolved the repository" in note))
+    late = [(2, [], [], True)] * 2
+    check("citeledger/check-scan-deadline", scanned,
+          {"search": [(3, ["unread", "unread"], ["warn"], False)] + late,
+           "masking": [(3, ["unread", "unread"], ["warn"], False)] + late})
+
+
+def _citecheck_split_oracle_cases(tmp):
+    """A split-delimiter command whose quoted here-document sits in a frame the shared lexer refuses by default
+    (a '${', a subscript's '[', a marked '((', an array assignment's '(', a substitution opened after the '<<',
+    or a backquote substitution the '<<' sits in closed before its body) names its -F file as not read, with a
+    note, and is never allowed silently. Real bash (_ORACLE_BASH,
+    with the recording git fixture of the differential oracle) hands git commit -F m1.txt in every vector, so
+    the file the note names is one git reads. The citation check's lexing (split_delims) reads such a '<<', and
+    a later '<<' on its line (subscript-later), on as an operator and skips the line's bodies with none of the
+    newline's refusals, so the scan as written
+    keeps the file the lexing names (_citechk_commands); each lift decides its vectors, shown by a variant of
+    _lex_pass without it (_hook_variant), under which the lexing fails, the scan names no file and the
+    command allows with no note. Controls: the default lexing (split_delims False) still refuses every vector
+    with main's message, and a '((' command with no split delimiter, which bash also runs, is still refused by
+    the check's lexing, so its -F file goes unnamed (the disclosed residual of a command the lexer refuses)."""
+    repo = _CiteRepo(tmp / "citecheck-split-oracle", {"tools/a.py": b"a1\na2\n", "m1.txt": b"see tools/a.py:1\n"})
+    oracle = tmp / "citecheck-split-oracle-bash"
+    bindir, work, base = oracle / "bin", oracle / "work", tmp / "citecheck-split-oracle-variants"
+    for folder in (bindir, work, base):
+        folder.mkdir(parents=True)
+    (bindir / "git").write_text(_oracle_fake_git_source(), encoding="utf-8")
+    os.chmod(str(bindir / "git"), 0o755)
+    record = oracle / "argv.jsonl"
+    body, brace = "OF\nbody\nEOF\n", aiqt_hooks._HEREDOC_DOLLAR_BRACE_OPEN
+    bracket, arith = aiqt_hooks._HEREDOC_BRACKET_OPEN, aiqt_hooks._HEREDOC_ARITH_OPEN
+    vectors = (("dollar-brace", "echo ${x:-$(git commit -F m1.txt <<'E'\\\nOF)}", brace),
+               ("subscript", "a[$(git commit -F m1.txt <<'E'\\\nOF)]=1", bracket),
+               ("arith-newline", "(( git commit -F m1.txt <<'E'\\\n" + body + ") )\n", arith),
+               ("dollar-brace-body", "echo ${x:-$(git commit -F m1.txt <<'E'\\\n" + body + ")}\n", brace),
+               ("subscript-body", "a[$(git commit -F m1.txt <<'E'\\\n" + body + ")]=1\n", bracket),
+               ("subscript-later", "a[$(cat <<'E'\\\nOF; git commit -F m1.txt <<'Y')]=1\nx\nEOF\ny\nY\n", bracket),
+               ("array-body", "a=( $(git commit -F m1.txt <<'E'\\\n" + body + ") )\n",
+                aiqt_hooks._HEREDOC_ARRAY_OPEN),
+               ("subst-late", "git commit -F m1.txt <<'E'\\\nOF $(true\nbody\nEOF\n)\n",
+                aiqt_hooks._HEREDOC_SUBST_LATE),
+               ("backquote-closed", "git commit -F m1.txt `cat <<'E'\\\nOF `\nbody\nEOF\n",
+                aiqt_hooks._HEREDOC_BACKQUOTE_CLOSED))
+    unsplit = "(( git commit -F m1.txt <<'EOF'\nbody\nEOF\n) )\n"
+    split_unread = ["-F m1.txt: " + aiqt_hooks._CITECHK_SPLIT_UNREAD]
+
+    def read(command, session):
+        """One check of command: the verdict, whether the note names -F m1.txt, and each row's parse,
+        sources and sources not read."""
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, "-F m1.txt" in note,
+                [(r["detail"]["parse"], r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows])
+
+    def refusal(command):
+        try:
+            aiqt_hooks._lex_command(command)
+        except ValueError as exc:
+            return str(exc)
+        return None
+    ran, named, default = {}, {}, {}
+    for name, command, _message in vectors + (("unsplit", unsplit, arith),):
+        ran[name] = _oracle_run_argv(str(bindir), work, str(record), command)
+        named[name] = read(command, "split-oracle-" + name)
+        default[name] = refusal(command)
+    check("citeledger/split-oracle-bash-runs-commit", ran,
+          {name: [["commit", "-F", "m1.txt"]] for name in ran})
+    by_split = ("warn", True, [("raw", ["command text"], split_unread)])
+    check("citeledger/split-oracle-file-named", named,
+          dict({name: by_split for name, _command, _message in vectors},
+               unsplit=("allow", False, [("raw", ["command text"], [])])))
+    check("citeledger/split-oracle-default-refuses", default,
+          dict({name: message for name, _command, message in vectors}, unsplit=arith))
+    # Each lift of _lex_pass, removed by a variant, and the vectors it decides: under it those vectors allow
+    # with no note naming the file and no file in the row.
+    lifts = (("split_delims and (split_pending or _heredoc_word_split(",
+              "split_delims and (False or _heredoc_word_split(", ("subscript-later",)),
+             ('if op == "<<" and "${" in nest and not split_operator(i):', 'if op == "<<" and "${" in nest:',
+              ("dollar-brace", "dollar-brace-body")),
+             ('if op == "<<" and "((" in nest and not split_operator(i):', 'if op == "<<" and "((" in nest:',
+              ("arith-newline",)),
+             ("if mark is not None and not split_operator(i):", "if mark is not None:",
+              ("subscript", "subscript-body", "subscript-later", "array-body")),
+             ('if "${" in nest and not split_pending:', 'if "${" in nest:', ("dollar-brace-body",)),
+             ('if "((" in nest and not split_pending:', 'if "((" in nest:', ("arith-newline",)),
+             ("if mark is not None and not split_pending:", "if mark is not None:",
+              ("subscript-body", "array-body")),
+             ('if ("$(" in nest or "`" in nest) and not split_pending:', 'if "$(" in nest or "`" in nest:',
+              ("subst-late",)),
+             ("nest.low <= nest.heredoc_bq and not split_pending:", "nest.low <= nest.heredoc_bq:",
+              ("backquote-closed",)))
+    commands = {name: command for name, command, _message in vectors}
+    text, unlifted = _hook_functions("_lex_pass").get("_lex_pass", ""), {}
+    for index, (old, new, names) in enumerate(lifts):
+        variant = _hook_variant(base, "_lex_pass", text, old, new)
+        if variant is None:
+            unlifted[index] = "no variant: {!r} does not occur exactly once in _lex_pass".format(old)
+            continue
+        original = aiqt_hooks._lex_pass
+        aiqt_hooks._lex_pass = variant
+        try:
+            unlifted[index] = {name: read(commands[name], "split-oracle-variant-{}-{}".format(index, name))
+                               for name in names}
+        finally:
+            aiqt_hooks._lex_pass = original
+    silent = ("allow", False, [("raw", ["command text"], [])])
+    check("citeledger/split-oracle-lift-variants", unlifted,
+          {index: {name: silent for name in names} for index, (_old, _new, names) in enumerate(lifts)})
+    # A git commit that a lifted lexing reads as a here-document's body, which bash runs, is named on the
+    # path that reads the command both ways as on the raw path: each both-* vector holds a double-quoted
+    # "${HOME}" before its split delimiter, which the walk does not follow (_citechk_split_delim gives
+    # "both"), and its raw-* twin holds none. Bash runs git commit -F m2.txt in each of those, and the note
+    # names that commit as not read; in the both-* vectors the lexed -F m1.txt is read and judged too. The
+    # control both-unsplit-body is read both ways too but holds no split delimiter, so no lexing of it took a
+    # lift: the git commit text in its quoted here-document's body is the message bash gives git commit -F -,
+    # and the note does not name it. Under a variant of _citechk_commands without the search on the "both"
+    # path, the both-* vectors no longer name the commit, and under one that searches the bodies of a lexing
+    # that read no split delimiter, the control names one bash does not run; the raw-* vectors, which take
+    # the raw path, are unchanged under both.
+    home = '"${HOME}"'
+    hidden = (("both-dollar-brace", "git commit -F m1.txt; echo " + home + " ${x:-<<'E'\\\nND }\n"
+                                    "git commit -F m2.txt\n"),
+              ("both-arith", "echo " + home + "; (( x = 1 <<'E'\\\nND ))\ngit commit -F m2.txt\n"),
+              ("both-subst-late", "git commit -F m1.txt; echo " + home + "; cat <<'E'\\\nND $(true\n"
+                                  "git commit -F m2.txt\n)\n"),
+              ("both-unsplit-body", "echo " + home + " <x \\\n; git commit -F - <<'Y'\nsee tools/a.py:1\n"
+                                    "git commit -F m2.txt\nY\n"),
+              ("raw-dollar-brace", "git commit -F m1.txt; echo ${x:-<<'E'\\\nND }\ngit commit -F m2.txt\n"),
+              ("raw-arith", "echo; (( x = 1 <<'E'\\\nND ))\ngit commit -F m2.txt\n"),
+              ("raw-subst-late", "git commit -F m1.txt; echo; cat <<'E'\\\nND $(true\ngit commit -F m2.txt\n)\n"))
+    swallowed = "git commit in a here-document's body: " + aiqt_hooks._CITECHK_SWALLOWED
+
+    def read_hidden(command, session):
+        """One check of command: the verdict, whether the note names a git commit in a here-document's body
+        as not read, and each row's parse, sources and sources not read."""
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, "git commit in a here-document's body was not read" in note,
+                [(r["detail"]["parse"], r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows])
+    ran_hidden = {name: _oracle_run_argv(str(bindir), work, str(record), command) for name, command in hidden}
+    by_m1 = [["commit", "-F", "m1.txt"]]
+    check("citeledger/split-oracle-both-bash-runs-hidden", ran_hidden,
+          dict({name: ([] if name.endswith("arith") else by_m1) + [["commit", "-F", "m2.txt"]]
+                for name, _command in hidden}, **{"both-unsplit-body": [["commit", "-F", "-"]]}))
+    by_both_read = ("warn", True, [("both", ["-F m1.txt"], []), ("both", ["command text"], [swallowed])])
+    by_raw_named = ("warn", True, [("raw", ["command text"], split_unread + [swallowed])])
+    by_unsplit = ("warn", False, [("both", ["here-document"], []), ("both", ["command text"], [])])
+    named_hidden = {"both-dollar-brace": by_both_read,
+                    "both-arith": ("warn", True, [("both", ["command text"], [swallowed])]),
+                    "both-subst-late": by_both_read, "both-unsplit-body": by_unsplit,
+                    "raw-dollar-brace": by_raw_named,
+                    "raw-arith": ("warn", True, [("raw", ["command text"], [swallowed])]),
+                    "raw-subst-late": by_raw_named}
+    check("citeledger/split-oracle-both-body-named",
+          {name: read_hidden(command, "split-oracle-hidden-" + name) for name, command in hidden}, named_hidden)
+    flips = (("unsearched", 'for item in bodies(heredocs, spans, "both"):', "for item in ():"),
+             ("ungated", "if not any(_heredoc_word_split(command, end, len(command))", "if not any(True"))
+    flipped = {}
+    for label, old, new in flips:
+        variant = _hook_variant(base, "_citechk_commands",
+                                _hook_functions("_citechk_commands").get("_citechk_commands", ""), old, new)
+        if variant is None:
+            flipped[label] = "no variant: {!r} does not occur exactly once in _citechk_commands".format(old)
+            continue
+        original = aiqt_hooks._citechk_commands
+        aiqt_hooks._citechk_commands = variant
+        try:
+            flipped[label] = {name: read_hidden(command, "split-oracle-hidden-{}-{}".format(label, name))
+                              for name, command in hidden}
+        finally:
+            aiqt_hooks._citechk_commands = original
+    by_both_unnamed = ("warn", False, [("both", ["-F m1.txt"], []), ("both", ["command text"], [])])
+    unsearched = dict(named_hidden, **{"both-dollar-brace": by_both_unnamed, "both-subst-late": by_both_unnamed,
+                                       "both-arith": ("warn", False, [("both", ["command text"], [])])})
+    ungated = dict(named_hidden, **{"both-unsplit-body": ("warn", True, [("both", ["here-document"], []),
+                                                                         ("both", ["command text"], [swallowed])])})
+    check("citeledger/split-oracle-both-body-variant", flipped, {"unsearched": unsearched, "ungated": ungated})
+
+
+# The command shapes whose cost the citation check's residue gives (_citecheck_cost_cases), each (name, head,
+# unit, tail, rows): the unit repeated as often as fits the length asked for, between head and tail, then
+# blanks to that exact length, and the rows (_CITECHK_COST_ROWS) its command gives at or under the command
+# bound. The first thirteen each hold a backslash-newline and cost most in the lexings (two where the
+# command holds a double quote, one otherwise, that one reading serving as both) and the search
+# for split delimiters: double-quoted look-alikes of a split delimiter; one double-quoted substitution
+# holding many split delimiters that bash reads as quoted, many comments, many ANSI-C quotes (an odd count
+# of quote characters, so the nested lexing, which reads them as plain single quotes, does not lex), a long
+# run of '#' inside a word, or many subshells; many double-quoted substitutions each holding one split
+# delimiter that bash reads as quoted; many comments in backticks on one line; many quoted here-documents
+# with a body line, without one, two to a line, or before a split delimiter; and one quoted here-document
+# with a large body in a -m value's substitution. The fourteenth holds no backslash-newline and costs most
+# in the lexing itself: many one-word commands ('; a' repeated). The last three cost most in the scan of a
+# text for URLs (one long run of letters with no '://'), and in the search of a command that does not lex
+# for the git commit or gh pr it names (a git commit followed by many gh words with no pr create after
+# them, or a gh pr create followed by many git words with no commit after them), each of which took time
+# that grew with the square of its length before those patterns were made linear (_CITECHK_URL,
+# _CITECHK_RAW_KINDS). Every shape cites tools/a.py:1 or names an expansion it does not read, so each of
+# its commands gives a warn row and a note at the bound.
+_CITECHK_COST_BODY = "OF\nsee tools/${F}.py:1\nEOF\n"
+_CITECHK_COST_SHAPES = (
+    ("look-alikes", "git commit -F msg.txt; echo", " \"x <<E\\\nOF y\"", "", "lexed"),
+    ("subst-quoted-delims", "git commit -F msg.txt; echo \"$(", "cat <<E\\\n'OF'\nx\nEOF\n", ")\"", "both"),
+    ("subst-comments", "git commit -F msg.txt; echo \"$(", " # <<E\\\n# OF\n", ": )\"", "lexed"),
+    ("subst-ansi-c", "git commit -F msg.txt; echo \"$(echo $'x\\' y'", "; echo $'x\\' <<E\\\nOF y' $'\\''", ")\"",
+     "both, both warn"),
+    ("subst-hash-run", "git commit -m \"$(: x", "#", "; cat <<E\\\n" + _CITECHK_COST_BODY + ")\"", "raw, expanded"),
+    ("subst-subshells", "git commit -m \"$(:; ", "(:); ", "cat <<E\\\n" + _CITECHK_COST_BODY + ")\"",
+     "raw, expanded"),
+    ("substs-quoted-delim", "git commit -F msg.txt; echo", " \"$(cat <<E\\\n'OF'\nx\nEOF\n)\"", "", "both"),
+    ("backtick-comments", "git commit -F msg.txt; echo \"", "`: # x` ", "<<E\\\nOF y\"", "both, both warn"),
+    ("heredocs-body", "git commit -F msg.txt; ", "cat <<'Q'\nx\nQ\n", "echo a\\\nb", "lexed"),
+    ("heredocs-empty", "git commit -F msg.txt; ", "cat <<'Q'\nQ\n", "echo a\\\nb", "lexed"),
+    ("heredocs-paired", "git commit -F msg.txt; ", "cat <<'Q'; cat <<'R'\nx\nQ\ny\nR\n", "echo a\\\nb", "lexed"),
+    ("heredocs-then-split", "git commit -F msg.txt; ", "cat <<'Q'\nx\nQ\n", "cat <<E\\\n'OF'\nsee tools/a.py:1\nEOF\n",
+     "raw"),
+    ("subst-heredoc-body", "git commit -m \"$(cat <<'EOF'\n", "see tools/a.py:1\n", "EOF\n)\" \\\n--no-edit",
+     "both, capped"),
+    ("semicolons", "git commit -F msg.txt", "; a", "", "lexed"),
+    ("url-letters", "git commit -m 'see tools/a.py:1 ", "a", "'", "lexed"),
+    ("raw-gh-words", "git commit 'see tools/a.py:1 ", "gh ", "", "raw"),
+    ("raw-git-words", "gh pr create 'see tools/a.py:1 ", "git ", "", "raw"))
+# The rows each shape's command gives at the bound, by the name its entry above gives, each row (decision,
+# parse, the full list of citations it judged, each with its class, duplicates included): a lexed command's
+# row; a command read both ways, whose lexed reading's row judges the citation and whose reading as written
+# allows (it finds nothing) or warns too (an expansion it names); one read both ways whose text cites the
+# range on every line of a here-document, whose lexed reading's row judges it as often as the citation cap
+# allows (_CITECHK_MAX_CITES) and whose reading as written warns for the citations past that cap; and a
+# command scanned as written, whose row judges the citation or names an expansion of a here-document.
+_CITECHK_COST_CITED = [("tools/a.py:1", "unread")]
+_CITECHK_COST_ROWS = {"lexed": [("warn", "lexed", _CITECHK_COST_CITED)],
+                      "both": [("warn", "both", _CITECHK_COST_CITED), ("allow", "both", [])],
+                      "both, both warn": [("warn", "both", _CITECHK_COST_CITED), ("warn", "both", [])],
+                      "both, capped": [("warn", "both", _CITECHK_COST_CITED * aiqt_hooks._CITECHK_MAX_CITES),
+                                       ("warn", "both", [])],
+                      "raw": [("warn", "raw", _CITECHK_COST_CITED)],
+                      "raw, expanded": [("warn", "raw", [])]}
+_CITECHK_COST_OVER = 16 * 1024 * 1024  # the length the shapes are timed at over the bound (characters)
+_CITECHK_COST_CPU = 4.0                # CPU seconds a timed run may take: 2 under the check's 6 second budget
+_CITECHK_COST_WALL = 5.0               # wall seconds a timed run may take: half the 10 second hook timeout
+_CITECHK_COST_LIMIT = 10               # seconds a timed hook process is given before it is stopped, as the
+                                       # platform stops a hook (tools/gen_hooks.py, TIMEOUT)
+
+
+def _citecheck_cost_command(head, unit, tail, size):
+    """head, then unit repeated as often as fits, then tail, then blanks to size: a command of exactly size
+    characters (one unit at the least, so a longer one where head, one unit and tail are longer)."""
+    command = head + unit * max(1, (size - len(head) - len(tail)) // len(unit)) + tail
+    return command + " " * (size - len(command))
+
+
+def _citecheck_cost_run(root, command, session):
+    """One citation_read_check call on command at root, made as the platform makes it: the hook script run
+    as its own process (python3 -I -B, so it compiles the hook rather than reading a cached compilation), the
+    payload on its standard input. (exit code, note, each citint row it appended as (decision, parse, the
+    full list of citations it judged, each with its class, in the row's order and duplicates included), CPU
+    seconds of that process and the git probes it waited for, wall seconds); the exit code is "timeout"
+    where it ran past _CITECHK_COST_LIMIT seconds and was stopped."""
+    import resource
+    events = Path(aiqt_hooks._orch_state_dir_for_root(str(root))) / "guard-events.jsonl"
+
+    def rows():
+        if not events.is_file():
+            return []
+        return [json.loads(x) for x in events.read_text(encoding="utf-8").splitlines() if x.strip()]
+    payload = json.dumps({"hook_event_name": "PreToolUse", "cwd": str(root), "tool_name": "Bash",
+                          "tool_input": {"command": command}, "session_id": session}).encode("utf-8")
+    before, used = len(rows()), resource.getrusage(resource.RUSAGE_CHILDREN)
+    began = time.perf_counter()
+    try:
+        done = subprocess.run([sys.executable, "-I", "-B", aiqt_hooks.__file__, "citation_read_check"],
+                              input=payload, capture_output=True, timeout=_CITECHK_COST_LIMIT)
+        code, out = done.returncode, done.stdout
+    except subprocess.TimeoutExpired:
+        code, out = "timeout", b""
+    wall = time.perf_counter() - began
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (after.ru_utime - used.ru_utime) + (after.ru_stime - used.ru_stime)
+    try:
+        note = json.loads(out.decode("utf-8")).get("systemMessage", "")
+    except (ValueError, AttributeError):
+        note = ""
+    found = [(r["decision"], r["detail"]["parse"], [(c["cite"], c["class"]) for c in r["detail"]["citations"]])
+             for r in rows()[before:] if r.get("kind") == "citint"]
+    return code, note, found, cpu, wall
+
+
+def _citecheck_cost_cases(tmp):
+    """The command bound of the citation check (_CITECHK_COMMAND_MAX) is checked first, before the prefilter,
+    the kind search and any lexing: a command
+    one character under it or at it is lexed and its citation judged, and one a character over it is
+    neither lexed nor scanned, named as not read with the bound (parse too-long) in the note and in its
+    guard-events row; under a variant of _citechk_run without the bound, that command is lexed and judged
+    instead. The same holds for a git commit or gh pr create whose words, or whose git word, a
+    backslash-newline splits, since the kind search removes each backslash-newline as bash and the lexer do,
+    and labels the row over the bound with that command; one that joins git to commit, which bash runs as
+    gitcommit, is inert under the bound and at it and gets the note and an unlabelled row over it; under a
+    variant of _citechk_kind that keeps the backslash-newlines, the split commands over the bound still get
+    the note and the row, unlabelled. A command that names no git, a git commit whose commit word a
+    backslash-newline splits, git with its letters quoted apart (g'i't) and plain prose are each checked one
+    character under the bound, at it and over it, and at 16 MiB: whatever each names, each over the bound
+    gets the note and its too-long row. Without a session cwd (absent or empty), a command over the bound is
+    inert, as every command is there, and the same command with the cwd present gets the note and its row.
+    Each command shape of _CITECHK_COST_SHAPES is then timed through the hook run as its own process, as the
+    platform runs it, at exactly the bound's length and exactly 16 MiB: at the bound, its rows are checked
+    (_CITECHK_COST_ROWS: the decision, parse and full list of citations of each, duplicates included, so a
+    row that allows where a warn is due, or that judges a citation once more or once less, fails) and so is
+    its note; at 16 MiB, it must end with the note and the one warn row of a command over
+    the bound. Each run's CPU time (the process and the git probes it waited for) and wall time are printed,
+    one line each ("citation-check cost: " and a JSON object), so the figures the residue gives can be made
+    again from this suite; a run is checked to take at most _CITECHK_COST_CPU seconds of CPU time, 2 under
+    the check's 6 second budget (CPU time, which a runner busy with other work stretches less than elapsed
+    time), and at most _CITECHK_COST_WALL seconds of wall time, half the platform's 10 second timeout. The
+    URL pattern and the kind search, made linear, mask and find what the plain patterns did on a fixed set
+    of generated strings, and on the worst shape of each, timed in this process, take at most a tenth of the
+    plain patterns' time, so putting a plain pattern back fails check-linear-patterns."""
+    import random
+    import re
+    repo = _CiteRepo(tmp / "citecheck-cost", {"tools/a.py": b"a1\na2\n", "msg.txt": b"see tools/a.py:1\n"})
+    bound = aiqt_hooks._CITECHK_COMMAND_MAX
+    phrase = "this check cannot evaluate a command longer than {:,} characters".format(bound)
+    head = "git commit -m 'see tools/a.py:1"
+
+    def padded(length):
+        return head + " " * (length - len(head) - 1) + "'"
+
+    def bounded(length, session):
+        """The command of length characters checked: its length, the verdict, each row's parse, citations
+        and count of sources not read, and whether the note names the bound."""
+        verdict, note, rows = _citecheck_run(repo.root, padded(length), session)
+        return (len(padded(length)), verdict,
+                [(r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]],
+                  len(r["detail"]["sources_unread"])) for r in rows], phrase in note)
+    edges = {name: bounded(length, "bound-" + name)
+             for name, length in (("under", bound - 1), ("at", bound), ("over", bound + 1))}
+    judged = ("warn", [("lexed", ["tools/a.py:1"], 0)], False)
+    check("citeledger/check-command-bound", edges,
+          {"under": (bound - 1,) + judged, "at": (bound,) + judged,
+           "over": (bound + 1, "warn", [("too-long", [], 1)], True)})
+    # The bound decides the over vector: without it, the same command is lexed and its citation judged.
+    variants = tmp / "citecheck-cost-variants"
+    variants.mkdir()
+    unbounded = _hook_variant(variants, "_citechk_run", _hook_functions("_citechk_run").get("_citechk_run", ""),
+                              "if len(command) > _CITECHK_COMMAND_MAX:", "if False:")
+    if unbounded is None:
+        lifted = "no variant: the bound does not occur exactly once in _citechk_run"
+    else:
+        original = aiqt_hooks._citechk_run
+        aiqt_hooks._citechk_run = unbounded
+        try:
+            lifted = bounded(bound + 1, "bound-variant-over")
+        finally:
+            aiqt_hooks._citechk_run = original
+    check("citeledger/check-command-bound-variant", lifted, (bound + 1,) + judged)
+    # A backslash-newline between a command's words, or inside its git word, is removed by bash and by the
+    # lexer, and by the kind search too: such a git commit or gh pr create is lexed and judged one character
+    # under the bound and at it, and named as not read one over it, its row labelled with the command. One
+    # that joins git to commit (git\<newline>commit, which bash runs as gitcommit) is inert under the bound
+    # and at it, and one over it gets the note and a row the kind search leaves unlabelled (cmd None).
+    split_shapes = (("git-words", "git \\\n  commit -m 'see tools/a.py:1", "git-commit"),
+                    ("git-word", "gi\\\nt commit -m 'see tools/a.py:1", "git-commit"),
+                    ("gh-words", "gh pr \\\n create --body 'see tools/a.py:1", "gh-pr-create"),
+                    ("glued", "git\\\ncommit -m 'see tools/a.py:1", None))
+
+    def split(split_head, length, session):
+        """The split command of length characters checked: its length, the verdict, each row's command,
+        parse and citations, and whether the note names the bound."""
+        command = split_head + " " * (length - len(split_head) - 1) + "'"
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (len(command), verdict,
+                [(r["detail"]["cmd"], r["detail"]["parse"], [c["cite"] for c in r["detail"]["citations"]])
+                 for r in rows], phrase in note)
+    splits, split_want = {}, {}
+    for name, split_head, kind in split_shapes:
+        for side, length in (("under", bound - 1), ("at", bound), ("over", bound + 1)):
+            splits[(name, side)] = split(split_head, length, "split-{}-{}".format(name, side))
+            if side == "over":
+                split_want[(name, side)] = (length, "warn", [(kind, "too-long", [])], True)
+            elif kind is None:
+                split_want[(name, side)] = (length, "allow", [], False)
+            else:
+                split_want[(name, side)] = (length, "warn", [(kind, "lexed", ["tools/a.py:1"])], False)
+    check("citeledger/check-command-bound-split", splits, split_want)
+    # The removal decides only the label over the bound: under a variant of _citechk_kind that keeps each
+    # backslash-newline, the split commands over the bound name no git commit or gh pr create, and each
+    # still gets the note and its row, unlabelled.
+    kept = _hook_variant(variants, "_citechk_kind", _hook_functions("_citechk_kind").get("_citechk_kind", ""),
+                         'joined = command.replace("\\\\\\n", "")', "joined = command")
+    if kept is None:
+        unjoined = "no variant: the removal does not occur exactly once in _citechk_kind"
+    else:
+        original = aiqt_hooks._citechk_kind
+        aiqt_hooks._citechk_kind = kept
+        try:
+            unjoined = {name: split(split_head, bound + 1, "split-variant-" + name)
+                        for name, split_head, kind in split_shapes if kind is not None}
+        finally:
+            aiqt_hooks._citechk_kind = original
+    check("citeledger/check-command-bound-split-variant", unjoined,
+          {name: (bound + 1, "warn", [(None, "too-long", [])], True)
+           for name, _split_head, kind in split_shapes if kind is not None})
+    # Over the bound, a command always gets the note and its too-long row, whatever its text names and
+    # however its words are spelled: the bound is checked before the prefilter and the kind search, and the
+    # kind search only labels the row (cmd None where it finds no command). Each family below is checked one
+    # character under the bound, at it and one over it in this process, and at 16 MiB through the hook run
+    # as its own process. Under the bound and at it, each takes the path the other vectors here check: svn
+    # commit, which names no git, holds a commit word and is lexed, naming no command; a git commit whose
+    # commit word a backslash-newline splits holds no commit word as written, so the prefilter passes it
+    # over; git with its letters quoted apart (g'i't) is lexed as git and its citation judged; and prose with
+    # no commit or pr word is passed over by the prefilter.
+    families = (("no-git", "svn commit -m 'see tools/a.py:1", "'", None, None),
+                ("split-commit", "git co\\\nmmit -m 'see tools/a.py:1", "'", "git-commit", None),
+                ("quoted-git", "g'i't commit -m 'see tools/a.py:1", "'", None, "git-commit"),
+                ("prose", "Plain prose that cites tools/a.py:1 and names no command", ".", None, None))
+
+    def family(family_head, family_tail, length):
+        return family_head + " " * (length - len(family_head) - len(family_tail)) + family_tail
+    spelled, spelled_want = {}, {}
+    for name, family_head, family_tail, label, lexed in families:
+        for side, length in (("under", bound - 1), ("at", bound), ("over", bound + 1)):
+            command = family(family_head, family_tail, length)
+            verdict, note, rows = _citecheck_run(repo.root, command, "spelled-{}-{}".format(name, side))
+            spelled[(name, side)] = (len(command), verdict,
+                                     [(r["detail"]["cmd"], r["detail"]["parse"],
+                                       [c["cite"] for c in r["detail"]["citations"]],
+                                       len(r["detail"]["sources_unread"])) for r in rows], phrase in note)
+            if side == "over":
+                spelled_want[(name, side)] = (length, "warn", [(label, "too-long", [], 1)], True)
+            elif lexed is None:
+                spelled_want[(name, side)] = (length, "allow", [], False)
+            else:
+                spelled_want[(name, side)] = (length, "warn", [(lexed, "lexed", ["tools/a.py:1"], 0)], False)
+        command = family(family_head, family_tail, _CITECHK_COST_OVER)
+        code, note, rows, cpu, wall = _citecheck_cost_run(repo.root, command, "spelled-{}-16mib".format(name))
+        print("citation-check cost: " + json.dumps({"shape": "spelled-" + name, "side": "over",
+                                                   "chars": len(command), "decision": [row[0] for row in rows],
+                                                   "parse": [row[1] for row in rows], "cpu": round(cpu, 3),
+                                                   "wall": round(wall, 3)}, sort_keys=True), flush=True)
+        spelled[(name, "16mib")] = (code, len(command), rows, note.startswith(aiqt_hooks._CITECHK_HEAD),
+                                    phrase in note, cpu <= _CITECHK_COST_CPU, wall <= _CITECHK_COST_WALL)
+        spelled_want[(name, "16mib")] = (0, _CITECHK_COST_OVER, [("warn", "too-long", [])], True, True, True, True)
+    check("citeledger/check-command-bound-spellings", spelled, spelled_want)
+    # Without a session cwd no toplevel is probed and no state directory is known, so a command over the
+    # bound is inert there, as every command is: no note and no row, whether the cwd is absent or empty.
+    # Those two cases alone are a baseline check, since a hook that kept this command silent for any other
+    # reason would pass them as well. The same command with the session cwd present must get the note and
+    # its row, so the check as a whole fails where anything but the missing cwd keeps that command silent.
+    prose_over = family(families[3][1], families[3][2], bound + 1)
+    no_cwd = {}
+    for name, extra in (("absent", {}), ("empty", {"cwd": ""})):
+        payload = dict({"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "bound-no-cwd",
+                        "tool_input": {"command": prose_over}}, **extra)
+        no_cwd[name] = aiqt_hooks.citation_read_check(payload)
+    verdict, note, rows = _citecheck_run(repo.root, prose_over, "bound-cwd-present")
+    no_cwd["present"] = (verdict, phrase in note, [(r["detail"]["cmd"], r["detail"]["parse"]) for r in rows])
+    check("citeledger/check-command-bound-no-cwd", no_cwd,
+          {"absent": (0, None, None), "empty": (0, None, None), "present": ("warn", True, [(None, "too-long")])})
+    # The shapes, timed through the hook's own process at exactly the bound's length and exactly 16 MiB.
+    timed, want = {}, {}
+    for name, unit_head, unit, tail, outcome in _CITECHK_COST_SHAPES:
+        for side, size in (("at-bound", bound), ("over", _CITECHK_COST_OVER)):
+            command = _citecheck_cost_command(unit_head, unit, tail, size)
+            code, note, rows, cpu, wall = _citecheck_cost_run(repo.root, command, "cost-{}-{}".format(name, side))
+            print("citation-check cost: " + json.dumps({"shape": name, "side": side, "chars": len(command),
+                                                       "decision": [row[0] for row in rows],
+                                                       "parse": [row[1] for row in rows], "cpu": round(cpu, 3),
+                                                       "wall": round(wall, 3)}, sort_keys=True), flush=True)
+            timed[(name, side)] = (code, len(command), rows, note.startswith(aiqt_hooks._CITECHK_HEAD),
+                                   phrase in note, cpu <= _CITECHK_COST_CPU, wall <= _CITECHK_COST_WALL)
+            if side == "at-bound":
+                want[(name, side)] = (0, size, _CITECHK_COST_ROWS[outcome], True, False, True, True)
+            else:
+                want[(name, side)] = (0, size, [("warn", "too-long", [])], True, True, True, True)
+    check("citeledger/check-cost-shapes", timed, want)
+    # The linear patterns against the plain ones they replace, on strings drawn from the characters they turn
+    # on (a fixed seed, so every run draws the same strings).
+    plain_url = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*>")
+    plain_kinds = ((re.compile(r"\bgit\b[^\n;&|]*\bcommit\b"), "git-commit"),
+                   (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+create\b"), "gh-pr-create"),
+                   (re.compile(r"\bgh\b[^\n;&|]*\bpr\s+edit\b"), "gh-pr-edit"))
+
+    def plain_kind(text):
+        hits = sorted((found.start(), kind) for regex, kind in plain_kinds for found in [regex.search(text)] if found)
+        return hits[0][1] if hits else None
+    draw = random.Random(7)
+    url_atoms = ("a", "Z", "1", "+", ".", "-", ":", "/", "://", " ", "\t", "<", ">", "x:", "<ab:", "http", "_",
+                 "\u00e9", "1a")
+    kind_atoms = ("git", "gh", "commit", "pr", "create", "edit", " ", "\n", ";", "&", "|", "x", "_", "\t", "-",
+                  "gitx", "xgit", "commits", "pr\n", "\ncreate", "'", "\\", "\\\n", "gi\\\nt")
+    differ = []
+    for _ in range(20000):
+        line = "".join(draw.choice(url_atoms) for _ in range(draw.randint(0, 30)))
+        plain = (plain_url.sub(lambda found: " " * len(found.group(0)), line), len(plain_url.findall(line)))
+        if aiqt_hooks._CITECHK_URL.subn(aiqt_hooks._citechk_blank, line) != plain:
+            differ.append(("url", line))
+        text = "".join(draw.choice(kind_atoms) + draw.choice(("", " ")) for _ in range(draw.randint(0, 20)))
+        if aiqt_hooks._citechk_kind(text) != plain_kind(text.replace("\\\n", "")):
+            differ.append(("kind", text))
+    # The worst shape of each, 16,384 characters, timed in this process against the plain patterns on the
+    # same text: a run of letters with no '://' for the URL masking, and a git commit followed by many gh
+    # words, or a gh pr create followed by many git words, for the kind search. The plain patterns restart
+    # at each later letter or word, and the hook's read the text about once, so the hook's must take at most
+    # a tenth of the plain patterns' time (the fastest of five runs, against one run): with a plain pattern
+    # put back the two take about the same time and the check fails, on a fast host or a slow one, and at
+    # this length each plain run takes well under a second on the host where this was measured.
+    def fastest(call, text, runs):
+        spent = []
+        for _ in range(runs):
+            began = time.perf_counter()
+            call(text)
+            spent.append(time.perf_counter() - began)
+        return min(spent)
+
+    def hook_url(text):
+        return aiqt_hooks._CITECHK_URL.subn(aiqt_hooks._citechk_blank, text)
+
+    def plain_url_masked(text):
+        return plain_url.subn(lambda found: " " * len(found.group(0)), text)
+    size = 16384
+    slow = []
+    for name, text, hook, plain in (("url", "see " + "a" * (size - 4), hook_url, plain_url_masked),
+                                    ("gh-words", ("git commit '" + "gh " * size)[:size], aiqt_hooks._citechk_kind,
+                                     plain_kind),
+                                    ("git-words", ("gh pr create '" + "git " * size)[:size],
+                                     aiqt_hooks._citechk_kind, plain_kind)):
+        if fastest(hook, text, 5) * 10 > fastest(plain, text, 1):
+            slow.append(name)
+    check("citeledger/check-linear-patterns", (differ[:3], slow), ([], []))
+
+
+def _cite_unpaired(roadmap):
+    """The corpus ids of the rules of a parsed enforcement roadmap that name hook:citation-read-ledger without
+    hook:citation-read-check. The recorder checks no citation on its own, so such a rule would read enforced
+    in the register while nothing reads the ledger."""
+    return sorted(rule.get("corpus-id") for rule in roadmap.get("rule", [])
+                  if "hook:citation-read-ledger" in rule.get("mechanisms", [])
+                  and "hook:citation-read-check" not in rule.get("mechanisms", []))
+
+
+def _cite_roadmap_cases(tmp):
+    """citint and refcap read enforced through the citation hooks only as a pair: the roadmap names the
+    recorder for them, and never without the check that reads its ledger. The same test, run on the roadmap
+    with the check taken out, names both rules, so it fails on an unpaired roadmap."""
+    text = (repo_root() / ".aiqt" / "core" / "enforcement-roadmap.toml").read_text(encoding="utf-8")
+    try:
+        roadmap, alone = tomllib.loads(text), tomllib.loads(text.replace('"hook:citation-read-check", ', ""))
+    except (ValueError, RecursionError, MemoryError) as exc:  # an unparseable roadmap fails the check below
+        roadmap = alone = {"unparseable": type(exc).__name__}
+    recorded = sorted(rule.get("corpus-id") for rule in roadmap.get("rule", [])
+                      if "hook:citation-read-ledger" in rule.get("mechanisms", []))
+    check("citeledger/roadmap-pairs-recorder-with-check",
+          (recorded, _cite_unpaired(roadmap), _cite_unpaired(alone)),
+          (["citint", "refcap"], [], ["citint", "refcap"]))
+
+
+def _cite_pin_state(tmp):
+    """Pin the citation cases' state inside tmp. None of their fixture repositories holds an orchestration
+    registry, so a state directory resolves to $XDG_STATE_HOME/aiqt-guardrails/orch/<repository key>/:
+    XDG_STATE_HOME is set to tmp/cite-xdg (a case that changes it restores it), and every state directory
+    resolved until _cite_unpin_state is recorded. Returns what _cite_unpin_state restores and checks."""
+    saved = (os.environ.get("XDG_STATE_HOME"), aiqt_hooks._orch_state_dir_for_root, [])
+
+    def resolve(root):
+        path = saved[1](root)
+        saved[2].append(path)
+        return path
+    os.environ["XDG_STATE_HOME"] = str(tmp / "cite-xdg")
+    aiqt_hooks._orch_state_dir_for_root = resolve
+    return saved
+
+
+def _cite_unpin_state(tmp, saved):
+    """Undo _cite_pin_state, and check that the citation cases resolved a state directory and that every
+    one lies inside tmp, so a ledger or guard-events row that would land outside it fails a check instead
+    of being written there unseen."""
+    saved_xdg, aiqt_hooks._orch_state_dir_for_root, resolved = saved
+    if saved_xdg is None:
+        os.environ.pop("XDG_STATE_HOME", None)
+    else:
+        os.environ["XDG_STATE_HOME"] = saved_xdg
+    inside = os.path.realpath(str(tmp)) + os.sep
+    check("citeledger/state-dir-inside-tmp",
+          (bool(resolved), sorted({path for path in resolved if not os.path.realpath(path).startswith(inside)})),
+          (True, []))
+
+
+def _single_quoted(text):
+    """text as one single-quoted shell word."""
+    return "'" + text.replace("'", "'\"'\"'") + "'"
 
 
 def _leasehb_timed(fn, seconds=30):
@@ -17909,6 +22152,30 @@ def _main_isolated(report_path=None):
         _leasehb_write_integrity_cases(tmp)
         _leasehb_status_and_parse_cases(tmp)
         _rdp_cases(tmp)
+        pinned = _cite_pin_state(tmp)
+        try:
+            _citeledger_cases(tmp)
+            _citeledger_fixture_cases(tmp)
+            _citeledger_show_cases(tmp)
+            _citeledger_edit_cases(tmp)
+            _citeledger_scope_cases(tmp)
+            _citeledger_dedup_cases(tmp)
+            _citeledger_bound_cases(tmp)
+            _citeledger_deadline_cases(tmp)
+            _citeledger_timing_cases(tmp)
+            _citecheck_cases(tmp)
+            _citecheck_show_cases(tmp)
+            _citecheck_deadline_cases(tmp)
+            _citecheck_path_cases(tmp)
+            _citecheck_cross_cases(tmp)
+            _citecheck_suffix_cases(tmp)
+            _citeledger_walk_cases(tmp)
+            _citecheck_step_cases(tmp)
+            _citecheck_split_oracle_cases(tmp)
+            _citecheck_cost_cases(tmp)
+            _cite_roadmap_cases(tmp)
+        finally:
+            _cite_unpin_state(tmp, pinned)
         _rwh_cases(tmp)
         _gitalias_oracle_cases(tmp)
     finally:
