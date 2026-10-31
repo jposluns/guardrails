@@ -8997,6 +8997,74 @@ def _citecheck_split_oracle_cases(tmp):
     silent = ("allow", False, [("raw", ["command text"], [])])
     check("citeledger/split-oracle-lift-variants", unlifted,
           {index: {name: silent for name in names} for index, (_old, _new, names) in enumerate(lifts)})
+    # A git commit that a lifted lexing reads as a here-document's body, which bash runs, is named on the
+    # path that reads the command both ways as on the raw path: each both-* vector holds a double-quoted
+    # "${HOME}" before its split delimiter, which the walk does not follow (_citechk_split_delim gives
+    # "both"), and its raw-* twin holds none. Bash runs git commit -F m2.txt in each of those, and the note
+    # names that commit as not read; in the both-* vectors the lexed -F m1.txt is read and judged too. The
+    # control both-unsplit-body is read both ways too but holds no split delimiter, so no lexing of it took a
+    # lift: the git commit text in its quoted here-document's body is the message bash gives git commit -F -,
+    # and the note does not name it. Under a variant of _citechk_commands without the search on the "both"
+    # path, the both-* vectors no longer name the commit, and under one that searches the bodies of a lexing
+    # that read no split delimiter, the control names one bash does not run; the raw-* vectors, which take
+    # the raw path, are unchanged under both.
+    home = '"${HOME}"'
+    hidden = (("both-dollar-brace", "git commit -F m1.txt; echo " + home + " ${x:-<<'E'\\\nND }\n"
+                                    "git commit -F m2.txt\n"),
+              ("both-arith", "echo " + home + "; (( x = 1 <<'E'\\\nND ))\ngit commit -F m2.txt\n"),
+              ("both-subst-late", "git commit -F m1.txt; echo " + home + "; cat <<'E'\\\nND $(true\n"
+                                  "git commit -F m2.txt\n)\n"),
+              ("both-unsplit-body", "echo " + home + " <x \\\n; git commit -F - <<'Y'\nsee tools/a.py:1\n"
+                                    "git commit -F m2.txt\nY\n"),
+              ("raw-dollar-brace", "git commit -F m1.txt; echo ${x:-<<'E'\\\nND }\ngit commit -F m2.txt\n"),
+              ("raw-arith", "echo; (( x = 1 <<'E'\\\nND ))\ngit commit -F m2.txt\n"),
+              ("raw-subst-late", "git commit -F m1.txt; echo; cat <<'E'\\\nND $(true\ngit commit -F m2.txt\n)\n"))
+    swallowed = "git commit in a here-document's body: " + aiqt_hooks._CITECHK_SWALLOWED
+
+    def read_hidden(command, session):
+        """One check of command: the verdict, whether the note names a git commit in a here-document's body
+        as not read, and each row's parse, sources and sources not read."""
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, "git commit in a here-document's body was not read" in note,
+                [(r["detail"]["parse"], r["detail"]["sources"], r["detail"]["sources_unread"]) for r in rows])
+    ran_hidden = {name: _oracle_run_argv(str(bindir), work, str(record), command) for name, command in hidden}
+    by_m1 = [["commit", "-F", "m1.txt"]]
+    check("citeledger/split-oracle-both-bash-runs-hidden", ran_hidden,
+          dict({name: ([] if name.endswith("arith") else by_m1) + [["commit", "-F", "m2.txt"]]
+                for name, _command in hidden}, **{"both-unsplit-body": [["commit", "-F", "-"]]}))
+    by_both_read = ("warn", True, [("both", ["-F m1.txt"], []), ("both", ["command text"], [swallowed])])
+    by_raw_named = ("warn", True, [("raw", ["command text"], split_unread + [swallowed])])
+    by_unsplit = ("warn", False, [("both", ["here-document"], []), ("both", ["command text"], [])])
+    named_hidden = {"both-dollar-brace": by_both_read,
+                    "both-arith": ("warn", True, [("both", ["command text"], [swallowed])]),
+                    "both-subst-late": by_both_read, "both-unsplit-body": by_unsplit,
+                    "raw-dollar-brace": by_raw_named,
+                    "raw-arith": ("warn", True, [("raw", ["command text"], [swallowed])]),
+                    "raw-subst-late": by_raw_named}
+    check("citeledger/split-oracle-both-body-named",
+          {name: read_hidden(command, "split-oracle-hidden-" + name) for name, command in hidden}, named_hidden)
+    flips = (("unsearched", 'for item in bodies(heredocs, spans, "both"):', "for item in ():"),
+             ("ungated", "if not any(_heredoc_word_split(command, end, len(command))", "if not any(True"))
+    flipped = {}
+    for label, old, new in flips:
+        variant = _hook_variant(base, "_citechk_commands",
+                                _hook_functions("_citechk_commands").get("_citechk_commands", ""), old, new)
+        if variant is None:
+            flipped[label] = "no variant: {!r} does not occur exactly once in _citechk_commands".format(old)
+            continue
+        original = aiqt_hooks._citechk_commands
+        aiqt_hooks._citechk_commands = variant
+        try:
+            flipped[label] = {name: read_hidden(command, "split-oracle-hidden-{}-{}".format(label, name))
+                              for name, command in hidden}
+        finally:
+            aiqt_hooks._citechk_commands = original
+    by_both_unnamed = ("warn", False, [("both", ["-F m1.txt"], []), ("both", ["command text"], [])])
+    unsearched = dict(named_hidden, **{"both-dollar-brace": by_both_unnamed, "both-subst-late": by_both_unnamed,
+                                       "both-arith": ("warn", False, [("both", ["command text"], [])])})
+    ungated = dict(named_hidden, **{"both-unsplit-body": ("warn", True, [("both", ["here-document"], []),
+                                                                         ("both", ["command text"], [swallowed])])})
+    check("citeledger/split-oracle-both-body-variant", flipped, {"unsearched": unsearched, "ungated": ungated})
 
 
 # The command shapes whose cost the citation check's residue gives (_citecheck_cost_cases), each (name, head,

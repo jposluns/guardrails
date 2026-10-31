@@ -2591,11 +2591,16 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False, heredoc
     three raises at a '<<' in _lex_pass), and the newline that starts the bodies of that line and the skip of
     those bodies take none of their raises (a '${', a marked '((' or one of THE TEXT MARKS still open, a
     substitution opened after the line's first '<<' still open, a backquote substitution a '<<' sits in
-    closed, and an uncertain body end): the citation check scans every such command only as written
-    (_citechk_split_delim) and reads this lex only to name what it did not read. A raise met before the first
-    such '<<', or on another line, still fails the lex, and the check then names no file the command holds.
-    The default False reads every joined word as bash does and keeps every one of those raises, the reading
-    every other caller relies on.
+    closed, and an uncertain body end): the citation check scans such a command only as written
+    (_citechk_split_delim) and reads this lex only to name what it did not read, except where it reads the
+    command both ways (a double-quoted string before the split delimiter holds what its walk does not
+    follow): it then reads and judges the message and body files this lex names, and searches the bodies
+    this lex read for a command bash can run there as it does for the scan as written (_citechk_commands).
+    Every other raise still fails the lex, and the check then names no file the command holds; among them,
+    for example, a raise met before the first such '<<', one on another line, and one after that '<<' on
+    its own line that is none of those listed here, such as a later unquoted here-document (<<'E'\\, a
+    newline, ND <<Y). The default False reads every joined word as bash does and keeps every one of those
+    raises, the reading every other caller relies on.
 
     An unquoted '#' opens a comment only in a certain context (the comment rule above _nest_track). A command
     holding an uncertain '#' is lexed under both readings of each one (_lex_readings), and the segments of
@@ -26924,9 +26929,13 @@ def citation_read_recorder(data):
 # a here-document delimiter in it, when it is scanned as one that does not lex. Read both ways, a command is
 # lexed, with a read attempted of every message and body file that a lexing that lexed names (one that
 # cannot be read is named as not read; a lexing that did not lex is not evaluated, so a file only it names
-# is neither read nor named), and scanned as written, with those expansions named. A command is found after
-# the reserved words that begin its segment, so one in a brace group, after '!', 'if' or 'then', or after
-# time -- or coproc is read.
+# is neither read nor named), and scanned as written, with those expansions named; where a lexing that
+# lexed read a '<<' whose delimiter a backslash-newline splits, a git commit or gh pr create or edit the
+# kind search finds in a here-document's body that lexing read, or text bash can run in such a body where it
+# finds none, is named as not read too (_CITECHK_SWALLOWED, _CITECHK_SWALLOWED_TEXT), as on the scan as
+# written, since that lexing reads that line past the lexer's refusals and can take a command bash runs as
+# body. A command is found after the reserved words that begin its segment, so one in a brace group, after
+# '!', 'if' or 'then', or after time -- or coproc is read.
 # Each text is scanned once, in the order the command's options name it, and a cited or body-file path
 # longer than _CITECHK_PATH_SHOWN characters is shown in the note and the row shortened to that many
 # characters (_citechk_short).
@@ -27623,7 +27632,12 @@ def _citechk_commands(command, cwd, deadline):
     which reading bash makes: its commands as lexed, with a read attempted of every message and body file
     (one that cannot be read named as not read), and after them the item that the raw scan gives, all with
     parse "both"; a citation both readings find is judged in each,
-    so it can be listed twice. A command is read both ways too where only one of its two lexings lexes, or
+    so it can be listed twice. Where a lexing that lexes read a '<<' whose delimiter word a backslash-newline
+    splits, it read that line's operators and bodies past the lexer's refusals, so the bodies it read are
+    searched as for a split-delimiter command below (a commit or pr command there named with
+    _CITECHK_SWALLOWED, else text bash can run with _CITECHK_SWALLOWED_TEXT), each entry once, on the raw
+    scan's item, or as its own item where the kind search finds none in the command's text; the bodies of a
+    lexing that read no split delimiter are not searched. A command is read both ways too where only one of its two lexings lexes, or
     where their words, redirects or here-documents differ (_citechk_shape; a double quote inside a
     substitution in a double-quoted string, for example, which the first lexing takes as the string's end,
     so a later -F file can fall inside one -m value): the commands of each lexing that lexes are read, the
@@ -27673,6 +27687,25 @@ def _citechk_commands(command, cwd, deadline):
         return _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
     delims = {}  # each '<<' delimiter the walk parsed, by the index past its '<<', for _citechk_swallowed
     parse, why = _citechk_split_delim(command, readings[0][2], delims)
+
+    def bodies(heredocs, spans, parse):
+        # The items the search of each here-document body one lexing read gives, with parse: a commit or pr
+        # command that the kind search finds there, or, where it finds none, the body as text not read
+        # whenever bash can run text in it (_citechk_swallowed). The lexer records one '<<' span per
+        # here-document it reads, in the order of the heredocs list, so each body is paired with its operator.
+        items = []
+        places = [end for start, end in spans if command.startswith("<", start)]  # past each '<<'
+        for at, (_index, _before, body) in enumerate(heredocs):
+            kind = _citechk_kind(body)
+            if kind is not None:
+                items.append({"cmd": kind, "parse": parse, "texts": [],
+                              "unread": [("{} in a here-document's body".format(kind.replace("-", " ")),
+                                          _CITECHK_SWALLOWED)], "repo": cwd, "base": None})
+            elif at < len(places) and _citechk_swallowed(command, places[at], body, delims):
+                items.append({"cmd": None, "parse": parse, "texts": [],
+                              "unread": [("text in a here-document's body", _CITECHK_SWALLOWED_TEXT)],
+                              "repo": cwd, "base": None})
+        return items
     if parse == "raw":
         out = _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
         # The scan as written cannot read a message or body file, so each one a lexing that lexed names is
@@ -27686,24 +27719,13 @@ def _citechk_commands(command, cwd, deadline):
         # body to them): the scan as written reads its message or body files and its standard input only as
         # text, so the entry says they were not read. Where that search finds none in such a body, which it
         # does for a command word that quotes split (g'i't), the body is kept as text not read whenever bash
-        # can run text in it (_citechk_swallowed). The lexer records one '<<' span per here-document it
-        # reads, in the order of the heredocs list, so each body is paired with its operator.
+        # can run text in it (bodies).
         scanned = bool(out)  # whether the scan as written reads the command's text
         found = set()  # the entries already named, so a later lexing or option adds only entries new to
         # it: a set, so many distinct entries cost time that grows with their number, not its square
         for segments, heredocs, spans in readings:
             items = _citechk_items(segments, heredocs, cwd, "raw", deadline, evaluate=False, scanned=scanned)
-            places = [end for start, end in spans if command.startswith("<", start)]  # past each '<<'
-            for at, (_index, _before, body) in enumerate(heredocs):
-                kind = _citechk_kind(body)
-                if kind is not None:
-                    items.append({"cmd": kind, "parse": "raw", "texts": [],
-                                  "unread": [("{} in a here-document's body".format(kind.replace("-", " ")),
-                                              _CITECHK_SWALLOWED)], "repo": cwd, "base": None})
-                elif at < len(places) and _citechk_swallowed(command, places[at], body, delims):
-                    items.append({"cmd": None, "parse": "raw", "texts": [],
-                                  "unread": [("text in a here-document's body", _CITECHK_SWALLOWED_TEXT)],
-                                  "repo": cwd, "base": None})
+            items += bodies(heredocs, spans, "raw")
             for item in items:
                 unread = []
                 for entry in item["unread"]:
@@ -27728,7 +27750,29 @@ def _citechk_commands(command, cwd, deadline):
         out += [item for item in _citechk_items(readings[1][0], readings[1][1], cwd, parse, deadline)
                 if item not in first]
     if parse == "both":
-        out += _citechk_as_written(command, cwd, "both", _CITECHK_EXPANDED_BOTH)
+        scan = _citechk_as_written(command, cwd, "both", _CITECHK_EXPANDED_BOTH)
+        # A lexing that read a '<<' whose delimiter word a backslash-newline splits read that line's '<<'
+        # operators and bodies past the refusals that otherwise fail it (split_delims, _lex_command), so a
+        # body it read can hold a command that bash runs, as on the raw path above: each such lexing's
+        # bodies are searched as there, and each entry new to the search is kept on the scan's item where
+        # the kind search found one, else as its own item. A lexing that read no split delimiter took none
+        # of those lifts, so its bodies are read as main's lexer reads them and are not searched.
+        named = set()  # the entries already kept, as found is on the raw path
+        for _segments, heredocs, spans in readings:
+            if not any(_heredoc_word_split(command, end, len(command))
+                       for start, end in spans if command.startswith("<", start)):
+                continue
+            for item in bodies(heredocs, spans, "both"):
+                unread = [entry for entry in item["unread"] if entry not in named]
+                named.update(unread)
+                if not unread:
+                    continue
+                if scan:
+                    scan[0]["unread"] += unread
+                else:
+                    item["unread"] = unread
+                    out.append(item)
+        out += scan
         for item in out:
             item["why"] = why
     return out
