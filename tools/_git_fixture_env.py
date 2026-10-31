@@ -53,7 +53,7 @@ import tempfile
 _SCRATCH_HOME = None
 _PRESCRUB_ENVIRON = None
 
-# The F-367 auto-maintenance pins, applied through git's documented environment-config mechanism
+# The pins that switch off git's automatic gc and maintenance in fixtures, applied through git's documented environment-config mechanism
 # (GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n>, command-scope precedence, so a
 # repository-local setting cannot re-enable it): a fixture `git commit` otherwise spawns
 # `git maintenance run --auto`, which DETACHES (gc.autoDetach, and --detach on current git) and
@@ -165,7 +165,7 @@ def fixture_git_lifecycle():
             wrapper = Path(directory) / "git"
             # The -c pins mirror _NO_AUTO_MAINTENANCE argv-side: a descendant that scrubbed the
             # GIT_* environment (dropping the GIT_CONFIG_COUNT pins) still cannot spawn a
-            # detached auto-gc/auto-maintenance run through this wrapper (F-367).
+            # detached auto-gc/auto-maintenance run through this wrapper.
             pins = " ".join("-c " + shlex.quote("%s=%s" % pair) for pair in _NO_AUTO_MAINTENANCE)
             wrapper.write_text(
                 "#!/bin/sh\n"

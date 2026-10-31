@@ -18,10 +18,11 @@ load); the commonmark selftests exercise the vendored parser and its manifest.
   check_opf_standalone_closure.py             materialize opf/ alone and run the subset (also the default)
   check_opf_standalone_closure.py --self-test  the same, PLUS a deliberate flip proving it fails without the move
   ... --ci-job <job>                          either of the above over that CI job's legs alone (_CI_JOB_LEGS
-                                              partitions the subset between five CI jobs because the
+                                              partitions the subset between six CI jobs because the
                                               whole roster's worst case does not fit one job, nor four
                                               once every lane-member leg's bound reaches its config-lane
-                                              deadline plus the launch margin; the flip runs in the job
+                                              deadline plus the launch margin, and the sixth holds a leg
+                                              the other five have no room for; the flip runs in the job
                                               that holds opf-tooling-selftest, whose leg it is)
 
 Exit convention (matches the repo's gates):
@@ -79,8 +80,9 @@ recorded run and, for each leg whose command is a config-lane member, at or abov
 lanes give the same command plus the launch margin (_LEG_BOUND_FLOOR_S), so the closure never kills
 such a leg before the lane would; reaching one is attributed to the deadline (LEG BOUND EXCEEDED,
 exit 2), never as a failure the leg reported and never as a pass. opf-tooling-selftest's is shown
-below its budget READ FROM SOURCE, the one opf.py grants its own blocked-isolation leg, because a
-bound above that budget would not fit the CI job; on this tree it is 5031 s, its copied sources'
+below a budget READ FROM SOURCE, the one opf.py grants its own blocked-isolation leg, which its whole
+self-test exceeds, because a bound above that whole budget would not fit the CI job (see DELIBERATE
+SHORTER DEADLINE beside _LEG_CEILING_S); on this tree it is 5691 s, its copied sources'
 declared waits plus the launch margin (a term re-derived on every run, so it moves with them), above
 the 3660 s its config-lane deadline plus that margin gives (it rose from 1458 s, 3 x the leg's 486 s
 ceiling, to that 3660 s floor, and then past it, as opf.py's declared waits grew), and still below
@@ -208,7 +210,7 @@ _SUBSET = [
 #     before the config lane running that same command would.
 # The legs run one after another, so the worst case of one gate run is the SUM of the bounds plus one
 # bounded post-kill cleanup deadline per leg (_DRAIN_MARGIN_S, which the output drain and the leader
-# reap SHARE, paid only by a leg killed at its bound); the closure work is split between five CI jobs
+# reap SHARE, paid only by a leg killed at its bound); the closure work is split between six CI jobs
 # (_CI_JOB_LEGS: the whole roster's worst case does not fit one job), and the self-test requires EACH
 # job's worst case (_job_worst_case_s over that job's legs: its self-test step plus its live gate
 # step, cleanup deadlines included) to fit that job's own time limit, and refuses BY NAME any single
@@ -259,11 +261,11 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
-# limit): on this tree the whole roster's worst case is 93095 s at 3 (no one job fits it: the premise
-# of the split), the per-job worst cases are 21513 s (A), 20340 s (B), 15810 s (C), 19930 s (D) and
-# 19302 s (E) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the config-lane floors,
-# _LEG_BOUND_FLOOR_S, hold every floored leg's bound above its headroom term, opf-homes-selftest's
-# 1260 s above its 273 s and 364 s included; only opf-adopt-state-selftest and
+# limit): on this tree the whole roster's worst case is 96395 s at 3 (no one job fits it: the premise
+# of the split), the per-job worst cases are 21193 s (A), 21420 s (B), 15810 s (C), 19930 s (D),
+# 19302 s (E) and 3490 s (F) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the
+# config-lane floors, _LEG_BOUND_FLOOR_S, hold every floored leg's bound above its headroom term,
+# opf-homes-selftest's 1260 s above its 273 s and 364 s included; only opf-adopt-state-selftest and
 # opf-adopt-complete-selftest, both in C, are bounded by the headroom term), and the largest
 # multiplier that fits every job is 5.412 (at 5.413, job C's worst case is 21601.2 s, over its
 # limit).
@@ -273,7 +275,7 @@ _SUBSET = [
 # took 299.3 s, 4.34 times its 69 s ceiling; opf-init-selftest 299.6 s, 1.31 times its 228 s;
 # opf-pack-manifest-selftest 28.7 s, 1.69 times its 17 s. opf-doctor-selftest finished inside its
 # then 1140 s bound only because its declared-wait term set that bound (3 x 69 = 207 s alone would
-# have killed it); its bound is now 1440 s, its declared waits (1380 s) plus the 60 s launch margin,
+# have killed it); its bound is now 1560 s, its declared waits (1500 s) plus the 60 s launch margin,
 # above its 1260 s config-lane deadline plus that margin. That is one run at one load,
 # REPORTED by its account and not reproduced here. Covering it on the headroom term alone needs a
 # multiplier above 299.3 / 69 = 4.33768... (so 4.338 to three places, since 4.337 x 69 = 299.253
@@ -292,12 +294,17 @@ _SUBSET = [
 # regression runner's budgets), opf.py --self-test grants its blocked-isolation leg ALONE
 # 31 * _deadline_case_budget(180) = 31 * (180 + 5 + 1) = 5766 s (31 isolation cases, each its 180 s
 # timeout, the 5 s fixture cleanup grace and the 1 s receipt allowance), so the whole self-test grants
-# itself more; this leg's bound (5031 s on this tree: its declared waits, 4970.012 s rounded up to
-# 4971 s, plus the 60 s launch margin, above the 3660 s its config-lane deadline gives, the 3600 s the
+# itself more; this leg's bound (5691 s on this tree: its declared waits, 5630.012 s rounded up to
+# 5631 s, plus the 60 s launch margin, above the 3660 s its config-lane deadline gives, the 3600 s the
 # lanes give opf/tools/opf.py --self-test plus that margin; it rose with those waits from the former
-# 1458 s, 3 x its 486 s ceiling, to that 3660 s floor and then past it) sits below that. A
-# bound above it, 5766 + 60 = 5826 s, counts in both sweeps and in the negative leg: 3 x (5826 - 5031)
-# = 2385 s more, a job A worst case of 23898 s, over the 21600 s limit. So this bound takes the
+# 1458 s, 3 x its 486 s ceiling, to that 3660 s floor and then past it) sits below that. This
+# bound counts in both sweeps and in the negative leg, so job A's worst case moves 3 s per second of
+# it. A bound above that leg's budget alone, 5766 + 60 = 5826 s, is 3 x (5826 - 5691) = 405 s more, a
+# job A worst case of 21598 s, 2 s inside the 21600 s limit: that leg alone no longer shows the
+# misfit. The same runner launches its legs one after another (_watchdog_run_legs), and it grants its
+# completion-poll-masked leg 2954 s more, so a bound above those two legs, 5766 + 2954 + 60 = 8780 s, is
+# 3 x (8780 - 5691) = 9267 s more, a job A worst case of 30460 s, over the limit, and a bound above
+# the whole self-test's budget is larger still. So this bound takes the
 # kill-timeout rule's exception (AGENTS.md), as every other leg bound here does: a deliberately
 # shorter deadline, above the leg's recorded run and cutting a longer run short on purpose, with
 # reaching it attributed to the deadline (LEG BOUND EXCEEDED, exit 2; the self-test's negative leg,
@@ -355,10 +362,11 @@ _DRAIN_MARGIN_S = 10
 # change. The self-test discriminates it all the same: it passes _leg_bounds a launch margin one second
 # below the floor and requires every leg whose other terms then sit below the floor to be raised to
 # exactly the floor. The former 120 s floor put the three-job split's job B over its 21600 s limit
-# (21986 s at a headroom of 3, before the config-lane floors); on this tree it would raise only
-# opf-prompt-pack's bound, the config-lane floors holding every lane-member leg above it, and move
-# only job B's worst case, from 20340 s to 20450 s. The reported 1348.7 s opf.py figure above is
-# covered at any multiplier on this tree: that leg's bound is set by its declared waits (5031 s), not
+# (21986 s at a headroom of 3, before the config-lane floors); on this tree it would raise no bound
+# (opf-homes-contract's and opf-prompt-pack's declared waits, 180 s and 425 s, plus the launch margin
+# already reach 240 s and 485 s, and the config-lane floors hold every lane-member leg above it), so
+# it would move no job's worst case. The reported 1348.7 s opf.py figure above is
+# covered at any multiplier on this tree: that leg's bound is set by its declared waits (5691 s), not
 # by the headroom term.
 _MIN_LEG_BOUND_S = 60
 # Per-leg FLOORS, each the CONFIG-LANE DEADLINE of the leg's command plus _LAUNCH_MARGIN_S: a minimum
@@ -377,9 +385,9 @@ _MIN_LEG_BOUND_S = 60
 # 60) for every leg the lanes bound at the default, and 1860 s (1800 + 60) for opf-init-selftest and
 # opf-adopt-observe-selftest, whose commands carry 1800 s entries there. Five lane-member legs carry no
 # row because their other terms already reach their lane deadline plus the margin
-# (opf-tooling-selftest, whose command carries a 3600 s entry, so 3660 s, below the 5031 s its
+# (opf-tooling-selftest, whose command carries a 3600 s entry, so 3660 s, below the 5691 s its
 # declared waits give on this tree; opf-doctor-selftest, whose command takes the 1200 s default, so
-# 1260 s, below the 1440 s its declared waits, 1380 s, plus the margin give on this tree;
+# 1260 s, below the 1560 s its declared waits, 1500 s, plus the margin give on this tree;
 # opf-adopt-apply-selftest, opf-adopt-state-selftest and opf-adopt-complete-selftest), and two legs
 # are no lane member at all (opf-homes-contract and opf-prompt-pack, whose commands carry no
 # self-test flag, so the lane runner's roster does not select them).
@@ -478,29 +486,43 @@ _COPY_IGNORE = shutil.ignore_patterns(*_COPY_PATTERNS)
 _CANNOT_EVALUATE_MARKER = "CANNOT EVALUATE"
 
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
-# The closure work is PARTITIONED between five CI jobs, because the whole roster's worst case
+# The closure work is PARTITIONED between six CI jobs, because the whole roster's worst case
 # (_job_worst_case_s over every leg) does not fit one job's time limit with the bound rule above
 # unchanged, and, once every lane-member leg reaches its config-lane deadline plus the launch margin
 # (see _LEG_BOUND_FLOOR_S), it does not fit four. ARITHMETIC on this tree: the legs' two sweeps,
-# their cleanup deadlines and the flip come to 92145 s, and each job adds the 350 s vector allowance
+# their cleanup deadlines and the flip come to 95445 s, and each job adds the 350 s vector allowance
 # and the 600 s setup to them, so four jobs hold at most 4 x (21600 - 950) = 82600 s of that work,
-# 9545 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 21513 s (A,
-# the flip's job), 20340 s (B), 15810 s (C), 19930 s (D) and 19302 s (E), each within its 21600 s
-# limit. opf-import-complete-selftest, a leg main added, sits in D beside opf-import-batch-selftest:
+# 12845 s short; five is the fewest that the total allows, and the sixth, F, holds the one leg the
+# placement below finds no room for in the other five. The worst cases, at a headroom of 3, are
+# 21193 s (A, the flip's job), 21420 s (B), 15810 s (C), 19930 s (D), 19302 s (E) and 3490 s (F),
+# each within its 21600 s limit. opf-import-complete-selftest, a leg main added, sits in D beside opf-import-batch-selftest:
 # its 1260 s config-lane floor adds 2540 s to a job's worst case (two sweeps and two cleanup
 # deadlines), which A and E cannot hold (nor could B while it held the store-upgrade gate's leg), and D,
 # unlike C, is not moved by the headroom multiplier
-# up to 5.412. opf-release-history-selftest, added after it, sits in B: its 1260 s config-lane floor
-# adds the same 2540 s, which D (22470 s), A (24053 s) and E (21842 s) cannot hold, and B (20340 s),
-# like D, is not moved by the headroom multiplier up to 5.412. When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
+# up to 5.412. opf-release-history-selftest, added after it, sits alone in F: its 1260 s config-lane
+# floor adds the same 2540 s, which D (22470 s), A (23733 s), E (21842 s) and B (23960 s, beside
+# commonmark-headings-selftest) cannot hold. C could (18350 s), but C is the job the headroom
+# multiplier moves: with the leg in C the largest multiplier that fits every job falls from 5.412 to
+# 4.354 (at 4.355, job C's worst case is 21602.0 s), barely above the 4.338 the loaded
+# opf-doctor-selftest run needs (see _LEG_CEILING_S). F, like B and D, is not moved by the headroom
+# multiplier up to 5.412 (the leg's 1260 s floor exceeds its headroom term, 2 s times the
+# multiplier). When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
 # (the two legs' declared-wait sums from 3554.012 s to 4760.012 s and from 2820 s to 4026 s), the
 # opf-adopt-apply-selftest bound rose by 1206 s (2880 s to 4086 s) and the opf-tooling-selftest bound
 # by 1161 s (from 3660 s, set by its former floor row, to 4821 s), A, which had held
 # opf-adopt-apply-selftest since the three-job split, no longer fit (26175 s), so that leg moved to
 # E, and E's commonmark-headings-selftest and opf-init-builders-selftest moved to A and B to make
 # room; C, the only job whose worst case a headroom multiplier from 3 up to 5.412 moves (see
-# _LEG_CEILING_S), is unchanged. opf-prompt-pack stays in B, where the --ci-job sweep vector removes
-# it. Each job runs the --self-test step and then the live gate step over its own legs alone (--ci-job); the self-test's negative leg (the flip,
+# _LEG_CEILING_S), is unchanged. When the in-process loader vectors added four literal wait sites to
+# opf.py's sources (_opf_emit.py's loaded-exit probe at 300 s and fault-channel probe at 120 s, and
+# _opf_views.py's real-SIGINT probe and fault-channel probe at 120 s each: opf-tooling-selftest's
+# declared-wait sum from 4970.012 s to 5630.012 s) and a 120 s fault-channel probe to check_opf_doctor.py (1380 s to
+# 1500 s), the opf-tooling-selftest bound rose by 660 s (5031 s to 5691 s), counted three times in A
+# (both sweeps and the flip), and the opf-doctor-selftest bound by 120 s (1440 s to 1560 s), counted
+# twice, so A no longer fit (23733 s). commonmark-headings-selftest, whose config-lane floor holds its
+# bound at 1260 s (2540 s of a job's worst case), moved from A to B: only B (18880 s before the move)
+# and C had room for it, and C is the job the headroom multiplier moves. opf-prompt-pack stays in B,
+# where the --ci-job sweep vector removes it. Each job runs the --self-test step and then the live gate step over its own legs alone (--ci-job); the self-test's negative leg (the flip,
 # which runs opf.py --self-test under the opf-tooling-selftest bound) runs only in the job that
 # holds that leg. Every subset leg must be in exactly ONE job: a leg in no job would run in no CI job
 # at all, and a leg in more than one would make the jobs' worst cases overlap, so _partition_fault
@@ -514,7 +536,6 @@ _CI_JOB_LEGS = {
     "opf-closure-a": frozenset({
         "opf-tooling-selftest",
         "opf-doctor-selftest",
-        "commonmark-headings-selftest",
     }),
     "opf-closure-b": frozenset({
         "opf-homes-contract",
@@ -525,7 +546,7 @@ _CI_JOB_LEGS = {
         "opf-prompt-pack-selftest",
         "opf-prompt-pack",
         "opf-init-builders-selftest",
-        "opf-release-history-selftest",
+        "commonmark-headings-selftest",
     }),
     "opf-closure-c": frozenset({
         "opf-homes-selftest",
@@ -549,6 +570,9 @@ _CI_JOB_LEGS = {
         "opf-init-p0-selftest",
         "opf-init-observe-selftest",
         "commonmark-conformance",
+    }),
+    "opf-closure-f": frozenset({
+        "opf-release-history-selftest",
     }),
 }
 _CI_JOBS = tuple(sorted(_CI_JOB_LEGS))
@@ -590,7 +614,7 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     deadlines above, their work (four launches, and one throwaway opf/ copy and bound scan through
 #     _run_closure) is NOT measured into the 12.8 s. The per-job sweep vectors were added after it
 #     too: they launch no process and hold no deadline, and their work (a few throwaway opf/ copies
-#     and bound scans through run() and main(), four per CI job, so twenty over the five jobs) is NOT
+#     and bound scans through run() and main(), four per CI job, so twenty-four over the six jobs) is NOT
 #     measured into the 12.8 s either. So do the floor vectors: they launch no process and hold no
 #     deadline, and their work (a few more bound scans through _leg_bounds) is NOT measured into the
 #     12.8 s. Nor are the config-lane deadline vectors, which launch no process and hold no deadline
@@ -2454,7 +2478,7 @@ def _bounds_self_test(root):
           "key, nested deeper inside jobs:, inside a multi-line flow, quoted or plain scalar, or after "
           "a line break a YAML loader need not read -> each refused by name, never read for a limit; "
           "the same header as a direct jobs: key (one-column jobs mapping, trailing comment) -> read; "
-          "the real workflow's five jobs -> read above".format(_CI_JOBS[0]))
+          "the real workflow's six jobs -> read above".format(_CI_JOBS[0]))
     # Each refusal of the header reader, by name, on an input it alone stops: each entry is (check,
     # workflow text, the text its refusal must name). With that refusal removed the input reads a
     # limit or reaches another refusal, so each entry fails without it. Whitespace is YAML's: only

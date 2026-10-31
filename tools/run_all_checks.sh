@@ -156,11 +156,13 @@ run_gate "opf-standalone-closure-selftest-b" python3 -I -B tools/check_opf_stand
 run_gate "opf-standalone-closure-selftest-c" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-c
 run_gate "opf-standalone-closure-selftest-d" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-d
 run_gate "opf-standalone-closure-selftest-e" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-e
+run_gate "opf-standalone-closure-selftest-f" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-f
 run_gate "opf-standalone-closure-a" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-a
 run_gate "opf-standalone-closure-b" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-b
 run_gate "opf-standalone-closure-c" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-c
 run_gate "opf-standalone-closure-d" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-d
 run_gate "opf-standalone-closure-e" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-e
+run_gate "opf-standalone-closure-f" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-f
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
@@ -330,7 +332,7 @@ run_gate "dangerous-api" python3 -I -B tools/check_dangerous_api.py
 # harness is a real failure); the internal-name scan is gating too.
 run_gate "qa-adapter-selftest"      python3 -I -B tools/_qa_adapter.py --self-test
 run_gate "audit-reference-selftest" python3 -I -B tools/audit_reference.py --self-test
-run_gate "internal-names-selftest"  python3 -I -B tools/check_internal_names.py --self-test
+run_gate "internal-names-selftest"  python3 -I -B tools/check_selftest_execution.py --suite internal-names-selftest
 run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 
 # ADVISORY QA digest, run under run_gate. It runs the reference audit and prints a compact digest that
