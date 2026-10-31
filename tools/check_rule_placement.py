@@ -183,7 +183,7 @@ def check_name(family, name):
 
     Name-only checks (no frontmatter): numbered-non-aiqt, apex-nonstandard, bad-name, tier-code-mismatch.
     """
-    if family != "aiqt" and re.match(r"\d+-", name):
+    if family != "aiqt" and re.match(r"\d+-", name, re.ASCII):
         return ("numbered-non-aiqt", "a leading digit-dash prefix is reserved for aiqt/")
     if family == "aiqt":
         if name.startswith("00-"):
