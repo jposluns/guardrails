@@ -21717,9 +21717,11 @@ def _orch_message_lead_unread(command, spans):
     scan reads a bare `&` as an operator, though a consumer such as eval or an editor runs it (echo
     "$(date)"; eval "$(cat <<'EOF' ... EOF)", or eval "$(cat <<'EOF' ... EOF)" "$(true)"). Such a command
     fails closed on any '&' after the lead, as one the lexer refuses does, but for an && separator or a
-    '>&' redirect onto a descriptor number (2>&1) outside every such form (_orch_message_amps_outside):
+    '>&' redirect onto a descriptor number (2>&1) outside every such form (_orch_message_amps_outside)
+    where each form is a -m value of a plain git commit (_orch_message_forms_committed):
     git commit -m "$(cat <<'EOF' ... EOF)" && git push -u origin "$(git branch --show-current)" allows
-    where its body holds no '&'. The cost is that a plain git commit of the form denies any other '&'
+    where its body holds no '&', while eval "$(cat <<'EOF' ... EOF)" && echo "$(date)", sh -c and any
+    other consumer still deny any '&' after the lead. The cost is that a plain git commit of the form denies any other '&'
     after its lead, in its body or quoted or not, in a command that also holds another command
     substitution or a backquote."""
     recorded = {start for start, _end, kind in spans if kind in ("heredoc", "message-body")}
@@ -21758,8 +21760,9 @@ def _orch_message_amps_outside(command, forms):
     as one substitution in a double-quoted string ending at the form's own ')' (a "code" span from opened
     to close + 1, no span starting inside it). Bash reads the body as text, so the text outside the forms,
     which the replacement leaves as it is, reads as it reads in command. A lex that fails, gives no single
-    reading (_orch_lexed_amp_places), runs inside _SubstHeredocFloor or reads a bare '&' separator, an
-    unquoted or nested form, and a form's lead inside a quote, all read False (fail closed)."""
+    reading (_orch_lexed_amp_places), runs inside _SubstHeredocFloor or reads a bare '&' separator, a
+    form whose consumer is not a plain git commit (_orch_message_forms_committed), an unquoted or nested
+    form, and a form's lead inside a quote, all read False (fail closed)."""
     if _SubstHeredocs.main_lex:
         return False
     masked = list(command)
@@ -21775,6 +21778,8 @@ def _orch_message_amps_outside(command, forms):
             return False
     if misread or any(seg.sep_after == "&" for seg in segments):
         return False
+    if not _orch_message_forms_committed(segments, forms):
+        return False
     for opened, close in forms:
         if (opened, close + 1, "code") not in spans:
             return False
@@ -21782,6 +21787,21 @@ def _orch_message_amps_outside(command, forms):
             return False
     operators = {k for start, end, kind in spans if kind == "operator" for k in range(start, end)}
     return all(k in operators for k in range(forms[0][0], len(masked)) if masked[k] == "&")
+
+
+def _orch_message_forms_committed(segments, forms):
+    """True when every form in forms, (opened, close) as _orch_message_amps_outside takes them, lies in the
+    first of segments, the segments of that function's masked lex, and that segment is a plain git commit
+    (_git_commit_message_lifts), the one consumer the lexer lifts a read form's body for: every expansion or
+    substitution in it is a -m value, so each form is a commit message operand. An eval, sh -c, an
+    assignment or any other consumer, or a form in a later segment, reads False, so its command keeps
+    denying any '&' after the form's lead (_orch_message_lead_unread)."""
+    if not segments:
+        return False
+    first = segments[0]
+    if any(close >= len(first.raw) for _opened, close in forms):
+        return False
+    return _git_commit_message_lifts([], first.argv, first.argv_opaque, first.redirects, first.sep_after)
 
 
 def _orch_message_body_detach(command):
@@ -21795,7 +21815,8 @@ def _orch_message_body_detach(command):
     since none is proven to leave the value unrun. Where the lexer gives no single reading (an uncertain
     '#', or any command it refuses), a command holding the form's lead and an '&' fails closed, and so does
     one whose lead the lex read without recording the form's body (_orch_message_lead_unread), but for an
-    && separator or a 2>&1 redirect outside the form. A command with no such lead is not lexed again."""
+    && separator or a 2>&1 redirect outside a form a plain git commit takes as its message. A command with
+    no such lead is not lexed again."""
     if _ORCH_MESSAGE_LEAD_RE.search(command) is None:
         return False
     with _LexPlaces() as spans:
@@ -21973,8 +21994,8 @@ def _orch_foreground_detach(command):
     non-shell interpreter such as python3 -); a commit message form whose captured value any other
     consumer takes (eval "$(cat <<'EOF' ... EOF)", sh -c, an editor or shell alias git opens, an
     assignment) denies a bare `&` its body holds read as code (_orch_message_body_detach), and any '&'
-    after the form's lead but an && separator or a 2>&1 redirect outside the form denies where the lexer
-    reads no body (a second command substitution or a backquote in the command, _orch_message_lead_unread),
+    after the form's lead but an && separator or a 2>&1 redirect outside a form a plain git commit takes
+    as its message (for any other consumer, any '&' at all) denies where the lexer reads no body (a second command substitution or a backquote in the command, _orch_message_lead_unread),
     and any '&' at all where it refuses the command (_orch_unlexed_detach_kind);
     a commit message the plain git commit writes and a later command runs (git commit -m ... && sh
     .git/COMMIT_EDITMSG, git log -1 --format=%B piped to sh or read by eval, the commit's output
@@ -22010,7 +22031,9 @@ def _orch_foreground_detach(command):
     an && chain or with an option outside the listed ones; _orch_message_body_detach), and so does a
     plain git commit of that form with any '&' after its lead (in its body, quoted or not) but an &&
     separator or a 2>&1 redirect outside the form, in a command that also holds another command
-    substitution or a backquote, or with any '&' in a command holding a construct the lexer refuses. A
+    substitution or a backquote (any other consumer of the form there, eval or sh -c included, denies any
+    '&' after its lead, an && separator or a 2>&1 redirect too), or with any '&' in a command holding a
+    construct the lexer refuses. A
     body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
     to standard output, or one with no delimiter line; the lift reads only a bare `&`, not this no-`&`
     open-quote deny), or one whose quote leaves the scan open at the end,

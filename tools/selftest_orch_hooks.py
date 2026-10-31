@@ -13757,6 +13757,39 @@ def _main_isolated(report_path=None):
                                           command, opened, at, len(command))),)),
               [(m + "-amp", False, "<commit><-m><touch " + str(msg_repo / (m + "-amp")) + " &>", True,
                 "deny", "allow") for _t, m, _s in _operator_outside])
+        # The && or 2>&1 narrowing holds only for a form a plain git commit takes as its -m value
+        # (_orch_message_forms_committed). Each vector runs through real bash in the fixture repository with a
+        # body that touches a marker and holds no '&': under eval or sh -c the marker shows bash ran the body
+        # as code, and the command denies as before the narrowing, allowing against a mutant that drops the
+        # consumer restriction; under the plain git commit no marker is left, and the command allows, denying
+        # against a mutant whose consumer restriction admits nothing.
+        _other_consumers = (("eval {form} && echo \"$(date)\"", "consumer-eval"),
+                            ("sh -c {form} && echo \"$(date)\"", "consumer-sh-c"))
+        _plain_consumers = tuple((template, "consumer-" + marker) for template, marker, _s in _operator_outside)
+
+        def _consumer_rows(vectors, changes):
+            commands = [(template.format(form="\"$(cat <<'EOF'\ntouch " + str(msg_repo / marker) + "\nEOF\n)\""),
+                         marker) for template, marker in vectors]
+            for command, _marker in commands:
+                try:
+                    subprocess.run(["/usr/bin/bash", "-c", command], cwd=str(msg_repo), env=_msg_env,
+                                   capture_output=True, timeout=30)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            deadline = time.monotonic() + 5
+            while (not all((msg_repo / marker).exists() for _command, marker in commands)
+                   and time.monotonic() < deadline):
+                time.sleep(0.05)
+            return [(marker, (msg_repo / marker).exists(), _verdict(bg(command, rib=False)),
+                     _rdp_mutant(changes, lambda: _verdict(bg(command, rib=False))))
+                    for command, marker in commands]
+
+        check("trunc/fg-commit-message-operator-outside-other-consumer-denies",
+              _consumer_rows(_other_consumers, (("_orch_message_forms_committed", lambda *_a: True),)),
+              [(m, True, "deny", "allow") for _t, m in _other_consumers])
+        check("trunc/fg-commit-message-operator-outside-plain-commit-allows",
+              _consumer_rows(_plain_consumers, (("_orch_message_forms_committed", lambda *_a: False),)),
+              [(m, False, "allow", "deny") for _t, m in _plain_consumers])
         # Every other '&' after an unread lead still denies: one in a quoted string, a comment, an escape or
         # an ANSI-C quote, an &> or |& operator, a '>&' onto a file, and any '&' after a form the lexer does
         # not read as one double-quoted substitution ending at its own ')' (a form nested in another
