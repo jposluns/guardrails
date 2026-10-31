@@ -1,9 +1,9 @@
 # The orchestrator-integrity suite
 
-Seven controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
+Eight controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
 tools), a record-drift gate, a background-dispatch truncation guard, an unattended-ask blocker, a
-resume audit with a mutation barrier, a lease-heartbeat keeper (PostToolUse and Stop, warn-only),
-and a mistakes register. One registry declares the adopter's
+deliverable-exec guard, a resume audit with a mutation barrier, a lease-heartbeat keeper (PostToolUse
+and Stop, warn-only), and a mistakes register. One registry declares the adopter's
 bindings; one pure decision core (decide_yield in scripts/aiqt_hooks.py) makes every yield judgement,
 so a new yield path is covered by adding a binding, never by re-implementing judgement.
 
@@ -18,7 +18,7 @@ Where a registry is looked up (two scopes):
 
 - Every component except the truncation guard (the stop guard, the scheduled-yield and
   TeammateIdle bindings, the unattended-ask blocker, the resume audit and barrier, the dispatch
-  ledger, the prompt stamp, and the untracked wait-loop guard) looks only at the git-resolved
+  ledger, the prompt stamp, the untracked wait-loop guard, and the deliverable-exec guard) looks only at the git-resolved
   toplevel of the session cwd. With no git toplevel, or where the registry loader reads the registry
   there as absent, each of them is inert. A toplevel the loader cannot examine (a regular file, a
   directory this process cannot search, or one holding a regular file named `.aiqt`) reads as bad,
@@ -276,6 +276,7 @@ directory below, and a declaration there arms slice confinement.
   "state_dir": "path",
   "yield_tools": ["ScheduleWakeup", "CronCreate"],
   "dispatch_tools": [],
+  "deliverable_dirs": ["/abs/path/to/draft-staging", "/abs/path/to/hand-back"],
   "review_dispatch": {"commands": ["orch-dispatch"], "brief_option": "--brief",
                       "labels": {"target": "Review-target:", "revision": "Reviewed-revision:",
                                  "path": "Review-path:", "repo": "Review-repo:",
@@ -475,6 +476,43 @@ foreign-lease blocker as blocked only when its ref is covered by a fresh validat
 evidence-freshness check still applies). Undeclared means the free-text evidence path stands,
 byte-identical to prior behaviour; declared but with no readable fresh snapshot holds the affected
 items (cannot-evaluate), never blocked and never actionable.
+
+## The deliverable directories (`deliverable_dirs`)
+
+`deliverable_dirs` arms the deliverable-exec guard (`orch-deliverable-exec-guard`, rule wowo01,
+PreToolUse Bash): a non-empty list of ABSOLUTE directories the orchestrator receives worker
+deliverables in, the draft staging directories and the hand-back directory. Prefer the narrowest
+hand-back path the harness can name over a whole shared tree; an entry may not be the filesystem root
+or hold the session repository root. With the key declared, a Bash call that runs or imports a file IN
+PLACE from one of those directories is denied: a python/pypy script operand; an operand handed to
+`python -m` (the read-only printers json.tool and tokenize excepted); `-c` text naming a declared path
+outside a closed read-only hashlib/pathlib/json reader allow-list; python without `-I` or `-P` while
+the working directory is declared (a planted hashlib.py would shadow the standard library through
+sys.path[0]); a program fed from a declared file on stdin (a redirect or a pipe); a
+sh/bash/dash/zsh/ksh script operand or a `-c` body (classified recursively, two levels deep); `source`
+and the `.` builtin; direct execution of a declared path; a loader-environment assignment (PATH,
+PYTHONPATH, PYTHONSTARTUP, PYTHONHOME, PYTHONUSERBASE, BASH_ENV, ENV, LD_PRELOAD, LD_LIBRARY_PATH)
+whose value names a declared directory; and an opaque form (an unlexable construct, an unknown
+wrapper, or an indirection word such as eval or xargs) whose raw text names a declared directory
+beside an interpreter word. Each judged operand and each declared directory is compared both as
+written (normalized against the effective working directory, which follows literal cd/pushd operands)
+and through realpath, so a symlink into or out of a directory is caught either way. `bash -n` without
+`-c` (a syntax-only read), readers (cat, sed, wc, file, diff), hashing (sha256sum, a `python3 -I -c`
+hashlib reader), `git apply` and `git apply --check`, and repository tools that take a deliverable's
+path as a DATA argument stay allowed: reading and applying are governed elsewhere, and what this guard
+refuses is the in-place RUN of a worker deliverable (integ/workers-produce-inert-data: worker code
+runs only after a full reading and only in a disposable copy outside the declared directories and
+every live checkout).
+
+The key is validated fail-closed with a limited blast radius: an entry that is not a non-empty
+absolute NUL-free string, normalizes to the filesystem root, or holds the session repository root
+(which would refuse every interpreter call in the tree) makes the key malformed, and a malformed key,
+like a present-but-unreadable registry, denies ONLY interpreter-shaped candidates (an interpreter
+word, source or the dot builtin, exec, direct path execution, an indirection word, or a
+loader-environment assignment) until the operator repairs it; every other command is unaffected.
+Without the key the guard is entirely inert: the operator must declare it in the live registry, or the
+hook protects nothing. Like the untracked wait-loop guard it is not lease-gated (a bounded worker
+running a deliverable in place is equally wrong) and never reads `AIQT_ORCH_REQUIRE_REGISTRY`.
 
 ## The lease heartbeat
 
@@ -1699,3 +1737,5 @@ The stop guard's blocker substantiation is itself largely ACTOR-AUTHORABLE: the 
 The escape sentinel opens the clean-ALLOW channel only as an operator-created artefact: a regular file with a single hard link, reached without following any symlinked path component, resolved under the state-dir anchor (an absolute or '..' path outside it is rejected), owned by a uid other than this guard's, and not group- or other-writable; any other present file is ignored, recorded (a failed record write is warned about in the hook's banner, or in the block reason of a denied Stop or TeammateIdle), and normally raised once at the next resume. Uid inequality proves not-self, never operator identity; component resolution is a best-effort lstat walk under the anchor, so a narrow window between the walk and the descriptor-bound stat remains.
 
 The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops to guard-events, where a failed append is warned about in the hook's output, so a drop is never silent. A checkpoint or init marker that cannot be written is named in the hook's output (the deny reason and banner of a scheduling call, the block reason of a denied Stop or TeammateIdle, or the banner or note of an allow) whether or not its guard-events row is written; an unwritten checkpoint does not record that window's items, so one that then vanishes or is demoted before a later checkpoint write succeeds is not held as such unless an earlier checkpoint records it, and an unwritten init marker holds that window as cannot-evaluate. The checkpoint also records each open id's eligibility (granted-and-open vs proposed/ungranted), so a demotion of a previously-actionable id to proposed or ungranted with no closed receipt is held (cannot-evaluate) rather than silently routed to the harmless proposed bucket; that eligibility memory lives in the same actor-writable state dir, raising the bar without being categorical. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit. Each denial and each forced exit appends its own guard-events row, and each forced exit also a row in an append-only forced-exit log, whose rows the next resume normally raises once (at least once if recording that they were raised fails). Neither record is guaranteed: a failed append leaves no row, and the hook then adds a short recording-failure warning to its output (the block reason of a denied Stop or TeammateIdle, which has no banner; the deny reason and the banner of a denied scheduling call; the banner of a forced exit) while the decision stands, so the loss is reported, not silent. The guard-events row of an ALLOW released by the operator escape is the only record that the override was used, so a failed append there adds the same kind of warning (in the banner of a Stop or TeammateIdle, in the note of a scheduling call) while the ALLOW stands. The row of a clean ALLOW with no escape is the over-fire metric only and is best effort: a failed append there is not reported. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.
+
+The deliverable-exec guard is path-textual: it compares the literal operands and raw text of one Bash call (lexically against the effective working directory, and through realpath) with the declared `deliverable_dirs`. It does not catch a deliverable copied, moved or hard-linked outside the declared directories before running (running an unread COPY is the rule's judgement-level half: no hook state could prove a full reading), a path built at run time (a shell variable set in an earlier call, concatenation, an expansion), interpreters outside its judged families (node, perl, ruby, php, make, npm, a direct pip install: follow-up candidates), a repository tool that itself imports or executes a path it receives as a data argument, any non-Bash tool (the write-scope guard covers the structured write tools), or a symlink swapped between the check and the run. The registry that declares the directories is writable by the same uid through Bash, the existing registry-integrity residual, and the guard is entirely inert wherever the key is not declared.

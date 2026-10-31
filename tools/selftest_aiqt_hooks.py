@@ -4755,6 +4755,7 @@ _DEADLINE_CASES = {
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens", "ansi_c_herestr"),
     "orch_ask_guard": ("ask_long",),
+    "orch_deliverable_exec_guard": ("git_words", "nest_cmdsubst"),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
