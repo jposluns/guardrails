@@ -21701,6 +21701,25 @@ def _orch_lexed_amp_places(command, amps):
 _ORCH_MESSAGE_LEAD_RE = re.compile(r"\$\([ \t]*cat[ \t]+<<")
 
 
+def _orch_message_lead_unread(command, spans):
+    """True when command holds a lead of the commit message form (_ORCH_MESSAGE_LEAD_RE) whose '<<' starts no
+    span the lex recorded for the form's body ("heredoc" or "message-body" in spans, the _LexPlaces spans of
+    one lex of command) and an '&' follows that lead. The lexer reads the form's body only in the first and
+    only command substitution the lex skips whole (_SubstHeredocs): a second '$(' or a backquote anywhere in
+    the command makes the lex start again reading no body (_SubstHeredocRetry), so it records no span for
+    the form and the body stays opaque text inside a double-quoted string, where neither the lexer nor the
+    scan reads a bare `&` as an operator, though a consumer such as eval or an editor runs it (echo
+    "$(date)"; eval "$(cat <<'EOF' ... EOF)", or eval "$(cat <<'EOF' ... EOF)" "$(true)"). Such a command
+    fails closed on any '&' after the lead, as one the lexer refuses does. The cost is that a plain git
+    commit of the form denies an '&' after its lead, quoted or not, in a command that also holds another
+    command substitution or a backquote."""
+    recorded = {start for start, _end, kind in spans if kind in ("heredoc", "message-body")}
+    for match in _ORCH_MESSAGE_LEAD_RE.finditer(command):
+        if match.end() - 2 not in recorded and "&" in command[match.end():]:
+            return True
+    return False
+
+
 def _orch_message_body_detach(command):
     """True when command holds a commit message form "$(cat <<'EOF' ... EOF)" whose consuming segment is not
     a plain git commit (_git_commit_message_lifts) and whose body, read as shell code by the detach scan
@@ -21710,8 +21729,9 @@ def _orch_message_body_detach(command):
     -e -m, GIT_EDITOR=sh git commit -e -m, a configured core.editor with -e), a git alias that runs a shell
     (git -c alias.x='!sh -c' x), eval or sh -c. Every consumer but the plain git commit is read that way,
     since none is proven to leave the value unrun. Where the lexer gives no single reading (an uncertain
-    '#'), a command holding the form's lead and an '&' fails closed. A command with no such lead is not
-    lexed again."""
+    '#', or any command it refuses), a command holding the form's lead and an '&' fails closed, and so does
+    one whose lead the lex read without recording the form's body (_orch_message_lead_unread). A command
+    with no such lead is not lexed again."""
     if _ORCH_MESSAGE_LEAD_RE.search(command) is None:
         return False
     with _LexPlaces() as spans:
@@ -21719,6 +21739,8 @@ def _orch_message_body_detach(command):
             _lex_reading(command, False, {})
         except ValueError:
             return "&" in command
+    if _orch_message_lead_unread(command, spans):
+        return True
     for start, end, kind in spans:
         if kind != "message-body":
             continue
@@ -21739,7 +21761,8 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     separator is a "detach" whatever the scan reads, so a real detach the scan reads as quoted or commented
     text (the QUOTE SHIFT and COMMENT SHIFT false allows of _orch_foreground_detach) denies. Where the lexer
     refuses the command (a ValueError, _UncertainHashError included: an unquoted here-document, a here-string,
-    a process substitution, an open quote, a NUL, or '#' readings it cannot judge), the scan alone decides.
+    a process substitution, an open quote, a NUL, or '#' readings it cannot judge), the scan decides, after
+    a command holding the commit message form's lead and an '&' denies (_orch_unlexed_detach_kind).
     Where the lexer reads no bare `&`, the scan's verdict stands, with ONE narrowing: its "detach" reads as
     None only when both scan rules read the whole command (no quote open at the end and no uncertain '#') and
     every bare `&` they read lies, where the lexer places it in its one reading of the command
@@ -21789,7 +21812,7 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     try:
         segments = _lex_command(command)
     except ValueError:
-        return _orch_foreground_detach_kind(command)
+        return _orch_unlexed_detach_kind(command)
     if any(seg.sep_after == "&" for seg in segments):
         return "detach"
     if _orch_message_body_detach(command):
@@ -21810,6 +21833,20 @@ def _orch_foreground_detach_lexed(command, lifts=None):
             lifts.append(True)
         return None
     return kind
+
+
+def _orch_unlexed_detach_kind(command):
+    """The foreground detach verdict of a command the shared lexer refuses (_orch_foreground_detach_lexed): a
+    "detach" where command holds the commit message form's lead and an '&' (_orch_message_body_detach, whose
+    own lex is refused too, so it fails closed), and otherwise the raw scan's verdict. The scan reads the
+    form's body as double-quoted text, so without the first check a bare `&` in a body eval runs would
+    allow wherever a here-string, a process substitution or an unquoted here-document elsewhere in the
+    command makes the lexer refuse it (eval "$(cat <<'EOF' ... EOF)" <<< x), and so would a plain git
+    commit whose output a shell reads through a process substitution (git commit -m "$(cat <<'EOF' ...
+    EOF)" > >(sh))."""
+    if _orch_message_body_detach(command):
+        return "detach"
+    return _orch_foreground_detach_kind(command)
 
 
 def _orch_foreground_amps_lifted(command, skip_bodies=True):
@@ -21871,7 +21908,12 @@ def _orch_foreground_detach(command):
     here-document after an && chain or ';' or on a later line, an absolute or command-prefixed cat, a
     non-shell interpreter such as python3 -); a commit message form whose captured value any other
     consumer takes (eval "$(cat <<'EOF' ... EOF)", sh -c, an editor or shell alias git opens, an
-    assignment) denies a bare `&` its body holds read as code (_orch_message_body_detach), and a detacher
+    assignment) denies a bare `&` its body holds read as code (_orch_message_body_detach), and any '&'
+    after the form's lead denies where the lexer reads no body (a second command substitution or a
+    backquote in the command, _orch_message_lead_unread) or refuses the command (_orch_unlexed_detach_kind);
+    a commit message the plain git commit writes and a later command runs (git commit -m ... && sh
+    .git/COMMIT_EDITMSG, git log -1 --format=%B piped to sh or read by eval, the commit's output
+    redirected to a file and then run with sh) is the written-then-run residual, and a detacher
     the lexer path cannot read
     (an unquoted here-document, a
     here-string, a process substitution, a construct the lexer refuses) is the lexer-path residual.
@@ -21900,7 +21942,9 @@ def _orch_foreground_detach(command):
     here-document after an && chain or ';' or on a later line, an absolute or command-prefixed cat,
     python3 -) deny too, and so does a bare `&` in a commit message form's body whose captured value any
     other consumer takes (eval, sh -c, an editor or shell alias git opens, an assignment, a commit after
-    an && chain or with an option outside the listed ones; _orch_message_body_detach). A
+    an && chain or with an option outside the listed ones; _orch_message_body_detach), and so does a
+    plain git commit of that form with any '&' after its lead, quoted or not, in a command that also
+    holds another command substitution or a backquote, or a construct the lexer refuses. A
     body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
     to standard output, or one with no delimiter line; the lift reads only a bare `&`, not this no-`&`
     open-quote deny), or one whose quote leaves the scan open at the end,

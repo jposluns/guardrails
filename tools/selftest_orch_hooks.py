@@ -13629,6 +13629,79 @@ def _main_isolated(report_path=None):
                  _verdict(bg("eval \"$(cat <<'EOF'\nit's & b\nEOF\n)\"", rib=False)),
                  _verdict(bg("eval \"$(cat <<'EOF'\necho 'a & b'\nEOF\n)\"", rib=False))],
               ["deny"] * 11 + ["allow"])
+        # The lexer reads the form's body only in the command's first and only command substitution: a
+        # second '$(' or a backquote anywhere makes it lex again reading no body, so it records no span for
+        # the form, and a command whose lead it read that way fails closed on an '&' after the lead
+        # (_orch_message_lead_unread). Where the lexer refuses the command (a here-string, a process
+        # substitution, an unquoted here-document), the form's lead and an '&' deny before the scan, which
+        # reads the body as double-quoted text (_orch_unlexed_detach_kind). Each vector runs through real
+        # bash in the fixture repository (core.editor=sh), every vector first and then one shared deadline
+        # for the markers, and each row holds whether bash left its marker, the verdict, and the verdict
+        # against a mutant: the deny rows against one that removes their fix, so each fails if its fix
+        # stops deciding it, and the plain forms (which must still allow) against one that fails closed on
+        # any '&' after a lead whatever span the lex recorded, so each fails if the lift is lost.
+        subprocess.run(["git", "-C", str(msg_repo), "commit", "--allow-empty", "-q", "-m", "seed"],
+                       env=_msg_env, capture_output=True, timeout=30)
+
+        def _msg_body(marker, prefix=""):
+            return "\"$(cat <<'EOF'\n" + prefix + "touch " + str(msg_repo / marker) + " &\nEOF\n)\""
+
+        def _msg_vector_rows(vectors, changes):
+            commands = [(template.format(form=_msg_body(marker), summary_form=_msg_body(marker, "x; "),
+                                         plain="\"$(cat <<'EOF'\nmsg\nEOF\n)\""), marker)
+                        for template, marker in vectors]
+            for command, _marker in commands:
+                try:
+                    subprocess.run(["/usr/bin/bash", "-c", command], cwd=str(msg_repo), env=_msg_env,
+                                   capture_output=True, timeout=30)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            deadline = time.monotonic() + 5
+            while (not all((msg_repo / marker).exists() for _command, marker in commands)
+                   and time.monotonic() < deadline):
+                time.sleep(0.05)
+            return [(marker, (msg_repo / marker).exists(), _verdict(bg(command, rib=False)),
+                     _rdp_mutant(changes, lambda: _verdict(bg(command, rib=False))))
+                    for command, marker in commands]
+
+        _second_subst = (("git commit --allow-empty -m {plain}; eval {form}", "subst-commit-then-eval"),
+                         ("echo \"$(date)\"; eval {form}", "subst-before"),
+                         ("eval {form}; echo \"$(date)\"", "subst-after"),
+                         ("echo `date`; eval {form}", "subst-backquote-before"),
+                         ("eval {form} \"$(true)\"", "subst-argument"),
+                         ("true \"$(true)\"; git commit --allow-empty -e -m {form}", "subst-then-editor"),
+                         ("git commit --allow-empty -m {plain}; git commit --allow-empty -e -m {form}",
+                          "subst-plain-then-editor"))
+        check("trunc/fg-commit-message-second-substitution-denies",
+              _msg_vector_rows(_second_subst, (("_orch_message_lead_unread", lambda *_a: False),)),
+              [(m, True, "deny", "allow") for _t, m in _second_subst])
+        _unlexed_msg = (("eval {form}; cat <<< hi", "unlexed-herestring-after"),
+                        ("eval {form}; cat <(true)", "unlexed-procsubst-after"),
+                        ("eval {form}; cat <<X\nhi\nX", "unlexed-heredoc-after"),
+                        ("eval {form} <<< hi", "unlexed-herestring-argument"),
+                        ("git commit --allow-empty -m {summary_form} > >(sh)", "unlexed-summary-to-shell"))
+        check("trunc/fg-commit-message-unlexed-denies",
+              _msg_vector_rows(_unlexed_msg, (("_orch_unlexed_detach_kind",
+                                               aiqt_hooks._orch_foreground_detach_kind),)),
+              [(m, True, "deny", "allow") for _t, m in _unlexed_msg])
+        _plain_lifted = (("git commit --allow-empty -m {form}", "lifted-allow-empty"),
+                         ("git commit --allow-empty --no-edit -m {form}", "lifted-no-edit"),
+                         ("git commit -m {form}", "lifted-nothing-to-commit"),
+                         ("git commit --allow-empty -m {form} -m second", "lifted-two-m"),
+                         ("git commit -m {form} seed.txt", "lifted-pathspec"),
+                         ("git commit --allow-empty -m {form}; true", "lifted-semicolon"),
+                         ("git commit --allow-empty -m {form} && true", "lifted-and"),
+                         ("git commit --allow-empty -m {form} || true", "lifted-or"),
+                         ("git commit --allow-empty -m {form}\ntrue", "lifted-newline"),
+                         ("git commit --allow-empty -m {form} 2>&1", "lifted-stderr-dup"),
+                         ("git commit --allow-empty -m {form} > out.txt", "lifted-redirect"),
+                         ("'git' commit --allow-empty -m {form}", "lifted-quoted-git"),
+                         ("git commit --allow-empty -m \"$(cat <<'EOF'\ntouch lifted-quoted-amp \"a & b\"\n"
+                          "EOF\n)\"", "lifted-quoted-amp"))
+        check("trunc/fg-commit-message-plain-lifted-forms-allow",
+              _msg_vector_rows(_plain_lifted, (("_orch_message_lead_unread",
+                                                lambda command, _spans: "&" in command),)),
+              [(m, False, "allow", "deny") for _t, m in _plain_lifted])
         # Where the lexer refuses the command (an unquoted here-document, an open quote, a process
         # substitution, a here-string) the scan alone decides: its detach and open quote deny, and a
         # command it reads with no bare `&` allows.
