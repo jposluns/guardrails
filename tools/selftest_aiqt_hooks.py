@@ -18123,6 +18123,65 @@ def _main_isolated(monitor):
                 "git push origin main <<<x", "deny")
         gexpect("(gw-pf27) a command wrapper before the commit keeps the deny", "sudo git commit -m x <<<y",
                 "deny")
+        # The narrowing holds only when every interior is fully literal: a substitution body or here-string word
+        # holding an expansion, a substitution, a backquote, an operator, or a body run by anything but printf,
+        # echo or cat (eval, source, a dot command, another shell, a second git) keeps the closed-grammar deny,
+        # since bash runs that body as commands of its own and an inner commit there skips no outer check. A
+        # verification run piped into a sink or with its status swallowed inside an interior denies too.
+        _gw_interior_denies = (
+            "git commit -F <(eval \"git commit -$(echo n) -m inner\"; echo outer)",
+            "git commit -F <(echo `git commit -$(echo n) -m inner` outer)",
+            "git commit -F <(echo `printf x` outer)",
+            "git commit -F <(echo $(git commit -$(echo n) -m inner) outer)",
+            "git commit -F <(echo $HOME)",
+            "git commit -F <(eval git commit -m inner)",
+            "git commit -F <(source ./skip.sh; echo outer)",
+            "git commit -F <(. ./skip.sh)",
+            "git commit -F <(bash -c \"git commit -m inner\"; echo outer)",
+            "git commit -F <(sh -c 'git commit -m inner')",
+            "git commit -F <(git commit -m inner)",
+            "git commit -F <(printf msg; git commit -m inner)",
+            "git commit -F <(cat ~/msg)",
+            "git commit -F <(cat *.txt)",
+            "git commit -m x <<<\"$(eval \"git commit -$(echo n) -m inner\")\"",
+            "git commit -m x <<<`git commit -m inner`",
+            "git commit -m x <<<$(git commit -m inner)",
+            "git commit -m x <<<\"$(source ./skip.sh)\"",
+            "git commit -m x <<<\"$(. ./skip.sh)\"",
+            "git commit -m x <<<\"$(bash -c 'git commit -m inner')\"",
+            "git commit -m x <<<$HOME",
+            "git commit -F <(python3 -m pytest | head -1)",
+            "git commit -F <(pytest || true)",
+            "git commit -m x <<<\"$(python3 -m pytest | head -1)\"",
+            "git commit -m x <<<\"$(pytest || true)\"",
+            "git commit -F <(printf msg | head -1)",
+        )
+        for _gw_cmd in _gw_interior_denies:
+            gexpect("(gw-pf28) a non-literal interior keeps the closed-grammar deny: {!r}".format(_gw_cmd),
+                    _gw_cmd, "deny")
+        for _gw_cmd in ("git commit -m x <<<'hello world'", "git commit -F <(printf 'oracle %s\\n' msg)",
+                        "git commit --file <(cat msg.txt)", "git commit -F <(echo fix: bump to 1.2)"):
+            gexpect("(gw-pf29) a fully literal interior keeps the message-only allow: {!r}".format(_gw_cmd),
+                    _gw_cmd, "allow")
+        # A FLIP of the literal-only test: with _gate_commit_interior_literal accepting every interior, the
+        # body rows that hide no skip spelling (the reported eval shape included) allow, so the denies above
+        # genuinely rest on that test and a revert turns this red.
+        _gw_flip_rows = ("git commit -F <(eval \"git commit -$(echo n) -m inner\"; echo outer)",
+                         "git commit -F <(bash -c \"git commit -m inner\"; echo outer)",
+                         "git commit -F <(source ./skip.sh)", "git commit -F <(pytest || true)")
+        _gw_literal_saved = aiqt_hooks._gate_commit_interior_literal
+        aiqt_hooks._gate_commit_interior_literal = lambda text, body: True
+        try:
+            for _gw_nr in _gw_flip_rows:
+                if _decision(gwg, _gw_nr) == "deny":
+                    failures.append("(gw-pf-literal-flip) with the literal-only test removed {!r} should no longer "
+                                    "deny, got deny".format(_gw_nr))
+        finally:
+            aiqt_hooks._gate_commit_interior_literal = _gw_literal_saved
+        for _gw_nr in _gw_flip_rows:
+            if _decision(gwg, _gw_nr) != "deny":
+                failures.append("(gw-pf-literal-flip-restore) after restoring the literal-only test {!r} should "
+                                "deny, got {}".format(_gw_nr, _decision(gwg, _gw_nr)))
         # The narrowing is pinned by a FLIP: with _gate_commit_message_construct reverted to never qualify a
         # command (the pre-narrowing behaviour), the three message-only rows deny again through the closed
         # grammar, so the allows above genuinely rest on the narrowing and a revert turns this red.
