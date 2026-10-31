@@ -2592,7 +2592,8 @@ _DESTRUCT_TEXT_EDGES = (
     "git checkout x\n -- y", "git x reset --hard reset", "git git reset --hard", "git reset --hard; git clean",
     "git reset a --hard b --hard", "git checkout a -- b -- c", "docker rm x", "podman rmi y", "docker prune",
     "docker rmx", "docker x\nrm", "echo ok\ngit reset --hard", "git\u00a0clean", "rm\u00a0x", "dd\u2003of=x",
-    "echo git reset", "git reset " * 40, "dd " * 40 + "of=x", "git checkout " * 20 + "-- x", "find " * 30)
+    "echo git reset", "git reset " * 40, "dd " * 40 + "of=x", "git checkout " * 20 + "-- x", "find " * 30,
+    "mkfs.ext\u0663 /dev/x")
 _DESTRUCT_SHADOW_EDGES = (
     "f() { true; }", "f ( )", "1abc()", "a.b:c-d ()", "x ( \t)", "a" * 60 + "(", "f()", ".()", "1()", "-()",
     "a=b()", "function f", "alias x=y", "PATH=/x", "export PATH=x", "x f(", "\u00e9()", "_()", "9_()", "a b()",

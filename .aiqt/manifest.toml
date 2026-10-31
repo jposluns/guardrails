@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0f66cb3e3dae27259eaad8bb244c53605b1e949a90c6184447530116d82d677c"
+tree-sha256 = "e8b1222ec294f0235a6ddbfe6b883a76be1a78ee8183120de2bc77a340c2c584"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3471,8 +3471,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 197891
-sha256 = "16580d4055453329cfe53e1a7241a47e2c45707c4181fe2a6a5716568a4fe58a"
+bytes = 198401
+sha256 = "68a84f2373615c82739308252030df5a2358bddb9a69b88b47ca242ce033fb99"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -3916,8 +3916,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2208750
-sha256 = "5779158331eed237c80b1cdb3f1329b623174a99c5393e814f5f1d694e92dac3"
+bytes = 2208779
+sha256 = "f97794813f8fc24999916f92658b2b5020a88518f3f8e8a6f8a0e5ed91cec808"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
