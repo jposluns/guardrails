@@ -4,9 +4,10 @@
 The protected ref is supplied explicitly or derived from origin/HEAD. The candidate revision is
 supplied explicitly or defaults to HEAD. A merge-base exit status of 0 means rooted, 1 means
 ORPHANED, and every other status is cannot-evaluate. A rooted candidate that restores, at a path it
-changes from the merge base, the exact content a first-parent commit of the protected line replaced
-within the REVERT_WINDOW commits ending at that merge base is REVERTS, unless a commit in base..head
-carries a "Reverts: <full sha>" trailer naming every such commit. First-parent lag is always reported
+changes from any merge base, the exact blob a first-parent commit of the protected line replaced
+within the REVERT_WINDOW commits ending at that merge base is REVERTS, unless its image there equals
+the protected tip's or a commit in base..head carries a "Reverts: <full sha>" trailer naming every
+such commit. First-parent lag is always reported
 and becomes a blocking STALE verdict only when --max-lag is configured.
 
   check_branch_root.py [--root DIR] [--protected REF] [--head REV] [--max-lag N]
@@ -172,11 +173,32 @@ def _is_shallow(root):
     return value == "true"
 
 
-def _raw_records(root, *args):
+def _object_id(token):
+    """True for a full lowercase hex object id (SHA-1 or SHA-256), checked on the raw bytes so a
+    non-ASCII byte is refused here rather than raising on decode."""
+    return len(token) in (40, 64) and all(char in b"0123456789abcdef" for char in token)
+
+
+def _image(mode, oid, command):
+    """One side of a raw record: None where the path is absent, else the (mode, oid) pair. A mode that is
+    not six octal digits or an oid that is not a full hex id is a malformed record (cannot-evaluate)."""
+    if len(mode) != 6 or not all(char in b"01234567" for char in mode) or not _object_id(oid):
+        raise CannotEvaluate("git {} printed a malformed raw record".format(command))
+    return None if mode == b"000000" else (mode.decode("ascii"), oid.decode("ascii"))
+
+
+def _blob(image):
+    """The blob id an image holds, or None where the path is absent. A revert is judged on this alone,
+    so a mode change cannot hide a restored pre-image."""
+    return None if image is None else image[1]
+
+
+def _raw_records(root, *args, commits=None):
     """Run a git raw-diff command with -z and return its (commit, path, pre, post) records. Paths stay
     bytes, so a space, newline or non-UTF-8 byte in a name is compared exactly. An image is a
     (mode, oid) pair, or None where the path is absent on that side. commit is the preceding %H line
-    for log output and None for diff-tree."""
+    for log output and None for diff-tree. When commits is a list, every %H line is appended to it,
+    including those of commits that changed nothing."""
     probe = _git(root, args[0], "-z", *args[1:], binary=True)
     if probe.returncode != 0:
         raise CannotEvaluate("git {} failed ({})".format(
@@ -193,21 +215,30 @@ def _raw_records(root, *args):
             path = next(tokens, None)
             if len(fields) != 5 or not path:
                 raise CannotEvaluate("git {} printed a malformed raw record".format(args[0]))
-            images = []
-            for mode, oid in ((fields[0], fields[2]), (fields[1], fields[3])):
-                images.append(None if mode == b"000000" else (mode.decode("ascii"), oid.decode("ascii")))
-            records.append((commit, path, images[0], images[1]))
-        elif all(char in b"0123456789abcdef" for char in header):
+            records.append((commit, path, _image(fields[0], fields[2], args[0]),
+                            _image(fields[1], fields[3], args[0])))
+        elif _object_id(header):
             commit = header.decode("ascii")
+            if commits is not None:
+                commits.append(commit)
         else:
             raise CannotEvaluate("git {} printed an unrecognized line".format(args[0]))
     return records
 
 
+def _window_listed(commits, base):
+    """A correct git lists the window newest first starting at base itself, so an empty listing, or one
+    that does not start at base, cannot be judged."""
+    if not commits or commits[0] != base:
+        raise CannotEvaluate("git log listed {} for the revert window below {}, not that base first"
+                             .format("no commit" if not commits else commits[0], base))
+
+
 def _window_touches(root, base, window):
     """(commit, path, pre, post) for every path each of the window first-parent commits ending at base
     changed against its first parent, newest first. A shallow repository is judged only when the parent
-    of the oldest window commit is present: a shallow boundary commit diffs as if it added every file."""
+    of the oldest window commit is present: a shallow boundary commit diffs as if it added every file.
+    A listing without base as its first commit is cannot-evaluate."""
     if _is_shallow(root):
         commits = _git(root, "rev-list", "--count", "--first-parent", "-n", str(window + 1), base)
         if commits.returncode != 0 or not commits.stdout.strip().isdigit():
@@ -216,7 +247,10 @@ def _window_touches(root, base, window):
             raise CannotEvaluate(
                 "the repository is shallow and its history ends inside the {}-commit revert window "
                 "below {}; run `git fetch --unshallow` and retry".format(window, base))
-    return _raw_records(root, *_WINDOW_LOG_ARGS, "-n", str(window), base, "--")
+    commits = []
+    records = _raw_records(root, *_WINDOW_LOG_ARGS, "-n", str(window), base, "--", commits=commits)
+    _window_listed(commits, base)
+    return records
 
 
 def _reverts_named(root, base, head_sha):
@@ -236,10 +270,10 @@ def _allowed(undone, named):
 
 
 def _revert_findings(root, base, head_sha, window):
-    """(path, undone) for each path the head changes from base whose head image equals the pre-image of
-    a commit in the window; undone lists the window commits on that path from base back to that commit,
-    newest first. A deletion matches an add (an absent pre-image). Paths whose undone commits all carry
-    a Reverts trailer are dropped."""
+    """(path, undone) for each path the head changes from base whose head blob equals the pre-image blob
+    of a commit in the window (file modes are not compared); undone lists the window commits on that path
+    from base back to that commit, newest first. A deletion matches an add (an absent pre-image). Paths
+    whose undone commits all carry a Reverts trailer are dropped."""
     changed = {path: post for _c, path, _pre, post in _raw_records(
         root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", base, head_sha, "--")}
     if not changed:
@@ -253,13 +287,36 @@ def _revert_findings(root, base, head_sha, window):
         undone = []
         for commit, pre in touches[path]:
             undone.append(commit)
-            if pre == changed[path]:
+            if _blob(pre) == _blob(changed[path]):
                 findings.append((path, tuple(undone)))
                 break
     if findings:
         named = _reverts_named(root, base, head_sha)
         findings = [(path, undone) for path, undone in findings if not _allowed(undone, named)]
     return findings
+
+
+def _union_findings(root, bases, _protected_sha, head_sha, window):
+    """The revert findings judged from every merge base, deduplicated, and the bases that produced any.
+    A revert can be visible from one base only, so no single base stands in for the others."""
+    findings, anchors = [], []
+    for base in bases:
+        found = _revert_findings(root, base, head_sha, window)
+        if found:
+            anchors.append(base)
+        findings.extend(finding for finding in found if finding not in findings)
+    return sorted(findings), anchors
+
+
+def _settled(root, protected_sha, head_sha, findings):
+    """Drop the findings at paths where the head's image equals the protected tip's: merging the head
+    leaves such a path exactly as the protected line has it, so it undoes nothing there (for example a
+    stale branch that carries a revert the protected line already made)."""
+    if not findings:
+        return findings
+    differs = {path for _c, path, _pre, _post in _raw_records(
+        root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", protected_sha, head_sha, "--")}
+    return [(path, undone) for path, undone in findings if path in differs]
 
 
 def evaluate(root, protected=None, head=None, max_lag=None, revert_window=None):
@@ -302,15 +359,15 @@ def evaluate(root, protected=None, head=None, max_lag=None, revert_window=None):
     if not bases:
         raise CannotEvaluate("git merge-base exited 0 but returned no merge base")
 
-    # The revert check anchors on the base with the least lag (the first listed on a tie), the same base
-    # the reported lag measures.
-    lag, anchor = min(((_count_lag(root, base, protected_sha), base) for base in bases),
-                      key=lambda item: item[0])
-    findings = _revert_findings(root, anchor, head_sha, revert_window)
+    # The reported lag is the least across bases; the revert check is judged from every base.
+    lag = min(_count_lag(root, base, protected_sha) for base in bases)
+    findings, anchors = _union_findings(root, bases, protected_sha, head_sha, revert_window)
+    findings = _settled(root, protected_sha, head_sha, findings)
     if findings:
         return Result(
             1, "REVERTS", protected_ref, protected_sha, head_ref, head_sha,
-            bases, lag, max_lag, "restores content the protected line replaced by merge base {}".format(anchor),
+            bases, lag, max_lag, "restores content the protected line replaced by merge base(s) {}".format(
+                ", ".join(anchors)),
             tuple(findings),
         )
     if max_lag is not None and lag > max_lag:
@@ -441,11 +498,14 @@ def _commit_tree(root, tree, parents, message):
     return _fixture_git(root, *args, identity=True, input_text=message + "\n")
 
 
-def _plumb_commit(root, files, parents, message):
+def _plumb_commit(root, files, parents, message, modes=None):
     """Write a flat tree of {path bytes: content bytes} with hash-object and mktree, then commit it, so
-    a fixture path may carry a space, a newline or a non-UTF-8 byte whatever the filesystem allows."""
+    a fixture path may carry a space, a newline or a non-UTF-8 byte whatever the filesystem allows.
+    modes maps a path to a file mode other than 100644."""
+    modes = modes or {}
     entries = b"".join(
-        b"100644 blob " + _fixture_git(root, "hash-object", "-w", "--stdin", input_bytes=data).encode()
+        modes.get(path, b"100644") + b" blob "
+        + _fixture_git(root, "hash-object", "-w", "--stdin", input_bytes=data).encode()
         + b"\t" + path + b"\0"
         for path, data in files.items())
     tree = _fixture_git(root, "mktree", "-z", input_bytes=entries)
@@ -453,7 +513,7 @@ def _plumb_commit(root, files, parents, message):
 
 
 def _revert_vectors(temp, failures, case):
-    """R1-R14: the revert check. One repository holds every history; each case names its own refs."""
+    """R1-R19: the revert check. One repository holds every history; each case names its own refs."""
     def ref(name, sha):
         _fixture_git(repo, "update-ref", "refs/heads/" + name, sha)
         return "refs/heads/" + name
@@ -507,13 +567,16 @@ def _revert_vectors(temp, failures, case):
     case("R4 reset fold", 1, repo, main, "refs/heads/r4")
     _fixture_git(repo, "switch", "-q", "--detach", base)
 
-    # R5: the protected line advances again after the fold: it drops b.txt and changes c.txt once more.
-    # Anchored on the merge base the findings are unchanged; anchored on the tip, b.txt would vanish.
+    # R5: the protected line advances again after the fold: it drops b.txt, changes c.txt once more and
+    # adds n.txt. Anchored on the merge base c.txt is still found; b.txt is not, because the protected
+    # tip dropped it too, so merging the fold leaves it as the tip has it. Anchored on the tip, n.txt
+    # (which the fold never had) would be reported as well.
     drop = _plumb_commit(repo, {**old, b"c.txt": b"c2\n"}, (c2,), "main drops b")
     again = _plumb_commit(repo, {**old, b"c.txt": b"c3\n"}, (drop,), "main changes c again")
-    advanced = ref("protected", again)
+    later = _plumb_commit(repo, {**old, b"c.txt": b"c3\n", b"n.txt": b"n\n"}, (again,), "main adds n")
+    advanced = ref("protected", later)
     case("R5 main advanced", 1, repo, advanced, "refs/heads/r1")
-    found("R5 main advanced", advanced, "refs/heads/r1", {b"b.txt", b"c.txt"})
+    found("R5 main advanced", advanced, "refs/heads/r1", {b"c.txt"})
     # R6: the branch rebased onto the tip.
     case("R6 rebased", 0, repo, main, ref("r6", _plumb_commit(
         repo, {**main_files, b"f.txt": b"feature\n"}, (c2,), "rebased")))
@@ -570,6 +633,81 @@ def _revert_vectors(temp, failures, case):
     # R14: the push self-check names the same commit twice: nothing changed, nothing to judge.
     case("R14 protected is head", 0, repo, main, main)
 
+    # R15: a fold restores the exact pre-image blob of x.txt but as an executable file. The revert is
+    # judged on the blob alone, so the mode change does not hide it.
+    x0 = _plumb_commit(repo, {b"x.txt": b"x1\n"}, (), "x root")
+    x1 = _plumb_commit(repo, {b"x.txt": b"x2\n"}, (x0,), "main changes x")
+    x_head = ref("r15", _plumb_commit(repo, {b"x.txt": b"x1\n"}, (x1,), "restores x as executable",
+                                      {b"x.txt": b"100755"}))
+    case("R15 mode-flipped restore", 1, repo, ref("r15-main", x1), x_head)
+    found("R15 mode-flipped restore", "refs/heads/r15-main", x_head, {b"x.txt"})
+
+    # R16: two merge bases. The protected tip P merges side commit A (which changes p.txt) into S; the
+    # head has parents A and S and puts p.txt back. From S (the least lag, 1) the head changes nothing
+    # at p.txt; only from A (lag 2) is the revert visible. Every base is judged; the lag stays 1.
+    p0 = _plumb_commit(repo, {b"p.txt": b"p1\n"}, (), "p root")
+    p_side = _plumb_commit(repo, {b"p.txt": b"p2\n"}, (p0,), "side changes p")
+    p_line = _plumb_commit(repo, {b"p.txt": b"p1\n", b"s.txt": b"s\n"}, (p0,), "main adds s")
+    p_tip = _plumb_commit(repo, {b"p.txt": b"p2\n", b"s.txt": b"s\n"}, (p_line, p_side), "merge side")
+    p_head = ref("r16", _plumb_commit(repo, {b"p.txt": b"p1\n", b"s.txt": b"s\n"}, (p_side, p_line),
+                                      "merges both and puts p back"))
+    p_main = ref("r16-main", p_tip)
+    case("R16 two merge bases", 1, repo, p_main, p_head)
+    r16 = found("R16 two merge bases", p_main, p_head, {b"p.txt"})
+    if r16 is not None and (len(r16.bases) != 2 or r16.lag != 1):
+        failures.append("R16 two merge bases: expected two bases and lag 1, got bases={} lag={}".format(
+            len(r16.bases), r16.lag))
+
+    # R17: a stale branch cut before the protected line reverted its own change to k.txt and its own
+    # add of d.txt carries that revert. Merging it leaves both paths as the protected tip has them.
+    k0 = _plumb_commit(repo, {b"k.txt": b"k1\n"}, (), "k root")
+    k1 = _plumb_commit(repo, {b"k.txt": b"k2\n", b"d.txt": b"d\n"}, (k0,), "main changes k, adds d")
+    k2 = _plumb_commit(repo, {b"k.txt": b"k1\n"}, (k1,), "main reverts k and d")
+    k3 = _plumb_commit(repo, {b"k.txt": b"k1\n", b"o.txt": b"o\n"}, (k2,), "main adds o")
+    k_head = ref("r17", _plumb_commit(repo, {b"k.txt": b"k1\n", b"g.txt": b"g\n"}, (k1,),
+                                      "branch work carrying the revert of k and d"))
+    k_main = ref("r17-main", k3)
+    case("R17 carried protected revert", 0, repo, k_main, k_head)
+    found("R17 carried protected revert", k_main, k_head, set())
+
+    # R18 and R19 stand in for git with a wrapper around _git that rewrites one command's output.
+    real_git = _git
+
+    def faked(command, rewrite):
+        def fake(root, *args, **kwargs):
+            probe = real_git(root, *args, **kwargs)
+            if args[0] == command and (command != "log" or "--first-parent" in args):
+                return subprocess.CompletedProcess(probe.args, 0, rewrite(probe.stdout), b"")
+            return probe
+        return fake
+
+    def judged(label, fake, want):
+        globals()["_git"] = fake
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                got = run(repo, main, "refs/heads/r1")
+        except Exception as exc:
+            got = "an uncaught {}".format(type(exc).__name__)
+        finally:
+            globals()["_git"] = real_git
+        if got != want:
+            failures.append("{}: expected exit {}, got {}".format(label, want, got))
+
+    # R18: a git that exits 0 with an empty window log, or with one that does not list the base, leaves
+    # nothing to judge: cannot-evaluate, never a pass.
+    judged("R18 empty window log", faked("log", lambda _out: b""), 2)
+    judged("R18 window log without the base",
+           faked("log", lambda out: out.replace(c2.encode(), b"f" * len(c2))), 2)
+
+    # R19: a raw record with a non-ASCII or otherwise malformed mode or object id is cannot-evaluate.
+    def record(mode, oid):
+        return b":" + mode + b" 100644 " + oid + b" " + b"a" * 40 + b" M\0b.txt\0"
+    for label, mode, oid in (("non-ASCII oid", b"100644", b"\xff" * 40),
+                             ("non-ASCII mode", b"10064\xff", b"a" * 40),
+                             ("abbreviated oid", b"100644", b"a" * 12),
+                             ("non-hex oid", b"100644", b"g" * 40)):
+        judged("R19 " + label, faked("diff-tree", lambda _out, m=mode, o=oid: record(m, o)), 2)
+
     # R12: a shallow clone whose history ends inside the window is cannot-evaluate.
     shallow = temp / "r12-shallow"
     try:
@@ -601,7 +739,7 @@ def _mutant_vector(failures):
     def absence_ignored(root, base, window):
         return [record for record in real_touches(root, base, window) if record[2] is not None]
 
-    def without_z(root, *args):
+    def without_z(root, *args, commits=None):
         probe = _git(root, *args)
         records = []
         commit = None
@@ -614,7 +752,16 @@ def _mutant_vector(failures):
                                 None if fields[1] == "000000" else (fields[1], fields[3])))
             elif line:
                 commit = line
+                if commits is not None:
+                    commits.append(commit)
         return records
+
+    def least_lag_only(root, bases, protected_sha, head_sha, window):
+        anchor = min(bases, key=lambda base: _count_lag(root, base, protected_sha))
+        return real_findings(root, anchor, head_sha, window), [anchor]
+
+    def decoded_unchecked(mode, oid, _command):
+        return None if mode == b"000000" else (mode.decode("ascii"), oid.decode("ascii"))
 
     for label, injected, vector in (
             ("check removed", {"_revert_findings": lambda *_a: []}, "R1 "),
@@ -626,7 +773,12 @@ def _mutant_vector(failures):
             ("window one narrower", {"_window_touches": lambda r, b, w: real_touches(r, b, w - 1)}, "R10 "),
             ("parsed without -z", {"_raw_records": without_z}, "R11 "),
             ("--diff-merges=first-parent dropped", {"_WINDOW_LOG_ARGS": tuple(
-                arg for arg in _WINDOW_LOG_ARGS if arg != "--diff-merges=first-parent")}, "R13 ")):
+                arg for arg in _WINDOW_LOG_ARGS if arg != "--diff-merges=first-parent")}, "R13 "),
+            ("file mode compared with the blob", {"_blob": lambda image: image}, "R15 "),
+            ("least-lag merge base only", {"_union_findings": least_lag_only}, "R16 "),
+            ("protected tip image ignored", {"_settled": lambda _r, _p, _h, findings: findings}, "R17 "),
+            ("window listing unchecked", {"_window_listed": lambda _commits, _base: None}, "R18 "),
+            ("record bytes decoded unchecked", {"_image": decoded_unchecked}, "R19 ")):
         saved = {name: value for name, value in globals().items() if name in injected}
         missing = sorted(name for name in injected if name not in saved)
         if missing:
@@ -926,7 +1078,7 @@ def self_test(_vectors=True):
                "default-root/cwd-unavailable")
     print("SELF-TEST PASS: V1-V13 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
           "(both cannot-evaluate) outcomes; verdicts are asserted by exit code; an unbuildable V10 or V11 "
-          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R14 cover the revert "
+          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R19 cover the revert "
           "check and each listed mutant of it turns its named R vector red")
     return 0
 
