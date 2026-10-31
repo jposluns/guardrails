@@ -574,7 +574,7 @@ def self_test_main():
         failures.append("probe raised instead of failing safe: {!r}".format(exc))
     finally:
         _containment.os.supports_dir_fd = saved_supports
-    # load_policy strict schema (FIX 2): a valid policy passes; each malformation fails closed.
+    # load_policy strict schema: a valid policy passes; each malformation fails closed.
     def _policy_rejects(fake_data):
         g = globals()
         saved = g["load_toml"]
@@ -604,7 +604,7 @@ def self_test_main():
         failures.append("an unknown [platforms] key was not rejected")
     if not _policy_rejects(dict(base_policy, hardbreak={"not": "a list"})):
         failures.append("a non-array hardbreak policy value was not rejected")
-    # validate_allowances row schema (FIX 2): an unknown key and a bool offset each fail closed.
+    # validate_allowances row schema: an unknown key and a bool offset each fail closed.
     # The path does not exist, so a downstream read would also raise GateError; assert the SPECIFIC
     # schema rejection reason so the test isolates the key/type check, not the file-read failure.
     good_row = {"path": "x", "sha256": "0" * 64, "start": 0, "end": 1,
@@ -621,7 +621,7 @@ def self_test_main():
     except GateError as exc:
         if "malformed" not in str(exc):
             failures.append("a boolean allowance offset was not rejected on its own terms: {}".format(exc))
-    # FIX A: a nested / non-string codepoints element must fail closed (GateError -> exit 2), never
+    # A nested / non-string codepoints element must fail closed (GateError -> exit 2), never
     # reach set(cps) as an unhashable list and raise an uncaught TypeError -> traceback -> exit 1.
     try:
         validate_allowances(repo_root(), [dict(good_row, codepoints=[["U+200B"]])], {"x"})
@@ -707,7 +707,7 @@ def self_test_main():
         except GateError as exc:
             if "cannot read" not in str(exc):
                 failures.append("validate_hardbreak unreadable rejection on wrong terms: {}".format(exc))
-    # effective_attributes fail-closed (FIX 4): launch failure and malformed response each -> GateError.
+    # effective_attributes fail-closed: launch failure and malformed response each -> GateError.
     def _boom(*_a, **_k):
         raise FileNotFoundError("injected git launch failure")
 
@@ -734,7 +734,7 @@ def self_test_main():
             failures.append("malformed check-attr response raised {!r} not GateError".format(exc))
     finally:
         subprocess.run = saved_run
-    # _load_vectors strict rows (FIX 6): a malformed row and a missing required class each fail closed.
+    # _load_vectors strict rows: a malformed row and a missing required class each fail closed.
     def _vectors_reject(fake_rows):
         g = globals()
         saved = g["load_toml"]
@@ -768,19 +768,19 @@ def self_test_main():
         failures.append("a pass vector missing its expected sha256 was not rejected")
     if not _vectors_reject([dict(r) for r in valid_vectors[1:]]):  # drops the required "pass" class
         failures.append("a vector set missing a required class was not rejected")
-    # FIX C: an unknown vector-row key fails closed (exit 2), not a silent exit-0 accept.
+    # An unknown vector-row key fails closed (exit 2), not a silent exit-0 accept.
     unknown_key = [dict(r) for r in valid_vectors]
     unknown_key[1]["surprise"] = 1
     if not _vectors_reject(unknown_key):
         failures.append("an unknown vector-row key was not rejected")
-    # FIX C: a malformed sha256 (wrong length, non-hex, or uppercase) on a pass vector is a schema
+    # A malformed sha256 (wrong length, non-hex, or uppercase) on a pass vector is a schema
     # error (exit 2) at load, not a downstream exit-1 digest mismatch.
     for bad in ("0" * 63, "0" * 65, "g" * 64, "A" * 64):
         bad_sha = [dict(r) for r in valid_vectors]
         bad_sha[0]["sha256"] = bad
         if not _vectors_reject(bad_sha):
             failures.append("a malformed pass-vector sha256 {!r} was not rejected".format(bad))
-    # FIX B completeness guard (fail-closed, exit 2): every non-pass class MUST carry a CLASS_FINDING
+    # Completeness guard (fail-closed, exit 2): every non-pass class MUST carry a CLASS_FINDING
     # binding, so a class added to VECTOR_CLASSES cannot silently ship unbound. It runs before any
     # CLASS_FINDING lookup below, so a gap fails closed here rather than raising a bare KeyError later.
     unbound = [c for c in VECTOR_CLASSES if c != "pass" and c not in CLASS_FINDING]
@@ -788,8 +788,8 @@ def self_test_main():
         print("error: vector class(es) {} have no CLASS_FINDING binding; fail-closed".format(
             ", ".join(unbound)), file=sys.stderr)
         return 2
-    # FIX B: the class->finding binding is exercised, not bool(findings). A cross-class payload swap
-    # (codex round-2 replaced every failure payload with identical CRLF bytes) must now be flagged:
+    # The class->finding binding is exercised, not bool(findings). A cross-class payload swap
+    # (every failure payload replaced with identical CRLF bytes) must be flagged:
     # a non-CR class bound against a CRLF-only finding set fails its binding, while the CR classes and
     # each class against its own scan leg pass. This is the durable in-code mutation guard; the class
     # lists derive from CLASS_FINDING itself, so a removed binding is caught by the guard above.
@@ -809,8 +809,8 @@ def self_test_main():
             failures.append("class {!r} failed to bind to its own scan leg".format(cls))
     # The published vectors (3.4), run through the same scan. Each non-pass class is bound to the
     # SPECIFIC finding its scan leg emits (CLASS_FINDING), so a class name proves its own leg fired: a
-    # cross-class payload swap (codex round-2 replaced every failure payload with identical CRLF bytes)
-    # no longer passes.
+    # cross-class payload swap (every failure payload replaced with identical CRLF bytes)
+    # does not pass.
     try:
         for row in _load_vectors(repo_root()):
             data = base64.b64decode(row["payload-base64"], validate=True)

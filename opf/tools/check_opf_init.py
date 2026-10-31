@@ -1285,7 +1285,7 @@ def _suite_isolated(invoke):
             # dropped), so an inherited GIT_INDEX_FILE / GIT_DIR / GIT_WORK_TREE / GIT_OBJECT_DIRECTORY /
             # GIT_COMMON_DIR cannot redirect this write to a caller's external index or repository; it stays
             # hermetic like the other fixture calls, which all route through the same scrub (test-hermeticity).
-            # Bounded like every other fixture git call (QA24): on expiry run() kills git and waits for
+            # Bounded like every other fixture git call: on expiry run() kills git and waits for
             # git alone, not for EOF from a descendant still holding its pipes, and the gate fails.
             try:
                 proc = subprocess.run([git, "-C", str(root)] + list(args), input=data,

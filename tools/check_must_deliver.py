@@ -96,7 +96,7 @@ def read_declared(path):
         data = tomllib.loads(text)
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise DemoError("{} does not parse ({})".format(DECL_REL, exc))
     if set(data) != TOP_KEYS:
