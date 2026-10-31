@@ -251,10 +251,11 @@ resource's own state, the host's available capacity, and your own footprint dire
 such a failure or reporting it onward; absent that reading the condition resolves to a local error to
 investigate while work continues, never a stop or a resource-wide alarm.
 
-An external-interface observation establishes behaviour only for its observing principal, named in each
-citing brief or record by identity, non-secret credential reference and effective scope; a control using
-another principal remains unverified until its relevant runtime path is observed to produce the expected
-result under that principal.
+An external-interface observation establishes behaviour only for the effective principal whose authority
+its request used, named in each citing brief or record by identity, non-secret credential reference
+(anonymous access or an unavailable one recorded as such) and effective scope; a control using another
+principal remains unverified until its relevant runtime path is observed to produce the expected result
+under it.
 
 ## A partial read is not the whole
 
@@ -569,11 +570,6 @@ not needed, detaching it is a deliberate, recorded choice, not a reflex.
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
 source. Trust is never a substitute for the gate.
-
-Before a worker-proposed field change is applied, its proposed value is compared with the field's prior
-values on the branch; restoration after an intervening different value awaits one adjudication, with the
-ruling durably registered, carried in later triage briefs and consulted before reopening the same
-conflict.
 
 ## Workers produce inert data
 
@@ -1086,8 +1082,10 @@ Every ruling and decision is recorded to the durable store the session it is mad
 conversation, is the source of truth: a decision that is not recorded did not happen.
 
 A brief or record stating review or fix rounds used or allowed cites durable round records for usage and
-the recorded governing rule or authorized decision for the limit, reporting a missing or conflicting
-basis as unresolved rather than substituting memory.
+the recorded governing rule or authorized decision for the limit; where recorded rulings conflict the
+later one governs, as the decision-classification rule (deccls) sets out, and a missing basis,
+conflicting round records, or rulings of unclear order are reported as unresolved rather than
+substituted from memory.
 
 Pending records stay durable without obstructing synchronization of the checkout tracking the protected
 line; versioned records enter through reviewed integration.

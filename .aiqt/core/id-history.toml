@@ -3191,10 +3191,6 @@ id = "recfst.3"
 born-release = "1.1.0"
 
 [[born]]
-id = "valgat.2"
-born-release = "1.1.0"
-
-[[born]]
 id = "obsbeh.11"
 born-release = "1.1.0"
 

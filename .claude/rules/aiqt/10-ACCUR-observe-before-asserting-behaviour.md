@@ -31,7 +31,8 @@ resource's own state, the host's available capacity, and your own footprint dire
 such a failure or reporting it onward; absent that reading the condition resolves to a local error to
 investigate while work continues, never a stop or a resource-wide alarm.
 
-An external-interface observation establishes behaviour only for its observing principal, named in each
-citing brief or record by identity, non-secret credential reference and effective scope; a control using
-another principal remains unverified until its relevant runtime path is observed to produce the expected
-result under that principal.
+An external-interface observation establishes behaviour only for the effective principal whose authority
+its request used, named in each citing brief or record by identity, non-secret credential reference
+(anonymous access or an unavailable one recorded as such) and effective scope; a control using another
+principal remains unverified until its relevant runtime path is observed to produce the expected result
+under it.

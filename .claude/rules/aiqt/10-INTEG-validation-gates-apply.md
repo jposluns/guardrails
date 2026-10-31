@@ -17,8 +17,3 @@ map-iso-42001-broad: [A.6.2.4]
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
 source. Trust is never a substitute for the gate.
-
-Before a worker-proposed field change is applied, its proposed value is compared with the field's prior
-values on the branch; restoration after an intervening different value awaits one adjudication, with the
-ruling durably registered, carried in later triage briefs and consulted before reopening the same
-conflict.
