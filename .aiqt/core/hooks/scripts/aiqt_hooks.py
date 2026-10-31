@@ -35896,7 +35896,7 @@ def write_scope_guard(data):
 # _fsw_/_FSW_/_Fsw prefix here, so neither collides with the rest of this module.
 
 _CLK_LEASE_MAX_BYTES = 1 << 20
-_CLK_SESS_RE = re.compile(r"[A-Za-z0-9]{1,32}-(\d{8}T\d{6}Z)")
+_CLK_SESS_RE = re.compile(r"[A-Za-z0-9]{1,32}-([0-9]{8}T[0-9]{6}Z)")
 _CLK_EVENTS = ("PostToolUse", "PostToolUseFailure")
 
 
@@ -35942,7 +35942,7 @@ def _clk_lease_file():
 
 
 _CLK_LEASE_FIELD_RE = re.compile(r"[ \t]*(?:[-*][ \t]+)?(\*\*)?(Active-session|Session-start-UTC):(?(1)\*\*)(.*)")
-_CLK_START_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z|\d{8}T\d{6}Z")
+_CLK_START_VALUE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|[0-9]{8}T[0-9]{6}Z")
 _CLK_HEADING_RE = re.compile(r"[ \t]{0,3}#{1,6}(?:[ \t]|$)")
 _CLK_TRANSCRIPT_PREFIX_BYTES = 256 << 10
 
@@ -36080,8 +36080,9 @@ _FSW_WORDCH_RE = re.compile(r"[A-Za-z0-9]")
 _FSW_STAMP_RE = re.compile(_FSW_TIME_GRAMMAR + "(?:" + _FSW_ZONE_GRAMMAR + r")?(?![\d:])")
 _FSW_TOKEN_BEFORE = r"(?<![A-Za-z0-9_.~/-])"
 _FSW_TOKEN_AFTER = r"(?![^/\s'\"`;|&<>()])"
+# Any non-ASCII character right after `date` makes another command word, so it is never read as date.
 _FSW_DATE_CMD_RE = re.compile(r"[ \t]*(?:(?:(?:/usr)?/bin/)?env[ \t]+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^ \t`()]*[ \t]+){0,4}"
-                          r"(?:(?:/usr)?/bin/)?date(?![\w-])")
+                          r"(?:(?:/usr)?/bin/)?date(?![A-Za-z0-9_-]|[^\x00-\x7f])")
 _FSW_DATE_LOOKAHEAD = 256
 # Duplicated verbatim in stamp-truth-stop.py (code and quote exemption); the self-test asserts they are identical.
 _FSW_BTICK_RE = re.compile(r"`+")

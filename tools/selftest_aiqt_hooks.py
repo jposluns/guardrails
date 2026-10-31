@@ -8299,6 +8299,12 @@ def _fsw_unit_suite():
             self.assertTrue(self.ev("Bash", command=f"echo $(/usrdate 2099-01-01T00:00Z) > {PROJ}/private/s.md"))
             self.assertTrue(self.ev("Bash", command=f"echo $(envdate 2099-01-01T00:00Z) > {PROJ}/private/s.md"))
 
+        def test_non_ascii_after_date_is_not_a_date_span(self):
+            # a non-ASCII digit, letter or space glued to `date` makes another command word, so its literal counts
+            for glued in ("٣", "é", " ", "　"):
+                cmd = f"echo $(date{glued} -d 2099-01-01T00:00Z) > {PROJ}/private/s.md"
+                self.assertTrue(self.ev("Bash", command=cmd), ascii(cmd))
+
         def test_r4_keyword_must_immediately_precede(self):
             for line in ("hb: 2099-01-01T00:00Z next", "target branch pushed, hb: 2099-01-01T00:00Z",
                          "next we did a b c and hb 2099-01-01T00:00Z"):
@@ -10538,6 +10544,7 @@ def _clk_unit_suite():
     driving the dispatcher's main() for this mode. Returns (the TestCase class, None)."""
     import inspect
     _cfg = aiqt_hooks._clk_cfg
+    _utc_field = aiqt_hooks._clk_utc_field
     clock_line = aiqt_hooks._clk_clock_line
     fmt_elapsed = aiqt_hooks._clk_fmt_elapsed
     lease_file = aiqt_hooks._clk_lease_file
@@ -10553,8 +10560,9 @@ def _clk_unit_suite():
     # a FIFO test's child timeout is a hang guard only (a blocking open never returns), far above the child's own
     # run (well under a second), so the verdict never depends on the host's speed
     HANG_TIMEOUT = 120
-    line_re = re.compile(r"^CLOCK \(read by hook, authoritative\): \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \| "
-                         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| session elapsed \d{2,}:\d{2})?$")
+    line_re = re.compile(r"^CLOCK \(read by hook, authoritative\): "
+                         r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} \S+ \| "
+                         r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z( \| session elapsed [0-9]{2,}:[0-9]{2})?$")
 
     def run_main(stdin_text, env=None, argv=("clock_inject",)):
         old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
@@ -10705,6 +10713,17 @@ def _clk_unit_suite():
                 with open(self.lease, "w") as f:
                     f.write(f"Active-session: {bad}\nActive-session: sess-20200101T000000Z\n")
                 self.assertIsNone(lease_start(self.lease), bad)
+
+        def test_non_ascii_digit_time_refused(self):
+            # a str \d admits every Unicode digit and strptime reads them, so the time is matched with [0-9]
+            self.assertEqual(_utc_field("20260923T141710Z"), datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
+            for value in ("2026092٣T141710Z", "2026-09-2٣T14:17:10Z"):
+                self.assertIsNone(_utc_field(value), ascii(value))
+
+        def test_non_ascii_digit_session_id_carries_no_time(self):
+            # an id whose time holds a non-ASCII digit is not <label>-YYYYMMDDTHHMMSSZ, so Session-start-UTC is read
+            self.write_lease("Active-session: sess-2026092٣T141710Z\nSession-start-UTC: 20260923T141800Z\n")
+            self.assertEqual(lease_start(self.lease), datetime.datetime(2026, 9, 23, 14, 18, tzinfo=utc))
 
         # -- lease start sources --
         def write_lease(self, text):
@@ -10873,8 +10892,9 @@ def _env_values(**values):
 # AIQT_STORE_ROOT and AIQT_LEASE_FILE are read; the worker markers and the ORCH_ spellings are proven inert.
 _CLOCK_ENV = ("AIQT_STORE_ROOT", "AIQT_LEASE_FILE", "AIQT_HOOKS_WORKER", "ORCH_STORE_ROOT", "ORCH_LEASE_FILE",
               "ORCH_WORKER", "ORCH_VERIFY_OWNER")
-_CLOCK_LINE_RE = re.compile(r"CLOCK \(read by hook, authoritative\): \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \| "
-                            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| session elapsed \d{2,}:\d{2})?")
+_CLOCK_LINE_RE = re.compile(r"CLOCK \(read by hook, authoritative\): "
+                            r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} \S+ \| "
+                            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z( \| session elapsed [0-9]{2,}:[0-9]{2})?")
 _FSW_WARN_PREFIX = "future-stamp-write: future stamp "
 
 
