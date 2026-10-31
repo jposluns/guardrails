@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "aa1f9a13a1de13742534baaf08d8247f597f6ad65000abbb4385830c9a23688b"
+tree-sha256 = "02c09019cbe3a18334e3b22e3aa8fee0a3332d3f204deecada29057bb9553689"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2276,8 +2276,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 44669
-sha256 = "3d035f2568508929d740e651b7fa5d9373e6d2fc7293ec8568c4f5332953b88f"
+bytes = 44712
+sha256 = "61f09593d1fbc07a5bbdfe491b74a91979b795ef78ee4e7e20ad33d51984d9b8"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2486,13 +2486,13 @@ sha256 = "3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262"
 
 [[sources]]
 path = "opf/enforcement/ci/opf-ci.sh"
-bytes = 2178
-sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
+bytes = 2367
+sha256 = "1654c4d42af032b218d37f38aca4f3dce924288e44e27ddbddb4239da65281fe"
 
 [[sources]]
 path = "opf/enforcement/claude/pretooluse_deny.py"
-bytes = 180963
-sha256 = "a86792a425a619ed873e54807c529e7ed38d179aa72b744c6674cb479880e268"
+bytes = 181081
+sha256 = "841da3daeadaa14cb63220c67f073c431c230a8ceb676d2fc6054a66a6422713"
 
 [[sources]]
 path = "opf/enforcement/claude/settings.opf.json"
@@ -2516,8 +2516,8 @@ sha256 = "fc2cf56a4c48dfae4d6ba7d04e1de03040ed9fccf09bc54838d707d8b1340d4c"
 
 [[sources]]
 path = "opf/enforcement/platforms.toml"
-bytes = 6914
-sha256 = "d073f5e3e09a55c716ad6f71b24a68eb9ec1c7f5c36bae68f7d8f3dc0f21d4c5"
+bytes = 7080
+sha256 = "c67c0f2ef516c6afdabd1949fc5cfa76b77d79a7f5cb3c6bef1515c24caf3172"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
@@ -2526,8 +2526,13 @@ sha256 = "cd48ca45fc01a32cf5c134e8b3e12a2509f0195ab6a299d5a1bda1fe984eec2a"
 
 [[sources]]
 path = "opf/enforcement/precommit/pre-commit"
-bytes = 10627
-sha256 = "02f97b775948be98897e6ffb2b28999a37c387ad4170104dc72ea38f5cd8bc64"
+bytes = 10724
+sha256 = "55a0fdf5f4ba22edf5c6c05a368ec3d92d9a7e7c2461a4077dc5e07dd41a0ed2"
+
+[[sources]]
+path = "opf/enforcement/residuals.toml"
+bytes = 6294
+sha256 = "82e32132462982a53e14b197004693abca6366f0ea0c3f222b2f74cfcfc0a82e"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/SKILL.md"
@@ -2772,7 +2777,7 @@ sha256 = "3d70e8f5a117d4a75b3bf3080dccc03bab881d8e441bb1f9e119ac8650414f62"
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
 bytes = 174891
-sha256 = "40087af3f3fe64b79a45eebd97ad93377a39726ca60b1095f8b25be026bd2d80"
+sha256 = "6800c8d09052030d061491c2a56a164f0b0b55953e18dcc3a3ec82ede4fa7347"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_discover.py"
