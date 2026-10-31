@@ -572,7 +572,7 @@ integrates them, and workers apply nothing themselves. Parallelism lives in the 
 and seriality live in the apply stage.
 
 A candidate records its base commit; the apply refuses to write a whole-file candidate over a path whose
-content at that base, absence included, differs on the target: a diff with context fails where that drift
+content at that base, absence included, differs on the target now: a diff with context fails where that drift
 touches it, but a whole file overwrites that drift silently. Such a path is replayed three-way from that
 base; the result, not the reviewed change, is validated before it lands. A conflicted or partial replay
 is a cannot-evaluate, never resolved by taking either side. A candidate with no recorded base is a

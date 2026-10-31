@@ -87,6 +87,11 @@
 #                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
 #                        it. When a queued fold lands, record its measured cost here against the 559-unit
 #                        estimate.
+#                        Fold measured 2026-10-31: workers-produce-inert-data gained its paragraph on a
+#                        candidate's recorded base and the replay of a drifted whole-file candidate
+#                        (wowo01.22): measured PACK 134426 -> 134988 (+562 units, against the 559 units
+#                        estimated for all four queued folds); rule files 117930 -> 118492; managed block
+#                        360 and file headers 16136 unchanged. Ratchet unchanged.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
